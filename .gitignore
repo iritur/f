@@ -1,5 +1,14 @@
-/target
-/.cargo
+# Unanchored, so this catches the per-crate `abi/target/`, `env/target/` and
+# the rest that `xtask coverage` writes into, not just the workspace root.
+target/
+
+# `.cargo/config.toml` is tracked, and has to be: it carries the `xtask` alias
+# and the kernel's link flags, so `cargo xtask` does not exist in a checkout
+# without it. Only a CARGO_HOME vendored under this directory is ignored — the
+# container puts its own at /opt/cargo, so nothing in the tree writes here.
+/.cargo/registry/
+/.cargo/git/
+
 *.iso
 *.img
 /claims/*.local.jsonl
