@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = ["abi", "env", "ring", "kernel", "user/init", "bench", "xtask"]
+
+[workspace.package]
+version = "0.0.1"
+# Nothing here goes to a registry. These crates are an operating system, not a
+# library set: publishing one would be a mistake rather than a release, and
+# saying so is also what lets the dependency policy tell an internal path
+# dependency apart from an unbounded wildcard on somebody else's crate.
+publish = false
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+repository = "https://example.invalid/f"
+
+[workspace.dependencies]
+f-abi = { path = "abi" }
+f-env = { path = "env" }
+f-ring = { path = "ring" }
+f-bench = { path = "bench" }
+
+# ---------------------------------------------------------------------------
+# The unsafe policy, enforced by the compiler rather than by review culture.
+#
+# `unsafe_code = "forbid"` is the workspace default. Exactly three crates
+# override it to "allow": abi, ring and kernel — the frame. Every other crate,
+# now and in future, inherits the forbid and cannot opt out silently: doing so
+# is a visible diff in that crate's Cargo.toml.
+#
+# See docs/rfc/0004-determinism-substrate.md and LICENSING.md.
+# ---------------------------------------------------------------------------
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+missing_safety_doc = "deny"
+mem_forget = "deny"
+todo = "warn"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+debug = true

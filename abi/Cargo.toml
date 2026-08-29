@@ -1,0 +1,15 @@
+[package]
+name = "f-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Wire types crossing a trust boundary. repr(C), fixed-width, no generics, no Drop."
+
+[lints.rust]
+# The frame. Overrides the workspace forbid — see the note in the root Cargo.toml.
+unsafe_code = "allow"
+missing_docs = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

@@ -1,0 +1,15 @@
+[package]
+name = "f-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Measurement harness. Records distributions, never summaries."
+publish = false
+
+[dependencies]
+f-abi.workspace = true
+f-env.workspace = true
+f-ring.workspace = true
+
+[lints]
+workspace = true

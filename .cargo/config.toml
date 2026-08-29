@@ -1,0 +1,24 @@
+[alias]
+xtask = "run --package xtask --"
+
+[build]
+# Host builds by default so `cargo test` covers abi/env/ring/init. The kernel is
+# built for its own target explicitly by `cargo xtask build`.
+
+# The kernel is a fixed-address image, not a relocatable one. Without these it
+# links as a static-PIE at vaddr 0, which no loader can place — and the failure
+# is QEMU refusing the file rather than anything that names the cause.
+#
+# The linker script is relative to the workspace root, which is where xtask runs
+# cargo from.
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "relocation-model=static",
+    # The image lives in the top two gibibytes, which is what this code model
+    # describes: a sign-extended 32-bit displacement reaches anything in the
+    # kernel from anywhere else in it, so a call does not need to go through a
+    # global offset table to find its target.
+    "-C", "code-model=kernel",
+    "-C", "link-arg=-Tkernel/linker.ld",
+    "-C", "link-arg=--nmagic",
+]

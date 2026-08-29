@@ -1,0 +1,18 @@
+[package]
+name = "f-init"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The first user component. Holds only what it was granted."
+
+[dependencies]
+f-abi.workspace = true
+f-env.workspace = true
+f-ring.workspace = true
+
+# No override. This crate inherits `unsafe_code = "forbid"` from the workspace,
+# which is the point: everything above the frame is safe by construction, and
+# `cargo xtask lint-unsafe` fails the build if that stops being true.
+[lints]
+workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "f-env"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The determinism substrate. Every source of nondeterminism in the system passes through here."
+
+[lints]
+workspace = true
