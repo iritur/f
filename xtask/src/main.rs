@@ -34,9 +34,11 @@ const DETERMINISM_ALLOW: &[(&str, &str)] = &[
     (
         "bench/",
         "the harness measures the system and is not part of it; a clock is what \
-         an instrument is. Revisit at M2, when a hardware Env exists for the \
-         host and the harness can read time through the substrate like \
-         everything else",
+         an instrument is. E0-B08 built the hardware Env the note here used to \
+         wait for, and it is the kernel's: a counter read through kernel/src/arch. \
+         This harness runs on the host, where there is still no Env of any kind, \
+         so the entry stands until something on the host needs one — which is the \
+         revisit condition now, in place of a milestone that has since arrived",
     ),
 ];
 

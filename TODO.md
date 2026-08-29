@@ -170,8 +170,38 @@ load-bearing.*
   number. The frequency was only obviously wrong because a second, independent
   measurement disagreed with it.
   *needs:* E0-B06
-- [ ] **E0-B08** `S` Wire the hardware `Env` to the one legitimate `rdtsc`; add the wall-clock capability from RFC 0009.
-  *exit:* `lint-determinism` still passes with exactly one allow-listed site; a seeded run and a hardware run both satisfy the `Env` contract tests.
+- [x] **E0-B08** `S` Wire the hardware `Env` to the one legitimate `rdtsc`; add the wall-clock capability from RFC 0009.
+  *exit:* met. `kernel/src/env.rs` is the production `Env`: `now()` is the
+  timestamp counter divided by the frequency `apic::calibrate` measured,
+  reached through `arch::x86_64::read_tsc` rather than through a second call
+  site, so `DETERMINISM_ALLOW` is unchanged and still names one file.
+  `f_env::contract` is the new part worth arguing with — the properties every
+  `Env` owes, written once as a function rather than as a test, because the
+  seeded environment is checked on the host and the hardware one exists only
+  inside a kernel with no host harness. The host tests run it against
+  `SeededEnv` and `SimEnv` and against six environments broken on purpose, one
+  per violation; the boot runs it against both environments on the same run and
+  prints `env contract  arithmetic ok, seeded ok, hardware ok`.
+  **Nothing consumes the hardware `Env` yet, and that is the honest state.**
+  The boot still runs on the seed, because the boot log is a fixture and a
+  fixture carrying a number from a real clock fails at random. The first caller
+  with a genuine claim on real time is the scheduler at M3; wiring one before
+  then would mean inventing consumers to make the type look used.
+  Found while building: the obvious tick-to-nanosecond conversion,
+  `ticks * 1_000_000 / tsc_khz`, overflows `u64` after about ninety minutes of
+  uptime at 3.4 GHz — and does not fail, it wraps, so the monotonic clock jumps
+  backwards by nine minutes on any boot that lives long enough. Dividing first
+  and scaling the remainder is exact and lasts the 584 years the type allows.
+  The self-test asserts the overflow case still overflows, so the reason for the
+  split cannot be quietly deleted.
+  On the wall clock: it is the CMOS, read once at boot and carried forward on
+  the monotonic clock rather than re-read — re-reading a clock that people set
+  is how a stamp moves backwards between two lines that both look right. It is
+  stated as accurate to an hour, which looks absurd and is the honest number: an
+  undisciplined oscillator's drift dominates the second of quantisation, and a
+  bound in seconds would be a precision claim this system cannot support. A
+  machine whose firmware keeps local time is wrong by whole hours and no bound
+  of this shape covers that, which `rtc.rs` says outright.
   *needs:* E0-B07, E0-D01
 - [ ] **E0-B09** `L` User page tables and the ring-3 transition; a `syscall` entry used strictly for channel setup. **(M3)**
   *exit:* a user process runs, faults deliberately, and is killed cleanly while core 0 holds its M2 jitter bound throughout.

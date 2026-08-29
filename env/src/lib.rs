@@ -28,6 +28,7 @@
 
 #![no_std]
 
+pub mod contract;
 pub mod sim;
 
 /// A point in time, in nanoseconds since an arbitrary origin.

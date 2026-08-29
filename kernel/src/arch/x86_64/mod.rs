@@ -2,10 +2,10 @@
 //! x86-64 support.
 //!
 //! The boot handoff, serial output, a QEMU exit channel, the single legitimate
-//! hardware time source, and the core's answer to which core it is. Real
-//! descriptor tables and paging owned by the frame arrived at M1; the local
-//! APIC and the clock measured against the 8254 arrive here at M2 — see
-//! `docs/design/ring-scene-boot.html` section 15.
+//! hardware time source, the wall clock that may order nothing, and the core's
+//! answer to which core it is. Real descriptor tables and paging owned by the
+//! frame arrived at M1; the local APIC and the clock measured against the 8254
+//! arrive here at M2 — see `docs/design/ring-scene-boot.html` section 15.
 
 pub mod apic;
 pub mod boot;
@@ -16,6 +16,7 @@ pub mod paging;
 pub mod pic;
 pub mod pit;
 pub mod port;
+pub mod rtc;
 pub mod serial;
 
 /// Which core is executing this.
