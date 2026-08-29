@@ -1,0 +1,33 @@
+[package]
+name = "f-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The frame. The only code in the system permitted to be unsafe."
+
+[dependencies]
+f-abi.workspace = true
+f-env.workspace = true
+f-ring.workspace = true
+
+[lints.rust]
+# The frame. This is the crate the < 5% unsafe-of-TCB metric measures.
+# Adding another crate to this list is a visible, reviewable diff.
+unsafe_code = "allow"
+missing_docs = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+[[bin]]
+name = "f-kernel"
+path = "src/main.rs"
+# The kernel is `no_std` and defines its own panic handler, so a host test
+# harness cannot be built for it: the harness links `std`, and two crates then
+# claim the `panic_impl` lang item. There are no host tests here and there will
+# not be — the kernel is exercised in QEMU by `cargo xtask run`, and its logic
+# lives in `abi`, `env` and `ring`, which are tested on the host.
+test = false
+bench = false
