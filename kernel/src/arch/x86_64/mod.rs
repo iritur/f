@@ -14,6 +14,7 @@ pub mod idt;
 pub mod multiboot;
 pub mod paging;
 pub mod pic;
+pub mod pit;
 pub mod port;
 pub mod serial;
 

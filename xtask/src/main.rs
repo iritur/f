@@ -101,6 +101,7 @@ fn main() -> ExitCode {
         "build" => build(),
         "run" => run(),
         "fault" => fault(args.get(1).map(String::as_str)),
+        "timer" => timer(args.get(1).map(String::as_str)),
         "test" => test(),
         "verify" => verify(),
         "lint" => lint_all(),
@@ -140,6 +141,8 @@ cargo xtask <command>
   run                Boot the kernel in QEMU and report its exit status
   fault [kind]       Boot it into a deliberate fault and check the report:
                      pf, ud or df
+  timer [seconds]    Run the 1 kHz timer and print a jitter histogram. Sixty
+                     seconds by default. A measurement, not an assertion
   test               Workspace tests on both x86-64 and AArch64
   verify             lint, then test, then boot. The one command a session runs
                      to check its own work before a human is asked to
@@ -279,40 +282,65 @@ fn to_elf32() -> Result<(), String> {
     }
 }
 
-fn run() -> Result<(), String> {
+/// Boot the kernel and return the exit status QEMU reported.
+///
+/// One definition of the machine, three callers. It was two copies until the
+/// timer needed a third, and three copies of a machine definition is three
+/// chances for a run to be compared against a differently-shaped one.
+///
+/// `append` is the kernel command line, which is the only thing the three
+/// callers differ by.
+fn boot(append: Option<&str>) -> Result<Option<i32>, String> {
     build()?;
     let kernel = kernel_elf32();
     if !kernel.exists() {
         return Err(format!("kernel image not found at {}", kernel.display()));
     }
 
+    let mut qemu = Command::new("qemu-system-x86_64");
+    qemu.args(["-kernel", kernel.to_str().ok_or("kernel path is not valid UTF-8")?]);
+
+    if let Some(append) = append {
+        qemu.args(["-append", append]);
+    }
+
+    // Pinned, not defaulted. The kernel prints the loader's memory map, so the
+    // machine's size is part of its output — and an emulator default that moves
+    // between versions would move the boot log with it, quietly breaking the one
+    // M0 contract that matters: the same commit produces the same run, byte for
+    // byte.
+    //
+    // The processor model is deliberately *not* pinned, and that is worth a
+    // sentence because the timer would like it to be. QEMU's TCG backend refuses
+    // `tsc-deadline` and `x2apic` by name — it says so on stderr and clears the
+    // bits — so asking for them buys a warning on every run and changes nothing.
+    // The kernel detects what it was given and uses the mechanism that is there.
+    //
     // `isa-debug-exit` turns a kernel run into something an integration test can
     // assert on: the kernel chooses its own exit code and QEMU reports it.
-    let status = Command::new("qemu-system-x86_64")
-        .args([
-            "-kernel",
-            kernel.to_str().ok_or("kernel path is not valid UTF-8")?,
-            // Pinned, not defaulted. The kernel now prints the loader's memory
-            // map, so the machine's size is part of its output — and an
-            // emulator default that moves between versions would move the
-            // boot log with it, quietly breaking the one M0 contract that
-            // matters: the same commit produces the same run, byte for byte.
-            "-m",
-            "128M",
-            "-serial",
-            "stdio",
-            "-display",
-            "none",
-            "-device",
-            "isa-debug-exit,iobase=0xf4,iosize=0x04",
-            "-no-reboot",
-        ])
+    qemu.args([
+        "-m",
+        "128M",
+        "-serial",
+        "stdio",
+        "-display",
+        "none",
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-no-reboot",
+    ]);
+
+    let status = qemu
         .current_dir(root())
         .status()
         .map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
 
+    Ok(status.code())
+}
+
+fn run() -> Result<(), String> {
     // QEMU reports (value << 1) | 1, so Success(0x10) arrives as 33.
-    match status.code() {
+    match boot(None)? {
         Some(33) => {
             println!("\nM0 ok");
             Ok(())
@@ -352,32 +380,7 @@ fn fault(kind: Option<&str>) -> Result<(), String> {
         ));
     }
 
-    build()?;
-    let kernel = kernel_elf32();
-
-    let status = Command::new("qemu-system-x86_64")
-        .args([
-            "-kernel",
-            kernel.to_str().ok_or("kernel path is not valid UTF-8")?,
-            "-m",
-            "128M",
-            "-append",
-        ])
-        .arg(format!("fault={kind}"))
-        .args([
-            "-serial",
-            "stdio",
-            "-display",
-            "none",
-            "-device",
-            "isa-debug-exit,iobase=0xf4,iosize=0x04",
-            "-no-reboot",
-        ])
-        .current_dir(root())
-        .status()
-        .map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
-
-    match status.code() {
+    match boot(Some(&format!("fault={kind}")))? {
         // The kernel faulted, reported, and chose its own exit code. Which is
         // the whole point: a machine that reaches this has an exception path
         // that works.
@@ -395,6 +398,46 @@ fn fault(kind: Option<&str>) -> Result<(), String> {
              where it was called from."
             .into()),
         Some(other) => Err(format!("qemu exited {other}; expected 35")),
+        None => Err("qemu terminated by signal".into()),
+    }
+}
+
+/// Run the timer for a while and print the jitter histogram it produced.
+///
+/// # Why this is a command and not part of `verify`
+///
+/// Because it takes a minute, and because its output is a measurement. `verify`
+/// asserts; this one reports. Every boot already proves the timer path works —
+/// a hundred ticks, and a run that does not get all hundred fails — so what is
+/// left for this command is the distribution, which nothing asserts on and
+/// nothing should.
+///
+/// # What a number from here is worth
+///
+/// Not much, and the reason is in `intent/0001-the-first-timer/spec.md`. QEMU's
+/// TCG backend refuses TSC-deadline outright, so the mechanism the milestone
+/// names is not the one that runs here; and the APIC timer it falls back on is
+/// emulated against a host clock QEMU does not control. What comes out is a
+/// distribution of the emulator. `claims/0002-timer-jitter.toml` says what
+/// would have to be true for a number to be quotable, and the development
+/// container sets `F_ENVIRONMENT=container` so that the claims harness already
+/// knows this is not it.
+fn timer(seconds: Option<&str>) -> Result<(), String> {
+    let seconds = seconds.unwrap_or("60");
+    let parsed: u32 = seconds.parse().map_err(|_| format!("not a number of seconds: {seconds}"))?;
+    if parsed == 0 {
+        return Err("a zero-second measurement has nothing in it".into());
+    }
+
+    println!("booting for a {parsed}-second run at 1 kHz; this takes about that long\n");
+
+    match boot(Some(&format!("timer={parsed}")))? {
+        Some(33) => {
+            println!("\ntimer ok — the histogram above is of this machine, not of a claim");
+            Ok(())
+        }
+        Some(35) => Err("the kernel reported failure — see the serial log above".into()),
+        Some(other) => Err(format!("qemu exited {other}; expected 33 or 35")),
         None => Err("qemu terminated by signal".into()),
     }
 }

@@ -1,6 +1,6 @@
 ---
 id: 0001
-status: in-progress
+status: done
 spec: ./spec.md
 ---
 
@@ -96,12 +96,15 @@ this diff moves the legacy interrupt controllers and remaps their vectors, and
 kernel/src/arch/x86_64/pit.rs       NEW: the 8254, gate-controlled and polled.
                                     The known reference, and the only clock in
                                     the tree whose frequency is a constant
-kernel/src/jitter.rs                NEW: fixed-width histogram, no float, no
-                                    allocation, percentiles by counting
+kernel/src/jitter.rs                NEW: log-bucketed histogram, no float, no
+                                    allocation, no division on the sample path;
+                                    plus a boot self-test, because the kernel
+                                    crate cannot be tested on the host
 kernel/src/arch/x86_64/apic.rs      calibration against the 8254 in one pass
                                     over both clocks; arming both mechanisms
                                     from one absolute schedule; the tick handler
 kernel/src/arch/x86_64/idt.rs       the timer vector
+kernel/src/arch/x86_64/mod.rs       the pit module
 kernel/src/arch/x86_64/multiboot.rs a command-line parameter with a value, so
                                     `timer=60` can say sixty
 kernel/src/main.rs                  the fixed-length probe every boot runs, and
@@ -112,6 +115,7 @@ xtask/src/main.rs                   `cargo xtask timer [seconds]`; the QEMU
 claims/0002-timer-jitter.toml       NEW: the p99 bound, pending
 CLAUDE.md                           the new command
 TODO.md                             E0-B07 done, with what its exit actually met
+intent/0001-the-first-timer/        this plan and its intent, closed out
 ```
 
 ### Order
@@ -144,8 +148,14 @@ print a histogram whose count is the number of ticks it waited for.
   is then measured against a deadline that moved to accommodate it.
 - A deadline already in the past must still deliver an interrupt, or the run
   stops dead. Both mechanisms need a floor for this, for different reasons.
-- The bucket shift is computed from a measured frequency. A calibration that
-  failed must not reach it.
+- Bucket width. Planned as fixed-width buckets a quarter of a microsecond
+  across, sized from the measured frequency, which is right for the 5 µs bound
+  and wrong for everything else: under the emulator every sample landed past
+  the top of the range and the histogram was one bar. Changed during the build
+  to logarithmic buckets, eight to the octave — constant *relative* precision,
+  no dependence on a calibrated frequency, and one structure that covers both
+  real hardware and an emulator. Recorded here rather than quietly rewritten,
+  because the reason the first design failed is the useful part.
 - The spin waiting for the 8254's gate must be bounded, or a machine without a
   working channel 2 hangs in boot with no output — the exact failure E0-B06
   exists to have removed, and a poor thing to reintroduce one milestone later.

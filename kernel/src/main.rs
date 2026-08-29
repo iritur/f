@@ -22,6 +22,7 @@
 #![no_main]
 
 pub mod arch;
+pub mod jitter;
 pub mod mem;
 pub mod percpu;
 
@@ -258,6 +259,8 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         }
     }
 
+    run_timer(&boot);
+
     // A fault on purpose, when asked for one. This is how the report path is
     // tested: `cargo xtask fault <kind>` boots with the parameter, and the run
     // is expected to end in a dump and a failure exit rather than in `M0 ok`.
@@ -265,6 +268,105 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
 
     kprintln!("M0 ok");
     arch::x86_64::exit_qemu(arch::x86_64::Exit::Success)
+}
+
+/// The rate everything about M2 is stated at.
+///
+/// A kilohertz, from `docs/design/ring-scene-boot.html`: *done when a 1 kHz
+/// timer runs for 60 seconds and you have a jitter histogram*.
+const TIMER_HZ: u32 = 1_000;
+
+/// How many ticks an ordinary boot waits for.
+///
+/// A tenth of a second. Enough to prove the whole path — arm, deliver,
+/// dispatch, record, re-arm, disarm — on every single run, and short enough
+/// that nobody starts skipping the boot to avoid it. The measurement run is
+/// six hundred times longer and is asked for explicitly.
+const PROBE_TICKS: u64 = 100;
+
+/// Calibrate the clocks and run the timer.
+///
+/// Two runs live here and the difference between them is the whole reason the
+/// split exists. An ordinary boot takes [`PROBE_TICKS`] and prints only things
+/// that cannot vary — which mechanism, how many ticks — because the boot log is
+/// a fixture and two runs of one commit have to match byte for byte.
+///
+/// `timer=<seconds>` on the command line is the measurement. It prints the
+/// histogram, the frequencies it was denominated in, and everything else that
+/// moves. Nothing asserts on that output, and nothing should: it is a
+/// measurement, and `claims/0002-timer-jitter.toml` is where a measurement
+/// becomes something anybody is allowed to quote.
+fn run_timer(boot: &BootInfo) {
+    match jitter::self_test() {
+        Ok(()) => kprintln!("  jitter        ok"),
+        Err(why) => {
+            kprintln!("FAIL: jitter histogram: {why}");
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+
+    // SAFETY: boot processor, once, interrupts still disabled — which is what
+    // keeps the calibration interval the length the 8254 says it is — and after
+    // `apic::init` on this core.
+    let clocks = match unsafe { arch::x86_64::apic::calibrate() } {
+        Ok(clocks) => clocks,
+        Err(why) => {
+            kprintln!("FAIL: clock calibration: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+
+    // Which mechanism, and against what — both fixed properties of the machine.
+    // The two frequencies are measurements and stay out of this line.
+    kprintln!(
+        "  clocks        measured against the 8254 over {} ms; timer via {}",
+        arch::x86_64::pit::CALIBRATE_MICROS / 1_000,
+        clocks.backend.label(),
+    );
+
+    let seconds = boot.parameter_u32(b"timer=");
+    let target = match seconds {
+        Some(seconds) => u64::from(seconds) * u64::from(TIMER_HZ),
+        None => PROBE_TICKS,
+    };
+
+    // SAFETY: this core was brought up and calibrated above, `idt::init` has
+    // installed the timer's vector, and interrupts are disabled on entry —
+    // `run` enables them for the duration and disables them again.
+    let summary = match unsafe { arch::x86_64::apic::run(TIMER_HZ, target) } {
+        Ok(summary) => summary,
+        Err(why) => {
+            kprintln!("FAIL: timer: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+
+    // A short run is a failure however it is dressed up: the timer stopped
+    // firing and the histogram is of whatever happened before it did.
+    if summary.ticks != summary.target {
+        kprintln!("FAIL: timer stopped after {} of {} ticks", summary.ticks, summary.target);
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+
+    if seconds.is_none() {
+        kprintln!("  timer         {} ticks at {} Hz", summary.ticks, summary.hz);
+        return;
+    }
+
+    kprintln!();
+    kprintln!(
+        "TIMER — {} ticks at {} Hz via {}",
+        summary.ticks,
+        summary.hz,
+        summary.backend.label()
+    );
+    kprintln!("    tsc           {} kHz", summary.tsc_khz);
+    kprintln!("    apic timer    {} kHz", clocks.apic_khz);
+    kprintln!("    missed        {} tick(s) a full period or more late", summary.missed);
+
+    let mut serial = arch::x86_64::serial::Serial;
+    summary.late.report(summary.tsc_khz, &mut serial);
+    kprintln!();
 }
 
 /// Fault deliberately, if the command line asked.

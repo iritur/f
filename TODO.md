@@ -140,14 +140,35 @@ load-bearing.*
   *exit:* met. `cargo xtask fault stack` overflows the stack and reports `EXCEPTION 8` with `rsp` at exactly `__kernel_stack_bottom` — the guard caught it. Before, the same overflow walked down through the descriptor tables and reset the machine with no output.
   Found by trying to provoke a double fault with a stack overflow: the stack grows straight down into `.bss`, where the descriptor tables live, so an overflow corrupts the machinery that would have reported it and the machine triple-faults with no output. The interrupt stack table cannot help — by then the IDT itself is gone.
   *needs:* E0-B06
-- [>] **E0-B07** `M` Local APIC and TSC-deadline timer, calibrated against a known reference. **(M2)**
-  `intent/0001-the-first-timer/`, in two parts. The first takes over the
+- [x] **E0-B07** `M` Local APIC and TSC-deadline timer, calibrated against a known reference. **(M2)**
+  `intent/0001-the-first-timer/`, in two parts. The first took over the
   interrupt controller: the local APIC mapped through a device window of its
   own, a spurious vector, and the 8259 pair remapped off the exception vectors
   and masked — because their default assignment puts a free-running IRQ 0 on
   the double-fault vector, and the first `sti` would have reported a double
-  fault that never happened.
-  *exit:* a 1 kHz timer runs for 60 seconds and produces a jitter histogram.
+  fault that never happened. The second built the schedule and the histogram.
+  *exit:* met. `cargo xtask timer 60` runs 60 000 ticks at 1 kHz and prints a
+  log-bucketed distribution of how late each one was, with p50, p99, p99.9 and
+  an exact maximum. Every boot runs a hundred ticks of the same path and fails
+  if it does not get all hundred, so the mechanism is checked on every run
+  while the measurement stays out of the log — a boot log carrying a timing
+  number is a fixture that fails at random, and two runs of this commit are
+  still byte-identical.
+  **Two things the exit does not say, and both matter.** The mechanism the task
+  names is the one that cannot run here: QEMU's TCG backend refuses
+  `tsc-deadline` and `x2apic` by name, so the timer runs on the APIC's own
+  one-shot countdown and the TSC-deadline path is written, selected by `cpuid`,
+  and unexercised until there is a runner with `/dev/kvm`. And the histogram a
+  container produces is of the emulator — p99 lateness in the hundreds of
+  microseconds against a 5 µs bound. `claims/0002-timer-jitter.toml` is
+  `pending` for that reason; **E0-P06 still owns the number**.
+  Found while building: `0b1011_0010` is the byte every 8254 calibration
+  example uses, and its mode field selects mode *1*, not mode 0. With the gate
+  raised after the counter is loaded it reads as already expired — a
+  ten-millisecond interval that measures eighty microseconds, and a calibration
+  wrong by two orders of magnitude that still produces a confident-looking
+  number. The frequency was only obviously wrong because a second, independent
+  measurement disagreed with it.
   *needs:* E0-B06
 - [ ] **E0-B08** `S` Wire the hardware `Env` to the one legitimate `rdtsc`; add the wall-clock capability from RFC 0009.
   *exit:* `lint-determinism` still passes with exactly one allow-listed site; a seeded run and a hardware run both satisfy the `Env` contract tests.

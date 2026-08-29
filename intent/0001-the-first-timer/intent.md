@@ -1,6 +1,6 @@
 ---
 id: 0001
-status: accepted
+status: shipped
 originator: Dmitri Chudinov
 todo: E0-B07
 ---
