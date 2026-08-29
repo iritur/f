@@ -6,6 +6,11 @@
 //! answer to which core it is. Real descriptor tables and paging owned by the
 //! frame arrived at M1; the local APIC and the clock measured against the 8254
 //! arrive here at M2 — see `docs/design/ring-scene-boot.html` section 15.
+//!
+//! M3 adds the other privilege level: `ring3` is the transition and the system
+//! call entry, and `probe` is the program on the far side of it. What a process
+//! *is* rather than how it is entered lives outside this module, in
+//! `crate::process`, because none of it is particular to this architecture.
 
 pub mod apic;
 pub mod boot;
@@ -16,6 +21,8 @@ pub mod paging;
 pub mod pic;
 pub mod pit;
 pub mod port;
+pub mod probe;
+pub mod ring3;
 pub mod rtc;
 pub mod serial;
 

@@ -54,11 +54,33 @@
 //! mapping there is a collision rather than a mapping. A window of its own
 //! cannot collide with anything, on any machine.
 //!
+//! # A process's address space
+//!
+//! [`UserSpace`] is the second kind. It is a top table of its own whose upper
+//! half is *copied* from the kernel's, entry for entry, and whose lower half is
+//! built one page at a time with [`USER`] set the whole way down. Copying the
+//! upper half rather than sharing a pointer to it is what makes a system call
+//! and an interrupt from ring 3 land on mappings that are already there: no
+//! switch of the kernel's own view, and the timer keeps ticking across the
+//! transition because its register window is in the half that was copied.
+//!
+//! The copy is a snapshot, and that is the one thing about it worth watching.
+//! Every top-level slot the kernel will ever have is created before the first
+//! process exists — the direct map, the device window and the kernel window are
+//! one slot each — so a snapshot is currently exact. *Reversal:* the day the
+//! kernel maps something into a top-level slot that did not exist at process
+//! creation, every process built before that is missing it, and the symptom is
+//! a kernel address that works in the kernel and faults inside a process.
+//! Sharing has to become structural then: pre-allocate all 256 upper tables at
+//! boot so that every root points at the same ones.
+//!
 //! # What this is still not
 //!
-//! No per-process address spaces, no user pages, no lazy mapping, no shootdown,
-//! and no unmapping at all. Those arrive with M3 and M4, when there is something
-//! to isolate from something else and a second core to tell about it.
+//! No lazy mapping, no shootdown, and no unmapping — a process's pages are
+//! given back by freeing its frames after its address space stops being the
+//! one in `CR3`, which is sound for one process on one core and is not a
+//! general answer. Those arrive with M4, when a page belongs to a capability
+//! and a second core has to be told it has gone.
 
 use super::cpuid;
 use crate::mem::{Frame, FrameAllocator, Order};
@@ -107,6 +129,15 @@ const PRESENT: u64 = 1 << 0;
 /// Writes are permitted.
 const WRITE: u64 = 1 << 1;
 
+/// Ring 3 may reach this page.
+///
+/// The whole of the isolation, and it has to be set at *every* level: the
+/// processor takes the logical and of the bit down the walk, so a leaf that
+/// grants it under a table that does not is a page ring 3 cannot see. That
+/// asymmetry is deliberate and is what makes the kernel's copied upper half
+/// safe — nothing up there has this bit at any level.
+const USER: u64 = 1 << 2;
+
 /// Writes go straight through rather than into a cache.
 const WRITE_THROUGH: u64 = 1 << 3;
 
@@ -136,6 +167,13 @@ const NO_EXECUTE: u64 = 1 << 63;
 /// no-execute bit here would apply to everything below it — which for the entry
 /// covering the kernel would include the kernel's own text.
 const TABLE: u64 = PRESENT | WRITE;
+
+/// Flags for an entry pointing at another table in a process's lower half.
+///
+/// [`TABLE`] plus [`USER`], for the reason [`USER`] gives: the bit is anded
+/// down the walk, so leaving it off here would make every leaf below
+/// unreachable from ring 3 while looking, in the leaf, exactly right.
+const USER_TABLE: u64 = TABLE | USER;
 
 unsafe extern "C" {
     static __text_start: u8;
@@ -292,6 +330,16 @@ pub enum BuildError {
     /// unusual machine, and mapping it anyway would put a device on top of
     /// whatever is in the next slot.
     DeviceOutOfWindow,
+    /// A process's address space needed more tables than [`MAX_USER_TABLES`].
+    /// Reported rather than silently dropped, because a table that is not on
+    /// the list is a frame that is never given back — a leak that grows by one
+    /// process and is invisible in every count except the free one.
+    TooManyTables,
+    /// A process was asked for a page in the kernel's half of the address
+    /// space. Refused here rather than at the leaf, because at the leaf it
+    /// would be a mapping with [`USER`] set on a kernel table — which is to say
+    /// a hole in the isolation, made by arithmetic rather than by intent.
+    NotUserAddress,
 }
 
 impl BuildError {
@@ -303,6 +351,8 @@ impl BuildError {
             Self::TooMuchMemory => "more physical memory than the direct map covers",
             Self::Overlap => "a mapping collided with a larger one",
             Self::DeviceOutOfWindow => "a device sits beyond the device window",
+            Self::TooManyTables => "a process's address space needs more tables than are tracked",
+            Self::NotUserAddress => "a process was offered a page in the kernel's half",
         }
     }
 }
@@ -490,6 +540,243 @@ pub unsafe fn map_device(
     }
 
     Ok(DEVICE_OFFSET + phys)
+}
+
+/// How many tables one process's address space may need.
+///
+/// A process at M3 has one text page, one guard and one stack page inside a
+/// single two-mebibyte region, which is four tables: the top one, and one at
+/// each level below it. Eight is that with room for a second region, and it is
+/// a bound rather than a limit worth designing around — E0-B11 gives a process
+/// an `AddressSpace` capability with a quota behind it, and this array is what
+/// that replaces.
+pub const MAX_USER_TABLES: usize = 8;
+
+/// What a page in a process's half is for.
+///
+/// The two permissions a process can be given, named rather than composed by
+/// the caller. Flag arithmetic stays in this file: a caller that builds its own
+/// leaf is a caller that can forget [`USER`] — or remember it in the leaf and
+/// forget it in the tables, which fails in the direction that looks like a bug
+/// in the process.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UserPage {
+    /// Executable and not writable. A process's text, and the only thing it
+    /// may execute.
+    Text,
+    /// Writable and never executable. A process's stack, and later its data.
+    Data,
+}
+
+impl UserPage {
+    /// The leaf entry's flags, address excluded.
+    ///
+    /// Never [`GLOBAL`]. A global entry survives the `CR3` write that leaves
+    /// this address space, which for a page belonging to one process is
+    /// precisely the mapping that must not survive it.
+    const fn flags(self, features: Features) -> u64 {
+        let nx = if features.nx { NO_EXECUTE } else { 0 };
+        match self {
+            Self::Text => PRESENT | USER,
+            Self::Data => PRESENT | USER | WRITE | nx,
+        }
+    }
+}
+
+/// One process's address space, and the frames it is made of.
+///
+/// The frame list is the whole of the ownership model at M3, and it is honest
+/// about being small: a process's tables are given back by freeing exactly the
+/// frames that were allocated for them, so the list has to be complete or the
+/// free count does not come back. E0-B11 replaces it with a capability
+/// derivation tree, where the same question is asked of every object rather
+/// than of page tables alone.
+pub struct UserSpace {
+    root: u64,
+    tables: [Frame; MAX_USER_TABLES],
+    count: usize,
+    shared: usize,
+}
+
+impl UserSpace {
+    /// The physical address of the top-level table, which is what `CR3` holds.
+    #[must_use]
+    pub const fn root(&self) -> u64 {
+        self.root
+    }
+
+    /// How many of the kernel's top-level slots this space carries a copy of.
+    ///
+    /// Reported so the boot log can say it. A number that changes when the
+    /// kernel gains a window is the earliest visible sign of the snapshot
+    /// problem the module comment names.
+    #[must_use]
+    pub const fn shared_slots(&self) -> usize {
+        self.shared
+    }
+
+    /// Every frame this address space is built from.
+    ///
+    /// Its pages are not here: those are the caller's, because the caller
+    /// allocated them and knows what is in them.
+    #[must_use]
+    pub fn tables(&self) -> &[Frame] {
+        &self.tables[..self.count]
+    }
+
+    /// Note a frame as one this space will have to give back.
+    fn record(&mut self, frame: Frame) -> Result<(), BuildError> {
+        if self.count == MAX_USER_TABLES {
+            return Err(BuildError::TooManyTables);
+        }
+        self.tables[self.count] = frame;
+        self.count += 1;
+        Ok(())
+    }
+}
+
+/// Build an address space for a process: the kernel's upper half, and nothing
+/// else yet.
+///
+/// The lower half is empty. Every page in it arrives through [`map_user`], one
+/// at a time, which is the only way a process gets anything at all.
+///
+/// # Errors
+///
+/// [`BuildError::NoFrames`] if the top table cannot be allocated.
+///
+/// # Safety
+///
+/// `kernel` must be the address space currently in `CR3` and `frames` must be
+/// rebound onto its direct map, because both tables are read and written
+/// through it.
+pub unsafe fn user_space(
+    frames: &mut FrameAllocator,
+    kernel: &AddressSpace,
+) -> Result<UserSpace, BuildError> {
+    // SAFETY: the caller's guarantee that frames are addressable.
+    let root = unsafe { table(frames) }?;
+    let mut space =
+        UserSpace { root, tables: [Frame::from_addr(0); MAX_USER_TABLES], count: 0, shared: 0 };
+    space.record(Frame::from_addr(root))?;
+
+    // The upper half, entry for entry. Not a copy of half a page: only the
+    // present entries are taken, so the count is the number of kernel windows
+    // rather than the number of slots that exist.
+    for slot in ENTRIES / 2..ENTRIES {
+        // SAFETY: `kernel.root` is a table this module built and `slot` is in
+        // range by construction.
+        let entry = unsafe { read(frames, kernel.root, slot) };
+        if entry & PRESENT == 0 {
+            continue;
+        }
+        // SAFETY: as above, into the table allocated a few lines up, which
+        // nothing else has seen.
+        unsafe { write(frames, root, slot, entry) };
+        space.shared += 1;
+    }
+
+    Ok(space)
+}
+
+/// Map one page into a process's half of its address space.
+///
+/// # Errors
+///
+/// [`BuildError::NotUserAddress`] if `virt` is not in the lower half,
+/// [`BuildError::NoFrames`] or [`BuildError::TooManyTables`] if a table cannot
+/// be made or recorded, and [`BuildError::Overlap`] if something is already
+/// there.
+///
+/// # Safety
+///
+/// As [`user_space`], and `space` must not be the address space currently in
+/// `CR3`: this writes entries that were not present, and a live space would
+/// need each of them invalidated.
+pub unsafe fn map_user(
+    frames: &mut FrameAllocator,
+    space: &mut UserSpace,
+    virt: u64,
+    phys: u64,
+    kind: UserPage,
+    features: Features,
+) -> Result<(), BuildError> {
+    // The lower half, and canonical. Everything at or above this is the
+    // kernel's, and the hole in between is not an address at all.
+    if virt >= 1 << 47 {
+        return Err(BuildError::NotUserAddress);
+    }
+
+    let root = space.root;
+    // SAFETY: the caller's guarantee, passed down.
+    let pdpt = unsafe { descend_user(frames, space, root, slot_of(virt, 39)) }?;
+    // SAFETY: as above.
+    let pd = unsafe { descend_user(frames, space, pdpt, slot_of(virt, 30)) }?;
+    // SAFETY: as above.
+    let pt = unsafe { descend_user(frames, space, pd, slot_of(virt, 21)) }?;
+
+    // SAFETY: as above.
+    let existing = unsafe { read(frames, pt, slot_of(virt, 12)) };
+    if existing & PRESENT != 0 {
+        return Err(BuildError::Overlap);
+    }
+    // SAFETY: as above.
+    unsafe { write(frames, pt, slot_of(virt, 12), phys | kind.flags(features)) };
+    Ok(())
+}
+
+/// Follow an entry in a process's half, creating a table if there is none.
+///
+/// Deliberately not [`descend`], and the difference is two things that both
+/// have to be true at once: the entry it writes carries [`USER`], because the
+/// processor ands that bit down the walk and a leaf cannot grant what a parent
+/// withheld; and the frame it allocates is recorded, because a process's tables
+/// are given back when it dies and one that was never written down is one that
+/// never comes back.
+///
+/// # Safety
+///
+/// As [`build`].
+unsafe fn descend_user(
+    frames: &mut FrameAllocator,
+    space: &mut UserSpace,
+    parent: u64,
+    slot: usize,
+) -> Result<u64, BuildError> {
+    // SAFETY: the caller's guarantee; `parent` is a table this module made.
+    let existing = unsafe { read(frames, parent, slot) };
+    if existing & PRESENT != 0 {
+        if existing & PAGE_SIZE_BIT != 0 {
+            return Err(BuildError::Overlap);
+        }
+        return Ok(existing & ADDRESS_MASK);
+    }
+
+    // SAFETY: as above.
+    let fresh = unsafe { table(frames) }?;
+    space.record(Frame::from_addr(fresh))?;
+    // SAFETY: as above.
+    unsafe { write(frames, parent, slot, fresh | USER_TABLE) };
+    Ok(fresh)
+}
+
+/// Switch to a process's address space, or back out of one.
+///
+/// # Safety
+///
+/// `root` must be a top-level table this module built whose upper half is the
+/// kernel's, because the code performing the switch and the stack under it are
+/// both up there. Everything [`activate`] says applies here too; this is the
+/// same instruction with a weaker argument type, because a process's space is
+/// not an [`AddressSpace`] and the switch back to the kernel's is.
+pub unsafe fn switch(root: u64) {
+    // SAFETY: the caller has established that the kernel window and the direct
+    // map are in `root`, which is what makes the instruction after this one
+    // fetchable. Non-global entries are flushed, which for a process's lower
+    // half is the point.
+    unsafe {
+        core::arch::asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags));
+    }
 }
 
 /// Map one four-kibibyte page.

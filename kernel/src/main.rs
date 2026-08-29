@@ -26,6 +26,7 @@ pub mod env;
 pub mod jitter;
 pub mod mem;
 pub mod percpu;
+pub mod process;
 
 use core::panic::PanicInfo;
 
@@ -166,8 +167,16 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         if features.nx { "on" } else { "unavailable" },
         if features.global { "on" } else { "unavailable" },
         // Not enabled on purpose, and the log says which of the two reasons it
-        // is off for: nothing to switch between yet, or nothing to switch with.
-        if features.pcid { "available, unused until E0-B09" } else { "unavailable" },
+        // is off for: nothing worth switching between yet, or nothing to switch
+        // with. E0-B09 was the milestone this line used to wait for and it has
+        // arrived: there is a second address space now, entered once per boot
+        // and left once. Tagging translations buys nothing at that rate, and an
+        // address-space identifier that is wrong is a process reading another
+        // one's memory through a stale translation — the one failure mode in
+        // this file with no fault behind it. The condition to revisit is a
+        // scheduler that switches between processes often enough to measure,
+        // which is E1.
+        if features.pcid { "available, and deliberately off" } else { "unavailable" },
         // The grain the direct map is built with. Not a protection — a saving,
         // and the one number that says whether this machine offered the larger
         // page or the mapping fell back to the smaller one.
@@ -260,7 +269,7 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         }
     }
 
-    let clocks = run_timer(&boot);
+    let clocks = calibrate();
 
     // M2, and the substrate's other half. Everything above this line ran on the
     // seed. This is what a machine gives instead: the timestamp counter behind
@@ -308,6 +317,12 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     }
     kprintln!("  env contract  arithmetic ok, seeded ok, hardware ok");
 
+    // M3. The other privilege level, and the first thing in this system that is
+    // not the kernel. It runs inside a timer window on purpose: the milestone's
+    // exit criterion is not that a process runs and not that the timer runs, it
+    // is that both are true at once.
+    timed_window(&boot, &mut frames, &space, features, clocks);
+
     // A fault on purpose, when asked for one. This is how the report path is
     // tested: `cargo xtask fault <kind>` boots with the parameter, and the run
     // is expected to end in a dump and a failure exit rather than in `M0 ok`.
@@ -331,22 +346,28 @@ const TIMER_HZ: u32 = 1_000;
 /// six hundred times longer and is asked for explicitly.
 const PROBE_TICKS: u64 = 100;
 
-/// Calibrate the clocks and run the timer.
+/// How many ticks the frame takes out of ring 3 before it tells the process it
+/// has run long enough.
 ///
-/// Two runs live here and the difference between them is the whole reason the
-/// split exists. An ordinary boot takes [`PROBE_TICKS`] and prints only things
-/// that cannot vary — which mechanism, how many ticks — because the boot log is
-/// a fixture and two runs of one commit have to match byte for byte.
+/// Eight, at a kilohertz: eight milliseconds of a process holding the core
+/// while the timer keeps its schedule. Small enough to disappear inside the
+/// hundred-tick probe an ordinary boot already runs, and large enough that
+/// "the timer ran while ring 3 did" is a statement about a schedule rather than
+/// about one lucky interrupt.
 ///
-/// `timer=<seconds>` on the command line is the measurement. It prints the
-/// histogram, the frequencies it was denominated in, and everything else that
-/// moves. Nothing asserts on that output, and nothing should: it is a
-/// measurement, and `claims/0002-timer-jitter.toml` is where a measurement
-/// becomes something anybody is allowed to quote.
+/// A count of *ticks* and not of instructions, which is what keeps the boot log
+/// a fixture on machines two orders of magnitude apart in speed. `process` says
+/// why at length.
+const USER_TICKS: u64 = 8;
+
+/// Measure both clocks against the 8254 and say which mechanism will drive the
+/// timer.
 ///
-/// Returns the calibration, because the hardware `Env` is denominated in it:
-/// the timestamp counter is a count until something says how fast it runs.
-fn run_timer(boot: &BootInfo) -> arch::x86_64::apic::Clocks {
+/// Separated from the run it used to be part of, because at M3 the interesting
+/// thing inside a timer window stopped being a wait. The calibration has to
+/// happen before the hardware `Env` is denominated in it, and the `Env` is
+/// reported before the window opens — so the two are no longer one function.
+fn calibrate() -> arch::x86_64::apic::Clocks {
     match jitter::self_test() {
         Ok(()) => kprintln!("  jitter        ok"),
         Err(why) => {
@@ -374,6 +395,74 @@ fn run_timer(boot: &BootInfo) -> arch::x86_64::apic::Clocks {
         clocks.backend.label(),
     );
 
+    clocks
+}
+
+/// Open a timer window, run a process inside it, and report both.
+///
+/// # The two runs, and why they are still two
+///
+/// An ordinary boot takes [`PROBE_TICKS`] and prints only things that cannot
+/// vary — which mechanism, how many ticks, how many the frame took out of ring
+/// 3 — because the boot log is a fixture and two runs of one commit have to
+/// match byte for byte. `timer=<seconds>` on the command line is the
+/// measurement: it prints the histogram, the frequencies it was denominated in,
+/// and everything else that moves. Nothing asserts on that output, and nothing
+/// should — `claims/0002-timer-jitter.toml` is where a measurement becomes
+/// something anybody is allowed to quote.
+///
+/// # Why the process runs *here*
+///
+/// M3's exit criterion is not that a process runs and not that the timer runs.
+/// It is that both are true at once: a process runs, faults deliberately, and
+/// is killed cleanly *while core 0 holds its jitter bound throughout*. So the
+/// process is entered with the timer already armed, ticks taken out of ring 3
+/// are counted separately from ticks in total, and the same assertion that has
+/// covered every boot since M2 — every tick the schedule asked for arrived —
+/// now covers a window that contained user space.
+///
+/// What this cannot assert is the bound itself. The 5 µs p99 is not met in this
+/// environment and was not met before user space existed either: QEMU's TCG
+/// backend emulates the timer against a host clock it does not control. E0-P06
+/// owns that number and the claim stays `pending`. What is asserted here is the
+/// part that is this milestone's to break — that ring 3 did not cost the
+/// schedule a tick.
+fn timed_window(
+    boot: &BootInfo,
+    frames: &mut mem::FrameAllocator,
+    space: &paging::AddressSpace,
+    features: paging::Features,
+    clocks: arch::x86_64::apic::Clocks,
+) {
+    // The arithmetic before the machinery, for the same reason `env::self_test`
+    // runs before the contract check: a selector layout that is wrong is a
+    // `sysret` into whatever descriptor happened to be there, which is not a
+    // fault and cannot be debugged after the fact.
+    match process::self_test() {
+        Ok(()) => kprintln!("  process       layout ok, sysret selectors agree"),
+        Err(why) => {
+            kprintln!("FAIL: process: {why}");
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+
+    // SAFETY: boot processor, once on this core, after `gdt::init` installed
+    // every descriptor the selectors written here name, and before anything
+    // enters ring 3.
+    unsafe { arch::x86_64::ring3::init() };
+
+    let asked = process::Provoke::chosen(boot);
+    let provoke = if asked.needs_no_execute() && !features.nx {
+        // Not a failure of the kernel, and not something to pretend was tested.
+        // The same answer `fault=nx` gives: say the provocation is unavailable
+        // and run the one that needs nothing.
+        kprintln!("  no-execute    unavailable on this machine; ring 3 has nothing to provoke");
+        process::Provoke::Exit
+    } else {
+        asked
+    };
+    kprintln!("  provoking     {}, from ring 3", provoke.label());
+
     let seconds = boot.parameter_u32(b"timer=");
     let target = match seconds {
         Some(seconds) => u64::from(seconds) * u64::from(TIMER_HZ),
@@ -382,17 +471,78 @@ fn run_timer(boot: &BootInfo) -> arch::x86_64::apic::Clocks {
 
     // SAFETY: this core was brought up and calibrated above, `idt::init` has
     // installed the timer's vector, and interrupts are disabled on entry —
-    // `run` enables them for the duration and disables them again.
-    let summary = match unsafe { arch::x86_64::apic::run(TIMER_HZ, target) } {
-        Ok(summary) => summary,
+    // `start` enables them and `stop` disables them again.
+    let window = match unsafe { arch::x86_64::apic::start(TIMER_HZ, target) } {
+        Ok(window) => window,
         Err(why) => {
             kprintln!("FAIL: timer: {}", why.message());
             arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
         }
     };
 
+    // Nothing between here and `stop` prints. A serial port at 115 200 baud
+    // spends most of a millisecond on a line, which at a kilohertz is most of a
+    // tick interval — so a window that logged what happened inside it would be
+    // a measurement of the logging.
+    //
+    // SAFETY: the boot processor, with the kernel's address space in `CR3`,
+    // `frames` rebound onto its direct map, `ring3::init` done above, and
+    // interrupts enabled by `start` with the timer armed.
+    let outcome =
+        unsafe { process::run(frames, space, features, provoke, USER_TICKS, window.giveup()) };
+
+    // SAFETY: on the core `start` was called on, while its run is still armed.
+    let _ = unsafe { arch::x86_64::apic::wait(&window) };
+    // SAFETY: as above, once per `start`.
+    let summary = unsafe { arch::x86_64::apic::stop(&window) };
+
+    let report = match outcome {
+        Ok(report) => report,
+        Err(why) => {
+            kprintln!("FAIL: process: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+
+    kprintln!(
+        "  user space    root {:#018x}, {} kernel slot(s) shared",
+        report.root,
+        report.shared_slots
+    );
+    kprintln!("  user frames   {} given back, free count unchanged", report.frames);
+    kprintln!(
+        "  user process  announced itself, then ran until the frame had taken {USER_TICKS} \
+         tick(s) from ring 3"
+    );
+    match report.death {
+        process::Death::Killed { vector, error, address, rip } => kprintln!(
+            "  user death    exception {vector} at {address:#018x}, error {error:#x}, \
+             rip {rip:#018x} — killed"
+        ),
+        process::Death::Exited(status) => kprintln!(
+            "  user death    asked to end with status {status}, after {} refused call(s)",
+            report.refused
+        ),
+        // `process::run` turns this into `Error::NoDeath` before it returns, so
+        // reaching it means the two paths disagree about disagreeing.
+        process::Death::Running => {
+            kprintln!("FAIL: the process ended and the frame did not notice");
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+
+    // The provocation has to have provoked. A protection that did not fire is
+    // not a smaller result than a fault — it is the opposite result, and the
+    // one this whole milestone exists to rule out.
+    if let Err(why) = report.verdict(provoke, USER_TICKS) {
+        kprintln!("FAIL: {why}");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+
     // A short run is a failure however it is dressed up: the timer stopped
-    // firing and the histogram is of whatever happened before it did.
+    // firing and the histogram is of whatever happened before it did. It is
+    // also, since M3, the assertion that ring 3 did not cost the schedule
+    // anything — the window it covers is the one the process ran inside.
     if summary.ticks != summary.target {
         kprintln!("FAIL: timer stopped after {} of {} ticks", summary.ticks, summary.target);
         arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
@@ -400,7 +550,7 @@ fn run_timer(boot: &BootInfo) -> arch::x86_64::apic::Clocks {
 
     if seconds.is_none() {
         kprintln!("  timer         {} ticks at {} Hz", summary.ticks, summary.hz);
-        return clocks;
+        return;
     }
 
     kprintln!();
@@ -412,13 +562,12 @@ fn run_timer(boot: &BootInfo) -> arch::x86_64::apic::Clocks {
     );
     kprintln!("    tsc           {} kHz", summary.tsc_khz);
     kprintln!("    apic timer    {} kHz", clocks.apic_khz);
+    kprintln!("    from ring 3   {} tick(s) of the run", report.ticks);
     kprintln!("    missed        {} tick(s) a full period or more late", summary.missed);
 
     let mut serial = arch::x86_64::serial::Serial;
     summary.late.report(summary.tsc_khz, &mut serial);
     kprintln!();
-
-    clocks
 }
 
 /// Fault deliberately, if the command line asked.

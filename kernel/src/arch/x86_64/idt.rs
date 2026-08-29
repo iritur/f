@@ -63,6 +63,12 @@ const BREAKPOINT: u64 = 3;
 /// The page fault, which is the one with an informative error code.
 const PAGE_FAULT: u64 = 14;
 
+/// The bits of a saved code selector that hold a privilege level.
+const PRIVILEGE: u64 = 3;
+
+/// What those bits hold when the interrupted code was a process.
+const USER_PRIVILEGE: u64 = 3;
+
 /// Every register the processor was holding, in the order the stubs push them.
 ///
 /// `repr(C)` and the field order are load-bearing twice over: this is a view of
@@ -311,6 +317,17 @@ pub unsafe extern "C" fn interrupt_dispatch(frame: *mut Frame) {
     // rather than only reporting: the interrupted code carries on, having lost
     // nothing but the time.
     if frame.vector == u64::from(apic::TIMER_VECTOR) {
+        // Whose time it was. A tick taken out of ring 3 is the evidence M3 has
+        // to produce — that the timer kept its schedule while a process held
+        // the core — and the saved code selector is the only place that fact
+        // exists. It is read here, before the handler acknowledges anything,
+        // because after `on_tick` the frame describes an interrupt that is
+        // over.
+        if frame.cs & PRIVILEGE == USER_PRIVILEGE {
+            // SAFETY: the timer's own gate, on the core it was armed on, and
+            // the selector says the interrupted code was at ring 3.
+            unsafe { crate::process::tick_from_ring3() };
+        }
         // SAFETY: reached from the timer's own gate, on the core the timer was
         // armed on, with interrupts disabled by that gate.
         unsafe { apic::on_tick() };
@@ -328,6 +345,29 @@ pub unsafe extern "C" fn interrupt_dispatch(frame: *mut Frame) {
     // boot log at a moment nothing chose, and the boot log is a fixture.
     if frame.vector == u64::from(apic::SPURIOUS_VECTOR) {
         return;
+    }
+
+    // Everything below this line used to be the end of the machine, and for a
+    // fault taken at ring 0 it still is. A fault taken at ring 3 is a different
+    // event with the same shape: the process did something it was not permitted
+    // to do, and what is supposed to happen is that the process stops and the
+    // kernel does not.
+    //
+    // One bit of the saved code selector is the whole difference. `process::kill`
+    // records what happened and points this frame back at the kernel, so the
+    // `iretq` at the end of the stub — the same one that would have resumed the
+    // process — resumes the call that started it instead.
+    if frame.cs & PRIVILEGE == USER_PRIVILEGE {
+        let address = if frame.vector == PAGE_FAULT { faulting_address() } else { 0 };
+        // SAFETY: this is the frame the stub is about to restore from, and the
+        // selector above establishes that the fault was taken at ring 3.
+        if unsafe { crate::process::kill(frame, address) } {
+            return;
+        }
+        // No process was running, so an exception claiming ring 3 is the
+        // kernel's own problem after all. Fall through and report it: a frame
+        // rewritten to resume a call that is not on the stack would turn a
+        // diagnosable fault into an unrecoverable one.
     }
 
     report(frame);

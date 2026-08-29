@@ -103,6 +103,7 @@ fn main() -> ExitCode {
         "build" => build(),
         "run" => run(),
         "fault" => fault(args.get(1).map(String::as_str)),
+        "user" => user(args.get(1).map(String::as_str)),
         "timer" => timer(args.get(1).map(String::as_str)),
         "test" => test(),
         "verify" => verify(),
@@ -142,7 +143,10 @@ cargo xtask <command>
   build              Build the kernel for {KERNEL_TARGET}
   run                Boot the kernel in QEMU and report its exit status
   fault [kind]       Boot it into a deliberate fault and check the report:
-                     pf, ud or df
+                     pf, ud, df, nx, wx or stack
+  user [kind]        Boot into a process that violates one isolation property
+                     on purpose and check the kernel survives it: kernel, null,
+                     text, stack, priv, call or exit. All seven with no argument
   timer [seconds]    Run the 1 kHz timer and print a jitter histogram. Sixty
                      seconds by default. A measurement, not an assertion
   test               Workspace tests on both x86-64 and AArch64
@@ -402,6 +406,90 @@ fn fault(kind: Option<&str>) -> Result<(), String> {
         Some(other) => Err(format!("qemu exited {other}; expected 35")),
         None => Err("qemu terminated by signal".into()),
     }
+}
+
+/// Every isolation property a process is asked to violate, and what it is.
+///
+/// The list is here rather than in the kernel's help text because it is what
+/// this command iterates: `cargo xtask user` runs all of them, which is the
+/// form the suite is worth having in. Six of the seven must fail — that is the
+/// point of them — and the seventh must not, which is what stops the other six
+/// from passing for the wrong reason.
+const PROVOCATIONS: &[(&str, &str)] = &[
+    ("kernel", "read the kernel's direct map"),
+    ("null", "write to the page at address zero"),
+    ("text", "write to its own text"),
+    ("stack", "execute its own stack"),
+    ("priv", "run an instruction only ring 0 may"),
+    ("call", "make a call the frame does not have"),
+    ("exit", "nothing at all: ask to end, and be believed"),
+];
+
+/// Boot into a process that deliberately violates one isolation property, or
+/// all of them in turn.
+///
+/// # Why this expects success where `fault` expects failure
+///
+/// They are opposite assertions about the same event. `cargo xtask fault`
+/// provokes the *kernel* into faulting and expects the machine to die
+/// reporting it, because a kernel that carries on after one of those has not
+/// noticed. This provokes a *process* into faulting and expects the machine to
+/// finish normally, because the entire claim of phase 00 is that a process
+/// doing something it was not permitted to do is an event the frame handles
+/// rather than an event it suffers.
+///
+/// A run that ends at 35 is therefore a failure here and a success there. The
+/// kernel decides which it was, not this command: it knows which exception the
+/// provocation was supposed to raise and refuses to finish if it got a
+/// different one — or none.
+fn user(kind: Option<&str>) -> Result<(), String> {
+    let chosen: Vec<&(&str, &str)> = match kind {
+        None => PROVOCATIONS.iter().collect(),
+        Some(name) => {
+            let found = PROVOCATIONS.iter().find(|(known, _)| *known == name);
+            let Some(found) = found else {
+                let list: Vec<String> =
+                    PROVOCATIONS.iter().map(|(name, what)| format!("  {name:<8} {what}")).collect();
+                return Err(format!("unknown provocation: {name}\n\n{}", list.join("\n")));
+            };
+            vec![found]
+        }
+    };
+
+    let all = chosen.len() > 1;
+    for (name, what) in chosen {
+        if all {
+            println!("\n--- user={name}: {what}");
+        }
+        match boot(Some(&format!("user={name}")))? {
+            // The process ended, the kernel did not, and the kernel agreed that
+            // what ended the process is what the provocation named. All three
+            // are asserted in the kernel; this is the exit code that says so.
+            Some(33) => println!("\nuser={name}: the process ended and the kernel did not"),
+            Some(35) => {
+                return Err(format!(
+                    "the kernel refused to finish after `user={name}`. Either a protection \
+                     did not hold — which is the failure this exists to find — or the \
+                     process did not do what it was told. The serial log above says which."
+                ));
+            }
+            Some(0) => {
+                return Err(format!(
+                    "the machine reset with no output during `user={name}`. A fault taken at \
+                     ring 3 whose handler cannot run is a triple fault, so this is the \
+                     descriptor tables, the task state segment's ring-0 stack, or the \
+                     address space the handler was entered from."
+                ));
+            }
+            Some(other) => return Err(format!("qemu exited {other}; expected 33")),
+            None => return Err("qemu terminated by signal".into()),
+        }
+    }
+
+    if all {
+        println!("\nall {} provocations held", PROVOCATIONS.len());
+    }
+    Ok(())
 }
 
 /// Run the timer for a while and print the jitter histogram it produced.
