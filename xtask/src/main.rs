@@ -836,6 +836,56 @@ fn truncate(text: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
+/// The value of one `key = value` line in a claim file.
+///
+/// Not a TOML parser, and deliberately not: the claim registry reads a handful
+/// of flat scalars, and a dependency on a real parser would be the first
+/// third-party crate in the tree for the sake of six fields. It knows two
+/// things `split('=')` did not — that a `#` outside quotes starts a comment,
+/// and that quotes come off in pairs.
+///
+/// What it is blind to, stated so the next person does not discover it the
+/// hard way: table headers, arrays, multi-line `"""` strings, and any key
+/// whose value spans lines. A claim needing those needs a parser, not a longer
+/// version of this.
+fn toml_scalar(line: &str) -> Option<String> {
+    let (_, value) = line.split_once('=')?;
+
+    // Tracking the quote state is the whole difference between this and
+    // `split('#').next()`, which would cut `notes = "a # b"` in half.
+    let mut quoted = false;
+    let mut end = value.len();
+    for (at, c) in value.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '#' if !quoted => {
+                end = at;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    // `trim` also takes the carriage return off a CRLF file, which the claim
+    // registry currently is.
+    let value = value[..end].trim();
+    let unquoted = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
+    Some(unquoted.to_string())
+}
+
+/// Find `key` in a claim file and return its value.
+///
+/// The key must be followed by whitespace and an `=`, so `status` is not
+/// answered by `statement`. The previous `starts_with` match would have been,
+/// had the two ever been ordered the other way round in the file.
+fn toml_field(text: &str, key: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let line = line.trim_start();
+        let rest = line.strip_prefix(key)?;
+        rest.trim_start().starts_with('=').then(|| toml_scalar(line))?
+    })
+}
+
 fn claims_list() -> Result<(), String> {
     let dir = root().join("claims");
     let mut found: BTreeMap<String, String> = BTreeMap::new();
@@ -846,12 +896,7 @@ fn claims_list() -> Result<(), String> {
         if path.extension().is_some_and(|e| e == "toml") {
             let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
             let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            let status = text
-                .lines()
-                .find(|l| l.trim_start().starts_with("status"))
-                .and_then(|l| l.split('=').nth(1))
-                .map(|s| s.trim().trim_matches('"').to_string())
-                .unwrap_or_else(|| "unknown".into());
+            let status = toml_field(&text, "status").unwrap_or_else(|| "unknown".into());
             found.insert(name, status);
         }
     }
@@ -892,12 +937,7 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         .ok_or_else(|| format!("no claim named {name} in claims/"))?;
 
     let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
-    let field = |key: &str| {
-        text.lines()
-            .find(|l| l.trim_start().starts_with(key))
-            .and_then(|l| l.split('=').nth(1))
-            .map(|s| s.trim().trim_matches('"').to_string())
-    };
+    let field = |key: &str| toml_field(&text, key);
 
     let status = field("status").unwrap_or_else(|| "unknown".into());
     let milestone = field("milestone").unwrap_or_else(|| "?".into());
@@ -967,4 +1007,54 @@ fn coverage() -> Result<(), String> {
          The fuzzing harness at phase 01 consumes the same instrumentation."
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::toml_field;
+
+    /// The shapes the claim registry actually contains, carriage returns
+    /// included, because the file on disk has them.
+    const SAMPLE: &str = concat!(
+        "name       = \"ring-submit-latency\"\r\n",
+        "status     = \"pending\"          # pending | tracked | gating\r\n",
+        "milestone  = \"M5\"\r\n",
+        "statement  = \"\"\"\r\n",
+        "\r\n",
+        "[hardware]\r\n",
+        "runner = \"runner-class-A\"       # pinned bare metal, thermally stable\r\n",
+        "notes  = \"a # inside quotes is not a comment\"\r\n",
+    );
+
+    #[test]
+    fn an_inline_comment_is_not_part_of_the_value() {
+        // The bug this replaced reported `pending"          # pending | tracked
+        // | gating` as the status of every claim in the registry.
+        assert_eq!(toml_field(SAMPLE, "status").as_deref(), Some("pending"));
+    }
+
+    #[test]
+    fn a_hash_inside_quotes_is_not_a_comment() {
+        assert_eq!(
+            toml_field(SAMPLE, "notes").as_deref(),
+            Some("a # inside quotes is not a comment")
+        );
+    }
+
+    #[test]
+    fn a_key_is_not_answered_by_a_longer_one() {
+        assert_eq!(toml_field(SAMPLE, "state"), None);
+        assert_eq!(toml_field(SAMPLE, "run"), None);
+    }
+
+    #[test]
+    fn a_carriage_return_does_not_survive_into_the_value() {
+        assert_eq!(toml_field(SAMPLE, "milestone").as_deref(), Some("M5"));
+        assert_eq!(toml_field(SAMPLE, "name").as_deref(), Some("ring-submit-latency"));
+    }
+
+    #[test]
+    fn a_missing_key_is_absent_rather_than_empty() {
+        assert_eq!(toml_field(SAMPLE, "joules_per_op"), None);
+    }
 }
