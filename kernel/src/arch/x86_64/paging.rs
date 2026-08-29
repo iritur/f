@@ -46,6 +46,14 @@
 //!   entries need not be flushed when `CR3` changes. Free here, and worth
 //!   having in place before there is a second address space to switch to.
 //!
+//! **The device window**, at [`DEVICE_OFFSET`]. Memory-mapped registers, one
+//! page at a time, uncacheable. It is a separate window rather than a hole in
+//! the direct map because the direct map is built out of gibibyte and
+//! mebibyte pages: on a machine with enough memory, the page holding a device
+//! register would fall inside one of them, and asking for a four-kibibyte
+//! mapping there is a collision rather than a mapping. A window of its own
+//! cannot collide with anything, on any machine.
+//!
 //! # What this is still not
 //!
 //! No per-process address spaces, no user pages, no lazy mapping, no shootdown,
@@ -62,6 +70,21 @@ use crate::mem::{Frame, FrameAllocator, Order};
 /// physical address used as a virtual one lands in unmapped space rather than in
 /// the middle of the kernel.
 pub const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
+
+/// Where memory-mapped device registers appear.
+///
+/// A window of its own, one PML4 slot wide — five hundred and twelve gibibytes,
+/// which is every device address any machine this kernel runs on will have —
+/// and a long way from both the direct map and the kernel image. A device
+/// register at physical `p` is read and written at `DEVICE_OFFSET + p`.
+///
+/// Deliberately *not* an offset into the direct map. See the module comment:
+/// the direct map is built from huge pages, and a four-kibibyte mapping inside
+/// one of them is an error rather than a refinement.
+pub const DEVICE_OFFSET: u64 = 0xFFFF_9000_0000_0000;
+
+/// How far past [`DEVICE_OFFSET`] a device may sit: one top-level slot.
+const DEVICE_WINDOW: u64 = 512 * GIB;
 
 /// Bytes in a page.
 const PAGE: u64 = 4096;
@@ -83,6 +106,17 @@ const PRESENT: u64 = 1 << 0;
 
 /// Writes are permitted.
 const WRITE: u64 = 1 << 1;
+
+/// Writes go straight through rather than into a cache.
+const WRITE_THROUGH: u64 = 1 << 3;
+
+/// The line is not cached at all.
+///
+/// With [`WRITE_THROUGH`] and the page-attribute-table bit clear, this selects
+/// the uncacheable type under the default attribute table — which is what a
+/// device register needs, and needs for correctness rather than for speed: a
+/// cached read of a status register returns whatever it said the first time.
+const CACHE_DISABLE: u64 = 1 << 4;
 
 /// This entry is the page itself rather than a pointer to a finer table.
 const PAGE_SIZE_BIT: u64 = 1 << 7;
@@ -252,6 +286,12 @@ pub enum BuildError {
     /// file rather than a condition to handle, and reported rather than
     /// silently unmapping what was there.
     Overlap,
+    /// A device was found at a physical address the device window does not
+    /// reach. Five hundred and twelve gibibytes up, which no PC-class machine
+    /// puts a register at — so this is a misread base address rather than an
+    /// unusual machine, and mapping it anyway would put a device on top of
+    /// whatever is in the next slot.
+    DeviceOutOfWindow,
 }
 
 impl BuildError {
@@ -262,6 +302,7 @@ impl BuildError {
             Self::NoFrames => "not enough frames to build an address space",
             Self::TooMuchMemory => "more physical memory than the direct map covers",
             Self::Overlap => "a mapping collided with a larger one",
+            Self::DeviceOutOfWindow => "a device sits beyond the device window",
         }
     }
 }
@@ -384,6 +425,71 @@ pub unsafe fn activate(space: &AddressSpace) {
     unsafe {
         core::arch::asm!("mov cr3, {}", in(reg) space.root, options(nostack, preserves_flags));
     }
+}
+
+/// Map one page of device registers into a live address space.
+///
+/// Returns the address the registers can be reached at, which is
+/// [`DEVICE_OFFSET`] plus the physical address — offset within the page
+/// included, so a base that is not page-aligned still returns the right place
+/// to read.
+///
+/// # Why this one runs after the switch and [`build`] runs before it
+///
+/// [`build`] writes tables describing an address space that is not active yet,
+/// so nothing it writes can be stale. This writes into the space the caller is
+/// running in. Two consequences, and both are handled here rather than left to
+/// the caller: the page must be invalidated afterwards, because a not-present
+/// entry may already be cached negatively; and every table this touches is
+/// reached through the direct map, so the allocator must already have been
+/// rebound onto it.
+///
+/// # Errors
+///
+/// [`BuildError::DeviceOutOfWindow`] if the device is past the window,
+/// [`BuildError::NoFrames`] if a table cannot be allocated, and
+/// [`BuildError::Overlap`] never — nothing else maps into this window, which is
+/// the reason it is a window of its own.
+///
+/// # Safety
+///
+/// `space` must be the address space currently in `CR3`, `frames` must have
+/// been rebound onto its direct map, and `phys` must name device registers
+/// rather than ordinary memory: this mapping is uncacheable and writable, and
+/// pointing it at memory somebody else owns aliases that memory with different
+/// caching, which is a corruption the hardware will not report.
+pub unsafe fn map_device(
+    frames: &mut FrameAllocator,
+    space: &AddressSpace,
+    phys: u64,
+    features: Features,
+) -> Result<u64, BuildError> {
+    if phys >= DEVICE_WINDOW {
+        return Err(BuildError::DeviceOutOfWindow);
+    }
+
+    let page = phys & !(PAGE - 1);
+    let virt = DEVICE_OFFSET + page;
+
+    let nx = if features.nx { NO_EXECUTE } else { 0 };
+    let global = if features.global { GLOBAL } else { 0 };
+    let flags = PRESENT | WRITE | CACHE_DISABLE | WRITE_THROUGH | nx | global;
+
+    // SAFETY: the caller has guaranteed the allocator is rebound onto the
+    // direct map of the active space, which is what makes every table this
+    // walks readable and writable.
+    unsafe { map_page(frames, space.root, virt, page, flags) }?;
+
+    // The entry was not present a moment ago, and a not-present translation may
+    // have been cached as such. One instruction, and skipping it is the kind of
+    // bug that reproduces on one machine in ten.
+    // SAFETY: invalidating a page is architecturally valid at ring 0 for any
+    // address, mapped or not.
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
+    }
+
+    Ok(DEVICE_OFFSET + phys)
 }
 
 /// Map one four-kibibyte page.

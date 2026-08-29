@@ -34,7 +34,7 @@
 use core::arch::global_asm;
 use core::fmt::Write;
 
-use super::gdt;
+use super::{apic, gdt};
 // The macro is `#[macro_export]`ed, so it lives at the crate root. Importing it
 // here is the opposite of the situation in `main.rs`, where the same import
 // would be a redefinition — the root is where it already is.
@@ -174,6 +174,14 @@ unsafe extern "C" {
     /// Addresses of the thirty-two exception stubs, built by the assembly below
     /// so that the list of them exists in exactly one place.
     static isr_table: [u64; EXCEPTION_VECTORS];
+
+    /// The stub for an interrupt the local APIC could not explain.
+    ///
+    /// A label rather than an entry in the table above, because it is not the
+    /// thirty-third exception: it is a device vector, it lives at the far end
+    /// of the table, and putting it in a list indexed by vector number would
+    /// mean two hundred and twenty-four empty entries between.
+    static isr_spurious: u8;
 }
 
 /// Install the interrupt descriptor table.
@@ -201,6 +209,15 @@ pub unsafe fn init() {
         // one of the first thirty-two, and it is not live until `lidt`.
         unsafe { slot.write(Gate::new(handler, ist)) };
     }
+
+    // The spurious vector, which is the only non-exception gate this kernel
+    // installs so far. It is not optional: the local APIC has to be told a
+    // vector to deliver an unexplainable interrupt to, and a machine with no
+    // gate there answers one with a fault about the fault.
+    let slot = idt.wrapping_add(apic::SPURIOUS_VECTOR as usize);
+    // SAFETY: this core's own table, `SPURIOUS_VECTOR` is a `u8` and the table
+    // has 256 slots, and it is not live until `lidt` below.
+    unsafe { slot.write(Gate::new((&raw const isr_spurious) as u64, 0)) };
 
     let pointer = gdt::DescriptorPointer {
         limit: (core::mem::size_of::<[Gate; IDT_ENTRIES]>() - 1) as u16,
@@ -272,6 +289,19 @@ pub unsafe extern "C" fn interrupt_dispatch(frame: *mut Frame) {
     // boot probe takes one, and the machine carries on.
     if frame.vector == BREAKPOINT {
         kprintln!("  exceptions    ok — breakpoint taken and returned");
+        return;
+    }
+
+    // An interrupt the local APIC withdrew between asserting it and having it
+    // acknowledged. It is not an error, it needs no end-of-interrupt — the
+    // architecture is explicit that sending one here would acknowledge somebody
+    // else's interrupt — and there is nothing useful to say about it. Returning
+    // silently is the whole handler.
+    //
+    // Silent on purpose rather than for lack of a counter: this path is
+    // reachable from any interrupt, so anything it printed would appear in the
+    // boot log at a moment nothing chose, and the boot log is a fixture.
+    if frame.vector == u64::from(apic::SPURIOUS_VECTOR) {
         return;
     }
 
@@ -457,6 +487,15 @@ isr_30:
 isr_31:
     pushq $0
     pushq $31
+    jmp isr_common
+
+    // Not an exception, so not in the table above and not reached by index.
+    // The processor pushes no error code for a device vector, so the stub
+    // pushes the zero that keeps every frame the same shape, then the vector.
+    .globl isr_spurious
+isr_spurious:
+    pushq $0
+    pushq $255
     jmp isr_common
 
 isr_common:
