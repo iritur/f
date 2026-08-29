@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   The F development environment, from Windows.
 
@@ -57,22 +57,26 @@ function Require-Docker {
     }
 }
 
+# The parameter is `$ComposeArgs` and not the obvious `$Args` because `$Args`
+# is an automatic variable: a parameter of that name binds nothing, silently,
+# and every command below degenerates into a bare `docker compose -f <file>`
+# that prints the usage screen and exits 0. Do not rename it back.
 function Compose {
-    param([string[]]$Args)
-    & docker compose -f $ComposeFile @Args
+    param([string[]]$ComposeArgs)
+    & docker compose -f $ComposeFile @ComposeArgs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
 # One-shot command in a throwaway container. `--rm` because a development
 # container that accumulates state is a development machine again.
 function Exec {
-    param([string]$Service, [string[]]$Args)
-    Compose -Args (@("run", "--rm", $Service) + $Args)
+    param([string]$Service, [string[]]$ComposeArgs)
+    Compose -ComposeArgs (@("run", "--rm", $Service) + $ComposeArgs)
 }
 
 function Xtask {
-    param([string]$Service, [string[]]$Args)
-    Exec -Service $Service -Args (@("cargo", "xtask") + $Args)
+    param([string]$Service, [string[]]$ComposeArgs)
+    Exec -Service $Service -ComposeArgs (@("cargo", "xtask") + $ComposeArgs)
 }
 
 switch ($Command.ToLower()) {
@@ -122,29 +126,29 @@ switch ($Command.ToLower()) {
         Require-Docker
         $service = "dev"
         if ($Rest -and $Rest[0] -eq "full") { $service = "full" }
-        Compose -Args @("build", $service)
+        Compose -ComposeArgs @("build", $service)
         Write-Host ""
         Write-Host "built. Try: .\docker\dev.ps1 lint" -ForegroundColor Green
     }
 
-    "shell"    { Require-Docker; Exec  -Service "dev"  -Args @("/bin/bash") }
+    "shell"    { Require-Docker; Exec  -Service "dev"  -ComposeArgs @("/bin/bash") }
 
-    "lint"     { Require-Docker; Xtask -Service "dev"  -Args @("lint") }
-    "test"     { Require-Docker; Xtask -Service "dev"  -Args @("test") }
-    "run"      { Require-Docker; Xtask -Service "dev"  -Args @("run") }
-    "claims"   { Require-Docker; Xtask -Service "dev"  -Args @("claims") }
-    "coverage" { Require-Docker; Xtask -Service "dev"  -Args @("coverage") }
+    "lint"     { Require-Docker; Xtask -Service "dev"  -ComposeArgs @("lint") }
+    "test"     { Require-Docker; Xtask -Service "dev"  -ComposeArgs @("test") }
+    "run"      { Require-Docker; Xtask -Service "dev"  -ComposeArgs @("run") }
+    "claims"   { Require-Docker; Xtask -Service "dev"  -ComposeArgs @("claims") }
+    "coverage" { Require-Docker; Xtask -Service "dev"  -ComposeArgs @("coverage") }
 
-    "x"        { Require-Docker; Xtask -Service "dev"  -Args $Rest }
-    "cargo"    { Require-Docker; Exec  -Service "dev"  -Args (@("cargo") + $Rest) }
-    "full"     { Require-Docker; Exec  -Service "full" -Args $Rest }
+    "x"        { Require-Docker; Xtask -Service "dev"  -ComposeArgs $Rest }
+    "cargo"    { Require-Docker; Exec  -Service "dev"  -ComposeArgs (@("cargo") + $Rest) }
+    "full"     { Require-Docker; Exec  -Service "full" -ComposeArgs $Rest }
 
     "export" {
         Require-Docker
         $dest = Join-Path $RepoRoot "target-export"
         New-Item -ItemType Directory -Force -Path $dest | Out-Null
         Write-Host "copying /work/target out of its volume into $dest ..."
-        Compose -Args @("run", "--rm", "-v", "${dest}:/export", "dev",
+        Compose -ComposeArgs @("run", "--rm", "-v", "${dest}:/export", "dev",
                         "bash", "-lc", "cp -a /work/target/. /export/ && ls -la /export | head")
         Write-Host "done." -ForegroundColor Green
     }
@@ -152,7 +156,7 @@ switch ($Command.ToLower()) {
     "clean" {
         Require-Docker
         Write-Host "removing the build and cache volumes (the working tree is untouched)..."
-        Compose -Args @("down", "-v")
+        Compose -ComposeArgs @("down", "-v")
         Write-Host "done. The next build re-downloads the registry index." -ForegroundColor Green
     }
 

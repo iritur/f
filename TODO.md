@@ -166,7 +166,8 @@ load-bearing.*
   *exit:* both paths pass the same suppression test; doorbells per operation under load is recorded.
   *needs:* E0-B12
 - [x] **E0-B16** `M` The development container: `docker/`, reading the toolchain pin from `rust-toolchain.toml` so the image cannot drift from the tree.
-  *exit:* on a machine whose only prerequisite is Docker, `.\docker\dev.ps1 build` then `lint`, `test` and `run` all pass. The environment stops being a step that is not in the tree.
+  *exit:* met, at the second attempt. `.\docker\dev.ps1 build` then `lint`, `test` and `run` all pass on a machine whose only prerequisite is Docker, under Windows PowerShell 5.1 and PowerShell 7 both. The environment stops being a step that is not in the tree.
+  Marked done before it was, and worth recording as the second instance of the same lesson as `E0-B02`: the wrapper had never run once. `Compose`, `Exec` and `Xtask` each took a parameter named `$Args`, which is a PowerShell automatic variable — it binds nothing, silently, so every verb degenerated into a bare `docker compose -f <file>` that printed the usage screen and exited **0**. A failure that reports success is worse than one that does not, and only running the thing finds it. Underneath that, the script was saved as UTF-8 with no BOM, so 5.1 decoded its em-dashes as ANSI smart quotes and could not parse the file at all, despite the docstring promising 5.1 support.
 - [ ] **E0-B17** `S` Teach `xtask` to honour `CARGO_TARGET_DIR` instead of assuming `./target`.
   *exit:* `cargo xtask run` finds the kernel when the target directory has been moved; found while containerising, where moving it is the whole performance story on Windows.
   *needs:* E0-B16
