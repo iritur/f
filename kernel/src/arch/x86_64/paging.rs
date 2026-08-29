@@ -52,6 +52,7 @@
 //! and no unmapping at all. Those arrive with M3 and M4, when there is something
 //! to isolate from something else and a second core to tell about it.
 
+use super::cpuid;
 use crate::mem::{Frame, FrameAllocator, Order};
 
 /// Where physical memory appears in the kernel's address space.
@@ -208,35 +209,6 @@ pub unsafe fn enable_features() -> Features {
     }
 
     features
-}
-
-/// One `cpuid` leaf, as `(ebx, ecx, edx)`.
-///
-/// # Safety
-///
-/// None beyond the instruction itself, which is unprivileged and has no memory
-/// effect. `unsafe` because it is `asm!`.
-unsafe fn cpuid(leaf: u32) -> (u32, u32, u32) {
-    let ebx: u32;
-    let ecx: u32;
-    let edx: u32;
-    // SAFETY: `rbx` is reserved by the compiler, so it is saved and restored
-    // around the instruction rather than named as an output. The target
-    // disables the red zone, so using the stack here is sound.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "cpuid",
-            "mov {ebx:e}, ebx",
-            "pop rbx",
-            ebx = lateout(reg) ebx,
-            inout("eax") leaf => _,
-            out("ecx") ecx,
-            out("edx") edx,
-            options(preserves_flags),
-        );
-    }
-    (ebx, ecx, edx)
 }
 
 /// A kernel address space, named by the physical address of its top table.

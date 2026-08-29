@@ -28,6 +28,8 @@
 
 use core::arch::asm;
 
+use crate::percpu::PerCpu;
+
 /// Selector for the kernel code segment.
 pub const KERNEL_CODE: u16 = 0x08;
 
@@ -80,9 +82,21 @@ pub struct DescriptorPointer {
 
 /// Null, kernel code, kernel data, and two slots for the system descriptor
 /// that names the task state segment — system descriptors are sixteen bytes.
-static mut GDT: [u64; 5] = [0; 5];
+///
+/// Per core, because the fourth and fifth slots name *this* core's task state
+/// segment, and a segment is not something two cores can share.
+static GDT: PerCpu<[u64; 5]> = PerCpu::new([0; 5]);
 
-static mut TSS: Tss = Tss {
+/// Per core, which is what forces the table above to be: this is where the
+/// stack pointers live.
+///
+/// Sharded here and not yet everywhere it needs to be. The double-fault stack
+/// each of these names comes from the linker script, and there is exactly one
+/// of it — so on a second core this table would be private and the stack it
+/// points at would not be. Sharding the stacks belongs with the code that
+/// starts the second core (E0-B10), because a stack needs a guard page under
+/// it and a guard page needs the mapper, which does not exist this early.
+static TSS: PerCpu<Tss> = PerCpu::new(Tss {
     _reserved0: 0,
     privilege_stacks: [0; 3],
     _reserved1: 0,
@@ -90,7 +104,7 @@ static mut TSS: Tss = Tss {
     _reserved2: 0,
     _reserved3: 0,
     iomap_base: core::mem::size_of::<Tss>() as u16,
-};
+});
 
 unsafe extern "C" {
     /// The far end of the double-fault stack, from the linker script.
@@ -105,8 +119,11 @@ unsafe extern "C" {
 ///
 /// # Safety
 ///
-/// Call once, on the boot processor, before enabling interrupts. Reloading the
-/// segment registers and the code segment mid-flight is only sound because the
+/// Call once per core, on that core, before enabling interrupts on it. It
+/// installs the calling core's own tables and no other core's — which is what
+/// makes it the right shape for the application processors, and why the
+/// obligation is once *per core* rather than once. Reloading the segment
+/// registers and the code segment mid-flight is only sound because the
 /// descriptors being installed describe the same flat address space the caller
 /// is already running in.
 pub unsafe fn init() {
@@ -114,9 +131,9 @@ pub unsafe fn init() {
     // its far end, because a stack grows down from there.
     let fault_stack_top = (&raw const __fault_stack_top) as u64;
 
-    let tss = (&raw mut TSS).cast::<Tss>();
-    // SAFETY: single-threaded boot path, and nothing else refers to the task
-    // state segment until it is installed below.
+    let tss = TSS.mine();
+    // SAFETY: this core's slot, on the boot path, and nothing else refers to
+    // the task state segment until it is installed below.
     unsafe {
         tss.write(Tss {
             _reserved0: 0,
@@ -129,25 +146,25 @@ pub unsafe fn init() {
         });
     }
 
-    let tss_base = (&raw const TSS).cast::<u8>() as u64;
+    let tss_base = tss as u64;
     let (low, high) = tss_descriptor(tss_base, core::mem::size_of::<Tss>() as u32 - 1);
 
     // One write per `unsafe` block, with the offset arithmetic outside it:
     // computing a pointer is not the dangerous act, and a block covering five
     // writes has a SAFETY comment covering whichever one the reader thinks of.
-    let gdt = (&raw mut GDT).cast::<u64>();
+    let gdt = GDT.mine().cast::<u64>();
     for (index, descriptor) in
         [(0, 0), (1, CODE_DESCRIPTOR), (2, DATA_DESCRIPTOR), (3, low), (4, high)]
     {
         let at = gdt.wrapping_add(index);
-        // SAFETY: one core, before anything can observe a partly built table,
-        // and the index is one of the five slots the table has.
+        // SAFETY: this core's own table, before anything can observe it partly
+        // built, and the index is one of the five slots it has.
         unsafe { at.write(descriptor) };
     }
 
     let pointer = DescriptorPointer {
         limit: (core::mem::size_of::<[u64; 5]>() - 1) as u16,
-        base: (&raw const GDT).cast::<u8>() as u64,
+        base: gdt as u64,
     };
 
     // SAFETY: the pointer describes the table built immediately above, at an

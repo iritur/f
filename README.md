@@ -27,7 +27,7 @@ is the intended order.
 cargo xtask verify   # lint, test, boot — everything, before asking for review
 cargo xtask run      # boot the kernel in QEMU, assert on its exit code
 cargo xtask test     # workspace tests
-cargo xtask lint     # the three policy checks
+cargo xtask lint     # the four policy checks
 cargo xtask claims   # what is measured, and what gates
 ```
 

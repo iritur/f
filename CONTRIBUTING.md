@@ -16,9 +16,9 @@ cargo xtask lint
 cargo xtask test
 ```
 
-Both must pass. `lint` runs three checks that encode architectural decisions
-rather than style preferences, and each failure message names the RFC it comes
-from.
+Both must pass. `lint` runs four checks that encode architectural decisions
+rather than style preferences, and each failure message names where the
+decision comes from.
 
 ## The three policies that are not negotiable in review
 
@@ -34,6 +34,14 @@ RFC. See RFC 0001.
 
 **The licence boundary.** The permissive tree never imports `third_party/`.
 Imported code is reachable only over a ring. See `LICENSING.md` and RFC 0003.
+
+The fourth check, `lint-percpu`, is not one of the three: it enforces a design
+decision rather than a policy, which is why it is named here and not above.
+Kernel state is per-CPU from the first allocation, behind `PerCpu<T>`, while
+only one core is running — see `kernel/src/percpu.rs` and section 14 of
+`docs/design/ring-scene-boot.html`. The reason it is mechanised at all is that
+the cost of breaking it is not paid until the day a second core boots, which is
+the worst day to start paying it.
 
 ## Where a change starts
 

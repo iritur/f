@@ -113,8 +113,8 @@ load-bearing.*
 
 ### Build
 
-- [>] **E0-B01** `M` **Green build.** Done in the container; the CI half is `E0-P01`.
-  *exit:* `cargo xtask lint && cargo xtask test && cargo xtask run` passes from a clean checkout on a machine with only the pinned toolchain and QEMU installed; CI does the same.
+- [x] **E0-B01** `M` **Green build.** Done in the container; the CI half is `E0-P01`.
+  *exit:* met. The three commands pass in the development image — a machine whose only prerequisites are the pinned toolchain and QEMU — from a tree copied out of `git ls-files` into an empty directory with no `target/` in it, so nothing in the loop depends on something a previous build left behind. CI runs the same three commands; that it *stays* green on a pull request is `E0-P01`'s exit and not this one, which is the split the note above always claimed.
 - [x] **E0-B02** `M` Bootloader handoff — **multiboot 1**, not Limine or multiboot 2: QEMU implements it in its own `-kernel` loader, so the handoff costs a header and a stub rather than a vendored binary or an ISO step. Memory map reaches the kernel; no framebuffer, which M1 does not need.
   *exit:* met. The kernel prints seven regions and 130 559 KiB usable, then exits 33 with `M0 ok`, and two runs of the same commit are byte-identical.
   *needs:* E0-B01
@@ -126,8 +126,10 @@ load-bearing.*
   Kernel relinked to -2 GiB and loaded low; the boot stub maps the first gibibyte twice so the jump between the two windows survives; the kernel then builds its own tables from allocator frames — a direct map of all usable physical memory at `0xFFFF800000000000` plus the kernel window — switches `CR3`, and drops the identity window entirely.
   *exit:* met. The M1 stress test passes *through the direct map*, which is the part that proves the switch. On a 2 GiB machine the pass that claims memory the identity window could not reach adds 262 112 frames, so the path is demonstrated rather than assumed.
   *needs:* E0-B03
-- [ ] **E0-B05** `S` `PerCpu<T>` in place before the second core exists, per the standing decision.
-  *exit:* no kernel-global mutable state outside `PerCpu`; a lint or a review checklist item enforces it.
+- [x] **E0-B05** `S` `PerCpu<T>` in place before the second core exists, per the standing decision.
+  The kernel had exactly three mutable statics — the GDT, the task state segment and the IDT — and all three are now slots in a `PerCpu<T>`, indexed by the initial APIC id the processor reports. `gdt::init` and `idt::init` install *this core's* tables and no other core's, which is the shape the application processors need and the reason the safety obligation on both changed from "once" to "once per core". `PerCpu::mine` hands out a raw pointer rather than a reference, because a per-CPU abstraction cannot see an interrupt handler reaching the same slot as the code it interrupted, and a safe `&mut` would be claiming otherwise.
+  *exit:* met, from both sides. Boot prints `per-cpu core 0 of 8, slots distinct` before the tables are installed, having proved that a write through one slot is invisible to the other seven — a shard that returns the same pointer for every core looks perfectly correct on a machine with one. `cargo xtask lint-percpu` fails the build on a `static mut`, or on a `static` holding a cell, a lock or an atomic, anywhere under `kernel/` except `percpu.rs`; a probe file carrying four of them reported four findings, and the `PerCpu` and plain `const`-like statics beside them reported none. All six `cargo xtask fault` paths still report, including `df` and `stack`, which are the two that go through the interrupt stack table in the now-per-core task state segment. The cost is eight frames off the free count: seven extra copies of the interrupt table, 28 KiB.
+  Sharded here and not everywhere: the double-fault stack the task state segments name still comes from the linker script and there is exactly one of it, because a stack needs a guard page and a guard page needs the mapper. That belongs to `E0-B10`, and the code says so where it is wrong rather than in this file.
 - [x] **E0-B06** `M` GDT, IDT, exception handlers with a register dump worth reading. **(M2)**
   Also fixed a live landmine: `GDTR` still pointed at the boot stub's table in low memory, which E0-B04 stopped mapping. Nothing had noticed because nothing had reloaded a segment or taken an interrupt — and the first thing to do either would have been this handler.
   *exit:* met. `cargo xtask fault pf|ud|df` boots into a deliberate fault; the report names the exception, decodes the error code, gives the faulting instruction and prints all fifteen registers. `df` proves the interrupt stack table: a fault with no usable stack is reported rather than resetting the machine.
@@ -224,6 +226,7 @@ load-bearing.*
   *exit:* the page describes what is actually true on the day of release.
 - [ ] **E0-R04** `S` **Release 0.1.** Two gating claims, the reproduction command, and the honest-status page.
   *exit:* the tag exists, the package is attached, and the claims snapshot is in it.
+  *needs:* E0-P05, E0-P06, E0-R01, E0-R02, E0-R03
 
 - [x] **E0-B19** `M` Write exclusive-or execute on the kernel mapping, and a direct map that is never executable.
   The kernel window is now 4 KiB pages with per-section permissions from the linker script: text executable and not writable, constants neither, everything else writable and not executable. `CR0.WP` makes the read-only half apply to ring 0, `EFER.NXE` makes the no-execute half legal, and both are reported at boot rather than assumed.

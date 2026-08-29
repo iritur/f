@@ -23,6 +23,7 @@
 
 pub mod arch;
 pub mod mem;
+pub mod percpu;
 
 use core::panic::PanicInfo;
 
@@ -69,10 +70,22 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     kprintln!("  sqe size      {} bytes", core::mem::size_of::<f_abi::Sqe>());
     kprintln!("  cqe size      {} bytes", core::mem::size_of::<f_abi::Cqe>());
 
+    // Before the descriptor tables, because they are the first thing to live in
+    // a per-CPU slot and a shard that hands out the wrong address would install
+    // them somewhere nothing points at.
+    match percpu::self_test() {
+        Ok(cpu) => kprintln!("  per-cpu       core {cpu} of {}, slots distinct", percpu::MAX_CPUS),
+        Err(why) => {
+            kprintln!("FAIL: per-cpu state: {why}");
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+
     // Descriptor tables before anything that could fault. The stub's table is
     // in low memory, which the kernel's address space stops mapping a few lines
     // below — and an exception with no handler is a reset with no output.
-    // SAFETY: boot processor, once, interrupts still disabled.
+    // SAFETY: once on this core, which is the only one running, interrupts
+    // still disabled.
     unsafe { arch::x86_64::gdt::init() };
     // SAFETY: as above, and after the code selector its gates name exists.
     unsafe { arch::x86_64::idt::init() };

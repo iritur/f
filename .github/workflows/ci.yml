@@ -14,6 +14,7 @@ jobs:
       - run: cargo xtask lint-determinism
       - run: cargo xtask lint-licensing
       - run: cargo xtask lint-unsafe
+      - run: cargo xtask lint-percpu
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # The hooks in .claude/ are policy too, and they are the only policy that
