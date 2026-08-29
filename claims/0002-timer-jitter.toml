@@ -1,0 +1,49 @@
+# The mechanism exists and produces a distribution; the number does not exist
+# yet, because nothing this project can currently execute on is capable of
+# producing one worth quoting. Registered now, with the threshold on record,
+# so that the target predates any number somebody might be tempted by.
+#
+# E0-P06 is what moves this to `gating`, and it needs RFC 0007 first: a jitter
+# bound is meaningless without saying what the core was reserved from.
+name       = "timer-jitter"
+status     = "pending"          # pending | tracked | gating
+milestone  = "M2"
+
+statement  = """
+A 1 kHz timer, running for 60 seconds on a core reserved under the policy of
+RFC 0007, is late by less than 5 µs at p99. Lateness is measured against an
+absolute schedule — deadline n is t0 + n·period — so that a late tick cannot
+move the deadline it was late for.
+"""
+
+[baseline]
+system  = "none"
+notes   = "There is no comparison here. Unlike claim 0001 this is an absolute bound on the system's own behaviour, not a ratio against somebody else's, so a baseline configuration would be a baseline of nothing. What takes its place is the reservation policy: the same kernel on an unreserved core is a different measurement and is not this claim."
+
+[workload]
+path    = "kernel/src/arch/x86_64/apic.rs"
+hz      = 1_000
+seconds = 60
+
+[metrics]
+primary   = "ns_late_p99"
+secondary = ["ns_late_p50", "ns_late_p999", "ns_late_max", "missed_deadlines"]
+
+[threshold]
+ns_late_p99      = { max = 5_000 }
+missed_deadlines = { max = 0 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "Requires /dev/kvm at minimum, and bare metal to be defensible. QEMU's TCG backend refuses tsc-deadline and x2apic by name and emulates the APIC timer against a host clock it does not control, so a container run measures the emulator: p99 lateness there is hundreds of microseconds and the distribution is of QEMU. The development image sets F_ENVIRONMENT=container for exactly this reason."
+
+[reproduce]
+command = "cargo xtask timer 60"
+
+[diagnosis]
+# Recorded here so a red result carries its own first debugging step, rather
+# than being rediscovered each time.
+tail_only          = "something is preempting the core. Check the reservation first — RFC 0007 — before looking at the kernel"
+uniformly_late     = "not jitter. A calibration error scales the whole distribution; compare tsc_khz against the 8254 over a longer interval"
+missed_deadlines   = "the period is shorter than the handler plus delivery. Either the rate is too high for the machine or something on the tick path has grown"
+best_case_bimodal  = "idle-exit latency. This kernel spins between ticks and does not halt; if that changed, it changed the measurement — RFC 0006"

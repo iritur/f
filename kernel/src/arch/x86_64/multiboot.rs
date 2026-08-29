@@ -398,6 +398,37 @@ impl BootInfo {
         self.cmdline().windows(needle.len()).any(|window| window == needle)
     }
 
+    /// The decimal number following this parameter, if there is one.
+    ///
+    /// `parameter_u32(b"timer=")` on a command line of `timer=60` gives 60.
+    /// `None` if the parameter is absent, if nothing follows it, or if what
+    /// follows would not fit — an out-of-range value is refused rather than
+    /// wrapped, because a boot parameter that silently becomes a different
+    /// number is worse than one that is ignored.
+    ///
+    /// Still not a parser, for the same reason [`Self::has_parameter`] is not:
+    /// the needle includes its own `=`, so a caller gets exactly the grammar it
+    /// wrote and nothing has to agree about separators.
+    #[must_use]
+    pub fn parameter_u32(&self, needle: &[u8]) -> Option<u32> {
+        let line = self.cmdline();
+        if needle.is_empty() || needle.len() > line.len() {
+            return None;
+        }
+
+        let at = line.windows(needle.len()).position(|window| window == needle)?;
+        let digits = line[at + needle.len()..].iter().copied().take_while(u8::is_ascii_digit);
+
+        let mut value: u32 = 0;
+        let mut any = false;
+        for digit in digits {
+            value = value.checked_mul(10)?.checked_add(u32::from(digit - b'0'))?;
+            any = true;
+        }
+
+        if any { Some(value) } else { None }
+    }
+
     /// Where the loader's own memory map lives, as a base and a length.
     ///
     /// The frame allocator has to be told: the map is read lazily by

@@ -175,6 +175,12 @@ unsafe extern "C" {
     /// so that the list of them exists in exactly one place.
     static isr_table: [u64; EXCEPTION_VECTORS];
 
+    /// The stub for the local APIC's timer.
+    ///
+    /// A label rather than a table entry, for the same reason as the spurious
+    /// one below: it is a device vector, not the thirty-third exception.
+    static isr_timer: u8;
+
     /// The stub for an interrupt the local APIC could not explain.
     ///
     /// A label rather than an entry in the table above, because it is not the
@@ -210,14 +216,22 @@ pub unsafe fn init() {
         unsafe { slot.write(Gate::new(handler, ist)) };
     }
 
-    // The spurious vector, which is the only non-exception gate this kernel
-    // installs so far. It is not optional: the local APIC has to be told a
-    // vector to deliver an unexplainable interrupt to, and a machine with no
-    // gate there answers one with a fault about the fault.
-    let slot = idt.wrapping_add(apic::SPURIOUS_VECTOR as usize);
-    // SAFETY: this core's own table, `SPURIOUS_VECTOR` is a `u8` and the table
-    // has 256 slots, and it is not live until `lidt` below.
-    unsafe { slot.write(Gate::new((&raw const isr_spurious) as u64, 0)) };
+    // The two non-exception gates. The spurious one is not optional: the local
+    // APIC has to be told a vector to deliver an unexplainable interrupt to,
+    // and a machine with no gate there answers one with a fault about the
+    // fault. The timer's is the first gate in this table that exists because
+    // the kernel wants something to happen rather than because something might
+    // go wrong.
+    let devices = [
+        (apic::TIMER_VECTOR as usize, (&raw const isr_timer) as u64),
+        (apic::SPURIOUS_VECTOR as usize, (&raw const isr_spurious) as u64),
+    ];
+    for (vector, handler) in devices {
+        let slot = idt.wrapping_add(vector);
+        // SAFETY: this core's own table, both vectors came from a `u8` so both
+        // are inside a table of 256, and none of it is live until `lidt` below.
+        unsafe { slot.write(Gate::new(handler, 0)) };
+    }
 
     let pointer = gdt::DescriptorPointer {
         limit: (core::mem::size_of::<[Gate; IDT_ENTRIES]>() - 1) as u16,
@@ -289,6 +303,17 @@ pub unsafe extern "C" fn interrupt_dispatch(frame: *mut Frame) {
     // boot probe takes one, and the machine carries on.
     if frame.vector == BREAKPOINT {
         kprintln!("  exceptions    ok — breakpoint taken and returned");
+        return;
+    }
+
+    // The timer. The one vector in this table that is not about something
+    // having gone wrong, and the reason the stubs restore the frame and `iretq`
+    // rather than only reporting: the interrupted code carries on, having lost
+    // nothing but the time.
+    if frame.vector == u64::from(apic::TIMER_VECTOR) {
+        // SAFETY: reached from the timer's own gate, on the core the timer was
+        // armed on, with interrupts disabled by that gate.
+        unsafe { apic::on_tick() };
         return;
     }
 
@@ -489,9 +514,15 @@ isr_31:
     pushq $31
     jmp isr_common
 
-    // Not an exception, so not in the table above and not reached by index.
-    // The processor pushes no error code for a device vector, so the stub
-    // pushes the zero that keeps every frame the same shape, then the vector.
+    // Not exceptions, so not in the table above and not reached by index. The
+    // processor pushes no error code for a device vector, so each stub pushes
+    // the zero that keeps every frame the same shape, then its vector.
+    .globl isr_timer
+isr_timer:
+    pushq $0
+    pushq $32
+    jmp isr_common
+
     .globl isr_spurious
 isr_spurious:
     pushq $0

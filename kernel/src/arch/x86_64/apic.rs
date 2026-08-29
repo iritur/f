@@ -44,7 +44,8 @@
 //! offsets into a window that is not there would read zeroes and believe them.
 
 use super::paging::{self, AddressSpace, BuildError, Features};
-use super::{cpuid, read_msr, write_msr};
+use super::{cpuid, pit, read_msr, read_tsc, write_msr};
+use crate::jitter::Histogram;
 use crate::mem::FrameAllocator;
 use crate::percpu::PerCpu;
 
@@ -73,15 +74,55 @@ const REG_TASK_PRIORITY: u32 = 0x80;
 /// Spurious interrupt vector, and the software enable bit.
 const REG_SPURIOUS: u32 = 0xF0;
 
+/// End of interrupt. Written to acknowledge one; the value is ignored.
+const REG_EOI: u32 = 0xB0;
+
 /// The local vector table entry for the APIC's own timer.
 const REG_LVT_TIMER: u32 = 0x320;
+
+/// Loading this starts the APIC timer counting down. Loading zero stops it.
+const REG_TIMER_INITIAL: u32 = 0x380;
+
+/// What the APIC timer has left to count. Read-only, and the whole reason the
+/// APIC's own clock can be calibrated at all.
+const REG_TIMER_CURRENT: u32 = 0x390;
+
+/// How far the APIC timer divides its input clock.
+const REG_TIMER_DIVIDE: u32 = 0x3E0;
+
+/// Divide by one. The bit pattern is not the number: the field's three bits are
+/// split around a reserved one, which is why this is written out rather than
+/// computed.
+const DIVIDE_BY_1: u32 = 0b1011;
+
+/// The deadline the processor compares the timestamp counter against.
+///
+/// Writing it arms the timer; writing zero disarms it. Reading it back gives
+/// zero once the interrupt has been delivered, which is how the hardware says
+/// "that one has already happened".
+const IA32_TSC_DEADLINE: u32 = 0x6E0;
 
 /// The APIC is enabled in software. Distinct from the hardware enable in
 /// `IA32_APIC_BASE`, and both are required.
 const SPURIOUS_ENABLE: u32 = 1 << 8;
 
+/// The timer's local vector table entry counts down once and stops.
+const LVT_TIMER_ONE_SHOT: u32 = 0b00 << 17;
+
+/// The timer's local vector table entry fires when the timestamp counter
+/// reaches [`IA32_TSC_DEADLINE`].
+const LVT_TIMER_DEADLINE: u32 = 0b10 << 17;
+
 /// An entry in the local vector table is masked and will not be delivered.
 pub const LVT_MASKED: u32 = 1 << 16;
+
+/// Where the timer's interrupt goes.
+///
+/// The first vector above the thirty-two the processor reserves for its own
+/// exceptions, which is the conventional place and — since `pic.rs` has moved
+/// the legacy controllers to 0x30 — a vector nothing else on the machine can
+/// deliver to.
+pub const TIMER_VECTOR: u8 = 32;
 
 /// Where a spurious interrupt goes.
 ///
@@ -103,10 +144,91 @@ pub struct Apic {
     /// Where the register window is, or zero before bring-up. Zero is a usable
     /// sentinel here precisely because the device window never starts at zero.
     regs: u64,
+    /// The timestamp counter's rate, measured against the 8254. Zero until
+    /// [`calibrate`] has run.
+    tsc_khz: u64,
+    /// The APIC timer's own rate, measured in the same pass.
+    apic_khz: u64,
+    /// Which mechanism arms the timer on this processor.
+    backend: Backend,
 }
 
-/// Where each core's local APIC was found.
-static APIC: PerCpu<Apic> = PerCpu::new(Apic { regs: 0 });
+/// Each core's local APIC, and the two clock rates measured through it.
+///
+/// Written at bring-up and calibration, read everywhere after — including from
+/// the tick handler, which never writes it. That split is what makes it safe to
+/// copy the whole thing out by value on the interrupt path: nothing can be
+/// changing it while an interrupt is being handled, because the only code that
+/// changes it runs with interrupts disabled and before any are armed.
+static APIC: PerCpu<Apic> =
+    PerCpu::new(Apic { regs: 0, tsc_khz: 0, apic_khz: 0, backend: Backend::OneShot });
+
+/// How the timer is armed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Backend {
+    /// `IA32_TSC_DEADLINE`: the deadline is handed to the processor as an
+    /// absolute timestamp-counter value. The mechanism the milestone names, and
+    /// the one worth having — there is no conversion, no divisor and no
+    /// separate clock, so the only error left is the one in the schedule.
+    Deadline,
+    /// The APIC timer counting down once from a loaded value. Always present;
+    /// used where TSC-deadline is not.
+    ///
+    /// It is a fallback and it is not a lesser design: the schedule is still
+    /// absolute and still in counter ticks. What differs is that the remaining
+    /// interval has to be converted into APIC ticks with a measured ratio, so
+    /// an error in the calibration becomes an error in the interval — which is
+    /// exactly the error TSC-deadline does not have.
+    OneShot,
+}
+
+impl Backend {
+    /// A word for the boot log.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Deadline => "tsc-deadline",
+            Self::OneShot => "apic one-shot",
+        }
+    }
+}
+
+/// The timer's schedule and what it has recorded, for this core.
+///
+/// Deliberately separate from [`APIC`], and deliberately without the tick
+/// count in it. The handler takes a `&mut` to this and nothing else does while
+/// a run is in progress, which is what makes that reference exclusive; the one
+/// value the waiting loop has to see — [`TICKS`] — is kept outside it so that
+/// no reference is ever live across a read of it.
+#[derive(Clone, Copy)]
+pub struct Timer {
+    /// Counter ticks between deadlines.
+    period: u64,
+    /// The absolute deadline the next interrupt is for.
+    deadline: u64,
+    /// How many ticks the run asked for.
+    target: u64,
+    /// Ticks that arrived a whole period or more late — a deadline that was
+    /// not merely missed by a margin but skipped.
+    missed: u64,
+    /// How late each tick was, in counter ticks.
+    late: Histogram,
+}
+
+/// The schedule, per core.
+static TIMER: PerCpu<Timer> =
+    PerCpu::new(Timer { period: 0, deadline: 0, target: 0, missed: 0, late: Histogram::new() });
+
+/// Ticks delivered, per core.
+///
+/// The one piece of timer state that two things touch: the handler writes it
+/// and the waiting loop reads it. It lives on its own, outside [`Timer`], and
+/// every access to it on both sides is volatile through the raw pointer — never
+/// through a reference, because a reference here would be a claim that the
+/// handler and the code it interrupted are not both looking at it, and they
+/// are. `percpu.rs` says this is the case no per-CPU abstraction can see; this
+/// is what discharging that looks like.
+static TICKS: PerCpu<u64> = PerCpu::new(0);
 
 /// Why the local APIC could not be brought up.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -254,7 +376,7 @@ pub unsafe fn init(
     // SAFETY: this core's own slot, on the boot path, with interrupts disabled
     // — so no handler can be holding it — and nothing else in the kernel names
     // this shard.
-    unsafe { slot.write(Apic { regs }) };
+    unsafe { slot.write(Apic { regs, tsc_khz: 0, apic_khz: 0, backend: Backend::OneShot }) };
 
     // Read the last register written back, through the shard rather than
     // through the local. Two things are being checked and neither is
@@ -273,6 +395,428 @@ pub unsafe fn init(
     }
 
     Ok(Found { phys, version: version as u8, max_lvt: (version >> 16) as u8 })
+}
+
+/// What the two clocks turned out to run at.
+#[derive(Clone, Copy)]
+pub struct Clocks {
+    /// The timestamp counter, in kilohertz.
+    pub tsc_khz: u64,
+    /// The APIC timer's input, in kilohertz, at a divisor of one.
+    pub apic_khz: u64,
+    /// Which mechanism will arm the timer.
+    pub backend: Backend,
+}
+
+/// Why the timer could not be set up or run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TimerError {
+    /// [`init`] has not run on this core.
+    NotBroughtUp,
+    /// The reference clock did not answer. See [`pit::CalibrateError`].
+    Reference(pit::CalibrateError),
+    /// A measured frequency is outside any band a working machine produces.
+    /// Reported rather than used: every interval in the system would be
+    /// computed from it, so a wrong number here is a wrong number everywhere,
+    /// and silently continuing would make the timer's own output the evidence
+    /// for the frequency that produced it.
+    ImplausibleClock,
+    /// A run was asked for before [`calibrate`].
+    NotCalibrated,
+    /// The requested frequency is faster than the measured clocks can express —
+    /// a period of less than one tick of the counter the schedule is kept in.
+    PeriodTooShort,
+}
+
+impl TimerError {
+    /// A sentence for the serial log.
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NotBroughtUp => "the local APIC has not been brought up on this core",
+            Self::Reference(e) => e.message(),
+            Self::ImplausibleClock => "a calibrated frequency is outside any plausible band",
+            Self::NotCalibrated => "the clocks have not been calibrated",
+            Self::PeriodTooShort => "the requested tick rate is faster than the clock",
+        }
+    }
+}
+
+/// The slowest clock worth believing, in kilohertz. One megahertz.
+const PLAUSIBLE_MIN_KHZ: u64 = 1_000;
+
+/// The fastest, in kilohertz. A hundred gigahertz.
+///
+/// Both bounds are deliberately absurd. They are not a quality check — they
+/// catch a measurement that did not happen at all: a counter that did not
+/// advance, a gate that rose immediately, a subtraction the wrong way round.
+/// A band tight enough to judge a real machine would fail on the next one.
+const PLAUSIBLE_MAX_KHZ: u64 = 100_000_000;
+
+/// Measure the timestamp counter and the APIC timer against the 8254.
+///
+/// One pass over one interval, sampling both clocks at each end, because two
+/// passes would measure two different intervals and the ratio between the two
+/// clocks is the thing the one-shot path depends on.
+///
+/// # Errors
+///
+/// [`TimerError`]. Fatal: everything after this is computed from these numbers.
+///
+/// # Safety
+///
+/// Call once per core, on that core, after [`init`] on the same core, with
+/// interrupts disabled — an interrupt landing inside the interval would be
+/// counted as part of it and would inflate both frequencies together, which is
+/// the failure mode a ratio does not reveal.
+pub unsafe fn calibrate() -> Result<Clocks, TimerError> {
+    let slot = APIC.mine();
+    // SAFETY: this core's own slot, interrupts disabled, no handler armed.
+    let mut apic = unsafe { slot.read() };
+    if apic.regs == 0 {
+        return Err(TimerError::NotBroughtUp);
+    }
+
+    // The APIC timer, counting down from as far as it can, undivided and
+    // masked. Masked because nothing is to be delivered — the count register is
+    // being read directly — and undivided because a divisor would throw away
+    // resolution in the one measurement everything else is derived from.
+    // SAFETY: `apic.regs` is the window `init` mapped and checked.
+    unsafe { write_reg(apic.regs, REG_TIMER_DIVIDE, DIVIDE_BY_1) };
+    // SAFETY: as above.
+    unsafe { write_reg(apic.regs, REG_LVT_TIMER, LVT_MASKED | LVT_TIMER_ONE_SHOT) };
+    // SAFETY: as above. This is the write that starts it.
+    unsafe { write_reg(apic.regs, REG_TIMER_INITIAL, u32::MAX) };
+
+    // The closure is built outside the `unsafe` block below, so that its own
+    // obligation — reading a device register — is discharged where it is taken
+    // rather than swallowed by the block around the call.
+    let regs = apic.regs;
+    let probe = || {
+        // SAFETY: `regs` is the window `init` mapped and checked, and the
+        // current-count register is read-only with no side effect.
+        (read_tsc(), unsafe { read_reg(regs, REG_TIMER_CURRENT) })
+    };
+
+    // SAFETY: the 8254 is present on this platform, and interrupts are off per
+    // this function's own contract.
+    let sampled = unsafe { pit::calibrate_micros(probe) };
+
+    // Stop it, whatever happened. A one-shot timer left running is a timer that
+    // reaches zero somewhere unrelated to anything.
+    // SAFETY: as above; zero is the defined way to stop it.
+    unsafe { write_reg(apic.regs, REG_TIMER_INITIAL, 0) };
+
+    let ((tsc_before, apic_before), (tsc_after, apic_after)) =
+        sampled.map_err(TimerError::Reference)?;
+
+    // The timestamp counter counts up and the APIC timer counts down, so the
+    // two subtractions go opposite ways. Getting this backwards is the classic
+    // calibration bug and it does not announce itself: it produces a number,
+    // and the number is wrong by a factor nobody can guess afterwards.
+    let tsc_delta = tsc_after.saturating_sub(tsc_before);
+    let apic_delta = u64::from(apic_before.saturating_sub(apic_after));
+
+    let micros = u64::from(pit::CALIBRATE_MICROS);
+    let tsc_khz = tsc_delta.saturating_mul(1_000) / micros;
+    let apic_khz = apic_delta.saturating_mul(1_000) / micros;
+
+    if !(PLAUSIBLE_MIN_KHZ..=PLAUSIBLE_MAX_KHZ).contains(&tsc_khz)
+        || !(PLAUSIBLE_MIN_KHZ..=PLAUSIBLE_MAX_KHZ).contains(&apic_khz)
+    {
+        return Err(TimerError::ImplausibleClock);
+    }
+
+    // SAFETY: `cpuid` is unprivileged and has no memory effect.
+    let (_, ecx, _) = unsafe { cpuid(1) };
+    let backend = if ecx & (1 << 24) == 0 { Backend::OneShot } else { Backend::Deadline };
+
+    apic.tsc_khz = tsc_khz;
+    apic.apic_khz = apic_khz;
+    apic.backend = backend;
+    // SAFETY: this core's own slot, interrupts still disabled, nothing armed.
+    unsafe { slot.write(apic) };
+
+    Ok(Clocks { tsc_khz, apic_khz, backend })
+}
+
+/// What a run produced.
+#[derive(Clone, Copy)]
+pub struct Summary {
+    /// Ticks actually delivered. Equal to what was asked for unless the run
+    /// gave up, which is the only reason to check it.
+    pub ticks: u64,
+    /// What was asked for.
+    pub target: u64,
+    /// The rate the schedule was built at.
+    pub hz: u32,
+    /// The counter the histogram is denominated in.
+    pub tsc_khz: u64,
+    /// Which mechanism armed it.
+    pub backend: Backend,
+    /// Ticks that arrived a whole period or more late.
+    pub missed: u64,
+    /// How late every tick was.
+    pub late: Histogram,
+}
+
+/// Run the timer at `hz` for `target` ticks, recording how late each one was.
+///
+/// Returns with interrupts disabled and the timer disarmed, whether it
+/// completed or gave up.
+///
+/// # Why this spins rather than halting
+///
+/// Two reasons, and the second is the one that decided it. Halting between
+/// ticks would put the idle-exit path inside every sample, and how deep a core
+/// is allowed to idle is a policy that does not exist yet — RFC 0006 says it is
+/// computed from the reservation table, and there is no reservation table. So a
+/// halting measurement would be measuring a decision nobody has made.
+///
+/// And a halt with no interrupt to wake it is a machine that stops with no
+/// output. The give-up bound below is why this cannot hang; a halt would make
+/// the bound unreachable, because there would be no code running to check it.
+///
+/// This does mean the number is the best case for wake-up latency. Said here
+/// rather than discovered later.
+///
+/// # Errors
+///
+/// [`TimerError`] if the core is not calibrated or the rate is impossible. A
+/// run that ends early is not an error: it returns a [`Summary`] whose `ticks`
+/// is short of its `target`, because the histogram it collected up to that
+/// point is worth more than an error code.
+///
+/// # Safety
+///
+/// Call on the core that was brought up and calibrated, with interrupts
+/// disabled on entry, after [`super::idt::init`] has installed
+/// [`TIMER_VECTOR`]. This function enables interrupts and disables them again.
+pub unsafe fn run(hz: u32, target: u64) -> Result<Summary, TimerError> {
+    // SAFETY: this core's own slot; nothing is armed, so no handler can be
+    // holding it.
+    let apic = unsafe { APIC.mine().read() };
+    if apic.regs == 0 {
+        return Err(TimerError::NotBroughtUp);
+    }
+    if apic.tsc_khz == 0 {
+        return Err(TimerError::NotCalibrated);
+    }
+
+    let period = apic.tsc_khz.saturating_mul(1_000) / u64::from(hz.max(1));
+    if period == 0 {
+        return Err(TimerError::PeriodTooShort);
+    }
+
+    let now = read_tsc();
+    let first = now.saturating_add(period);
+
+    let timer = TIMER.mine();
+    // SAFETY: this core's slot, interrupts disabled, nothing armed — so no
+    // handler exists that could be holding a reference to it.
+    unsafe {
+        timer.write(Timer { period, deadline: first, target, missed: 0, late: Histogram::new() });
+    }
+    let ticks_at = TICKS.mine();
+    // SAFETY: this core's counter, before any handler can write it.
+    unsafe { ticks_at.write_volatile(0) };
+
+    // SAFETY: the caller has established that the vector is installed and the
+    // window is this core's.
+    unsafe { arm_first(&apic, first, now) };
+
+    // The whole schedule, plus a quarter of it, plus a second. Generous on
+    // purpose: this bound is not a timeout on a slow tick, it is the answer to
+    // a timer that never fires at all, and a bound tight enough to be a timeout
+    // would turn a slow machine into a failure.
+    let budget = period.saturating_mul(target).saturating_mul(5) / 4;
+    let giveup = now.saturating_add(budget).saturating_add(apic.tsc_khz.saturating_mul(1_000));
+
+    // SAFETY: every vector the APIC can deliver to now has a gate — the timer's
+    // and the spurious one — and the legacy controllers were masked at bring-up.
+    unsafe { core::arch::asm!("sti", options(nostack)) };
+
+    let delivered = loop {
+        // SAFETY: a volatile read of this core's counter, which the handler
+        // writes volatilely. No reference to it is taken on either side.
+        let n = unsafe { ticks_at.read_volatile() };
+        if n >= target {
+            break n;
+        }
+        if read_tsc() > giveup {
+            break n;
+        }
+        core::hint::spin_loop();
+    };
+
+    // SAFETY: disabling delivery on this core. Everything below runs with no
+    // handler able to interleave, which is what makes reading the state back by
+    // value sound.
+    unsafe { core::arch::asm!("cli", options(nostack)) };
+
+    // Unconditionally, because the handler only disarms on the path where it
+    // reached the target — and the other path is exactly the one where a timer
+    // is still armed and nobody is waiting for it.
+    // SAFETY: this core's window, interrupts now disabled.
+    unsafe { disarm(&apic) };
+
+    // SAFETY: interrupts are disabled and the timer is disarmed, so no handler
+    // can be running or about to run: this is the one moment the whole struct
+    // can be read out by value.
+    let state = unsafe { timer.read() };
+
+    Ok(Summary {
+        ticks: delivered,
+        target,
+        hz,
+        tsc_khz: apic.tsc_khz,
+        backend: apic.backend,
+        missed: state.missed,
+        late: state.late,
+    })
+}
+
+/// Point the timer's local vector table entry at [`TIMER_VECTOR`] and arm it.
+///
+/// # Safety
+///
+/// `apic` must describe this core's mapped window, and [`TIMER_VECTOR`] must
+/// have a gate installed.
+unsafe fn arm_first(apic: &Apic, deadline: u64, now: u64) {
+    let mode = match apic.backend {
+        Backend::Deadline => LVT_TIMER_DEADLINE,
+        Backend::OneShot => LVT_TIMER_ONE_SHOT,
+    };
+    // Unmasked, so this is the write that makes delivery possible.
+    // SAFETY: the caller's guarantee.
+    unsafe { write_reg(apic.regs, REG_LVT_TIMER, mode | u32::from(TIMER_VECTOR)) };
+
+    // Between changing the timer's mode and writing the deadline, because the
+    // two are separate stores to separate places and the processor is entitled
+    // to reorder them. The manual requires the fence here specifically; without
+    // it a deadline can be armed against the mode the entry used to have.
+    // SAFETY: a fence has no operands and no failure mode.
+    unsafe { core::arch::asm!("mfence", options(nostack, preserves_flags)) };
+
+    // SAFETY: as above.
+    unsafe { arm(apic, deadline, now) };
+}
+
+/// Arm for one absolute deadline.
+///
+/// The deadline is absolute in both paths, which is the property that matters:
+/// re-arming with "now plus a period" would let a late tick push the next one
+/// later, and the resulting histogram would look *better* than the truth
+/// because every deadline had moved to accommodate the tick that missed it.
+///
+/// # Safety
+///
+/// As [`arm_first`], and the timer's local vector table entry must already
+/// name the right mode.
+unsafe fn arm(apic: &Apic, deadline: u64, now: u64) {
+    match apic.backend {
+        Backend::Deadline => {
+            // A deadline already in the past is delivered immediately, which is
+            // the behaviour wanted: a tick that is late is still owed.
+            // SAFETY: the register exists — `calibrate` chose this backend only
+            // after `cpuid` reported it.
+            unsafe { write_msr(IA32_TSC_DEADLINE, deadline) };
+        }
+        Backend::OneShot => {
+            // Counter ticks to APIC ticks. Both rates were measured over the
+            // same interval, so this ratio is the one thing calibration is
+            // really for.
+            let remaining = deadline.saturating_sub(now);
+            let count = remaining.saturating_mul(apic.apic_khz) / apic.tsc_khz.max(1);
+            // Never zero: loading zero stops the timer rather than firing it at
+            // once, so a deadline already past would arm nothing and the run
+            // would stall. One is the soonest this mechanism can say "now".
+            let count = count.clamp(1, u64::from(u32::MAX)) as u32;
+            // SAFETY: the caller's guarantee.
+            unsafe { write_reg(apic.regs, REG_TIMER_INITIAL, count) };
+        }
+    }
+}
+
+/// Stop the timer and mask its vector.
+///
+/// # Safety
+///
+/// As [`arm_first`].
+unsafe fn disarm(apic: &Apic) {
+    match apic.backend {
+        // SAFETY: zero is the defined disarm for this register.
+        Backend::Deadline => unsafe { write_msr(IA32_TSC_DEADLINE, 0) },
+        // SAFETY: and for this one.
+        Backend::OneShot => unsafe { write_reg(apic.regs, REG_TIMER_INITIAL, 0) },
+    }
+    // Masked as well as stopped. Two mechanisms, one of which is a countdown
+    // that could already be in flight — stopping it is not the same as
+    // promising nothing is on its way.
+    // SAFETY: the caller's guarantee.
+    unsafe { write_reg(apic.regs, REG_LVT_TIMER, LVT_MASKED) };
+}
+
+/// Where a timer interrupt arrives.
+///
+/// # Safety
+///
+/// Called from the interrupt dispatcher on the core the timer was armed on,
+/// with interrupts disabled by the gate. Not to be called from anywhere else:
+/// it acknowledges an interrupt that would then not have happened, and it
+/// advances a schedule nobody is keeping.
+pub(super) unsafe fn on_tick() {
+    // First, before anything else this function does — including finding out
+    // which core it is on. Everything after this point is measured out of the
+    // *next* interval rather than this one, and the schedule is absolute, so a
+    // cost here does not accumulate.
+    let now = read_tsc();
+
+    // SAFETY: read by value. The handler never writes this shard and the only
+    // code that does runs with interrupts disabled and nothing armed, so no
+    // write can be in progress.
+    let apic = unsafe { APIC.mine().read() };
+
+    let ticks_at = TICKS.mine();
+    // SAFETY: volatile, through the raw pointer, because the waiting loop is
+    // reading the same location. See [`TICKS`].
+    let ticks = unsafe { ticks_at.read_volatile() } + 1;
+
+    let slot = TIMER.mine();
+    // SAFETY: this reference is exclusive for as long as it is live. Two
+    // claims, and both are needed: no other core can reach this slot, which is
+    // what `PerCpu` is; and no other code *on this core* can, because the gate
+    // is an interrupt gate so this handler cannot interrupt itself, and the
+    // only other reader — the loop in `run` — touches `TICKS` and never this.
+    // That separation is the whole reason the tick count lives outside `Timer`.
+    let timer = unsafe { &mut *slot };
+
+    let late = now.saturating_sub(timer.deadline);
+    timer.late.record(late);
+    if late >= timer.period {
+        timer.missed += 1;
+    }
+
+    if ticks < timer.target {
+        timer.deadline = timer.deadline.saturating_add(timer.period);
+        // SAFETY: this core's window, and the mode was set by `arm_first`.
+        unsafe { arm(&apic, timer.deadline, now) };
+    } else {
+        // SAFETY: as above.
+        unsafe { disarm(&apic) };
+    }
+
+    // SAFETY: volatile, for the same reason as the read above. Written after
+    // the timer is re-armed so that the loop cannot observe the target being
+    // reached before the hardware has been told to stop.
+    unsafe { ticks_at.write_volatile(ticks) };
+
+    // Last. Until this write the APIC will not deliver another interrupt at
+    // this priority, which is the guarantee that makes everything above
+    // single-threaded with respect to itself.
+    // SAFETY: this core's window; the value written to this register is ignored
+    // by the hardware.
+    unsafe { write_reg(apic.regs, REG_EOI, 0) };
 }
 
 /// Read one 32-bit register.
