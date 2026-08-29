@@ -1,0 +1,9 @@
+# LF in the repository and in a checkout, on every platform.
+#
+# Three files had drifted to CRLF while the other sixty-six were LF:
+# `.github/workflows/ci.yml`, the claim registry entry, and
+# `kernel/src/mem.rs`. The last of those turned a two-line `cargo fmt` change
+# into an 824-line diff, which is the cost being paid here — a line ending that
+# depends on who last saved a file is charged to every diff after it, not just
+# the one that introduced it.
+* text=auto eol=lf
