@@ -7,7 +7,7 @@ jobs:
     name: policy checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: rustup show
       # Each of these encodes an architectural decision. A failure names the
       # RFC it comes from.
@@ -21,14 +21,14 @@ jobs:
     name: tests (x86-64, total store order)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: cargo test -p f-abi -p f-env -p f-ring -p f-init
 
   test-aarch64:
     name: tests (AArch64, weak memory)
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # This job is not a portability nicety. x86-64 total-store-order hides
       # the entire class of ordering bug the ring is exposed to, so this is the
       # only configuration in which the ring tests mean anything.
@@ -38,7 +38,7 @@ jobs:
     name: memory-ordering litmus (AArch64)
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # These are stress tests, not a model check. RustMC lands at M5 and is
       # what actually explores what RC11 permits. Until then this job plus the
       # AArch64 unit tests are the coverage, and the gap is real.
@@ -48,14 +48,14 @@ jobs:
     name: coverage instrumentation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: cargo xtask coverage
 
   kernel:
     name: kernel boots
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
       - run: cargo xtask run
 
@@ -63,5 +63,5 @@ jobs:
     name: dependency policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
