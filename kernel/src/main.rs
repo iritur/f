@@ -239,6 +239,25 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         }
     }
 
+    // M2. The first device the kernel maps, and the point at which an
+    // interrupt becomes something that can be arranged rather than only
+    // survived. Nothing is delivered by this call: it makes delivery possible.
+    // SAFETY: boot processor, once, interrupts still disabled, after `idt::init`
+    // on this core, and after the switch to `space` with `frames` rebound onto
+    // its direct map — which is the whole list `apic::init` asks for.
+    match unsafe { arch::x86_64::apic::init(&mut frames, &space, features) } {
+        Ok(found) => kprintln!(
+            "  local apic    xapic at {:#018x}, version {:#04x}, {} lvt entries",
+            found.phys,
+            found.version,
+            u16::from(found.max_lvt) + 1,
+        ),
+        Err(why) => {
+            kprintln!("FAIL: local apic: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+
     // A fault on purpose, when asked for one. This is how the report path is
     // tested: `cargo xtask fault <kind>` boots with the parameter, and the run
     // is expected to end in a dump and a failure exit rather than in `M0 ok`.

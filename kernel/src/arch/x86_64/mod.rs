@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! x86-64 support.
 //!
-//! At M0 this is the boot handoff, serial output, a QEMU exit channel, the
-//! single legitimate hardware time source, and the core's answer to which core
-//! it is. Real descriptor tables, paging owned by the frame, and the local APIC
-//! arrive at M1 and M2 — see `docs/design/ring-scene-boot.html` section 15. The
-//! page tables the boot stub builds exist only to make the jump to long mode
-//! legal, and M1 replaces them.
+//! The boot handoff, serial output, a QEMU exit channel, the single legitimate
+//! hardware time source, and the core's answer to which core it is. Real
+//! descriptor tables and paging owned by the frame arrived at M1; the local
+//! APIC and the clock measured against the 8254 arrive here at M2 — see
+//! `docs/design/ring-scene-boot.html` section 15.
 
+pub mod apic;
 pub mod boot;
 pub mod gdt;
 pub mod idt;
 pub mod multiboot;
 pub mod paging;
+pub mod pic;
+pub mod port;
 pub mod serial;
 
 /// Which core is executing this.
@@ -75,6 +77,54 @@ pub(crate) unsafe fn cpuid(leaf: u32) -> (u32, u32, u32) {
         );
     }
     (ebx, ecx, edx)
+}
+
+/// Read a model-specific register.
+///
+/// # Safety
+///
+/// `msr` must be a register this processor implements. Reading one it does not
+/// raises a general protection fault — which is now reported rather than fatal
+/// to the machine, but is still a fault nobody asked for. Callers check
+/// `cpuid` first.
+pub(crate) unsafe fn read_msr(msr: u32) -> u64 {
+    let low: u32;
+    let high: u32;
+    // SAFETY: the caller has promised the register exists. `rdmsr` reads it
+    // into edx:eax and touches nothing else.
+    unsafe {
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") msr,
+            out("eax") low,
+            out("edx") high,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    (u64::from(high) << 32) | u64::from(low)
+}
+
+/// Write a model-specific register.
+///
+/// # Safety
+///
+/// As [`read_msr`], and considerably more: a model-specific register is where
+/// the processor keeps the switches that change what instructions mean. The
+/// caller must know what this particular register does and must preserve every
+/// bit of it that belongs to somebody else — these registers are read, modified
+/// and written, never assigned, unless the whole register is one field.
+pub(crate) unsafe fn write_msr(msr: u32, value: u64) {
+    // SAFETY: the caller has promised the register exists and that this value
+    // is a correct thing to put in it.
+    unsafe {
+        core::arch::asm!(
+            "wrmsr",
+            in("ecx") msr,
+            in("eax") value as u32,
+            in("edx") (value >> 32) as u32,
+            options(nostack, preserves_flags),
+        );
+    }
 }
 
 /// QEMU `isa-debug-exit` port. Writing to it terminates the machine with an

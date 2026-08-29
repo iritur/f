@@ -140,7 +140,13 @@ load-bearing.*
   *exit:* met. `cargo xtask fault stack` overflows the stack and reports `EXCEPTION 8` with `rsp` at exactly `__kernel_stack_bottom` — the guard caught it. Before, the same overflow walked down through the descriptor tables and reset the machine with no output.
   Found by trying to provoke a double fault with a stack overflow: the stack grows straight down into `.bss`, where the descriptor tables live, so an overflow corrupts the machinery that would have reported it and the machine triple-faults with no output. The interrupt stack table cannot help — by then the IDT itself is gone.
   *needs:* E0-B06
-- [ ] **E0-B07** `M` Local APIC and TSC-deadline timer, calibrated against a known reference. **(M2)**
+- [>] **E0-B07** `M` Local APIC and TSC-deadline timer, calibrated against a known reference. **(M2)**
+  `intent/0001-the-first-timer/`, in two parts. The first takes over the
+  interrupt controller: the local APIC mapped through a device window of its
+  own, a spurious vector, and the 8259 pair remapped off the exception vectors
+  and masked — because their default assignment puts a free-running IRQ 0 on
+  the double-fault vector, and the first `sti` would have reported a double
+  fault that never happened.
   *exit:* a 1 kHz timer runs for 60 seconds and produces a jitter histogram.
   *needs:* E0-B06
 - [ ] **E0-B08** `S` Wire the hardware `Env` to the one legitimate `rdtsc`; add the wall-clock capability from RFC 0009.
