@@ -2,8 +2,9 @@
 //! Build orchestration, and the place where written policy becomes a check
 //! that can fail a build.
 //!
-//! Three of the commands here exist because a policy nobody can enforce is a
-//! preference: `lint-determinism`, `lint-licensing` and `lint-unsafe`.
+//! Four of the commands here exist because a policy nobody can enforce is a
+//! preference: `lint-determinism`, `lint-licensing`, `lint-unsafe` and
+//! `lint-percpu`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -65,6 +66,33 @@ fn is_tooling(rel: &str) -> bool {
 /// base that the < 5% metric in the architecture document measures.
 const UNSAFE_ALLOW: &[&str] = &["abi/", "ring/", "kernel/"];
 
+/// The tree whose mutable state must be sharded by core.
+///
+/// Only the kernel. A library crate's statics are that library's business and
+/// are tested on the host; this is about the one program where two cores run
+/// the same code over the same memory.
+const PERCPU_SCOPE: &str = "kernel/";
+
+/// Where a mutable `static` is the point rather than a violation.
+const PERCPU_ALLOW: &[(&str, &str)] = &[(
+    "kernel/src/percpu.rs",
+    "the shard itself: `PerCpu` is the type every other mutable static has to \
+     be spelled as, so it is the one place that may hold the cell",
+)];
+
+/// What a mutable `static` looks like when it is not spelled `static mut`.
+///
+/// Interior mutability in a `static` is global mutable state wearing a type
+/// that makes it legal, and the type is the only clue. This list is names, not
+/// semantics — a wrapper of its own would slip past it, which is a limit worth
+/// stating rather than a hole worth pretending is closed.
+///
+/// Most specific first, because the first match is the one reported and
+/// `UnsafeCell<T>` contains `Cell<`. The general form is last, where it catches
+/// what the named ones did not.
+const SHARED_STATE: &[&str] =
+    &["UnsafeCell", "RefCell", "OnceCell", "OnceLock", "Mutex", "RwLock", "Atomic", "Cell<"];
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("help");
@@ -79,6 +107,7 @@ fn main() -> ExitCode {
         "lint-determinism" => lint_determinism(),
         "lint-licensing" => lint_licensing(),
         "lint-unsafe" => lint_unsafe(),
+        "lint-percpu" => lint_percpu(),
         "claims" => claims_list(),
         "claim" => claim_run(args.get(1).map(String::as_str)),
         "bench" => bench(args.get(1).map(String::as_str)),
@@ -120,6 +149,7 @@ cargo xtask <command>
   lint-licensing     SPDX headers present; no import of third_party from the
                      permissive tree
   lint-unsafe        No `unsafe` outside the frame crates
+  lint-percpu        No kernel-global mutable state outside `PerCpu`
 
   claims             List the claims registry and whether each one gates
   claim <name>       Run one claim's workload and report against its threshold
@@ -418,6 +448,7 @@ fn lint_all() -> Result<(), String> {
     lint_determinism()?;
     lint_licensing()?;
     lint_unsafe()?;
+    lint_percpu()?;
     // The same check the CI policy job runs. It lives here because a local
     // `lint` that is a subset of the gate teaches people the gate is passing
     // when it is not — which is how a formatting failure reached CI on a tree
@@ -594,6 +625,79 @@ fn lint_unsafe() -> Result<(), String> {
         findings.len(),
         findings.join("\n"),
         UNSAFE_ALLOW.join(", ")
+    ))
+}
+
+/// No kernel-global mutable state outside `PerCpu`.
+///
+/// # What this enforces and why it is a lint
+///
+/// `docs/design/ring-scene-boot.html` section 14: all kernel state is per-CPU
+/// from the very first allocation, behind a `PerCpu<T>`, even while only one
+/// core is running — because retrofitting the shard onto state that is already
+/// reached as a global is a refactor that touches every call site, and it
+/// arrives on the same day as the first SMP bug.
+///
+/// A decision like that is kept by nobody unless something fails when it is
+/// broken. The failure mode without this check is not a bad review: it is a
+/// `static mut` added at three in the morning that works perfectly on one core
+/// and is discovered at M3, when the second one starts and the symptom is
+/// memory corruption rather than a compile error.
+///
+/// # What it cannot see
+///
+/// Names. A `static` holding a type that wraps an `UnsafeCell` under some other
+/// identifier is invisible here, as is state hidden behind a pointer into
+/// memory the allocator handed out. This is a check on the spelling that makes
+/// global mutable state *legal*, which is the spelling every accidental
+/// instance of it uses.
+fn lint_percpu() -> Result<(), String> {
+    let mut findings = Vec::new();
+
+    for path in rust_sources()? {
+        let rel = relative(&path);
+        if !rel.starts_with(PERCPU_SCOPE)
+            || PERCPU_ALLOW.iter().any(|(allowed, _)| rel.starts_with(allowed))
+        {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", rel))?;
+
+        for (line_no, line) in text.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            if code.contains("static mut ") {
+                findings.push(format!("  {}:{}  `static mut`", rel, line_no + 1));
+                continue;
+            }
+            // Only the declaration, so that a `static` holding a `PerCpu<T>`
+            // whose *slot* type contains a cell is not reported: the slot is
+            // private to one core, which is the whole point.
+            let Some(declaration) = code.split_once("static ") else { continue };
+            if declaration.1.contains("PerCpu<") {
+                continue;
+            }
+            // The first match, not every match: one static is one finding, and
+            // a count that says four when three lines are wrong is a lint
+            // nobody trusts the second time.
+            if let Some(name) = SHARED_STATE.iter().find(|name| declaration.1.contains(*name)) {
+                findings.push(format!("  {}:{}  `static` holding {name}", rel, line_no + 1));
+            }
+        }
+    }
+
+    if findings.is_empty() {
+        println!("lint-percpu: ok  (mutable kernel state is sharded)");
+        return Ok(());
+    }
+    Err(format!(
+        "kernel-global mutable state in {} place(s):\n{}\n\n\
+         Kernel state is per-CPU from the first allocation, behind `PerCpu<T>` —\n\
+         see kernel/src/percpu.rs and ring-scene-boot section 14. Two cores\n\
+         never reach the same slot, which is why nothing here needs a lock.\n\
+         A static that genuinely must be shared is an architectural change and\n\
+         needs an RFC, not an allow-list entry.",
+        findings.len(),
+        findings.join("\n")
     ))
 }
 

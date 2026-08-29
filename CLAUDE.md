@@ -7,7 +7,7 @@ has stopped being a convention and become a document — move it to `docs/`.
 
 ```
 cargo xtask verify     # the whole local loop: lint, test, boot. Run this before asking for review.
-cargo xtask lint       # three policy checks, then fmt and clippy
+cargo xtask lint       # four policy checks, then fmt and clippy
 cargo xtask test       # workspace tests, x86-64 and AArch64
 cargo xtask run        # boot the kernel in QEMU; expects exit code 33
 cargo xtask fault pf   # boot into a deliberate fault; pf, ud or df
@@ -45,6 +45,9 @@ made executable, `third_party` imported drivers behind a licence boundary.
   `# Safety` section states. RFC 0001.
 - **The licence boundary.** The permissive tree never imports `third_party/`.
   Reachable only over a ring. `LICENSING.md`, RFC 0003.
+- **Kernel state is per-CPU.** Every mutable `static` under `kernel/` is a
+  `PerCpu<T>`, so two cores never reach the same slot and nothing there locks.
+  `kernel/src/percpu.rs`, `ring-scene-boot` section 14.
 - **Every file starts with** `// SPDX-License-Identifier: Apache-2.0 OR MIT`.
 - **Numbers need claims.** Any number that reaches `docs/design/` has an entry
   in `claims/` with a baseline, a workload and a one-command reproduction.

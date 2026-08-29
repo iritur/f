@@ -38,7 +38,7 @@ cargo install cargo-deny     # dependency policy, matches the CI job
 ## First run
 
 ```
-cargo xtask lint     # the three policy checks — expect these to pass first
+cargo xtask lint     # the four policy checks — expect these to pass first
 cargo xtask test     # abi, env, ring, init on the host
 cargo xtask run      # kernel in QEMU; expect exit 33 and "M0 ok"
 ```
@@ -70,5 +70,6 @@ Each of these is deliberate and has a home in the milestone ladder
   and doorbell suppression.
 - The ABI layout assertions. A change that breaks `size_of::<Sqe>() == 64`
   fails at compile time in `abi/` rather than at a peer.
-- Three policies as executable checks rather than prose: determinism,
-  the licence boundary, and the frame's `unsafe` allow-list.
+- Four decisions as executable checks rather than prose: determinism, the
+  licence boundary, the frame's `unsafe` allow-list, and kernel state sharded
+  per core behind `PerCpu<T>` while only one core is running.

@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! x86-64 support.
 //!
-//! At M0 this is the boot handoff, serial output, a QEMU exit channel, and the
-//! single legitimate hardware time source. Real descriptor tables, paging owned
-//! by the frame, and the local APIC arrive at M1 and M2 — see
-//! `docs/design/ring-scene-boot.html` section 15. The page tables the boot stub
-//! builds exist only to make the jump to long mode legal, and M1 replaces them.
+//! At M0 this is the boot handoff, serial output, a QEMU exit channel, the
+//! single legitimate hardware time source, and the core's answer to which core
+//! it is. Real descriptor tables, paging owned by the frame, and the local APIC
+//! arrive at M1 and M2 — see `docs/design/ring-scene-boot.html` section 15. The
+//! page tables the boot stub builds exist only to make the jump to long mode
+//! legal, and M1 replaces them.
 
 pub mod boot;
 pub mod gdt;
@@ -13,6 +14,68 @@ pub mod idt;
 pub mod multiboot;
 pub mod paging;
 pub mod serial;
+
+/// Which core is executing this.
+///
+/// # Why the processor is asked rather than told
+///
+/// The alternative is a counter handed out as cores are started, which is one
+/// more piece of boot state to keep — and which reads correctly on the boot
+/// processor whatever the code does, because the boot processor is the one that
+/// initialises the counter. The initial APIC id is the machine's own answer,
+/// available before the APIC is configured, before a second core exists, and
+/// with no state behind it that could be wrong.
+///
+/// # What is true only for now
+///
+/// The initial APIC id is used directly as a slot index, which assumes the ids
+/// are small and dense. QEMU numbers them from zero and a single-core machine
+/// answers zero, so the assumption holds for every configuration this kernel
+/// currently boots on. It is not true in general: a multi-socket machine
+/// numbers by package and core, and the ids are sparse.
+///
+/// `cpuid` also serialises, which is a cost worth naming before it is paid in a
+/// loop. Nothing calls this per interrupt yet.
+///
+/// *Reversal:* E0-B10 starts the application processors, and each core learns
+/// its own dense index there. From that point the index lives in `GS` and this
+/// function reads it with one `mov` — which is both the cheap answer and the
+/// one that survives sparse ids. `PerCpu` does not change; this function does.
+#[must_use]
+pub fn current_cpu() -> usize {
+    // SAFETY: `cpuid` is unprivileged and has no memory effect.
+    let (ebx, _, _) = unsafe { cpuid(1) };
+    (ebx >> 24) as usize
+}
+
+/// One `cpuid` leaf, as `(ebx, ecx, edx)`.
+///
+/// # Safety
+///
+/// None beyond the instruction itself, which is unprivileged and has no memory
+/// effect. `unsafe` because it is `asm!`.
+pub(crate) unsafe fn cpuid(leaf: u32) -> (u32, u32, u32) {
+    let ebx: u32;
+    let ecx: u32;
+    let edx: u32;
+    // SAFETY: `rbx` is reserved by the compiler, so it is saved and restored
+    // around the instruction rather than named as an output. The target
+    // disables the red zone, so using the stack here is sound.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "mov {ebx:e}, ebx",
+            "pop rbx",
+            ebx = lateout(reg) ebx,
+            inout("eax") leaf => _,
+            out("ecx") ecx,
+            out("edx") edx,
+            options(preserves_flags),
+        );
+    }
+    (ebx, ecx, edx)
+}
 
 /// QEMU `isa-debug-exit` port. Writing to it terminates the machine with an
 /// exit status derived from the value, which is what lets an integration test

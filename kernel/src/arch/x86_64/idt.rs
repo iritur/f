@@ -39,6 +39,7 @@ use super::gdt;
 // here is the opposite of the situation in `main.rs`, where the same import
 // would be a redefinition — the root is where it already is.
 use crate::kprintln;
+use crate::percpu::PerCpu;
 
 /// Vectors the processor defines. Everything above is available for devices.
 const EXCEPTION_VECTORS: usize = 32;
@@ -155,7 +156,19 @@ impl Gate {
     }
 }
 
-static mut IDT: [Gate; IDT_ENTRIES] = [Gate::EMPTY; IDT_ENTRIES];
+/// Per core, like every other table the kernel owns.
+///
+/// The contents are identical on every core today and will not always be —
+/// interrupt routing is the first thing that differs once there is more than
+/// one core to route to. Sharding it now costs `MAX_CPUS * 4 KiB` of `.bss`
+/// and removes the question; sharing it would buy 28 KiB back and put a
+/// read-mostly global in the one kernel that has decided not to have any.
+///
+/// *Reversal:* if that memory is ever worth the exception, the table is
+/// genuinely write-once, and a shared immutable one is defensible — but it
+/// needs a type that says "written once at boot, read by hardware thereafter",
+/// not a `static mut`.
+static IDT: PerCpu<[Gate; IDT_ENTRIES]> = PerCpu::new([Gate::EMPTY; IDT_ENTRIES]);
 
 unsafe extern "C" {
     /// Addresses of the thirty-two exception stubs, built by the assembly below
@@ -167,10 +180,10 @@ unsafe extern "C" {
 ///
 /// # Safety
 ///
-/// Call once, after [`gdt::init`], because every gate names the kernel code
-/// selector that installs.
+/// Call once per core, on that core, after [`gdt::init`] on the same core,
+/// because every gate names the kernel code selector that installs.
 pub unsafe fn init() {
-    let idt = (&raw mut IDT).cast::<Gate>();
+    let idt = IDT.mine().cast::<Gate>();
     let stubs = (&raw const isr_table).cast::<u64>();
 
     for vector in 0..EXCEPTION_VECTORS {
@@ -184,14 +197,14 @@ pub unsafe fn init() {
         let handler = unsafe { stub.read() };
 
         let slot = idt.wrapping_add(vector);
-        // SAFETY: single-threaded boot path, the table has 256 slots and this
-        // is one of the first thirty-two, and it is not live until `lidt`.
+        // SAFETY: this core's own table, the table has 256 slots and this is
+        // one of the first thirty-two, and it is not live until `lidt`.
         unsafe { slot.write(Gate::new(handler, ist)) };
     }
 
     let pointer = gdt::DescriptorPointer {
         limit: (core::mem::size_of::<[Gate; IDT_ENTRIES]>() - 1) as u16,
-        base: (&raw const IDT).cast::<u8>() as u64,
+        base: idt as u64,
     };
 
     // SAFETY: the pointer describes the table built immediately above, in the
