@@ -1,0 +1,15 @@
+# The gate on changes to the agent configuration.
+#
+# `cargo xtask eval` runs evals/tasks/*.toml and fails below this rate. The CI
+# job that runs it triggers on a diff to CLAUDE.md, .claude/ or REVIEW.md —
+# changes whose effect is otherwise invisible at the moment they are made.
+
+min_pass_rate = 0.95
+
+# Why not 1.0. The suite drives a model, and a floor of 1.0 makes one sampled
+# failure indistinguishable from a broken instruction — which trains people to
+# re-run until green, and a gate everybody re-runs is not a gate. 0.95 over
+# twenty-two tasks tolerates one and no more.
+#
+# The number moves in a reviewable diff, and moving it down is a decision about
+# what this repository will accept. It is not a way to make a red build green.

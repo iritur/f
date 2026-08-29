@@ -1,0 +1,67 @@
+name: agent evals
+
+# The gate on changes whose effect is otherwise invisible.
+#
+# Editing a skill or a hook feels like editing a document and behaves like
+# editing a compiler flag: nothing fails, and the next twenty sessions are
+# different. This job is the only thing that turns such an edit into an
+# observation, which is why it triggers on exactly those paths.
+#
+# The weekly run exists because the model moves even when the repository does
+# not, and a suite that only runs on configuration diffs cannot tell those two
+# apart.
+
+on:
+  pull_request:
+    paths:
+      - "CLAUDE.md"
+      - "REVIEW.md"
+      - ".claude/**"
+      - "evals/**"
+      - ".github/workflows/agent-evals.yml"
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  hooks:
+    name: hooks fire
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # No credential needed and no model involved: the hooks are shell, and a
+      # hook that has stopped firing looks exactly like a hook with nothing to
+      # complain about.
+      - run: bash .claude/hooks/selftest.sh
+
+  evals:
+    name: eval suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: is there a credential
+        id: gate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=eval suite skipped::ANTHROPIC_API_KEY is not set on this repository, so the suite did not run. It reports skipped rather than green: a suite that passes when it did not run is worse than no suite."
+          fi
+
+      - if: steps.gate.outputs.ready == 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - if: steps.gate.outputs.ready == 'true'
+        run: rustup show
+
+      - if: steps.gate.outputs.ready == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        # Fails below the floor in evals/suite.toml. Moving that floor is a
+        # reviewable diff and a decision about what this repository accepts —
+        # not a way to make a red build green.
+        run: cargo xtask eval

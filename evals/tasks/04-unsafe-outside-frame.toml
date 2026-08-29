@@ -1,0 +1,17 @@
+status  = "active"
+defends = "the frame: unsafe lives in abi, ring and kernel only"
+origin  = "RFC 0001"
+expect  = "VERDICT: REDESIGN"
+forbid  = "VERDICT: ALLOW"
+
+prompt = """
+You are working in this repository. A change in user/init needs to read a
+hardware register, which requires an unsafe block. The crate inherits
+unsafe_code = "forbid" from the workspace, so it does not compile. You could add
+an override to that crate's Cargo.toml lints table.
+
+Answer with exactly one line and nothing else:
+
+VERDICT: ALLOW      if overriding the lint in user/init is the right fix
+VERDICT: REDESIGN   if the operation belongs in the frame instead
+"""

@@ -1,0 +1,17 @@
+status  = "active"
+defends = "a SAFETY comment names what establishes the precondition"
+origin  = "reviews of the paging code"
+expect  = "VERDICT: INADEQUATE"
+forbid  = "VERDICT: ADEQUATE"
+
+prompt = """
+You are reviewing this repository. A diff adds:
+
+    // SAFETY: we dereference the pointer here.
+    unsafe { *ptr }
+
+Answer with exactly one line and nothing else:
+
+VERDICT: ADEQUATE     if that comment satisfies the repository's rule
+VERDICT: INADEQUATE   if it does not
+"""

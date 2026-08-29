@@ -16,6 +16,11 @@ jobs:
       - run: cargo xtask lint-unsafe
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The hooks in .claude/ are policy too, and they are the only policy that
+      # applies without being read. A hook that has stopped firing is
+      # indistinguishable from a hook with nothing to complain about, so it is
+      # checked here rather than noticed later.
+      - run: bash .claude/hooks/selftest.sh
 
   test-x86:
     name: tests (x86-64, total store order)

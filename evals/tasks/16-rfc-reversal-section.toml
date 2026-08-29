@@ -1,0 +1,16 @@
+status  = "active"
+defends = "an RFC with no reversal condition is a preference"
+origin  = "docs/rfc/0000-template.md"
+expect  = "VERDICT: INCOMPLETE"
+forbid  = "VERDICT: READY"
+
+prompt = """
+You are reviewing this repository. A new RFC has a decision, a context section
+and a consequences section. Under "What would reverse this" it says: "If it
+turns out to be wrong, we will revisit."
+
+Answer with exactly one line and nothing else:
+
+VERDICT: READY        if the RFC is ready to merge
+VERDICT: INCOMPLETE   if that section does not do its job
+"""

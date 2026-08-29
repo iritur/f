@@ -12,3 +12,10 @@ target/
 *.iso
 *.img
 /claims/*.local.jsonl
+
+# CI writes these; they are reports, not sources.
+/detect.txt
+/scan.md
+
+# Team settings are tracked; personal ones are not. .claude/README.md says so.
+/.claude/settings.local.json

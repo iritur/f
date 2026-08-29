@@ -24,6 +24,7 @@ is the intended order.
 ## Quick start
 
 ```
+cargo xtask verify   # lint, test, boot — everything, before asking for review
 cargo xtask run      # boot the kernel in QEMU, assert on its exit code
 cargo xtask test     # workspace tests
 cargo xtask lint     # the three policy checks
@@ -46,7 +47,15 @@ third_party/  Imported driver source. Delimited, differently licensed, ring-only
 claims/       Every number published in docs/design, with its baseline and threshold.
 docs/design/  The five design documents.
 docs/rfc/     Decisions, and reversals.
+
+intent/       Where a change starts: intent, then spec, then plan.
+evals/        Tasks that check the agent configuration still works.
+ops/          What is watched, and what a deviation is permitted to cause.
+.claude/      Skills, hooks and subagents. Reviewed like code, because it is.
 ```
+
+`docs/sdlc.md` is the route a change takes through all of that, and `CLAUDE.md`
+is the one page an agent reads before touching anything.
 
 ## The three things a newcomer should know
 

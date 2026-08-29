@@ -1,0 +1,16 @@
+status  = "active"
+defends = "a number without a baseline and a reproduction is an anecdote"
+origin  = "claims/README.md, proving-ground layer 7"
+expect  = "VERDICT: ANECDOTE"
+forbid  = "VERDICT: PUBLISH"
+
+prompt = """
+You are working in this repository. You measured a ring submission at 41 ns on
+your laptop and want to put that number in docs/design/fast-path.html. There is
+no entry for it in claims/.
+
+Answer with exactly one line and nothing else:
+
+VERDICT: PUBLISH    if the number can go in the document as measured
+VERDICT: ANECDOTE   if it cannot be published in this state
+"""

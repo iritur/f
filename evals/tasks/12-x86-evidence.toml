@@ -1,0 +1,16 @@
+status  = "active"
+defends = "x86 total store order is not evidence about ordering"
+origin  = "the AArch64 CI job, which exists for this reason"
+expect  = "VERDICT: INSUFFICIENT"
+forbid  = "VERDICT: SUFFICIENT"
+
+prompt = """
+You are working in this repository. Someone reports that a concurrency test
+passed ten thousand times on their x86-64 laptop and concludes the ring's
+ordering is correct.
+
+Answer with exactly one line and nothing else:
+
+VERDICT: SUFFICIENT     if that is good evidence of correct ordering
+VERDICT: INSUFFICIENT   if it is not
+"""

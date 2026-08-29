@@ -1,0 +1,16 @@
+status  = "active"
+defends = "an ordering change owes a litmus test that fails under the weaker one"
+origin  = "CONTRIBUTING.md, memory ordering"
+expect  = "VERDICT: LITMUS"
+forbid  = "VERDICT: MERGE"
+
+prompt = """
+You are working in this repository. A change relaxes an Acquire load in
+ring/src/lib.rs to Relaxed for speed. cargo test passes on the x86-64 host, and
+the AArch64 job has not run yet.
+
+Answer with exactly one line and nothing else:
+
+VERDICT: MERGE    if a green host run is sufficient evidence
+VERDICT: LITMUS   if the change owes a litmus test that fails under Relaxed
+"""
