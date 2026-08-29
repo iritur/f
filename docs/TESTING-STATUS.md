@@ -6,14 +6,14 @@ assumed closed.
 
 | Layer | Status | Where |
 |---|---|---|
-| **L0** Determinism substrate | **Built** | `env/src/lib.rs`, `xtask lint-determinism`, boot self-check in `kernel/src/main.rs` |
-| **L1** Deterministic simulation | **Hook only** | `env/src/sim.rs` — seeded fault injection with protocol-aware site labels. No device models, no seed sweeps. Full simulator at phase 01. |
+| **L0** Determinism substrate | **Built** | `env/src/lib.rs`, `env/src/contract.rs`, `xtask lint-determinism`, and a boot that runs the contract against the seeded and the hardware `Env` on the same run — `kernel/src/env.rs`, `kernel/src/main.rs` |
+| **L1** Deterministic simulation | **Hook only** | `env/src/sim.rs` — seeded fault injection with protocol-aware site labels. No device models, no seed sweeps, and nothing has yet injected a fault at a named site: E0-P09. Full simulator at phase 01. |
 | **L2** Concurrency and memory model | **Stress tests only** | `ring/tests/litmus.rs` plus an AArch64 CI job. **Not** a model check — RustMC at M5. |
 | **L3** Proof | **Absent** | Verus on the frame at phase 02; Kani on capability properties at M4. The frame must stop moving first. |
 | **L4** Fuzzing | **Instrumentation only** | `xtask coverage`. No SQE generator, no snapshot harness, no hostile-peer fuzzer. Phase 01. |
-| **L5** Performance regression | **Harness only** | `bench/` records distributions with p50/p99/p99.9. No change-point detection — that needs commit history to reason about, phase 02. |
+| **L5** Performance regression | **Harness only** | `bench/` records distributions with p50/p99/p99.9 and marks the counters it cannot read as absent. No change-point detection — that needs commit history to reason about, phase 02. |
 | **L6** Hardware in the loop | **Absent** | Photodiode rig at phase 03, when there is a compositor to measure. Correctly deferred. |
-| **L7** Claims registry | **Built, one entry** | `claims/`, `xtask claims`, `xtask claim <name>` |
+| **L7** Claims registry | **Built, two entries, both `pending`** | `claims/`, `xtask claims`, `xtask claim <name>` |
 
 ## What was deliberately built early
 
@@ -32,18 +32,58 @@ revisited later.
 worthless, and instrumenting a mature kernel is painful. It costs almost nothing
 while the kernel is two thousand lines.
 
+## What the seven layers have no row for
+
+Provoking the running system into failing on purpose. It is neither simulation
+nor proof — it is the real kernel, in QEMU, being asked to do something that
+must not work:
+
+- `cargo xtask fault pf|ud|df|nx|wx|stack` — six kernel faults, each of which
+  must be *reported* rather than survived. The exception path is the one piece
+  of the kernel that only runs when something has already gone wrong, so it is
+  either exercised deliberately or discovered to be broken at the worst moment.
+- `cargo xtask user` — seven boots in which a process at ring 3 violates one
+  isolation rule each. Six must fault and the kernel must survive every one; the
+  seventh must not fault, which is what stops the other six passing for the
+  wrong reason. In the CI gate.
+
+These are the shape E0-P08 will take at M4 and they are **not** E0-P08. That
+suite is about capabilities — a process cannot name one it was not given, forge
+a handle, use a revoked one, or panic the kernel by trying — and there is no
+capability table yet. What exists now covers the layer underneath it: the page
+tables and the privilege level.
+
+The absence of a row is worth stating rather than papering over. A taxonomy
+built around simulation, proof and fuzzing has no natural home for "run the real
+thing and try to break it", and that is where most of this project's evidence
+currently comes from.
+
 ## The honest gaps
 
 - **The litmus tests are empirical, not exhaustive.** They will not reliably
   catch a rare interleaving. RustMC explores what the memory model *permits*;
   stress tests explore what one machine happened to do. Do not mistake a green
   litmus job for a proof of the ordering.
-- **`instructions_per_op` and `joules_per_op` report `Unavailable`.** The
-  counters are not wired until M2. The harness carries the fields and marks them
-  absent rather than omitting them, so a claim cannot quietly narrow to
-  wall-clock only.
-- **Claim 0001 is `pending` and measures the host.** No user interrupts, no
-  registered buffers, no deadline class. It exists so the workload is
-  version-controlled alongside the claim rather than written the day someone
-  wants a number.
-- **Nothing here has been executed.** See `BOOTSTRAP.md`.
+- **`instructions_per_op` and `joules_per_op` still report `Unavailable`, and
+  the reason they give has expired.** They say the counters are not wired until
+  M2. M2 arrived at E0-B07 and they are still not wired; E0-P04 owns it. The
+  harness carries the fields and marks them absent rather than omitting them, so
+  a claim cannot quietly narrow to wall-clock only — but the string in
+  `bench/src/lib.rs` names a milestone that has been and gone, which is the
+  smaller version of the failure this page exists to prevent.
+- **Both claims are `pending`, and neither gates anything.** 0001 measures the
+  host: no user interrupts, no registered buffers, no deadline class. 0002 has a
+  threshold and no number, because the only environment available emulates the
+  timer against a host clock it does not control — `F_ENVIRONMENT=container` is
+  how the harness already knows. They exist so the workload and the threshold
+  are version-controlled rather than written the day somebody wants a number.
+  E0-P05 and E0-P06 are what move them.
+- **`cargo xtask verify` is local, and local is not everything.** It runs the
+  lints, the host tests and a QEMU boot. It cannot run the AArch64 tests or the
+  litmus job, which are exactly where L2 means anything — x86-64's total store
+  order hides the entire class of bug the ring is exposed to. Those run in CI
+  and nothing local substitutes for them.
+- **Every layer above L2 is a plan.** L3 and L6 are absent, L4 is
+  instrumentation with nothing feeding it, and L5 is a harness with no history
+  behind it. This page is worth re-reading whenever one of those is described in
+  the present tense somewhere else.
