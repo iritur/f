@@ -1,6 +1,26 @@
 name: ci
 
-on: [push, pull_request]
+# Once per change, not twice.
+#
+# `on: [push, pull_request]` ran this entire matrix twice for every commit on a
+# branch with a pull request open — the same seven jobs, both AArch64 runners
+# and the QEMU boot included, against a tree that had not changed between them.
+# It is invisible precisely because both copies pass, and it was half of the
+# gate's time budget: E0-B07 put seventeen checks on one commit, of which seven
+# were a verbatim second copy of the other seven.
+#
+# The pull request is the gate. `main` is checked again after a merge because a
+# merge commit is a tree nobody has tested — it is the join of two trees that
+# each passed separately, which is not the same claim.
+#
+# The deliberate cost: a branch with no pull request open gets no run at all.
+# That is the trade, and it is the right way round — work that has not asked for
+# review has not asked for a runner either, and the moment it asks for one it
+# gets both.
+on:
+  push:
+    branches: [main]
+  pull_request:
 
 jobs:
   policy:

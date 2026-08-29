@@ -204,6 +204,12 @@ load-bearing.*
 ### Prove
 
 - [ ] **E0-P01** `M` CI pull-request gate under ten minutes: lint, test, run, claims.
+  Half the budget was being spent twice: `ci` triggered on both `push` and
+  `pull_request`, so every commit on a branch with a pull request open built the
+  whole matrix — both AArch64 runners and the QEMU boot — against an identical
+  tree. Fixed; the gate is now the pull request, and `main` is checked again
+  after a merge because a merge commit is a tree nobody tested. Still open: the
+  claims job, the ten-minute measurement, and the red half of the exit.
   *exit:* the workflow is green on a pull request that changes one line, and red on a pull request that regresses a gating claim.
   *needs:* E0-B01
 - [ ] **E0-P02** `M` **The reproduction check.** Two runs of the same `(seed, commit)` on two different runners produce a byte-identical execution trace hash.
