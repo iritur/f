@@ -102,9 +102,11 @@ load-bearing.*
   *exit:* met. `docs/rfc/0007-reservations.md` is accepted, and `claims/0002-timer-jitter.toml` carries a `[reservation]` section naming all four and requiring every run to record whether each was obtained by partition or by exclusion — so the two easy ways to produce a flattering histogram, an idle machine and a quietly dropped component, are both excluded by the file rather than by the operator's care. E0-P06 is now waiting on a machine instead of on a decision.
 - [ ] **E0-D05** `S` Write RFC 0013 — every component publishes a state tree.
   *exit:* RFC merged; E0-B15 has a specification to build against.
-- [ ] **E0-D06** `S` Write RFC 0006 — idle depth is computed from the reservation table.
+- [x] **E0-D06** `S` Write RFC 0006 — idle depth is computed from the reservation table.
   Design only at this epoch; implementation is E1/E5.
-  *exit:* RFC merged; the bench harness carries idle-residency and joules fields, marked absent.
+  Written after E0-D04 and not before it, because the arithmetic reads the table RFC 0007 defines. Energy was in the first paragraph of the thesis and owned by no subsystem in any of the five design documents; it now has one, and the owner is admission control rather than a new subsystem. The sentence to attack is that Linux's governors predict because Linux cannot know, and admission control means F knows — a predictor being what you build when the information is absent, and this architecture having already paid to make it present.
+  *exit:* met. `docs/rfc/0006-energy.md` is accepted, and `bench/src/lib.rs` carries `idle_residency` beside `joules_per_op`, both `Metric::Unavailable`. The new one does not repeat the mistake the TESTING-STATUS commit found in its neighbours: it names E5-B07 rather than a milestone that has already arrived, and it says the absence is not a wiring gap — nothing idles, because the kernel spins between ticks on purpose.
+  `apic::wait`'s comment said the idle policy did not exist. It does now, so the comment says what is actually still missing: the table, and the implementation.
 - [ ] **E0-D07** `M` Adopt the twelve rules in `CONTRIBUTING.md`, and mechanise the three that can be.
   *exit:* `xtask lint` gains a unit-and-epoch check on public `abi` fields, a claims-ownership check, and a no-callback check; each fails a deliberately broken fixture.
 - [ ] **E0-D08** `M` Write `RELEASING.md` — what a release is, what it contains, how a stranger reproduces it.

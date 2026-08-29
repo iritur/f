@@ -681,9 +681,10 @@ pub fn ticks() -> u64 {
 ///
 /// Two reasons, and the second is the one that decided it. Halting between
 /// ticks would put the idle-exit path inside every sample, and how deep a core
-/// is allowed to idle is a policy that does not exist yet — RFC 0006 says it is
-/// computed from the reservation table, and there is no reservation table. So a
-/// halting measurement would be measuring a decision nobody has made.
+/// is allowed to idle is computed from the reservation table — RFC 0006 — and
+/// there is neither a reservation table nor an implementation of the
+/// computation before E5-B07. So a halting measurement would be measuring a
+/// policy that is written and not yet in effect.
 ///
 /// And a halt with no interrupt to wake it is a machine that stops with no
 /// output. The give-up bound is why this cannot hang; a halt would make the
