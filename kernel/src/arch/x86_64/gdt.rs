@@ -25,6 +25,19 @@
 //! stack to switch to unconditionally, whatever `rsp` currently holds. The
 //! double-fault handler uses one. It is the difference between a kernel that
 //! reports a stack overflow and a kernel that vanishes.
+//!
+//! # The three ring-3 descriptors, and why their order is fixed
+//!
+//! M3 added three more slots. Two of them do something — a code segment and a
+//! data segment at privilege level three — and the third exists only because
+//! `sysret` computes the selectors it loads by adding fixed offsets to one
+//! number in `IA32_STAR`. Positions here are an interface with the processor,
+//! not a layout choice, and [`USER_BASE`] says so where somebody would
+//! otherwise tidy the gap away.
+//!
+//! Segments carry almost none of the isolation on this architecture: flat is
+//! flat, and the only field that matters in a long-mode descriptor is the
+//! privilege level. What keeps a process out of the kernel is `paging::USER`.
 
 use core::arch::asm;
 
@@ -39,6 +52,30 @@ pub const KERNEL_DATA: u16 = 0x10;
 /// Selector for the task state segment.
 const TSS_SELECTOR: u16 = 0x18;
 
+/// Where the three ring-3 descriptors start.
+///
+/// The order of the three is not a choice. `sysret` computes both selectors it
+/// loads from this one number: the stack segment is `USER_BASE + 8` and the
+/// 64-bit code segment is `USER_BASE + 16`, each with its requested privilege
+/// level forced to three. So the slot at `USER_BASE` itself has to be the
+/// 32-bit code segment, which this kernel never loads and cannot omit — a gap
+/// there would move the other two and `sysret` would land in whatever
+/// followed. `syscall` reads the other half of the same register and requires
+/// the same adjacency of the kernel pair, which slots one and two already have.
+const USER_BASE: u16 = 0x28;
+
+/// Selector for the user data segment, which is also the ring-3 stack segment.
+pub const USER_DATA: u16 = (USER_BASE + 8) | 3;
+
+/// Selector for the 64-bit user code segment.
+pub const USER_CODE: u16 = (USER_BASE + 16) | 3;
+
+/// What `IA32_STAR` holds: the two segment bases `syscall` and `sysret` use.
+///
+/// Bits 47:32 are the kernel pair, bits 63:48 the user pair. The low half of
+/// the register is the 32-bit entry point and is meaningless in long mode.
+pub const STAR: u64 = ((USER_BASE as u64) << 48) | ((KERNEL_CODE as u64) << 32);
+
 /// The interrupt stack table slot the double-fault handler switches to.
 ///
 /// One-based, because that is how the descriptor encodes it: zero means "do not
@@ -51,15 +88,38 @@ const CODE_DESCRIPTOR: u64 = 0x00AF_9A00_0000_FFFF;
 /// Kernel data: present, writable.
 const DATA_DESCRIPTOR: u64 = 0x00CF_9200_0000_FFFF;
 
+/// User code, 32-bit. Never loaded by anything this kernel runs.
+///
+/// It is here because `sysret` names it by position — see [`USER_BASE`] — and a
+/// slot that must exist is better filled with the descriptor the architecture
+/// says belongs there than with a zero that would be a fault waiting for the
+/// first `sysret` to a compatibility-mode process.
+const USER_CODE32_DESCRIPTOR: u64 = 0x00CF_FA00_0000_FFFF;
+
+/// User data, ring 3: present, writable. Also the ring-3 stack segment.
+const USER_DATA_DESCRIPTOR: u64 = 0x00CF_F200_0000_FFFF;
+
+/// User code, ring 3: present, executable, readable, 64-bit.
+///
+/// The only difference from [`CODE_DESCRIPTOR`] is two bits of privilege level.
+/// That is the whole of what a segment contributes to isolation on this
+/// architecture — the rest is in the page tables, which is why `paging::USER`
+/// and not this constant is where a mistake would actually cost something.
+const USER_CODE_DESCRIPTOR: u64 = 0x00AF_FA00_0000_FFFF;
+
 /// A 64-bit task state segment.
 ///
-/// Most of it is for privilege-level stack switching, which arrives with user
-/// space at M3. The part in use now is the interrupt stack table.
+/// Two of its fields are live. The interrupt stack table is what makes a double
+/// fault reportable; `privilege_stacks[0]` is what makes an interrupt taken
+/// from ring 3 land somewhere the kernel owns, and it arrived with user space
+/// at M3.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct Tss {
     _reserved0: u32,
-    /// Stacks for entry from a lower privilege level. M3.
+    /// Stacks for entry from a lower privilege level. Only the first is used:
+    /// there are three privilege levels below zero on this architecture and
+    /// this kernel has exactly two, ring 0 and ring 3.
     privilege_stacks: [u64; 3],
     _reserved1: u64,
     /// Stacks a descriptor may name unconditionally.
@@ -80,12 +140,19 @@ pub struct DescriptorPointer {
     pub base: u64,
 }
 
-/// Null, kernel code, kernel data, and two slots for the system descriptor
-/// that names the task state segment — system descriptors are sixteen bytes.
+/// How many descriptors the table holds.
+///
+/// Null, kernel code, kernel data, two slots for the system descriptor that
+/// names the task state segment — system descriptors are sixteen bytes — and
+/// then the three ring-3 descriptors at [`USER_BASE`], in the order `sysret`
+/// requires.
+const SLOTS: usize = 8;
+
+/// The table.
 ///
 /// Per core, because the fourth and fifth slots name *this* core's task state
 /// segment, and a segment is not something two cores can share.
-static GDT: PerCpu<[u64; 5]> = PerCpu::new([0; 5]);
+static GDT: PerCpu<[u64; SLOTS]> = PerCpu::new([0; SLOTS]);
 
 /// Per core, which is what forces the table above to be: this is where the
 /// stack pointers live.
@@ -153,9 +220,16 @@ pub unsafe fn init() {
     // computing a pointer is not the dangerous act, and a block covering five
     // writes has a SAFETY comment covering whichever one the reader thinks of.
     let gdt = GDT.mine().cast::<u64>();
-    for (index, descriptor) in
-        [(0, 0), (1, CODE_DESCRIPTOR), (2, DATA_DESCRIPTOR), (3, low), (4, high)]
-    {
+    for (index, descriptor) in [
+        (0, 0),
+        (1, CODE_DESCRIPTOR),
+        (2, DATA_DESCRIPTOR),
+        (3, low),
+        (4, high),
+        (usize::from(USER_BASE / 8), USER_CODE32_DESCRIPTOR),
+        (usize::from(USER_BASE / 8) + 1, USER_DATA_DESCRIPTOR),
+        (usize::from(USER_BASE / 8) + 2, USER_CODE_DESCRIPTOR),
+    ] {
         let at = gdt.wrapping_add(index);
         // SAFETY: this core's own table, before anything can observe it partly
         // built, and the index is one of the five slots it has.
@@ -163,7 +237,7 @@ pub unsafe fn init() {
     }
 
     let pointer = DescriptorPointer {
-        limit: (core::mem::size_of::<[u64; 5]>() - 1) as u16,
+        limit: (core::mem::size_of::<[u64; SLOTS]>() - 1) as u16,
         base: gdt as u64,
     };
 
@@ -212,6 +286,36 @@ pub unsafe fn init() {
     unsafe {
         asm!("ltr {sel:x}", sel = in(reg) TSS_SELECTOR, options(nostack, preserves_flags));
     }
+}
+
+/// Where the processor is to put an interrupt frame taken from ring 3.
+///
+/// # Why the caller supplies it rather than this module owning a stack
+///
+/// The obvious arrangement is a per-core stack of its own, named here and
+/// pointed at once. It is wrong for the same reason a per-thread kernel stack
+/// exists in every kernel that has threads: this address is where the processor
+/// starts writing when it leaves ring 3, so it must be below everything the
+/// kernel is currently using and above nothing. The only code that knows that
+/// address is the code that is about to enter ring 3, and it knows it exactly
+/// once — as its own stack pointer at the moment of the transition.
+///
+/// A fixed stack top here would be *above* the live kernel frames, and the
+/// first interrupt from ring 3 would overwrite them. That failure is silent,
+/// arrives on the first tick, and presents as corruption in whatever the kernel
+/// was doing rather than as anything to do with user space.
+///
+/// The pointer is handed out rather than the write performed, because the
+/// caller is assembly that has to do it after its own last push and cannot call
+/// back into Rust to do so. See `ring3::enter`.
+#[must_use]
+pub fn kernel_stack_slot() -> *mut u64 {
+    let tss = TSS.mine();
+    // SAFETY: no dereference happens — this computes the address of a field of
+    // this core's own task state segment. The slot is written by assembly that
+    // uses an unaligned store, which is what the packed layout requires and
+    // what the processor itself does when it reads the field back.
+    unsafe { &raw mut (*tss).privilege_stacks[0] }
 }
 
 /// Build the two halves of a system descriptor for a task state segment.

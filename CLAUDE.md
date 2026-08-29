@@ -10,7 +10,8 @@ cargo xtask verify     # the whole local loop: lint, test, boot. Run this before
 cargo xtask lint       # four policy checks, then fmt and clippy
 cargo xtask test       # workspace tests, x86-64 and AArch64
 cargo xtask run        # boot the kernel in QEMU; expects exit code 33
-cargo xtask fault pf   # boot into a deliberate fault; pf, ud or df
+cargo xtask fault pf   # boot into a deliberate fault; pf, ud, df, nx, wx or stack
+cargo xtask user       # seven boots: a process violates one rule each, and is killed
 cargo xtask timer 60   # run the 1 kHz timer and print a jitter histogram
 cargo xtask claims     # the claims registry and what gates
 cargo xtask todo E0    # what is available to start now, ranked by what it unblocks

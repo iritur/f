@@ -203,8 +203,55 @@ load-bearing.*
   machine whose firmware keeps local time is wrong by whole hours and no bound
   of this shape covers that, which `rtc.rs` says outright.
   *needs:* E0-B07, E0-D01
-- [ ] **E0-B09** `L` User page tables and the ring-3 transition; a `syscall` entry used strictly for channel setup. **(M3)**
-  *exit:* a user process runs, faults deliberately, and is killed cleanly while core 0 holds its M2 jitter bound throughout.
+- [x] **E0-B09** `L` User page tables and the ring-3 transition; a `syscall` entry used strictly for channel setup. **(M3)**
+  `intent/0002-something-that-is-not-the-kernel/`. A process is an address space
+  whose upper half is a copy of the kernel's, two pages — text executable and
+  not writable, stack writable and never executable, an unmapped guard between
+  them — and two ways of ending. It is entered through a hand-built interrupt
+  frame, answers three calls, and comes back either through `sysret` or through
+  the interrupt table with its frame rewritten to resume the kernel call that
+  started it.
+  *exit:* met, and the *while* is the part worth reading. Every boot builds a
+  process, enters ring 3, takes **eight timer ticks out of it**, watches it read
+  the kernel's direct map, reports `exception 14 … error 0x5` — present, and
+  refused — kills it, gives back all six frames with the free count unchanged,
+  and then finishes the same hundred-tick window the whole thing ran inside. The
+  window's assertion is the one that has covered every boot since M2: every tick
+  the schedule asked for arrived. It now covers a window that contained user
+  space, which is what "throughout" is worth here.
+  `cargo xtask user` is the negative half and is in CI: seven boots, six
+  violations that must fault and one that must not. The error codes are the
+  evidence and each one is a different sentence — `0x5` reading the direct map
+  (present, and ring 3 still cannot have it), `0x6` writing the null page,
+  `0x7` writing its own text, `0x15` executing its own stack, and `EXCEPTION 13`
+  for `cli`. A protection nothing tries to violate is a protection nobody has
+  checked; these are the ring-3 half of what E0-B19 said.
+  **What the exit does not say, and it matters.** The M2 jitter *bound* is not
+  met here and was not met before user space existed: QEMU's TCG backend
+  emulates the timer against a host clock it does not control, and p99 lateness
+  is in the hundreds of microseconds against a 5 µs bound. E0-P06 still owns
+  that number. What this task can honestly claim is that ring 3 did not cost the
+  schedule a tick, and that is what is asserted.
+  Decided rather than assumed, so RFC 0014 exists: the design document says the
+  `syscall` entry is "used strictly for channel setup", which at M3 — with the
+  ring three milestones away — authorises no calls at all and produces a process
+  that can only die. The reading recorded is that the entry is a door and not an
+  interface: a call may exist only if it cannot be an opcode on a ring, and each
+  of the three names the thing that replaces it.
+  Found while building: how long a process runs cannot be measured in
+  instructions. A fixed loop count spans two orders of magnitude more timer ticks
+  under emulation than on a machine, and the tick count is in the boot log —
+  which is a fixture. So the frame counts ticks taken *out of ring 3* and the
+  process asks when to stop, which makes the same commit produce the same log on
+  both. That inverted the design: the interesting thing to do between arming a
+  timer and stopping it stopped being waiting, so `apic::run` became
+  `start`/`wait`/`stop`.
+  Also found: the ring-0 stack in the task state segment cannot be a fixed
+  per-core stack. Its top would be *above* the kernel frames that are live at the
+  moment ring 3 is entered, so the first timer tick from a process would push an
+  interrupt frame straight through them. It has to be the stack pointer of the
+  call that entered ring 3 — which is the same address the system call entry and
+  the resume point use, because all three are the same claim.
   *needs:* E0-B07
 - [ ] **E0-B10** `M` Load `user/init` from a boot module; start the application processors. **(M3)**
   *exit:* init runs on core 1; the M2 jitter measurement on core 0 is unaffected.

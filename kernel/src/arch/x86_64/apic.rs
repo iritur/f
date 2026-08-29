@@ -560,39 +560,64 @@ pub struct Summary {
     pub late: Histogram,
 }
 
-/// Run the timer at `hz` for `target` ticks, recording how late each one was.
+/// A timer run that has been armed and not yet stopped.
 ///
-/// Returns with interrupts disabled and the timer disarmed, whether it
-/// completed or gave up.
+/// The schedule lives in [`TIMER`], per core, and this is the handle the caller
+/// keeps: what was asked for, what the numbers are denominated in, and the one
+/// value nothing else knows — the point past which waiting for a tick that is
+/// not coming stops being patience.
 ///
-/// # Why this spins rather than halting
+/// # Why a run is three calls rather than one
 ///
-/// Two reasons, and the second is the one that decided it. Halting between
-/// ticks would put the idle-exit path inside every sample, and how deep a core
-/// is allowed to idle is a policy that does not exist yet — RFC 0006 says it is
-/// computed from the reservation table, and there is no reservation table. So a
-/// halting measurement would be measuring a decision nobody has made.
+/// It was one until M3. The reason it is three is that the interesting thing to
+/// do between arming a timer and stopping it stopped being *waiting*: a process
+/// runs there now, at ring 3, and the whole claim the milestone has to support
+/// is that the schedule survives it. A `run(hz, target)` that owns the interval
+/// can only be given a callback, and a callback that enters ring 3 is not a
+/// callback — it is the rest of the kernel.
+#[derive(Clone, Copy)]
+pub struct Window {
+    hz: u32,
+    target: u64,
+    tsc_khz: u64,
+    giveup: u64,
+}
+
+impl Window {
+    /// The counter value past which a tick that has not arrived is not coming.
+    ///
+    /// Handed out because the give-up is not only [`wait`]'s: a process that is
+    /// waiting on ticks needs the same bound, for the same reason, and two
+    /// bounds computed from two guesses would be two ways to hang.
+    #[must_use]
+    pub const fn giveup(&self) -> u64 {
+        self.giveup
+    }
+
+    /// How many ticks the run asked for.
+    #[must_use]
+    pub const fn target(&self) -> u64 {
+        self.target
+    }
+}
+
+/// Arm the timer at `hz` for `target` ticks and enable delivery.
 ///
-/// And a halt with no interrupt to wake it is a machine that stops with no
-/// output. The give-up bound below is why this cannot hang; a halt would make
-/// the bound unreachable, because there would be no code running to check it.
-///
-/// This does mean the number is the best case for wake-up latency. Said here
-/// rather than discovered later.
+/// Returns with interrupts *enabled*, which is the whole difference between
+/// this and every other function in this module: from here until [`stop`] the
+/// core is taking ticks, and whatever the caller does in between is what the
+/// histogram is a distribution of.
 ///
 /// # Errors
 ///
-/// [`TimerError`] if the core is not calibrated or the rate is impossible. A
-/// run that ends early is not an error: it returns a [`Summary`] whose `ticks`
-/// is short of its `target`, because the histogram it collected up to that
-/// point is worth more than an error code.
+/// [`TimerError`] if the core is not calibrated or the rate is impossible.
 ///
 /// # Safety
 ///
 /// Call on the core that was brought up and calibrated, with interrupts
 /// disabled on entry, after [`super::idt::init`] has installed
-/// [`TIMER_VECTOR`]. This function enables interrupts and disables them again.
-pub unsafe fn run(hz: u32, target: u64) -> Result<Summary, TimerError> {
+/// [`TIMER_VECTOR`]. Pair every call with [`stop`] on the same core.
+pub unsafe fn start(hz: u32, target: u64) -> Result<Window, TimerError> {
     // SAFETY: this core's own slot; nothing is armed, so no handler can be
     // holding it.
     let apic = unsafe { APIC.mine().read() };
@@ -636,18 +661,67 @@ pub unsafe fn run(hz: u32, target: u64) -> Result<Summary, TimerError> {
     // and the spurious one — and the legacy controllers were masked at bring-up.
     unsafe { core::arch::asm!("sti", options(nostack)) };
 
-    let delivered = loop {
-        // SAFETY: a volatile read of this core's counter, which the handler
-        // writes volatilely. No reference to it is taken on either side.
-        let n = unsafe { ticks_at.read_volatile() };
-        if n >= target {
-            break n;
+    Ok(Window { hz, target, tsc_khz: apic.tsc_khz, giveup })
+}
+
+/// Ticks delivered on this core since the run was armed.
+#[must_use]
+pub fn ticks() -> u64 {
+    // SAFETY: a volatile read of this core's counter, which the handler writes
+    // volatilely. No reference to it is taken on either side.
+    unsafe { TICKS.mine().read_volatile() }
+}
+
+/// Spin until the run has had every tick it asked for, or until it is clear
+/// none is coming.
+///
+/// Returns how many were delivered.
+///
+/// # Why this spins rather than halting
+///
+/// Two reasons, and the second is the one that decided it. Halting between
+/// ticks would put the idle-exit path inside every sample, and how deep a core
+/// is allowed to idle is a policy that does not exist yet — RFC 0006 says it is
+/// computed from the reservation table, and there is no reservation table. So a
+/// halting measurement would be measuring a decision nobody has made.
+///
+/// And a halt with no interrupt to wake it is a machine that stops with no
+/// output. The give-up bound is why this cannot hang; a halt would make the
+/// bound unreachable, because there would be no code running to check it.
+///
+/// This does mean the number is the best case for wake-up latency. Said here
+/// rather than discovered later.
+///
+/// # Safety
+///
+/// Call on the core [`start`] was called on, while its run is still armed.
+pub unsafe fn wait(window: &Window) -> u64 {
+    loop {
+        let n = ticks();
+        if n >= window.target {
+            return n;
         }
-        if read_tsc() > giveup {
-            break n;
+        if read_tsc() > window.giveup {
+            return n;
         }
         core::hint::spin_loop();
-    };
+    }
+}
+
+/// Disarm the timer and report what the run recorded.
+///
+/// Returns with interrupts disabled, whether the run completed or gave up. A
+/// run that ended early is not an error: the [`Summary`] says how many ticks it
+/// actually got, because the histogram it collected up to that point is worth
+/// more than an error code.
+///
+/// # Safety
+///
+/// Call on the core [`start`] was called on, once per [`start`].
+pub unsafe fn stop(window: &Window) -> Summary {
+    // SAFETY: this core's own slot; read by value, and the handler never writes
+    // it.
+    let apic = unsafe { APIC.mine().read() };
 
     // SAFETY: disabling delivery on this core. Everything below runs with no
     // handler able to interleave, which is what makes reading the state back by
@@ -663,17 +737,19 @@ pub unsafe fn run(hz: u32, target: u64) -> Result<Summary, TimerError> {
     // SAFETY: interrupts are disabled and the timer is disarmed, so no handler
     // can be running or about to run: this is the one moment the whole struct
     // can be read out by value.
-    let state = unsafe { timer.read() };
+    let state = unsafe { TIMER.mine().read() };
+    // SAFETY: as above; nothing can be advancing the counter now.
+    let delivered = unsafe { TICKS.mine().read_volatile() };
 
-    Ok(Summary {
+    Summary {
         ticks: delivered,
-        target,
-        hz,
-        tsc_khz: apic.tsc_khz,
+        target: window.target,
+        hz: window.hz,
+        tsc_khz: window.tsc_khz,
         backend: apic.backend,
         missed: state.missed,
         late: state.late,
-    })
+    }
 }
 
 /// Point the timer's local vector table entry at [`TIMER_VECTOR`] and arm it.
