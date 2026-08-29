@@ -1,0 +1,83 @@
+# The development environment, as a service.
+#
+#   docker compose -f docker/compose.yaml build dev
+#   docker compose -f docker/compose.yaml run --rm dev
+#
+# or, on Windows, `docker\dev.ps1 shell`, which wraps both.
+
+name: f-dev
+
+services:
+  # The default environment. Everything `cargo xtask lint | test | run |
+  # coverage` needs.
+  dev: &dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: dev
+      args:
+        # Match the caller's ids so a bind-mounted file is owned by the person
+        # who wrote it. Docker Desktop on Windows fakes ownership and does not
+        # care; a WSL2 or Linux host does.
+        UID: ${F_UID:-1000}
+        GID: ${F_GID:-1000}
+    image: f-dev:latest
+    working_dir: /work
+    stdin_open: true
+    tty: true
+    volumes:
+      # The working tree. Read-write, because the whole point is to build it.
+      - ..:/work
+
+      # `target/` lives in a named volume rather than in the bind mount. On
+      # Windows this is the single largest performance difference available:
+      # a Rust target directory is tens of thousands of small files, and every
+      # one of them crossing the Windows filesystem boundary is a syscall
+      # nobody needs. It also keeps the host tree clean.
+      #
+      # The cost, stated because it surprises people: build output is not
+      # visible from Windows. `docker\dev.ps1 export` copies it out when
+      # something needs to be looked at from the host.
+      - target:/work/target
+
+      # Registry and git caches, so a rebuilt image does not re-download the
+      # index and a `cargo clean` does not cost the network.
+      - registry:/opt/cargo/registry
+      - gitcache:/opt/cargo/git
+
+      # cargo-deny clones the advisory database here. Persisted so the
+      # dependency-policy job does not re-clone RustSec on every run.
+      - advisories:/opt/cargo/advisory-dbs
+    environment:
+      # Read by the claims harness. A number collected with this set is not a
+      # claim: see docker/README.md, "what this environment is not for".
+      F_ENVIRONMENT: container
+      CARGO_TERM_COLOR: always
+    # QEMU under this image runs in software emulation (TCG). Hardware
+    # acceleration needs /dev/kvm, which needs nested virtualisation in WSL2 —
+    # available on Windows 11 with a configured .wslconfig, and not on Windows
+    # 10. Uncomment only if `wsl -e ls -l /dev/kvm` shows the device, otherwise
+    # compose refuses to start the service.
+    #
+    # devices:
+    #   - /dev/kvm:/dev/kvm
+
+  # Everything in `dev`, plus cargo-deny, cargo-llvm-cov and cargo-nextest.
+  # Slower to build; use it when running the dependency-policy job or
+  # summarising coverage.
+  full:
+    <<: *dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: full
+      args:
+        UID: ${F_UID:-1000}
+        GID: ${F_GID:-1000}
+    image: f-dev:full
+
+volumes:
+  target:
+  registry:
+  gitcache:
+  advisories:

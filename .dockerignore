@@ -1,0 +1,6 @@
+# The build context is two files: the toolchain pin, which the image installs
+# from, and the entrypoint. The working tree arrives at run time as a bind
+# mount, so it is not part of the image and does not belong in its context.
+*
+!rust-toolchain.toml
+!docker/entrypoint.sh
