@@ -96,20 +96,24 @@ load-bearing.*
 - [x] **E0-D03** `M` Write RFC 0011 — peers negotiate a version, they do not match one.
   *exit:* RFC merged; `ChannelHeader` carries version, floor, offered and required features inside the existing 64 bytes; `negotiate()` has tests for every refusal path.
   *needs:* E0-D02 (refusals are reported in the error space)
-- [ ] **E0-D04** `S` Write RFC 0007 — the hard class reserves whole cores and pre-faulted memory.
-  Must precede the M2 jitter gate, or that gate measures an idle machine.
-  *exit:* RFC merged; the claim for timer jitter states which reservation it was collected under.
+- [x] **E0-D04** `S` Write RFC 0007 — the hard class reserves whole cores and pre-faulted memory.
+  Must precede the M2 jitter gate, or that gate measures an idle machine. It does: E0-B07 landed the timer, and this was written before the gate rather than after a number existed to design around.
+  Four components — a physical core, a bandwidth allocation, a cache partition, pre-faulted huge pages — admitted together or the test is testing nothing. The branch worth disagreeing with is what happens on hardware that cannot partition one of them: the component is neither waived nor pretended, it is bought by holding the co-resident cores idle. That is the expensive answer on purpose. A waived component costs a tail nobody sees; exclusion costs capacity everybody does, and a cost that is visible is the one that gets argued with rather than discovered.
+  *exit:* met. `docs/rfc/0007-reservations.md` is accepted, and `claims/0002-timer-jitter.toml` carries a `[reservation]` section naming all four and requiring every run to record whether each was obtained by partition or by exclusion — so the two easy ways to produce a flattering histogram, an idle machine and a quietly dropped component, are both excluded by the file rather than by the operator's care. E0-P06 is now waiting on a machine instead of on a decision.
 - [ ] **E0-D05** `S` Write RFC 0013 — every component publishes a state tree.
   *exit:* RFC merged; E0-B15 has a specification to build against.
-- [ ] **E0-D06** `S` Write RFC 0006 — idle depth is computed from the reservation table.
+- [x] **E0-D06** `S` Write RFC 0006 — idle depth is computed from the reservation table.
   Design only at this epoch; implementation is E1/E5.
-  *exit:* RFC merged; the bench harness carries idle-residency and joules fields, marked absent.
+  Written after E0-D04 and not before it, because the arithmetic reads the table RFC 0007 defines. Energy was in the first paragraph of the thesis and owned by no subsystem in any of the five design documents; it now has one, and the owner is admission control rather than a new subsystem. The sentence to attack is that Linux's governors predict because Linux cannot know, and admission control means F knows — a predictor being what you build when the information is absent, and this architecture having already paid to make it present.
+  *exit:* met. `docs/rfc/0006-energy.md` is accepted, and `bench/src/lib.rs` carries `idle_residency` beside `joules_per_op`, both `Metric::Unavailable`. The new one does not repeat the mistake the TESTING-STATUS commit found in its neighbours: it names E5-B07 rather than a milestone that has already arrived, and it says the absence is not a wiring gap — nothing idles, because the kernel spins between ticks on purpose.
+  `apic::wait`'s comment said the idle policy did not exist. It does now, so the comment says what is actually still missing: the table, and the implementation.
 - [ ] **E0-D07** `M` Adopt the twelve rules in `CONTRIBUTING.md`, and mechanise the three that can be.
   *exit:* `xtask lint` gains a unit-and-epoch check on public `abi` fields, a claims-ownership check, and a no-callback check; each fails a deliberately broken fixture.
 - [ ] **E0-D08** `M` Write `RELEASING.md` — what a release is, what it contains, how a stranger reproduces it.
   *exit:* document merged; `cargo xtask release --dry-run` prints the manifest it would produce.
-- [ ] **E0-D09** `S` Record the target-JSON decision: use `targets/x86_64-f.json` or delete it.
-  *exit:* an RFC or a comment in `xtask` giving the reason, so the unused file stops being a question.
+- [x] **E0-D09** `S` Record the target-JSON decision: use `targets/x86_64-f.json` or delete it.
+  Deleted. Nothing built it — its only two references in the whole tree were `BOOTSTRAP.md`'s gap table and this line — and everything it said that the built-in `x86_64-unknown-none` does not is two codegen flags already set in `.cargo/config.toml`, beside the paragraph explaining why the image does not link without them. The usual argument for a custom target does not apply here either: the build already passes `-Zbuild-std`, so the JSON was never buying the thing a JSON usually buys, and an unbuilt second copy of a target definition cannot fail loudly when the spec schema moves under it.
+  *exit:* met. The file is gone; the reason and the reversal condition — a data layout, a linker flavour or an atomic width that the built-in plus rustflags cannot express — are a doc comment on `KERNEL_TARGET` in `xtask/src/main.rs`. The `BOOTSTRAP.md` gap row is struck through and marked done, which is where the question was actually being asked from.
 
 ### Build
 

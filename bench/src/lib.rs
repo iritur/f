@@ -236,6 +236,23 @@ pub struct Sample {
     pub instructions_per_op: Metric,
     /// Joules per operation.
     pub joules_per_op: Metric,
+    /// Fraction of the run the core spent in an idle state, in `[0, 1]`.
+    ///
+    /// Absent, and absent for a reason rather than for want of wiring: nothing
+    /// enters an idle state at all yet. The kernel spins between ticks and
+    /// `apic::wait` says why — the idle-exit path would otherwise sit inside
+    /// every jitter sample. RFC 0006 makes the depth computable from the
+    /// reservation table and E5-B07 implements it, and that is the point at
+    /// which this becomes a number.
+    ///
+    /// One fraction is a summary, which is the thing this crate exists to
+    /// refuse. What RFC 0006 is actually about is residency *per state* — a
+    /// core that idled deeply and a core that idled often and shallowly are the
+    /// same scalar and are not the same result. This widens to a breakdown when
+    /// there is a source to fill it; the scalar is what the registry can ingest
+    /// today, and the gap is stated here rather than discovered by whoever
+    /// first tries to publish an energy number.
+    pub idle_residency: Metric,
 }
 
 impl Sample {
@@ -249,6 +266,10 @@ impl Sample {
             // claim reports the gap rather than pretending it does not exist.
             instructions_per_op: Metric::Unavailable("PMU not wired until M2"),
             joules_per_op: Metric::Unavailable("energy counters not wired until M2"),
+            // Not a wiring gap: there is no idle state to be resident in until
+            // the kernel stops spinning, and it does not stop until RFC 0006's
+            // policy is implemented at E5-B07.
+            idle_residency: Metric::Unavailable("nothing idles yet; RFC 0006, E5-B07"),
         }
     }
 
@@ -258,6 +279,7 @@ impl Sample {
         println!("latency {}", self.latency);
         println!("insn/op {}", self.instructions_per_op);
         println!("J/op    {}", self.joules_per_op);
+        println!("idle    {}", self.idle_residency);
     }
 }
 

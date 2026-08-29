@@ -3,8 +3,10 @@
 # producing one worth quoting. Registered now, with the threshold on record,
 # so that the target predates any number somebody might be tempted by.
 #
-# E0-P06 is what moves this to `gating`, and it needs RFC 0007 first: a jitter
-# bound is meaningless without saying what the core was reserved from.
+# E0-P06 is what moves this to `gating`. RFC 0007 is now written and the
+# reservation it requires is stated below, so a jitter bound here says what the
+# core was reserved from. What remains between this file and a gating claim is
+# a machine on which all four components of that reservation are obtainable.
 name       = "timer-jitter"
 status     = "pending"          # pending | tracked | gating
 milestone  = "M2"
@@ -19,6 +21,19 @@ move the deadline it was late for.
 [baseline]
 system  = "none"
 notes   = "There is no comparison here. Unlike claim 0001 this is an absolute bound on the system's own behaviour, not a ratio against somebody else's, so a baseline configuration would be a baseline of nothing. What takes its place is the reservation policy: the same kernel on an unreserved core is a different measurement and is not this claim."
+
+# What the core was reserved from. RFC 0007 — a jitter bound is a statement
+# about interference that did not happen, so the reservation is part of the
+# claim rather than part of the runner's configuration. Each component is
+# recorded as obtained by partition or by exclusion with every run; a run that
+# cannot show all four is not this claim, whatever number it produces.
+[reservation]
+policy    = "rfc-0007"
+core      = "exclusive physical core — both SMT siblings held by the reservation, or SMT disabled in firmware"
+bandwidth = "memory-bandwidth allocation for the reserved core group; batch work throttled around it"
+cache     = "last-level cache partition where the hardware offers one, and exclusion of the co-resident cores where it does not"
+memory    = "pre-faulted huge pages, never reclaimed, migrated or compacted while the reservation lives"
+notes     = "The two obvious ways to produce a good-looking number here are an idle machine and a waived component. Both are excluded by recording how each of the four was obtained, beside the histogram, on every run."
 
 [workload]
 path    = "kernel/src/arch/x86_64/apic.rs"
