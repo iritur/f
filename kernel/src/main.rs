@@ -22,6 +22,7 @@
 #![no_main]
 
 pub mod arch;
+pub mod env;
 pub mod jitter;
 pub mod mem;
 pub mod percpu;
@@ -101,15 +102,15 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
 
     // The determinism substrate is live from the first line of kernel code that
     // observes anything. Nothing below may read the clock directly.
-    let mut env = SeededEnv::new(SEED, 100);
+    let mut seeded = SeededEnv::new(SEED, 100);
     kprintln!("  seed          {SEED:#018x}");
 
     let mut mixed: u64 = 0;
     for _ in 0..8 {
-        mixed ^= env.next_u64();
+        mixed ^= seeded.next_u64();
     }
     kprintln!("  env digest    {mixed:#018x}");
-    kprintln!("  env clock     {} ns", env.now().as_nanos());
+    kprintln!("  env clock     {} ns", seeded.now().as_nanos());
 
     // The same seed must always produce the same digest. This is the weakest
     // possible form of the reproducibility contract, asserted at boot so that a
@@ -139,7 +140,7 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // The value that masks every free-list link. It comes from the environment
     // rather than from the hardware because a defence that made a run
     // irreproducible would cost more than it bought — see `mem`.
-    let mut frames = mem::FrameAllocator::new(env.next_u64());
+    let mut frames = mem::FrameAllocator::new(seeded.next_u64());
     // SAFETY: every region came from a validated handoff, and the reserved list
     // covers the kernel image, the structures the loader still owns, and every
     // module it loaded.
@@ -216,7 +217,7 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         kprintln!("  reclaimed     {reclaimed} frame(s) above the old identity map");
     }
 
-    match mem::self_test(&mut frames, &mut env) {
+    match mem::self_test(&mut frames, &mut seeded) {
         Ok(()) => kprintln!("  frame alloc   ok"),
         Err(why) => {
             kprintln!("FAIL: frame allocator: {why}");
@@ -259,7 +260,53 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         }
     }
 
-    run_timer(&boot);
+    let clocks = run_timer(&boot);
+
+    // M2, and the substrate's other half. Everything above this line ran on the
+    // seed. This is what a machine gives instead: the timestamp counter behind
+    // the clock that has ordering authority, and the CMOS behind a wall time
+    // that may be stamped on things and may order nothing. RFC 0009.
+    //
+    // The arithmetic first, because it is the part that can be wrong quietly —
+    // an overflow an hour into a boot, a calendar wrong by a day — and because
+    // there is no point checking a contract on top of a conversion that lies.
+    if let Err(why) = env::self_test().and_then(|()| arch::x86_64::rtc::self_test()) {
+        kprintln!("FAIL: env arithmetic: {why}");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+
+    // SAFETY: boot processor, once on this core, after `apic::calibrate` on the
+    // same core, and with interrupts disabled — `apic::run` disabled them again
+    // before returning. That is the whole list `Hardware::new` asks for.
+    let mut hardware = unsafe { env::Hardware::new(clocks.tsc_khz) };
+
+    match hardware.wall() {
+        // The uncertainty and not the time. A boot log is a fixture, and the
+        // one number here that does not move between two runs of one commit is
+        // how wrong the reading could be.
+        Some(stamp) => kprintln!(
+            "  wall clock    firmware rtc, uncertain to {} s",
+            stamp.uncertainty_nanos / 1_000_000_000
+        ),
+        // Not a failure. RFC 0009 makes this an `Option` precisely so a machine
+        // with nothing trustworthy can say so, rather than produce a plausible
+        // number that is usable and wrong.
+        None => kprintln!("  wall clock    none — nothing here worth believing"),
+    }
+
+    // One contract, both environments, on the same boot. A property checked
+    // against only the seeded environment is a property the hardware one gets
+    // to violate, and the hardware one is where a violation cannot be
+    // reproduced afterwards.
+    if let Err(why) = f_env::contract::check(&mut seeded) {
+        kprintln!("FAIL: seeded env: {}", why.message());
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+    if let Err(why) = f_env::contract::check(&mut hardware) {
+        kprintln!("FAIL: hardware env: {}", why.message());
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+    kprintln!("  env contract  arithmetic ok, seeded ok, hardware ok");
 
     // A fault on purpose, when asked for one. This is how the report path is
     // tested: `cargo xtask fault <kind>` boots with the parameter, and the run
@@ -296,7 +343,10 @@ const PROBE_TICKS: u64 = 100;
 /// moves. Nothing asserts on that output, and nothing should: it is a
 /// measurement, and `claims/0002-timer-jitter.toml` is where a measurement
 /// becomes something anybody is allowed to quote.
-fn run_timer(boot: &BootInfo) {
+///
+/// Returns the calibration, because the hardware `Env` is denominated in it:
+/// the timestamp counter is a count until something says how fast it runs.
+fn run_timer(boot: &BootInfo) -> arch::x86_64::apic::Clocks {
     match jitter::self_test() {
         Ok(()) => kprintln!("  jitter        ok"),
         Err(why) => {
@@ -350,7 +400,7 @@ fn run_timer(boot: &BootInfo) {
 
     if seconds.is_none() {
         kprintln!("  timer         {} ticks at {} Hz", summary.ticks, summary.hz);
-        return;
+        return clocks;
     }
 
     kprintln!();
@@ -367,6 +417,8 @@ fn run_timer(boot: &BootInfo) {
     let mut serial = arch::x86_64::serial::Serial;
     summary.late.report(summary.tsc_khz, &mut serial);
     kprintln!();
+
+    clocks
 }
 
 /// Fault deliberately, if the command line asked.

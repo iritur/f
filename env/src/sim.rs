@@ -20,7 +20,7 @@
 //!
 //! See `docs/design/proving-ground.html` layer 1.
 
-use crate::{Env, Instant, Scheduler, SeededEnv};
+use crate::{Env, Instant, Scheduler, SeededEnv, WallTime};
 
 /// What a simulated failure looks like to the code under test.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -109,6 +109,14 @@ impl Env for SimEnv {
         self.inner.next_u64()
     }
 
+    /// Forwarded rather than defaulted. The default is `None`, and a simulator
+    /// that answers `None` would make every path which stamps a wall-clock time
+    /// take its no-clock branch under simulation and only ever take the other
+    /// one on hardware — which is the branch nothing would then be testing.
+    fn wall(&self) -> Option<WallTime> {
+        self.inner.wall()
+    }
+
     fn scheduler(&mut self) -> &mut dyn Scheduler {
         self.inner.scheduler()
     }
@@ -146,6 +154,15 @@ mod tests {
         let (a, _) = trace(1234);
         let (b, _) = trace(5678);
         assert_ne!(a, b, "different seeds must explore different trajectories");
+    }
+
+    #[test]
+    fn the_simulator_keeps_the_seeded_wall_clock() {
+        let a = SimEnv::new(4242, 10, 0);
+        let b = SimEnv::new(4242, 10, 0);
+        let stamp = a.wall().expect("a simulated run has a wall clock");
+        assert_eq!(stamp.source, crate::WallSource::Simulated);
+        assert_eq!(a.wall(), b.wall(), "a seed must reproduce its wall clock");
     }
 
     #[test]

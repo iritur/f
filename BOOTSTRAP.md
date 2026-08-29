@@ -55,7 +55,7 @@ Each of these is deliberate and has a home in the milestone ladder
 | Every page is 2 MiB and every mapping is writable. No read-only text, no 4 KiB granularity, no per-process address spaces. Read-only text needs either 4 KiB granularity or 2 MiB-aligned sections in the linker script, which is the same prerequisite as the guard page below — the two arrive together. Data is no longer executable: the direct map is mapped no-execute, and `cargo xtask fault nx` proves it by faulting. | M3-M4 |
 | `targets/x86_64-f.json` is shipped but unused — `xtask` builds against the built-in `x86_64-unknown-none`. Switch when the target needs something the built-in does not give. | M1 |
 | No descriptor tables, no paging, no APIC. | M1-M2 |
-| `Env` has a seeded implementation only. The hardware implementation reads the one legitimate `rdtsc` but is not yet wired to it. | M2 |
+| `Env` has a hardware implementation as of E0-B08 — the timestamp counter for `now()`, the CMOS for `wall()` — and nothing consumes it. The boot runs on the seed, because a boot log carrying a number from a real clock is a fixture that fails at random. The first caller that genuinely needs real time is the scheduler. | M3 |
 | No capability table. The negative test suite is the phase-00 exit criterion and does not exist yet. | M4 |
 | `Producer`/`Consumer` are bound to borrowed memory, not to a mapped shared region with a validated `ChannelHeader`. | M5 |
 | Coverage instrumentation for fuzzing. Cheap now, painful later — see `docs/design/proving-ground.html` section 08. | M0-M1 |
