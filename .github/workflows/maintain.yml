@@ -1,0 +1,116 @@
+name: maintain
+
+# The maintain-stage loop: detect deterministically, then let the bands decide
+# how much a model is allowed to do about it.
+#
+#   ops/detect.sh  ->  max-band  ->  what ops/bands.yaml permits  ->  intent/
+#
+# Band 0 and 1 end here, in the log. Band 2 opens a read-only diagnosis that
+# ends in a draft intent. Band 3 permits the same diagnosis to arrive as a pull
+# request. Nothing in this file deploys anything, and no band lets it.
+
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+jobs:
+  detect:
+    name: bands
+    runs-on: ubuntu-latest
+    outputs:
+      band: ${{ steps.detect.outputs.band }}
+      report: ${{ steps.detect.outputs.report }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: detect
+        run: |
+          bash ops/detect.sh | tee detect.txt
+          band=$(sed -n 's/^max-band: //p' detect.txt | tail -n 1)
+          echo "band=${band:-0}" >> "$GITHUB_OUTPUT"
+          {
+            echo "report<<REPORT_EOF"
+            cat detect.txt
+            echo "REPORT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - run: cat detect.txt >> "$GITHUB_STEP_SUMMARY"
+
+  diagnose:
+    name: read-only diagnosis
+    needs: detect
+    if: needs.detect.outputs.band >= 2
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: is there a credential
+        id: gate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=band ${{ needs.detect.outputs.band }} with no credential::Something moved and nothing diagnosed it. The report is in the detect job summary."
+          fi
+
+      - if: steps.gate.outputs.ready == 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      # Read-only by construction: the only tool that can write is Write, and
+      # the prompt confines it to intent/. The band, not the prompt, is what
+      # decides whether the result may become a pull request — see the next
+      # step's condition.
+      - if: steps.gate.outputs.ready == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          REPORT: ${{ needs.detect.outputs.report }}
+          BAND: ${{ needs.detect.outputs.band }}
+        run: |
+          claude -p "Follow .claude/agents/incident-intent.md exactly.
+
+          ops/detect.sh reported band $BAND. Its output, quoted verbatim, is:
+
+          $REPORT
+
+          Write one intent/NNNN-short-name/intent.md and change nothing else.
+          Quote the detector output in the Problem section rather than
+          paraphrasing it. State your confidence, and put everything you
+          inferred in Open questions. status stays draft."
+
+      - name: open it as a pull request
+        if: steps.gate.outputs.ready == 'true' && needs.detect.outputs.band >= 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git status --porcelain intent/)" ]; then
+            echo "::notice::the diagnosis wrote no intent; nothing to open"
+            exit 0
+          fi
+          branch="maintain/band-${{ needs.detect.outputs.band }}-${{ github.run_id }}"
+          git config user.name  "maintain workflow"
+          git config user.email "noreply@example.invalid"
+          git checkout -b "$branch"
+          git add intent/
+          git commit -m "intent: band ${{ needs.detect.outputs.band }} detection, drafted by the maintain workflow"
+          git push origin "$branch"
+          gh pr create \
+            --title "intent: band ${{ needs.detect.outputs.band }} detection" \
+            --body "Drafted by .github/workflows/maintain.yml from ops/detect.sh. Nobody has read this yet: triage it as fix now, schedule, or dismiss with a reason. If it is real, it also becomes a task in evals/."
+
+      # Band 2 stops short of a branch. The draft is an artifact somebody
+      # collects, which is the difference between a diagnosis and a claim on
+      # everybody's attention.
+      - name: keep the draft as an artifact
+        if: steps.gate.outputs.ready == 'true' && needs.detect.outputs.band < 3
+        uses: actions/upload-artifact@v4
+        with:
+          name: intent-draft
+          path: intent/
+          if-no-files-found: ignore

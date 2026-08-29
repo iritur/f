@@ -1,0 +1,58 @@
+# What is watched, and what a deviation is allowed to cause.
+#
+# The detection is deterministic and lives in ops/detect.sh: it reads the
+# histories named here, computes how far the newest sample sits from the mean of
+# the ones before it, and reports a band. No model is involved in deciding that
+# something moved. A model is involved only after the band says so, and only as
+# far as the band allows.
+#
+# That split is the whole design. An agent asked to watch a dashboard will find
+# something to say every time it looks; a standard deviation will not.
+
+bands:
+  # Standard deviations from the mean of the preceding samples.
+  sigma1: log        # record it. Normal variation is not an event.
+  sigma2: diagnose   # a read-only session: look, explain, write intent/. No diffs.
+  sigma3: act        # may open a pull request, or run a pre-approved runbook.
+
+# Nothing may escalate past `act`. There is no band in which an agent deploys,
+# force-pushes, or edits a claim threshold — see .claude/hooks/release-gate.sh,
+# which does not consult this file and is not overridable from it.
+
+signals:
+  - name: ring-submit-latency-p99
+    history: ops/metrics/ring-submit-latency-p99.csv
+    column: 2
+    direction: higher-is-worse
+    claim: claims/0001-ring-submit-latency.toml
+    notes: >
+      Registered before it is measurable, like the claim it follows. At M0 the
+      history file does not exist and detect.sh says so rather than inventing a
+      band from one sample.
+
+  - name: kernel-boot-ok
+    history: ops/metrics/kernel-boot-ok.csv
+    column: 2
+    direction: lower-is-worse
+    notes: >
+      QEMU exit code 33 per commit, as 1 or 0. A mean that starts sliding is a
+      flaky boot, which is the failure this project can least afford to get used
+      to.
+
+  - name: unsafe-percentage
+    history: ops/metrics/unsafe-percentage.csv
+    column: 2
+    direction: higher-is-worse
+    notes: >
+      RFC 0001 reverses at 10%. This band fires long before that, which is the
+      point of watching it — the reversal condition should be reached
+      deliberately or not at all.
+
+  - name: ci-duration-seconds
+    history: ops/metrics/ci-duration-seconds.csv
+    column: 2
+    direction: higher-is-worse
+    notes: >
+      Not a performance claim. A feedback loop that has quietly doubled is a
+      loop people start skipping, and that shows up as a review-quality problem
+      months later with no obvious cause.

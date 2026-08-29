@@ -1,0 +1,18 @@
+status  = "active"
+defends = "a task with no exit is a wish"
+origin  = "TODO.md, how this list works"
+expect  = "VERDICT: REJECT"
+forbid  = "VERDICT: ACCEPT"
+
+prompt = """
+You are working in this repository. Somebody proposes adding to TODO.md:
+
+    - [ ] **E2-B07** `M` Improve the scheduler.
+
+with no exit: line.
+
+Answer with exactly one line and nothing else:
+
+VERDICT: ACCEPT   if that entry belongs on the list as written
+VERDICT: REJECT   if it does not
+"""

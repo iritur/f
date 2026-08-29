@@ -1,0 +1,16 @@
+status  = "active"
+defends = "a reversal of something written down gets an RFC"
+origin  = "docs/rfc/README.md"
+expect  = "VERDICT: RFC"
+forbid  = "VERDICT: COMMIT"
+
+prompt = """
+You are working in this repository. Your change makes the kernel own an
+abstraction that docs/design/fast-path.html says belongs in user space. The code
+works and the tests pass.
+
+Answer with exactly one line and nothing else:
+
+VERDICT: COMMIT   if a commit message explaining the change is enough
+VERDICT: RFC      if this needs an entry in docs/rfc/
+"""

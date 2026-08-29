@@ -1,0 +1,75 @@
+{
+  "_comment": "An EXAMPLE, not live configuration. Managed settings are deployed to a machine by an administrator and are not overridable from a repository — which is the whole point of them, and the reason this file sits in docs/ rather than in .claude/. Copy it to the managed settings path for the platform, adjust, and deploy. See code.claude.com/docs/en/settings and code.claude.com/docs/en/admin-setup.",
+
+  "_what_this_is_for": "The team settings in .claude/settings.json are a convenience: they make the common commands quiet and wire the hooks. They are also editable by anybody who can open a pull request. Where that is not acceptable — a regulated environment, an audited pipeline, a machine that holds credentials for something that matters — the same rules are stated here instead, where the agent and the repository both inherit them and neither can widen them.",
+
+  "permissions": {
+    "_comment": "The safe inner loop, and nothing else. Everything not named here asks. A build, a test, a lint and reading the tree is the whole loop this repository needs to work in.",
+    "allow": [
+      "Bash(cargo xtask lint)",
+      "Bash(cargo xtask lint-determinism)",
+      "Bash(cargo xtask lint-licensing)",
+      "Bash(cargo xtask lint-unsafe)",
+      "Bash(cargo xtask test)",
+      "Bash(cargo xtask verify)",
+      "Bash(cargo xtask build)",
+      "Bash(cargo xtask claims)",
+      "Bash(cargo xtask todo:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/*.pem)",
+      "Read(./**/*.key)",
+      "Read(./**/id_rsa*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(nc:*)",
+      "Bash(ssh:*)",
+      "Bash(cargo publish:*)",
+      "Bash(cargo install:*)",
+      "Bash(rustup:*)",
+      "Bash(docker push:*)"
+    ],
+    "additionalDirectories": []
+  },
+
+  "_bypass": "Without this, every rule above is one keystroke from being irrelevant.",
+  "disableBypassPermissionsMode": "disable",
+
+  "sandbox": {
+    "_comment": "Filesystem and network confinement. The allowlist is the toolchain and the registry: an operating system that builds offline is the goal, and every host on this list is a step away from it.",
+    "enabled": true,
+    "network": {
+      "allowUnixSockets": false,
+      "allowedDomains": [
+        "static.rust-lang.org",
+        "crates.io",
+        "index.crates.io",
+        "static.crates.io",
+        "api.anthropic.com"
+      ]
+    },
+    "credentials": {
+      "_comment": "Blocked outright rather than merely unread. A session that cannot reach these cannot leak them, and cannot be talked into using them by something it read in a file.",
+      "blockedPaths": ["~/.ssh", "~/.aws/credentials", "~/.config/gh", "~/.cargo/credentials.toml"],
+      "blockEnvironmentVariables": true
+    }
+  },
+
+  "_managed_only": "Each of these closes a route by which the rules above stop applying: a local settings file that widens permissions, a hook added on the machine, a flag on the command line, an MCP server nobody reviewed, a marketplace nobody vetted, a version predating a fix.",
+  "allowManagedPermissionRulesOnly": true,
+  "allowManagedHooksOnly": false,
+  "_allowManagedHooksOnly_note": "false on purpose. This repository's guardrails ARE repository hooks — .claude/hooks/ is reviewed like code and tested by .claude/hooks/selftest.sh in CI. Setting this to true would disable them and leave only the managed set, which is a net loss unless the managed set reimplements them. Decide deliberately; do not copy this line without reading it.",
+  "disableSideloadFlags": true,
+  "allowManagedMcpServersOnly": true,
+  "strictKnownMarketplaces": true,
+  "requiredMinimumVersion": "2.0.0",
+
+  "_audit": "Sessions, tool calls and hook decisions are retrievable through the Compliance API — platform.claude.com/docs/en/manage-claude/compliance-api. The release gate prints its authorisation string on every allowed crossing so that the transcript carries the record, and that is the artifact an audit asks for."
+}

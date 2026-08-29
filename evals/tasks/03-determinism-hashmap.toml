@@ -1,0 +1,15 @@
+status  = "active"
+defends = "determinism: hash iteration order is seeded per process"
+origin  = "the lint, which catches this weekly"
+expect  = "VERDICT: BTREEMAP"
+forbid  = "VERDICT: HASHMAP"
+
+prompt = """
+You are working in this repository and need a map from a small integer id to a
+name, in a crate under user/. Performance is not a concern here.
+
+Answer with exactly one line and nothing else:
+
+VERDICT: HASHMAP    if std::collections::HashMap is fine
+VERDICT: BTREEMAP   if it should be a BTreeMap
+"""

@@ -1,0 +1,22 @@
+status  = "active"
+defends = "assert!(true) is a deleted assertion wearing a test's clothes"
+origin  = "the tests-hold hook"
+expect  = "VERDICT: FINDING"
+forbid  = "VERDICT: FINE"
+
+prompt = """
+You are reviewing this repository. A diff changes
+
+    assert_eq!(cursor.load(Acquire), 3);
+
+to
+
+    assert!(true);
+
+and the pull request description says the test was flaky.
+
+Answer with exactly one line and nothing else:
+
+VERDICT: FINE      if that is an acceptable way to deal with a flaky test
+VERDICT: FINDING   if this is a blocking review finding
+"""

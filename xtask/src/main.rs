@@ -74,6 +74,7 @@ fn main() -> ExitCode {
         "run" => run(),
         "fault" => fault(args.get(1).map(String::as_str)),
         "test" => test(),
+        "verify" => verify(),
         "lint" => lint_all(),
         "lint-determinism" => lint_determinism(),
         "lint-licensing" => lint_licensing(),
@@ -81,6 +82,8 @@ fn main() -> ExitCode {
         "claims" => claims_list(),
         "claim" => claim_run(args.get(1).map(String::as_str)),
         "bench" => bench(args.get(1).map(String::as_str)),
+        "evals" => evals_list(),
+        "eval" => eval_run(args.get(1).map(String::as_str)),
         "coverage" => coverage(),
         "todo" => todo_list(args.get(1).map(String::as_str)),
         "help" | "--help" | "-h" => {
@@ -109,6 +112,8 @@ cargo xtask <command>
   fault [kind]       Boot it into a deliberate fault and check the report:
                      pf, ud or df
   test               Workspace tests on both x86-64 and AArch64
+  verify             lint, then test, then boot. The one command a session runs
+                     to check its own work before a human is asked to
   lint               Every policy check below, in order
 
   lint-determinism   No direct source of nondeterminism outside the allow-list
@@ -120,6 +125,10 @@ cargo xtask <command>
   claim <name>       Run one claim's workload and report against its threshold
   bench [name]       Run a benchmark binary directly
   coverage           Host tests with coverage instrumentation
+
+  evals              List the agent eval suite and what each task defends
+  eval [name]        Run the suite, or one task, and report the pass rate
+                     against the floor in evals/suite.toml
 
   todo [epoch]       What in TODO.md is ready to start, and what is waiting on
                      what. The list is a dependency graph, not a sequence.
@@ -371,6 +380,36 @@ fn test() -> Result<(), String> {
     println!(
         "\nnote: x86-64 total-store-order hides weak-memory ordering bugs.\n      \
          An AArch64 job is required before the ring tests mean anything."
+    );
+    Ok(())
+}
+
+/// The whole local loop, in the order that fails cheapest first.
+///
+/// # Why this is one command
+///
+/// A session that cannot check its own work sends its work to a human to be
+/// checked, and the human becomes the test suite. So there has to be exactly one
+/// command, it has to cover everything CI covers that can run locally, and its
+/// healthy output has to be unmistakable — which is what the last line is for.
+///
+/// The order is deliberate: the policy lints take seconds and rule out the
+/// changes that cannot merge whatever else is true of them, the tests take a
+/// minute, and the boot needs QEMU. Failing in that order is failing cheapest
+/// first.
+///
+/// It is not identical to CI. CI additionally runs the tests on AArch64, which
+/// is where the ring tests mean anything, and the litmus job in release mode.
+/// Nothing local can substitute for those, and pretending otherwise is worse
+/// than the gap.
+fn verify() -> Result<(), String> {
+    lint_all()?;
+    test()?;
+    run()?;
+    println!("\nverify: all green");
+    println!(
+        "         Local only. The AArch64 tests and the litmus job run in CI and\n         \
+         cover the class of bug an x86 host cannot see."
     );
     Ok(())
 }
@@ -1013,9 +1052,183 @@ fn coverage() -> Result<(), String> {
     Ok(())
 }
 
+/// A `"""`-delimited value, which [`toml_scalar`] deliberately does not handle.
+///
+/// It exists for `evals/tasks/*.toml`, whose prompts are paragraphs and would be
+/// illegible on one line. The same caveat applies as to everything else in this
+/// file: it reads the shape these files are written in. It is not a TOML parser,
+/// and an eval that needs one needs a parser rather than a longer version of
+/// this.
+fn toml_multiline(text: &str, key: &str) -> Option<String> {
+    let mut body: Vec<&str> = Vec::new();
+    let mut open = false;
+
+    for line in text.lines() {
+        if open {
+            if line.trim_end().ends_with("\"\"\"") {
+                return Some(body.join("\n").trim().to_string());
+            }
+            body.push(line.trim_end());
+            continue;
+        }
+        // The `=` test is what stops `prompt` being answered by `prompt_notes`,
+        // the same way `toml_field` stops `status` being answered by
+        // `statement`.
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(key)
+            && let Some(rest) = rest.trim_start().strip_prefix('=')
+            && rest.trim_start().starts_with("\"\"\"")
+        {
+            open = true;
+        }
+    }
+    None
+}
+
+/// The eval suite, in file order, which is the order they were written in and
+/// therefore roughly the order the mistakes happened in.
+fn eval_files() -> Result<Vec<PathBuf>, String> {
+    let dir = root().join("evals").join("tasks");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("reading evals/tasks/: {e}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "toml"))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+fn eval_name(path: &Path) -> String {
+    path.file_stem().unwrap_or_default().to_string_lossy().to_string()
+}
+
+fn evals_list() -> Result<(), String> {
+    let files = eval_files()?;
+    if files.is_empty() {
+        println!("evals: none registered yet. See evals/README.md.");
+        return Ok(());
+    }
+
+    println!("evals:");
+    for path in &files {
+        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let status = toml_field(&text, "status").unwrap_or_else(|| "unknown".into());
+        let defends = toml_field(&text, "defends").unwrap_or_default();
+        println!("  {:<30} {:<12} {}", eval_name(path), status, truncate(&defends, 44));
+    }
+    println!(
+        "\n{} tasks, one policy each.\n\
+         `cargo xtask eval` runs the suite; `cargo xtask eval <name>` runs one.",
+        files.len()
+    );
+    Ok(())
+}
+
+/// What to say when the CLI the suite drives is absent. Worth stating in full,
+/// because the alternative reading of a missing binary is that the suite passed.
+const NO_CLAUDE_CLI: &str = "\
+The eval suite drives the CLI in non-interactive mode, so it needs `claude` on
+PATH and a credential in the environment. The CI job skips itself when the
+secret is absent, rather than reporting green.";
+
+/// Run the eval suite against the agent configuration in this repository.
+///
+/// # What this measures
+///
+/// Not the model. The model is not ours to change. What is ours is `CLAUDE.md`,
+/// `.claude/skills/`, `.claude/hooks/` and `REVIEW.md` — and every one of those
+/// is a change whose effect is invisible at the moment it is made. The suite is
+/// how a change to them is observed at all, which is why the CI job that runs it
+/// triggers on a diff to exactly those paths.
+///
+/// # Grading
+///
+/// Each task ends by demanding a verdict token, and grading is a substring test
+/// for it. That is crude on purpose: a grader that judges free text is another
+/// model, with its own failure modes, sitting between a change and the evidence
+/// about it. A task that cannot be reduced to a verdict token is a task that has
+/// not been made specific enough yet.
+fn eval_run(filter: Option<&str>) -> Result<(), String> {
+    let suite_path = root().join("evals").join("suite.toml");
+    let suite = std::fs::read_to_string(&suite_path)
+        .map_err(|e| format!("reading {}: {e}", suite_path.display()))?;
+    let floor: f64 =
+        toml_field(&suite, "min_pass_rate").and_then(|value| value.parse().ok()).unwrap_or(1.0);
+
+    let mut ran = 0usize;
+    let mut passed = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+
+    for path in eval_files()? {
+        let name = eval_name(&path);
+        if filter.is_some_and(|f| !name.contains(f)) {
+            continue;
+        }
+
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let status = toml_field(&text, "status").unwrap_or_else(|| "active".into());
+        if status != "active" {
+            println!("  {name:<30} skipped ({status})");
+            continue;
+        }
+
+        let prompt = toml_multiline(&text, "prompt")
+            .ok_or_else(|| format!("{name}: no `prompt = \"\"\"..\"\"\"` block"))?;
+        let expect = toml_field(&text, "expect")
+            .ok_or_else(|| format!("{name}: no `expect` verdict token"))?;
+        let forbid = toml_field(&text, "forbid").filter(|f| !f.is_empty());
+
+        let out = Command::new("claude").args(["-p", &prompt]).current_dir(root()).output();
+        let out = out.map_err(|e| format!("could not run `claude`: {e}\n\n{NO_CLAUDE_CLI}"))?;
+
+        let answer = String::from_utf8_lossy(&out.stdout).to_lowercase();
+        let found = answer.contains(&expect.to_lowercase());
+        let tripped = forbid.as_ref().is_some_and(|f| answer.contains(&f.to_lowercase()));
+
+        ran += 1;
+        if found && !tripped {
+            passed += 1;
+            println!("  {name:<30} pass");
+        } else {
+            let why = if tripped {
+                format!("said `{}`", forbid.unwrap_or_default())
+            } else {
+                format!("did not say `{expect}`")
+            };
+            println!("  {name:<30} FAIL   {why}");
+            failed.push(format!("{name}: {why}"));
+        }
+    }
+
+    if ran == 0 {
+        println!("\nno active tasks matched. `cargo xtask evals` lists them.");
+        return Ok(());
+    }
+
+    let rate = passed as f64 / ran as f64;
+    println!("\n{passed}/{ran} passed ({:.0}%), floor is {:.0}%", rate * 100.0, floor * 100.0);
+
+    if rate + f64::EPSILON < floor {
+        let mut message = String::from(
+            "eval pass rate is below the floor.\n\n\
+             This gates changes to CLAUDE.md, .claude/ and REVIEW.md, because those\n\
+             are changes whose effect is otherwise invisible. Either the change is\n\
+             wrong, or the floor in evals/suite.toml moves — and moving it is a\n\
+             reviewable diff, which is the point.\n",
+        );
+        for line in &failed {
+            message.push_str("\n  ");
+            message.push_str(line);
+        }
+        return Err(message);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::toml_field;
+    use super::{toml_field, toml_multiline};
 
     /// The shapes the claim registry actually contains, carriage returns
     /// included, because the file on disk has them.
@@ -1060,5 +1273,31 @@ mod tests {
     #[test]
     fn a_missing_key_is_absent_rather_than_empty() {
         assert_eq!(toml_field(SAMPLE, "joules_per_op"), None);
+    }
+
+    /// The shape an eval task is written in, which is the only shape
+    /// `toml_multiline` promises to read.
+    const TASK: &str = concat!(
+        "status = \"active\"\r\n",
+        "defends = \"the determinism policy\"\r\n",
+        "prompt = \"\"\"\r\n",
+        "Line one.\r\n",
+        "\r\n",
+        "Line two.\r\n",
+        "\"\"\"\r\n",
+        "expect = \"VERDICT: refuse\"\r\n",
+    );
+
+    #[test]
+    fn a_multiline_prompt_keeps_its_paragraphs() {
+        assert_eq!(toml_multiline(TASK, "prompt").as_deref(), Some("Line one.\n\nLine two."));
+    }
+
+    #[test]
+    fn a_scalar_after_a_multiline_is_still_readable() {
+        // The failure this guards against is a `"""` block swallowing the rest
+        // of the file, which makes every later key look absent.
+        assert_eq!(toml_field(TASK, "expect").as_deref(), Some("VERDICT: refuse"));
+        assert_eq!(toml_multiline(TASK, "statement"), None);
     }
 }

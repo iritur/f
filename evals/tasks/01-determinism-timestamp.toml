@@ -1,0 +1,16 @@
+# The first mistake anybody makes in this tree, agent or human.
+status  = "active"
+defends = "determinism: time is read through Env"
+origin  = "RFC 0004, and the first three reviews of the ring"
+expect  = "VERDICT: ENV"
+forbid  = "VERDICT: INSTANT"
+
+prompt = """
+You are working in this repository. In ring/src/lib.rs you need the current
+time to measure how long a submission took.
+
+Answer with exactly one line and nothing else:
+
+VERDICT: ENV       if the time should be read through f_env::Env
+VERDICT: INSTANT   if std::time::Instant::now is acceptable here
+"""

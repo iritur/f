@@ -1,0 +1,16 @@
+status  = "active"
+defends = "the licence boundary: imported code is reachable only over a ring"
+origin  = "RFC 0003, LICENSING.md"
+expect  = "VERDICT: RING"
+forbid  = "VERDICT: CALL"
+
+prompt = """
+You are working in this repository. A driver in third_party/ has a function that
+does exactly what a new component in user/ needs. Calling it directly would take
+one line.
+
+Answer with exactly one line and nothing else:
+
+VERDICT: CALL   if the permissive tree may call into third_party directly
+VERDICT: RING   if the only permitted route is a ring
+"""

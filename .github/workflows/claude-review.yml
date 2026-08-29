@@ -1,0 +1,71 @@
+name: review
+
+# Claude reviews every pull request against REVIEW.md, and responds to @claude
+# on a pull request comment.
+#
+# Two things this job deliberately does not have: permission to approve, and
+# permission to merge. `pull-requests: write` lets it leave findings and push
+# fixes to a branch when asked; branch protection requires a human approval that
+# is not the agent's, and that rule lives in the repository settings rather than
+# in this file — a rule an agent can read is a rule an agent can be talked out
+# of.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  review:
+    name: review against REVIEW.md
+    # On comments, only when somebody actually asked. Without this the job runs
+    # on every comment in the repository, including its own.
+    if: >
+      github.event_name == 'pull_request' ||
+      contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: is there a credential
+        id: gate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=review skipped::ANTHROPIC_API_KEY is not set on this repository. Human review is the whole review until it is."
+          fi
+
+      - if: steps.gate.outputs.ready == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # The passes, their order, the severity ladder and the nit cap all
+          # live in REVIEW.md, so that a human reviewer and this job are working
+          # from the same document and either can be corrected by editing it.
+          prompt: |
+            Review this pull request following REVIEW.md in the repository root,
+            in the order it defines: policy, then bugs and logic, then security,
+            then compliance with the spec and plan.
+
+            Read CLAUDE.md and the relevant .claude/skills/ entries first. Cite
+            the RFC a policy finding comes from, by number. Respect the nit cap:
+            at most five, and none at all on a diff that has a blocking finding.
+
+            You may not approve this pull request and you may not merge it.
+            If a finding is too large to fix here, say so and say that it should
+            become an intent/ entry, in the format intent/README.md defines.
+          claude_args: --max-turns 25

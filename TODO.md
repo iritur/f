@@ -724,3 +724,11 @@ than an exit, because they do not close.
   *cadence:* whenever something is dropped, which is the moment it is easiest not to do.
 - [ ] **A-08** Re-read the risk register: the fallbacks, the reversal triggers, and the two claims that would falsify a bet if they came back wrong.
   *cadence:* once per epoch, out loud, with the whole team.
+- [ ] **A-09** `CLAUDE.md` stays one page and stays true. A mistake made twice earns a line under *Common mistakes*; a mistake made a third time means the instruction is not working and becomes a task in `evals/`.
+  *cadence:* every repeat finding, which is the moment it is easiest to fix once and forget.
+- [ ] **A-10** The eval suite runs, and the floor in `evals/suite.toml` is not lowered to make a change pass. Lowering it is a decision about what this repository accepts.
+  *cadence:* every diff to `CLAUDE.md`, `.claude/` or `REVIEW.md`, and weekly on the schedule.
+- [ ] **A-11** Every incident produces a post-mortem in `docs/postmortem/` and a change to something that *runs* — a lint, a hook, a test, an eval, a band. An incident that produced no eval will happen again in a form nobody recognises.
+  *cadence:* every incident, including the near misses where nothing broke.
+- [ ] **A-12** The linkage holds both ways: an accepted `intent/` names its task IDs, and the task names the intent. Either half alone rots silently, and the pair is the only route from a ranked task back to the argument for it.
+  *cadence:* whenever an intent is accepted or a task is added.

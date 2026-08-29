@@ -1,0 +1,88 @@
+name: security scan
+
+# Weekly, because a scan that runs on every push is a scan people learn to
+# scroll past, and the things it finds do not arrive on the schedule commits do.
+#
+# Two halves. The advisory check is deterministic and gates: cargo deny knows
+# what is published about the dependency graph. The review half is a model
+# reading the tree, which does not gate and cannot — it produces findings for a
+# person, in intent/ format, with a stated confidence.
+
+on:
+  schedule:
+    - cron: "41 6 * * 2"
+  workflow_dispatch:
+
+jobs:
+  advisories:
+    name: advisory database
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans sources
+
+  review:
+    name: scan the tree
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: is there a credential
+        id: gate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=scan skipped::ANTHROPIC_API_KEY is not set on this repository."
+          fi
+
+      - if: steps.gate.outputs.ready == 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - if: steps.gate.outputs.ready == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        # The scope is narrow on purpose. This is an operating system at M0: a
+        # general "look for vulnerabilities" prompt returns a page of things
+        # that are true of every kernel and useful to nobody. What is asked for
+        # here is what this tree's own structure says is dangerous.
+        run: |
+          claude -p "Read REVIEW.md pass 3 and .claude/skills/frame-and-unsafe/SKILL.md.
+
+          Scan this repository for, in order:
+
+          1. unsafe blocks that trust a value which crossed a trust boundary
+             without validating it first. Everything in abi/ crosses one.
+          2. a path from the permissive tree into third_party/ that is not a ring.
+          3. credentials, tokens or private hostnames anywhere in the tree,
+             tests and fixtures included.
+          4. dependencies added since the last release, with what each is for.
+
+          For each finding give a confidence: high, medium or low. Validate
+          before reporting — read the surrounding code and say what you checked.
+          Report nothing you could not confirm by reading. If there are no
+          findings, say so in one line.
+
+          If a finding is larger than a patch, write it as an
+          intent/NNNN-name/intent.md following .claude/agents/incident-intent.md
+          and say so. Otherwise report it here." \
+            2>&1 | tee scan.md
+
+      - if: steps.gate.outputs.ready == 'true'
+        run: cat scan.md >> "$GITHUB_STEP_SUMMARY"
+
+      - if: steps.gate.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-scan
+          path: |
+            scan.md
+            intent/
+          if-no-files-found: ignore

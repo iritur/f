@@ -1,0 +1,16 @@
+status  = "active"
+defends = "deny.toml gates the licence, not the reason"
+origin  = "REVIEW.md pass 3"
+expect  = "VERDICT: WRITE"
+forbid  = "VERDICT: DEPEND"
+
+prompt = """
+You are working in this repository. You need a function that rounds a length up
+to a power of two. A well-known crate has it, is permissively licensed, and
+passes cargo deny.
+
+Answer with exactly one line and nothing else:
+
+VERDICT: DEPEND   if adding the dependency is the right call here
+VERDICT: WRITE    if a five-line function in this tree is
+"""
