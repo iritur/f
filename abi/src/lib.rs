@@ -456,13 +456,7 @@ mod tests {
         // cancelled operation reports it in the flags and leaves `result` alone,
         // so a caller checking only `is_error` sees a success and a caller
         // checking only the flag sees a cancellation. Both are right.
-        let cqe = Cqe {
-            user_data: 7,
-            result: 0,
-            flags: cflags::CANCELLED,
-            timestamp: 0,
-            ext: 0,
-        };
+        let cqe = Cqe { user_data: 7, result: 0, flags: cflags::CANCELLED, timestamp: 0, ext: 0 };
         assert!(!cqe.is_error());
         assert!(cqe.was_cancelled());
         assert_eq!(cqe.error(), None);

@@ -137,11 +137,7 @@ fn sh(program: &str, args: &[&str]) -> Result<(), String> {
         .current_dir(root())
         .status()
         .map_err(|e| format!("could not run {program}: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{program} {} failed", args.join(" ")))
-    }
+    if status.success() { Ok(()) } else { Err(format!("{program} {} failed", args.join(" "))) }
 }
 
 fn capture(program: &str, args: &[&str]) -> Result<String, String> {
@@ -171,12 +167,8 @@ fn llvm_tool(name: &str) -> Result<PathBuf, String> {
         .ok_or("rustc -vV did not report a host triple")?
         .to_string();
 
-    let path = Path::new(sysroot.trim())
-        .join("lib")
-        .join("rustlib")
-        .join(host)
-        .join("bin")
-        .join(name);
+    let path =
+        Path::new(sysroot.trim()).join("lib").join("rustlib").join(host).join("bin").join(name);
 
     if path.exists() {
         Ok(path)
@@ -204,7 +196,14 @@ fn kernel_elf32() -> PathBuf {
 fn build() -> Result<(), String> {
     sh(
         "cargo",
-        &["build", "-p", "f-kernel", "--target", KERNEL_TARGET, "-Zbuild-std=core,compiler_builtins"],
+        &[
+            "build",
+            "-p",
+            "f-kernel",
+            "--target",
+            KERNEL_TARGET,
+            "-Zbuild-std=core,compiler_builtins",
+        ],
     )?;
     to_elf32()
 }
@@ -237,10 +236,7 @@ fn to_elf32() -> Result<(), String> {
     if status.success() {
         Ok(())
     } else {
-        Err(format!(
-            "llvm-objcopy could not rewrite {} as a 32-bit ELF",
-            relative(&src)
-        ))
+        Err(format!("llvm-objcopy could not rewrite {} as a 32-bit ELF", relative(&src)))
     }
 }
 
@@ -354,13 +350,11 @@ fn fault(kind: Option<&str>) -> Result<(), String> {
             "the kernel finished normally — `fault={kind}` did not fault, so \
              nothing about the exception path was tested"
         )),
-        Some(0) => Err(
-            "the machine reset without reporting: a fault whose handler faults \
+        Some(0) => Err("the machine reset without reporting: a fault whose handler faults \
              is a triple fault, and a triple fault has no output. Either the \
              descriptor tables are not installed or the handler cannot run \
              where it was called from."
-                .into(),
-        ),
+            .into()),
         Some(other) => Err(format!("qemu exited {other}; expected 35")),
         None => Err("qemu terminated by signal".into()),
     }
@@ -385,13 +379,27 @@ fn lint_all() -> Result<(), String> {
     lint_determinism()?;
     lint_licensing()?;
     lint_unsafe()?;
+    // The same check the CI policy job runs. It lives here because a local
+    // `lint` that is a subset of the gate teaches people the gate is passing
+    // when it is not — which is how a formatting failure reached CI on a tree
+    // whose three policy lints were all green.
+    sh("cargo", &["fmt", "--all", "--", "--check"])?;
     // Two invocations, because the workspace has two worlds in it. Everything
     // except the kernel is checked for the host; the kernel is checked for the
     // bare-metal target it actually runs on, which is the only configuration in
     // which checking it means anything.
     sh(
         "cargo",
-        &["clippy", "--workspace", "--exclude", "f-kernel", "--all-targets", "--", "-D", "warnings"],
+        &[
+            "clippy",
+            "--workspace",
+            "--exclude",
+            "f-kernel",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ],
     )?;
     sh(
         "cargo",
@@ -431,10 +439,7 @@ fn rust_sources() -> Result<Vec<PathBuf>, String> {
 }
 
 fn relative(path: &Path) -> String {
-    path.strip_prefix(root())
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+    path.strip_prefix(root()).unwrap_or(path).to_string_lossy().replace('\\', "/")
 }
 
 fn lint_determinism() -> Result<(), String> {
@@ -442,13 +447,11 @@ fn lint_determinism() -> Result<(), String> {
 
     for path in rust_sources()? {
         let rel = relative(&path);
-        if is_tooling(&rel)
-            || DETERMINISM_ALLOW.iter().any(|(allowed, _)| rel.starts_with(allowed))
+        if is_tooling(&rel) || DETERMINISM_ALLOW.iter().any(|(allowed, _)| rel.starts_with(allowed))
         {
             continue;
         }
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("reading {}: {e}", rel))?;
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", rel))?;
 
         for (line_no, line) in text.lines().enumerate() {
             // A mention in a comment is documentation, not a call site.
@@ -481,8 +484,7 @@ fn lint_licensing() -> Result<(), String> {
 
     for path in rust_sources()? {
         let rel = relative(&path);
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("reading {}: {e}", rel))?;
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", rel))?;
 
         if !text.starts_with("// SPDX-License-Identifier:") {
             missing.push(rel.clone());
@@ -492,8 +494,7 @@ fn lint_licensing() -> Result<(), String> {
         //
         // The SPDX check above applies everywhere, tooling included. This one
         // cannot: the checker's own source contains the string it searches for.
-        if !is_tooling(&rel)
-            && (text.contains("use third_party") || text.contains("third_party::"))
+        if !is_tooling(&rel) && (text.contains("use third_party") || text.contains("third_party::"))
         {
             leaked.push(rel);
         }
@@ -533,8 +534,7 @@ fn lint_unsafe() -> Result<(), String> {
         if is_tooling(&rel) || UNSAFE_ALLOW.iter().any(|allowed| rel.starts_with(allowed)) {
             continue;
         }
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("reading {}: {e}", rel))?;
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", rel))?;
         for (line_no, line) in text.lines().enumerate() {
             let code = line.split("//").next().unwrap_or("");
             if code.contains("unsafe ") || code.contains("unsafe{") {
@@ -592,8 +592,7 @@ fn ids_in(line: &str) -> Vec<String> {
 
 fn parse_todo() -> Result<Vec<Task>, String> {
     let path = root().join("TODO.md");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("reading TODO.md: {e}"))?;
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("reading TODO.md: {e}"))?;
 
     let mut tasks: Vec<Task> = Vec::new();
     let mut epoch = String::from("(none)");
@@ -628,10 +627,11 @@ fn parse_todo() -> Result<Vec<Task>, String> {
         let Some((id, rest)) = rest.split_once("**") else { continue };
 
         // The size is the first backticked token, when there is one.
-        let (size, title) = match rest.trim_start().strip_prefix('`').and_then(|r| r.split_once('`')) {
-            Some((size, title)) => (size.to_string(), title.trim().to_string()),
-            None => (String::from("?"), rest.trim().to_string()),
-        };
+        let (size, title) =
+            match rest.trim_start().strip_prefix('`').and_then(|r| r.split_once('`')) {
+                Some((size, title)) => (size.to_string(), title.trim().to_string()),
+                None => (String::from("?"), rest.trim().to_string()),
+            };
 
         tasks.push(Task {
             id: id.to_string(),
@@ -776,7 +776,9 @@ fn todo_list(filter: Option<&str>) -> Result<(), String> {
     // is the critical path, and a task holding up nothing can wait for a wet
     // afternoon however urgent it feels.
     let unblocks = transitive_dependents(&tasks, &by_id);
-    ready.sort_by_key(|t| (std::cmp::Reverse(unblocks.get(t.id.as_str()).copied().unwrap_or(0)), t.id.clone()));
+    ready.sort_by_key(|t| {
+        (std::cmp::Reverse(unblocks.get(t.id.as_str()).copied().unwrap_or(0)), t.id.clone())
+    });
 
     let critical: Vec<_> =
         ready.iter().filter(|t| unblocks.get(t.id.as_str()).copied().unwrap_or(0) > 0).collect();
@@ -803,7 +805,12 @@ fn todo_list(filter: Option<&str>) -> Result<(), String> {
     if !leaves.is_empty() {
         println!("  unblocks nothing — real work, but nothing is waiting on it");
         for task in &leaves {
-            println!("    {:<8} {:<2}              {}", task.id, task.size, truncate(&task.title, 52));
+            println!(
+                "    {:<8} {:<2}              {}",
+                task.id,
+                task.size,
+                truncate(&task.title, 52)
+            );
         }
     }
 
@@ -930,10 +937,7 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         .map_err(|e| format!("reading claims/: {e}"))?
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .find(|p| {
-            p.file_stem()
-                .is_some_and(|s| s.to_string_lossy().ends_with(name))
-        })
+        .find(|p| p.file_stem().is_some_and(|s| s.to_string_lossy().ends_with(name)))
         .ok_or_else(|| format!("no claim named {name} in claims/"))?;
 
     let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;

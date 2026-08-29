@@ -184,7 +184,11 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // rather than assumed to be everything.
     unsafe { frames.rebind(paging::PHYS_OFFSET, space.direct_limit()) };
 
-    kprintln!("  address space {:#018x} root, direct map at {:#018x}", space.root(), paging::PHYS_OFFSET);
+    kprintln!(
+        "  address space {:#018x} root, direct map at {:#018x}",
+        space.root(),
+        paging::PHYS_OFFSET
+    );
 
     // Memory the identity window could not reach is now reachable. Nothing was
     // skipped on this machine; the pass exists so that the first machine with
@@ -384,7 +388,10 @@ fn report_memory(magic: u32, info: u32) -> BootInfo {
         // Not fatal yet, because nothing depends on a module at M1. It becomes
         // fatal at E0-B10, where the first one is loaded and where an
         // unreserved module is memory handed out from under its owner.
-        kprintln!("  note          {} module(s) beyond what is tracked, and NOT reserved", boot.modules_dropped());
+        kprintln!(
+            "  note          {} module(s) beyond what is tracked, and NOT reserved",
+            boot.modules_dropped()
+        );
     }
 
     // A map with no usable memory in it is a map that was misread, not a

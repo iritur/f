@@ -59,12 +59,7 @@ impl Shared {
     }
 
     fn chan(&self) -> Channel<'_> {
-        Channel {
-            head: &self.head,
-            tail: &self.tail,
-            flags: &self.flags,
-            entries: &self.entries,
-        }
+        Channel { head: &self.head, tail: &self.tail, flags: &self.flags, entries: &self.entries }
     }
 }
 

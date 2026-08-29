@@ -322,10 +322,7 @@ mod tests {
             assert!(lo <= v, "bucket lower bound {lo} must not exceed {v}");
             assert!(hi >= v, "bucket upper bound {hi} must not fall below {v}");
             // Two significant figures per octave: never more than ~12% low.
-            assert!(
-                v - lo <= v / 8 + 1,
-                "resolution too coarse for {v}, got {lo}"
-            );
+            assert!(v - lo <= v / 8 + 1, "resolution too coarse for {v}, got {lo}");
         }
     }
 

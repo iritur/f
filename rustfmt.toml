@@ -1,0 +1,11 @@
+# The formatting the tree is already written in, stated so that `cargo fmt`
+# agrees with it. Without this file rustfmt's small-function heuristics —
+# 60 columns for a call, 18 for a struct literal, 50 for an `if`/`else` — break
+# lines this tree deliberately keeps whole, and the CI policy job fails against
+# code nobody has touched.
+#
+# `Max` lets those constructs use the full width rather than a fraction of it.
+# The width itself is rustfmt's default and is restated here because it is what
+# gives the line above its meaning.
+max_width = 100
+use_small_heuristics = "Max"

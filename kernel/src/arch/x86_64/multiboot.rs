@@ -319,8 +319,7 @@ impl BootInfo {
                         modules_dropped += 1;
                         continue;
                     }
-                    modules[module_count] =
-                        Module { start: u64::from(start), end: u64::from(end) };
+                    modules[module_count] = Module { start: u64::from(start), end: u64::from(end) };
                     module_count += 1;
                 }
             }
@@ -396,9 +395,7 @@ impl BootInfo {
         if needle.is_empty() || needle.len() > self.cmdline_len {
             return false;
         }
-        self.cmdline()
-            .windows(needle.len())
-            .any(|window| window == needle)
+        self.cmdline().windows(needle.len()).any(|window| window == needle)
     }
 
     /// Where the loader's own memory map lives, as a base and a length.

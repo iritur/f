@@ -165,9 +165,6 @@ mod tests {
             let _ = env.should_fail("ring.publish");
         }
         let rate = f64::from(env.injected()) / f64::from(n);
-        assert!(
-            (0.05..0.15).contains(&rate),
-            "expected roughly 10% injection, got {rate:.3}"
-        );
+        assert!((0.05..0.15).contains(&rate), "expected roughly 10% injection, got {rate:.3}");
     }
 }

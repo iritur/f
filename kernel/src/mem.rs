@@ -343,8 +343,8 @@ impl FrameAllocator {
 
         while frame.saturating_add(FRAME_SIZE) <= region_end {
             let end = frame + FRAME_SIZE;
-            let usable = frame >= LOW_MEMORY_LIMIT
-                && !reserved.iter().any(|r| r.overlaps(frame, end));
+            let usable =
+                frame >= LOW_MEMORY_LIMIT && !reserved.iter().any(|r| r.overlaps(frame, end));
 
             if usable {
                 if end > self.limit {

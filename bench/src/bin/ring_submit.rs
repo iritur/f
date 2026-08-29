@@ -30,8 +30,7 @@ fn main() {
     let head = Cursor::new();
     let tail = Cursor::new();
     let flags = AtomicU32::new(0);
-    let entries: Vec<UnsafeCell<Sqe>> =
-        (0..RING).map(|_| UnsafeCell::new(Sqe::ZERO)).collect();
+    let entries: Vec<UnsafeCell<Sqe>> = (0..RING).map(|_| UnsafeCell::new(Sqe::ZERO)).collect();
 
     let chan = || Channel { head: &head, tail: &tail, flags: &flags, entries: &entries };
     let producer = Producer::new(chan()).expect("ring size is a power of two");

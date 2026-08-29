@@ -23,14 +23,7 @@ use f_abi::{Sqe, class, flags};
 /// inverting priority behind batch work in some other service queue.
 #[must_use]
 pub fn nop(user_data: u64, deadline: u64) -> Sqe {
-    Sqe {
-        opcode: 0,
-        flags: flags::NO_CQE,
-        class: class::SOFT,
-        user_data,
-        deadline,
-        ..Sqe::ZERO
-    }
+    Sqe { opcode: 0, flags: flags::NO_CQE, class: class::SOFT, user_data, deadline, ..Sqe::ZERO }
 }
 
 #[cfg(test)]
