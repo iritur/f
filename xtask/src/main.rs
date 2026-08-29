@@ -10,6 +10,25 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+/// The target the kernel is built for.
+///
+/// A built-in target and not a JSON file in `targets/`, which is a decision
+/// rather than an omission. `targets/x86_64-f.json` was shipped at M0, was
+/// never built by anything, and was deleted at E0-D09. Everything it stated
+/// that the built-in does not is two codegen flags — `relocation-model=static`
+/// and `code-model=kernel` — and those live in `.cargo/config.toml` beside the
+/// paragraph explaining why the image does not link without them. One copy,
+/// with the reason next to it. A second copy that no build consumes cannot
+/// fail loudly: the target-spec JSON schema moves between nightlies, this tree
+/// pins a nightly, and a file nothing compiles rots silently until somebody
+/// switches to it and inherits a codegen configuration nobody has run.
+///
+/// Reverse this when the target needs something the built-in plus rustflags
+/// cannot express — a different data layout, another linker flavour, a change
+/// to `max-atomic-width` — or when the machine named at E5 wants a target the
+/// toolchain does not ship. The build already passes `-Zbuild-std`, so a
+/// custom target costs nothing extra there and the switch is this constant
+/// plus a path.
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 
 /// Direct sources of nondeterminism. Any of these outside an allowed path
