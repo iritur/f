@@ -1,0 +1,1045 @@
+<title>What Must Be Stated</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;700;900&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root{
+  --paper:#F2F4F7; --surface:#FFFFFF; --surface-2:#E9ECF2;
+  --ink:#12141A; --ink-2:#3A4150; --muted:#6B7382;
+  --line:#D6DBE4; --line-strong:#B9C0CD;
+  --cobalt:#2F4FD8; --rust:#A8431C; --teal:#0B6E5C;
+  --on-accent:#FFFFFF;
+  --shadow:0 1px 2px rgba(18,20,26,.05), 0 8px 24px -16px rgba(18,20,26,.28);
+  --sans:"IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --display:"Chivo", "IBM Plex Sans", ui-sans-serif, sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --col:66ch; --wide:1180px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+    --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+    --line:#262C39; --line-strong:#3D4657;
+    --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+    --on-accent:#0D0F14;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+  --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+  --line:#262C39; --line-strong:#3D4657;
+  --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+  --on-accent:#0D0F14;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+}
+
+*{box-sizing:border-box;}
+body{margin:0; background:var(--paper); color:var(--ink); font-family:var(--sans); font-size:17px; line-height:1.65; -webkit-font-smoothing:antialiased;}
+.wrap{max-width:var(--wide); margin:0 auto; padding:0 28px 96px;}
+
+h1,h2,h3,h4{font-family:var(--display); text-wrap:balance; margin:0;}
+h1{font-weight:900; font-size:clamp(2.5rem,6.2vw,4.2rem); line-height:.98; letter-spacing:-.035em;}
+h2{font-weight:900; font-size:clamp(1.5rem,3vw,2.05rem); line-height:1.08; letter-spacing:-.025em;}
+h3{font-weight:700; font-size:1.14rem; line-height:1.3; letter-spacing:-.012em;}
+h4{font-weight:700; font-size:.92rem; line-height:1.35;}
+p{margin:0;}
+a{color:var(--cobalt); text-decoration-thickness:1px; text-underline-offset:2px;}
+a:focus-visible{outline:2px solid var(--cobalt); outline-offset:3px; border-radius:2px;}
+strong,b{font-weight:600;}
+code{font-family:var(--mono); font-size:.87em; background:var(--surface-2); padding:.1em .34em; border-radius:3px;}
+em.sys{font-style:normal; font-weight:600;}
+
+.eyebrow{font-family:var(--mono); font-size:.7rem; font-weight:600; letter-spacing:.16em; text-transform:uppercase; color:var(--muted);}
+
+.mast{padding:72px 0 40px; border-bottom:1px solid var(--line-strong);}
+.mast-grid{display:flex; flex-direction:column; gap:26px;}
+.mast .lede{font-size:1.2rem; line-height:1.55; color:var(--ink-2); max-width:60ch;}
+.mast .lede b{color:var(--ink);}
+.specline{display:flex; flex-wrap:wrap; gap:10px 26px; padding-top:6px; font-family:var(--mono); font-size:.74rem; color:var(--muted); letter-spacing:.04em;}
+.specline span b{color:var(--ink-2);}
+
+section{padding:52px 0 8px; border-bottom:1px solid var(--line);}
+section:last-of-type{border-bottom:0;}
+.sec-head{display:flex; align-items:baseline; gap:16px; margin-bottom:20px; flex-wrap:wrap;}
+.sec-num{font-family:var(--mono); font-size:.74rem; font-weight:600; color:var(--cobalt); letter-spacing:.1em; padding-top:.5em;}
+.flow{display:flex; flex-direction:column; gap:18px;}
+.flow > p, .flow > ul, .flow > .note, .flow > h3, .flow > .claim{max-width:var(--col);}
+
+ul.list{margin:0; padding-left:0; list-style:none; display:flex; flex-direction:column; gap:11px;}
+ul.list li{position:relative; padding-left:22px;}
+ul.list li::before{content:""; position:absolute; left:2px; top:.62em; width:7px; height:7px; border:1.5px solid var(--cobalt); border-radius:1px;}
+
+.note{border-left:3px solid var(--rust); background:color-mix(in srgb, var(--rust) 7%, var(--surface)); padding:14px 18px; border-radius:0 5px 5px 0; font-size:.95rem; color:var(--ink-2);}
+.note b{color:var(--ink);}
+.claim{border-left:3px solid var(--cobalt); background:color-mix(in srgb, var(--cobalt) 7%, var(--surface)); padding:14px 18px; border-radius:0 5px 5px 0; font-size:.95rem; color:var(--ink-2);}
+.claim b{color:var(--ink);}
+.claim .t{font-family:var(--mono); font-size:.68rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--cobalt); display:block; margin-bottom:7px;}
+
+.tablewrap{overflow-x:auto; border:1px solid var(--line); border-radius:7px; background:var(--surface); margin:6px 0 4px;}
+table{border-collapse:collapse; width:100%; min-width:820px; font-size:.87rem;}
+th,td{text-align:left; padding:12px 15px; border-bottom:1px solid var(--line); vertical-align:top; line-height:1.5;}
+thead th{font-family:var(--mono); font-size:.66rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); background:var(--surface-2); border-bottom:1px solid var(--line-strong); white-space:nowrap;}
+tbody tr:last-child td{border-bottom:0;}
+td.sysname{white-space:nowrap;}
+td.sysname b{font-family:var(--display); font-weight:700; font-size:.95rem; display:block;}
+td.sysname span{font-family:var(--mono); font-size:.66rem; color:var(--muted); letter-spacing:.05em;}
+td.fpos{background:color-mix(in srgb, var(--cobalt) 4%, var(--surface));}
+
+.chip{display:inline-block; font-family:var(--mono); font-size:.62rem; font-weight:600; letter-spacing:.08em; text-transform:uppercase; padding:3px 7px; border-radius:3px; border:1px solid currentColor; white-space:nowrap;}
+.chip.ahead{color:var(--teal); background:color-mix(in srgb, var(--teal) 10%, var(--surface));}
+.chip.behind{color:var(--rust); background:color-mix(in srgb, var(--rust) 10%, var(--surface));}
+.chip.par{color:var(--muted); background:var(--surface-2);}
+
+.streams{display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:13px; margin:8px 0 4px;}
+.stream{background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--cobalt); border-radius:6px; padding:16px 18px 18px; display:flex; flex-direction:column; gap:10px; box-shadow:var(--shadow);}
+.stream .k{font-family:var(--mono); font-size:.66rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--cobalt);}
+.stream .from{font-family:var(--mono); font-size:.73rem; color:var(--muted); line-height:1.75;}
+.stream .from b{color:var(--ink-2);}
+.stream .takes{font-size:.89rem; color:var(--ink-2); line-height:1.55; border-top:1px dashed var(--line-strong); padding-top:10px; margin-top:auto;}
+.stream .takes b{color:var(--ink);}
+
+.neighbours{display:flex; flex-direction:column; margin:6px 0 4px;}
+.nb{display:grid; grid-template-columns:minmax(150px,200px) 1fr; gap:6px 22px; padding:16px 0; border-top:1px solid var(--line);}
+.nb:last-child{border-bottom:1px solid var(--line);}
+.nb .n{font-family:var(--display); font-weight:700; font-size:1rem; line-height:1.35;}
+.nb .n span{display:block; font-family:var(--mono); font-size:.66rem; font-weight:600; color:var(--muted); letter-spacing:.05em; text-transform:uppercase; padding-top:3px;}
+.nb .d{font-size:.92rem; color:var(--ink-2); max-width:64ch;}
+
+.deficit{display:flex; flex-direction:column; margin:6px 0 4px;}
+.df{display:grid; grid-template-columns:minmax(140px,190px) 1fr; gap:6px 22px; padding:15px 0; border-top:1px solid var(--line);}
+.df:last-child{border-bottom:1px solid var(--line);}
+.df .n{font-family:var(--display); font-weight:700; font-size:.98rem;}
+.df .d{font-size:.92rem; color:var(--ink-2); max-width:64ch;}
+
+.foot{padding-top:40px; font-family:var(--mono); font-size:.7rem; color:var(--muted); letter-spacing:.06em; line-height:1.8; max-width:80ch;}
+
+@media (max-width:720px){
+  body{font-size:16px;}
+  .wrap{padding:0 20px 72px;}
+  .nb, .df{grid-template-columns:1fr;}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none !important; transition:none !important;}}
+
+.chip.dec{color:var(--ink-2); background:var(--surface-2); border-style:dashed;}
+td.sysname span{display:block; padding-top:3px;}
+.nb .d b{color:var(--ink);}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="mast-grid">
+    <div class="eyebrow">Proposition &middot; nothing here is adopted</div>
+    <h1>What Must Be Stated</h1>
+    <p class="lede">Sixty-eight structural drawbacks of Linux, sorted by the cause that produces them; where <b>F</b> already answers each one, and the <b>seventeen it does not</b> &mdash; which collapse into nine decisions. The last six sections are the point: the rules, decisions, ABI corrections and claims this analysis says are missing, written as proposals rather than as changes.</p>
+    <div class="specline">
+      <span><b>Status</b> &nbsp;proposed &mdash; the tree is unchanged</span>
+      <span><b>Method</b> &nbsp;root causes, not a bug list</span>
+      <span><b>Result</b> &nbsp;40 answered &middot; 9 partial &middot; 17 open &middot; 2 declined</span>
+      <span><b>Output</b> &nbsp;12 rules &middot; 9 RFCs &middot; 3 ABI corrections &middot; 5 claims</span>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="sec-head"><div class="sec-num">01</div><h2>What this is</h2></div>
+  <div class="flow">
+    <p>The five design documents describe what F is. This one asks a narrower question and answers it adversarially: <em class="sys">every drawback of Linux that is a consequence of its architecture rather than of its engineering &mdash; is it answered here, and if so, where exactly, and if not, what would have to be decided?</em></p>
+    <p>The result is more encouraging than the length of section 14 suggests. Of sixty-eight drawbacks, <b>forty are answered outright</b> and nine partly, most of them by the same four or five structural decisions &mdash; which is the strongest available evidence that those decisions are load-bearing rather than decorative. One mechanism deleting eight unrelated problems is what a good architecture looks like from the outside, and it happens here repeatedly.</p>
+    <p>The seventeen that are not are the useful output, and they collapse into <b>nine decisions</b>, because open drawbacks share causes the same way answered ones share cures. Two of the nine threaten a bet. Two are the missing half of the thesis. Three are holes in an ABI that has already shipped a version number, which makes them cheap this month and expensive after M5.</p>
+    <div class="note">
+      <b>Nothing in this document has been applied.</b> No RFC was written, no crate was edited, no metric was changed. Sections 15 through 20 are what would follow if the analysis is accepted, itemised so that each item can be accepted, deferred or rejected on its own. <b>BOOTSTRAP.md</b> notes that the design documents run ahead of the code and that this is the intended order; this document runs one step ahead of those, and is filed outside <code>docs/design/</code> for that reason.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">02</div><h2>Method, and the fairness it requires</h2></div>
+  <div class="flow">
+    <p>Two disciplines, both borrowed from <em class="sys">Lineage and Debts</em>, because the failure mode of this kind of document is well known: it becomes a list of things a competitor does badly, which is worth nothing to the people building the alternative.</p>
+    <div class="claim">
+      <span class="t">The framing rule</span>
+      <b>These are the architecture's faults, not the engineering's.</b> Linux is the best-engineered instance of its architecture that has ever existed, maintained at a scale no other operating system has sustained. Every item below survived thirty years of extremely capable people trying to fix it, which is the evidence that it is structural. F must never claim to out-engineer Linux. It claims to out-architect it, on six named points, and to lose everywhere else &mdash; which is exactly what the comparison document already says.
+    </div>
+    <p>Second: a drawback counts as <em class="sys">answered</em> only when something in F makes it structurally unavailable. A policy that avoids it, a convention that discourages it, or an intention to be careful about it does not count and is recorded as partial. This is the same standard the claims registry applies to numbers, applied to design.</p>
+    <p>The status column reads:</p>
+    <ul class="list">
+      <li><b>Answered</b> &mdash; a named mechanism in a written document makes the drawback unavailable, and the document says where.</li>
+      <li><b>Partial</b> &mdash; the mechanism exists but the specific case is unaddressed, or the answer is named without being designed.</li>
+      <li><b>Open</b> &mdash; nothing in the corpus addresses it. These are the nine.</li>
+      <li><b>Declined</b> &mdash; F should not answer this, and section 19 says why.</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">03</div><h2>The nine causes</h2></div>
+  <div class="flow">
+    <p>Sorted by what produces them rather than by where they are felt. The point of the sort is that it predicts: two systems sharing a cause share the cure, and a cure that only fixes one of them is treating a symptom.</p>
+  </div>
+  <div class="streams">
+    <div class="stream">
+      <div class="k">Cause 01 &mdash; the 1970 interface</div>
+      <div class="from"><b>Process, file, descriptor, signal.</b><br>Abstractions designed for a machine with one core, one memory tier and a teletype, carried forward by compatibility.</div>
+      <div class="takes"><b>Produces:</b> the syscall tax, mandatory copies, readiness instead of completion, <code>fork</code>, signals, <code>errno</code>, path races.</div>
+    </div>
+    <div class="stream">
+      <div class="k">Cause 02 &mdash; ambient authority</div>
+      <div class="from"><b>Authority is a property of identity</b>, and every name in a global namespace is reachable by anyone who can spell it.</div>
+      <div class="takes"><b>Produces:</b> root, setuid, container escapes, the confused deputy, deny-list security, unrevocable descriptors.</div>
+    </div>
+    <div class="stream">
+      <div class="k">Cause 03 &mdash; shared fate</div>
+      <div class="from"><b>One address space, full authority, memory-unsafe language.</b> Most of the code is drivers and all of it is trusted.</div>
+      <div class="takes"><b>Produces:</b> whole-machine blast radius, the CVE profile, reboot-to-upgrade, unstable internal API, and the speculation problem F inherits differently.</div>
+    </div>
+    <div class="stream">
+      <div class="k">Cause 04 &mdash; global mutable state</div>
+      <div class="from"><b>The filesystem is the ground truth and anything may write to it</b>, so the machine's state is whatever has happened to it.</div>
+      <div class="takes"><b>Produces:</b> config drift, non-atomic upgrade, no rollback, crash-consistency conventions, search-by-walking, write amplification.</div>
+    </div>
+    <div class="stream">
+      <div class="k">Cause 05 &mdash; five unrelated policies</div>
+      <div class="from"><b>Each resource has its own scheduler and none of them knows the others exist</b>, so nothing arbitrates between them and nothing refuses.</div>
+      <div class="takes"><b>Produces:</b> missed deadlines through an unwatched resource, the OOM killer, reclaim stalls, sibling and cache interference, unmanaged accelerators, guessed idle states.</div>
+    </div>
+    <div class="stream">
+      <div class="k">Cause 06 &mdash; a 2005 hardware model</div>
+      <div class="from"><b>Uniform cores, flat memory, devices that need mediation.</b> Already the thesis of <em class="sys">The Fast Path</em> section 13.</div>
+      <div class="takes"><b>Produces:</b> unused user interrupts, pinned DMA, CXL as fake NUMA, zoned storage fighting the filesystem, the NPU as a device file.</div>
+    </div>
+    <div class="stream">
+      <div class="k">Cause 07 &mdash; time treated as one thing</div>
+      <div class="from"><b>One word for three jobs:</b> ordering events, measuring duration, naming a moment to a person.</div>
+      <div class="takes"><b>Produces:</b> five clocks and the bugs of choosing between them, leap seconds, the 2038 epoch, timers that stop across suspend, timestamps with no provenance.</div>
+    </div>
+    <div class="stream">
+      <div class="k">Cause 08 &mdash; the display sends pixels</div>
+      <div class="from"><b>The drawing call discards the meaning and keeps the image</b>, so everything that needs the meaning reconstructs it afterwards.</div>
+      <div class="takes"><b>Produces:</b> the copy count, the latency, and six separate subsystems rebuilding what the application already knew.</div>
+    </div>
+    <div class="stream">
+      <div class="k">Cause 09 &mdash; the system cannot be asked</div>
+      <div class="from"><b>Nondeterminism everywhere and no shared model of state</b>, so behaviour is observed rather than reproduced.</div>
+      <div class="takes"><b>Produces:</b> heisenbugs, five unrelated observability mechanisms, regressions found by users, and the impossibility of whole-system simulation.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">04</div><h2>Cause 01 &mdash; the 1970 interface</h2></div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Drawback</th><th>Why it is structural</th><th>F's position</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="sysname"><b>The syscall is the only boundary</b><span>boundary</span></td>
+        <td>Every service is reached by crossing a protection boundary that costs 40&ndash;100&nbsp;ns bare and three to eight times that with speculation mitigations enabled. A program that talks to its own kernel a thousand times a second spends its budget on the crossing rather than the work.</td>
+        <td class="fpos">The ring is the interface. Once a capability is granted the hot path contains no crossing at all &mdash; submission is a store and a doorbell. Bet 02.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b><code>read</code>/<code>write</code> copy semantics</b><span>memory</span></td>
+        <td>The API is defined as moving bytes into a buffer the caller owns, so a copy is mandatory even when the data is already resident. The page cache then holds a second copy of everything, and the memory that copy occupies is memory the workload does not get.</td>
+        <td class="fpos">Buffers are handed over, never duplicated. Reads resolve through the index and land by direct memory access in the caller's registered buffer, with no page cache holding a second copy. Resource document section 04.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Readiness, not completion</b><span>interface</span></td>
+        <td><code>select</code>, <code>poll</code> and <code>epoll</code> report that an operation would probably not block. The caller then performs it, and may block anyway, because the state can change in between. Three generations of API refined the notification without changing the model.</td>
+        <td class="fpos">Completion-based throughout, and every completion carries the timestamp of when the work actually finished &mdash; which is also where whole-system latency accounting comes from.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>"Everything is a file"</b><span>interface</span></td>
+        <td>The most elegant idea in operating systems buys its uniformity with synchronous byte-stream semantics, which cannot express asynchrony, batching or zero copy &mdash; the three properties current hardware rewards most.</td>
+        <td class="fpos">Same ambition, different primitive: the ring rather than the file. Uniformity that is asynchronous and zero-copy by construction. Recorded in <em class="sys">Lineage and Debts</em> against Plan 9.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Thread per unit of work</b><span>scheduling</span></td>
+        <td>Blocking calls make one thread per outstanding operation the natural design, and a context switch costs one to five microseconds counting the cache and TLB damage it leaves behind. The cost is paid at exactly the moment the work becomes interesting.</td>
+        <td class="fpos">The kernel allocates cores to runtimes; a runtime schedules its own work inside that allocation with no kernel involvement, and is told before a core is reclaimed so it can park cleanly. Resource document section 02.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b><code>fork()</code></b><span>lifecycle</span></td>
+        <td>It does not compose with threads, mappings, buffered state or any modern runtime; its cost scales with the address space rather than with the work; and it hands the child everything by default, so authority is removed afterwards rather than granted deliberately. A capability system cannot use it.</td>
+        <td class="fpos">Nothing in the corpus describes creating a component at run time. The boot section describes an assembler instantiating a declared topology, which covers startup and not the lifecycle.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Signals</b><span>lifecycle</span></td>
+        <td>Handlers may safely call almost nothing, every blocking call grew an <code>EINTR</code> path to survive them, delivery races with masking, and nothing composes. Every serious runtime ends by converting signals back into an event queue &mdash; which is the design that should have existed.</td>
+        <td class="fpos">Nothing. A component has no path by which it is told that a peer died, a capability was revoked, memory is under pressure, or a core is about to be taken away.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b><code>errno</code></b><span>interface</span></td>
+        <td>About a hundred and thirty values, flat, shared by every subsystem, with no room for a detail and no record of which layer produced it. <code>EINVAL</code> is the most common answer a syscall gives and it names nothing; recovering what happened means reading that version's source.</td>
+        <td class="fpos"><code>Cqe.result</code> currently says only "negative values are errors", which reproduces the drawback exactly, one milestone into the project.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Descriptors as small integers</b><span>authority</span></td>
+        <td>A descriptor is ambient, inherited across <code>fork</code> and <code>exec</code>, and cannot be taken back once passed. The number carries no rights and no provenance.</td>
+        <td class="fpos">Typed capability slots with a derivation tree: derive weaker, copy, revoke recursively. The M4 negative test suite is the exit criterion for exactly this.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Path-based access</b><span>authority</span></td>
+        <td>Names are resolved against a mutable global namespace at the moment of use, so every check-then-use is a race and every symlink is an attack surface. Thirty years of <code>*at()</code> variants are the mitigation.</td>
+        <td class="fpos">There is no global namespace and no path to resolve. A capability names the object, not a route to it, so there is no window between naming and using.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b><code>mmap</code> aliasing</b><span>memory</span></td>
+        <td>A shared mapping can change under a reader with no notification, and truncating the file behind it converts an ordinary load into a fatal fault. Correct use requires a protocol the API does not express.</td>
+        <td class="fpos">Blobs are immutable and content-addressed. A mapped blob cannot change under anyone, because changing it produces a different blob with a different hash.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b><code>ioctl</code></b><span>interface</span></td>
+        <td>The real driver interface is an untyped, unbounded, per-device escape hatch. It is where the kernel's attack surface actually lives and it cannot be reviewed as a whole because it is not a whole.</td>
+        <td class="fpos">Typed opcodes in a per-service space, with every wire type in one crate that is <code>repr(C)</code>, generic-free and layout-asserted at compile time. Every change to it is an ABI change and is reviewed as one.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">05</div><h2>Cause 02 &mdash; ambient authority</h2></div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Drawback</th><th>Why it is structural</th><th>F's position</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="sysname"><b>Root, and <code>setuid</code></b><span>authority</span></td>
+        <td>Authority is a property of who you are rather than of what you were handed, so every privileged program is a target and every successful escalation is total. There is no partial compromise of a system with an all-powerful account.</td>
+        <td class="fpos">There is no root, and no path to escalate because there is nothing to escalate to. A process can touch only what it was handed. Bet 04.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Global namespaces</b><span>authority</span></td>
+        <td>Process ids, mount points, network interfaces, abstract sockets, <code>/proc</code>, <code>/sys</code>: anything nameable is reachable by anyone who can spell it, so isolation has to be implemented as hiding names.</td>
+        <td class="fpos">No global namespace exists to hide from. Authority arrives by grant and by nothing else.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Containers are bundles of hiding</b><span>isolation</span></td>
+        <td>Namespaces, cgroups and seccomp compose into a deny-list over a syscall surface of several hundred entries. The default is access; the isolation is what is left after subtraction, which is why escapes keep being found in code nobody thought was part of the boundary.</td>
+        <td class="fpos">Components receive declaratively routed capabilities resolved at image assembly, so <em class="sys">what can this component reach</em> has a static, mechanically checkable answer rather than an audited one.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Deny-list security</b><span>isolation</span></td>
+        <td>Seccomp filters, LSM hooks, AppArmor and SELinux all retrofit policy onto a system whose default is permission. The complexity lands on the operator, and a policy nobody can read is a policy nobody can verify.</td>
+        <td class="fpos">Grant-only. There is no deny-list because there is nothing to deny &mdash; and section 13 records what that costs: it is affordable only because F has no ecosystem to accommodate.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>The confused deputy</b><span>authority</span></td>
+        <td>A component with authority can be talked into exercising it on a caller's behalf. The file dialog is the canonical case: the application asks for a file, the dialog holds the authority, and the boundary between choosing and granting is a convention.</td>
+        <td class="fpos">Bet 04 names the powerbox &mdash; "the file picker has to <em class="sys">be</em> the grant mechanism, invisibly" &mdash; and nothing in the corpus designs that flow. The bet's own stated failure mode is usability, and this is the mechanism that decides it.</td>
+        <td><span class="chip par">Partial</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Nothing can be revoked</b><span>authority</span></td>
+        <td>A descriptor or mapping, once passed, is gone. Withdrawing access means killing the recipient or invalidating the object for everyone.</td>
+        <td class="fpos">Recursive revocation through the derivation tree, taken wholesale from seL4, and one of the five properties the M4 negative suite must demonstrate.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>"What is this machine running?"</b><span>supply chain</span></td>
+        <td>The honest answer is a package list, a set of local modifications nobody recorded, and a hope. Measured boot covers the first few megabytes and stops well before anything interesting.</td>
+        <td class="fpos">A generation is one hash and the whole topology follows from it, so the answer exists &mdash; but no document states that the root hash <em class="sys">is</em> the attestation, or that measured boot extends into it.</td>
+        <td><span class="chip par">Partial</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">06</div><h2>Cause 03 &mdash; shared fate</h2></div>
+  <div class="flow">
+    <p>The row that matters here is the last one, and it is the only place in this document where F is arguably <em class="sys">worse</em> off than Linux rather than better.</p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Drawback</th><th>Why it is structural</th><th>F's position</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="sysname"><b>A driver bug is a kernel bug</b><span>isolation</span></td>
+        <td>Most kernel code is drivers, written by the widest possible range of contributors against hardware nobody else has, and all of it runs with full authority in the same address space as everything else.</td>
+        <td class="fpos">User-space, IOMMU-confined, restartable driver components. A fault restarts one component; the M-level done-criterion is killing a driver under load without the system noticing.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Memory-unsafe implementation language</b><span>safety</span></td>
+        <td>Memory safety accounts for the large majority of serious kernel vulnerabilities by every published triage, and the lifetimes involved are exactly the ones C cannot express: objects shared between interrupt context, work queues and user threads.</td>
+        <td class="fpos">Rust, with <code>unsafe</code> forbidden at the workspace root and overridden by exactly three crates. A fourth is a build failure rather than a review comment. RFC 0001.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Upgrading means rebooting</b><span>lifecycle</span></td>
+        <td>Live patching exists and cannot change a data structure, which is most of what an interesting update does. The industry's workaround is to treat the machine as disposable, which is a large amount of infrastructure built to route around one missing property.</td>
+        <td class="fpos">F has generations, atomic root swap and components that receive authority at instantiation &mdash; and then advertises "full system rollback: one reboot" as a target, which concedes the drawback rather than answering it.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>The internal API is deliberately unstable</b><span>evolution</span></td>
+        <td>"Do not break userspace" is enforced at the outer edge and inverted inside it, so an out-of-tree driver is a permanent maintenance obligation. This is the direct cause of the driver-import problem every clean-slate system faces.</td>
+        <td class="fpos">The boundary is a protocol rather than a kernel API, which is the right answer &mdash; and F's own channel header demands that both sides report an <em class="sys">identical</em> version, which is stricter than either half of Linux's position and makes independent component update impossible.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Global state and global locks</b><span>scalability</span></td>
+        <td>Shared kernel structures make scaling a locking problem. RCU is the mitigation and it is difficult enough to be a specialty within kernel engineering.</td>
+        <td class="fpos">Per-CPU from the first allocation, behind <code>PerCpu&lt;T&gt;</code>, decided before the second core exists because retrofitting the shard is one of the genuinely miserable refactors.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>TLB shootdown by interrupt</b><span>memory</span></td>
+        <td>Per-process address spaces mean every unmap is a cross-core interrupt storm, and the cost grows with core count &mdash; precisely the direction hardware is going.</td>
+        <td class="fpos">One address space and huge pages by default delete most of the traffic. True, and currently only implicit: no document states it as a property being bought.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Speculation reads across the boundary</b><span>confidentiality</span></td>
+        <td>Linux pays three to eight times its syscall cost to mitigate transient-execution attacks, and that payment is the single largest number in F's own case for the ring. But the mitigation is bought against a <em class="sys">hardware</em> boundary. A boundary drawn by a type system is the one this class of attack defeats most reliably, as browser JIT and WebAssembly sandboxes have demonstrated repeatedly.</td>
+        <td class="fpos">Nothing. Bet 01 puts everything in one address space and lets ownership draw the safety line; no document distinguishes integrity from confidentiality, and the absence of a mitigation <em class="sys">cost</em> has been read as the absence of a <em class="sys">threat</em>.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="flow" style="padding-top:18px">
+    <div class="note">
+      <b>Why this one is different from the other eight.</b> The rest of the gaps are things F has not designed yet. This is a claim F is implicitly making and has not defended. The comparison document already requires the phrase <em class="sys">sound by construction in the following respects</em> rather than <em class="sys">verified</em>; the same discipline applied here means naming confidentiality as a respect F does not currently hold, and then deciding what to do about it. Section 16 proposes the decision; section 18 proposes the two measurements that would make it falsifiable.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">07</div><h2>Cause 04 &mdash; global mutable state</h2></div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Drawback</th><th>Why it is structural</th><th>F's position</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="sysname"><b>The filesystem is the ground truth</b><span>state</span></td>
+        <td>A machine's state is the accumulated history of everything that has ever written to it. Two machines built the same way are not the same machine, and nobody can say how they differ.</td>
+        <td class="fpos">The system is a pure function of one declarative expression, and a generation is one hash. Bet 03, and the least risky idea in the architecture document.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Upgrade is not atomic and has no inverse</b><span>state</span></td>
+        <td>Package managers mutate a live tree in place. An interrupted upgrade leaves a state that was never designed, and undo means restoring from somewhere else.</td>
+        <td class="fpos">Publishing a root is a single write. The previous generation is still on disk, one boot entry away, and rollback is a root swap rather than a recovery procedure.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Crash consistency is a convention</b><span>durability</span></td>
+        <td>Durability requires <code>fsync</code>, whose error handling was for years such that a failure could be reported once and the dirty page discarded, so a retry returned success. Databases discovered this the hard way, in production, decades in.</td>
+        <td class="fpos">The durability primitive is <em class="sys">publish this root</em>: write the blobs, then write the root. A crash mid-publish leaves the previous root intact and some unreferenced blobs the next collection reclaims.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Search is a tree walk</b><span>naming</span></td>
+        <td>The directory hierarchy is the ground truth, so finding anything by property means visiting everything. Every desktop grows an index beside the filesystem, and the index is always slightly wrong.</td>
+        <td class="fpos">Directories are a view over a queryable index, not the ground truth. Search is a query, and the index is embedded rather than a service, so it is a local call.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Write amplification by mutual ignorance</b><span>storage</span></td>
+        <td>A filesystem promises random overwrite on a device that physically cannot do it, so the device's translation layer garbage-collects underneath a filesystem that is also garbage-collecting, each blind to the other's intentions.</td>
+        <td class="fpos">Append-only blobs on append-only zones: the same shape. Collection happens once, with knowledge of what is live, instead of twice, blindly. The write-amplification claim lives here.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Small random writes to large objects</b><span>storage</span></td>
+        <td>Database files, virtual machine images and scratch files are the workload content addressing is worst at: every write re-chunks and re-hashes a region and produces a new root.</td>
+        <td class="fpos">Mutable extents, copy-on-write at coarse granularity, content-addressed only at snapshot boundaries &mdash; and the resource document already calls this a patch rather than an elegant unification, which is the right register.</td>
+        <td><span class="chip par">Partial</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Every tool assumes a mutable path</b><span>compatibility</span></td>
+        <td>Thirty years of software takes a path, opens it, writes to it, and expects the write to be visible to the next program that opens the same path.</td>
+        <td class="fpos">Named in architecture section 11 as "not optional and not cheap", and designed nowhere. Section 19 proposes leaving it that way on purpose.</td>
+        <td><span class="chip dec">Declined</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">08</div><h2>Cause 05 &mdash; five policies that do not know each other</h2></div>
+  <div class="flow">
+    <p>The largest table, the strongest part of F's existing design, and four of the nine open items. The resource document's own thesis &mdash; that a task misses a deadline because of contention on a resource no policy was watching &mdash; turns out to be a sharper diagnosis than the document then acts on.</p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Drawback</th><th>Why it is structural</th><th>F's position</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="sysname"><b>Fair share is not a deadline</b><span>cpu</span></td>
+        <td>A proportional scheduler distributes throughput. A frame either lands before scanout or it does not, and no share of the machine expresses that.</td>
+        <td class="fpos">The scheduler's primitive is the triple <em class="sys">(class, deadline, energy cost)</em>, and the design refuses to collapse it into a single number the way a priority does.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Deadline scheduling is an island</b><span>cpu</span></td>
+        <td>Linux has had a deadline class for a decade. It reserves CPU time and nothing else, and no other subsystem in the kernel has heard of it.</td>
+        <td class="fpos">The deadline is a field in the submission entry, so every resource scheduler in the system orders by the same value. Resource document section 01.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Priority inversion at the I/O layer</b><span>cross-resource</span></td>
+        <td>A latency-critical task queues behind batch work in a device queue that nobody thought of as a scheduler, and misses a deadline through a resource it never contended for directly.</td>
+        <td class="fpos">Deadlines travel with the request across every ring they cross. The document also records the gaming risk and says bounding inheritance by the caller's own reservation is the answer &mdash; before implementation rather than after the first starvation bug.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Nothing ever refuses work</b><span>admission</span></td>
+        <td>Every promise is best effort, so "deadline" degrades into "hint", and the system discovers it was overcommitted at the moment it matters instead of at the moment of asking.</td>
+        <td class="fpos">Admission control: a hard-class reservation is granted against a schedulability test or refused, and a refusal is an error the caller must handle like a failed allocation.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Heterogeneous cores, corrected afterwards</b><span>cpu</span></td>
+        <td>Energy-aware scheduling is a correction applied to a fair-share decision that was made when all cores were identical. It approximates the right answer and misses.</td>
+        <td class="fpos">Slack decides placement: little slack goes to a fast core because nothing else meets the deadline, generous slack goes to the slowest core that still does, because finishing just in time usually beats racing to idle.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>The global out-of-memory killer</b><span>memory</span></td>
+        <td>A system-wide, nondeterministic event that selects a victim by heuristic and destroys work that had nothing to do with the allocation that failed.</td>
+        <td class="fpos">Hierarchical quotas following the capability routing tree. Allocation failure is local and deterministic: the component that exceeded its budget gets the error. Also a precondition for simulation.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Overcommit</b><span>memory</span></td>
+        <td>Allocation succeeds against memory that does not exist, and the accounting is settled later by the killer. Predictability is traded for utilisation, silently and globally.</td>
+        <td class="fpos">Implied by hierarchical quotas but never stated, and never stated <em class="sys">for reserved memory</em>, where it is the difference between a reservation and a wish.</td>
+        <td><span class="chip par">Partial</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>SMT siblings</b><span>cpu</span></td>
+        <td>A deadline task sharing a physical core with an unrelated thread has an execution budget that depends on what the neighbour is doing. Worst-case execution time on a shared core is not a number anyone can compute.</td>
+        <td class="fpos">Not addressed. Admission control tests CPU time and bandwidth against a core model that does not distinguish a hardware thread from a core.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Last-level cache contention</b><span>memory</span></td>
+        <td>The fastest way for a neighbour to destroy a latency target, and the one cgroups cannot express. Cache partitioning exists on the hardware and is exposed through a separate filesystem the scheduler knows nothing about.</td>
+        <td class="fpos">Bandwidth is a first-class reservation in the design. Cache is not mentioned anywhere, which leaves the reservation incomplete in the way that matters most for a compositor.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Reclaim, compaction, and huge-page maintenance</b><span>memory</span></td>
+        <td>The memory subsystem's own housekeeping is a leading cause of tail latency, and it runs precisely when memory is tight, which is precisely when the deadline task needs the machine.</td>
+        <td class="fpos">Huge pages by default, a buddy allocator with per-CPU free lists, and no statement about who pays for fragmentation, when, or whether a reserved component can be made to wait for it.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Memory bandwidth is unmanaged</b><span>memory</span></td>
+        <td>The actually contended resource on a modern machine, accounted for almost nowhere. Inference and audio compete for one controller and only one of them has a deadline.</td>
+        <td class="fpos">A reservation like any other, with batch work throttled to fit around it. This is the mechanism that turns the compositor's bandwidth cap from a hand-placed patch into an instance of something general.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Pressure is discovered, not delivered</b><span>memory</span></td>
+        <td>Applications learn that memory is tight by being killed, or by polling a counter that was added to the kernel decades in. There is no path by which the system asks a component to give something back.</td>
+        <td class="fpos">The resource document describes quotas and local failure, and no notification path at all. A component cannot be told anything &mdash; which is the same hole as the missing signal replacement, seen from the memory side.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Accelerators are device files</b><span>accelerator</span></td>
+        <td>One tenant at a time, no quality of service, no preemption, no memory accounting. The OS is the only component that can see CPU, GPU and NPU at once, and it declines to.</td>
+        <td class="fpos">A scheduled resource with admission control; weights and key-value cache are memory objects with tier policies; weights come from the object store, so ten components share one physical copy.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Idle and frequency selection are guesses</b><span>energy</span></td>
+        <td>Governors predict the next wakeup from history because the kernel has no way to know it. Prediction tuned for one workload class actively harms another &mdash; the inference case F's own architecture document names.</td>
+        <td class="fpos">Nothing. And F's admission control means F would <em class="sys">know</em> the next deadline rather than predicting it, which turns a heuristic into arithmetic. The thesis promises energy; no subsystem owns it.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Suspend and resume is a callback chain</b><span>energy</span></td>
+        <td>Every driver implements its own suspend and resume hooks, ordering is implicit, there is no schedulability argument anywhere in it, and it is the most reliable source of "it did not come back" in the field.</td>
+        <td class="fpos">Nothing. No document mentions suspend, resume, wake sources or device power states.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">09</div><h2>Cause 06 &mdash; a 2005 hardware model</h2></div>
+  <div class="flow">
+    <p>This cause is already tabulated, in more detail than would be useful to repeat, in <em class="sys">The Fast Path</em> section 13: user-level interrupts, shared virtual memory, CXL tiering, heterogeneous cores, matrix engines, zoned storage and user-level monitor-and-wait. All seven are answered by design, and they are the research surface rather than an incidental benefit.</p>
+    <p>Two rows belong here that are not in that table, because both are about honesty in measurement rather than about capability.</p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Drawback</th><th>Why it is structural</th><th>F's position</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="sysname"><b>Firmware steals the machine</b><span>measurement</span></td>
+        <td>System management interrupts and their equivalents preempt every core with no notification, for durations that exceed a frame budget on some platforms. No operating system can prevent this, Linux included, and no operating system can honestly publish a p99.9 without accounting for it.</td>
+        <td class="fpos">Not mentioned. F's headline numbers are tail latencies, so the first hostile question about a jitter histogram will be this one, and the claims registry has no field in which to answer it.</td>
+        <td><span class="chip par">Partial</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>The counter is not a clock</b><span>time</span></td>
+        <td>Timestamp counters vary with frequency and power state on older parts, differ between sockets, and are calibrated against a reference that itself drifts. Every timing subsystem accumulates corrections for this.</td>
+        <td class="fpos">M2 calibrates a timer against a known reference and gates on a jitter histogram, and there is exactly one legitimate <code>rdtsc</code> in the tree, which is the right structure. What is unstated is what the calibration is promised to survive.</td>
+        <td><span class="chip par">Partial</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">10</div><h2>Cause 07 &mdash; time treated as one thing</h2></div>
+  <div class="flow">
+    <p>The cheapest section in this document to act on, and the one with an ABI hole already shipped.</p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Drawback</th><th>Why it is structural</th><th>F's position</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="sysname"><b>Five clocks, and the bug is the choice</b><span>time</span></td>
+        <td>Real time jumps when someone sets it. Monotonic time stops across suspend. Boot time does not. Raw is unadjusted, and TAI exists for the small number of people who know why. Choosing wrongly produces a timeout that fires early, a timer that never fires, or a duration that is negative.</td>
+        <td class="fpos"><code>f_env::Instant</code> already has the right shape &mdash; nanoseconds since an origin, monotonic, comparable only within one <code>Env</code>. What is missing is the rule that says it is the <em class="sys">only</em> clock with ordering authority.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b><code>Sqe.deadline</code> has no unit and no epoch</b><span>abi</span></td>
+        <td>Not a Linux drawback &mdash; a local one, found by looking for Linux's. A <code>u64</code> named <code>deadline</code>, in a crate whose whole purpose is to be load-bearing against code written by somebody else, with the unit, the origin and the zero value all left to inference.</td>
+        <td class="fpos">Two peers written independently will resolve it differently, and the first symptom will be a scheduling decision rather than a parse error. The correction is free today and an ABI break after M5.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Leap seconds</b><span>time</span></td>
+        <td>A scheduled discontinuity in the clock a whole system orders by, which has taken down large fleets more than once, and which exists because civil time is a calendar problem being solved inside a scheduler.</td>
+        <td class="fpos">Nothing &mdash; and F is in the rare position of being able to simply not have them, by keeping civil time out of the system entirely.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>The 2038 epoch, and timestamps without provenance</b><span>time</span></td>
+        <td>A 32-bit epoch is still being repaired two decades after it was diagnosed. And a file's modification time is a bare number: no source, no uncertainty, no way to know whether it means anything.</td>
+        <td class="fpos"><code>u64</code> nanoseconds runs to roughly 584 years, so the epoch problem does not recur &mdash; but nothing says so, and nothing carries a source or an uncertainty alongside a wall-clock stamp.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Boot is a dependency graph discovered at run time</b><span>lifecycle</span></td>
+        <td>An initial ramdisk, a cold-plug pass, and a service manager resolving ordering against devices that appear when they appear. The same machine boots differently on different days.</td>
+        <td class="fpos">Boot is a pure function of one hash. The assembler instantiates a declared topology, drivers bind by matching declared properties, and a driver that fails leaves its subtree unstarted rather than failing the boot.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">11</div><h2>Cause 08 &mdash; the display sends pixels</h2></div>
+  <div class="flow">
+    <p>F's second research pillar, and the area where the corpus is furthest ahead of the field. The table is short because <em class="sys">The Fast Path</em> section 15 and <em class="sys">Ring, Scene, Boot</em> sections 06 through 12 already argue it in full; what belongs here is only the check that each named Linux-side drawback has an owner.</p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Drawback</th><th>Why it is structural</th><th>F's position</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="sysname"><b>Pixels as the abstraction</b><span>graphics</span></td>
+        <td>The drawing call discards the meaning and keeps the image, so everything downstream that needs the meaning reconstructs it by guessing.</td>
+        <td class="fpos">Applications submit scene deltas; the compositor holds one retained scene for the machine and derives it from a semantic structure.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Two to four copies per frame</b><span>graphics</span></td>
+        <td>App to toolkit to compositor to GPU to scanout, each layer owning a buffer it must hand on.</td>
+        <td class="fpos">One retained scene, damage-tracked, explicit timeline synchronisation, direct scanout when a surface is fullscreen.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Thirty to eighty milliseconds to photon</b><span>latency</span></td>
+        <td>Nobody owns the end-to-end number, so each layer optimises its own segment and the sum is nobody's responsibility.</td>
+        <td class="fpos">A stated budget of 9&nbsp;ms typical and 14&nbsp;ms p99, with input timestamped at the driver, prediction to the next scanout, GPU rasterisation and a deadline class the compositor cannot be preempted out of.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Accessibility rots because it is advisory</b><span>semantics</span></td>
+        <td>Nothing visibly breaks when the tree is wrong, so it drifts, in every system that has ever built one. The failure is structural, not cultural.</td>
+        <td class="fpos">The single distinguishing bet of the pillar: the structure is the only source of truth, so a wrong tree is immediately wrong pixels.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Six subsystems rebuilding one structure</b><span>semantics</span></td>
+        <td>Accessibility, automation, theming, testing, remote display and agent control each re-derive what the application already knew and threw away.</td>
+        <td class="fpos">Projections of one structure, with node identity stable across visual change. Four projections from one application is the stated demonstration.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Protocol fragmentation</b><span>evolution</span></td>
+        <td>Wayland fixed X11's security model and then recreated much of its extension sprawl, because a protocol without a versioning discipline grows one by accident.</td>
+        <td class="fpos">The architecture document says to take Fuchsia's versioning discipline for both the ring protocols and the component interfaces. It is named and not designed, and it is the same gap as the channel header's exact-match rule.</td>
+        <td><span class="chip par">Partial</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>The toolkit tax</b><span>scope</span></td>
+        <td>Text shaping, bidirectional layout, input methods, colour management and printing are larger than the kernel, entirely unglamorous, and the reason new systems stay terminal demos.</td>
+        <td class="fpos">Named as a top risk, correctly, and unowned by design at this stage. Section 19 proposes keeping it that way and saying so out loud.</td>
+        <td><span class="chip dec">Declined</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>The canvas escape hatch</b><span>semantics</span></td>
+        <td>An application that draws its own pixels leaves the semantic model, and every prior attempt at this thesis died there.</td>
+        <td class="fpos">Named as the most interesting open question in the pillar, with the timeline case as the test. Honest, unresolved, and correctly deferred to phase 03.</td>
+        <td><span class="chip par">Partial</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">12</div><h2>Cause 09 &mdash; the system cannot be asked</h2></div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Drawback</th><th>Why it is structural</th><th>F's position</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="sysname"><b>Nondeterminism at unmarked places</b><span>testing</span></td>
+        <td>A kernel reads time, randomness and ordering from thousands of sites nobody enumerated, so a run cannot be reproduced and a rare interleaving is found by luck.</td>
+        <td class="fpos">The determinism substrate, at M0, with a build-failing lint and an allow-list of two paths. The one property in the corpus that cannot be retrofitted, which is why it exists before anything else. RFC 0004.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Five observability mechanisms, no shared model</b><span>observability</span></td>
+        <td>Procfs, sysfs, ftrace, perf and eBPF describe overlapping subsets of the system in unrelated vocabularies, so every tool re-derives structure by parsing something. eBPF is genuinely excellent and is also the proof of the problem: it exists because the kernel could not otherwise be asked what it was doing.</td>
+        <td class="fpos">The architecture document requires that measurement be a system service rather than a build configuration, names Fuchsia's diagnostics layer as the model, predicts that it will be deferred because it reads like tooling &mdash; and then does not design it.</td>
+        <td><span class="chip behind">Open</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Regressions are found by users</b><span>measurement</span></td>
+        <td>Performance is nobody's gate. A change lands, a distribution ships it, and the report arrives eighteen months later as a complaint about a laptop.</td>
+        <td class="fpos">The claims registry, gating the build, with distributions rather than summaries and change-point detection rather than thresholds. Layer 7, built, one entry.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Whole-system state cannot be compared</b><span>testing</span></td>
+        <td>There is no answer to "is this machine in the same state as that one", so a divergence is observed as a symptom rather than located as a difference.</td>
+        <td class="fpos">Content-addressed state makes the comparison a hash comparison &mdash; for state that reaches the store. Live component state does not, and will not until something publishes it.</td>
+        <td><span class="chip par">Partial</span></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Concurrency bugs need luck</b><span>testing</span></td>
+        <td>Stress testing explores what one machine happened to do, not what the memory model permits, so the ordering bug ships and reproduces on one customer's hardware.</td>
+        <td class="fpos">Litmus tests now, model checking at M5, deterministic simulation from phase 01, and a testing-status document that says plainly which of those exist today. The honesty is the notable part.</td>
+        <td><span class="chip ahead">Answered</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">13</div><h2>Where Linux is right, and what F pays</h2></div>
+  <div class="flow">
+    <p>The section that makes the previous nine believable. Every item below is a property Linux has because of a decision this document has just criticised, and F gives up each one deliberately.</p>
+  </div>
+  <div class="deficit">
+    <div class="df">
+      <div class="n">Not breaking userspace</div>
+      <div class="d">The single most valuable property Linux has, sustained for thirty years by a culture rather than a mechanism, and the reason software written in 1998 still runs. F's channel header currently requires both peers to report an identical ABI version, which is stricter than either half of Linux's position &mdash; stability at the outer edge, churn within &mdash; and quietly falsifies the claim that components are independently replaceable. A rule can fix the mechanism. Nothing can buy the culture, and F should not pretend otherwise.</div>
+    </div>
+    <div class="df">
+      <div class="n">Work conservation</div>
+      <div class="d">Linux uses the machine. Reservations do not: a granted hard-class reservation leaves capacity idle by construction, and the stricter the reservation the more it leaves. Any throughput benchmark will find this immediately, so F should state it first, as the price of the arithmetic rather than as a surprise.</div>
+    </div>
+    <div class="df">
+      <div class="n">Overcommit</div>
+      <div class="d">Allocating memory that does not exist is genuinely efficient for the common case, and most programs never touch what they ask for. Strict accounting buys predictability with wasted capacity. That is the right trade for a deadline system and it is still a trade.</div>
+    </div>
+    <div class="df">
+      <div class="n">One scheduler with full information</div>
+      <div class="d">A monolithic scheduler sees every runnable thread on the machine. F hands cores to user-level runtimes, and a runtime cannot see another runtime's queue &mdash; so the system trades global optimality for the deletion of a boundary crossing. The resource document does not currently acknowledge this, and it is exactly the objection a scheduling researcher will raise first.</div>
+    </div>
+    <div class="df">
+      <div class="n"><code>fork</code> plus <code>exec</code></div>
+      <div class="d">A terrible primitive that composes beautifully at a prompt. Whatever replaces it will be more checkable and less immediate, and the loss is real for interactive use.</div>
+    </div>
+    <div class="df">
+      <div class="n"><code>errno</code>'s universality</div>
+      <div class="d">Every programmer alive knows what <code>ENOENT</code> means. A structured error space is better and is also another vocabulary, and the cost lands on whoever ports something.</div>
+    </div>
+    <div class="df">
+      <div class="n">Deny-lists</div>
+      <div class="d">Subtracting authority is how security gets retrofitted onto an ecosystem that already exists, which is a problem F does not have and Linux cannot avoid. Grant-only requires everything to be written for it. F can afford that only because nothing is written for it yet &mdash; which is a consequence of having no users, not a victory over people who do.</div>
+    </div>
+    <div class="df">
+      <div class="n">Thirty years of everything else</div>
+      <div class="d">Drivers, tuning, workload-specific optimisation, tooling, and the accumulated knowledge of how the thing behaves at three in the morning. The comparison document already says F loses on every axis that is not one of its six claims. This document adds only that the baseline for every claim must be a Linux configured by someone trying to win.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">14</div><h2>The gap register</h2></div>
+  <div class="flow">
+    <p>The nine, ranked by what they threaten rather than by how much work they are. Two threaten a bet, which means they are not schedulable against convenience; three are ABI holes, which means they are cheap now and expensive later; the rest threaten a claim each.</p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Gap</th><th>What it threatens</th><th>Proposed decision</th><th>Settle by</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="sysname"><b>Speculative isolation</b><span>critical</span></td>
+        <td>Bets 01 and 04, and the safety claim itself. Language isolation is being asked to carry a load it demonstrably cannot.</td>
+        <td class="fpos">RFC 0005 &mdash; speculation is a boundary the language does not draw</td>
+        <td>before M4, and before any untrusted component is hosted</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Power, idle, suspend</b><span>critical</span></td>
+        <td>Half the thesis. Energy is promised in the first paragraph of the architecture document and owned by no subsystem in any of the five.</td>
+        <td class="fpos">RFC 0006 &mdash; idle depth is computed from the reservation table</td>
+        <td>designed before M2, where the energy counters land</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Reservations are incomplete</b><span>high</span></td>
+        <td>Every latency claim. Admission control that ignores siblings, cache and reclaim can pass and then miss, which is worse than not testing.</td>
+        <td class="fpos">RFC 0007 &mdash; the hard class reserves whole cores and pre-faulted memory</td>
+        <td>before M2's jitter gate is believed</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>No component lifecycle</b><span>high</span></td>
+        <td>Bet 02's completeness and bet 04's usability. Nothing creates a component at run time, nothing tells one that its world changed, and the powerbox is named but unbuilt.</td>
+        <td class="fpos">RFC 0008 &mdash; no fork, no signals: spawn from a manifest, one control ring</td>
+        <td>M3 to M4</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>The clock rules</b><span>high &middot; cheap</span></td>
+        <td>The determinism contract, and the meaning of the word deadline in a shipped ABI.</td>
+        <td class="fpos">RFC 0009 &mdash; three clocks, and only one of them orders anything</td>
+        <td>now &mdash; it is an ABI hole</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>The error space</b><span>high &middot; cheap</span></td>
+        <td>The ergonomics bet 02 names as its own failure mode, and a caller's ability to respond differently to four kinds of refusal the architecture depends on.</td>
+        <td class="fpos">RFC 0010 &mdash; errors name a domain, and cancellation is not an error</td>
+        <td>now &mdash; ABI</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Protocol evolution</b><span>medium-high</span></td>
+        <td>The component model, live update, and the driver-import strategy that rests on the boundary being a protocol.</td>
+        <td class="fpos">RFC 0011 &mdash; peers negotiate a version, they do not match one</td>
+        <td>now &mdash; ABI, and the only one that touches layout</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Update requires a reboot</b><span>medium</span></td>
+        <td>A published metric that concedes a Linux drawback F is in a position to delete outright.</td>
+        <td class="fpos">RFC 0012 &mdash; an update is a generation swap, and the root hash is the attestation</td>
+        <td>phase 02, with the object store</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>No state tree</b><span>medium</span></td>
+        <td>The apparatus every other claim reads. Cheap while the kernel is two thousand lines, painful at twenty.</td>
+        <td class="fpos">RFC 0013 &mdash; every component publishes a state tree</td>
+        <td>M1 to M2</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">15</div><h2>Twelve rules proposed for the repository</h2></div>
+  <div class="flow">
+    <p>The gaps above are not independent accidents. Each one is a place where a discipline the project already applies elsewhere was not applied here, so the durable output of this analysis is the discipline rather than the nine fixes. These are proposed for <code>CONTRIBUTING.md</code>, and the last column is the part this repository cares about: whether the rule can be made executable, in the way that the determinism, licensing and <code>unsafe</code> policies already are.</p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Rule</th><th>Because</th><th>Mechanised as</th></tr></thead>
+    <tbody>
+      <tr><td class="sysname"><b>R01 &mdash; Name the mechanism, not the intention</b></td><td>A drawback is answered when something makes it unavailable. "We will be careful about X" is a plan, and plans are what the systems being criticised also had.</td><td>review; the status vocabulary in section 02</td></tr>
+      <tr><td class="sysname"><b>R02 &mdash; A boundary the hardware speculates through is not a confidentiality boundary</b></td><td>The one place where F's architecture is currently weaker than the system it criticises, and it entered by nobody stating the rule.</td><td>topology check: every component declares a domain</td></tr>
+      <tr><td class="sysname"><b>R03 &mdash; Every quantity crossing the ABI states its unit, its epoch and its zero</b></td><td><code>deadline: u64</code> shipped without any of the three, in the one crate whose entire purpose is to be correct against code written by somebody else.</td><td>lintable: a public field in <code>abi/</code> whose doc comment names no unit fails</td></tr>
+      <tr><td class="sysname"><b>R04 &mdash; Fail closed</b></td><td>Unknown opcode, unknown flag, non-zero reserved field: refuse. Ignoring an unknown bit is how a protocol acquires two incompatible interpretations and no error.</td><td>review, plus the hostile-peer fuzzer at phase 01</td></tr>
+      <tr><td class="sysname"><b>R05 &mdash; Nothing is delivered asynchronously</b></td><td>Every event is a ring entry drained at a polling point. This is what keeps the determinism contract whole, and it is the reason F never needs the concept of async-signal-safety.</td><td>lintable: no interface registers a callback</td></tr>
+      <tr><td class="sysname"><b>R06 &mdash; Nothing is inherited</b></td><td>Authority arrives by grant and never by descent. Inheritance is how a capability system quietly becomes an ambient one.</td><td>static: authority is computed from the topology</td></tr>
+      <tr><td class="sysname"><b>R07 &mdash; A refusal names its domain</b></td><td>The architecture asks callers to handle refusals as ordinary control flow. A caller that cannot tell why it was refused cannot do that.</td><td>ABI: the error space in section 17</td></tr>
+      <tr><td class="sysname"><b>R08 &mdash; Do not use the word deadline for a promise nothing can refuse</b></td><td>The word is the whole discipline. A hard class without admission control is a hint with a better name, and that is precisely how deadline scheduling became decorative elsewhere.</td><td>review; and a hard-class path with no admission test is a bug</td></tr>
+      <tr><td class="sysname"><b>R09 &mdash; Every headline claim names the subsystem that owns it</b></td><td>Energy is in the thesis, in the first paragraph, and had no owning subsystem across five documents. That is how half a claim goes missing without anyone deciding to drop it.</td><td>lintable: every entry in <code>claims/</code> cites an owning document section</td></tr>
+      <tr><td class="sysname"><b>R10 &mdash; Peers negotiate; they never demand equality</b></td><td>Lockstep versioning contradicts the component model, and the component model is what three separate arguments in the corpus rest on.</td><td>ABI: the header in section 17</td></tr>
+      <tr><td class="sysname"><b>R11 &mdash; The apparatus ships with the thing it measures</b></td><td>Determinism and coverage instrumentation were built early for exactly this reason, and the reasoning was written down. The state tree is the same argument and was deferred anyway.</td><td>process: a milestone that produces a number also produces its instrument</td></tr>
+      <tr><td class="sysname"><b>R12 &mdash; A concession is written as a cost, never hidden in a metric</b></td><td>"Full system rollback: one reboot" is a concession dressed as a target. Reservations leaving capacity idle is a cost that belongs beside the latency claim, not in a rebuttal after someone runs a throughput benchmark.</td><td>review; and the claims registry carries the cost beside the number</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">16</div><h2>Nine RFCs, and the decision each would record</h2></div>
+  <div class="flow">
+    <p>The decision record is append-only and exists for reversals and for anything a future contributor would otherwise re-litigate. Each of these qualifies. Numbers continue from 0004; each is stated as the decision it would make, so that it can be argued with before it is written.</p>
+  </div>
+  <div class="neighbours">
+    <div class="nb">
+      <div class="n">RFC 0005<span>speculation</span></div>
+      <div class="d"><b>Language-enforced isolation is an integrity boundary, not a confidentiality one.</b> Three domain kinds, assigned in the component topology rather than chosen at run time: the <em class="sys">frame</em>, where every capability index, buffer index and cursor read is bounds-checked and index-masked unconditionally, because the gadget the frame actually presents is a bounds check followed by a dependent load; a <em class="sys">shared</em> domain, whose membership is an explicit declaration that these components may read each other's memory, since under speculation they can; and <em class="sys">private</em> domains &mdash; own address space, exclusive physical core, predictor barrier on entry &mdash; which is the default for anything holding a secret, anything hosting untrusted code, and every imported driver. Section 14 of the architecture document already puts imported drivers in separate address spaces; this generalises that into a rule and says what it is for. <b>Reversed by:</b> a shipping, verified hardware primitive for speculative isolation within an address space &mdash; or the opposite result, cross-domain cost dominating real workloads, which would mean bet 01's premise does not hold at the confidentiality level and should be said rather than narrowed around.</div>
+    </div>
+    <div class="nb">
+      <div class="n">RFC 0006<span>energy</span></div>
+      <div class="d"><b>Power is an output of admission control, not a subsystem with its own policy.</b> Idle state selection is arithmetic: every hard-class consumer states a period, so the frame knows the earliest deadline on each core and enters the deepest state whose exit latency fits the slack. Frequency selection is the continuous version of the placement rule that already exists. Device power is a component lifecycle state, with wake sources and resume cost declared and <em class="sys">admitted</em> &mdash; a device whose resume cost cannot be met is not permitted to enter that state. Suspend is a generation-scoped transition that quiesces by rings, not a per-driver callback chain. The reason this is worth doing is narrow and strong: Linux's governors predict because Linux cannot know, and F's admission control means F knows. <b>Reversed by:</b> measurement showing a good predictor lands within noise of the computed selection.</div>
+    </div>
+    <div class="nb">
+      <div class="n">RFC 0007<span>reservations</span></div>
+      <div class="d"><b>A granted hard-class reservation holds a physical core, a bandwidth allocation, a cache partition where the hardware offers one, and pre-faulted huge-page memory that is never reclaimed, migrated or compacted while it lives.</b> Admission tests all four together or it is testing nothing. The consequence is stated rather than discovered: reservations are anti-work-conserving, far fewer are grantable than the core count suggests, and the soft class must therefore be the easy path or the discipline evaporates in exactly the way the resource document warns. The physical-core rule is the same rule RFC 0005 needs for a different reason, which is the shape worth looking for &mdash; one mechanism, two claims. <b>Reversed by:</b> measurement showing sibling and cache interference stays inside the frame budget on the target hardware.</div>
+    </div>
+    <div class="nb">
+      <div class="n">RFC 0008<span>lifecycle</span></div>
+      <div class="d"><b>No fork, no signals.</b> A component is created by submitting a spawn entry naming a manifest hash and an explicit capability list; the child's authority is the intersection of what the manifest declares and what the parent holds, and nothing &mdash; memory, handles, authority, identity &mdash; is inherited. Every component has one mandatory inbound control ring carrying peer death, revocation, pressure grade, core-reclaim notice, shutdown with a deadline, and generation change. And granting is a user action: a picker is the grant, so a component receives a capability to the object the user named and never holds authority over the namespace it came from. <b>Reversed by:</b> nothing plausible for fork; for the control ring, evidence that polling costs more than the delivery it replaces, which suppression already answers for the general case.</div>
+    </div>
+    <div class="nb">
+      <div class="n">RFC 0009<span>time</span></div>
+      <div class="d"><b>Monotonic time is the only clock with ordering authority</b>, it does not stop across suspend, and it is the only epoch a deadline may be expressed in. <b>Wall time is a datum, not a clock</b>: an injectable, possibly absent capability returning TAI nanoseconds with a source and an uncertainty, which may be stamped on objects and shown to people and may never order an event or drive a timer. <b>Civil time does not exist below the semantic layer</b> &mdash; zones, calendars, leap seconds and formatting are a projection, in exactly the sense the interface thesis uses the word. And <code>Sqe.deadline</code> is monotonic nanoseconds in the channel's epoch, with zero meaning none. <b>Reversed by:</b> a service needing wall-clock ordering across machines, which is a distributed problem whose answer is a hybrid logical clock at that layer, not re-privileging wall time here.</div>
+    </div>
+    <div class="nb">
+      <div class="n">RFC 0010<span>errors</span></div>
+      <div class="d"><b>A negative completion result carries a domain and a code, with a detail in <code>ext</code>.</b> Six domains, being the four refusals this architecture actually distinguishes &mdash; authority, admission, resource, peer &mdash; plus argument and device. Cancellation stays a completion flag and is never an error code. Partial completion is an explicit transferred count, never inferred from a short result. The reason this matters more here than in Linux is that F's design turns on refusals the caller is expected to <em class="sys">handle</em>: admission refuses reservations, capabilities refuse authority, quotas refuse allocations, and a caller that cannot tell them apart retries blindly. <b>Reversed by:</b> nothing about the split; a wrong domain list is a versioned addition under RFC 0011, which is why the two belong in the same milestone.</div>
+    </div>
+    <div class="nb">
+      <div class="n">RFC 0011<span>evolution</span></div>
+      <div class="d"><b>The channel header carries the version the writer speaks, the oldest it still speaks, the features it offers and the subset it requires; setup opens at the intersection or refuses with a peer error naming what was missing.</b> Additions land in reserved space behind a feature bit; removals raise the floor, which is a visible diff. Unknown flags and opcodes are still refused &mdash; negotiation makes compatibility explicit without making the wire permissive. This is the mechanism half of Linux's most valuable property, and its absence currently contradicts three separate arguments in the corpus: swappable components, imported drivers behind a stable protocol, and live update. <b>Reversed by:</b> evidence that no component is ever updated independently of the frame, which would mean the component model is not real.</div>
+    </div>
+    <div class="nb">
+      <div class="n">RFC 0012<span>update</span></div>
+      <div class="d"><b>Everything above the frame updates without a reboot</b>: instantiate the new version alongside, transfer state over a versioned state-transfer protocol, swap routing atomically at a quiescent point, retire the old. A component that cannot transfer its state declares that in its manifest and is restarted instead &mdash; a visible choice rather than a discovered one. The frame is the exception and needs a reboot, and F says so. <b>And the running system's identity is the generation root hash</b>, so attestation is the sentence <em class="sys">this machine is running root X</em> and needs no machinery beyond what bet 03 already builds. <b>Reversed by:</b> a class of component with no findable quiescent point, which would narrow live update rather than abandon it.</div>
+    </div>
+    <div class="nb">
+      <div class="n">RFC 0013<span>observability</span></div>
+      <div class="d"><b>Every component publishes a hierarchical, typed, versioned tree of its own state and counters</b> into a shared read-only mapping, readable without stopping it, without a debug build and without a debugger. It is content-addressed at snapshot boundaries, so a whole-system snapshot is one hash and comparing two runs is a hash comparison that descends only where it differs &mdash; which hands the simulator its strongest oracle, because divergence becomes a subtree identified at the moment it appears rather than a symptom observed at the end. Publishing is batch class, so the apparatus can never cause the miss it exists to observe. <b>Reversed by:</b> a publishing cost that cannot be kept off the deadline path, which would move the tree to sampled snapshots rather than remove it.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">17</div><h2>Three ABI corrections</h2></div>
+  <div class="flow">
+    <p>These are separated from the rest because they have a deadline that the others do not. <code>abi/</code> exists to be load-bearing against code written by people who are not in the room, and its own documentation says every change to it is an ABI change. Today there is exactly one peer and it has never run; after M5 there is a ring protocol with recorded numbers and a compatibility obligation. All three corrections are free this month.</p>
+    <div class="claim">
+      <span class="t">Correction 01 &mdash; the deadline has no unit</span>
+      <b><code>Sqe.deadline: u64</code>, documented as "absolute deadline".</b> Absolute against what origin, in what unit, and what does zero mean? Proposed: monotonic nanoseconds in the channel's epoch &mdash; the same clock <code>f_env::Instant</code> reports &mdash; with zero as an explicit <code>NO_DEADLINE</code> constant, and a note distinguishing it from a deadline already in the past, which is a late hard-class request and must be treated as one. <b>No layout change.</b>
+    </div>
+    <div class="claim">
+      <span class="t">Correction 02 &mdash; the error space is errno with fewer names</span>
+      <b><code>Cqe.result: i32</code>, documented as "negative values are errors".</b> Proposed: a negative result is <code>-((domain &lt;&lt; 16) | code)</code> over six domains, with <code>Cqe.ext</code> carrying a per-domain detail &mdash; the offending capability index for an authority refusal, the largest grantable budget for an admission refusal, the peer's epoch for a peer error. Non-negative results become explicitly per-opcode, which is where partial transfer counts live. <b>No layout change.</b>
+    </div>
+    <div class="claim">
+      <span class="t">Correction 03 &mdash; the header demands equality</span>
+      <b><code>ChannelHeader.abi_version</code> must equal <code>ABI_VERSION</code> exactly, and there is one spare <code>u32</code>.</b> Proposed: version, version floor, offered features and required features, negotiating to the intersection. The header is <code>align(64)</code> and its fields currently occupy thirty-two bytes, so the four new fields and a widened reserved array fit inside the existing cache line and the <code>size_of</code> assertion is unchanged. <b>This is the only one that touches layout, and it is the one that gets expensive fastest</b> &mdash; after a second peer exists, adding a negotiation field means negotiating how to negotiate.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">18</div><h2>Five claims, and one discipline</h2></div>
+  <div class="flow">
+    <p>Every proposal above that asserts a number should arrive with its entry in <code>claims/</code>, because the registry's whole purpose is that a claim which stops holding cannot quietly persist in prose. Three of these five are F measured against itself, which is unusual for this project and correct here: they exist to make a design decision falsifiable, not to beat a baseline.</p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Proposed claim</th><th>Baseline</th><th>What it decides</th></tr></thead>
+    <tbody>
+      <tr><td class="sysname"><b>Cross-domain call and setup cost</b><span>rfc 0005</span></td><td>In-domain ring call; a tuned Linux syscall; seL4-class IPC as the reference floor</td><td>Whether private domains are affordable at all. If a cross-domain call costs what a microkernel crossing costs and the hot path really contains none, the rule is cheap. If it does not, bet 01 has a problem worth naming.</td></tr>
+      <tr><td class="sysname"><b>Frame index-masking overhead</b><span>rfc 0005</span></td><td>The same build with masking removed</td><td>Whether the unconditional rule survives contact with the ring submit number. Masking that costs measurably is a rule that will be quietly disabled later.</td></tr>
+      <tr><td class="sysname"><b>Idle residency and joules per operation</b><span>rfc 0006</span></td><td>Tuned Linux with a deliberately chosen governor, same workload, same machine</td><td>The energy half of the thesis, and the earliest claim in the project that does not need a compositor to exist. Available from M2.</td></tr>
+      <tr><td class="sysname"><b>Deadline miss rate with and without sibling exclusivity and cache partitioning</b><span>rfc 0007</span></td><td>F against itself, one variable at a time</td><td>Whether the strict reservation is buying anything. One experiment settles a design decision that otherwise gets argued from first principles forever.</td></tr>
+      <tr><td class="sysname"><b>Frames dropped during a generation swap</b><span>rfc 0012</span></td><td>F against itself; and against the reboot the current metric concedes</td><td>Turns "full system rollback: one reboot" into a stronger published claim, or shows that live update is not reachable and the metric was honest after all.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="flow" style="padding-top:18px">
+    <div class="note">
+      <b>And one addition to the claims discipline itself.</b> Every latency claim should record whether firmware-induced stalls were observed during collection. A p99.9 published without it invites the first hostile question a systems audience will ask, and the answer "we did not look" is worse than a larger number honestly attributed.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">19</div><h2>What this proposes not to do</h2></div>
+  <div class="flow">
+    <p>A list of things not being fixed is part of the output, because the way a research vehicle acquires a product's obligations is one reasonable-sounding item at a time.</p>
+    <ul class="list">
+      <li><b>Mutable-path compatibility beyond a read-only view.</b> Real work, genuinely useful, and no claim depends on it. It is the single most likely route by which this project acquires an ecosystem it did not choose.</li>
+      <li><b>POSIX, in any form.</b> Already settled by RFC 0002 and RFC 0003, and restated here because every gap in section 14 has a POSIX-shaped answer that would look like progress.</li>
+      <li><b>Distributed time, distributed anything.</b> RFC 0009 stops at the machine boundary deliberately.</li>
+      <li><b>The canvas problem, before there is a compositor.</b> It is the pillar's hardest question and it is a phase-03 question. Answering it on paper now costs nothing and proves nothing.</li>
+      <li><b>Verification beyond the frame and the protocols.</b> Restated because RFC 0005 will tempt someone to promise a speculation proof. seL4's cost is the reference: a person-decade for ten thousand lines, and it does not extend upward.</li>
+      <li><b>The toolkit tax, wireless, printers, and the long tail.</b> Already declined, correctly, and worth re-declining every time a new subsystem is designed.</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">20</div><h2>Sequencing against the ladder</h2></div>
+  <div class="flow">
+    <p>Nine decisions is not nine pieces of work in one sitting. Three of them are documents that should exist before the next line of code, because they describe bytes that are already written down; the rest attach to milestones that already exist, and mostly change what those milestones must <em class="sys">prove</em> rather than what they must build.</p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>When</th><th>What is stated</th><th>Why then and not later</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="sysname"><b>Before more code</b><span>now</span></td>
+        <td class="fpos">RFC 0009, 0010, 0011 and the three ABI corrections</td>
+        <td>All three are the wire format. There is currently one peer, it has never run, and the cost of each correction is a paragraph. After M5 there is a recorded number, a compatibility obligation, and a negotiation problem about how to negotiate.</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>M1 &ndash; M2</b><span>memory, time</span></td>
+        <td class="fpos">RFC 0013 (state tree), RFC 0006 (power), RFC 0007 (reservations)</td>
+        <td>M2 produces the project's first real measurement and gates on it forever afterwards. A jitter histogram collected before the reservation rules exist is a number about an idle machine, and the counters that make it a claim need somewhere to be published from.</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>M3 &ndash; M4</b><span>user space, capabilities</span></td>
+        <td class="fpos">RFC 0008 (lifecycle), RFC 0005 (domains)</td>
+        <td>M3 introduces user space and M4 introduces the capability table and its negative test suite. Both decisions change what those suites must demonstrate &mdash; and "a component in another domain cannot read this one's secret by speculation" belongs in that suite, where it is a research contribution rather than a checkbox.</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Phase 02</b><span>object store</span></td>
+        <td class="fpos">RFC 0012 (generation swap and attestation)</td>
+        <td>It needs the store and the generation machinery to exist. Stating it earlier would be designing against nothing; stating it later means the rollback metric ships as written and becomes the thing being defended.</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Alongside all of it</b><span>discipline</span></td>
+        <td class="fpos">The twelve rules, and the five claims</td>
+        <td>The rules are what stop the tenth gap. Four of the nine above exist because a discipline this project already applies &mdash; make the policy executable, name the baseline, state the cost &mdash; was not applied to a subsystem nobody had written yet.</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="flow" style="padding-top:22px">
+    <div class="claim">
+      <span class="t">The one-line version</span>
+      <b>F answers forty of sixty-eight outright and nine more in part, most of them with four decisions.</b> Of the nine decisions the remaining seventeen collapse into: three are the wire format and are cheap this month; two threaten a bet and one of those &mdash; speculation &mdash; is a claim currently being made without being defended; two are the missing half of the thesis, which is energy; and two are the lifecycle and the apparatus, both of which are cheaper now than at any later point. None of the nine requires abandoning anything already decided, which is the most useful thing this analysis found.
+    </div>
+  </div>
+  <div class="foot">
+    Examined: the five design documents, RFCs 0000&ndash;0004, <code>claims/</code>, <code>docs/TESTING-STATUS.md</code>, <code>BOOTSTRAP.md</code>, <code>LICENSING.md</code>, and the current contents of <code>abi/</code>, <code>env/</code>, <code>ring/</code>, <code>kernel/</code>, <code>user/init/</code> and <code>xtask/</code>. &middot; Nothing in the repository was modified by this document: no RFC was added, no crate was edited, no metric was changed. Sections 15&ndash;20 are proposals awaiting a decision, and each is separable from the others. &middot; Status: proposed &middot; 2026-08-28.
+  </div>
+</section>
+
+</div>

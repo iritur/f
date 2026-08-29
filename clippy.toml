@@ -1,0 +1,4 @@
+# Kernel code runs without a stack guard on some paths; keep frames small.
+stack-size-threshold = 4096
+# Any `unsafe` block must carry a SAFETY comment discharging stated obligations.
+# Enforced via [workspace.lints.clippy] in Cargo.toml.

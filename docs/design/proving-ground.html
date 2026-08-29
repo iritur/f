@@ -1,0 +1,495 @@
+<title>Proving Ground</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;700;900&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root{
+  --paper:#F2F4F7; --surface:#FFFFFF; --surface-2:#E9ECF2;
+  --ink:#12141A; --ink-2:#3A4150; --muted:#6B7382;
+  --line:#D6DBE4; --line-strong:#B9C0CD;
+  --cobalt:#2F4FD8; --rust:#A8431C; --teal:#0B6E5C;
+  --on-accent:#FFFFFF;
+  --shadow:0 1px 2px rgba(18,20,26,.05), 0 8px 24px -16px rgba(18,20,26,.28);
+  --sans:"IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --display:"Chivo", "IBM Plex Sans", ui-sans-serif, sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --col:66ch; --wide:1180px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+    --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+    --line:#262C39; --line-strong:#3D4657;
+    --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+    --on-accent:#0D0F14;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+  --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+  --line:#262C39; --line-strong:#3D4657;
+  --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+  --on-accent:#0D0F14;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+}
+
+*{box-sizing:border-box;}
+body{margin:0; background:var(--paper); color:var(--ink); font-family:var(--sans); font-size:17px; line-height:1.65; -webkit-font-smoothing:antialiased;}
+.wrap{max-width:var(--wide); margin:0 auto; padding:0 28px 96px;}
+
+h1,h2,h3,h4{font-family:var(--display); text-wrap:balance; margin:0;}
+h1{font-weight:900; font-size:clamp(2.5rem,6.2vw,4.2rem); line-height:.98; letter-spacing:-.035em;}
+h2{font-weight:900; font-size:clamp(1.5rem,3vw,2.05rem); line-height:1.08; letter-spacing:-.025em;}
+h3{font-weight:700; font-size:1.14rem; line-height:1.3; letter-spacing:-.012em;}
+h4{font-weight:700; font-size:.93rem; line-height:1.35;}
+p{margin:0;}
+a{color:var(--cobalt); text-decoration-thickness:1px; text-underline-offset:2px;}
+a:focus-visible{outline:2px solid var(--cobalt); outline-offset:3px; border-radius:2px;}
+strong,b{font-weight:600;}
+code{font-family:var(--mono); font-size:.87em; background:var(--surface-2); padding:.1em .34em; border-radius:3px;}
+
+.eyebrow{font-family:var(--mono); font-size:.7rem; font-weight:600; letter-spacing:.16em; text-transform:uppercase; color:var(--muted);}
+
+.mast{padding:72px 0 40px; border-bottom:1px solid var(--line-strong);}
+.mast-grid{display:flex; flex-direction:column; gap:26px;}
+.mast .lede{font-size:1.2rem; line-height:1.55; color:var(--ink-2); max-width:60ch;}
+.mast .lede b{color:var(--ink);}
+.specline{display:flex; flex-wrap:wrap; gap:10px 26px; padding-top:6px; font-family:var(--mono); font-size:.74rem; color:var(--muted); letter-spacing:.04em;}
+.specline span b{color:var(--ink-2);}
+
+section{padding:52px 0 8px; border-bottom:1px solid var(--line);}
+section:last-of-type{border-bottom:0;}
+.sec-head{display:flex; align-items:baseline; gap:16px; margin-bottom:20px; flex-wrap:wrap;}
+.sec-num{font-family:var(--mono); font-size:.74rem; font-weight:600; color:var(--cobalt); letter-spacing:.1em; padding-top:.5em;}
+.flow{display:flex; flex-direction:column; gap:18px;}
+.flow > p, .flow > ul, .flow > .note, .flow > h3, .flow > .claim{max-width:var(--col);}
+
+ul.list{margin:0; padding-left:0; list-style:none; display:flex; flex-direction:column; gap:11px;}
+ul.list li{position:relative; padding-left:22px;}
+ul.list li::before{content:""; position:absolute; left:2px; top:.62em; width:7px; height:7px; border:1.5px solid var(--cobalt); border-radius:1px;}
+
+.note{border-left:3px solid var(--rust); background:color-mix(in srgb, var(--rust) 7%, var(--surface)); padding:14px 18px; border-radius:0 5px 5px 0; font-size:.95rem; color:var(--ink-2);}
+.note b{color:var(--ink);}
+.claim{border-left:3px solid var(--cobalt); background:color-mix(in srgb, var(--cobalt) 7%, var(--surface)); padding:15px 19px; border-radius:0 5px 5px 0; font-size:.97rem; color:var(--ink-2); line-height:1.55;}
+.claim b{color:var(--ink);}
+.claim .t{font-family:var(--mono); font-size:.68rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--cobalt); display:block; margin-bottom:7px;}
+
+pre{background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:15px 18px; overflow-x:auto; font-family:var(--mono); font-size:.755rem; line-height:1.7; color:var(--ink-2); margin:0; tab-size:4;}
+pre .c{color:var(--muted);}
+pre .k{color:var(--cobalt); font-weight:600;}
+pre .w{color:var(--rust); font-weight:600;}
+.codecap{font-family:var(--mono); font-size:.68rem; color:var(--muted); letter-spacing:.06em; text-transform:uppercase; padding-bottom:7px;}
+.codeblock{display:flex; flex-direction:column; margin:4px 0;}
+
+.tablewrap{overflow-x:auto; border:1px solid var(--line); border-radius:7px; background:var(--surface); margin:6px 0 4px;}
+table{border-collapse:collapse; width:100%; min-width:700px; font-size:.88rem;}
+th,td{text-align:left; padding:12px 15px; border-bottom:1px solid var(--line); vertical-align:top; line-height:1.5;}
+thead th{font-family:var(--mono); font-size:.66rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); background:var(--surface-2); border-bottom:1px solid var(--line-strong); white-space:nowrap;}
+tbody tr:last-child td{border-bottom:0;}
+td.m{font-family:var(--mono); font-size:.76rem; color:var(--ink-2); white-space:nowrap;}
+td.tool b{font-family:var(--display); font-weight:700; font-size:.94rem; display:block;}
+td.tool span{font-family:var(--mono); font-size:.66rem; color:var(--muted); letter-spacing:.05em;}
+
+.chip{display:inline-block; font-family:var(--mono); font-size:.62rem; font-weight:600; letter-spacing:.08em; text-transform:uppercase; padding:3px 7px; border-radius:3px; border:1px solid currentColor; white-space:nowrap;}
+.chip.take{color:var(--teal); background:color-mix(in srgb, var(--teal) 10%, var(--surface));}
+.chip.build{color:var(--cobalt); background:color-mix(in srgb, var(--cobalt) 10%, var(--surface));}
+.chip.later{color:var(--muted); background:var(--surface-2);}
+
+.layers{display:grid; grid-template-columns:auto 1fr; gap:6px 14px; margin:8px 0 4px; min-width:0;}
+.lyi{font-family:var(--mono); font-size:.7rem; font-weight:600; color:var(--muted); display:flex; align-items:center; letter-spacing:.08em; white-space:nowrap;}
+.ly{display:flex; flex-wrap:wrap; align-items:baseline; gap:5px 12px; border:1px solid var(--line); border-left:4px solid var(--cobalt); border-radius:5px; padding:12px 16px;}
+.ly h4{flex:0 0 auto;}
+.ly .d{font-family:var(--mono); font-size:.72rem; color:var(--muted); letter-spacing:.02em; line-height:1.55;}
+.ly0{background:color-mix(in srgb, var(--cobalt) 15%, var(--surface));}
+.ly1{background:color-mix(in srgb, var(--cobalt) 12%, var(--surface));}
+.ly2{background:color-mix(in srgb, var(--cobalt) 9.5%, var(--surface));}
+.ly3{background:color-mix(in srgb, var(--cobalt) 7%, var(--surface));}
+.ly4{background:color-mix(in srgb, var(--cobalt) 5%, var(--surface));}
+.ly5{background:color-mix(in srgb, var(--cobalt) 3.5%, var(--surface));}
+.ly6{background:color-mix(in srgb, var(--cobalt) 2%, var(--surface));}
+.ly7{background:var(--surface);}
+
+.seq{display:flex; flex-direction:column; margin:6px 0 4px;}
+.sq{display:grid; grid-template-columns:118px 1fr; gap:0 20px; padding:17px 0; border-top:1px solid var(--line);}
+.sq:first-child{border-top:1px solid var(--line-strong);}
+.sq:last-child{border-bottom:1px solid var(--line-strong);}
+.sqw{font-family:var(--mono); font-size:.74rem; font-weight:600; color:var(--cobalt); letter-spacing:.06em; line-height:1.5;}
+.sqb{display:flex; flex-direction:column; gap:5px;}
+.sqb p{font-size:.92rem; color:var(--ink-2); max-width:62ch;}
+
+.foot{padding-top:40px; font-family:var(--mono); font-size:.7rem; color:var(--muted); letter-spacing:.06em; line-height:1.8; max-width:80ch;}
+.refs{display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:9px 26px; font-size:.85rem;}
+.refs a{display:block; padding:5px 0; color:var(--ink-2); text-decoration:none; border-bottom:1px solid transparent;}
+.refs a:hover{color:var(--cobalt); border-bottom-color:var(--line-strong);}
+.refs a span{font-family:var(--mono); font-size:.67rem; color:var(--muted); display:block; letter-spacing:.05em;}
+
+@media (max-width:720px){
+  body{font-size:16px;}
+  .wrap{padding:0 20px 72px;}
+  .sq{grid-template-columns:1fr; gap:6px 0;}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none !important; transition:none !important;}}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="mast-grid">
+    <div class="eyebrow">Third companion &middot; the evidence apparatus</div>
+    <h1>Proving Ground</h1>
+    <p class="lede">For a system whose entire deliverable is <b>defensible measured claims</b>, the test apparatus is not quality assurance sitting beside the work &mdash; it <em>is</em> the work. This is the design for it: seven layers, what each one can and cannot establish, which parts already exist and should be taken rather than written, and the one property that must be designed into F from the first commit because it can never be retrofitted.</p>
+    <div class="specline">
+      <span><b>Companion to</b> &nbsp;The Fast Path</span>
+      <span><b>Alongside</b> &nbsp;Ring, Scene, Boot &middot; Deadline All the Way Down &middot; Lineage and Debts</span>
+      <span><b>Anchors on</b> &nbsp;architecture &sect;13</span>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="sec-head"><div class="sec-num">01</div><h2>The reframe</h2></div>
+  <div class="flow">
+    <p>Section 13 of the architecture document says the question that replaces "who are your first thousand users" is whether you can state a small number of claims, each with a named baseline and a number, that a competent skeptic could try to refute and fail. Everything in this document follows from taking that literally.</p>
+    <p>Three consequences that are easy to nod at and hard to actually accept:</p>
+    <ul class="list">
+      <li><b>An unmeasured improvement did not happen.</b> Not "is probably fine" &mdash; did not happen. If a design decision cannot be tied to a number that moves, it is a preference.</li>
+      <li><b>An unreproducible measurement is an anecdote.</b> Including one you personally watched.</li>
+      <li><b>The apparatus is on the critical path, not beside it.</b> A system that ships its architecture first and its measurement second will discover, two years in, that half its claims were never instrumentable and the other half regressed silently somewhere it cannot now find.</li>
+    </ul>
+    <div class="claim">
+      <span class="t">The load-bearing consequence</span>
+      One property &mdash; <b>whole-system determinism</b> &mdash; has to be designed into F from the first commit. Every other layer here can be added later at ordinary cost. Determinism cannot: retrofitting it means finding and re-plumbing every source of nondeterminism in a system that has grown around their absence, which is why no mainstream kernel has it and why none of them will ever get it.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">02</div><h2>Why F can do what Linux cannot</h2></div>
+  <div class="flow">
+    <p>Deterministic simulation testing is the strongest known technique in systems reliability. FoundationDB built a single-threaded simulator that runs an entire cluster &mdash; simulated disks, networks, machine crashes &mdash; deterministically, and has accumulated on the order of a trillion CPU-hours of simulated testing. TigerBeetle's simulator reproduces any bug exactly from a seed plus a commit hash, and reports that a minute of simulated time is worth days of real-world testing. The technique is well understood and the tooling is maturing fast.</p>
+    <p>It is also almost never applied to operating systems, because operating systems are the hardest possible target: nondeterminism enters through interrupts, timers, DMA, core scheduling, device responses, and ambient global state, at thousands of unmarked places.</p>
+    <p><b>F's architecture removes almost all of them &mdash; not deliberately, but as a side effect of decisions already made for other reasons.</b></p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Architectural decision</th><th>Why it was made</th><th>What it hands the simulator</th></tr></thead>
+        <tbody>
+          <tr><td class="m">Every service is a ring</td><td>Speed &mdash; bet 02</td><td>One uniform interception point for every interaction in the system. Not thousands of syscalls and ioctls: one protocol, one place to control ordering.</td></tr>
+          <tr><td class="m">No ambient authority</td><td>Security &mdash; bet 04</td><td>Every authority flow is explicit and enumerable, so there are no hidden channels through which nondeterminism can enter unobserved.</td></tr>
+          <tr><td class="m">Drivers in user space</td><td>Isolation &mdash; &sect;08</td><td>Hardware already sits behind a component boundary, so a simulated device is a component substitution rather than a kernel patch.</td></tr>
+          <tr><td class="m">Content-addressed immutable storage</td><td>Rollback &mdash; bet 03</td><td>Exact whole-system state snapshots are cheap and verifiable by hash. Comparing two runs is comparing two roots.</td></tr>
+          <tr><td class="m">Completion timestamps in every CQE</td><td>Latency accounting</td><td>A complete causal trace of the system, produced by the system, with no instrumentation build.</td></tr>
+          <tr><td class="m">Per-CPU state from the first allocation</td><td>Scalability</td><td>No shared mutable global state to serialize or reason about.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="claim">
+      <span class="t">A research claim in its own right</span>
+      <b>An operating system architected so that whole-system deterministic simulation is tractable.</b> This is not a testing convenience &mdash; it is an argument that the same properties which make a system fast and safe also make it <em>verifiable by simulation</em>, and that the three are the same design pressure viewed from different angles. Nobody has demonstrated this at OS scale. It is recorded as a claim in architecture section 13, and as the seventh entry in the novelty list in <em>Lineage and Debts</em> section 07.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">03</div><h2>The seven layers</h2></div>
+  <div class="flow">
+    <p>Each layer establishes something the layers below cannot. The ordering is by dependency, not importance &mdash; though layer 0 is both first and most important.</p>
+  </div>
+  <div class="layers">
+    <div class="lyi">L7</div>
+    <div class="ly ly7"><h4>Claims registry</h4><div class="d">every documented number, machine-readable, CI-gated, one-command reproducible</div></div>
+    <div class="lyi">L6</div>
+    <div class="ly ly6"><h4>Hardware in the loop</h4><div class="d">photodiode input-to-photon &middot; external power &middot; PMU and processor trace &middot; bare-metal runners</div></div>
+    <div class="lyi">L5</div>
+    <div class="ly ly5"><h4>Performance regression</h4><div class="d">change-point detection &middot; instructions and joules per operation &middot; full latency distributions</div></div>
+    <div class="lyi">L4</div>
+    <div class="ly ly4"><h4>Fuzzing</h4><div class="d">structure-aware SQE generation &middot; snapshot restore &middot; hostile-peer harness &middot; differential vs. Linux</div></div>
+    <div class="lyi">L3</div>
+    <div class="ly ly3"><h4>Proof</h4><div class="d">frame invariants and capability soundness &middot; bounded checks on validation paths</div></div>
+    <div class="lyi">L2</div>
+    <div class="ly ly2"><h4>Concurrency and memory model</h4><div class="d">weak-memory model checking &middot; exhaustive interleavings &middot; ordering litmus tests</div></div>
+    <div class="lyi">L1</div>
+    <div class="ly ly1"><h4>Deterministic simulation</h4><div class="d">simulated devices &middot; fault injection &middot; seed sweeps &middot; time acceleration</div></div>
+    <div class="lyi">L0</div>
+    <div class="ly ly0"><h4>Determinism substrate</h4><div class="d">every source of nondeterminism behind an injectable capability &mdash; <b>build this first or never</b></div></div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">04</div><h2>Layer 0 &mdash; the determinism substrate</h2></div>
+  <div class="flow">
+    <p>The rule is absolute and it constrains F's own design, not just the test harness: <b>nothing in the system may observe nondeterminism except through a capability that the simulator can substitute.</b></p>
+    <p>That means time is not an instruction, it is a capability. Randomness is a capability. Interrupt arrival, ring consumer ordering, device response latency, core assignment and memory-allocation addresses are all decided by an injectable policy that is the real scheduler in production and a seeded deterministic one under test.</p>
+  </div>
+  <div class="codeblock">
+    <div class="codecap">What "no ambient nondeterminism" means in practice</div>
+<pre><span class="c">// FORBIDDEN anywhere in the system, including tests and drivers:</span>
+<span class="w">rdtsc()</span> &middot; <span class="w">clock_gettime()</span> &middot; <span class="w">rdrand()</span> &middot; <span class="w">HashMap::new()</span> <span class="c">// random seed</span>
+address-dependent iteration &middot; unsynchronized wall-clock reads
+
+<span class="c">// REQUIRED — all of it substitutable by the simulator:</span>
+<span class="k">trait</span> Env {
+    <span class="k">fn</span> now(&<span class="k">self</span>) -> Instant;          <span class="c">// virtual clock under test</span>
+    <span class="k">fn</span> rng(&<span class="k">self</span>) -> &<span class="k">mut</span> dyn Rng;        <span class="c">// seeded</span>
+    <span class="k">fn</span> sched(&<span class="k">self</span>) -> &<span class="k">mut</span> dyn Scheduler; <span class="c">// decides every interleaving</span>
+}
+
+<span class="c">// The contract that makes everything else possible:</span>
+<span class="c">//   (seed, commit_hash) → byte-identical execution, always.</span></pre>
+  </div>
+  <div class="flow">
+    <div class="note"><b>Enforce it mechanically on day one.</b> A lint that fails the build on any forbidden call, applied to the whole tree including imported code paths. This costs an afternoon at milestone M0 and is effectively impossible to impose at month eighteen, because by then the violations are load-bearing and each one has a reason. The discipline is the deliverable here &mdash; the substrate is only a few hundred lines.</div>
+    <p>One deliberate consequence worth stating: <b>this makes hash-map iteration order, allocator addresses and thread interleaving reproducible</b>, which eliminates the entire category of bugs that appear once in ten thousand runs and can never be reproduced by the person who has to fix them. That category is where kernel engineering time actually goes.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">05</div><h2>Layer 1 &mdash; deterministic simulation</h2></div>
+  <div class="flow">
+    <p>With layer 0 in place, the entire system runs single-threaded inside a simulator that controls every decision. The simulator supplies modelled devices and injects faults; a seed selects the whole trajectory.</p>
+    <h3>What to model, and what to break</h3>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Modelled component</th><th>Faults to inject</th></tr></thead>
+      <tbody>
+        <tr><td class="m">NVMe / zoned storage</td><td>Torn writes, bit rot, misdirected writes, reordered completions, latency spikes, zone-full and reset-required conditions, device disappearing mid-operation.</td></tr>
+        <tr><td class="m">Network interface</td><td>Drop, duplicate, reorder, corrupt, partition, asymmetric partition, delayed delivery.</td></tr>
+        <tr><td class="m">Ring peers</td><td>Peer stall, peer crash mid-write, restart with a stale epoch, hostile cursor values, entry mutated after validation.</td></tr>
+        <tr><td class="m">Clock</td><td>Drift, step changes, non-monotonicity across cores, frequency scaling.</td></tr>
+        <tr><td class="m">Memory and IOMMU</td><td>Allocation failure under pressure, translation faults, device page-fault latency, tier migration.</td></tr>
+        <tr><td class="m">Components</td><td>Arbitrary crash and restart, particularly of imported driver components mid-transaction.</td></tr>
+        <tr><td class="m">Power and thermal</td><td>Throttling, core parking, energy-policy transitions during a deadline-critical operation.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="flow">
+    <p>Two refinements worth adopting from current practice rather than rediscovering:</p>
+    <ul class="list">
+      <li><b>Protocol-aware fault injection.</b> Uniformly random faults spend most of their budget on uninteresting states. Targeting faults at protocol state transitions &mdash; the moment a capability is revoked, the instant a ring epoch increments, the window between claim and publish &mdash; finds far more per unit of simulated time. TigerBeetle published this refinement in 2026 and it is directly applicable to F's ring and capability protocols.</li>
+      <li><b>Seed sweeps as the CI workload.</b> Continuous background seed exploration, with any failing seed captured as a permanent regression test. A failing seed <em>is</em> the bug report: it reproduces byte-identically on any machine at that commit, which converts the hardest class of kernel bug into an ordinary one.</li>
+    </ul>
+    <div class="claim"><b>What this layer establishes:</b> that the system's <em>logic</em> is correct under adversarial ordering and hardware failure. What it cannot establish is anything about real timing, real hardware behaviour, or real performance &mdash; the simulator's clock is fictional. Layers 5 and 6 exist because of that boundary, and conflating the two is the most common way simulation-tested systems still ship latency bugs.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">06</div><h2>Layer 2 &mdash; concurrency and the memory model</h2></div>
+  <div class="flow">
+    <p>Deterministic simulation explores orderings the scheduler chooses. It does not explore what a <em>weak memory model</em> permits &mdash; the reorderings the hardware itself is allowed to perform. For F that gap sits directly on the most critical code in the system.</p>
+    <p>The ring's correctness rests entirely on one release-store and one acquire-load. The implementation companion already flags the trap: using <code>Relaxed</code> there works on x86-64 and fails on ARM64, which is the worst available failure mode because every test on an x86 laptop passes. Simulation will not catch it. Only a memory-model tool will.</p>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Tool</th><th>What it does</th><th>Use it for</th></tr></thead>
+      <tbody>
+        <tr><td class="tool"><b>RustMC</b><span>on GenMC</span></td><td>Stateless model checking of unmodified concurrent Rust, via LLVM IR, under axiomatic weak memory models including RC11.</td><td>The primary tool. Verify the ring cursor protocol, the epoch mechanism and the multi-producer claim under weak memory rather than under an assumed ordering.</td></tr>
+        <tr><td class="tool"><b>Loom</b><span>exhaustive</span></td><td>Exhaustive permutation of interleavings for small concurrent Rust units.</td><td>Small, high-value primitives where exhaustiveness is affordable and worth having.</td></tr>
+        <tr><td class="tool"><b>Shuttle</b><span>randomized</span></td><td>Randomized scheduling, trading soundness for scale.</td><td>Larger subsystems where exhaustive checking will not terminate.</td></tr>
+        <tr><td class="tool"><b>Litmus tests</b><span>hand-written</span></td><td>Minimal programs whose outcome distinguishes one ordering from another.</td><td><b>Regression guards.</b> A test that must fail under <code>Relaxed</code> and pass under <code>Release</code>/<code>Acquire</code> is what stops a future contributor from "optimizing" the ordering away.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="flow">
+    <div class="note"><b>Run the whole suite on both architectures, always.</b> x86-64's total-store-order model hides the entire class of bug this layer exists to find. An ARM64 target in CI is not a portability nicety for F &mdash; it is the only configuration where these tests mean anything.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">07</div><h2>Layer 3 &mdash; proof, deliberately targeted</h2></div>
+  <div class="flow">
+    <p>Architecture section 08 already sets the policy: verify the frame's invariants and the ring protocols, not the system. This layer is how, and the honest cost.</p>
+    <p>The tooling has moved. <b>Verus</b> is the current state of the art for Rust, embedding specifications and proofs in Rust syntax with linear ghost types and an SMT backend; case studies report roughly five lines of proof per line of implementation, which is exactly why the target must stay small. <b>Kani</b> is the lighter complement &mdash; bounded model checking needing only contracts and harnesses, no proof code &mdash; and is the right tool for validation and parsing paths where bounded exhaustiveness is enough.</p>
+    <div class="claim">
+      <span class="t">The development worth knowing about</span>
+      AI-assisted proof generation has begun landing on real kernel code. <b>KVerus produced upstream-accepted Verus proofs for 23 previously unverified functions in Asterinas's memory-management module</b> &mdash; and Asterinas is F's closest kernel relative, which makes both the technique and the proof idioms directly transferable. Reported success is around 80% on single-file tasks and 51% at repository level with cross-file dependencies. That is not "proof is now free," but it materially changes the cost of the frame's proof obligation, which bet 01 identifies as the thing most likely to sink the kernel design.
+    </div>
+    <h3>What to actually prove, in priority order</h3>
+    <ul class="list">
+      <li><b>Capability soundness.</b> Derivation only ever weakens rights; revocation is complete through the derivation tree; no sequence of operations yields authority that was not granted. This is bet 04's entire content, and if it is wrong nothing else in the system matters.</li>
+      <li><b>The frame's unsafe API obligations.</b> Bet 01 concedes that frame soundness is a proof obligation rather than a compiler guarantee. Discharge it explicitly, or the framekernel's safety argument is an assertion.</li>
+      <li><b>Address-space and mapping invariants.</b> The Asterinas precedent means there is now prior art to work from rather than starting cold.</li>
+      <li><b>Ring protocol state machines.</b> Bounded checking with Kani is enough here &mdash; the state space is small and the properties are simple. Full deductive proof is not worth the ratio.</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">08</div><h2>Layer 4 &mdash; fuzzing the one surface</h2></div>
+  <div class="flow">
+    <p>F has an unusual advantage here. Linux presents hundreds of syscalls and an unbounded ioctl surface, which is why syzkaller needs a whole description language to generate meaningful programs. <b>F presents one interface: the ring.</b> Every interaction with every service is a stream of submission entries. That is a dramatically smaller and better-structured target.</p>
+    <ul class="list">
+      <li><b>Structure-aware submission generation.</b> Generate valid-shaped SQE streams from the opcode schemas, with the capability field, buffer references and chaining flags mutated within their type constraints. The equivalent of syzkaller's description language, but generated from F's own protocol definitions rather than hand-written and perpetually stale.</li>
+      <li><b>Snapshot-based execution.</b> Coverage-guided fuzzing with fast snapshot restore &mdash; the technique behind Nyx, which restores thousands of times per second and found 44 bugs with 22 CVEs in hypervisors. F's content-addressed storage makes snapshot and restore natural rather than bolted on.</li>
+      <li><b>The hostile-peer harness.</b> The highest-value target in the system, and specific to F's threat model. Drive the ring from a deliberately malicious peer: impossible cursor values, entries mutated between validation and use, epochs that jump backwards, a producer that dies mid-claim. This is the direct executable test of the survival rules in the implementation companion, and those rules are load-bearing for the whole imported-driver safety argument.</li>
+      <li><b>Differential fuzzing against Linux.</b> Run the same imported driver in F's shimmed component and under Linux, feed both identical device-level input, and compare. Divergence is either a shim bug or a genuine behavioural difference worth understanding &mdash; and this is the only practical way to gain confidence in a shim implementing an API surface you do not control.</li>
+    </ul>
+    <div class="note"><b>Coverage instrumentation from milestone M0.</b> Fuzzing without coverage feedback is close to worthless, and adding instrumentation to a mature kernel is painful. A KCOV-equivalent that reports executed edges costs very little when the kernel is two thousand lines.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">09</div><h2>Layer 5 &mdash; performance regression under noise</h2></div>
+  <div class="flow">
+    <p>This is where most projects' measurement discipline quietly collapses, and the failure is statistical rather than technical. Run-to-run noise swamps the signal, so a fixed threshold either misses real regressions or fires constantly until everyone ignores it. Both outcomes end with nobody watching.</p>
+    <p>The answer is well established and F should simply adopt it: <b>change point detection</b> rather than thresholds. Treat each metric as a time series over commits and detect statistically significant shifts in its distribution &mdash; the approach behind Hunter's modified E-divisive means and the CI systems built on it, which exists precisely because it copes with noisy data where thresholds cannot. A 2026 study across 174 manually annotated performance series found that ensemble voting over multiple detectors improves the precision/recall trade-off by around 11% in F-score, so use an ensemble rather than one detector.</p>
+    <h3>Measure the things that are not noisy</h3>
+    <ul class="list">
+      <li><b>Instructions retired per operation</b> is nearly noise-free, attributable to a specific change, and survives a hardware upgrade. Wall-clock time is none of those.</li>
+      <li><b>Joules per operation</b> is the efficiency claim's actual currency, and section 13 makes it non-optional rather than a nice-to-have.</li>
+      <li><b>Resident bytes per unit of work</b> catches the regressions nobody notices until a memory-constrained machine falls over.</li>
+      <li><b>Cache misses, TLB misses and branch mispredictions per operation</b> explain <em>why</em> a time changed, which is what turns a red build into a fix.</li>
+    </ul>
+    <div class="claim"><b>Record distributions, never summaries.</b> Averaging at collection time destroys information that cannot be recovered, and a benchmark harness that reports a mean while pausing to record it systematically under-reports exactly the stalls the architecture exists to eliminate. Keep full histograms, publish p50, p99 and p99.9, and make the raw distribution part of the artifact a third party can re-analyze.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">10</div><h2>Layer 6 &mdash; hardware in the loop</h2></div>
+  <div class="flow">
+    <p>Some claims cannot be measured from inside the machine making them, and F's headline interface claim is one of them.</p>
+    <div class="claim">
+      <span class="t">The instrument that settles &sect;05</span>
+      <b>Input-to-photon cannot be measured in software.</b> The software timestamp ends at the moment of GPU submission; everything after that &mdash; scanout, panel response, the display's own processing &mdash; is invisible to the system and is a substantial fraction of the number a person actually perceives. The honest instrument is a <b>photodiode fixed to the panel</b> and an instrumented input device sharing one timebase, comparing the electrical moment of input against the optical moment of light. Published rigs sample the photodiode at 14-bit resolution over thousands of samples per run. Without this, a claim of "9 ms typical, 14 ms p99" is an estimate of the part of the pipeline F can see, and should be labelled as such.
+    </div>
+    <p>The rest of the layer:</p>
+    <ul class="list">
+      <li><b>External power measurement</b> for the energy claims. On-chip energy counters are convenient and are also the thing being optimized against; an external meter is what a skeptic will ask for.</li>
+      <li><b>Performance counters and processor trace</b> for the counter-based metrics in layer 5, and for cycle-level investigation when a change-point detector fires without an obvious cause.</li>
+      <li><b>Dedicated bare-metal runners.</b> Shared cloud instances cannot produce defensible tail-latency numbers &mdash; noisy neighbours, frequency variation and virtualization overhead all live exactly in the p99.9 the architecture claims to fix. A small number of pinned, thermally stable, physically identical machines is worth more than a large elastic fleet.</li>
+    </ul>
+    <div class="note"><b>Budget the rig early, use it late.</b> The photodiode setup is inexpensive &mdash; a photodiode, an ADC, an instrumented switch, a shared clock &mdash; but it only becomes useful once there is a compositor to measure, at phase 03. Specify it now so the compositor is built with an external timebase it can be correlated against; retrofitting a shared timebase is much harder than designing for one.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">11</div><h2>Layer 7 &mdash; the claims registry</h2></div>
+  <div class="flow">
+    <p>The layer that turns six layers of machinery into the thing section 13 actually asked for. Every claim in every document becomes a machine-readable record, and the documents render their numbers <em>from</em> that record rather than restating them by hand.</p>
+  </div>
+  <div class="codeblock">
+    <div class="codecap">One claim, as a record</div>
+<pre>claim: <span class="k">ring-submit-latency</span>
+  statement:  single ring submission, warm cache, beats an
+              equivalent syscall by at least 5&times;
+  baseline:   linux-6.x-tuned  <span class="c">// io_uring, sched_ext, hugepages</span>
+  workload:   bench/ring_submit.rs
+  metrics:    [ns_per_op_p99, instructions_per_op, joules_per_op]
+  threshold:  ns_per_op_p99 &lt; 50 AND ratio_vs_baseline &gt; 5.0
+  hardware:   runner-class-A          <span class="c">// pinned bare metal</span>
+  reproduce:  <span class="k">cargo xtask claim ring-submit-latency</span>
+  history:    claims/ring-submit-latency.jsonl
+  status:     <span class="k">gating</span>              <span class="c">// fails the build on regression</span></pre>
+  </div>
+  <div class="flow">
+    <p>What that buys, and why it is worth the modest effort:</p>
+    <ul class="list">
+      <li><b>Documents cannot drift from reality.</b> A number in a published document that no longer holds is the fastest way to lose a reader's trust, and it happens to every long-lived project. Generating the numbers from the registry makes drift structurally impossible.</li>
+      <li><b>A skeptic runs one command.</b> Section 13's reproducibility requirement stops being an aspiration and becomes a script.</li>
+      <li><b>The baseline is versioned alongside the claim.</b> Which is what stops the tuned-Linux comparison from quietly decaying into a stock-Linux comparison as the baseline configuration ages and nobody re-checks it.</li>
+      <li><b>Gating is explicit.</b> Some claims gate the build; some are tracked but advisory. Marking which is which prevents the common failure where a broken benchmark gets muted "temporarily" and stays muted.</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">12</div><h2>What to build when</h2></div>
+  <div class="flow">
+    <p>Mapped onto the milestone ladder in the implementation companion. The ordering is not negotiable at the top and is fairly free at the bottom.</p>
+  </div>
+  <div class="seq">
+    <div class="sq">
+      <div class="sqw">M0 &mdash; M1</div>
+      <div class="sqb">
+        <h3>Layer 0, and the lint that enforces it</h3>
+        <p>The <code>Env</code> capability, the seeded scheduler, and a build-failing lint on every forbidden source of nondeterminism. Plus coverage instrumentation, while the kernel is small enough that adding it is trivial. <b>Nothing else on this page is possible if this slips.</b></p>
+      </div>
+    </div>
+    <div class="sq">
+      <div class="sqw">M2</div>
+      <div class="sqb">
+        <h3>The claims registry, with its first entry</h3>
+        <p>Timer jitter p99 is the first real measurement the project produces. Make it the first registry entry rather than a number in a commit message, and the apparatus grows with the system instead of being retrofitted onto it.</p>
+      </div>
+    </div>
+    <div class="sq">
+      <div class="sqw">M4</div>
+      <div class="sqb">
+        <h3>Capability negative tests, then Kani on the same properties</h3>
+        <p>The negative suite is already the phase-00 exit criterion. Bounded model checking of the same properties costs little on top and catches the cases the test author did not think of.</p>
+      </div>
+    </div>
+    <div class="sq">
+      <div class="sqw">M5</div>
+      <div class="sqb">
+        <h3>Ring litmus tests and weak-memory checking</h3>
+        <p>The moment the ring exists, before anything is built on it. Litmus tests as permanent regression guards; RustMC on the cursor protocol; ARM64 in CI from this point onward.</p>
+      </div>
+    </div>
+    <div class="sq">
+      <div class="sqw">Phase 01</div>
+      <div class="sqb">
+        <h3>The simulator and the hostile-peer fuzzer</h3>
+        <p>Device models arrive with the drivers, so the simulator becomes possible exactly when there is something to simulate. The hostile-peer harness lands with the first cross-trust-boundary ring.</p>
+      </div>
+    </div>
+    <div class="sq">
+      <div class="sqw">Phase 02</div>
+      <div class="sqb">
+        <h3>Verus on the frame; change-point detection in CI</h3>
+        <p>Proof work needs a frame that has stopped moving. By this point there is enough commit history for change-point detection to have a distribution to reason about.</p>
+      </div>
+    </div>
+    <div class="sq">
+      <div class="sqw">Phase 03</div>
+      <div class="sqb">
+        <h3>The photodiode rig</h3>
+        <p>When there is a compositor to measure. Specify the shared timebase before building the compositor, not after.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">13</div><h2>What not to build</h2></div>
+  <div class="flow">
+    <ul class="list">
+      <li><b>Do not write a fuzzer.</b> Coverage-guided mutation engines are a mature field. Write the F-specific parts &mdash; the SQE generator and the hostile-peer harness &mdash; and drive them with an existing engine.</li>
+      <li><b>Do not write a model checker.</b> RustMC, Loom and Shuttle exist and are the product of years of research. Write litmus tests, not tooling.</li>
+      <li><b>Do not attempt whole-system proof.</b> seL4's decade for ten thousand lines is the calibration, and section 08 already made this call. Verify the frame and stop.</li>
+      <li><b>Do not build a CI system.</b> Use an ordinary one and put the intelligence in the claims registry and the detectors.</li>
+      <li><b>Do not defer the substrate for velocity.</b> The one irreversible decision on this page. Every week of "we will make it deterministic later" makes later cost more, and past some point it simply does not happen &mdash; which is the entire reason no mainstream kernel can do what section 02 describes.</li>
+    </ul>
+    <div class="claim"><b>The whole document in one line:</b> build layer 0 in the first fortnight, buy or borrow layers 2 through 5, invest original effort only in the simulator, the hostile-peer harness and the claims registry &mdash; because those three are the parts that are specific to F, and they are also the three that turn the architecture's promises into things a skeptic can try to break.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">14</div><h2>Sources</h2></div>
+  <div class="refs">
+    <a href="https://antithesis.com/docs/resources/deterministic_simulation_testing/">Deterministic simulation testing: how it works<span>Antithesis</span></a>
+    <a href="https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/internals/vopr.md">The VOPR simulator<span>TigerBeetle</span></a>
+    <a href="https://tigerbeetle.com/blog/2026-08-20-protocol-aware-dst/">Protocol-aware deterministic simulation testing<span>TigerBeetle, August 2026</span></a>
+    <a href="https://pierrezemb.fr/posts/learn-about-dst/">An introduction to deterministic simulation testing<span>Pierre Zemb</span></a>
+    <a href="https://www.warpstream.com/blog/deterministic-simulation-testing-for-our-entire-saas">DST applied to an entire product<span>WarpStream</span></a>
+    <a href="https://github.com/ivanyu/awesome-deterministic-simulation-testing">Curated DST resources<span>index</span></a>
+    <a href="https://arxiv.org/abs/2605.03822">KVerus: scalable proof generation for Rust<span>arXiv, 2026 &mdash; Asterinas results</span></a>
+    <a href="https://arxiv.org/pdf/2607.01504">Kani: a model checker for Rust<span>arXiv, 2026</span></a>
+    <a href="https://popl26.sigplan.org/details/POPL-2026-tutorials/6/Creusot-Formal-verification-of-Rust-programs">Creusot tutorial<span>POPL 2026</span></a>
+    <a href="https://arxiv.org/pdf/2502.06293">RustMC: weak-memory model checking for Rust<span>arXiv</span></a>
+    <a href="https://plv.mpi-sws.org/genmc/cav21-paper.pdf">GenMC: a model checker for weak memory models<span>CAV</span></a>
+    <a href="https://www.usenix.org/conference/usenixsecurity21/presentation/schumilo">Nyx: greybox fuzzing with fast snapshots<span>USENIX Security</span></a>
+    <a href="https://arxiv.org/pdf/2405.10220">SoK: prudent evaluation practices for fuzzing<span>arXiv</span></a>
+    <a href="https://arxiv.org/pdf/2301.03034">Hunter: change point detection for performance regressions<span>arXiv</span></a>
+    <a href="https://arxiv.org/pdf/2606.18377">Change point detection for performance anomalies at Mozilla<span>arXiv, 2026</span></a>
+    <a href="https://doi.org/10.1145/3838807">Reproducible execution-time measurement in CI<span>ACM TOSEM</span></a>
+    <a href="https://github.com/marconett/click2photon">click2photon: photodiode display-latency measurement<span>reference rig</span></a>
+    <a href="https://antmicro.com/blog/2025/09/video-latency-tester">Open-source video latency probe<span>Antmicro</span></a>
+  </div>
+  <div class="foot">
+    Also worth reading before committing to a design: FoundationDB's own account of building its simulator &middot; syzkaller's description language, as the thing F's SQE generator should improve on by being generated rather than hand-written &middot; Apache Otava, for change-point detection at practical cost &middot; the seL4 verification papers, for a calibrated sense of what full proof actually costs.
+  </div>
+</section>
+
+</div>

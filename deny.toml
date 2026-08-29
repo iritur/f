@@ -1,0 +1,36 @@
+# Dependency policy. A research OS whose claim is a small trusted base cannot
+# have an unbounded dependency graph — every crate here is code somebody must
+# read before the safety argument means anything.
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+# A path dependency inside this workspace has no version requirement, so it
+# reads as a wildcard. The rule is aimed at `foo = "*"` from a registry — an
+# unbounded external dependency — not at one crate here depending on another.
+allow-wildcard-paths = true
+# The kernel tree takes no dependency that is not no_std and audited.
+deny = [
+    { name = "openssl" },
+    { name = "ring" },   # name collision with our own crate; avoid confusion
+]
+
+[licenses]
+# Permissive only in the workspace proper. Copyleft is confined to third_party/,
+# which is excluded from this check and governed by LICENSING.md instead.
+allow = ["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0"]
+confidence-threshold = 0.9
+exceptions = []
+
+[advisories]
+yanked = "deny"
+# `unmaintained = "deny"` was removed from cargo-deny's schema: every advisory
+# — vulnerability, unsoundness and unmaintained alike — is now denied by
+# default, and an exception is an entry in `ignore` with an id and a reason.
+# That is the same shape as the allow-lists in `xtask`, and for the same
+# reason: an exception should be a reviewable diff rather than a setting.
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

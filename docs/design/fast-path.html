@@ -1,0 +1,890 @@
+<title>The Fast Path</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;700;900&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root{
+  --paper:#F2F4F7; --surface:#FFFFFF; --surface-2:#E9ECF2;
+  --ink:#12141A; --ink-2:#3A4150; --muted:#6B7382;
+  --line:#D6DBE4; --line-strong:#B9C0CD;
+  --cobalt:#2F4FD8; --rust:#A8431C; --teal:#0B6E5C;
+  --on-accent:#FFFFFF;
+  --shadow:0 1px 2px rgba(18,20,26,.05), 0 8px 24px -16px rgba(18,20,26,.28);
+  --sans:"IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --display:"Chivo", "IBM Plex Sans", ui-sans-serif, sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --col:66ch; --wide:1180px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+    --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+    --line:#262C39; --line-strong:#3D4657;
+    --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+    --on-accent:#0D0F14;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+  --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+  --line:#262C39; --line-strong:#3D4657;
+  --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+  --on-accent:#0D0F14;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+}
+
+*{box-sizing:border-box;}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:var(--sans); font-size:17px; line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:var(--wide); margin:0 auto; padding:0 28px 96px;}
+.col{max-width:var(--col);}
+
+h1,h2,h3,h4{font-family:var(--display); text-wrap:balance; margin:0;}
+h1{font-weight:900; font-size:clamp(2.6rem,6.5vw,4.4rem); line-height:.98; letter-spacing:-.035em;}
+h2{font-weight:900; font-size:clamp(1.6rem,3.2vw,2.2rem); line-height:1.08; letter-spacing:-.025em;}
+h3{font-weight:700; font-size:1.16rem; line-height:1.3; letter-spacing:-.012em;}
+h4{font-weight:700; font-size:.95rem; line-height:1.35;}
+p{margin:0;}
+a{color:var(--cobalt); text-decoration-thickness:1px; text-underline-offset:2px;}
+a:focus-visible{outline:2px solid var(--cobalt); outline-offset:3px; border-radius:2px;}
+strong, b{font-weight:600;}
+code{font-family:var(--mono); font-size:.87em; background:var(--surface-2); padding:.1em .34em; border-radius:3px;}
+
+.eyebrow{
+  font-family:var(--mono); font-size:.7rem; font-weight:600;
+  letter-spacing:.16em; text-transform:uppercase; color:var(--muted);
+}
+
+.mast{padding:72px 0 40px; border-bottom:1px solid var(--line-strong);}
+.mast-grid{display:flex; flex-direction:column; gap:26px;}
+.mast .lede{font-size:1.2rem; line-height:1.55; color:var(--ink-2); max-width:60ch;}
+.mast .lede b{color:var(--ink);}
+.specline{
+  display:flex; flex-wrap:wrap; gap:10px 26px; padding-top:6px;
+  font-family:var(--mono); font-size:.74rem; color:var(--muted);
+  letter-spacing:.04em;
+}
+.specline span b{color:var(--ink-2);}
+
+section{padding:56px 0 8px; border-bottom:1px solid var(--line);}
+section:last-of-type{border-bottom:0;}
+.sec-head{display:flex; align-items:baseline; gap:16px; margin-bottom:20px; flex-wrap:wrap;}
+.sec-num{
+  font-family:var(--mono); font-size:.74rem; font-weight:600; color:var(--cobalt);
+  letter-spacing:.1em; padding-top:.5em;
+}
+.flow{display:flex; flex-direction:column; gap:18px;}
+.flow > p, .flow > ul, .flow > .note{max-width:var(--col);}
+
+ul.list{margin:0; padding-left:0; list-style:none; display:flex; flex-direction:column; gap:11px;}
+ul.list li{position:relative; padding-left:22px;}
+ul.list li::before{
+  content:""; position:absolute; left:2px; top:.62em;
+  width:7px; height:7px; border:1.5px solid var(--cobalt); border-radius:1px;
+}
+
+.note{
+  border-left:3px solid var(--rust); background:color-mix(in srgb, var(--rust) 7%, var(--surface));
+  padding:14px 18px; border-radius:0 5px 5px 0; font-size:.95rem; color:var(--ink-2);
+}
+.note b{color:var(--ink);}
+
+.ledger{
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:1px;
+  background:var(--line); border:1px solid var(--line); border-radius:7px; overflow:hidden;
+  margin:6px 0 4px;
+}
+.ledger div{background:var(--surface); padding:16px 18px 18px; display:flex; flex-direction:column; gap:5px;}
+.ledger .fig{font-family:var(--mono); font-size:1.5rem; font-weight:600; color:var(--rust); letter-spacing:-.02em; font-variant-numeric:tabular-nums;}
+.ledger .cap{font-size:.85rem; color:var(--ink-2); line-height:1.4;}
+.ledger .sub{font-family:var(--mono); font-size:.68rem; color:var(--muted); letter-spacing:.05em; text-transform:uppercase;}
+
+.stackwrap{margin:8px 0 6px; overflow-x:auto; padding-bottom:4px;}
+.stack{
+  display:grid; grid-template-columns:auto minmax(430px,1fr) minmax(160px,220px);
+  gap:6px 14px; min-width:640px; align-items:stretch;
+}
+.lv{
+  display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 12px;
+  border:1px solid var(--line); border-left:4px solid var(--cobalt);
+  border-radius:5px; padding:12px 16px;
+}
+.lv h4{flex:0 0 auto;}
+.lv .techs{font-family:var(--mono); font-size:.73rem; color:var(--muted); letter-spacing:.02em; line-height:1.55;}
+.lv-idx{
+  font-family:var(--mono); font-size:.7rem; font-weight:600; color:var(--muted);
+  display:flex; align-items:center; letter-spacing:.08em; white-space:nowrap;
+}
+.lv0{background:color-mix(in srgb, var(--cobalt) 16%, var(--surface));}
+.lv1{background:color-mix(in srgb, var(--cobalt) 13%, var(--surface));}
+.lv2{background:color-mix(in srgb, var(--cobalt) 10%, var(--surface));}
+.lv3{background:color-mix(in srgb, var(--cobalt) 7.5%, var(--surface));}
+.lv4{background:color-mix(in srgb, var(--cobalt) 5%, var(--surface));}
+.lv5{background:color-mix(in srgb, var(--cobalt) 3%, var(--surface));}
+.lv6{background:var(--surface);}
+.bypass{
+  grid-column:3; grid-row:1 / span 5;
+  border:1px dashed var(--rust); border-radius:5px;
+  background:color-mix(in srgb, var(--rust) 6%, var(--surface));
+  padding:14px 15px; display:flex; flex-direction:column; gap:8px; justify-content:center;
+}
+.bypass .t{font-family:var(--mono); font-size:.7rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--rust);}
+.bypass .d{font-size:.82rem; line-height:1.45; color:var(--ink-2);}
+.stack-note{grid-column:1 / -1; font-family:var(--mono); font-size:.7rem; color:var(--muted); padding-top:8px; letter-spacing:.03em;}
+
+.budget{display:flex; flex-direction:column; gap:20px; margin:8px 0 4px;}
+.bar-row{display:flex; flex-direction:column; gap:8px;}
+.bar-label{display:flex; justify-content:space-between; align-items:baseline; gap:14px; font-family:var(--mono); font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; color:var(--muted);}
+.bar-label b{color:var(--ink); font-size:.95rem; letter-spacing:0; text-transform:none; font-family:var(--sans);}
+.bar{display:flex; height:34px; border-radius:4px; overflow:hidden; border:1px solid var(--line-strong); background:var(--surface);}
+.seg{display:flex; align-items:center; justify-content:center; font-family:var(--mono); font-size:.66rem; font-weight:600; white-space:nowrap; overflow:hidden;}
+.seg.a{background:var(--cobalt); color:var(--on-accent);}
+.seg.b{background:color-mix(in srgb, var(--cobalt) 78%, var(--surface)); color:var(--on-accent);}
+.seg.c{background:color-mix(in srgb, var(--cobalt) 50%, var(--surface)); color:var(--ink);}
+.seg.d{background:color-mix(in srgb, var(--cobalt) 30%, var(--surface)); color:var(--ink);}
+.seg.e{background:color-mix(in srgb, var(--cobalt) 16%, var(--surface)); color:var(--ink);}
+.seg.x{background:color-mix(in srgb, var(--rust) 72%, var(--surface)); color:var(--on-accent); border-right:1px solid var(--surface);}
+.seg.blank{background:transparent; color:var(--muted);}
+
+.tablewrap{overflow-x:auto; border:1px solid var(--line); border-radius:7px; background:var(--surface); margin:6px 0 4px;}
+table{border-collapse:collapse; width:100%; min-width:680px; font-size:.9rem;}
+th,td{text-align:left; padding:12px 16px; border-bottom:1px solid var(--line); vertical-align:top; line-height:1.5;}
+thead th{
+  font-family:var(--mono); font-size:.68rem; font-weight:600; letter-spacing:.12em;
+  text-transform:uppercase; color:var(--muted); background:var(--surface-2);
+  border-bottom:1px solid var(--line-strong); white-space:nowrap;
+}
+tbody tr:last-child td{border-bottom:0;}
+td.layer{font-family:var(--mono); font-size:.78rem; color:var(--ink-2); white-space:nowrap;}
+td.num{font-family:var(--mono); font-variant-numeric:tabular-nums; white-space:nowrap;}
+
+.chip{
+  display:inline-block; font-family:var(--mono); font-size:.64rem; font-weight:600;
+  letter-spacing:.08em; text-transform:uppercase; padding:3px 8px; border-radius:3px;
+  border:1px solid currentColor; white-space:nowrap;
+}
+.chip.ship{color:var(--teal); background:color-mix(in srgb, var(--teal) 10%, var(--surface));}
+.chip.edge{color:var(--cobalt); background:color-mix(in srgb, var(--cobalt) 10%, var(--surface));}
+.chip.bet{color:var(--rust); background:color-mix(in srgb, var(--rust) 10%, var(--surface));}
+
+.bets{display:grid; grid-template-columns:repeat(auto-fit,minmax(290px,1fr)); gap:14px; margin:6px 0 4px;}
+.bet{
+  background:var(--surface); border:1px solid var(--line); border-radius:7px;
+  padding:18px 20px 20px; display:flex; flex-direction:column; gap:9px; box-shadow:var(--shadow);
+}
+.bet .k{font-family:var(--mono); font-size:.68rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--cobalt);}
+.bet p{font-size:.92rem; color:var(--ink-2); line-height:1.55;}
+.bet .against{font-size:.84rem; color:var(--muted); border-top:1px dashed var(--line-strong); padding-top:9px; margin-top:auto;}
+.bet .against b{color:var(--rust); font-family:var(--mono); font-size:.68rem; letter-spacing:.1em; text-transform:uppercase; display:block; margin-bottom:3px;}
+
+.phases{display:flex; flex-direction:column; margin:6px 0 4px;}
+.phase{display:grid; grid-template-columns:64px 1fr; gap:0 20px; padding:20px 0; border-top:1px solid var(--line);}
+.phase:first-child{border-top:1px solid var(--line-strong);}
+.phase:last-child{border-bottom:1px solid var(--line-strong);}
+.ph-n{
+  font-family:var(--mono); font-size:1.5rem; font-weight:600; color:var(--cobalt);
+  letter-spacing:-.02em; line-height:1.1; font-variant-numeric:tabular-nums;
+}
+.ph-body{display:flex; flex-direction:column; gap:7px;}
+.ph-body p{font-size:.93rem; color:var(--ink-2); max-width:62ch;}
+.ph-meta{display:flex; flex-wrap:wrap; gap:8px 20px; font-family:var(--mono); font-size:.7rem; color:var(--muted); letter-spacing:.05em; padding-top:2px;}
+.ph-meta b{color:var(--ink-2);}
+
+.risks{display:flex; flex-direction:column;}
+.risk{display:grid; grid-template-columns:minmax(130px,180px) 1fr; gap:6px 22px; padding:16px 0; border-top:1px solid var(--line);}
+.risk:last-child{border-bottom:1px solid var(--line);}
+.risk .rn{font-family:var(--display); font-weight:700; font-size:.98rem; line-height:1.35;}
+.risk .rd{font-size:.92rem; color:var(--ink-2); max-width:62ch;}
+
+.refs{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:10px 28px; font-size:.86rem;}
+.refs a{display:block; padding:5px 0; color:var(--ink-2); text-decoration:none; border-bottom:1px solid transparent;}
+.refs a:hover{color:var(--cobalt); border-bottom-color:var(--line-strong);}
+.refs a span{font-family:var(--mono); font-size:.68rem; color:var(--muted); display:block; letter-spacing:.05em;}
+.foot{padding-top:40px; font-family:var(--mono); font-size:.7rem; color:var(--muted); letter-spacing:.06em; line-height:1.8; max-width:80ch;}
+
+.flow > h3, .flow > .claim{max-width:var(--col);}
+.claim{
+  border-left:3px solid var(--cobalt); background:color-mix(in srgb, var(--cobalt) 7%, var(--surface));
+  padding:16px 20px; border-radius:0 5px 5px 0; font-size:1.02rem; color:var(--ink); line-height:1.55;
+}
+.claim .t{font-family:var(--mono); font-size:.68rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--cobalt); display:block; margin-bottom:7px;}
+
+.part{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:8px 0 4px;}
+.part-col{border:1px solid var(--line); border-radius:6px; padding:16px 18px 18px; display:flex; flex-direction:column; gap:10px;}
+.part-col.rt{border-left:4px solid var(--cobalt); background:color-mix(in srgb, var(--cobalt) 8%, var(--surface));}
+.part-col.lx{border-left:4px solid var(--line-strong); background:var(--surface);}
+.part-col h4{font-size:1rem;}
+.part-tag{font-family:var(--mono); font-size:.66rem; font-weight:600; letter-spacing:.1em; text-transform:uppercase; color:var(--muted);}
+.res{font-family:var(--mono); font-size:.73rem; line-height:1.9; color:var(--ink-2); display:flex; flex-direction:column;}
+.res b{color:var(--ink);}
+.own{font-size:.82rem; color:var(--muted); border-top:1px dashed var(--line-strong); padding-top:9px; margin-top:auto; line-height:1.5;}
+.own b{color:var(--ink-2);}
+.ringlink{
+  grid-column:1 / -1; border:1px dashed var(--rust); border-radius:6px;
+  background:color-mix(in srgb, var(--rust) 6%, var(--surface));
+  padding:11px 16px; font-size:.85rem; color:var(--ink-2); text-align:center;
+}
+.ringlink b{font-family:var(--mono); font-size:.68rem; font-weight:600; letter-spacing:.1em; text-transform:uppercase; color:var(--rust); display:block; margin-bottom:3px;}
+.hyp{
+  grid-column:1 / -1; border:1px solid var(--line-strong); border-radius:6px;
+  background:var(--surface-2); padding:14px 18px; display:flex; flex-direction:column; gap:5px;
+}
+.hyp .t{font-family:var(--mono); font-size:.68rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-2);}
+.hyp .d{font-size:.85rem; color:var(--muted); line-height:1.5;}
+
+@media (max-width:720px){
+  .part{grid-template-columns:1fr;}
+  body{font-size:16px;}
+  .wrap{padding:0 20px 72px;}
+  .stack{grid-template-columns:auto 1fr;}
+  .bypass{grid-column:1 / -1; grid-row:auto;}
+  .phase{grid-template-columns:44px 1fr; gap:0 14px;}
+  .risk{grid-template-columns:1fr;}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none !important; transition:none !important;}}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="mast-grid">
+    <div class="eyebrow">Reference architecture &middot; systems research</div>
+    <h1>The Fast Path</h1>
+    <p class="lede">Four goals &mdash; <b>blazingly fast, technologically current, effective everywhere, beautiful and fully customizable</b> &mdash; do not automatically coexist. Speed usually costs safety. Customization usually costs stability. Beauty usually costs latency. This document picks the small set of architectural invariants that make all four fall out of the design instead of fighting each other, names the concrete technology for each layer, and is honest about which parts ship today and which are a bet.</p>
+    <div class="specline">
+      <span><b>Scope</b> &nbsp;research vehicle, workstation class</span>
+      <span><b>Horizon</b> &nbsp;2026&ndash;2032</span>
+      <span><b>Posture</b> &nbsp;clean slate; drivers imported, nothing else</span>
+      <span><b>Companions</b> &nbsp;Ring, Scene, Boot &middot; Deadline All the Way Down &middot; Lineage and Debts &middot; Proving Ground</span>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="sec-head"><div class="sec-num">01</div><h2>The thesis in one paragraph</h2></div>
+  <div class="flow">
+    <p>A modern OS is not slow because its instructions are slow. It is slow because it crosses protection boundaries and copies memory thousands of times a second, schedules threads that immediately block, and paints pixels through five layers of indirection. So the whole design reduces to four invariants: <b>no boundary crossing on the hot path</b> (shared-memory rings instead of syscalls), <b>no copies</b> (buffers are handed over, never duplicated), <b>no ambient authority</b> (capabilities, so isolation is free rather than a tax), and <b>no mutable global state</b> (content-addressed, versioned storage, so customization can never corrupt the system). Speed, security and customizability then stop being trade-offs against each other &mdash; they become the same property viewed from three angles. Beauty is the fifth invariant, and it is really a latency budget.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">02</div><h2>Where the time actually goes</h2></div>
+  <div class="flow">
+    <p>Before choosing technology, be precise about the enemy. These are the recurring costs in a conventional stack on current x86-64 and ARM64 hardware. Every decision later in this document targets one of these lines.</p>
+    <div class="ledger">
+      <div><div class="fig">~40&ndash;100 ns</div><div class="cap">Bare syscall entry and exit, before mitigations.</div><div class="sub">boundary</div></div>
+      <div><div class="fig">3&ndash;8&times;</div><div class="cap">That cost multiplied once Spectre and Meltdown mitigations &mdash; page-table isolation, indirect-branch barriers &mdash; are enabled.</div><div class="sub">boundary</div></div>
+      <div><div class="fig">1&ndash;5 &micro;s</div><div class="cap">A full context switch, counting the cache and TLB damage it leaves behind.</div><div class="sub">scheduling</div></div>
+      <div><div class="fig">2&ndash;4&times;</div><div class="cap">Times a single frame's pixels are copied: app &rarr; toolkit &rarr; compositor &rarr; GPU &rarr; scanout.</div><div class="sub">memory</div></div>
+      <div><div class="fig">30&ndash;80 ms</div><div class="cap">Typical desktop input-to-photon latency &mdash; the number a person actually feels.</div><div class="sub">graphics</div></div>
+      <div><div class="fig">100s of ms</div><div class="cap">Cold application start: dynamic linking, relocations, page faults, runtime warm-up.</div><div class="sub">startup</div></div>
+    </div>
+    <p>None of these are compute. They are all <b>coordination overhead</b>. That is the good news: coordination overhead is an architecture problem, and architecture is the one thing a new OS is allowed to change.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">03</div><h2>Five load-bearing bets</h2></div>
+  <div class="flow">
+    <p>Everything else is detail. If any one of these five is wrong, the project is wrong.</p>
+  </div>
+  <div class="bets">
+    <div class="bet">
+      <div class="k">Bet 01 &mdash; kernel shape</div>
+      <h3>Framekernel, not microkernel or monolith</h3>
+      <p>Run everything in one address space for monolithic speed, but use Rust's ownership model to partition the kernel into a small privileged <em>frame</em> &mdash; the only code allowed <code>unsafe</code> &mdash; and unprivileged services above it. Microkernel-grade isolation reasoning without paying microkernel IPC.</p>
+      <div class="against"><b>What could break it</b> Soundness of the frame is a proof obligation, not a compiler guarantee. Get the frame's API wrong and the entire safety argument collapses silently.</div>
+    </div>
+    <div class="bet">
+      <div class="k">Bet 02 &mdash; the I/O primitive</div>
+      <h3>One primitive: the shared-memory ring</h3>
+      <p>Not files, not sockets, not ioctls. Every service &mdash; storage, network, graphics, timers, IPC, process control &mdash; is a submission and completion ring pair in shared memory, addressed by capability. Batched, asynchronous, zero-copy, uniform. <code>io_uring</code> generalized from an I/O accelerator into the entire system interface.</p>
+      <div class="against"><b>What could break it</b> Rings are hard to make ergonomic. If writing against one feels worse than a blocking read, nobody writes native apps.</div>
+    </div>
+    <div class="bet">
+      <div class="k">Bet 03 &mdash; state model</div>
+      <h3>Content-addressed and immutable, top to bottom</h3>
+      <p>No mutable filesystem as the primary abstraction. A Merkle-DAG blob store with copy-on-write views, and the entire system configuration as a pure function of a declarative expression. Snapshots, atomic upgrade, instant rollback, reproducible builds and free undo become one mechanism instead of six features.</p>
+      <div class="against"><b>What could break it</b> Write amplification and garbage collection. And every existing tool assumes mutable paths.</div>
+    </div>
+    <div class="bet">
+      <div class="k">Bet 04 &mdash; authority</div>
+      <h3>Capabilities, with no root and no global namespace</h3>
+      <p>A process can only touch what it was handed. There is no path to escalate because there is nothing to escalate to. Sandboxing stops being a feature bolted on top and becomes the default state of the machine, at no runtime cost.</p>
+      <div class="against"><b>What could break it</b> Usability. Capability systems fail when granting authority is inconvenient &mdash; the file picker has to <em>be</em> the grant mechanism, invisibly.</div>
+    </div>
+    <div class="bet">
+      <div class="k">Bet 05 &mdash; the display</div>
+      <h3>One GPU-driven scene graph for the whole machine</h3>
+      <p>Applications submit scene deltas, not pixels. The compositor holds a single retained scene for every window on the system and resolves it in one GPU pass, vector-native and resolution-independent. Blur, refraction, real material shading and 120 Hz animation become nearly free because they are one shader, not thirty composited surfaces.</p>
+      <div class="against"><b>What could break it</b> It requires a new toolkit. Every legacy app that submits pixel buffers falls back to the slow path and looks foreign next to native ones.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">04</div><h2>The stack</h2></div>
+  <div class="flow">
+    <p>Seven layers. The important feature of this diagram is not the layers &mdash; it is the dashed column at the right, which is where the performance actually comes from. On the hot path an application talks to hardware through pre-negotiated shared memory and never traverses the layers at all. The layers exist to <em>set up</em> and <em>revoke</em> that channel, not to sit inside it.</p>
+  </div>
+  <div class="stackwrap">
+    <div class="stack">
+      <div class="lv-idx">L6</div>
+      <div class="lv lv6">
+        <h4>Applications</h4>
+        <div class="techs">native Rust &middot; WASM components (WASI 0.3) &middot; Linux binaries via compat layer</div>
+      </div>
+      <div class="bypass">
+        <div class="t">Fast path</div>
+        <div class="d">Once a capability is granted, the app owns a ring pair mapped onto the device queue. Submission is a store and a doorbell. <b>No syscall, no copy, no scheduler involvement.</b></div>
+        <div class="d">L1&ndash;L5 negotiate and revoke this channel. They are not in it.</div>
+      </div>
+
+      <div class="lv-idx">L5</div>
+      <div class="lv lv5">
+        <h4>Shell &amp; toolkit</h4>
+        <div class="techs">declarative reactive UI &middot; typed design tokens &middot; structured-object shell</div>
+      </div>
+
+      <div class="lv-idx">L4</div>
+      <div class="lv lv4">
+        <h4>Compositor &amp; input</h4>
+        <div class="techs">retained scene graph &middot; GPU compute path rasterizer &middot; timeline semaphores &middot; VRR &middot; HDR</div>
+      </div>
+
+      <div class="lv-idx">L3</div>
+      <div class="lv lv3">
+        <h4>System services</h4>
+        <div class="techs">object store &middot; semantic index &middot; inference service &middot; identity &middot; policy</div>
+      </div>
+
+      <div class="lv-idx">L2</div>
+      <div class="lv lv2">
+        <h4>User-space drivers</h4>
+        <div class="techs">NVMe &middot; NIC &middot; GPU &middot; audio &mdash; each a restartable isolated component</div>
+      </div>
+
+      <div class="lv-idx">L1</div>
+      <div class="lv lv1">
+        <h4>Kernel frame</h4>
+        <div class="techs">capabilities &middot; address spaces &middot; IRQ routing &middot; ring setup &middot; the only <code>unsafe</code> code</div>
+      </div>
+
+      <div class="lv-idx">L0</div>
+      <div class="lv lv0">
+        <h4>Hardware</h4>
+        <div class="techs">x86-64 / ARM64 / RISC-V &middot; IOMMU &middot; NPU &middot; CXL &middot; measured boot</div>
+      </div>
+
+      <div class="stack-note">Isolation is enforced by the type system and the IOMMU, not by ring transitions. A driver fault restarts one component; it does not panic the machine.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">05</div><h2>Beauty is a latency budget</h2></div>
+  <div class="flow">
+    <p>"Beautiful" is not a font choice. What people perceive as quality in an interface is overwhelmingly <b>the delay between moving their hand and the screen agreeing</b>, plus the absence of jitter. Fix the latency and even a plain interface feels expensive; miss it and no amount of blur and shadow rescues the machine. So set a hard budget and architect backwards from it.</p>
+    <div class="budget">
+      <div class="bar-row">
+        <div class="bar-label"><b>Conventional desktop stack</b><span>45 ms typical &middot; 80 ms p99</span></div>
+        <div class="bar">
+          <div class="seg x" style="flex:0 0 14%">input 6ms</div>
+          <div class="seg x" style="flex:0 0 24%">app + toolkit 11ms</div>
+          <div class="seg x" style="flex:0 0 22%">CPU raster 10ms</div>
+          <div class="seg x" style="flex:0 0 22%">composite 10ms</div>
+          <div class="seg x" style="flex:0 0 18%">scanout 8ms</div>
+        </div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label"><b>Target</b><span>9 ms typical &middot; 14 ms p99</span></div>
+        <div class="bar">
+          <div class="seg a" style="flex:0 0 11%">1ms</div>
+          <div class="seg b" style="flex:0 0 33%">app 3ms</div>
+          <div class="seg c" style="flex:0 0 22%">GPU raster 2ms</div>
+          <div class="seg d" style="flex:0 0 11%">1ms</div>
+          <div class="seg e" style="flex:0 0 23%">scanout 2ms</div>
+          <div class="seg blank" style="flex:1 1 auto"></div>
+        </div>
+      </div>
+    </div>
+    <p style="padding-top:6px;">Four mechanisms buy the difference:</p>
+    <ul class="list">
+      <li><b>Timestamp input at the driver and predict forward.</b> The compositor knows when the next scanout is and renders for <em>that</em> instant, not for when the event arrived. This alone removes a full frame.</li>
+      <li><b>Rasterize vectors on the GPU.</b> Compute-shader path rendering &mdash; the approach Vello demonstrates, using prefix-scan to parallelize work that is normally sequential &mdash; makes resolution independence and real-time effects cheap and deletes the CPU raster segment entirely.</li>
+      <li><b>Never copy a frame.</b> One retained scene graph, damage-tracked, explicit GPU synchronization through timeline semaphores, direct scanout when a surface is fullscreen.</li>
+      <li><b>Give the UI a deadline, not a priority.</b> The scheduler needs earliest-deadline-first classes so the compositor and audio threads structurally cannot be preempted into a missed frame. Real-time capability is a UI feature.</li>
+    </ul>
+    <div class="note"><b>Where this is genuinely hard:</b> a 9 ms budget gives an app 3 ms to produce a scene delta. Any garbage-collected language with a stop-the-world pause above 1 ms is disqualified from the UI thread. That is the real reason the base system has no GC.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">06</div><h2>Customization without fragility</h2></div>
+  <div class="flow">
+    <p>"Fully customizable" normally means "eventually broken." Users change something, it interacts badly, the machine stops booting &mdash; so vendors respond by locking everything down. The way out is to make experimentation <em>structurally</em> non-destructive. Three mechanisms, each for a different scope:</p>
+    <ul class="list">
+      <li><b>Configuration is a declarative expression and the system is its output.</b> The Nix and Guix model. The entire machine &mdash; packages, services, dotfiles, kernel parameters &mdash; is a pure function of one versioned expression. Every change produces a new generation; the previous one is still on disk, one boot entry away. You can change anything because you can undo everything.</li>
+      <li><b>Everything above the kernel frame is a swappable typed component.</b> Interfaces defined in WIT, implemented as WebAssembly components. Replace the compositor, the shell, the indexer or the window manager without recompiling the system &mdash; and without those components gaining any authority they were not granted.</li>
+      <li><b>Policy is sandboxed, verified code injected into the system.</b> This is the mechanism <code>sched_ext</code> proved works: let people write the actual scheduling algorithm, load it into the running kernel, verify it terminates, and stay able to eject it when it misbehaves. Apply the same pattern to I/O policy, cache policy, power policy and security policy. It is the difference between a configuration flag and genuine programmability.</li>
+    </ul>
+    <p>Visual customization follows the same logic. A system-wide <b>typed design-token layer</b> in the compositor &mdash; color, spacing, radius, motion, material, type scale &mdash; means a theme restyles every native application including ones its author never saw, and cannot break layout because the tokens are typed and range-checked.</p>
+    <p>And the deepest form of customizability: <b>every UI action is a call on the same capability API that automation uses.</b> The graphical shell is one client of the system, not a privileged one. That makes the machine scriptable by construction rather than by scraping.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">07</div><h2>Future-oriented means AI-native, structurally</h2></div>
+  <div class="flow">
+    <p>An OS designed now that treats accelerated inference as an application concern will be legacy on arrival. Being AI-native is not a chat window in the corner &mdash; it is four specific pieces of systems work:</p>
+    <ul class="list">
+      <li><b>The NPU is a scheduled resource with QoS, not a device file.</b> Current on-device engines are built for isolated inferences and degrade badly under concurrent, conflicting requests across CPU, integrated GPU and NPU. The OS is the only component that can see all three, so heterogeneous co-scheduling belongs there.</li>
+      <li><b>KV cache is a memory tier the OS manages.</b> Inference progress is tightly coupled to accelerator memory consumption; placement, eviction and reuse across processes is a paging problem, and paging is an operating system's core competence. Model weights come from the content-addressed store &mdash; deduplicated across every app, mapped rather than copied.</li>
+      <li><b>Semantic index as a first-class, capability-gated service.</b> The user's data indexed locally and privately, queryable by meaning, granted per-app like any other capability. This is what makes local assistance useful rather than a demo.</li>
+      <li><b>Agents are principals in the capability model.</b> An autonomous agent gets a scoped, revocable, auditable capability set &mdash; and because storage is immutable and versioned, every action it takes is inspectable and reversible for free. This is the strongest argument for bets 03 and 04: the immutable, capability-based design that looks academic today is exactly what makes an agentic machine safe to hand real authority.</li>
+    </ul>
+    <p>One more detail worth knowing: energy-aware scheduling tuned for browser workloads actively harms inference, parking CPUs at low frequencies during model execution and degrading both latency and efficiency. Power management has to become workload-aware &mdash; again an OS-level concern, not an app-level one.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">08</div><h2>Technology selection</h2></div>
+  <div class="flow">
+    <p>Layer by layer: the specific choice, the reason, and how mature it is. <span class="chip ship">Shipping</span> means production-grade today. <span class="chip edge">Edge</span> means real but young. <span class="chip bet">Bet</span> means you are betting on it maturing.</p>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Layer</th><th>Choice</th><th>Why this one</th><th>Maturity</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="layer">Kernel language</td>
+          <td><b>Rust</b>, no_std, with a proof-carrying unsafe frame</td>
+          <td>Memory and data-race safety without a garbage collector. Asterinas demonstrates the framekernel model concretely: Linux-comparable performance with the unsafe trusted computing base held to roughly 14% of the codebase, and 210+ Linux syscalls implemented.</td>
+          <td><span class="chip ship">Shipping</span></td>
+        </tr>
+        <tr>
+          <td class="layer">Kernel model</td>
+          <td><b>Framekernel</b>, with seL4 as the reference for capability design</td>
+          <td>seL4 proves the capability model at 9&ndash;18k SLOC with IPC within 10&ndash;20% of the hardware floor for kernel entry, address-space switch and exit. Borrow its authority model; skip the address-space switch by using language-enforced isolation instead.</td>
+          <td><span class="chip edge">Edge</span></td>
+        </tr>
+        <tr>
+          <td class="layer">Hardware safety</td>
+          <td><b>CHERI</b> capabilities where available; PAC, BTI and CET elsewhere</td>
+          <td>Bounds, permissions and a validity tag on every pointer, enforced in hardware &mdash; the only credible path to making legacy C safe. Morello shows strong spatial safety in purecap mode, but it remains an evaluation platform rather than a product.</td>
+          <td><span class="chip bet">Bet</span></td>
+        </tr>
+        <tr>
+          <td class="layer">System interface</td>
+          <td><b>Shared-memory ring pairs</b> with io_uring semantics, universal</td>
+          <td>Batching amortizes the boundary crossing to near zero. io_uring zero-copy receive already lands network payloads directly in user memory while headers still go through the normal stack. Generalize the pattern from I/O to every service.</td>
+          <td><span class="chip ship">Shipping</span></td>
+        </tr>
+        <tr>
+          <td class="layer">Drivers</td>
+          <td><b>User-space and restartable</b>, IOMMU-confined; virtio first</td>
+          <td>A driver bug becomes a restart, not a panic. Start with virtio so the whole system can be developed in a VM, then port real NVMe and GPU drivers to a narrow, deliberately chosen hardware set.</td>
+          <td><span class="chip ship">Shipping</span></td>
+        </tr>
+        <tr>
+          <td class="layer">Scheduling</td>
+          <td><b>Pluggable policy</b> plus a deadline class plus user-level runtimes</td>
+          <td>sched_ext, mainlined in Linux 6.12, established that safely loadable scheduler policy is practical. Make it native rather than an add-on, and hand core allocation to user-space runtimes so async tasks never involve the kernel at all.</td>
+          <td><span class="chip ship">Shipping</span></td>
+        </tr>
+        <tr>
+          <td class="layer">Component model</td>
+          <td><b>Declaratively routed capabilities</b>, resolved at image assembly</td>
+          <td>Authority is not passed by hand at runtime but declared in the component topology, which makes <em>what can this component reach</em> a question with a static, mechanically checkable answer. Fuchsia's component framework is the worked example; Genode's recursive composition is the deeper treatment. This is the largest gap between what bet 04 promises and what the rest of this document specifies.</td>
+          <td><span class="chip edge">Edge</span></td>
+        </tr>
+        <tr>
+          <td class="layer">Storage</td>
+          <td><b>Merkle-DAG object store</b>, copy-on-write views, embedded query engine</td>
+          <td>Snapshots, dedup, atomic upgrade, rollback and time-travel from a single mechanism. Directories become a view over a queryable index rather than the ground truth, so search is a query instead of a scan. Fuchsia already ships content-addressed, merkle-verified package delivery on this shape, which is direct prior art rather than an untested idea.</td>
+          <td><span class="chip edge">Edge</span></td>
+        </tr>
+        <tr>
+          <td class="layer">System config</td>
+          <td><b>Declarative and functional</b>, on the Nix/Guix model</td>
+          <td>Reproducible builds, atomic generations, one-boot rollback. This is what makes deep customization survivable, and it is the least risky idea in this entire document.</td>
+          <td><span class="chip ship">Shipping</span></td>
+        </tr>
+        <tr>
+          <td class="layer">App format</td>
+          <td><b>WASM Component Model</b> with WASI 0.3; native Rust for system components</td>
+          <td>WASI 0.3.0, ratified June 2026, moved async into the Component Model itself with first-class <code>stream</code> and <code>future</code> types, so components compose across languages without hand-written state machines. A typed, sandboxed, language-agnostic app boundary that matches the capability model exactly.</td>
+          <td><span class="chip edge">Edge</span></td>
+        </tr>
+        <tr>
+          <td class="layer">2D rendering</td>
+          <td><b>GPU compute path rasterization</b>, Vello-class, over Vulkan or WebGPU</td>
+          <td>Resolution independence and near-free effects. Vello is still alpha, but it ships three backends &mdash; GPU compute, pure CPU, and a hybrid &mdash; which is exactly the fallback ladder an OS needs across a range of hardware.</td>
+          <td><span class="chip bet">Bet</span></td>
+        </tr>
+        <tr>
+          <td class="layer">Compositor</td>
+          <td><b>Single retained scene graph</b>, explicit sync, direct scanout, HDR</td>
+          <td>Scene deltas instead of pixel buffers is what collapses the copy count and the latency budget together. Fuchsia's Scenic is the closest existing proof that it works at system scale.</td>
+          <td><span class="chip edge">Edge</span></td>
+        </tr>
+        <tr>
+          <td class="layer">Driver import</td>
+          <td><b>Source-level KPI shim</b>, imported drivers compiled into isolated components</td>
+          <td>No Linux runs anywhere; only driver source is imported. FreeBSD maintains an in-tree compatibility layer that builds unmodified AMD and Intel graphics drivers against a foreign kernel, which is the existence proof that the API surface is tractable. Section 14 sets out what gets imported and what gets written.</td>
+          <td><span class="chip edge">Edge</span></td>
+        </tr>
+        <tr>
+          <td class="layer">Verification</td>
+          <td><b>Verus or Kani</b> on the frame; model checking on the ring protocols</td>
+          <td>A full seL4-style proof cost roughly a person-decade for 10k lines. Target the frame's invariants and the protocol state machines instead &mdash; most of the assurance for a fraction of the cost.</td>
+          <td><span class="chip edge">Edge</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">09</div><h2>Build order</h2></div>
+  <div class="flow">
+    <p>Ordered because it genuinely is a sequence &mdash; each phase is unusable until the previous one exists. Effort figures are person-years for a competent team, and assume you are not also inventing new research. They are the honest reason most OS projects should narrow their scope before writing any code.</p>
+  </div>
+  <div class="phases">
+    <div class="phase">
+      <div class="ph-n">00</div>
+      <div class="ph-body">
+        <h3>Boot and the frame</h3>
+        <p>Rust kernel, one architecture, QEMU with virtio only. Capability table, address spaces, interrupt routing, a timer, a serial console. Done when a capability-restricted user-space process runs and provably cannot touch anything it was not handed.</p>
+        <div class="ph-meta"><span><b>Effort</b> 0.5&ndash;1.5 py</span><span><b>Prior art</b> Asterinas, Redox, Theseus, Hubris</span><span><b>Risk</b> low</span></div>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="ph-n">01</div>
+      <div class="ph-body">
+        <h3>Rings and user-space drivers</h3>
+        <p>The universal submission and completion ring, the doorbell mechanism, IOMMU-confined driver components, and virtio-blk, virtio-net and virtio-gpu running entirely in user space. Done when a driver can be killed and restarted under load without the system noticing.</p>
+        <div class="ph-meta"><span><b>Effort</b> 1&ndash;2 py</span><span><b>Prior art</b> io_uring, SPDK, DPDK, Genode</span><span><b>Risk</b> medium</span></div>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="ph-n">02</div>
+      <div class="ph-body">
+        <h3>The object store and the declarative system</h3>
+        <p>Content-addressed blob store, copy-on-write views, the query index, and the configuration evaluator that builds an entire system generation from one expression. Done when you can break the system deliberately and roll it back from the boot menu.</p>
+        <div class="ph-meta"><span><b>Effort</b> 1.5&ndash;3 py</span><span><b>Prior art</b> Nix, Guix, git, casync, Unison</span><span><b>Risk</b> medium</span></div>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="ph-n">03</div>
+      <div class="ph-body">
+        <h3>Compositor, renderer, toolkit</h3>
+        <p>The longest and hardest phase, and where most projects die. Retained scene graph, GPU path rasterizer, text shaping, input prediction, the design-token system, and an accessibility tree built in from the first commit rather than retrofitted three years later.</p>
+        <div class="ph-meta"><span><b>Effort</b> 4&ndash;10 py</span><span><b>Prior art</b> Vello, Xilem, Scenic, Impeller, AccessKit</span><span><b>Risk</b> high</span></div>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="ph-n">04</div>
+      <div class="ph-body">
+        <h3>Application platform</h3>
+        <p>WASM component runtime, WIT interface definitions for every system service, the powerbox grant flow, and the package and generation model for third-party software. Done when someone outside the team ships an app.</p>
+        <div class="ph-meta"><span><b>Effort</b> 2&ndash;4 py</span><span><b>Prior art</b> Wasmtime, WASI 0.3, Fuchsia components</span><span><b>Risk</b> medium</span></div>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="ph-n">05</div>
+      <div class="ph-body">
+        <h3>Driver import</h3>
+        <p>The kernel-API shim, and the imported graphics stack running as an isolated, IOMMU-confined component. Do this <em>after</em> the native drivers on the measured paths exist, or the shim's assumptions quietly become the system's assumptions. Getting real hardware working is what turns benchmarks on emulated devices into evidence.</p>
+        <div class="ph-meta"><span><b>Effort</b> 2&ndash;5 py</span><span><b>Prior art</b> FreeBSD linuxkpi, LKL, NetBSD rump</span><span><b>Risk</b> high</span></div>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="ph-n">06</div>
+      <div class="ph-body">
+        <h3>AI substrate</h3>
+        <p>NPU and GPU co-scheduling with QoS, KV cache as a managed memory tier, model weights mapped from the object store, the semantic index service, and agents as revocable capability principals.</p>
+        <div class="ph-meta"><span><b>Effort</b> 2&ndash;5 py</span><span><b>Prior art</b> active research, no settled answer</span><span><b>Risk</b> high</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">10</div><h2>How you would know it is working</h2></div>
+  <div class="flow">
+    <p>Define the numbers before writing code, measure them in CI from phase 00, and refuse to regress them. Every one of these is p99, not average &mdash; averages hide exactly the behavior people perceive as cheapness.</p>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Metric</th><th class="num">Conventional</th><th class="num">Target</th><th>What it proves</th></tr></thead>
+      <tbody>
+        <tr><td>Input to photon, p99</td><td class="num">60&ndash;80 ms</td><td class="num">&lt; 14 ms</td><td>The graphics pipeline and the scheduler are both honest.</td></tr>
+        <tr><td>Boundary crossings per UI frame</td><td class="num">300&ndash;3000</td><td class="num">&lt; 10</td><td>The ring abstraction is genuinely being used, not wrapped in a blocking shim.</td></tr>
+        <tr><td>Cold start to first frame</td><td class="num">300&ndash;1200 ms</td><td class="num">&lt; 50 ms</td><td>No dynamic linking storm; the object store maps instead of copying.</td></tr>
+        <tr><td>Full system rollback</td><td class="num">not possible</td><td class="num">1 reboot</td><td>Customization is genuinely non-destructive.</td></tr>
+        <tr><td>Unsafe code in the TCB</td><td class="num">~100%</td><td class="num">&lt; 5% of LOC</td><td>The framekernel partition is real and holding.</td></tr>
+        <tr><td>Driver crash blast radius</td><td class="num">whole machine</td><td class="num">one component</td><td>Isolation is structural rather than aspirational.</td></tr>
+        <tr><td>Audio round trip</td><td class="num">10&ndash;30 ms</td><td class="num">&lt; 5 ms</td><td>The deadline scheduler class holds up under load.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">11</div><h2>Where this most likely fails</h2></div>
+  <div class="flow">
+    <p>Worth stating plainly, because the failure modes of new operating systems are extremely well documented and almost identical every time.</p>
+  </div>
+  <div class="risks">
+    <div class="risk">
+      <div class="rn">The ecosystem wall</div>
+      <div class="rd">This is what kills OS projects, not technical difficulty. Fuchsia had a decade and a very large team, shipped a real microkernel, a real component framework and a real Linux compatibility layer &mdash; and never found a use case that generated developer interest. Technical excellence does not produce an ecosystem. Decide who the first thousand users are and what they cannot currently do, before phase 00.</div>
+    </div>
+    <div class="risk">
+      <div class="rn">Drivers</div>
+      <div class="rd">Modern GPUs, Wi-Fi and power management represent tens of thousands of person-years of accumulated vendor work. The viable answers are: target one machine exactly, the way Asahi did; stay on virtio under a hypervisor; or shim an existing driver ecosystem. Writing them yourself is not on the list.</div>
+    </div>
+    <div class="risk">
+      <div class="rn">The UI toolkit tax</div>
+      <div class="rd">Phase 03 is larger than phases 00 through 02 combined, and it is entirely unglamorous: text shaping, bidirectional layout, input methods, accessibility, color management, printing. Redox needed years of work before a desktop environment could be ported to it. Budget for this or the OS stays a terminal demo forever.</div>
+    </div>
+    <div class="risk">
+      <div class="rn">Rings are ergonomically hostile</div>
+      <div class="rd">Completion-based asynchronous I/O with borrowed buffers is genuinely harder to write against than a blocking read, and Rust's ownership model makes it harder still. If the ergonomic layer is not excellent, developers wrap everything in a blocking shim and the entire performance argument quietly evaporates.</div>
+    </div>
+    <div class="risk">
+      <div class="rn">Immutability meets reality</div>
+      <div class="rd">Content-addressed storage fights write-heavy workloads, garbage collection becomes a real engineering problem, and every existing tool assumes mutable paths. The mutable-path compatibility view is not optional and is not cheap.</div>
+    </div>
+    <div class="risk">
+      <div class="rn">Betting on immature dependencies</div>
+      <div class="rd">CHERI is still an evaluation platform. Vello is alpha. WASI 0.3 is months old. Each is the right long-term call and each can slip by years. Every bet needs a documented fallback that is merely good rather than exceptional.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">12</div><h2>The honest recommendation</h2></div>
+  <div class="flow">
+    <p>Do not build a general-purpose desktop OS. Build this architecture for <b>one workload where current systems visibly fail</b> &mdash; a low-latency creative workstation, a robotics or edge controller, a confidential-computing guest, an agent execution host &mdash; and let generality arrive later if it earns its way in. That is what every successful new OS actually did: seL4 through certification-critical embedded, Fuchsia through appliances, Asahi through exactly one laptop.</p>
+    <p>The architecture here does not get weaker when the target narrows. The framekernel, the universal ring, the immutable store, the capability model and the GPU-driven compositor are all <em>more</em> defensible on a focused machine than a general one &mdash; because a focused machine lets you choose the hardware, skip the compatibility layer, and spend the entire budget on the fast path. Then widen.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">13</div><h2>The research target</h2></div>
+  <div class="flow">
+    <p>Everything above is the general architecture. This section commits it &mdash; not to a product, but to a research vehicle, which changes what counts as success.</p>
+    <p>The ecosystem wall in section 11 is a <em>product</em> problem. Research systems are judged on defensible measured claims rather than on users: Exokernel, Barrelfish, Arrakis, Singularity and Theseus between them had approximately no users and changed how a generation of systems were built. That removes the constraint that kills most clean-slate work. It does not lower the bar &mdash; it moves it onto measurement, where a claim without a named baseline, a published workload and a reproduction command is not a result.</p>
+    <div class="claim">
+      <span class="t">Thesis</span>
+      Mainstream operating systems are built on a hardware model that stopped being accurate around 2015. They assume uniform cores, one flat memory tier, devices that need the kernel to mediate every access, and accelerators that are just files. A decade of silicon capability &mdash; user-level interrupts, device-side address translation, memory tiering across CXL, zoned storage, on-package matrix engines &mdash; is either unused or retrofitted into abstractions that predate it. This system is the argument that designing <em>for</em> the current machine, rather than adapting <em>to</em> it, is worth a large constant factor in both speed and energy.
+    </div>
+    <p>Speed and efficiency are therefore not separate promises. They are the predicted consequences of the thesis, which is a considerably stronger position than claiming both directly.</p>
+    <h3>The capabilities the system is built to exploit</h3>
+    <p>Each of these is real silicon, shipping or imminent, and each is either unused or awkwardly retrofitted by mainstream kernels. Together they are the research surface.</p>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Capability</th><th>What mainstream systems do with it</th><th>What this system does</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="layer">User-level interrupts</td>
+          <td>Essentially nothing. Delivery still costs a kernel transition, so event-driven designs pay several hundred nanoseconds per wakeup.</td>
+          <td>The ring doorbell becomes a user-to-user operation with no kernel involvement, taking the notification path from roughly a thousand cycles to roughly a hundred. This is the single largest upgrade available to bet 02.</td>
+          <td><span class="chip edge">Edge</span></td>
+        </tr>
+        <tr>
+          <td class="layer">IOMMU shared virtual memory<br>(PASID, ATS, PRI)</td>
+          <td>Used by a handful of accelerator stacks. Everything else pins pages and maintains an explicit DMA mapping per operation.</td>
+          <td>Devices walk the process page tables and take page faults like any other consumer. Registration and pinning disappear for capable devices, which removes both a per-operation cost and the most awkward part of the buffer-ownership API.</td>
+          <td><span class="chip edge">Edge</span></td>
+        </tr>
+        <tr>
+          <td class="layer">CXL memory tiering</td>
+          <td>Exposed as another NUMA node &mdash; a description that is convenient and false, since the cost model is nothing like inter-socket memory.</td>
+          <td>Tier placement is a first-class decision with an explicit measured cost model, driven by observed access patterns and deadline class rather than by NUMA balancing heuristics.</td>
+          <td><span class="chip bet">Bet</span></td>
+        </tr>
+        <tr>
+          <td class="layer">Heterogeneous cores</td>
+          <td>Energy-aware scheduling bolted onto a fair-share scheduler that was designed when all cores were identical.</td>
+          <td>The scheduler's primitive is a tuple of core class, energy cost and deadline &mdash; not a fair-share weight with an energy correction applied afterwards.</td>
+          <td><span class="chip ship">Shipping</span></td>
+        </tr>
+        <tr>
+          <td class="layer">NPUs and matrix engines</td>
+          <td>A device file. One tenant at a time, no quality of service, no preemption, no memory accounting.</td>
+          <td>A scheduled resource with QoS classes, with the model's key-value cache managed as an OS memory tier and weights mapped from the content-addressed store rather than copied per process.</td>
+          <td><span class="chip bet">Bet</span></td>
+        </tr>
+        <tr>
+          <td class="layer">Zoned and FDP storage</td>
+          <td>Partial support underneath filesystems that still assume random overwrite, so the device's own garbage collection fights the filesystem's.</td>
+          <td>Bet 03's object store is append-only by construction, which is precisely the access pattern zoned devices want. The impedance mismatch that forces write amplification in conventional stacks simply does not arise.</td>
+          <td><span class="chip edge">Edge</span></td>
+        </tr>
+        <tr>
+          <td class="layer">User-level monitor and wait</td>
+          <td>Available and largely unused; waiting still means a scheduler round trip.</td>
+          <td>A ring consumer parks its core at low power armed on the cursor's own address, waking on the store itself &mdash; no interrupt, no scheduler, and no jitter tail.</td>
+          <td><span class="chip ship">Shipping</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="flow">
+    <h3>What makes it evidence rather than a demo</h3>
+    <ul class="list">
+      <li><b>The baseline must be a tuned Linux, not a default one.</b> Compared against a stock configuration, every number here is meaningless. The comparison is Linux with io_uring, with a sched_ext policy chosen for the workload, with huge pages, with the relevant device features enabled &mdash; configured by someone trying to win. Beating a strawman is the most common way systems research becomes worthless, and it is entirely self-inflicted.</li>
+      <li><b>Report instructions and energy, not only time.</b> Nanoseconds per operation conflate algorithmic wins with clock speed. Instructions retired per operation, joules per operation and resident bytes per unit of work are the numbers that survive a hardware change &mdash; and given the efficiency claim, energy is not optional.</li>
+      <li><b>p99 and p99.9, never means.</b> An average hides exactly the behavior the architecture exists to fix.</li>
+      <li><b>One command reproduces every claim.</b> If a third party cannot re-run it, it is an anecdote.</li>
+      <li><b>Whole-system deterministic simulation, and it has to be designed in from the first commit.</b> The architecture already supplies what a simulator needs, as a side effect of decisions made for other reasons: every interaction is a ring, so there is one interception point rather than thousands; no ambient authority, so no hidden channels; drivers in user space, so a modelled device is a component substitution; content-addressed storage, so whole-system state comparison is a hash comparison. Given a determinism substrate &mdash; time, randomness and every ordering decision behind an injectable capability &mdash; a seed and a commit hash reproduce any run byte for byte. This is the one property on this list that cannot be retrofitted, which is precisely why no mainstream kernel has it. <em>Proving Ground</em> sets out the substrate and the six layers built on it.</li>
+      <li><b>Measurement is a system service, not a build configuration.</b> Every component exposes a live, hierarchical, queryable tree of its own state and counters &mdash; readable without a debugger, without a special build, and without stopping the system. Fuchsia's diagnostics layer is the model worth copying here. This reads like tooling and gets deferred for that reason, which is a mistake in a system whose <em>output is measurements</em>: completions already carry timestamps, and this is the mechanism that turns them into evidence rather than into a profiling exercise somebody has to set up by hand.</li>
+    </ul>
+    <div class="note"><b>The question that replaces "who are your first thousand users":</b> can you state a small number of claims, each with a named baseline and a number, that a competent skeptic could try to refute and fail? Three defended claims beat twelve asserted ones, and the failure mode of ambitious systems work is almost always the second.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">14</div><h2>Importing drivers without importing Linux</h2></div>
+  <div class="flow">
+    <p>No Linux runs anywhere in this system. Nothing boots it, nothing runs beside it, and there is no compatibility partition. What gets imported is <em>driver source</em>, compiled against a shim into this system's own isolated components. The distinction matters and it is not a technicality: the imported code runs under this kernel's memory model, this kernel's scheduler and this kernel's capability rules, or it does not run.</p>
+    <div class="claim">
+      <span class="t">Principle</span>
+      Import what you are not researching. Write what you are. If a claim depends on a code path, that path must be yours &mdash; importing Linux's block layer to make a storage-efficiency argument would mean importing the thing being measured.
+    </div>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Subsystem</th><th>Strategy</th><th>Reasoning</th></tr></thead>
+      <tbody>
+        <tr><td class="layer">GPU &mdash; user-mode driver</td><td><b>Import</b> Mesa</td><td>The larger half by far &mdash; the Vulkan implementation, shader compiler and state tracking &mdash; and already the portable half, running across Linux, the BSDs and Android. It reaches the kernel through a comparatively narrow per-driver interface, so the work is a platform layer rather than a port.</td></tr>
+        <tr><td class="layer">GPU &mdash; kernel-mode driver</td><td><b>Import</b> via source shim</td><td>Memory management, command submission, scheduling and display. Enormous, undocumented, in permanent motion, and no claim in this document concerns display pipelines. FreeBSD runs unmodified AMD and Intel DRM drivers in-tree through a compatibility layer maintained by a team far smaller than a from-scratch effort would need. That is the existence proof.</td></tr>
+        <tr><td class="layer">Wi-Fi, Bluetooth</td><td><b>Import</b>, or omit</td><td>Same reasoning, less urgency. A research vehicle can be wired.</td></tr>
+        <tr><td class="layer">NVMe</td><td><b>Native</b></td><td>Zoned storage and the append-only object store are headline claims. This is the code path the argument lives on.</td></tr>
+        <tr><td class="layer">Network interface</td><td><b>Native</b></td><td>Zero-copy receive and user-interrupt delivery are claims. An imported stack forfeits both.</td></tr>
+        <tr><td class="layer">NPU and accelerators</td><td><b>Native</b> where documented; vendor user-space runtime where not</td><td>The scheduling and memory-tiering claims live here. Where documentation does not exist, wrap the vendor runtime and be explicit that those numbers are bounded by it.</td></tr>
+        <tr><td class="layer">Audio</td><td><b>Native</b></td><td>Small, well documented, and on the deadline path.</td></tr>
+        <tr><td class="layer">USB and input</td><td>Import the stack; <b>native</b> at the input path</td><td>Input timestamping at interrupt time is load-bearing for the latency claim in section 05, so that specific path is written even when the transport underneath it is imported.</td></tr>
+        <tr><td class="layer">Everything else</td><td><b>Skip</b></td><td>Printers, legacy storage controllers, and the long tail. A research vehicle is allowed to not support them, and saying so plainly is better than pretending otherwise.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="flow">
+    <h3>Split the graphics driver before deciding anything about it</h3>
+    <p>"Import the GPU driver" hides two very different problems, and conflating them makes the task look harder than it is. The kernel-mode half is entangled with its host kernel and is what a shim exists to carry. The user-mode half &mdash; Mesa &mdash; is the majority of the code and is <em>already portable</em>, because it has been made to run on several operating systems and reaches the kernel through a narrow, per-driver interface.</p>
+    <p>So the target is <b>Mesa plus a DRM-shaped kernel interface</b>, not a port of any vendor's kernel driver. Fuchsia arrived at exactly this decomposition independently &mdash; its graphics architecture is a GPU-specific library loaded into each application's address space, plus a system driver that owns the hardware. That split is the right one to copy even though, as below, its drivers are not.</p>
+    <h3>Three ways to import, in order of preference</h3>
+    <ul class="list">
+      <li><b>Source-level KPI shim.</b> Implement enough of Linux's internal kernel API &mdash; allocation, locking, work queues, completions, the DMA and PCI interfaces, the device model, the DRM core &mdash; that unmodified driver sources compile against this kernel. Upstream fixes keep applying, because the source is unmodified. The cost is that you are implementing an API surface you do not control and which grows; tracking it is continuous work rather than a one-time port.</li>
+      <li><b>Library-kernel import.</b> Compile Linux as a library behind a small host interface and run it as a component. Broader coverage, since you get whole subsystems rather than individual drivers &mdash; but you also inherit Linux's internal architecture wholesale, which means running a second scheduler and memory model inside your own. Acceptable for a subsystem you have no claims about; corrosive if it spreads.</li>
+      <li><b>Anykernel-style import.</b> Drivers from a source already factored for out-of-kernel use. The cleanest engineering of the three and the smallest hardware coverage, which for a research vehicle may be the wrong trade.</li>
+    </ul>
+    <h3>The container the imported code goes in</h3>
+    <p>Choosing what to import settles half the question. The other half is what it runs inside, and here there is a design worth taking wholesale rather than deriving.</p>
+    <p>Fuchsia's second-generation driver framework treats a driver as an ordinary <b>component</b>: it receives an incoming namespace of explicitly routed capabilities, speaks a typed protocol rather than calling into kernel internals, and carries a declared restart-on-crash policy so a fault takes down one driver host instead of the machine. That is precisely the arrangement section 08 specifies, already worked out and shipping. Linux drivers assume the opposite of all three &mdash; kernel context, ambient authority, and that a fault is terminal &mdash; which is exactly the gap a shim has to close.</p>
+    <p>Two properties of that container matter more than they first appear:</p>
+    <ul class="list">
+      <li><b>The boundary is a protocol, not a kernel API.</b> A typed protocol surface is far smaller and far more stable than the internal-kernel-API surface a shim otherwise has to chase forever. The shim's job becomes bridging one driver's expectations to that protocol, rather than reimplementing an ever-growing slice of another kernel.</li>
+      <li><b>Authority is routed declaratively, and can therefore be checked.</b> Capabilities are not passed by hand at runtime; they are declared in the component topology and resolved when the system image is assembled. That means the question <em>what can this component reach?</em> has a static answer, computed from the configuration rather than discovered by audit. For imported code nobody has reviewed for this environment, a mechanically checkable bound on reachable authority is worth more than any amount of code reading &mdash; and it composes directly with bet 03, since routing is simply more of the same declarative expression that builds the rest of the system.</li>
+    </ul>
+    <div class="note"><b>Take the container, not the contents.</b> Fuchsia's driver <em>inventory</em> cannot replace Linux's here, for three reasons and the second is decisive: its coverage was scoped to a narrow device range; its graphics architecture supports only unified-memory devices, with discrete-memory GPUs explicitly an unported aspiration &mdash; so for a workstation with a discrete card it supplies nothing at all; and the project is now in maintenance, which is the wrong risk profile for the one component deliberately chosen as <em>not</em> a research subject. Linux driver code will still have thousands of contributors in a decade. The synthesis is to put shimmed Linux drivers inside a Fuchsia-shaped container.</div>
+    <p>One further discipline worth importing with it: interface <b>versioning</b>. Defining a protocol is easy; evolving it without breaking independently updated components is the part that is actually hard, and Fuchsia's explicit availability annotations and compatibility testing are a solved answer to a problem this system will otherwise meet late and badly. Take the discipline, not the interface language &mdash; the ring protocols and the component interfaces both need it.</p>
+    <h3>Why this strengthens the safety claim instead of weakening it</h3>
+    <p>Imported driver code is C, and it would be the largest concentration of unsafe code in the system &mdash; a direct threat to the trusted-computing-base metric in section 10. The resolution is that it does not go in the trusted computing base at all.</p>
+    <ul class="list">
+      <li>Imported drivers run as <b>isolated user-space components</b>, IOMMU-confined and restartable &mdash; exactly the arrangement section 08 already specifies for native drivers. The isolation boundary is uniform; only the shim is per-driver.</li>
+      <li>An imported driver therefore holds no ambient authority and can address no memory it was not granted. A fault restarts one component. The unsafe-code metric counts the frame, not the drivers, and survives intact.</li>
+      <li>That arrangement is itself a publishable result: <b>unmodified vendor driver code, running with no ambient authority, confined and restartable, with the cost of that confinement measured.</b> Nobody has a good public number for what that isolation costs on a modern GPU.</li>
+    </ul>
+    <h3>The licence boundary is the isolation boundary</h3>
+    <p>Imported Linux driver source is licensed under the GPL, and a component built from it is a derivative work. That is a constraint on the project's structure, not merely on its paperwork, and it is worth settling before the first import rather than after.</p>
+    <p>The resolution is unusually clean here, and it is a consequence of the architecture rather than a workaround. FreeBSD keeps its compatibility layer and the drivers built on it in a delimited part of its tree, and rests the separation on an in-kernel linking argument. <b>F's imported drivers sit in separate address spaces, share no symbols, and communicate only over a ring</b> &mdash; which is a far stronger separation than linking, and one that maps exactly onto the boundary the licence needs.</p>
+    <div class="claim">
+      <span class="t">The consequence</span>
+      Keep the frame and all native components permissively licensed so the research is reusable, keep imported driver components in a delimited subtree under the terms their source requires, and let the ring be the only thing that crosses between them. <b>The licence boundary and the isolation boundary then want to be the same boundary, and the architecture already draws it.</b> This is an additional reason &mdash; independent of safety &mdash; to keep imported drivers out of the frame even where the confinement carries a measurable cost.
+    </div>
+    <div class="note"><b>The honest risk.</b> Graphics drivers make deep assumptions about their host kernel's memory management, scheduling and fence semantics, and they assume they are running in kernel context. FreeBSD's precedent is in-kernel; hosting the same drivers in an isolated user-space component is harder and is where this plan is most likely to need a fallback. Budget for the possibility that the GPU driver ends up inside the frame with a documented exception, and measure what that costs rather than hiding it.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">15</div><h2>The interface thesis</h2></div>
+  <div class="flow">
+    <p>The second research pillar, and the one where the least has changed since 1984. Every mainstream system hands an application a rectangle and lets it draw. Everything the system subsequently wants to know about what is on that screen has to be recovered afterwards, by a separate mechanism, imperfectly.</p>
+    <p>Count the subsystems that exist purely to reconstruct information the application already had and threw away: the accessibility tree, the UI automation API, the theming engine, the test harness's selector language, the remote-display protocol, the screenshot-and-guess loop that agents use. Six mechanisms, six sets of bugs, six things that drift out of sync with the interface they describe &mdash; all because the drawing call discarded the meaning and kept only the pixels.</p>
+    <div class="claim">
+      <span class="t">Thesis</span>
+      The application declares a semantic structure. The system owns it. Pixels are one projection of it, and not a privileged one.
+    </div>
+    <h3>What the structure actually holds</h3>
+    <p>Precision matters here, because stated loosely this is a slogan rather than a design. Each node carries content (text, media, a value), a role (button, list, field, canvas), state (enabled, selected, expanded), relations to other nodes (labelled by, controls, flows to), and an <b>intent</b> &mdash; what activating it does, expressed as a capability invocation rather than a callback. Presentation is separate: layout constraints and style tokens, never pixel coordinates. The retained GPU scene graph described in the implementation companion is then <em>derived</em> from this structure rather than authored directly.</p>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Subsystem today</th><th>Under this model</th></tr></thead>
+      <tbody>
+        <tr><td>Accessibility tree &mdash; separate, retrofitted, perpetually stale because nothing breaks when it is wrong</td><td>There is no separate tree to drift. The structure the screen reader consumes is the structure the pixels came from.</td></tr>
+        <tr><td>Automation and scripting &mdash; a second API, fragile selectors, breaks on redesign</td><td>The same nodes with the same stable identity that rendering used. Automation and display are two readers of one structure.</td></tr>
+        <tr><td>Theming &mdash; per-toolkit, cosmetic only, breaks layout when pushed</td><td>Style tokens resolved by the system at projection time, so a theme reaches applications its author never saw and cannot break a layout it does not control.</td></tr>
+        <tr><td>Testing &mdash; screenshot diffing and brittle queries</td><td>Assertions against the semantic tree, with node identity stable across visual change.</td></tr>
+        <tr><td>Remote display &mdash; encode and stream pixels</td><td>Ship the structure; project it on the far side at the far side's resolution and refresh rate.</td></tr>
+        <tr><td>Agents &mdash; screenshots and coordinate guessing</td><td>Read the structure, invoke the declared intent. Because intent is a capability call, every agent action is scoped, auditable and revocable &mdash; which is what section 07 was promising in the abstract.</td></tr>
+        <tr><td>Search and indexing &mdash; per-application, if at all</td><td>The semantic index reads live interface state as a matter of course.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="flow">
+    <h3>Why this is research and not merely engineering</h3>
+    <p>The open questions are genuine, and previous attempts failed on them rather than on effort:</p>
+    <ul class="list">
+      <li><b>What is the right node vocabulary?</b> Too small and applications cannot express themselves, so they escape into opaque canvases. Too large and it becomes another sprawling markup vocabulary whose semantics are ambiguous in practice.</li>
+      <li><b>Can a custom canvas participate?</b> This is the hard case and the one that has sunk every prior attempt. An audio timeline or a 3D viewport renders its own pixels &mdash; but it can still declare a semantic model of its <em>content</em>: clips, tracks, times, objects, selections. Whether that is expressive enough to be useful, and cheap enough to maintain, is the most interesting open question in this section.</li>
+      <li><b>What does the indirection cost?</b> Deriving a scene graph rather than authoring one must not spend the latency budget from section 05. This is the falsifiable claim and it should be measured early, because a negative result here invalidates the pillar.</li>
+    </ul>
+    <h3>Honest prior art, and the distinguishing bet</h3>
+    <p>This is not unprecedented. The web's document model with accessibility annotations is a semantic tree with a rendering projection, and it is a partial success at best. Model-view architectures, Morphic, and every accessibility API of the last thirty years have reached for the same idea.</p>
+    <p>They share one failure mode: <b>the semantics were optional.</b> An annotation that nothing depends on rots, because nothing visibly breaks when it is wrong. The distinguishing bet here is to make the semantic structure the <em>only</em> source of truth &mdash; if the tree is wrong, the pixels are wrong, immediately and visibly. Load-bearing structures do not drift, and that is the entire difference.</p>
+    <h3>What a convincing demonstration looks like</h3>
+    <ul class="list">
+      <li><b>One application, four projections</b> &mdash; local display, a remote client at different density and refresh rate, a screen reader, and an agent driving it through declared intents &mdash; with no application code specific to any of them.</li>
+      <li><b>Latency parity</b> with a directly authored scene graph, measured against the section 05 budget. The claim stands or falls here.</li>
+      <li><b>The hard case, done properly:</b> a real-time timeline that renders custom pixels while remaining fully addressable, scriptable and describable. If the canvas degrades to an opaque box, the thesis is interesting but not proven.</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">16</div><h2>Primary sources</h2></div>
+  <div class="refs">
+    <a href="https://www.usenix.org/publications/loginonline/asterinas-rust-based-framekernel-reimagine-linux-2020s">Asterinas: a Rust-based framekernel<span>USENIX ;login:</span></a>
+    <a href="https://www.phoronix.com/news/Asterinas-0.18">Asterinas 0.18 release<span>Phoronix, June 2026</span></a>
+    <a href="https://dl.acm.org/doi/10.1145/3678015.3680492">Framekernel: intra-kernel privilege separation in Rust<span>ACM APSys</span></a>
+    <a href="https://sel4.systems/About/seL4-whitepaper.pdf">The seL4 microkernel whitepaper<span>seL4 Foundation</span></a>
+    <a href="https://dl.acm.org/doi/10.1145/1629575.1629596">seL4: formal verification of an OS kernel<span>ACM SOSP</span></a>
+    <a href="https://bytecodealliance.org/articles/WASI-0.3">WASI 0.3 launched<span>Bytecode Alliance, June 2026</span></a>
+    <a href="https://wasi.dev/releases/wasi-p3">WASI 0.3 release notes<span>wasi.dev</span></a>
+    <a href="https://docs.kernel.org/next/scheduler/sched-ext.html">Extensible scheduler class<span>Linux kernel documentation</span></a>
+    <a href="https://docs.kernel.org/networking/iou-zcrx.html">io_uring zero-copy receive<span>Linux kernel documentation</span></a>
+    <a href="https://github.com/linebender/vello">Vello: a GPU compute-centric 2D renderer<span>Linebender</span></a>
+    <a href="https://fuchsia.dev/fuchsia-src/concepts/components/v2/starnix">Starnix: running Linux binaries on Fuchsia<span>fuchsia.dev</span></a>
+    <a href="https://www.cl.cam.ac.uk/techreports/UCAM-CL-TR-975.pdf">Memory safety with CHERI capabilities<span>Cambridge technical report</span></a>
+    <a href="https://doi.org/10.1145/3728360">Security implications of the Morello platform<span>ACM TOPS</span></a>
+    <a href="https://arxiv.org/html/2506.24045v1">Agent.xpu: agentic LLM scheduling on heterogeneous SoCs<span>arXiv</span></a>
+    <a href="https://arxiv.org/html/2603.23640v2">LLM inference at the edge: mobile, NPU and GPU trade-offs<span>arXiv, 2026</span></a>
+    <a href="https://www.webpronews.com/redox-os-the-rust-written-operating-system-that-refuses-to-stay-niche/">Redox OS progress<span>2026</span></a>
+  </div>
+  <div class="foot">
+    Also worth reading directly: Barrelfish and Arrakis on the kernel as a control plane &middot; Singularity and Midori on language-based isolation &middot; Genode on capability-based component systems &middot; Plan 9 on uniform naming &middot; Oxide's Hubris on all-Rust embedded kernels &middot; Theseus on intralingual design.
+  </div>
+</section>
+
+</div>

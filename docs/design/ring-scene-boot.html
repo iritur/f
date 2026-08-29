@@ -1,0 +1,671 @@
+<title>Ring, Scene, Boot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;700;900&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root{
+  --paper:#F2F4F7; --surface:#FFFFFF; --surface-2:#E9ECF2;
+  --ink:#12141A; --ink-2:#3A4150; --muted:#6B7382;
+  --line:#D6DBE4; --line-strong:#B9C0CD;
+  --cobalt:#2F4FD8; --rust:#A8431C; --teal:#0B6E5C;
+  --on-accent:#FFFFFF;
+  --shadow:0 1px 2px rgba(18,20,26,.05), 0 8px 24px -16px rgba(18,20,26,.28);
+  --sans:"IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --display:"Chivo", "IBM Plex Sans", ui-sans-serif, sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --col:66ch; --wide:1180px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+    --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+    --line:#262C39; --line-strong:#3D4657;
+    --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+    --on-accent:#0D0F14;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+  --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+  --line:#262C39; --line-strong:#3D4657;
+  --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+  --on-accent:#0D0F14;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+}
+
+*{box-sizing:border-box;}
+body{margin:0; background:var(--paper); color:var(--ink); font-family:var(--sans); font-size:17px; line-height:1.65; -webkit-font-smoothing:antialiased;}
+.wrap{max-width:var(--wide); margin:0 auto; padding:0 28px 96px;}
+
+h1,h2,h3,h4{font-family:var(--display); text-wrap:balance; margin:0;}
+h1{font-weight:900; font-size:clamp(2.6rem,6.5vw,4.4rem); line-height:.98; letter-spacing:-.035em;}
+h2{font-weight:900; font-size:clamp(1.5rem,3vw,2.05rem); line-height:1.08; letter-spacing:-.025em;}
+h3{font-weight:700; font-size:1.14rem; line-height:1.3; letter-spacing:-.012em;}
+h4{font-weight:700; font-size:.95rem; line-height:1.35;}
+p{margin:0;}
+a{color:var(--cobalt); text-decoration-thickness:1px; text-underline-offset:2px;}
+a:focus-visible{outline:2px solid var(--cobalt); outline-offset:3px; border-radius:2px;}
+strong,b{font-weight:600;}
+code{font-family:var(--mono); font-size:.87em; background:var(--surface-2); padding:.1em .34em; border-radius:3px;}
+
+.eyebrow{font-family:var(--mono); font-size:.7rem; font-weight:600; letter-spacing:.16em; text-transform:uppercase; color:var(--muted);}
+
+.mast{padding:72px 0 40px; border-bottom:1px solid var(--line-strong);}
+.mast-grid{display:flex; flex-direction:column; gap:26px;}
+.mast .lede{font-size:1.2rem; line-height:1.55; color:var(--ink-2); max-width:60ch;}
+.mast .lede b{color:var(--ink);}
+.specline{display:flex; flex-wrap:wrap; gap:10px 26px; padding-top:6px; font-family:var(--mono); font-size:.74rem; color:var(--muted); letter-spacing:.04em;}
+.specline span b{color:var(--ink-2);}
+
+.partbar{
+  display:flex; align-items:baseline; gap:18px; padding:64px 0 8px; flex-wrap:wrap;
+}
+.partbar .n{font-family:var(--mono); font-size:.72rem; font-weight:600; letter-spacing:.18em; text-transform:uppercase; color:var(--rust);}
+.partbar h2{font-size:clamp(1.7rem,3.6vw,2.5rem);}
+.partbar .r{flex:1 1 120px; height:1px; background:var(--line-strong); min-width:40px;}
+
+section{padding:44px 0 8px; border-bottom:1px solid var(--line);}
+section:last-of-type{border-bottom:0;}
+.sec-head{display:flex; align-items:baseline; gap:16px; margin-bottom:20px; flex-wrap:wrap;}
+.sec-num{font-family:var(--mono); font-size:.74rem; font-weight:600; color:var(--cobalt); letter-spacing:.1em; padding-top:.5em;}
+.flow{display:flex; flex-direction:column; gap:18px;}
+.flow > p, .flow > ul, .flow > .note, .flow > h3, .flow > .claim{max-width:var(--col);}
+
+ul.list{margin:0; padding-left:0; list-style:none; display:flex; flex-direction:column; gap:11px;}
+ul.list li{position:relative; padding-left:22px;}
+ul.list li::before{content:""; position:absolute; left:2px; top:.62em; width:7px; height:7px; border:1.5px solid var(--cobalt); border-radius:1px;}
+
+.note{border-left:3px solid var(--rust); background:color-mix(in srgb, var(--rust) 7%, var(--surface)); padding:14px 18px; border-radius:0 5px 5px 0; font-size:.95rem; color:var(--ink-2);}
+.note b{color:var(--ink);}
+.claim{border-left:3px solid var(--cobalt); background:color-mix(in srgb, var(--cobalt) 7%, var(--surface)); padding:14px 18px; border-radius:0 5px 5px 0; font-size:.95rem; color:var(--ink-2);}
+.claim b{color:var(--ink);}
+
+pre{
+  background:var(--surface-2); border:1px solid var(--line); border-radius:6px;
+  padding:15px 18px; overflow-x:auto; font-family:var(--mono); font-size:.755rem;
+  line-height:1.7; color:var(--ink-2); margin:0; tab-size:4;
+}
+pre .c{color:var(--muted); font-style:normal;}
+pre .k{color:var(--cobalt); font-weight:600;}
+pre .w{color:var(--rust); font-weight:600;}
+.codecap{font-family:var(--mono); font-size:.68rem; color:var(--muted); letter-spacing:.06em; text-transform:uppercase; padding-bottom:7px;}
+.codeblock{display:flex; flex-direction:column; margin:4px 0;}
+
+.tablewrap{overflow-x:auto; border:1px solid var(--line); border-radius:7px; background:var(--surface); margin:6px 0 4px;}
+table{border-collapse:collapse; width:100%; min-width:640px; font-size:.88rem;}
+th,td{text-align:left; padding:11px 15px; border-bottom:1px solid var(--line); vertical-align:top; line-height:1.5;}
+thead th{font-family:var(--mono); font-size:.67rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); background:var(--surface-2); border-bottom:1px solid var(--line-strong); white-space:nowrap;}
+tbody tr:last-child td{border-bottom:0;}
+td.m{font-family:var(--mono); font-size:.76rem; color:var(--ink-2); white-space:nowrap;}
+td.num{font-family:var(--mono); font-variant-numeric:tabular-nums; white-space:nowrap;}
+
+.chip{display:inline-block; font-family:var(--mono); font-size:.63rem; font-weight:600; letter-spacing:.08em; text-transform:uppercase; padding:3px 8px; border-radius:3px; border:1px solid currentColor; white-space:nowrap;}
+.chip.ok{color:var(--teal); background:color-mix(in srgb, var(--teal) 10%, var(--surface));}
+.chip.warn{color:var(--rust); background:color-mix(in srgb, var(--rust) 10%, var(--surface));}
+
+.ms{display:flex; flex-direction:column; margin:6px 0 4px;}
+.msrow{display:grid; grid-template-columns:70px 1fr; gap:0 20px; padding:20px 0; border-top:1px solid var(--line);}
+.msrow:first-child{border-top:1px solid var(--line-strong);}
+.msrow:last-child{border-bottom:1px solid var(--line-strong);}
+.msn{font-family:var(--mono); font-size:1.35rem; font-weight:600; color:var(--cobalt); letter-spacing:-.02em; line-height:1.2;}
+.msb{display:flex; flex-direction:column; gap:8px;}
+.msb p{font-size:.93rem; color:var(--ink-2); max-width:62ch;}
+.done{font-size:.88rem; color:var(--ink-2); border-left:2px solid var(--teal); padding-left:12px; background:color-mix(in srgb, var(--teal) 5%, transparent);}
+.done b{font-family:var(--mono); font-size:.66rem; letter-spacing:.1em; text-transform:uppercase; color:var(--teal); display:block; margin-bottom:2px;}
+.msmeta{font-family:var(--mono); font-size:.7rem; color:var(--muted); letter-spacing:.05em;}
+.msmeta b{color:var(--ink-2);}
+
+.chain{display:flex; flex-direction:column; margin:6px 0 4px; border:1px solid var(--line); border-radius:7px; overflow:hidden; background:var(--surface);}
+.step{display:grid; grid-template-columns:34px 1fr auto; gap:0 16px; padding:12px 16px; border-top:1px solid var(--line); align-items:baseline;}
+.step:first-child{border-top:0;}
+.step .i{font-family:var(--mono); font-size:.72rem; font-weight:600; color:var(--cobalt);}
+.step .d{font-size:.9rem; color:var(--ink-2); line-height:1.5;}
+.step .t{font-family:var(--mono); font-size:.72rem; color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap;}
+.step.hot{background:color-mix(in srgb, var(--rust) 6%, var(--surface));}
+.step.hot .i{color:var(--rust);}
+
+.foot{padding-top:40px; font-family:var(--mono); font-size:.7rem; color:var(--muted); letter-spacing:.06em; line-height:1.8; max-width:80ch;}
+
+@media (max-width:720px){
+  body{font-size:16px;}
+  .wrap{padding:0 20px 72px;}
+  .msrow{grid-template-columns:52px 1fr; gap:0 14px;}
+  .step{grid-template-columns:28px 1fr; gap:0 12px;}
+  .step .t{grid-column:2; padding-top:3px;}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none !important; transition:none !important;}}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="mast-grid">
+    <div class="eyebrow">Implementation companion to The Fast Path</div>
+    <h1>Ring, Scene, Boot</h1>
+    <p class="lede">Four parts at the level where the design decisions are actually load-bearing: <b>the ring protocol</b> that replaces the system call, <b>the compositor</b> that replaces the window system, <b>the semantic layer</b> that feeds it, and <b>the phase-00 bring-up</b> you could open an editor and start on. The architecture document argues these are the right choices. This one is about getting them right &mdash; and, for part III, about how it would fail.</p>
+    <div class="specline">
+      <span><b>Target</b> &nbsp;x86-64 first, ARM64 second</span>
+      <span><b>Language</b> &nbsp;Rust, no_std</span>
+      <span><b>Assumes</b> &nbsp;The Fast Path, sections 03, 05, 13 and 15</span>
+      <span><b>Alongside</b> &nbsp;Deadline All the Way Down &middot; Lineage and Debts &middot; Proving Ground</span>
+    </div>
+  </div>
+</header>
+
+<div class="partbar"><span class="n">Part I</span><h2>The ring protocol</h2><span class="r"></span></div>
+
+<section>
+  <div class="sec-head"><div class="sec-num">01</div><h2>What it has to survive</h2></div>
+  <div class="flow">
+    <p>Bet 02 says every service is a ring. That makes the ring the single most consequential piece of code in the system &mdash; and it has a harder job than <code>io_uring</code> does, because some of its peers are isolated components running <em>imported driver code compiled from C</em>, which can fault, hang or be compromised at any moment while holding a live channel.</p>
+    <p>Five requirements, in the order they constrain the design:</p>
+    <ul class="list">
+      <li><b>No syscall on the hot path.</b> Submission is stores to memory the producer already has mapped. Nothing else.</li>
+      <li><b>No copies.</b> Buffers are transferred by ownership, not duplicated.</li>
+      <li><b>ABI-stable across trust and language boundaries.</b> The peer may be an imported driver built against the shim in section 14 of the architecture document, a WASM component, or code from a toolchain you do not control. Everything shared is <code>#[repr(C)]</code>, fixed-width, and version-stamped.</li>
+      <li><b>A dead peer must not corrupt or hang us.</b> This single requirement eliminates more design options than the other four combined &mdash; most importantly, it forbids any lock in shared memory.</li>
+      <li><b>Bounded latency, not just high throughput.</b> A design that is fast on average and occasionally stalls forfeits the determinism claim outright. p99 is the number this architecture is measured on; a good mean is not evidence of anything.</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">02</div><h2>Memory layout</h2></div>
+  <div class="flow">
+    <p>One channel is one contiguous shared mapping. The indirection between the index ring and the entry array is worth keeping from <code>io_uring</code>: it lets a producer prepare entries out of order and publish a batch with one store.</p>
+  </div>
+  <div class="codeblock">
+    <div class="codecap">Channel layout &mdash; one shared mapping</div>
+<pre>offset    size   contents
+------    ----   --------
+0x0000    64     <span class="k">ChannelHeader</span>   magic, abi_version, ring_size,
+                                 sqe_off, cqe_off, epoch, capabilities
+0x0040    64     <span class="k">ProducerCursor</span>  head: AtomicU32          <span class="c">// own cache line</span>
+0x0080    64     <span class="k">ConsumerCursor</span>  tail: AtomicU32, flags   <span class="c">// own cache line</span>
+0x00C0    4*N    <span class="k">SQ index ring</span>   u32 slots, N a power of two
+...       64*N   <span class="k">SQE array</span>       64-byte entries, one cache line each
+...       32*M   <span class="k">CQ ring</span>         32-byte completions, inline
+...       var    <span class="k">inline arena</span>    optional, for payloads under ~256 bytes</pre>
+  </div>
+  <div class="flow">
+    <div class="note"><b>The cursors get their own cache lines, and this is not a micro-optimization.</b> If <code>head</code> and <code>tail</code> share a line, every producer store invalidates the consumer's copy and every consumer store invalidates the producer's. Measured cost of getting this wrong is roughly 100&ndash;150 cycles per operation &mdash; enough to turn a 30 ns submission into a 200 ns one. If your first benchmark comes in five times slower than expected, this is the reason, essentially every time.</div>
+    <p>Ring sizes are powers of two so index computation is <code>cursor &amp; mask</code> rather than a division. Cursors are free-running and allowed to wrap: occupancy is <code>head.wrapping_sub(tail)</code>, which stays correct across the wrap because unsigned arithmetic wraps the same way. Never store a separate count &mdash; a count is a second piece of state that can disagree with the cursors.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">03</div><h2>The cursor protocol</h2></div>
+  <div class="flow">
+    <p>Two things must be exactly right: the memory ordering that publishes an entry, and the mechanism that decides whether to wake the peer.</p>
+  </div>
+  <div class="codeblock">
+    <div class="codecap">Producer &mdash; the entire hot path</div>
+<pre><span class="k">let</span> head = self.head.load(Ordering::<span class="k">Relaxed</span>);   <span class="c">// we are the only writer</span>
+<span class="k">let</span> tail = self.tail.load(Ordering::<span class="k">Acquire</span>);   <span class="c">// peer publishes with Release</span>
+
+<span class="k">if</span> head.wrapping_sub(tail) == self.mask + 1 {
+    <span class="k">return</span> Err(Full);                          <span class="c">// never block, never spin here</span>
+}
+
+self.sqe[(head & self.mask) <span class="k">as</span> usize].write(entry);      <span class="c">// 1. payload</span>
+self.head.store(head.wrapping_add(1), Ordering::<span class="k">Release</span>);  <span class="c">// 2. publish</span>
+
+<span class="c">// 3. wake the peer only if it told us it is going to sleep</span>
+<span class="k">if</span> self.flags.load(Ordering::<span class="k">Acquire</span>) & NEED_WAKEUP != 0 {
+    self.doorbell();
+}</pre>
+  </div>
+  <div class="flow">
+    <p>The <code>Release</code> store is the whole correctness argument: it guarantees the entry write is visible before the cursor advance that exposes it. Paired with the consumer's <code>Acquire</code> load, that is a complete happens-before edge. On x86-64 both compile to plain <code>mov</code> with only a compiler barrier; on ARM64 they become <code>stlr</code> and <code>ldar</code>. Using <code>Relaxed</code> here works on x86 and fails on ARM, which is the worst possible failure mode &mdash; it will pass every test you run on your laptop.</p>
+    <h3>Notification suppression</h3>
+    <p>Waking a peer costs one to two microseconds &mdash; three orders of magnitude more than a submission. So the consumer publishes its intent instead:</p>
+    <ul class="list">
+      <li>While actively draining the ring, the consumer clears <code>NEED_WAKEUP</code>. Producers see this and skip the doorbell entirely.</li>
+      <li>Before sleeping, the consumer sets <code>NEED_WAKEUP</code>, then re-checks the ring once more before actually sleeping &mdash; this second check closes the race where a producer published between the drain and the flag write.</li>
+    </ul>
+    <p>Under load this drives doorbell count to zero and the channel becomes pure polling. Under idle it costs exactly one doorbell to restart. The same idea is proven in <code>io_uring</code>'s polled mode and in virtio's event-index mechanism; it is not novel and it should not be reinvented.</p>
+    <div class="claim"><b>On a deadline-class core the consumer should never sleep at all.</b> It parks with user-level monitor-and-wait &mdash; <code>UMONITOR</code>/<code>UMWAIT</code> on x86, <code>WFE</code> on ARM &mdash; armed on the cursor's own address, so the core drops to low power but wakes on the store itself. No interrupt, no scheduler, no jitter tail. This is one of the seven capabilities named in section 13 of the architecture document, and it is the easiest of them to adopt: the instructions have shipped for years and are almost entirely unused.</div>
+    <h3>The doorbell itself</h3>
+    <p>Suppression minimizes how <em>often</em> you ring. User interrupts change what a ring <em>costs</em>, and the two compose &mdash; this is not a choice between them.</p>
+    <p>Conventionally a doorbell is an inter-processor interrupt: the kernel is entered, a target is resolved, an interrupt is delivered, the receiving side traps back out. One to two microseconds, and worse, a variable one to two microseconds. With user-level interrupt delivery the sending core writes a user-interrupt target register and the receiving thread's handler runs <b>without any kernel transition on either side</b> &mdash; roughly a hundred cycles, and far more importantly a <em>bounded</em> hundred cycles.</p>
+    <ul class="list">
+      <li>It collapses the gap between the polled and blocked paths. Today the design pushes hard toward polling because waking is catastrophic; when a wake costs a hundred cycles, an idle consumer can block and stay responsive, which recovers the energy that constant polling burns.</li>
+      <li>It removes the last kernel entry from the notification path, so a fully idle channel and a fully saturated one have the same cost structure.</li>
+      <li>The suppression protocol above stays exactly as written. <code>NEED_WAKEUP</code> still governs whether to signal; only the cost of signalling changes.</li>
+    </ul>
+    <div class="note"><b>Keep the fallback.</b> User interrupts are recent and unevenly available. Abstract the doorbell behind one function with three implementations &mdash; user interrupt, kernel IPI, pure polling &mdash; selected at channel creation from what the hardware actually reports. Then measure all three. The delta between them is one of the cleanest results this system can produce, because nobody has published it for a general-purpose IPC path.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">04</div><h2>Buffer ownership, and the ergonomics answer</h2></div>
+  <div class="flow">
+    <p>Section 11 of the architecture document lists ergonomics as the risk most likely to sink bet 02: completion-based I/O with borrowed buffers is genuinely harder to write than a blocking read, and if developers respond by wrapping everything in a blocking shim, the entire performance argument evaporates. This is the section that answers it.</p>
+    <h3>Registration, once</h3>
+    <p>A process registers a memory region once and receives a <code>BufferSetId</code>. The IOMMU mapping is established at that moment and never touched again. Individual operations then reference <code>(buf_set, index, offset, len)</code> &mdash; sixteen bytes, no per-operation pinning, no page-table work, no validation beyond a bounds check against a size the kernel already knows.</p>
+    <h3>And on capable hardware, not even once</h3>
+    <p>Registration exists to solve a problem that newer silicon removes. With IOMMU shared virtual memory &mdash; process address space identifiers, address translation services, page request interfaces &mdash; a device walks the process's own page tables and takes ordinary page faults when it touches something not resident. There is nothing to pin and nothing to register, because the device shares the address space rather than being handed a window onto it.</p>
+    <ul class="list">
+      <li>The SQE's buffer triple becomes a plain virtual address in the submitting process's own address space, with the PASID carried by the channel rather than the entry.</li>
+      <li>Long-lived buffer pools stop being a requirement, which removes the most awkward constraint the ownership API imposes on callers &mdash; a caller can submit from an ordinary allocation.</li>
+      <li>Memory that is never touched is never faulted in, so a large sparse buffer costs what it uses rather than what it spans.</li>
+    </ul>
+    <div class="claim"><b>Both paths ship, and the difference is the result.</b> Registration remains the fallback for devices without translation services, and it is what section 13's efficiency claim is measured against: pinned-and-registered versus shared-virtual, same workload, same device class, reporting page-fault cost and tail latency alongside throughput. Device-side faulting is not free &mdash; a fault on the device path is far more expensive than one on the CPU path, and a design that faults in the middle of a deadline-critical operation has traded a known cost for an unknown one. Which path wins, and under what access pattern, is an open question worth answering properly rather than assuming.</div>
+    <div class="claim"><b>Make the buffer set an object, not a table entry.</b> A registered region is more useful as a first-class capability object &mdash; one that can be granted, cloned copy-on-write, resized and shared, with rights that only ever narrow &mdash; than as an index into a per-process array. Fuchsia's memory objects are the worked example, and the shape fits this system exactly: a buffer set becomes something the capability system already knows how to route, revoke and account for, rather than a second bookkeeping mechanism running alongside it.</div>
+    <h3>Ownership transfer, enforced by the compiler</h3>
+    <p>The failure mode of every completion-based API is the same: a future is dropped while the kernel still holds a pointer into its buffer, and the kernel writes into memory that has been freed or reused. Reference counting hides it; the type system can eliminate it.</p>
+  </div>
+  <div class="codeblock">
+    <div class="codecap">The API shape that makes the bug unrepresentable</div>
+<pre><span class="c">/// A buffer whose address is stable for as long as it is owned.</span>
+<span class="k">pub unsafe trait</span> StableBuffer { <span class="k">fn</span> parts(&<span class="k">self</span>) -> (BufSet, u32, u32); }
+
+<span class="c">/// Proof that an operation is in flight. Holds the buffer hostage.</span>
+<span class="k">pub struct</span> Submitted&lt;B: StableBuffer&gt; { buf: B, token: u64 }
+
+<span class="k">impl</span> Ring {
+    <span class="c">// buf is MOVED in — the caller no longer has it</span>
+    <span class="k">pub fn</span> submit&lt;B: StableBuffer&gt;(&<span class="k">self</span>, op: Op, buf: B) -> Submitted&lt;B&gt;;
+
+    <span class="c">// the ONLY way to get it back is to await the completion</span>
+    <span class="k">pub async fn</span> complete&lt;B&gt;(&<span class="k">self</span>, s: Submitted&lt;B&gt;) -> (Result&lt;u32&gt;, B);
+}
+
+<span class="c">// Dropping a Submitted without completing it does not free the buffer.</span>
+<span class="c">// It submits a cancel and moves ownership to the runtime's graveyard,</span>
+<span class="c">// which releases it when the cancellation completes.</span>
+<span class="k">impl</span>&lt;B&gt; Drop <span class="k">for</span> Submitted&lt;B&gt; { <span class="c">/* ... */</span> }</pre>
+  </div>
+  <div class="flow">
+    <p>Because the buffer is moved into <code>Submitted</code> and only returned by <code>complete</code>, there is no way to hold a reference to it while the operation is in flight. Cancellation safety, the notoriously subtle part of async I/O, becomes a property of ownership rather than a rule in the documentation. This pattern is well established in Rust's io_uring bindings and is the correct thing to borrow wholesale.</p>
+    <div class="note"><b>Then hide it.</b> The ownership API is the foundation, not the interface. Above it, ship an ordinary-looking async API &mdash; <code>read</code>, <code>write</code>, <code>send</code> &mdash; that owns its buffers internally and batches submissions transparently. Developers should be able to write ordinary code and get batched zero-copy behavior without knowing the word "ring". If reaching the fast path requires understanding this section, bet 02 has already failed.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">05</div><h2>Entry formats</h2></div>
+  <div class="flow">
+    <p>Sixty-four bytes for a submission, one cache line exactly. Thirty-two for a completion, so two share a line.</p>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Off</th><th>Type</th><th>Field</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td class="m">0</td><td class="m">u8</td><td class="m">opcode</td><td>The operation. Opcode space is per-service, not global &mdash; a storage ring and a compositor ring share the envelope, not the vocabulary.</td></tr>
+        <tr><td class="m">1</td><td class="m">u8</td><td class="m">flags</td><td><code>LINK</code> (next entry waits on this one), <code>DRAIN</code>, <code>FIXED_BUF</code>, <code>NO_CQE</code> for fire-and-forget.</td></tr>
+        <tr><td class="m">2</td><td class="m">u16</td><td class="m">class</td><td>Scheduling class and priority for this operation.</td></tr>
+        <tr><td class="m">4</td><td class="m">u32</td><td class="m">cap</td><td>Index into the caller's capability table. The service resolves it; a forged value fails the bounds check and kills the channel.</td></tr>
+        <tr><td class="m">8</td><td class="m">u64</td><td class="m">user_data</td><td>Returned verbatim in the completion. The correlation token, opaque to the service.</td></tr>
+        <tr><td class="m">16</td><td class="m">u64</td><td class="m">deadline</td><td><b>Absolute time by which this must complete.</b> Lets the service order by deadline rather than arrival &mdash; earliest-deadline-first applied at the I/O layer, not only in the CPU scheduler.</td></tr>
+        <tr><td class="m">24</td><td class="m">u64</td><td class="m">offset</td><td>Operation-specific position.</td></tr>
+        <tr><td class="m">32</td><td class="m">u32&times;3</td><td class="m">buf_set, index, len</td><td>The registered-buffer reference. No pointers ever cross the boundary. On hardware with shared virtual memory this collapses to a plain address in the submitter's own address space, with the address-space identifier carried by the channel &mdash; see the second half of section 04.</td></tr>
+        <tr><td class="m">44</td><td class="m">u32+u64&times;2</td><td class="m">pad, ext[2]</td><td>Operation-specific payload. Reaching 64 bytes exactly.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="flow">
+    <p>The completion carries <code>user_data</code>, a result, flags, an <code>ext</code> word &mdash; and a <b>completion timestamp taken by the service at the moment the work finished</b>. That last field costs eight bytes and gives you per-operation deadline adherence across the whole system for free, with no instrumentation build and no sampling profiler. For a system whose entire proposition is measurable determinism, it pays for itself immediately.</p>
+    <h3>Chaining</h3>
+    <p>The <code>LINK</code> flag makes the next entry depend on this one's success. Read, then transform, then hand to the compositor becomes one batch, published with one cursor store and at most one doorbell. This is the mechanism that makes the "fewer than ten boundary crossings per frame" target in section 10 achievable rather than aspirational &mdash; without chaining, every dependency becomes a round trip.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">06</div><h2>Surviving a dead peer</h2></div>
+  <div class="flow">
+    <p>The peer on the other end of a channel is frequently an isolated component built around imported C driver source. It can fault, hang, be restarted underneath you, or be compromised through a bug in code neither you nor its vendor has audited for this environment. The rule is simple to state and it constrains everything: <b>shared memory is untrusted input, always.</b></p>
+    <div class="claim"><b>This is a sharper threat than it looks, and it is the reason section 14's import strategy is safe.</b> Imported drivers hold no ambient authority and are confined by the IOMMU &mdash; but they still sit at one end of a live shared mapping, which is the one channel confinement cannot police. The rules below are what make that mapping safe to expose, and they are therefore load-bearing for the architecture's central safety claim, not merely defensive hygiene.</div>
+    <ul class="list">
+      <li><b>No locks in the shared region. None.</b> A peer that dies holding a mutex deadlocks the survivor permanently, and there is no safe recovery. Single-producer/single-consumer rings need no locks at all; that is the main reason to prefer one ring per client over one shared ring.</li>
+      <li><b>Validate every cursor on every read.</b> If <code>head.wrapping_sub(tail) &gt; ring_size</code>, the channel is corrupt. Tear it down, log it, do not attempt repair, and never panic &mdash; a peer must not be able to halt you by writing a bad integer.</li>
+      <li><b>Never dereference anything from shared memory.</b> Indices only, bounds-checked against sizes held in your own private memory. A pointer in a shared region is an arbitrary-write primitive handed to the other side.</li>
+      <li><b>Read each field exactly once.</b> Copy the entry out before validating it. Validating in place and then reading again lets the peer change the value between the two &mdash; the classic time-of-check/time-of-use bug, and it appears in almost every first implementation.</li>
+      <li><b>Stamp an epoch in the header.</b> A restarted peer increments it; a mismatch means every outstanding token is stale and must be discarded rather than matched against the new peer's completions.</li>
+    </ul>
+    <h3>When you do need many producers</h3>
+    <p>Inside a single trust domain a multi-producer ring is fine, using per-slot sequence numbers rather than a lock:</p>
+  </div>
+  <div class="codeblock">
+    <div class="codecap">Lock-free MPSC claim &mdash; only within one trust domain</div>
+<pre><span class="k">let</span> pos  = self.enqueue_pos.fetch_add(1, Ordering::<span class="k">Relaxed</span>);
+<span class="k">let</span> slot = &self.slots[(pos & self.mask) <span class="k">as</span> usize];
+
+<span class="c">// wait for the slot's turn — no lock, no ABA</span>
+<span class="k">while</span> slot.seq.load(Ordering::<span class="k">Acquire</span>) != pos { core::hint::spin_loop(); }
+
+slot.write(entry);
+slot.seq.store(pos.wrapping_add(1), Ordering::<span class="k">Release</span>);</pre>
+  </div>
+  <div class="flow">
+    <div class="note"><b>Note the limit.</b> A producer that dies between claiming <code>pos</code> and storing <code>seq</code> stalls that slot forever. That is acceptable among threads of one process, which fail together anyway. It is <b>not</b> acceptable across a trust boundary &mdash; and an imported driver component is a trust boundary. There, one SPSC ring per client, always, with the number of clients bounded at channel-creation time.</div>
+    <h3>What to expect from the numbers</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Operation</th><th class="num">Target</th><th>If you miss it</th></tr></thead>
+        <tbody>
+          <tr><td>Single submission, warm cache</td><td class="num">20&ndash;40 ns</td><td>Over ~150 ns means false sharing. Check cache-line alignment on the cursors first.</td></tr>
+          <tr><td>Batched submission, 32 entries</td><td class="num">5&ndash;10 ns each</td><td>Flat versus single submission means the batch is not actually being amortized &mdash; you are publishing per entry.</td></tr>
+          <tr><td>Completion poll, empty ring</td><td class="num">~10 ns</td><td>Costlier means you are issuing a real load fence where an acquire load suffices.</td></tr>
+          <tr><td>Doorbell wake &mdash; kernel IPI path</td><td class="num">1&ndash;2 &micro;s</td><td>The conventional cost, and the reason suppression exists at all. Also highly variable, which matters more than the mean.</td></tr>
+          <tr><td>Doorbell wake &mdash; user interrupt</td><td class="num">~100 cycles</td><td>If it is not roughly two orders of magnitude better than the IPI path, the user-interrupt setup is wrong &mdash; most likely the receiver is still taking a kernel transition somewhere in its handler prologue.</td></tr>
+          <tr><td>Equivalent Linux syscall</td><td class="num">200&ndash;500 ns</td><td>The number being beaten. Measure against a tuned kernel, per section 13 &mdash; a stock configuration makes the comparison worthless.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<div class="partbar"><span class="n">Part II</span><h2>The compositor</h2><span class="r"></span></div>
+
+<section>
+  <div class="sec-head"><div class="sec-num">07</div><h2>Scene deltas, not pixels</h2></div>
+  <div class="flow">
+    <p>The compositor owns one retained scene graph covering every window on the machine. Nobody hands it pixels and nobody hands it command buffers. It receives <em>edits to the scene it already holds</em>.</p>
+    <div class="claim"><b>Who sends those edits changed.</b> Under the interface thesis in section 15 of the architecture document, applications do not author scene nodes at all &mdash; they declare a semantic structure, and the projection layer in part III derives scene deltas from it. Everything in this part is unchanged by that: the compositor is agnostic about whether a delta was authored by hand or projected, and it must stay that way, because the projection layer is the newest and least settled piece of the system while this pipeline is the most load-bearing. <b>Read part II as the rendering target and part III as its principal client.</b></div>
+    <p>The arithmetic is the entire argument. A 4K frame is about 33 MB. A typical UI frame changes somewhere between five and fifty nodes &mdash; a caret moves, a value updates, a panel slides. Fifty deltas is roughly two kilobytes. That is a factor of ten thousand, and it is why the copy count in section 02 of the architecture document collapses rather than merely shrinking.</p>
+    <h3>Node kinds</h3>
+    <p>Deliberately few. Every additional node kind is a new shader path and a new source of pipeline stalls.</p>
+    <ul class="list">
+      <li><b>Transform</b> &mdash; an affine matrix applied to a subtree.</li>
+      <li><b>Clip</b> &mdash; a path restricting a subtree.</li>
+      <li><b>Layer</b> &mdash; opacity and blend mode; forces an intermediate target only when it genuinely must.</li>
+      <li><b>Draw</b> &mdash; a filled or stroked path, a glyph run, or an image.</li>
+      <li><b>Effect</b> &mdash; blur, drop shadow, or a material, parameterized rather than open-ended.</li>
+      <li><b>Semantic</b> &mdash; role, label, value, relations. Carried in the same tree, submitted in the same commit.</li>
+    </ul>
+    <div class="claim"><b>Accessibility lives in the scene graph from the first commit.</b> It is one extra node kind now and an unshippable retrofit in three years, because by then thousands of drawing calls will exist with no semantic content attached and no way to infer it. This is the cheapest correct decision in the entire document.</div>
+    <h3>The delta protocol</h3>
+    <p>Carried on an ordinary ring, using the ordinary envelope from part I: <code>CreateNode</code>, <code>SetTransform</code>, <code>SetPath</code>, <code>SetPaint</code>, <code>RemoveNode</code>, then <code>Commit</code>. The commit carries a frame token and the deadline it was scheduled against, and it is <b>atomic</b> &mdash; the compositor applies every delta in a commit or none of them. A half-applied frame is a torn frame, and there is no recovery from it that the user will not see.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">08</div><h2>The GPU pipeline</h2></div>
+  <div class="flow">
+    <p>Four stages, of which only the first touches the CPU. This is the shape Vello demonstrates and the reason section 05's CPU raster segment disappears entirely rather than merely getting faster.</p>
+  </div>
+  <div class="chain">
+    <div class="step"><span class="i">1</span><span class="d"><b>Encode.</b> Walk the dirty subtrees and flatten them into a linear encoding of paths, transforms and paints. The only CPU stage, and it touches changed nodes only.</span><span class="t">CPU &middot; ~0.3 ms</span></div>
+    <div class="step"><span class="i">2</span><span class="d"><b>Coarse raster.</b> A compute shader bins path segments into 16&times;16 tiles. Prefix-scan computes per-tile counts and offsets in parallel, which is the trick that removes the inherently sequential part of rasterization.</span><span class="t">GPU &middot; ~0.5 ms</span></div>
+    <div class="step"><span class="i">3</span><span class="d"><b>Fine raster.</b> One workgroup per tile computes exact coverage per pixel and composites in linear space. Blur, shadow and material effects are stages in this same pass, not separate render targets.</span><span class="t">GPU &middot; ~1.2 ms</span></div>
+    <div class="step"><span class="i">4</span><span class="d"><b>Present.</b> Write the swapchain image, or hand the surface straight to the display controller when one surface covers the screen and no composition is required.</span><span class="t">GPU &middot; ~0.1 ms</span></div>
+  </div>
+  <div class="flow">
+    <h3>Text, honestly</h3>
+    <p>Pure path rendering for all text is the elegant answer and the wrong one. Body text at 14 px has too many small paths and the per-glyph overhead dominates. The pragmatic split: shaping on the CPU, cached by <code>(string, font, size, features)</code> since the same runs recur constantly; a coverage atlas for small static text; GPU path rendering for large, animated, or transformed text where the atlas would need constant regeneration and resolution independence actually matters. Say this out loud in the design rather than discovering it after committing to one path.</p>
+    <h3>Explicit synchronization only</h3>
+    <p>Timeline semaphores throughout, never implicit driver synchronization. The application signals value N when its deltas are ready; the compositor waits N and signals M when composited; the present engine waits M. Implicit sync means the driver inserts waits you did not ask for and cannot see, which is survivable on a desktop and disqualifying on a machine whose selling point is a bounded frame time.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">09</div><h2>The latency chain</h2></div>
+  <div class="flow">
+    <p>Section 05 of the architecture document sets the budget. This is the mechanism that meets it, step by step, with the two moves that recover the most time marked.</p>
+  </div>
+  <div class="chain">
+    <div class="step"><span class="i">1</span><span class="d">The input driver timestamps the event from the hardware clock at interrupt time &mdash; not when userspace gets around to reading it.</span><span class="t">t = 0</span></div>
+    <div class="step hot"><span class="i">2</span><span class="d"><b>The compositor computes backwards from the next scanout.</b> It knows the display's timing and its own rolling p99 GPU cost, so it sets the application's deadline at <code>T_scanout &minus; gpu_p99 &minus; margin</code> and wakes it exactly then. The app is not asked to render as early as possible; it is asked to render as late as is safe.</span><span class="t">recovers ~1 frame</span></div>
+    <div class="step"><span class="i">3</span><span class="d">The application wakes under the deadline scheduler class, produces deltas, commits.</span><span class="t">+3 ms budget</span></div>
+    <div class="step"><span class="i">4</span><span class="d">The compositor applies the commit atomically and encodes the dirty subtrees.</span><span class="t">+0.3 ms</span></div>
+    <div class="step hot"><span class="i">5</span><span class="d"><b>Late-latch.</b> Immediately before GPU submit, pointer and stylus position are re-read and patched directly into the relevant transform nodes. Cursor-tracking content is therefore one whole frame fresher than the rest of the scene, which is precisely the content whose lag people notice.</span><span class="t">recovers ~1 frame</span></div>
+    <div class="step"><span class="i">6</span><span class="d">GPU pipeline stages 2 through 4 run.</span><span class="t">+1.8 ms</span></div>
+    <div class="step"><span class="i">7</span><span class="d">Scanout, with variable refresh so the frame is displayed when it is ready rather than at a fixed cadence.</span><span class="t">+2 ms</span></div>
+  </div>
+  <div class="flow">
+    <div class="note"><b>Frame pacing is where most implementations quietly lose their advantage.</b> Rendering immediately after the previous present maximizes throughput and maximizes latency &mdash; the finished frame then waits in a queue for the display. Submitting as late as the p99 estimate safely allows is the single highest-return change in the whole pipeline, and it costs nothing but bookkeeping.</div>
+    <h3>Counting the boundary crossings</h3>
+    <p>Section 10 asks for fewer than ten per frame. Walking the chain above: the application writes deltas into shared memory, which is zero. Its commit suppresses the doorbell because the compositor is actively polling, which is zero. The compositor reads the deltas from shared memory, zero. Its GPU submission goes through its own ring to the driver component, zero &mdash; followed by one MMIO doorbell write, which is not a system call. Present is one more. <b>Two hardware writes and no system calls per frame</b> is the steady state. The target has margin in it.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">10</div><h2>Degrading instead of missing</h2></div>
+  <div class="flow">
+    <p>This section inverts a habit every desktop compositor has, and it is where the interface layer stops being a rendering exercise and becomes a determinism claim.</p>
+    <p>A conventional compositor that will not finish in time renders late. That is the wrong trade in both directions, for two separate reasons:</p>
+    <ul class="list">
+      <li><b>A late frame is worse than a simplified one.</b> Missing the scanout means the previous frame is shown again and the new one lands a full period later &mdash; a visible hitch. Dropping a blur to a cheaper approximation for one frame is, in practice, invisible. The system is optimizing the wrong variable when it protects quality at the cost of timing.</li>
+      <li><b>The compositor must not be able to perturb anything else with a deadline.</b> It shares memory bandwidth with every other consumer on the machine, and bandwidth &mdash; not compute &mdash; is what they genuinely contend for. A compositor that can starve a deadline-class workload by drawing an expensive frame has made every other latency guarantee in the system conditional.</li>
+    </ul>
+    <p>Two mechanisms, both of which must exist from the first version, because retrofitting either means rewriting the scheduler integration:</p>
+    <ul class="list">
+      <li><b>Effect level-of-detail against a per-frame budget.</b> Each effect node declares a cost estimate and a cheaper fallback. When the running estimate exceeds the remaining budget, the compositor downgrades effects in a fixed, <em>deterministic</em> priority order &mdash; deterministic so degradation is reproducible under test rather than a source of visual bugs nobody can reproduce twice.</li>
+      <li><b>The compositor is the lowest-ranked deadline task on the machine, and its GPU submissions are bandwidth-capped.</b> Not merely a lower priority &mdash; an explicit cap, so a pathological frame cannot transiently starve anything above it. The compositor is a real-time task and it is the <em>least</em> important one.</li>
+    </ul>
+    <div class="claim"><b>The measurable form.</b> Take any deadline-class workload the system can already hold &mdash; a low-latency audio round trip, a control loop, an inference job under a QoS class &mdash; and establish its baseline distribution. Then run it again with the compositor deliberately overloaded: a pathological scene, every effect enabled, at the highest refresh the display will accept. <b>The workload's p99.9 must not move.</b> If it moves, the isolation is decorative and the architecture's determinism claim is conditional on nobody drawing anything interesting.</div>
+    <p>This is a cheap experiment and an unusually informative one, because it fails loudly. Most systems have never run it, which is why most systems have a compositor that can ruin a real-time workload and no documentation admitting so.</p>
+  </div>
+</section>
+
+<div class="partbar"><span class="n">Part III</span><h2>The semantic layer</h2><span class="r"></span></div>
+
+<section>
+  <div class="sec-head"><div class="sec-num">11</div><h2>The semantic model</h2></div>
+  <div class="flow">
+    <p>Section 15 of the architecture document argues the thesis: the application declares a semantic structure, the system owns it, and pixels are one projection of it. This part is how that gets built. The structure has to be precise enough to implement, small enough that developers will adopt it, and expressive enough that they do not immediately escape from it &mdash; and those three pull against each other, which is the research problem.</p>
+  </div>
+  <div class="codeblock">
+    <div class="codecap">What a node holds</div>
+<pre><span class="k">struct</span> Node {
+    id:        NodeId,          <span class="c">// stable, author-assigned, survives redesign</span>
+    role:      Role,            <span class="c">// a small CLOSED vocabulary</span>
+    content:   Content,         <span class="c">// text | value | media | none</span>
+    state:     StateSet,        <span class="c">// enabled, selected, expanded, busy, invalid</span>
+    relations: SmallVec&lt;Relation&gt;, <span class="c">// labelled_by, controls, owns, flows_to</span>
+    intent:    Option&lt;CapRef&gt;,  <span class="w">// a capability — NOT a callback</span>
+    layout:    Constraints,     <span class="w">// intrinsic size, flex — NEVER coordinates</span>
+    style:     TokenSet,        <span class="w">// semantic tokens — NEVER colour values</span>
+}</pre>
+  </div>
+  <div class="flow">
+    <p>Four of those fields carry a rule that is load-bearing rather than stylistic.</p>
+    <ul class="list">
+      <li><b>Intent is a capability reference, not a callback.</b> The most consequential line in the struct. A callback is opaque &mdash; you can invoke it and you can learn nothing else about it. A capability reference means the system <em>knows what a control does</em>: it can describe the action to a screen reader without the author writing a label, check whether a caller is permitted to invoke it, log it, and &mdash; because storage is versioned under bet 03 &mdash; undo it. This is the join that makes agent control an authorized capability invocation rather than screen-scraping with extra steps, and it wires the interface thesis directly into bet 04.</li>
+      <li><b>Layout is constraints, never coordinates.</b> The instant an application says <code>x = 340</code> the structure stops being projectable to anything but the display it was written for. Constraint-based layout is the price of multi-projection, and there is no partial version of this rule &mdash; one escape hatch and every projection except the local one silently degrades.</li>
+      <li><b>Style is semantic tokens, never values.</b> <code>emphasis</code>, <code>danger</code>, <code>surface-2</code> &mdash; resolved at projection time against the active theme and the display's actual characteristics. This is the mechanism behind section 06's claim in the architecture document that a theme reaches applications its author never saw; without it that claim is decoration.</li>
+      <li><b>Identity is stable and author-assigned.</b> A visual redesign must not change node identity. This is what makes automation and tests non-brittle, and it is also what lets the projection layer diff cheaply instead of re-deriving.</li>
+    </ul>
+    <h3>Transport and ownership</h3>
+    <p>Carried on an ordinary ring using part I's envelope: <code>DeclareNode</code>, <code>SetState</code>, <code>SetContent</code>, <code>SetRelations</code>, <code>Remove</code>, <code>Commit</code> &mdash; atomic per commit, deadline-stamped, exactly like the scene protocol in section 07. Nothing new is needed at the transport layer, which is a good sign for the design.</p>
+    <p>The inversion in one sentence: <b>the system owns the tree and the application holds a handle to it.</b> Today applications own their interface and grudgingly export a shadow of it on request. That reversal is the entire thesis, and everything else in this part is consequence.</p>
+    <div class="note"><b>The concession that decides adoption.</b> Developers want to write immediate-mode code &mdash; rebuild the whole tree every frame, because it is dramatically easier to reason about than manual delta bookkeeping. The system wants retained, for the reasons in section 07. Resolve it in the client library: run reconciliation locally against the previous tree and emit only the differences. Developers write immediate-mode; the wire carries deltas. This is the same failure mode as the ring ergonomics problem in section 04, and it has the same answer &mdash; if using the model correctly requires understanding the model, it will not be used correctly.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">12</div><h2>Projection</h2></div>
+  <div class="flow">
+    <p>Projection turns the semantic tree into whatever a particular consumer needs. For the display that means scene deltas, which is where part II picks up.</p>
+  </div>
+  <div class="chain">
+    <div class="step"><span class="i">1</span><span class="d"><b>Resolve.</b> Style tokens against the active theme and the display's real characteristics &mdash; density, colour gamut, HDR capability, reduced-motion preference. A token becomes a value only here, and never in the application.</span><span class="t">~0.05 ms</span></div>
+    <div class="step hot"><span class="i">2</span><span class="d"><b>Solve.</b> Layout from constraints and the viewport. The expensive stage, and the one that must be incremental or the whole pillar fails.</span><span class="t">~0.2 ms</span></div>
+    <div class="step"><span class="i">3</span><span class="d"><b>Emit.</b> Produce scene deltas. Part II's retained scene graph is the <em>output</em> of this stage rather than something an application authored.</span><span class="t">~0.1 ms</span></div>
+    <div class="step"><span class="i">4</span><span class="d">Part II section 08 runs unchanged from here &mdash; encode, coarse raster, fine raster, present.</span><span class="t">~1.8 ms</span></div>
+  </div>
+  <div class="flow">
+    <div class="note"><b>Incrementality is the entire engineering risk in this part.</b> If a delta touching five semantic nodes triggers a full layout solve, the section 05 budget is gone and the simpler design wins outright. Work must be proportional to the change, not to the tree &mdash; which means dirty-tracking through the constraint graph, and constraints scoped tightly enough that a local change cannot cascade globally. Expect this to be where a negative result comes from, if one comes.</div>
+    <p>The budget follows directly from the architecture document: the application gets 3 ms, so reconciliation plus all three projection stages must fit comfortably inside a fraction of it. <b>Target under 0.5 ms for a typical delta on a realistic tree.</b> That is the number the pillar is measured against.</p>
+    <h3>The payoff: many projections, one structure</h3>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Projection</th><th>What it produces</th><th>Application code required</th></tr></thead>
+      <tbody>
+        <tr><td class="m">Local display</td><td>Scene deltas into part II's pipeline.</td><td>None beyond the declaration.</td></tr>
+        <tr><td class="m">Remote client</td><td>The tree itself, projected on the far side at <em>its</em> density and refresh rate. Not an encoded pixel stream.</td><td>None.</td></tr>
+        <tr><td class="m">Screen reader</td><td>A linearized accessible presentation. No rendering happens at all.</td><td>None.</td></tr>
+        <tr><td class="m">Agent</td><td>No projection &mdash; the tree is read directly and intents are invoked as capability calls, scoped and auditable.</td><td>None.</td></tr>
+        <tr><td class="m">Test harness</td><td>Assertions against nodes with identity stable across visual change.</td><td>None.</td></tr>
+        <tr><td class="m">Semantic index</td><td>Live interface state, feeding the service in architecture section 07.</td><td>None.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="flow">
+    <p>Six consumers, one declaration, and the rightmost column is the argument. Today each of those requires a separate integration that the application author has to write, maintain, and keep synchronized with a UI that keeps changing underneath it.</p>
+    <p><b>The system runs projection, not the application.</b> Applications supply custom rendering for canvas nodes only &mdash; which is the necessary escape hatch, and therefore the subject of the next section.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">13</div><h2>The hard cases</h2></div>
+  <div class="flow">
+    <p>Three of them, stated with their failure conditions, because this pillar is the least settled part of the system and pretending otherwise would make the rest of these documents less trustworthy.</p>
+    <h3>Can a canvas participate?</h3>
+    <p>This is the case that sank every predecessor. An audio timeline or a 3D viewport renders its own pixels and cannot be expressed in any reasonable node vocabulary. If such a node becomes an opaque rectangle, then every projection except the local display goes blind exactly where the application's real work happens &mdash; and the thesis is true only for toolbars and dialogs.</p>
+    <p>The design: a canvas node declares <em>both</em> its custom rendering <em>and</em> a semantic model of its content. A timeline declares tracks, clips, time ranges and the current selection. A viewport declares objects, camera and selection. The pixels stay bespoke; the content stays addressable and manipulable.</p>
+    <div class="claim"><b>The test, stated so it can fail:</b> can an agent select the clip between 4.2 s and 6.8 s on track 3, and can a screen reader describe it, without either one seeing a single pixel? If yes, the thesis holds through the hard case. If no, canvas is an opaque box and the pillar is only partly true &mdash; which is worth knowing early rather than at the end.</div>
+    <p>There is an incentive problem underneath the technical one, and it deserves stating plainly: this asks developers to declare structure they do not currently declare. The honest pitch is that they get automation, accessibility, testing, remote projection and agent support in exchange, where today each of those is a separate integration they must write and maintain. That trade is only real if declaring the semantic model is <em>less</em> work than the five integrations it replaces. Whether it is, is a usability question rather than a technical one, and it should be tested against real developers early &mdash; the answer determines whether the pillar is adoptable at all.</p>
+    <h3>Does the indirection cost the budget?</h3>
+    <p>The falsifiable claim. Measure semantic-delta-to-photon against directly-authored-scene-to-photon, same content, same machine, same display. They must be within noise. If projection costs a millisecond, section 05's budget is spent on indirection, the simpler design wins on its merits, and the pillar should be abandoned rather than defended. Run this comparison as early as there is anything to run it on.</p>
+    <h3>Is the vocabulary the right size?</h3>
+    <p>Too small and applications escape into canvas, which voids the thesis. Too large and it becomes another sprawling markup vocabulary whose meanings are ambiguous in practice &mdash; the failure that overtook accessibility annotation on the web.</p>
+    <p>The approach: start deliberately small, and treat <b>every escape into canvas as a bug report about the vocabulary</b> rather than as an application's choice. That converts a vague design question into a measurable one &mdash; canvas-escape rate across a corpus of real applications &mdash; which is an unusually concrete metric for interface research and worth reporting whatever it says.</p>
+    <h3>What would falsify the pillar</h3>
+    <ul class="list">
+      <li><b>Projection cannot be made incremental enough.</b> The latency budget is lost and the indirection is not worth its cost.</li>
+      <li><b>Canvas-escape rate stays high.</b> The semantics do not cover the work real applications actually do, and the model describes only their edges.</li>
+      <li><b>Developers will not declare structure without enforcement.</b> The deepest risk, and the one that killed every predecessor. F's enforcement is structural &mdash; do not declare it and nothing renders &mdash; but canvas is a legitimate loophole, and if enough developers reach for it the loophole eats the thesis from inside. That is precisely the mechanism by which advisory semantics rotted everywhere else, arriving by a different route.</li>
+    </ul>
+    <div class="note"><b>Sequence this pillar behind the others.</b> Parts I and II are load-bearing and comparatively well understood; this part is neither. Build the compositor so it neither knows nor cares whether a delta was authored by hand or projected &mdash; then the semantic layer can be developed, measured, and if necessary abandoned, without taking the rendering pipeline down with it.</div>
+  </div>
+</section>
+
+<div class="partbar"><span class="n">Part IV</span><h2>Phase 00</h2><span class="r"></span></div>
+
+<section>
+  <div class="sec-head"><div class="sec-num">14</div><h2>Environment and repository</h2></div>
+  <div class="flow">
+    <p>Phase 00 runs on QEMU on bare metal, with no hypervisor and no partitioning. Those come later and would only obstruct the work here. Boot with UEFI through an existing bootloader &mdash; writing your own costs two weeks and teaches nothing that matters to this design. A modern bootloader hands over a memory map, a framebuffer, higher-half mapping and secondary-CPU startup, all of which you would otherwise write twice.</p>
+  </div>
+  <div class="codeblock">
+    <div class="codecap">Repository layout</div>
+<pre>fastpath/
+├── <span class="k">abi/</span>          <span class="c">// the ONLY crate crossing a trust boundary.</span>
+│                <span class="c">// #[repr(C)], fixed-width, no generics, no Drop,</span>
+│                <span class="c">// version-stamped. Review every change to it.</span>
+├── <span class="k">ring/</span>         <span class="c">// the protocol from part I. no_std, used by both</span>
+│                <span class="c">// kernel and userspace — one implementation, not two.</span>
+├── <span class="k">kernel/</span>
+│   └── src/
+│       ├── arch/x86_64/  <span class="c">// gdt, idt, apic, paging, context switch</span>
+│       ├── mm/           <span class="c">// frame allocator, page tables, address spaces</span>
+│       ├── cap/          <span class="c">// capability table, derivation tree, revocation</span>
+│       ├── chan/         <span class="c">// ring setup, doorbell routing</span>
+│       └── sched/        <span class="c">// round-robin now, EDF at phase 01</span>
+├── <span class="k">user/init/</span>    <span class="c">// the first user process</span>
+├── <span class="k">xtask/</span>        <span class="c">// cargo xtask run | test | debug — no Makefiles</span>
+└── <span class="k">tests/</span>        <span class="c">// integration tests driven through QEMU</span></pre>
+  </div>
+  <div class="flow">
+    <div class="note"><b>Isolating <code>abi/</code> as its own crate is a structural decision, not tidiness.</b> It is the only code whose layout is load-bearing across a boundary you do not control. Keeping it small and separate means every change to it is visible in review, and it gives you one obvious place to put the version check that stops a mismatched peer from being interpreted as corruption.</div>
+    <h3>Two decisions worth making now rather than later</h3>
+    <ul class="list">
+      <li><b>Make all kernel state per-CPU from the very first allocation</b>, behind a <code>PerCpu&lt;T&gt;</code> abstraction, even while only one core is running. Retrofitting per-CPU sharding onto global state is one of the genuinely miserable refactors, and this system's whole premise is that cores do not share.</li>
+      <li><b>Bring up the second core early &mdash; around M3 &mdash; but not before.</b> Early enough that no single-core assumption calcifies; late enough that you are not debugging SMP and paging simultaneously.</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">15</div><h2>The milestone ladder</h2></div>
+  <div class="flow">
+    <p>Seven milestones. Each has a done-criterion that is a test rather than a feeling, and every one of those tests belongs in CI the day it first passes.</p>
+  </div>
+  <div class="ms">
+    <div class="msrow">
+      <div class="msn">M0</div>
+      <div class="msb">
+        <h3>It boots, it says so, and it is already deterministic</h3>
+        <p>Custom target JSON, bootloader handoff, serial output on COM1, panic handler that prints something useful. Plus the one thing that cannot be added later: the <b>determinism substrate</b>. Time, randomness and every ordering decision reach the system only through an injectable <code>Env</code> capability, never from an instruction &mdash; with a build-failing lint on the forbidden calls, and coverage instrumentation added while the kernel is small enough for it to be trivial.</p>
+        <div class="done"><b>Done when</b> <code>cargo xtask run</code> prints a banner in QEMU and exits with status 0, driven by <code>-device isa-debug-exit</code> so the kernel can set its own exit code and a real integration test can assert on it &mdash; and when a seed plus a commit hash reproduces a run byte for byte.</div>
+        <div class="msmeta"><b>2&ndash;4 days</b> &middot; <b>the substrate is irreversible</b> &mdash; see <em>Proving Ground</em> section 04</div>
+      </div>
+    </div>
+    <div class="msrow">
+      <div class="msn">M1</div>
+      <div class="msb">
+        <h3>Memory</h3>
+        <p>Parse the bootloader's memory map into a physical frame allocator. Take ownership of the page tables rather than inheriting them &mdash; higher-half kernel with a direct physical map.</p>
+        <div class="done"><b>Done when</b> a stress test allocates and maps a thousand random frames, writes and verifies a pattern, unmaps and frees, ten times over &mdash; and the allocator's free count at the end is bit-identical to the start.</div>
+        <div class="msmeta"><b>~1 week</b></div>
+      </div>
+    </div>
+    <div class="msrow">
+      <div class="msn">M2</div>
+      <div class="msb">
+        <h3>Interrupts and time</h3>
+        <p>GDT, IDT, exception handlers with a register dump you will read hundreds of times. Local APIC, TSC-deadline timer, calibrated against a known reference.</p>
+        <div class="done"><b>Done when</b> a 1 kHz timer runs for 60 seconds and you have a jitter histogram with p99 under 5 &micro;s. This is the first real-time measurement in the project and it exists in week three &mdash; from here on, every milestone reports it, and a regression fails the build.</div>
+        <div class="msmeta"><b>~1 week</b> &middot; the most important milestone on this list</div>
+      </div>
+    </div>
+    <div class="msrow">
+      <div class="msn">M3</div>
+      <div class="msb">
+        <h3>User space, and a second core</h3>
+        <p>User page tables, the ring-3 transition, a <code>syscall</code> entry used strictly for channel setup and never on a hot path. Load a flat binary from a boot module. Start the application processors.</p>
+        <div class="done"><b>Done when</b> a user process runs on core 1, faults deliberately, and is killed cleanly while core 0 keeps its timer jitter inside the M2 bound throughout.</div>
+        <div class="msmeta"><b>1&ndash;2 weeks</b></div>
+      </div>
+    </div>
+    <div class="msrow">
+      <div class="msn">M4</div>
+      <div class="msb">
+        <h3>Capabilities</h3>
+        <p>A per-process table of typed slots &mdash; Untyped, Frame, AddressSpace, Channel, Endpoint, Irq. Derive a weaker capability, copy one, and revoke recursively through a derivation tree.</p>
+        <div class="done"><b>Done when</b> the negative test suite passes: a process cannot name a capability it was not given, cannot forge a handle, cannot use a revoked handle, cannot exceed granted rights, and cannot make the kernel panic by trying. These tests are the phase-00 exit criterion from section 09 of the architecture document, written as code.</div>
+        <div class="msmeta"><b>1&ndash;2 weeks</b></div>
+      </div>
+    </div>
+    <div class="msrow">
+      <div class="msn">M5</div>
+      <div class="msb">
+        <h3>The first ring</h3>
+        <p>Everything in part I: the layout, the cursor protocol with correct acquire/release ordering, notification suppression. Exactly two opcodes to start &mdash; <code>NOP</code> and <code>WRITE_SERIAL</code>.</p>
+        <div class="done"><b>Done when</b> one million NOPs submitted in batches of 32 report under 50 ns per operation, and the number is recorded in CI as a regression gate. If it comes in above 200 ns, re-read section 02 before changing anything else.</div>
+        <div class="msmeta"><b>~2 weeks</b></div>
+      </div>
+    </div>
+    <div class="msrow">
+      <div class="msn">M6</div>
+      <div class="msb">
+        <h3>Phase 00 complete</h3>
+        <p>Nothing new &mdash; this milestone is composition and proof.</p>
+        <div class="done"><b>Done when</b> a capability-restricted user process communicates with the kernel entirely through a ring, touches nothing it was not handed, and the whole suite runs under one command in CI with timer jitter and ring throughput recorded as gates on every commit.</div>
+        <div class="msmeta"><b>total: 7&ndash;10 weeks</b> &middot; matches the 0.5&ndash;1.5 person-year figure in section 09</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">16</div><h2>Tooling, and what not to build</h2></div>
+  <div class="flow">
+    <h3>Worth setting up on day one</h3>
+    <ul class="list">
+      <li><b><code>cargo xtask</code> for all orchestration.</b> Build, run, debug and test as Rust code rather than a Makefile. It stays readable at the point where the build genuinely gets complicated, which it will.</li>
+      <li><b>QEMU's debug-exit device</b>, so the kernel returns a real exit status and integration tests are ordinary <code>cargo test</code> rather than log-scraping.</li>
+      <li><b>A committed <code>.gdbinit</code></b> plus <code>qemu -s -S</code>. Symbolized breakpoints in kernel code from M0 turns most triage from guesswork into stepping.</li>
+      <li><b><code>qemu -d int,cpu_reset</code></b> in your notes. The first triple fault arrives during M1 and this is how you find it.</li>
+      <li><b>The jitter histogram and ring benchmark in CI from M2 and M5.</b> This is the habit that makes section 10's metrics real. Numbers that are not gated regress silently, and on a project whose entire claim is determinism, a silent latency regression is the failure that matters.</li>
+    </ul>
+    <h3>Explicitly not in phase 00</h3>
+    <ul class="list">
+      <li><b>No filesystem.</b> The object store is phase 02 and it is a different kind of problem. Boot modules are enough to load a binary.</li>
+      <li><b>No general heap.</b> A bump allocator plus a slab for fixed-size kernel objects. A real allocator now is speculative work against requirements you do not have yet.</li>
+      <li><b>No imported drivers, and no shim.</b> Bare QEMU with virtio. The kernel-API shim in architecture section 14 brings a large body of foreign C into the system, and introducing it before capabilities and rings are solid means debugging two unfamiliar systems through each other.</li>
+      <li><b>No drivers beyond serial and the timer.</b> Not even virtio &mdash; that is M-something in phase 01, once the ring it would be built on actually exists.</li>
+      <li><b>No graphics.</b> The compositor in part II is phase 03. Attempting it before rings and deadlines are solid produces a demo you have to throw away.</li>
+    </ul>
+    <div class="claim"><b>The through-line:</b> phase 00 exists to prove exactly two propositions &mdash; that isolation holds under adversarial use, and that the ring is genuinely faster than a system call. Everything in the ladder above serves one of those two. Anything that serves neither is phase 01 or later, however tempting it looks at the time.</div>
+  </div>
+  <div class="foot">
+    Reference implementations worth reading before starting, in roughly this order: Asterinas for the framekernel partition in practice &middot; seL4 for capability derivation and revocation done correctly &middot; the io_uring documentation for the cursor and suppression protocol &middot; virtio's event-index mechanism for the same idea arrived at independently &middot; Vello for the compute rasterization pipeline &middot; Jailhouse for how small a partitioning hypervisor is allowed to be.
+  </div>
+</section>
+
+</div>

@@ -1,0 +1,486 @@
+<title>Lineage and Debts</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;700;900&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root{
+  --paper:#F2F4F7; --surface:#FFFFFF; --surface-2:#E9ECF2;
+  --ink:#12141A; --ink-2:#3A4150; --muted:#6B7382;
+  --line:#D6DBE4; --line-strong:#B9C0CD;
+  --cobalt:#2F4FD8; --rust:#A8431C; --teal:#0B6E5C;
+  --on-accent:#FFFFFF;
+  --shadow:0 1px 2px rgba(18,20,26,.05), 0 8px 24px -16px rgba(18,20,26,.28);
+  --sans:"IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --display:"Chivo", "IBM Plex Sans", ui-sans-serif, sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --col:66ch; --wide:1180px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+    --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+    --line:#262C39; --line-strong:#3D4657;
+    --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+    --on-accent:#0D0F14;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+  --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+  --line:#262C39; --line-strong:#3D4657;
+  --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+  --on-accent:#0D0F14;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+}
+
+*{box-sizing:border-box;}
+body{margin:0; background:var(--paper); color:var(--ink); font-family:var(--sans); font-size:17px; line-height:1.65; -webkit-font-smoothing:antialiased;}
+.wrap{max-width:var(--wide); margin:0 auto; padding:0 28px 96px;}
+
+h1,h2,h3,h4{font-family:var(--display); text-wrap:balance; margin:0;}
+h1{font-weight:900; font-size:clamp(2.5rem,6.2vw,4.2rem); line-height:.98; letter-spacing:-.035em;}
+h2{font-weight:900; font-size:clamp(1.5rem,3vw,2.05rem); line-height:1.08; letter-spacing:-.025em;}
+h3{font-weight:700; font-size:1.14rem; line-height:1.3; letter-spacing:-.012em;}
+h4{font-weight:700; font-size:.92rem; line-height:1.35;}
+p{margin:0;}
+a{color:var(--cobalt); text-decoration-thickness:1px; text-underline-offset:2px;}
+a:focus-visible{outline:2px solid var(--cobalt); outline-offset:3px; border-radius:2px;}
+strong,b{font-weight:600;}
+code{font-family:var(--mono); font-size:.87em; background:var(--surface-2); padding:.1em .34em; border-radius:3px;}
+em.sys{font-style:normal; font-weight:600;}
+
+.eyebrow{font-family:var(--mono); font-size:.7rem; font-weight:600; letter-spacing:.16em; text-transform:uppercase; color:var(--muted);}
+
+.mast{padding:72px 0 40px; border-bottom:1px solid var(--line-strong);}
+.mast-grid{display:flex; flex-direction:column; gap:26px;}
+.mast .lede{font-size:1.2rem; line-height:1.55; color:var(--ink-2); max-width:60ch;}
+.mast .lede b{color:var(--ink);}
+.specline{display:flex; flex-wrap:wrap; gap:10px 26px; padding-top:6px; font-family:var(--mono); font-size:.74rem; color:var(--muted); letter-spacing:.04em;}
+.specline span b{color:var(--ink-2);}
+
+section{padding:52px 0 8px; border-bottom:1px solid var(--line);}
+section:last-of-type{border-bottom:0;}
+.sec-head{display:flex; align-items:baseline; gap:16px; margin-bottom:20px; flex-wrap:wrap;}
+.sec-num{font-family:var(--mono); font-size:.74rem; font-weight:600; color:var(--cobalt); letter-spacing:.1em; padding-top:.5em;}
+.flow{display:flex; flex-direction:column; gap:18px;}
+.flow > p, .flow > ul, .flow > .note, .flow > h3, .flow > .claim{max-width:var(--col);}
+
+ul.list{margin:0; padding-left:0; list-style:none; display:flex; flex-direction:column; gap:11px;}
+ul.list li{position:relative; padding-left:22px;}
+ul.list li::before{content:""; position:absolute; left:2px; top:.62em; width:7px; height:7px; border:1.5px solid var(--cobalt); border-radius:1px;}
+
+.note{border-left:3px solid var(--rust); background:color-mix(in srgb, var(--rust) 7%, var(--surface)); padding:14px 18px; border-radius:0 5px 5px 0; font-size:.95rem; color:var(--ink-2);}
+.note b{color:var(--ink);}
+.claim{border-left:3px solid var(--cobalt); background:color-mix(in srgb, var(--cobalt) 7%, var(--surface)); padding:14px 18px; border-radius:0 5px 5px 0; font-size:.95rem; color:var(--ink-2);}
+.claim b{color:var(--ink);}
+.claim .t{font-family:var(--mono); font-size:.68rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--cobalt); display:block; margin-bottom:7px;}
+
+.tablewrap{overflow-x:auto; border:1px solid var(--line); border-radius:7px; background:var(--surface); margin:6px 0 4px;}
+table{border-collapse:collapse; width:100%; min-width:820px; font-size:.87rem;}
+th,td{text-align:left; padding:12px 15px; border-bottom:1px solid var(--line); vertical-align:top; line-height:1.5;}
+thead th{font-family:var(--mono); font-size:.66rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); background:var(--surface-2); border-bottom:1px solid var(--line-strong); white-space:nowrap;}
+tbody tr:last-child td{border-bottom:0;}
+td.sysname{white-space:nowrap;}
+td.sysname b{font-family:var(--display); font-weight:700; font-size:.95rem; display:block;}
+td.sysname span{font-family:var(--mono); font-size:.66rem; color:var(--muted); letter-spacing:.05em;}
+td.fpos{background:color-mix(in srgb, var(--cobalt) 4%, var(--surface));}
+
+.chip{display:inline-block; font-family:var(--mono); font-size:.62rem; font-weight:600; letter-spacing:.08em; text-transform:uppercase; padding:3px 7px; border-radius:3px; border:1px solid currentColor; white-space:nowrap;}
+.chip.ahead{color:var(--teal); background:color-mix(in srgb, var(--teal) 10%, var(--surface));}
+.chip.behind{color:var(--rust); background:color-mix(in srgb, var(--rust) 10%, var(--surface));}
+.chip.par{color:var(--muted); background:var(--surface-2);}
+
+.streams{display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:13px; margin:8px 0 4px;}
+.stream{background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--cobalt); border-radius:6px; padding:16px 18px 18px; display:flex; flex-direction:column; gap:10px; box-shadow:var(--shadow);}
+.stream .k{font-family:var(--mono); font-size:.66rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--cobalt);}
+.stream .from{font-family:var(--mono); font-size:.73rem; color:var(--muted); line-height:1.75;}
+.stream .from b{color:var(--ink-2);}
+.stream .takes{font-size:.89rem; color:var(--ink-2); line-height:1.55; border-top:1px dashed var(--line-strong); padding-top:10px; margin-top:auto;}
+.stream .takes b{color:var(--ink);}
+
+.neighbours{display:flex; flex-direction:column; margin:6px 0 4px;}
+.nb{display:grid; grid-template-columns:minmax(150px,200px) 1fr; gap:6px 22px; padding:16px 0; border-top:1px solid var(--line);}
+.nb:last-child{border-bottom:1px solid var(--line);}
+.nb .n{font-family:var(--display); font-weight:700; font-size:1rem; line-height:1.35;}
+.nb .n span{display:block; font-family:var(--mono); font-size:.66rem; font-weight:600; color:var(--muted); letter-spacing:.05em; text-transform:uppercase; padding-top:3px;}
+.nb .d{font-size:.92rem; color:var(--ink-2); max-width:64ch;}
+
+.deficit{display:flex; flex-direction:column; margin:6px 0 4px;}
+.df{display:grid; grid-template-columns:minmax(140px,190px) 1fr; gap:6px 22px; padding:15px 0; border-top:1px solid var(--line);}
+.df:last-child{border-bottom:1px solid var(--line);}
+.df .n{font-family:var(--display); font-weight:700; font-size:.98rem;}
+.df .d{font-size:.92rem; color:var(--ink-2); max-width:64ch;}
+
+.foot{padding-top:40px; font-family:var(--mono); font-size:.7rem; color:var(--muted); letter-spacing:.06em; line-height:1.8; max-width:80ch;}
+
+@media (max-width:720px){
+  body{font-size:16px;}
+  .wrap{padding:0 20px 72px;}
+  .nb, .df{grid-template-columns:1fr;}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none !important; transition:none !important;}}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="mast-grid">
+    <div class="eyebrow">Comparative analysis &middot; second companion</div>
+    <h1>Lineage and Debts</h1>
+    <p class="lede">Twenty-six systems that tried something structurally new, what each one actually proved, what each one left unsolved &mdash; and where <b>F</b> stands against them. Written to be useful rather than flattering: the last two sections are the ones that matter, and they are the ones where F loses.</p>
+    <div class="specline">
+      <span><b>Companion to</b> &nbsp;The Fast Path</span>
+      <span><b>Alongside</b> &nbsp;Ring, Scene, Boot &middot; Deadline All the Way Down &middot; Proving Ground</span>
+      <span><b>Posture</b> &nbsp;synthesis, not superset</span>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="sec-head"><div class="sec-num">01</div><h2>How to read this</h2></div>
+  <div class="flow">
+    <p>The method behind F &mdash; take the strongest idea from each prior system and find a structure where they reinforce rather than fight &mdash; is sound, and it is how most durable systems work got done. But it needs one correction stated up front, because it is the specific way ambitious operating systems fail.</p>
+    <div class="claim">
+      <span class="t">The correction</span>
+      <b>F is a synthesis, not a superset.</b> No system beats every predecessor on every axis, and the ones that set out to &mdash; Fuchsia most recently, with a decade and hundreds of engineers &mdash; end up beaten by their own scope. What F can defensibly claim is a <em>specific combination</em> nobody has assembled, plus roughly six things nobody has tried at all. That is a strong position. "Best at everything" is not a position; it is the absence of one.
+    </div>
+    <p>So the comparison below has a fourth column that is often unflattering, and two closing sections that exist to keep the rest honest: what is genuinely new, which is shorter than it feels like it should be, and what F is permanently behind on, which is longer.</p>
+    <p>One note on fairness. Several systems here are twenty or forty years old and were solving their era's problems on their era's hardware. "What it left unsolved" is not a criticism of them &mdash; Exokernel had no IOMMU to work with, and Mach's IPC cost was a discovery nobody had made yet. The column records what the next system had to fix, which is how the field advances.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">02</div><h2>The lineage</h2></div>
+  <div class="flow">
+    <p>Five inheritance streams. Almost nothing in F's architecture is unprecedented in isolation; the bet is on the combination and on the handful of joins between them.</p>
+  </div>
+  <div class="streams">
+    <div class="stream">
+      <div class="k">Stream 01 &mdash; kernel structure</div>
+      <div class="from"><b>Asterinas</b> framekernel partition<br><b>Singularity / Midori</b> language-based isolation<br><b>Theseus</b> intralingual design<br><b>Hubris</b> all-Rust in production</div>
+      <div class="takes"><b>Takes:</b> one address space for speed, with the language rather than the MMU drawing the safety boundary, and the unsafe frame held to a few percent of the code.</div>
+    </div>
+    <div class="stream">
+      <div class="k">Stream 02 &mdash; authority</div>
+      <div class="from"><b>seL4</b> capability derivation and revocation<br><b>KeyKOS / EROS</b> pure capability systems<br><b>Genode</b> recursive component composition<br><b>Fuchsia</b> capabilities at product scale</div>
+      <div class="takes"><b>Takes:</b> no root, no global namespace, authority only by explicit grant &mdash; and Genode's insight that the same rule should apply recursively all the way down.</div>
+    </div>
+    <div class="stream">
+      <div class="k">Stream 03 &mdash; the data path</div>
+      <div class="from"><b>Exokernel</b> secure hardware multiplexing<br><b>Arrakis</b> kernel as control plane only<br><b>Demikernel</b> microsecond-scale datapath<br><b>io_uring</b> the ring mechanics themselves</div>
+      <div class="takes"><b>Takes:</b> the kernel sets up and revokes the channel and is absent from it. This is the single largest borrowing in F, and Arrakis is its closest ancestor.</div>
+    </div>
+    <div class="stream">
+      <div class="k">Stream 04 &mdash; state</div>
+      <div class="from"><b>Nix / Guix</b> functional system configuration<br><b>git / Unison</b> content addressing<br><b>Plan 9</b> uniform naming</div>
+      <div class="takes"><b>Takes:</b> the system as a pure function of a declarative expression, with immutability enforced by the storage layer rather than observed by convention.</div>
+    </div>
+    <div class="stream">
+      <div class="k">Stream 05 &mdash; interface</div>
+      <div class="from"><b>NeWS</b> send structure, not pixels<br><b>Fuchsia Scenic</b> system-wide retained scene<br><b>Morphic</b> live inspectable objects<br><b>DOM + ARIA</b> semantics beside rendering</div>
+      <div class="takes"><b>Takes:</b> the display layer holds a structure rather than receiving images &mdash; and the correction that the structure must be load-bearing, not advisory.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">03</div><h2>Kernel architecture</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>System</th><th>What it proved</th><th>What it left unsolved</th><th>Where F stands</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="sysname"><b>Mach</b><span>1985</span></td>
+          <td>That a kernel could be decomposed into servers at all &mdash; the idea that started the field.</td>
+          <td>IPC so expensive that it discredited microkernels for two decades and drove the industry back to monoliths.</td>
+          <td class="fpos">F removes the boundary crossing rather than optimizing it. There is no fast IPC because on the hot path there is no IPC. <span class="chip ahead">Ahead</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>L4 &middot; seL4</b><span>1993 &middot; 2009</span></td>
+          <td>Microkernel IPC can approach the hardware floor, and a kernel can be <em>fully machine-checked</em> against its specification. Still the field's high-water mark for assurance.</td>
+          <td>Verification cost roughly a person-decade for ten thousand lines and does not extend upward &mdash; everything built on seL4 is unverified. Address-space switches remain on every call.</td>
+          <td class="fpos">Borrows the authority model wholesale; declines the proof obligation, targeting the frame and protocols instead. <span class="chip behind">Behind on assurance</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Barrelfish</b><span>2009</span></td>
+          <td>The multikernel: treat a many-core machine as a distributed system, share no kernel state, and scalability stops being a locking problem.</td>
+          <td>Message passing everywhere is the wrong price when shared memory is cheap and coherent. Never met real workloads.</td>
+          <td class="fpos">Takes the no-shared-state rule as a design constraint, rejects the transport. Per-CPU from the first allocation; shared-memory rings instead of messages. <span class="chip ahead">Ahead</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Singularity &middot; Midori</b><span>2004 &middot; 2008</span></td>
+          <td>Software-isolated processes with contract-verified channels &mdash; isolation from types rather than hardware, with protocol conformance checked at compile time. Reportedly very fast.</td>
+          <td>Required every line of code in one managed language, so no C and no imported drivers, ever. Garbage collection in the base system. Cancelled before shipping.</td>
+          <td class="fpos">Same thesis with Rust, so no GC &mdash; and F deliberately hosts untrusted native components, which Singularity structurally could not. Its verified channel contracts are the model for F's ring protocol checking. <span class="chip ahead">Ahead</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Genode</b><span>2008</span></td>
+          <td>Capability-based composition applied recursively &mdash; every component is itself a parent that can spawn and constrain children, across several kernel backends.</td>
+          <td>Synchronous IPC-heavy design. Conventional interface layer. Small ecosystem despite genuine maturity.</td>
+          <td class="fpos">Rings replace synchronous IPC. But Genode's component model is more worked out than F's, and F should borrow from it rather than re-derive. <span class="chip behind">Behind on component model</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Fuchsia &middot; Zircon</b><span>2016</span></td>
+          <td>A capability-based, component-structured OS can ship on real consumer hardware with a real system compositor and run unmodified Linux binaries.</td>
+          <td>Never found a use case that pulled developers in. Under the components, Zircon is a conventional syscall kernel &mdash; the novelty sits in the framework rather than the interface.</td>
+          <td class="fpos">F replaces the syscall interface itself, and being a research vehicle removes the ecosystem obligation that defeated Fuchsia. But it takes <b>three separate mechanisms from that framework</b> &mdash; declarative capability routing, the driver container, and live structured diagnostics &mdash; and none from the kernel. The driver <em>inventory</em> is the part that cannot be reused: its graphics stack supports only unified-memory devices. <span class="chip behind">Behind on everything shipping-related</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Redox</b><span>2015</span></td>
+          <td>A Rust microkernel can be carried all the way to a usable desktop by a largely volunteer effort.</td>
+          <td>Deliberately Unix-shaped. POSIX compatibility constrains the design, so it is a better-built instance of a known architecture rather than a new one.</td>
+          <td class="fpos">F is not Unix-shaped and carries no POSIX constraint. <span class="chip behind">Behind on completeness</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Asterinas</b><span>2022</span></td>
+          <td>The framekernel works in practice: monolithic performance with the unsafe trusted base held near 14% of the code, and Linux ABI compatibility on top.</td>
+          <td>Being Linux-shaped is the entire goal, so it inherits Linux's abstractions, syscall interface, I/O model and storage model along with its compatibility.</td>
+          <td class="fpos"><b>F's closest kernel relative.</b> Same structure, opposite goal &mdash; F takes the framekernel and rejects the ABI, the syscall interface and the I/O model. <span class="chip par">Divergent</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Theseus</b><span>2020</span></td>
+          <td>Intralingual design taken to its limit: no address spaces at all, runtime-composable cells, and state-spill elimination that makes live evolution tractable.</td>
+          <td>Purity precludes hosting any untrusted or non-Rust code. Research scale, no serious hardware story.</td>
+          <td class="fpos">F is the compromised version &mdash; less elegant, but able to confine imported C drivers behind the IOMMU. <span class="chip behind">Behind on purity</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Hubris</b><span>2021</span></td>
+          <td>An all-Rust kernel with a statically declared task set is not merely viable but preferable in production embedded systems.</td>
+          <td>Static task set by design. Embedded scale. No dynamism, no general-purpose ambitions.</td>
+          <td class="fpos">F is dynamic and desktop-scale; it takes the discipline rather than the mechanism. <span class="chip par">Different scope</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>QNX</b><span>1982</span></td>
+          <td>A microkernel RTOS can be commercially durable for forty years, with hard real-time guarantees and a partitioning hypervisor shipping in safety-critical products.</td>
+          <td>Proprietary and POSIX-shaped. Architecturally conventional by current standards.</td>
+          <td class="fpos">F takes the seriousness about deadlines and the evidence that isolation and real-time coexist. <span class="chip behind">Behind on field-proven reliability</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">04</div><h2>The data path</h2></div>
+  <div class="flow">
+    <p>This is where F's central claim lives, and where the lineage is most direct.</p>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>System</th><th>What it proved</th><th>What it left unsolved</th><th>Where F stands</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="sysname"><b>Exokernel</b><span>1995</span></td>
+          <td>The kernel's only necessary job is secure multiplexing of hardware; abstractions belong in libraries the application chooses.</td>
+          <td>Every application then had to implement its own operating system, which nobody wanted. 1990s hardware had no IOMMU, so isolation was expensive software work.</td>
+          <td class="fpos">Same division of labour, but the IOMMU now enforces it in hardware and the system <em>ships</em> good abstractions rather than requiring each app to invent them. <span class="chip ahead">Ahead</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Arrakis</b><span>2014</span></td>
+          <td>Kernel as control plane only: applications reach network and storage hardware directly through virtual functions, with order-of-magnitude latency gains.</td>
+          <td>Covered network and storage alone. Depended on SR-IOV hardware that was then rare. Built on Barrelfish, so no path to a general system.</td>
+          <td class="fpos"><b>F's closest philosophical ancestor.</b> F generalizes the same thesis from two subsystems to every service, graphics and process control included. <span class="chip ahead">Ahead in scope</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Demikernel</b><span>2021</span></td>
+          <td>A portable library-OS datapath can hold microsecond-scale latency across heterogeneous kernel-bypass devices.</td>
+          <td>Datapath only &mdash; no storage model, no interface layer, no system.</td>
+          <td class="fpos">Same philosophy applied to a whole system rather than one layer. <span class="chip par">Adjacent</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>io_uring</b><span>2019</span></td>
+          <td>Shared-memory submission and completion rings with notification suppression make the syscall boundary nearly free at scale &mdash; in a production kernel, at enormous scale.</td>
+          <td>An accelerator bolted <em>beside</em> the syscall interface, not a replacement for it. Ergonomically hostile enough that most software never adopts it.</td>
+          <td class="fpos">F makes the ring the only interface, adds a deadline field and completion timestamps, and treats the ergonomics as a first-class design problem rather than an afterthought. <span class="chip ahead">Ahead</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Unikernels</b><span>MirageOS 2013</span></td>
+          <td>Specializing a single application into a single address space with no syscall boundary produces tiny, fast, minimal-attack-surface images.</td>
+          <td>One application per image. No multi-tenancy, no interactive interface, difficult to debug and operate.</td>
+          <td class="fpos">F keeps the no-boundary property while remaining multi-tenant, which is the harder half. <span class="chip ahead">Ahead</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">05</div><h2>State, naming and configuration</h2></div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>System</th><th>What it proved</th><th>What it left unsolved</th><th>Where F stands</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="sysname"><b>Plan 9</b><span>1992</span></td>
+          <td>One uniform naming mechanism plus per-process namespaces gives distribution, composition and sandboxing almost for free. Still the most elegant idea in operating systems.</td>
+          <td>Synchronous file I/O as the universal interface cannot express asynchrony, batching or zero-copy &mdash; the uniformity is bought with performance.</td>
+          <td class="fpos">Same ambition, different universal primitive: the ring rather than the file. Uniformity that is asynchronous and zero-copy by construction. <span class="chip ahead">Ahead</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Nix &middot; Guix</b><span>2003 &middot; 2012</span></td>
+          <td>A whole system can be a pure function of a declarative expression, with atomic generations and one-boot rollback. Deep customization stops being dangerous.</td>
+          <td>Built on top of a conventional POSIX filesystem, so immutability is a convention the kernel knows nothing about. Nothing at runtime participates. Evaluation is slow and the store grows without bound.</td>
+          <td class="fpos">The same model made <em>native</em>: the object store is the store, immutability is enforced by the storage layer, and the kernel is a participant rather than a bystander. <span class="chip ahead">Ahead</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>git &middot; Unison</b><span>2005 &middot; 2019</span></td>
+          <td>Content addressing makes deduplication, verification and history free, and Unison showed it works for <em>code</em> rather than only for files.</td>
+          <td>Neither is an operating system; neither confronts write amplification, garbage collection or hot-path latency.</td>
+          <td class="fpos">F carries content addressing into the storage layer and joins it to zoned devices &mdash; where the append-only shape stops being a cost and becomes a match. <span class="chip ahead">Ahead</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>NetBSD rump</b><span>2007</span></td>
+          <td>Kernel drivers can be factored to run outside the kernel unmodified, given a small enough host interface.</td>
+          <td>NetBSD's driver set, which is far narrower than Linux's on current hardware.</td>
+          <td class="fpos">F applies the same factoring to a Linux-sourced driver set through a source-level shim. <span class="chip par">Same technique</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">06</div><h2>Interface architecture</h2></div>
+  <div class="flow">
+    <p>The least-advanced area in the field, and consequently where F's second research pillar has the most room.</p>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>System</th><th>What it proved</th><th>What it left unsolved</th><th>Where F stands</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="sysname"><b>X11</b><span>1984</span></td>
+          <td>Network-transparent graphics, and that a display protocol can outlive four decades of hardware change.</td>
+          <td>Pixels and events as the abstraction. Forty years of extensions, no security model, and semantics recoverable only by guessing.</td>
+          <td class="fpos">The design F exists to replace. <span class="chip ahead">Ahead</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>NeWS</b><span>1986</span></td>
+          <td>The most under-remembered system here. Clients downloaded <em>behaviour</em> into a resolution-independent, PostScript-based display server, so interaction resolved locally with no round trip &mdash; vector-native and network-efficient decades before either was fashionable.</td>
+          <td>Shipping a full programming language into the display server is a security and complexity disaster. Proprietary, and X was free.</td>
+          <td class="fpos">Same instinct &mdash; send structure, not images &mdash; with declarative semantics in place of downloadable code, which is what makes it safe to accept from an untrusted client. <span class="chip ahead">Ahead</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Morphic</b><span>Self / Squeak, 1995</span></td>
+          <td>A live, uniformly inspectable, directly manipulable object world where the interface is editable while it runs.</td>
+          <td>No separation between semantics and presentation, no security model, and performance that never reached production expectations.</td>
+          <td class="fpos">F takes liveness and uniform inspectability, and adds the separation Morphic lacked. <span class="chip ahead">Ahead</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Oberon</b><span>1987</span></td>
+          <td>An entire system &mdash; compiler, kernel, interface &mdash; small enough for one person to understand, with a genuinely app-less, command-oriented interaction model.</td>
+          <td>Single user, no protection, effectively no concurrency, text-centric.</td>
+          <td class="fpos">F takes the app-less ambition into a protected, concurrent, graphical system. <span class="chip ahead">Ahead</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Wayland</b><span>2008</span></td>
+          <td>Fixing X11's security model and radically simplifying the protocol is possible and worth doing.</td>
+          <td>Clients still submit pixel buffers; the compositor composites surfaces rather than owning a scene. No semantic layer at all, and protocol fragmentation has recreated much of X's extension sprawl.</td>
+          <td class="fpos">F's compositor owns one retained scene for the whole machine, and receives deltas rather than images. <span class="chip ahead">Ahead</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>Fuchsia Scenic</b><span>2018</span></td>
+          <td>A system-wide retained scene graph works at product scale &mdash; the closest existing thing to F's compositor.</td>
+          <td>Applications still author scene nodes directly. No semantic layer above the scene, so accessibility and automation remain separate retrofitted subsystems.</td>
+          <td class="fpos">F derives the scene from a semantic structure, which is the step Scenic did not take. <span class="chip ahead">Ahead</span></td>
+        </tr>
+        <tr>
+          <td class="sysname"><b>DOM + ARIA</b><span>1998 &middot; 2008</span></td>
+          <td>A semantic tree with a rendering projection, at planetary scale &mdash; by far the most widely deployed version of F's interface thesis.</td>
+          <td><b>The semantics are advisory.</b> Nothing visibly breaks when they are wrong, so they rot &mdash; which is the failure mode of every accessibility annotation system ever built.</td>
+          <td class="fpos">F's single distinguishing bet in this area: make the structure the only source of truth, so a wrong tree is immediately wrong pixels. <span class="chip ahead">Ahead if it holds</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">07</div><h2>What is actually new</h2></div>
+  <div class="flow">
+    <p>Stripping out everything inherited, seven things remain that no prior system has done or combined. This list is deliberately short, because a short defensible list is worth more than a long asserted one &mdash; and because every item here is a claim someone could try to refute.</p>
+    <ul class="list">
+      <li><b>The ring as the universal system interface.</b> io_uring is an accelerator beside a syscall interface; Arrakis bypassed the kernel for network and storage only. Nobody has made one ring protocol the sole interface to every service &mdash; storage, network, graphics, timers, process control, IPC.</li>
+      <li><b>Deadlines and completion timestamps in the submission entry.</b> Earliest-deadline-first ordering applied at the I/O layer system-wide, with every completion carrying when it actually happened. Eight bytes for whole-system latency accounting with no instrumentation build. No OS does this.</li>
+      <li><b>User-level interrupts as the doorbell for general IPC.</b> The hardware exists and is essentially unused. Building an entire system interface on it, and publishing the measured difference against the interrupt path, is unclaimed ground.</li>
+      <li><b>Content-addressed storage meeting zoned devices with no translation layer.</b> Nix's model and ZNS hardware are structurally the same shape &mdash; append-only, immutable, garbage-collected &mdash; and nobody has joined them. The write amplification that conventional stacks fight should simply not arise.</li>
+      <li><b>Semantics as the only source of truth for the interface.</b> Every predecessor made them advisory and watched them rot. Making them load-bearing is the un-attempted version.</li>
+      <li><b>Untrusted imported drivers as confined ring peers, with the cost measured.</b> FreeBSD runs foreign drivers in-kernel; nobody has published what it costs to run them isolated, IOMMU-confined and restartable, on modern graphics hardware.</li>
+      <li><b>An operating system architected so that whole-system deterministic simulation is tractable.</b> The technique is proven elsewhere &mdash; FoundationDB on the order of a trillion simulated CPU-hours, TigerBeetle reproducing any bug exactly from a seed and a commit &mdash; and is almost never applied to operating systems, because kernels leak nondeterminism at thousands of unmarked places. F's ring interface, absence of ambient authority, user-space drivers and content-addressed state remove nearly all of them, not by design for testing but as a consequence of decisions made for speed and safety. The claim is that these are the same design pressure seen from three angles, and it is the only item on this list that must be built first or never.</li>
+    </ul>
+    <div class="note"><b>Note what is not on this list.</b> The framekernel, capabilities, kernel bypass, content addressing, declarative configuration, retained scene graphs, GPU vector rasterization and component models are all borrowed, and F should say so plainly in any writeup. Overclaiming on inherited ideas is how systems papers lose credibility, and the six items above are strong enough to stand without help.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">08</div><h2>Where F is behind, and will stay behind</h2></div>
+  <div class="flow">
+    <p>The section that makes the previous one believable.</p>
+  </div>
+  <div class="deficit">
+    <div class="df">
+      <div class="n">seL4 &mdash; assurance</div>
+      <div class="d">seL4 is machine-checked against its specification. F will verify its frame and its protocols and will not verify the system. That gap is permanent unless someone funds a decade of proof work, and no amount of Rust closes it. When F claims safety it must say <em>sound by construction in the following respects</em>, never <em>verified</em>.</div>
+    </div>
+    <div class="df">
+      <div class="n">Fuchsia &mdash; reality</div>
+      <div class="d">A decade, hundreds of engineers, shipping on consumer hardware, with a component framework and driver coverage F will not approach. F's advantage is that it does not need users; that is a change of subject, not a win.</div>
+    </div>
+    <div class="df">
+      <div class="n">Genode &mdash; component model</div>
+      <div class="d">Recursive capability-based composition worked out far more thoroughly than anything in F's documents. F should be reading Genode rather than re-deriving it, and should expect to find its own model naive by comparison.</div>
+    </div>
+    <div class="df">
+      <div class="n">Serenity &middot; Haiku &mdash; coherence</div>
+      <div class="d">Complete, consistent, genuinely pleasant desktops built by small teams. Architecturally conservative and entirely finished, which is the opposite of F's position. Completeness is a real achievement and F currently has none of it.</div>
+    </div>
+    <div class="df">
+      <div class="n">Theseus &mdash; purity</div>
+      <div class="d">F's framekernel is a compromise: it accepts imported C to get hardware support, and that compromise is exactly what Theseus refuses. Theseus is the more principled design and F should be honest that it traded principle for reach.</div>
+    </div>
+    <div class="df">
+      <div class="n">Linux &mdash; everything else</div>
+      <div class="d">Thirty years of driver coverage, tooling, tuning and workload-specific optimization. F's baseline is a <em>tuned</em> Linux and F will lose to it on most axes that are not the six claims above. Any comparison that does not say so is not a comparison.</div>
+    </div>
+    <div class="df">
+      <div class="n">QNX &mdash; field evidence</div>
+      <div class="d">Four decades of safety-critical deployment. F has a design document and a milestone ladder.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">09</div><h2>Nearest neighbours, in one line each</h2></div>
+  <div class="flow">
+    <p>If someone asks what F is, these five comparisons answer faster than a description does.</p>
+  </div>
+  <div class="neighbours">
+    <div class="nb">
+      <div class="n">Asterinas<span>closest kernel</span></div>
+      <div class="d">The same framekernel structure aimed at the opposite goal. Asterinas exists to <em>be</em> Linux with a sound trusted base; F takes the structure and discards the ABI, the syscall interface and the I/O model.</div>
+    </div>
+    <div class="nb">
+      <div class="n">Arrakis<span>closest thesis</span></div>
+      <div class="d">The same argument &mdash; kernel as control plane, hardware reached directly &mdash; generalized from network and storage to every service in the system, on hardware that finally makes it routine.</div>
+    </div>
+    <div class="nb">
+      <div class="n">seL4<span>closest authority model</span></div>
+      <div class="d">F's capability design is seL4's, minus the proof and minus the address-space switch. It inherits the rigour of the model and not the rigour of the method.</div>
+    </div>
+    <div class="nb">
+      <div class="n">Fuchsia<span>closest ambition</span></div>
+      <div class="d">The same capability-and-component vision with a different interface primitive and none of the obligations. Fuchsia is what happens when this ambition meets a shipping deadline.</div>
+    </div>
+    <div class="nb">
+      <div class="n">NeWS<span>closest interface instinct</span></div>
+      <div class="d">Forty years earlier, the same refusal to send pixels &mdash; and the same recognition that the display layer should hold something structured. F sends declarative semantics where NeWS sent executable code, which is the difference between accepting it from an untrusted client and not.</div>
+    </div>
+  </div>
+  <div class="foot">
+    Systems compared: Mach &middot; L4 &middot; seL4 &middot; Barrelfish &middot; Singularity &middot; Midori &middot; Genode &middot; Fuchsia / Zircon &middot; Redox &middot; Asterinas &middot; Theseus &middot; Hubris &middot; QNX &middot; Exokernel &middot; Arrakis &middot; Demikernel &middot; io_uring &middot; MirageOS &middot; Plan 9 &middot; Nix &middot; Guix &middot; Unison &middot; NetBSD rump &middot; X11 &middot; NeWS &middot; Morphic &middot; Oberon &middot; Wayland &middot; Scenic &middot; DOM/ARIA &middot; Serenity &middot; Haiku.
+  </div>
+</section>
+
+</div>

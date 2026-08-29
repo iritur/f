@@ -1,0 +1,40 @@
+# Not yet measurable — the ring exists, the hardware path does not. Registered
+# now so the target is on record before there is a number to be tempted by.
+name       = "ring-submit-latency"
+status     = "pending"          # pending | tracked | gating
+milestone  = "M5"
+
+statement  = """
+A single ring submission with a warm cache costs less than 50 ns at p99, and at
+least 5x less than an equivalent system call on a tuned Linux baseline.
+"""
+
+[baseline]
+system  = "linux-6.x-tuned"
+notes   = "io_uring enabled, sched_ext policy chosen for the workload, huge pages on, device features enabled. Configured by someone trying to win."
+
+[workload]
+path    = "bench/src/bin/ring_submit.rs"
+repeat  = 1_000_000
+batch   = 32
+
+[metrics]
+primary   = "ns_per_op_p99"
+secondary = ["instructions_per_op", "joules_per_op", "ns_per_op_p999"]
+
+[threshold]
+ns_per_op_p99     = { max = 50 }
+ratio_vs_baseline = { min = 5.0 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "Shared cloud instances cannot produce defensible tail latency."
+
+[reproduce]
+command = "cargo xtask claim ring-submit-latency"
+
+[diagnosis]
+# From ring-scene-boot section 06. Recorded here so a red result carries its own
+# first debugging step.
+over_150ns = "false sharing — check cache-line alignment on the cursors first"
+flat_batch = "the batch is not being amortised; you are publishing per entry"

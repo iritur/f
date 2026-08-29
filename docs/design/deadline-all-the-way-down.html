@@ -1,0 +1,306 @@
+<title>Deadline All the Way Down</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;700;900&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root{
+  --paper:#F2F4F7; --surface:#FFFFFF; --surface-2:#E9ECF2;
+  --ink:#12141A; --ink-2:#3A4150; --muted:#6B7382;
+  --line:#D6DBE4; --line-strong:#B9C0CD;
+  --cobalt:#2F4FD8; --rust:#A8431C; --teal:#0B6E5C;
+  --on-accent:#FFFFFF;
+  --shadow:0 1px 2px rgba(18,20,26,.05), 0 8px 24px -16px rgba(18,20,26,.28);
+  --sans:"IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --display:"Chivo", "IBM Plex Sans", ui-sans-serif, sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --col:66ch; --wide:1180px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+    --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+    --line:#262C39; --line-strong:#3D4657;
+    --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+    --on-accent:#0D0F14;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+  --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+  --line:#262C39; --line-strong:#3D4657;
+  --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+  --on-accent:#0D0F14;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+}
+
+*{box-sizing:border-box;}
+body{margin:0; background:var(--paper); color:var(--ink); font-family:var(--sans); font-size:17px; line-height:1.65; -webkit-font-smoothing:antialiased;}
+.wrap{max-width:var(--wide); margin:0 auto; padding:0 28px 96px;}
+
+h1,h2,h3,h4{font-family:var(--display); text-wrap:balance; margin:0;}
+h1{font-weight:900; font-size:clamp(2.4rem,5.8vw,4rem); line-height:.99; letter-spacing:-.035em;}
+h2{font-weight:900; font-size:clamp(1.5rem,3vw,2.05rem); line-height:1.08; letter-spacing:-.025em;}
+h3{font-weight:700; font-size:1.13rem; line-height:1.3; letter-spacing:-.012em;}
+h4{font-weight:700; font-size:.93rem; line-height:1.35;}
+p{margin:0;}
+a{color:var(--cobalt); text-decoration-thickness:1px; text-underline-offset:2px;}
+a:focus-visible{outline:2px solid var(--cobalt); outline-offset:3px; border-radius:2px;}
+strong,b{font-weight:600;}
+code{font-family:var(--mono); font-size:.87em; background:var(--surface-2); padding:.1em .34em; border-radius:3px;}
+
+.eyebrow{font-family:var(--mono); font-size:.7rem; font-weight:600; letter-spacing:.16em; text-transform:uppercase; color:var(--muted);}
+
+.mast{padding:72px 0 40px; border-bottom:1px solid var(--line-strong);}
+.mast-grid{display:flex; flex-direction:column; gap:26px;}
+.mast .lede{font-size:1.2rem; line-height:1.55; color:var(--ink-2); max-width:60ch;}
+.mast .lede b{color:var(--ink);}
+.specline{display:flex; flex-wrap:wrap; gap:10px 26px; padding-top:6px; font-family:var(--mono); font-size:.74rem; color:var(--muted); letter-spacing:.04em;}
+.specline span b{color:var(--ink-2);}
+
+section{padding:52px 0 8px; border-bottom:1px solid var(--line);}
+section:last-of-type{border-bottom:0;}
+.sec-head{display:flex; align-items:baseline; gap:16px; margin-bottom:20px; flex-wrap:wrap;}
+.sec-num{font-family:var(--mono); font-size:.74rem; font-weight:600; color:var(--cobalt); letter-spacing:.1em; padding-top:.5em;}
+.flow{display:flex; flex-direction:column; gap:18px;}
+.flow > p, .flow > ul, .flow > .note, .flow > h3, .flow > .claim{max-width:var(--col);}
+
+ul.list{margin:0; padding-left:0; list-style:none; display:flex; flex-direction:column; gap:11px;}
+ul.list li{position:relative; padding-left:22px;}
+ul.list li::before{content:""; position:absolute; left:2px; top:.62em; width:7px; height:7px; border:1.5px solid var(--cobalt); border-radius:1px;}
+
+.note{border-left:3px solid var(--rust); background:color-mix(in srgb, var(--rust) 7%, var(--surface)); padding:14px 18px; border-radius:0 5px 5px 0; font-size:.95rem; color:var(--ink-2);}
+.note b{color:var(--ink);}
+.claim{border-left:3px solid var(--cobalt); background:color-mix(in srgb, var(--cobalt) 7%, var(--surface)); padding:15px 19px; border-radius:0 5px 5px 0; font-size:.96rem; color:var(--ink-2); line-height:1.55;}
+.claim b{color:var(--ink);}
+.claim .t{font-family:var(--mono); font-size:.68rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--cobalt); display:block; margin-bottom:7px;}
+
+pre{background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:15px 18px; overflow-x:auto; font-family:var(--mono); font-size:.755rem; line-height:1.7; color:var(--ink-2); margin:0; tab-size:4;}
+pre .c{color:var(--muted);}
+pre .k{color:var(--cobalt); font-weight:600;}
+pre .w{color:var(--rust); font-weight:600;}
+.codecap{font-family:var(--mono); font-size:.68rem; color:var(--muted); letter-spacing:.06em; text-transform:uppercase; padding-bottom:7px;}
+.codeblock{display:flex; flex-direction:column; margin:4px 0;}
+
+.tablewrap{overflow-x:auto; border:1px solid var(--line); border-radius:7px; background:var(--surface); margin:6px 0 4px;}
+table{border-collapse:collapse; width:100%; min-width:720px; font-size:.88rem;}
+th,td{text-align:left; padding:12px 15px; border-bottom:1px solid var(--line); vertical-align:top; line-height:1.5;}
+thead th{font-family:var(--mono); font-size:.66rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); background:var(--surface-2); border-bottom:1px solid var(--line-strong); white-space:nowrap;}
+tbody tr:last-child td{border-bottom:0;}
+td.m{font-family:var(--mono); font-size:.76rem; color:var(--ink-2); white-space:nowrap;}
+td.dep b{font-family:var(--display); font-weight:700; font-size:.94rem; display:block;}
+td.dep span{font-family:var(--mono); font-size:.66rem; color:var(--muted); letter-spacing:.05em;}
+td.fb{background:color-mix(in srgb, var(--cobalt) 4%, var(--surface));}
+
+.res{display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; margin:8px 0 4px;}
+.rc{background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--cobalt); border-radius:6px; padding:15px 17px 17px; display:flex; flex-direction:column; gap:8px; box-shadow:var(--shadow);}
+.rc .k{font-family:var(--mono); font-size:.65rem; font-weight:600; letter-spacing:.11em; text-transform:uppercase; color:var(--cobalt);}
+.rc .d{font-size:.87rem; color:var(--ink-2); line-height:1.5;}
+.rc .u{font-family:var(--mono); font-size:.69rem; color:var(--muted); border-top:1px dashed var(--line-strong); padding-top:8px; margin-top:auto; line-height:1.6;}
+
+.foot{padding-top:36px; font-family:var(--mono); font-size:.7rem; color:var(--muted); letter-spacing:.06em; line-height:1.8; max-width:80ch;}
+
+@media (max-width:720px){
+  body{font-size:16px;}
+  .wrap{padding:0 20px 72px;}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none !important; transition:none !important;}}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="mast-grid">
+    <div class="eyebrow">Fourth companion &middot; the resource subsystems</div>
+    <h1>Deadline All the Way Down</h1>
+    <p class="lede">The five subsystems that phases 01 through 06 rest on and that the earlier documents named without designing: <b>CPU time, memory, storage, network and accelerators</b>. They are treated together because they are the same problem &mdash; a contended physical resource allocated against a deadline &mdash; and because giving each its own ad-hoc policy is precisely the mistake that makes conventional systems miss deadlines through a resource nobody was watching.</p>
+    <div class="specline">
+      <span><b>Companion to</b> &nbsp;The Fast Path</span>
+      <span><b>Alongside</b> &nbsp;Ring, Scene, Boot &middot; Lineage and Debts &middot; Proving Ground</span>
+      <span><b>Covers</b> &nbsp;phases 01&ndash;06</span>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="sec-head"><div class="sec-num">01</div><h2>One discipline, five resources</h2></div>
+  <div class="flow">
+    <p>A conventional system gives every resource its own unrelated policy: a fair-share scheduler for CPU, an elevator for storage, queueing disciplines for network, an approximation of least-recently-used for memory, and nothing whatsoever for accelerators. None of those policies knows the others exist.</p>
+    <p>The consequence is the failure mode the architecture document keeps describing from different angles: a task with a deadline misses it because of contention on a resource that no policy was watching. Section 10 of the implementation companion caps the compositor's memory bandwidth for exactly this reason &mdash; and as written that cap is a one-off patch on a general problem.</p>
+    <div class="claim">
+      <span class="t">The design</span>
+      <b>One admission-and-accounting discipline, parameterized per resource.</b> Every request carries a class and a deadline &mdash; the submission entry already has both fields. Every resource has a scheduler that is a policy plugged into one framework, and all five share a view of what is due and when. The compositor's bandwidth cap then stops being a special case and becomes an instance of a mechanism that also governs storage garbage collection, key-value cache residency and inference admission.
+    </div>
+    <h3>The four classes</h3>
+    <ul class="list">
+      <li><b>Hard.</b> The deadline must be met. <em>Admission-controlled</em> &mdash; a reservation is granted only if the resource can prove it is schedulable, and refused otherwise. This is what makes the word "deadline" mean something rather than function as a hint.</li>
+      <li><b>Soft.</b> A deadline exists and is honoured on a best-effort basis; missing it degrades quality rather than correctness. The compositor lives here, which is why section 10 of the implementation companion has it degrade rather than run late.</li>
+      <li><b>Batch.</b> Throughput matters, latency does not. Storage compaction, indexing, background inference.</li>
+      <li><b>Idle.</b> Runs only on resources nothing else wants.</li>
+    </ul>
+  </div>
+  <div class="res">
+    <div class="rc"><div class="k">Resource 01</div><div class="d">CPU time</div><div class="u">contended by: everything<br>partitioned by: core assignment</div></div>
+    <div class="rc"><div class="k">Resource 02</div><div class="d">Memory capacity, bandwidth and tier</div><div class="u">contended by: everything<br>partitioned by: quota and bandwidth allocation</div></div>
+    <div class="rc"><div class="k">Resource 03</div><div class="d">Storage bandwidth and capacity</div><div class="u">contended by: apps, GC, indexing<br>partitioned by: queue admission</div></div>
+    <div class="rc"><div class="k">Resource 04</div><div class="d">Network bandwidth</div><div class="u">contended by: components<br>partitioned by: queue-pair and rate</div></div>
+    <div class="rc"><div class="k">Resource 05</div><div class="d">Accelerator time and memory</div><div class="u">contended by: inference tenants<br>partitioned by: submission admission</div></div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">02</div><h2>CPU time, and the runtimes above it</h2></div>
+  <div class="flow">
+    <p>The scheduler's primitive is not a weight. It is the triple <code>(class, deadline, energy cost)</code>, and every design decision below follows from refusing to collapse that into a single number the way a priority does.</p>
+    <h3>Admission control is the load-bearing part</h3>
+    <p>A component asking for the hard class states a period and a worst-case execution budget. The scheduler runs a schedulability test against existing reservations and either grants or <b>refuses</b>. A refused reservation is an error the caller must handle, exactly like a failed allocation.</p>
+    <p>This is unusual enough to be worth defending. Every system that treats deadlines as hints ends up with deadlines that are not met, because nothing ever refuses work. Admission control converts a soft promise into an arithmetic one: if the test passes, the deadline is met by construction; if it fails, you learn at reservation time rather than during a take.</p>
+    <h3>Heterogeneous cores, and why slack decides placement</h3>
+    <p>Each core class carries a measured performance and energy model &mdash; frequency to throughput to power &mdash; calibrated at first boot rather than assumed. Placement is then a function of <b>slack</b>, not priority:</p>
+    <ul class="list">
+      <li>A task with little slack relative to its budget goes to a fast core, because nothing else meets the deadline.</li>
+      <li>A task with generous slack goes to the <em>slowest core that still meets its deadline</em>, because that is almost always the lowest-energy choice. Racing to idle on a fast core loses to finishing just in time on an efficient one for most work.</li>
+    </ul>
+    <p>Priority-based schedulers cannot express this, because priority conflates urgency with importance and slack is neither. Energy-aware extensions bolted onto fair-share schedulers approximate it and miss, which is one of the section 13 capability gaps this design exists to close.</p>
+    <h3>Deadline propagation across the rings</h3>
+    <div class="claim"><b>This is why the submission entry has a deadline field.</b> When a task blocks on a completion from another component, that component's work inherits the caller's deadline. Without inheritance you get priority inversion at the I/O layer: a hard-class task waits behind batch work in a storage queue and misses its deadline through a resource it never contended for directly. The deadline travels with the request, through every ring it crosses, and each resource scheduler orders by it.</div>
+    <h3>User-level runtimes</h3>
+    <p>The kernel does not schedule tasks. It allocates <em>cores</em> to runtimes, and a runtime schedules its own work inside that allocation with no kernel involvement &mdash; the reason async work never crosses a boundary. The kernel preempts only at allocation boundaries and on reservation expiry, and it notifies a runtime when it is about to lose a core so the runtime can park cleanly rather than being interrupted mid-task.</p>
+    <p>The concurrency model above that is structured: a task owns its children, cancellation propagates down, and a cancelled task's in-flight ring operations are cancelled through the ownership mechanism in section 04 of the implementation companion rather than abandoned. Cancellation and buffer ownership are the same problem and get one answer.</p>
+    <h3>Policy is pluggable, and verified</h3>
+    <p>The policy interface is small &mdash; select a core for a task, enqueue, dispatch, handle a tick, handle a block or wake &mdash; and a policy is loaded as sandboxed, verified code with a bounded execution guarantee and the ability to be ejected. This is the mechanism <code>sched_ext</code> proved viable, made native rather than an add-on. The hard class is not delegated: admission control and earliest-deadline-first dispatch stay in the frame, and a policy governs everything below.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">03</div><h2>Memory: three resources, not one</h2></div>
+  <div class="flow">
+    <p>Every system conflates three genuinely different resources under one word, and only the first is usually managed at all.</p>
+    <ul class="list">
+      <li><b>Capacity</b> &mdash; how many bytes. The one everybody accounts for.</li>
+      <li><b>Bandwidth</b> &mdash; how fast they can be reached. The actually-contended resource on a modern machine, and unmanaged nearly everywhere.</li>
+      <li><b>Tier</b> &mdash; where they live: on-package, on-board, across an interconnect. Latencies differ by an order of magnitude and the cost model is nothing like the uniform-access assumption most allocators carry.</li>
+    </ul>
+    <h3>The mechanics</h3>
+    <p>Physical memory is a buddy allocator with per-CPU free lists and huge pages by default, because translation misses are a measurable part of the budget this system claims. The frame owns the page tables; a component receives an address space and <b>memory objects</b> as capabilities, per the object model in section 04 of the implementation companion, and cannot name memory it was not granted.</p>
+    <p>Accounting is hierarchical and follows the capability routing tree: a component's quota is bounded by what was routed to it, and its children's quotas sum within its own. Allocation failure is therefore <em>local and deterministic</em> &mdash; the component that exceeded its budget gets the error. There is no global out-of-memory killer choosing a victim, which is both a correctness property and a precondition for the deterministic simulation in the testing companion, since a global killer is a system-wide nondeterministic event.</p>
+    <h3>Tiering, measured rather than guessed</h3>
+    <p>Placement is a function of access frequency and latency sensitivity, both observed: access-bit sampling and hardware event sampling give a real access profile rather than an inference from allocation order. Migration between tiers is asynchronous, rate-limited, and itself a batch-class consumer of memory bandwidth &mdash; so the tiering machinery cannot cause the deadline miss it exists to prevent.</p>
+    <div class="claim">
+      <span class="t">Bandwidth as a first-class reservation</span>
+      Modern processors can partition memory bandwidth between groups of cores. <b>Deadline-class components receive a bandwidth reservation the same way they receive a CPU reservation, and batch work is throttled to fit around it.</b> This is what turns the compositor cap in section 10 of the implementation companion from a hand-placed limit into an instance of a general mechanism &mdash; and it is the only honest way to make the concurrent-inference claim, since inference is a bandwidth hog and audio is a bandwidth-sensitive deadline task competing for the same controller.
+    </div>
+    <p>One consequence worth stating plainly: model weights and key-value cache are not special. They are memory objects with a tier policy and a bandwidth class, managed by this subsystem. Section 06 adds nothing to that beyond admission.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">04</div><h2>Storage: the object store, concretely</h2></div>
+  <div class="flow">
+    <p>Bet 03 asserts a content-addressed immutable store. This is the design behind the assertion.</p>
+    <h3>Format</h3>
+    <p>A blob is content plus its hash. An object is a blob whose content references other blobs by hash. A <b>root</b> is a single hash from which the entire system state is reachable, so a system generation is one hash and a rollback is a root swap.</p>
+    <p>Large objects are split by <b>content-defined chunking</b> &mdash; a rolling hash chooses boundaries, so an edit near the start of a large file does not re-chunk everything after it. This is what makes deduplication and delta transfer work in practice rather than in principle, and it is the difference between a store that shares data between generations and one that quietly stores twenty copies of a slightly edited file.</p>
+    <h3>The zoned mapping, which is the elegant part</h3>
+    <div class="claim">
+      <b>Blobs are append-only. Zones are append-only. They are the same shape.</b> A zone is filled sequentially with blobs and sealed. When a zone's live fraction falls below a threshold, its surviving blobs are copied forward and the zone is reset. That <em>is</em> the garbage collector &mdash; and it is the same operation the device's own flash translation layer would otherwise perform underneath, without knowing which data is live. Doing it once, with knowledge, instead of twice, blindly, is where the write-amplification claim in section 13 comes from. A conventional filesystem cannot make this claim because it promises random overwrite and must lie to the device to keep that promise.
+    </div>
+    <h3>Collection</h3>
+    <p>Reference counting is the wrong mechanism &mdash; it costs on every write and handles the reachability question badly. Instead: mark from the set of live roots, sweep zones by live fraction. The mark is incremental and generational, and the sweep is a <b>batch-class consumer of storage bandwidth under section 01's discipline</b>, so collection can never starve a deadline-class read. Roots are pinned explicitly, which is also how snapshot retention is expressed &mdash; keeping a generation means keeping its root.</p>
+    <h3>Naming and query</h3>
+    <p>Directories are a view, not the ground truth. The index maps paths, metadata and semantic attributes to blob hashes, and it is an embedded log-structured store rather than a separate service &mdash; queries are a local call, not a round trip. Search becomes a query over the index instead of a walk over a tree, which is the claim in the technology table.</p>
+    <h3>Durability, and the read path</h3>
+    <p>The durability primitive is not a flush of dirty pages. It is <b>publish this root</b>: write the blobs, then write the root. Atomicity is free because a root is a single write, and a crash mid-publish leaves the previous root intact with some unreferenced blobs the next collection reclaims.</p>
+    <p>Reads resolve a hash to a zone and offset through the index, then direct-memory-access straight into the caller's registered buffer. There is no page cache holding a second copy, which removes both the copy and the memory the copy occupied.</p>
+    <div class="note"><b>Where this design is genuinely bad.</b> Content addressing punishes small random writes to large mutable objects &mdash; a database file, a virtual machine image, a video project's scratch file. Every write re-chunks and re-hashes a region and produces a new root. The mitigation is a second object kind: a <em>mutable extent</em>, copy-on-write at coarse granularity, content-addressed only at snapshot boundaries. This is a real complication rather than an elegant unification, and pretending the pure model covers every workload would be the kind of overclaim the comparison document warns about.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">05</div><h2>Network</h2></div>
+  <div class="flow">
+    <p>The subsystem with no prior coverage in any document, and the one where the right move is mostly to import.</p>
+    <h3>What is written, and what is not</h3>
+    <p>Per the principle in section 14 of the architecture document &mdash; write what you research, import what you do not &mdash; the split is unusually clean here. <b>The datapath is written; the protocol logic is imported.</b> Congestion control and protocol correctness are decades of accumulated work in which F has no claim and no interest; the zero-copy, user-interrupt-delivered path from device queue to application memory is exactly where the claim lives.</p>
+    <ul class="list">
+      <li><b>Queues are mapped into the owning component</b>, through virtual functions or direct queue-pair assignment, so the datapath involves no kernel and no copy.</li>
+      <li><b>Receive:</b> headers go to the protocol stack, payload lands by direct memory access in the application's registered buffer &mdash; or, on hardware with shared virtual memory, straight into ordinary application memory with no registration at all.</li>
+      <li><b>Transmit:</b> the buffer is owned by the ring until completion, using the same ownership discipline as every other operation. Networking gets no bespoke lifetime rules.</li>
+      <li><b>Protocol:</b> take an existing stack. <b>Prefer QUIC as the primary transport</b> &mdash; it is user-space-native, which fits this architecture rather than fighting it, and it carries streams and cancellation semantics that map onto rings far better than a byte-stream socket does.</li>
+    </ul>
+    <h3>Authority and contention</h3>
+    <p>There is no ambient network authority. A component holds a capability naming specific endpoints or a port range; there is no "the network" to open. And bandwidth is a reservation under section 01's discipline, so a batch transfer cannot starve a deadline-class flow &mdash; the same mechanism, a fourth time.</p>
+    <div class="note"><b>State the claim narrowly.</b> The measurable assertion is packets per second per core, and joules per packet, against a tuned Linux using its own zero-copy receive path &mdash; not "our networking is faster." Throughput of a borrowed TCP implementation says nothing about F, and claiming it would poison the numbers that do.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">06</div><h2>Accelerators</h2></div>
+  <div class="flow">
+    <p>Section 13 of the architecture document says mainstream systems treat an accelerator as a device file with one tenant, no quality of service, no preemption and no accounting. This is what replacing that looks like, and it is mostly an application of the preceding four sections rather than new machinery.</p>
+    <ul class="list">
+      <li><b>Submission carries a class and a deadline</b>, like every other request, and admission control applies: an inference job asking for hard-class latency is granted a reservation or refused.</li>
+      <li><b>Memory is the real contention, and section 03 already owns it.</b> Weights and key-value cache are memory objects with tier policies. Cache residency is a paging decision, which is an operating system's oldest competence applied to a new consumer.</li>
+      <li><b>Weights come from the object store</b>, content-addressed &mdash; so ten components using the same model share one physical copy, mapped rather than loaded. That is a concrete, easily measured win over the per-process copy every current runtime makes, and it is the cheapest result in this document to demonstrate.</li>
+    </ul>
+    <div class="note"><b>Preemption is the honest problem.</b> Many accelerators cannot be preempted mid-kernel, so a long submission blocks the queue no matter what the scheduler wants. The mitigation is to bound work per submission &mdash; split large kernels so the scheduling quantum is a submission rather than a job &mdash; which costs some throughput and requires cooperation from the runtime producing the work. Where a closed vendor runtime will not cooperate, the quantum is whatever that runtime chooses, and every number measured through it is bounded by it. Report that alongside the result rather than quietly averaging it in.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">07</div><h2>Boot and the component topology</h2></div>
+  <div class="flow">
+    <p>A capability-routed component system needs a defined origin, and no document so far provides one.</p>
+    <ul class="list">
+      <li><b>Measured boot to a root of trust</b>, then the frame, which holds every capability that exists and has granted none.</li>
+      <li><b>The frame starts one component: the assembler</b>, handing it the root of the system generation &mdash; a single hash. Everything else follows from that hash, which is what makes a generation reproducible and a rollback a boot-time argument rather than a recovery procedure.</li>
+      <li><b>The assembler instantiates the component topology</b> described by the generation, routing capabilities declaratively as it goes. Nothing acquires authority by asking; everything receives it by being placed in the topology.</li>
+      <li><b>Drivers bind by matching declared device properties</b>, and a driver that fails to start leaves its subtree unstarted rather than failing the boot. The topology is therefore partially available by design, and the shell must be built to expect that rather than assume completeness.</li>
+    </ul>
+    <div class="claim"><b>The property this buys:</b> boot is a pure function of one hash. The same root produces the same topology, which is what allows the deterministic simulator to start a run from a known system state rather than from whatever the last test left behind &mdash; and what makes "roll back one generation" a complete, verified statement rather than a hope about what got restored.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">08</div><h2>A fallback for every immature bet</h2></div>
+  <div class="flow">
+    <p>Section 11 of the architecture document requires that every bet on an immature dependency carry a documented fallback that is merely good rather than exceptional. Those fallbacks were never written down. Here they are, and the column that matters is the last one &mdash; what is actually lost, stated in claims rather than in features.</p>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Dependency</th><th>If it does not mature</th><th>What the claim costs</th></tr></thead>
+      <tbody>
+        <tr><td class="dep"><b>Vello</b><span>alpha</span></td><td class="fb">Its own CPU and hybrid backends first; a conventional tessellating renderer as the floor.</td><td>Resolution independence and cheap effects. The latency budget survives &mdash; a tessellating renderer on a modern GPU still clears the frame budget for ordinary interfaces.</td></tr>
+        <tr><td class="dep"><b>WASI 0.3</b><span>months old</span></td><td class="fb">Native Rust components only, with the interface definitions kept as the boundary description.</td><td>Language plurality in the app model. Nothing in the kernel, the rings or the compositor changes.</td></tr>
+        <tr><td class="dep"><b>CHERI</b><span>evaluation platform</span></td><td class="fb">Software bounds checking at the shim boundary, plus pointer authentication and control-flow integrity where the hardware offers them.</td><td>The strong memory-safety claim for imported C. Isolation still holds through the IOMMU and the component boundary &mdash; the loss is depth, not kind.</td></tr>
+        <tr><td class="dep"><b>User interrupts</b><span>recent, uneven</span></td><td class="fb">Kernel inter-processor doorbell with more aggressive suppression, which the protocol already supports as one of three implementations.</td><td>The notification-cost claim specifically. The ring architecture is unaffected, and under load the suppressed path rings almost never anyway.</td></tr>
+        <tr><td class="dep"><b>Shared virtual memory</b><span>uneven support</span></td><td class="fb">Registered buffer sets &mdash; already designed, already the default path.</td><td>Nothing. This one is genuinely free, because both paths were specified from the start.</td></tr>
+        <tr><td class="dep"><b>Zoned storage</b><span>edge</span></td><td class="fb">Conventional namespaces, keeping the store's append-only write pattern regardless.</td><td>The write-amplification claim. Deduplication, rollback, snapshots and atomic publish all survive untouched.</td></tr>
+        <tr><td class="dep"><b>Bandwidth partitioning</b><span>vendor-dependent</span></td><td class="fb">Software throttling of batch-class consumers, measured rather than guaranteed.</td><td>The hard isolation guarantee weakens to a strong statistical one. Worth knowing before promising a deadline that depends on it.</td></tr>
+        <tr><td class="dep"><b>Accelerator preemption</b><span>often absent</span></td><td class="fb">Bounded submission sizes where the runtime cooperates; otherwise report the achievable quantum honestly.</td><td>Hard-class accelerator deadlines become soft-class. The multi-tenancy claim narrows from guaranteed to typical.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="flow">
+    <div class="claim"><b>Read the last column as the actual risk register.</b> No single fallback costs more than one claim, and none of them costs an architectural bet &mdash; which is the property worth checking whenever a new dependency is considered. A dependency whose failure would cost a <em>bet</em> rather than a claim should not be taken at all.</div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">09</div><h2>Where this is weakest</h2></div>
+  <div class="flow">
+    <ul class="list">
+      <li><b>Admission control is an API burden.</b> Every hard-class reservation can be refused, and callers must have something sensible to do about it. Systems that make failure impossible are pleasanter to program until the moment they silently miss a deadline instead &mdash; but the burden is real and the ergonomics need the same attention the ring API got, or developers will simply request the soft class for everything and the discipline evaporates.</li>
+      <li><b>The unified discipline is unproven at five resources.</b> Deadline scheduling of CPU is well understood. Applying one admission framework across memory bandwidth, storage, network and accelerators simultaneously is the interesting part and also the part with no precedent &mdash; the interactions between reservations on different resources may not compose as cleanly as this document assumes.</li>
+      <li><b>Deadline propagation can be gamed.</b> If inheriting a caller's deadline promotes work, a component that always claims urgency wins. Bounding inheritance by the caller's own reservation is the answer, and it needs designing before it is implemented rather than after the first starvation bug.</li>
+      <li><b>The storage design has a workload it is bad at</b>, and mutable extents are a patch rather than a resolution. Measure that case early and honestly &mdash; it is the one a skeptic will reach for first.</li>
+      <li><b>Everything here is design, not measurement.</b> Every number these subsystems are meant to produce is currently zero. The build order stands: this document exists so phases 01 through 06 have something to build against, not because designing further ahead than that would be wise.</li>
+    </ul>
+  </div>
+  <div class="foot">
+    Prior art to read before implementing rather than after: earliest-deadline-first admission and response-time analysis from the real-time literature &middot; sched_ext for the loadable-policy interface &middot; scheduler activations for the kernel-to-runtime core handoff &middot; the zoned-storage specifications for the device contract &middot; content-defined chunking as used in backup and delta-transfer systems &middot; the memory-bandwidth allocation facilities in current server processors.
+  </div>
+</section>
+
+</div>

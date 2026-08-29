@@ -1,0 +1,562 @@
+<title>The Long Plan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;700;900&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root{
+  --paper:#F2F4F7; --surface:#FFFFFF; --surface-2:#E9ECF2;
+  --ink:#12141A; --ink-2:#3A4150; --muted:#6B7382;
+  --line:#D6DBE4; --line-strong:#B9C0CD;
+  --cobalt:#2F4FD8; --rust:#A8431C; --teal:#0B6E5C;
+  --on-accent:#FFFFFF;
+  --shadow:0 1px 2px rgba(18,20,26,.05), 0 8px 24px -16px rgba(18,20,26,.28);
+  --sans:"IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --display:"Chivo", "IBM Plex Sans", ui-sans-serif, sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --col:66ch; --wide:1180px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+    --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+    --line:#262C39; --line-strong:#3D4657;
+    --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+    --on-accent:#0D0F14;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+  --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+  --line:#262C39; --line-strong:#3D4657;
+  --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+  --on-accent:#0D0F14;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+}
+
+*{box-sizing:border-box;}
+body{margin:0; background:var(--paper); color:var(--ink); font-family:var(--sans); font-size:17px; line-height:1.65; -webkit-font-smoothing:antialiased;}
+.wrap{max-width:var(--wide); margin:0 auto; padding:0 28px 96px;}
+
+h1,h2,h3,h4{font-family:var(--display); text-wrap:balance; margin:0;}
+h1{font-weight:900; font-size:clamp(2.5rem,6.2vw,4.2rem); line-height:.98; letter-spacing:-.035em;}
+h2{font-weight:900; font-size:clamp(1.5rem,3vw,2.05rem); line-height:1.08; letter-spacing:-.025em;}
+h3{font-weight:700; font-size:1.14rem; line-height:1.3; letter-spacing:-.012em;}
+h4{font-weight:700; font-size:.92rem; line-height:1.35;}
+p{margin:0;}
+a{color:var(--cobalt); text-decoration-thickness:1px; text-underline-offset:2px;}
+a:focus-visible{outline:2px solid var(--cobalt); outline-offset:3px; border-radius:2px;}
+strong,b{font-weight:600;}
+code{font-family:var(--mono); font-size:.87em; background:var(--surface-2); padding:.1em .34em; border-radius:3px;}
+em.sys{font-style:normal; font-weight:600;}
+
+.eyebrow{font-family:var(--mono); font-size:.7rem; font-weight:600; letter-spacing:.16em; text-transform:uppercase; color:var(--muted);}
+
+.mast{padding:72px 0 40px; border-bottom:1px solid var(--line-strong);}
+.mast-grid{display:flex; flex-direction:column; gap:26px;}
+.mast .lede{font-size:1.2rem; line-height:1.55; color:var(--ink-2); max-width:60ch;}
+.mast .lede b{color:var(--ink);}
+.specline{display:flex; flex-wrap:wrap; gap:10px 26px; padding-top:6px; font-family:var(--mono); font-size:.74rem; color:var(--muted); letter-spacing:.04em;}
+.specline span b{color:var(--ink-2);}
+
+section{padding:52px 0 8px; border-bottom:1px solid var(--line);}
+section:last-of-type{border-bottom:0;}
+.sec-head{display:flex; align-items:baseline; gap:16px; margin-bottom:20px; flex-wrap:wrap;}
+.sec-num{font-family:var(--mono); font-size:.74rem; font-weight:600; color:var(--cobalt); letter-spacing:.1em; padding-top:.5em;}
+.flow{display:flex; flex-direction:column; gap:18px;}
+.flow > p, .flow > ul, .flow > .note, .flow > h3, .flow > .claim{max-width:var(--col);}
+
+ul.list{margin:0; padding-left:0; list-style:none; display:flex; flex-direction:column; gap:11px;}
+ul.list li{position:relative; padding-left:22px;}
+ul.list li::before{content:""; position:absolute; left:2px; top:.62em; width:7px; height:7px; border:1.5px solid var(--cobalt); border-radius:1px;}
+
+.note{border-left:3px solid var(--rust); background:color-mix(in srgb, var(--rust) 7%, var(--surface)); padding:14px 18px; border-radius:0 5px 5px 0; font-size:.95rem; color:var(--ink-2);}
+.note b{color:var(--ink);}
+.claim{border-left:3px solid var(--cobalt); background:color-mix(in srgb, var(--cobalt) 7%, var(--surface)); padding:14px 18px; border-radius:0 5px 5px 0; font-size:.95rem; color:var(--ink-2);}
+.claim b{color:var(--ink);}
+.claim .t{font-family:var(--mono); font-size:.68rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--cobalt); display:block; margin-bottom:7px;}
+
+.tablewrap{overflow-x:auto; border:1px solid var(--line); border-radius:7px; background:var(--surface); margin:6px 0 4px;}
+table{border-collapse:collapse; width:100%; min-width:820px; font-size:.87rem;}
+th,td{text-align:left; padding:12px 15px; border-bottom:1px solid var(--line); vertical-align:top; line-height:1.5;}
+thead th{font-family:var(--mono); font-size:.66rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); background:var(--surface-2); border-bottom:1px solid var(--line-strong); white-space:nowrap;}
+tbody tr:last-child td{border-bottom:0;}
+td.sysname{white-space:nowrap;}
+td.sysname b{font-family:var(--display); font-weight:700; font-size:.95rem; display:block;}
+td.sysname span{font-family:var(--mono); font-size:.66rem; color:var(--muted); letter-spacing:.05em;}
+td.fpos{background:color-mix(in srgb, var(--cobalt) 4%, var(--surface));}
+
+.chip{display:inline-block; font-family:var(--mono); font-size:.62rem; font-weight:600; letter-spacing:.08em; text-transform:uppercase; padding:3px 7px; border-radius:3px; border:1px solid currentColor; white-space:nowrap;}
+.chip.ahead{color:var(--teal); background:color-mix(in srgb, var(--teal) 10%, var(--surface));}
+.chip.behind{color:var(--rust); background:color-mix(in srgb, var(--rust) 10%, var(--surface));}
+.chip.par{color:var(--muted); background:var(--surface-2);}
+
+.streams{display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:13px; margin:8px 0 4px;}
+.stream{background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--cobalt); border-radius:6px; padding:16px 18px 18px; display:flex; flex-direction:column; gap:10px; box-shadow:var(--shadow);}
+.stream .k{font-family:var(--mono); font-size:.66rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--cobalt);}
+.stream .from{font-family:var(--mono); font-size:.73rem; color:var(--muted); line-height:1.75;}
+.stream .from b{color:var(--ink-2);}
+.stream .takes{font-size:.89rem; color:var(--ink-2); line-height:1.55; border-top:1px dashed var(--line-strong); padding-top:10px; margin-top:auto;}
+.stream .takes b{color:var(--ink);}
+
+.neighbours{display:flex; flex-direction:column; margin:6px 0 4px;}
+.nb{display:grid; grid-template-columns:minmax(150px,200px) 1fr; gap:6px 22px; padding:16px 0; border-top:1px solid var(--line);}
+.nb:last-child{border-bottom:1px solid var(--line);}
+.nb .n{font-family:var(--display); font-weight:700; font-size:1rem; line-height:1.35;}
+.nb .n span{display:block; font-family:var(--mono); font-size:.66rem; font-weight:600; color:var(--muted); letter-spacing:.05em; text-transform:uppercase; padding-top:3px;}
+.nb .d{font-size:.92rem; color:var(--ink-2); max-width:64ch;}
+
+.deficit{display:flex; flex-direction:column; margin:6px 0 4px;}
+.df{display:grid; grid-template-columns:minmax(140px,190px) 1fr; gap:6px 22px; padding:15px 0; border-top:1px solid var(--line);}
+.df:last-child{border-bottom:1px solid var(--line);}
+.df .n{font-family:var(--display); font-weight:700; font-size:.98rem;}
+.df .d{font-size:.92rem; color:var(--ink-2); max-width:64ch;}
+
+.foot{padding-top:40px; font-family:var(--mono); font-size:.7rem; color:var(--muted); letter-spacing:.06em; line-height:1.8; max-width:80ch;}
+
+@media (max-width:720px){
+  body{font-size:16px;}
+  .wrap{padding:0 20px 72px;}
+  .nb, .df{grid-template-columns:1fr;}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none !important; transition:none !important;}}
+
+.chip.dec{color:var(--ink-2); background:var(--surface-2); border-style:dashed;}
+td.sysname span{display:block; padding-top:3px;}
+.nb .d b{color:var(--ink);}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="mast-grid">
+    <div class="eyebrow">Execution plan &middot; seven epochs</div>
+    <h1>The Long Plan</h1>
+    <p class="lede">Everything the five design documents and the decision record imply, ordered into <b>seven epochs</b>, each closed by a gate that is a test rather than a feeling, and each followed by a release a stranger can reproduce. The testing environment is not a section at the end: it is one of the four movements in every epoch, because the output of this project is measurements and an unmeasured system has produced nothing.</p>
+    <div class="specline">
+      <span><b>The list</b> &nbsp;<code>TODO.md</code>, with permanent task IDs</span>
+      <span><b>Horizon</b> &nbsp;13&ndash;30 person-years to 1.0</span>
+      <span><b>Contract</b> &nbsp;every number reproducible by a stranger, one command</span>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="sec-head"><div class="sec-num">01</div><h2>How the plan is meant to be used</h2></div>
+  <div class="flow">
+    <p>The plan lives in two places on purpose. This document holds the reasoning, the gates, the testing environment and the release contract &mdash; the parts that are argued rather than ticked. <code>TODO.md</code> holds the list, and is meant to be edited constantly by anyone.</p>
+    <div class="claim">
+      <span class="t">Four movements, every epoch</span>
+      <b>Decide, build, prove, release.</b> They interleave in practice and are separated in the list because the failure mode of a project like this one is doing all of the building and none of the proving, then discovering at the end that nothing measured is defensible. Naming the movement a task belongs to makes an unbalanced epoch visible while there is still time to rebalance it.
+    </div>
+    <p>Three rules make the list workable by someone who did not write it:</p>
+    <ul class="list">
+      <li><b>Every task carries an exit.</b> The observation that closes it &mdash; a test that passes, a number recorded, a document merged. A task with no exit is a wish, and wishes are what make a plan unfalsifiable.</li>
+      <li><b>Every task carries its blockers.</b> The list is a dependency graph rather than a sequence, so an unblocked task can be picked up by anyone without asking. That is the whole of what <em class="sys">freely realizable</em> means at the task level.</li>
+      <li><b>IDs are permanent and nothing is deleted.</b> A dropped task is marked dropped with its reason and stays in place. The reason is more valuable than the task was.</li>
+    </ul>
+    <p>Effort figures throughout are the architecture document's, unchanged: they assume a competent team that is not also inventing new research, and they are the honest reason to narrow scope before writing code rather than after.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">02</div><h2>The seven epochs</h2></div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Epoch</th><th>What exists when it ends</th><th>Testing capability gained</th><th>Effort &middot; risk</th><th>Release</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="sysname"><b>E0 &mdash; Ground truth</b><span>phase 00 &middot; M0&ndash;M6</span></td>
+        <td>Boots, deterministic, memory, interrupts, user space, capabilities, one ring with two opcodes. Nothing novel; all of it load-bearing.</td>
+        <td class="fpos">The substrate, the reproduction check, coverage, the bench harness, the claims registry with real numbers, the capability negative suite, a ten-minute pull-request gate.</td>
+        <td>0.5&ndash;1.5&nbsp;py<br><span class="chip par">low</span></td>
+        <td><b>0.1</b><br>&ldquo;it boots and it is honest&rdquo;</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>E1 &mdash; The datapath</b><span>phase 01</span></td>
+        <td>Rings everywhere, three virtio drivers in user space, IOMMU domains, admission control, user-level runtimes, the component supervisor.</td>
+        <td class="fpos">The deterministic simulator with device models and fault classes, nightly seed sweeps with automatic minimisation, the hostile-peer fuzzer, coverage-guided entry fuzzing, proof of the capability properties.</td>
+        <td>1&ndash;2&nbsp;py<br><span class="chip par">medium</span></td>
+        <td><b>0.2</b></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>E2 &mdash; State</b><span>phase 02</span></td>
+        <td>The object store on zoned devices, the index, the configuration evaluator, the assembler, generation swap, attestation.</td>
+        <td class="fpos">Crash-consistency torture with a power-cut model, collector invariants as properties, proof on the frame, whole-system state diffing, reproducible-build verification, change-point detection.</td>
+        <td>1.5&ndash;3&nbsp;py<br><span class="chip par">medium</span></td>
+        <td><b>0.3</b></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>E3 &mdash; The interface</b><span>phase 03</span></td>
+        <td>Retained scene, GPU path rasterisation, text, input prediction, the semantic layer and its projections. The longest epoch and the one that kills projects.</td>
+        <td class="fpos">Hardware in the loop: photodiode capture and external input injection, so the headline latency number involves no software timestamp. Semantic-tree assertions replace screenshot diffing.</td>
+        <td>4&ndash;10&nbsp;py<br><span class="chip behind">high</span></td>
+        <td><b>0.4</b></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>E4 &mdash; The platform</b><span>phase 04</span></td>
+        <td>Component runtime, interface definitions with availability annotations, the powerbox, third-party packaging.</td>
+        <td class="fpos">The compatibility matrix against older peers, a conformance suite generated from the interfaces, third-party build reproduction.</td>
+        <td>2&ndash;4&nbsp;py<br><span class="chip par">medium</span></td>
+        <td><b>0.5</b></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>E5 &mdash; Real hardware</b><span>phase 05</span></td>
+        <td>One named machine. The shim, the imported graphics stack confined, native storage, network, audio and input. Computed idle and ring-quiesced suspend.</td>
+        <td class="fpos">The hardware lab: netboot, serial capture, power cycling, unattended bisect on real silicon, external energy metering, week-long soaks.</td>
+        <td>2&ndash;5&nbsp;py<br><span class="chip behind">high</span></td>
+        <td><b>0.6</b></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>E6 &mdash; The AI substrate</b><span>phase 06</span></td>
+        <td>Heterogeneous co-scheduling with quality of service, cache as a memory tier, weights mapped from the store, agents as principals.</td>
+        <td class="fpos">Multi-tenant interference matrices, joules per token, and the concurrency case current systems fail.</td>
+        <td>2&ndash;5&nbsp;py<br><span class="chip behind">high</span></td>
+        <td><b>0.7</b></td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>E7 &mdash; The result</b><span>not a phase</span></td>
+        <td>Seven novelty claims defended with numbers and baselines, or withdrawn in writing. The replication guide, the outside reproduction, the write-up.</td>
+        <td class="fpos">Nothing new is built. The apparatus is turned on the project itself, which is the only test that has ever mattered here.</td>
+        <td>0.5&ndash;1&nbsp;py<br><span class="chip par">honest</span></td>
+        <td><b>1.0</b></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="flow" style="padding-top:18px">
+    <div class="note">
+      <b>The sum is 13 to 30 person-years, and that is the point of stating it.</b> The architecture document's own recommendation is to narrow to one workload where current systems visibly fail rather than build a general system, and this table is the argument for that recommendation rather than against it: E3 alone is larger than E0 through E2 combined. A narrowed target does not weaken any of the seven claims &mdash; it lets the hardware be chosen, the compatibility layer skipped, and the whole budget spent on the paths the claims live on.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">03</div><h2>The gates</h2></div>
+  <div class="flow">
+    <p>A gate is what closes an epoch, and each one is written as an observation somebody could make and be wrong about. The milestone ladder already works this way &mdash; a done-criterion that is a test rather than a feeling &mdash; and this extends the same discipline to the larger units.</p>
+  </div>
+  <div class="neighbours">
+    <div class="nb">
+      <div class="n">G0<span>ground truth</span></div>
+      <div class="d">A capability-restricted process talks to the kernel entirely through a ring, touches nothing it was not handed, and the suite runs under one command with jitter and ring throughput gating every commit. <b>Plus the two things phase 00 does not currently promise and should:</b> a seed and a commit reproduce a run byte for byte <em class="sys">on somebody else's machine</em>, and a stranger reproduces both published numbers from the README.</div>
+    </div>
+    <div class="nb">
+      <div class="n">G1<span>the datapath</span></div>
+      <div class="d">A driver is killed under sustained load and no client observes anything but latency. And the apparatus half, which matters more: a bug injected anywhere is found by an overnight seed sweep and arrives as a reproduction command rather than as a symptom somebody has to chase.</div>
+    </div>
+    <div class="nb">
+      <div class="n">G2<span>state</span></div>
+      <div class="d">Break the system deliberately and roll it back. Replace a running component without dropping work. Cut power at every write boundary of a publish and never observe a state that was not one of the two intended ones.</div>
+    </div>
+    <div class="nb">
+      <div class="n">G3<span>the interface</span></div>
+      <div class="d">Input to photon under 14 ms at p99, measured by photodiode under load, with no software timestamp in the measurement path &mdash; and one application driving four projections with no projection-specific code in it.</div>
+    </div>
+    <div class="nb">
+      <div class="n">G4<span>the platform</span></div>
+      <div class="d">Someone outside the team ships something, against a negotiated ABI, without reading the kernel source. This is the only gate whose outcome is not under the team's control, which is exactly why it is a gate.</div>
+    </div>
+    <div class="nb">
+      <div class="n">G5<span>real hardware</span></div>
+      <div class="d">An unmodified vendor driver runs confined, restartable and without ambient authority on real silicon, and the cost of that confinement is a published number. Nobody has published that number, which is why this gate is also a result.</div>
+    </div>
+    <div class="nb">
+      <div class="n">G6<span>the AI substrate</span></div>
+      <div class="d">Concurrent inference and audio, both inside their deadlines, on one machine, with weights shared from the store &mdash; against a baseline configured by someone trying to win.</div>
+    </div>
+    <div class="nb">
+      <div class="n">G7<span>the result</span></div>
+      <div class="d">A competent skeptic tries to refute a published claim using only what is in the release package, and fails. Every gate before this one exists to make this one possible to attempt.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">04</div><h2>The proving ground, built in order</h2></div>
+  <div class="flow">
+    <p><em class="sys">Proving Ground</em> specifies seven layers and <code>docs/TESTING-STATUS.md</code> records that three of them exist in some form. This is when each layer arrives, and why it arrives then rather than earlier or later. The rule behind the ordering is the one that put the determinism substrate at M0: <b>build the apparatus at the point where it is cheapest, which is almost always before it is needed.</b></p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Layer</th><th>Arrives</th><th>Why then</th><th>Reaches full strength</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="sysname"><b>L0 &mdash; determinism substrate</b><span>built</span></td>
+        <td>M0, done</td>
+        <td>The one property that cannot be retrofitted. Everything else on this page depends on it.</td>
+        <td class="fpos">E0, when the reproduction check runs across two machines rather than one.</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>L1 &mdash; deterministic simulation</b><span>hook only</span></td>
+        <td>E1</td>
+        <td>It needs components to substitute and devices to model, and neither exists before the datapath. The <em class="sys">hook</em> is already in place, which is the expensive half.</td>
+        <td class="fpos">E2, when a power-cut model turns crash consistency into a swept property rather than a hope.</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>L2 &mdash; concurrency and memory model</b><span>stress only</span></td>
+        <td>E0 stress, E1 checking</td>
+        <td>Litmus tests are cheap now and catch the obvious. Model checking explores what the memory model <em class="sys">permits</em>, which is a different question and worth its cost once the protocol stops moving.</td>
+        <td class="fpos">E1&ndash;E2, with the AArch64 job kept non-advisory throughout.</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>L3 &mdash; proof</b><span>absent</span></td>
+        <td>E1 (capabilities), E2 (frame)</td>
+        <td>Proof against a moving target is wasted work. The capability properties stop moving at M4; the frame stops moving around phase 02.</td>
+        <td class="fpos">E2. Deliberately narrow: the frame's invariants and the protocol state machines, never the system.</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>L4 &mdash; fuzzing</b><span>instrumentation only</span></td>
+        <td>E1</td>
+        <td>Coverage instrumentation is added at E0 because instrumenting a mature kernel is painful and instrumenting a two-thousand-line one is free. The fuzzers themselves need a real entry surface.</td>
+        <td class="fpos">E1, with the corpus committed and published as a release artifact.</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>L5 &mdash; performance regression</b><span>harness only</span></td>
+        <td>E0 harness, E2 detection</td>
+        <td>Change-point detection needs history to reason about, so the history is stored from the first measurement and the detector is written when there is a year of it.</td>
+        <td class="fpos">E2. Thresholds are never introduced as a stopgap; they train everyone to ignore the signal.</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>L6 &mdash; hardware in the loop</b><span>absent</span></td>
+        <td>E3 rig, E5 lab</td>
+        <td>Correctly deferred: there is nothing to point a photodiode at until a compositor exists. The lab arrives with real hardware.</td>
+        <td class="fpos">E5, when bisect runs unattended on the machine the claims are collected on.</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>L7 &mdash; claims registry</b><span>built, one entry</span></td>
+        <td>M0, done</td>
+        <td>Registering the apparatus before the numbers is what makes it grow with the system instead of being retrofitted onto it.</td>
+        <td class="fpos">Every epoch. A claim is added with the capability it measures, not after it.</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>L8 &mdash; the state tree</b><span>proposed</span></td>
+        <td>E0 v0, E1 everywhere</td>
+        <td>Not in the original seven. It belongs here because it is what every other layer reads: the simulator's oracle, the claims registry's source, and the answer to what a component is doing right now.</td>
+        <td class="fpos">E2, when comparing two whole-system states is comparing two hashes.</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">05</div><h2>The testing environment, concretely</h2></div>
+  <div class="flow">
+    <p>Eight components. The thing worth noticing is how much of it falls out of architectural decisions made for other reasons &mdash; one ring interface gives one interception point, no ambient authority gives no hidden channels, user-space drivers make a modelled device a component substitution, content-addressed state makes whole-system comparison a hash comparison. The environment is cheap here in a way it is not anywhere else, and that is a claim in its own right.</p>
+  </div>
+  <div class="streams">
+    <div class="stream">
+      <div class="k">01 &mdash; the simulator</div>
+      <div class="from">Virtual time &middot; seeded ordering &middot; device models &middot; component substitution &middot; snapshot and restore</div>
+      <div class="takes"><b>Catches:</b> ordering bugs, protocol violations, fault-handling paths that are never taken in production. <b>Gives:</b> a failure that reproduces from a seed and a commit, and a bisect that re-enters at simulated minute 39 instead of re-running the first 39.</div>
+    </div>
+    <div class="stream">
+      <div class="k">02 &mdash; fault injection</div>
+      <div class="from">Allocation failure &middot; translation faults &middot; device page-fault latency &middot; peer death mid-operation &middot; torn doorbell &middot; partial write &middot; power cut</div>
+      <div class="takes"><b>Catches:</b> the paths that only run when something has already gone wrong, which is where the bugs that matter live. The hook exists; each class is one file once code asks its <code>Env</code> whether an operation should fail.</div>
+    </div>
+    <div class="stream">
+      <div class="k">03 &mdash; the fuzzers</div>
+      <div class="from">Coverage-guided entry fuzzing &middot; a hostile peer that lies about its cursors and its epoch &middot; a committed corpus</div>
+      <div class="takes"><b>Catches:</b> everything a compromised or crashed peer can do to the one surface that accepts untrusted input. The kernel must never panic, corrupt or hang &mdash; a billion hostile operations is the bar.</div>
+    </div>
+    <div class="stream">
+      <div class="k">04 &mdash; proof and model checking</div>
+      <div class="from">Litmus tests &middot; memory-model checking &middot; bounded proof on capability properties &middot; deductive proof on frame invariants</div>
+      <div class="takes"><b>Catches:</b> what sampling cannot &mdash; the interleaving one machine never happened to produce. Deliberately narrow: the frame and the protocols, never the system, at a fraction of the seL4 cost and with none of its guarantee.</div>
+    </div>
+    <div class="stream">
+      <div class="k">05 &mdash; bench and claims</div>
+      <div class="from">Full distributions &middot; instructions and joules per operation &middot; versioned baselines &middot; change-point detection &middot; gating status in a reviewable diff</div>
+      <div class="takes"><b>Catches:</b> the regression that ships because it was 4% and nobody was watching. <b>Enforces:</b> that a number without a named baseline and a reproduction command never reaches a document.</div>
+    </div>
+    <div class="stream">
+      <div class="k">06 &mdash; hardware in the loop</div>
+      <div class="from">Photodiode capture &middot; external input injection &middot; external energy meter &middot; netboot, serial, power cycling &middot; unattended bisect</div>
+      <div class="takes"><b>Catches:</b> the difference between a number the system reports about itself and a number an instrument reports about the system. The latency claim is not credible measured any other way.</div>
+    </div>
+    <div class="stream">
+      <div class="k">07 &mdash; the state tree</div>
+      <div class="from">Hierarchical typed state, published continuously &middot; hashed at snapshot boundaries &middot; readable with no debug build and no debugger</div>
+      <div class="takes"><b>Catches:</b> divergence, at the moment it appears and in the subtree where it happened, instead of as a symptom at the end of a run. Also what makes a claim and a live reading the same number.</div>
+    </div>
+    <div class="stream">
+      <div class="k">08 &mdash; continuous integration</div>
+      <div class="from">Pull-request gate &middot; nightly sweeps &middot; weekly checking and soaks &middot; per-release reproduction</div>
+      <div class="takes"><b>Catches:</b> the slow decay of everything above. A muted job is a deleted job with extra steps, so the schedule is designed to stay green rather than to stay loud.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">06</div><h2>What catches what</h2></div>
+  <div class="flow">
+    <p>The table an environment has to survive: for each class of defect, which layer is supposed to catch it, and how often that layer runs. A row with no catching layer is either scheduled work or an accepted risk, and writing them down is how a gap stops being invisible.</p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Defect class</th><th>Caught by</th><th>Cadence</th><th>Available from</th></tr></thead>
+    <tbody>
+      <tr><td class="sysname"><b>Memory unsafety in the frame</b></td><td>The compiler, then proof on the invariants the compiler cannot express</td><td class="fpos">every build &middot; scheduled</td><td>E0 &middot; E2</td></tr>
+      <tr><td class="sysname"><b>Memory unsafety above the frame</b></td><td>Impossible by construction — <code>unsafe</code> is forbidden and the lint fails a fourth crate</td><td class="fpos">every build</td><td>done</td></tr>
+      <tr><td class="sysname"><b>Ordering and memory-model bugs</b></td><td>Litmus tests, then model checking; the simulator's seeded ordering for the protocol level</td><td class="fpos">every build &middot; weekly</td><td>E0 &middot; E1</td></tr>
+      <tr><td class="sysname"><b>Protocol violations by a peer</b></td><td>The hostile-peer fuzzer and header validation</td><td class="fpos">nightly</td><td>E1</td></tr>
+      <tr><td class="sysname"><b>Authority escapes</b></td><td>The capability negative suite, then bounded proof of the same five properties</td><td class="fpos">every build &middot; scheduled</td><td>E0 &middot; E1</td></tr>
+      <tr><td class="sysname"><b>Fault-path bugs</b></td><td>Seeded fault injection across every declared class</td><td class="fpos">nightly sweeps</td><td>E1</td></tr>
+      <tr><td class="sysname"><b>Crash inconsistency</b></td><td>Power-cut model at every write boundary of a publish</td><td class="fpos">nightly</td><td>E2</td></tr>
+      <tr><td class="sysname"><b>Performance regression</b></td><td>Distributions with change-point detection over stored history</td><td class="fpos">every build</td><td>E0 harness &middot; E2 detection</td></tr>
+      <tr><td class="sysname"><b>Latency tail regression</b></td><td>p99.9 gating, then the photodiode rig for anything user-visible</td><td class="fpos">every build &middot; per release</td><td>E0 &middot; E3</td></tr>
+      <tr><td class="sysname"><b>Energy regression</b></td><td>Joules per operation from counters, then an external meter</td><td class="fpos">every build &middot; per release</td><td>E1 &middot; E5</td></tr>
+      <tr><td class="sysname"><b>Nondeterminism creeping back</b></td><td>The determinism lint, and the two-machine reproduction check</td><td class="fpos">every build</td><td>E0</td></tr>
+      <tr><td class="sysname"><b>ABI incompatibility</b></td><td>The compatibility matrix against N-1 peers, both directions</td><td class="fpos">every build</td><td>E4 &mdash; <b>and this is late</b></td></tr>
+      <tr><td class="sysname"><b>Interface rot in the semantic tree</b></td><td>Nothing needs to catch it: a wrong tree is wrong pixels, immediately and visibly</td><td class="fpos">by construction</td><td>E3</td></tr>
+      <tr><td class="sysname"><b>Long-run degradation</b></td><td>Week-long soak with the state tree recorded throughout</td><td class="fpos">per release</td><td>E5</td></tr>
+      <tr><td class="sysname"><b>Firmware-induced jitter</b></td><td>Nothing can prevent it; the claims discipline requires it be reported when observed</td><td class="fpos">per measurement</td><td>E0 &mdash; a field, not a fix</td></tr>
+      <tr><td class="sysname"><b>Speculative reads across a domain</b></td><td>Nothing yet. Belongs in the M4 negative suite as a positive test once domains exist, and is a research contribution rather than a checkbox</td><td class="fpos">&mdash;</td><td>E1 &mdash; <b>currently uncovered</b></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="flow" style="padding-top:18px">
+    <div class="note">
+      <b>Two rows are uncomfortable and are supposed to be.</b> ABI compatibility has no catching layer until E4, which is an argument for settling the negotiation rules in E0 while the wire is still cheap to change. And nothing at all catches a speculative read across a domain boundary, because the domains do not exist yet &mdash; which is the practical form of the largest open gap in the analysis.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">07</div><h2>Continuous integration, and its time budgets</h2></div>
+  <div class="flow">
+    <p>Four cadences. The budgets are as load-bearing as the contents: a pull-request gate that takes forty minutes gets bypassed, and a bypassed gate is worse than no gate because it produces the belief that something was checked.</p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Cadence</th><th>Budget</th><th>Runs</th><th>On failure</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="sysname"><b>Pull request</b><span>every change</span></td>
+        <td>&lt; 10 min</td>
+        <td class="fpos">The three policy lints; workspace tests; the kernel in emulation asserting its exit code; litmus on two architectures; every gating claim; the two-machine reproduction check.</td>
+        <td>Blocks the merge. No exceptions and no override path &mdash; an override path becomes the path.</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Nightly</b><span>every day</span></td>
+        <td>&lt; 8 h</td>
+        <td class="fpos">Seed sweeps across every scenario with automatic minimisation; coverage-guided fuzzing from the committed corpus; the hostile peer; fault-class sweeps; the crash-consistency model from E2.</td>
+        <td>Files a reproduction command, not a symptom. A sweep failure that cannot be minimised is itself a bug in the apparatus.</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Weekly</b><span>every week</span></td>
+        <td>&lt; 48 h</td>
+        <td class="fpos">Memory-model checking; the proofs; reproducible-build verification across two machines; the compatibility matrix; long soaks once hardware exists.</td>
+        <td>Loud. These are the jobs that get muted first, so muting one is a reviewable diff like everything else.</td>
+      </tr>
+      <tr>
+        <td class="sysname"><b>Release</b><span>every tag</span></td>
+        <td>as long as it takes</td>
+        <td class="fpos">Everything above, plus the full claim set re-measured, the package built twice on two machines and compared by hash, and the reproduction guide executed from a clean machine by someone who did not write it.</td>
+        <td>No release. A release whose numbers were not re-measured is a claim about the past.</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="flow" style="padding-top:18px">
+    <p><b>Noise control is part of the design, not a tuning exercise.</b> Measurement runs on pinned cores with a stated frequency policy, reports instructions and joules per operation alongside nanoseconds because those survive a hardware change, stores distributions rather than summaries, and never compares across runner classes. Change-point detection over stored history replaces thresholds, because a threshold either misses the real regression or fires until everybody stops looking.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">08</div><h2>What a release is</h2></div>
+  <div class="flow">
+    <p>For a product, a release is software somebody installs. For a research vehicle whose deliverable is defensible measured claims, a release is <b>an evidence package</b>, and the software is one of its contents. That reframing decides everything else in this section.</p>
+    <div class="claim">
+      <span class="t">The release contract</span>
+      <b>Every published number in a release can be re-derived by a stranger, from the package, with one command, on hardware they can buy.</b> If that is not true of a number, the number is not in the release. This is the claims-registry rule applied to the whole artefact rather than to a single entry.
+    </div>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>The package contains</th><th>Because</th></tr></thead>
+    <tbody>
+      <tr><td class="sysname"><b>The source, at a tag</b></td><td>Obvious, and insufficient on its own — which is the point of everything below it.</td></tr>
+      <tr><td class="sysname"><b>The claims snapshot</b></td><td>Every number the release asserts, with its baseline, its workload, its distribution and its reproduction command. Machine-readable, so documents render from it rather than restating it.</td></tr>
+      <tr><td class="sysname"><b>The baseline configuration</b></td><td>The tuned Linux the comparison was made against, as configuration rather than as prose. This is what stops a tuned comparison decaying into a stock one as the baseline ages and nobody re-checks.</td></tr>
+      <tr><td class="sysname"><b>The seed corpus and scenario set</b></td><td>So a third party can run the same sweeps, and so a reported bug arrives as a seed rather than a description.</td></tr>
+      <tr><td class="sysname"><b>A content-addressed system image</b></td><td>One hash naming an entire bootable generation. Reproducing it from source and getting the same hash is a test, and it runs in the release job.</td></tr>
+      <tr><td class="sysname"><b>The dependency manifest and provenance</b></td><td>What went in, at what version, under what licence — with the imported subtree's terms kept distinct, because the licence boundary and the isolation boundary are deliberately the same boundary.</td></tr>
+      <tr><td class="sysname"><b>The honest-status page</b></td><td>What does not work, what was measured on emulated hardware, what is a hook rather than a system. <code>TESTING-STATUS.md</code> is this page and it ships with every release.</td></tr>
+      <tr><td class="sysname"><b>The decision record</b></td><td>Every RFC, including the superseded ones, so that a reader can see what was reversed and why rather than only what survived.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="flow" style="padding-top:18px">
+    <p><b>Cadence is milestone-driven, never calendar-driven.</b> A release happens when a gate closes. Dates on a research vehicle produce either padded gates or quiet ones, and both are ways of lying to yourself about where the project is.</p>
+    <p><b>Versioning is two numbers that mean different things.</b> The release version tracks gates. The ABI version tracks the wire, with a floor and feature bits, and moves entirely independently &mdash; a component built against release 0.3 must keep working at 0.4 or the component model is decorative.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">09</div><h2>Freely realizable, stated as four things that must never be true</h2></div>
+  <div class="flow">
+    <p>Transparency is easy to assert and hard to check, so it is stated here as negatives, each of which is falsifiable by anyone who tries.</p>
+    <ul class="list">
+      <li><b>No number exists that only we can reproduce.</b> Every claim carries a command, the command runs from a clean checkout, and the release job proves it by having someone who did not write it run it on a clean machine.</li>
+      <li><b>No step exists that is not in the tree.</b> If a build, a measurement or a release needs a script, the script is <code>xtask</code> and it is committed. Institutional knowledge in somebody's shell history is the standard way a project becomes unreproducible without anyone deciding it should be.</li>
+      <li><b>No dependency exists that cannot be replaced.</b> Every immature bet carries a written fallback that is merely good rather than exceptional, and the fallback is re-checked once per epoch. A dependency whose failure would cost a <em class="sys">bet</em> rather than a claim is not taken at all.</li>
+      <li><b>No result is published without its cost.</b> Reservations leave capacity idle. Content addressing is bad at small random writes. The frame still needs a reboot. Each of those goes beside the result it qualifies, not in a rebuttal after somebody finds it.</li>
+    </ul>
+    <p>The positive form of all four is the contribution path: someone who has never spoken to the team can clone the tree, run one command, get a green build, pick any unblocked task from <code>TODO.md</code>, see its exit test, and know when they are done. That is the whole of what this plan means by realizable, and it is checkable at any moment by trying it.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">10</div><h2>Where this plan most likely fails</h2></div>
+  <div class="flow">
+    <p>The failure modes of long plans are as well documented as the failure modes of new operating systems, and mostly consist of the plan being right about the work and wrong about the order.</p>
+    <div class="deficit">
+      <div class="df">
+        <div class="n">E3 eats everything</div>
+        <div class="d">Four to ten person-years is the widest range in the table for a reason, and the low end assumes a toolkit scope that has been narrowed hard. The mitigation is to reach G3 with the smallest interface that can carry the claim &mdash; one application, four projections &mdash; rather than a desktop.</div>
+      </div>
+      <div class="df">
+        <div class="n">The apparatus gets deferred</div>
+        <div class="d">Every prove task competes with a build task that feels more like progress, and the prove tasks lose that comparison every single time it is made. The four movements exist to make the imbalance visible; the gates exist so it cannot be resolved by shipping anyway.</div>
+      </div>
+      <div class="df">
+        <div class="n">The ABI ossifies before it is right</div>
+        <div class="d">Three corrections are cheap in E0 and expensive after E1, and by E4 the compatibility matrix makes them a negotiation about how to negotiate. This is the one place in the plan where the ordering is not a preference.</div>
+      </div>
+      <div class="df">
+        <div class="n">The baseline decays</div>
+        <div class="d">A tuned Linux comparison becomes a stock Linux comparison by doing nothing at all for eighteen months. It is in the always-on list, it will still be the first thing skipped, and it is the single most effective way for this project's numbers to become worthless.</div>
+      </div>
+      <div class="df">
+        <div class="n">Scope arrives one reasonable item at a time</div>
+        <div class="d">Mutable-path compatibility, a shell, a package ecosystem, wireless. Each is defensible alone; together they are the product obligations RFC 0002 exists to refuse. Anything dropped moves to a dropped marker with a reason, in a reviewable diff, so that re-adding it is also a decision.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="sec-num">11</div><h2>Keeping the plan true</h2></div>
+  <div class="flow">
+    <p>A plan is a document that decays faster than code, because nothing fails when it is wrong. Four maintenance rules, all cheap and all easy to skip:</p>
+    <ul class="list">
+      <li><b>The list is edited, not rewritten.</b> Task IDs are permanent, dropped tasks keep their reasons, and the shape of what was abandoned stays visible.</li>
+      <li><b>Every gate closure updates the honest-status page.</b> The distance between this plan and the tree is the number that matters most and the one nobody volunteers.</li>
+      <li><b>Every reversal is an RFC.</b> The decision record is append-only and the reversals are the part worth keeping; the reasoning already lives in the design documents.</li>
+      <li><b>Re-read the risk register once an epoch.</b> Fallbacks for immature dependencies, the unsafe percentage against its 10% reversal trigger, the baselines, and the two claims that would falsify a bet if they came back wrong.</li>
+    </ul>
+    <div class="claim">
+      <span class="t">The one-line version</span>
+      <b>Seven epochs, seven gates, seven releases, and one contract: every number a stranger can re-derive.</b> The testing environment is not the last epoch's work &mdash; it is the second movement of every epoch, and the reason the gates can be written as observations rather than as opinions.
+    </div>
+  </div>
+  <div class="foot">
+    The list: <code>TODO.md</code>. &middot; Sources: the five design documents, RFCs 0000&ndash;0004, <code>claims/</code>, <code>docs/TESTING-STATUS.md</code>, <code>BOOTSTRAP.md</code>, and <code>docs/what-must-be-stated.html</code> for the nine open decisions scheduled here. &middot; Effort figures are the architecture document's, unchanged. &middot; Status: proposed &middot; 2026-08-28.
+  </div>
+</section>
+
+</div>
