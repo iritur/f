@@ -85,6 +85,9 @@ Added when the same mistake happens twice. Each line is a scar.
 - Building a bare-metal *library* image with link-time optimisation on. The rlib
   carries bitcode rather than machine code, so the image links to nothing —
   silently — and the failure looks like the entry point having moved.
+- Writing code above the frame that only compiles on x86-64, and finding out
+  from the AArch64 job. `cargo xtask test` now cross-checks the four crates that
+  job tests; the ordering still needs the arm runner, the compile does not.
 
 ## How work reaches this repo
 

@@ -1062,9 +1062,41 @@ fn test() -> Result<(), String> {
     // came to have tests that nothing ran: the list stopped matching the
     // workspace the moment a crate was added, and silently.
     sh("cargo", &["test", "--workspace", "--exclude", "f-kernel"])?;
+
+    // The half of the AArch64 job that does not need an AArch64 machine.
+    //
+    // CI runs the tests on an arm runner, which is where the ordering means
+    // anything and which nothing local substitutes for. But most of what that
+    // job has ever caught is not an ordering bug at all: it is code that does
+    // not *compile* off x86-64, and a compile is a compile on any host. This
+    // check would have caught the one that got through — a component calling
+    // through a door whose one instruction is `#[cfg(target_arch = "x86_64")]`
+    // — and it costs two seconds.
+    //
+    // A bare-metal target rather than a hosted one, because it is the AArch64
+    // target `rust-toolchain.toml` pins and so the only one guaranteed to be
+    // installed. The crates checked are the four the arm job tests.
+    sh(
+        "cargo",
+        &[
+            "check",
+            "-p",
+            "f-abi",
+            "-p",
+            "f-env",
+            "-p",
+            "f-ring",
+            "-p",
+            "f-init",
+            "--target",
+            "aarch64-unknown-none",
+        ],
+    )?;
+
     println!(
         "\nnote: x86-64 total-store-order hides weak-memory ordering bugs.\n      \
-         An AArch64 job is required before the ring tests mean anything."
+         The AArch64 crates compile here; whether the ring's ordering holds on\n      \
+         one is the arm job's to say, and nothing local substitutes for it."
     );
     Ok(())
 }

@@ -7,7 +7,7 @@
 //! `unsafe_code = "forbid"`, and `cargo xtask lint-unsafe` fails the build if
 //! any crate outside the frame acquires it.
 //!
-//! At E0-B10 that stopped being the whole of it. [`component`] is this crate as
+//! At E0-B10 that stopped being the whole of it. `component` is this crate as
 //! something that *runs*: a flat image, linked by `user/init/link.ld`, handed to
 //! the machine by the boot loader as a file and copied into a frame the process
 //! was granted. The kernel does not contain it. What is left here is the part
@@ -16,6 +16,17 @@
 
 #![no_std]
 
+// The component is x86-64's, and only because the door is. Nothing in
+// `component.rs` is architecture-specific — it is capability calls and a polling
+// loop — but the one instruction underneath it is, and `f_abi::door::call` is
+// compiled only where there is a frame to call. On any other target this crate
+// is the protocol arithmetic and its tests, which is what the AArch64 job runs
+// it for.
+//
+// *Reversal:* an AArch64 frame. At that point `door::call` grows a second
+// implementation and this gate goes away — inventing one before the frame
+// exists would be an ABI with nothing on the other side of it.
+#[cfg(target_arch = "x86_64")]
 pub mod component;
 
 use f_abi::{Sqe, class, flags};

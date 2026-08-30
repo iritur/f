@@ -107,6 +107,20 @@ taken to a green `cargo xtask verify` before the next one started.
    gaining a fourth step.
 6. The documents.
 
+## What CI caught that the local loop could not
+
+One thing, and it is the reason `docs/sdlc.md` names the gap it does. `user/init`
+called through a door whose one instruction is `#[cfg(target_arch = "x86_64")]`,
+so the crate did not compile on the arm runner — a failure the whole local loop
+is structurally unable to see, because it has no AArch64 anything.
+
+Fixed twice: `component` is gated on the architecture whose door it calls, with
+the reversal named; and `cargo xtask test` now cross-*compiles* the four crates
+that job tests for `aarch64-unknown-none`, which is two seconds and would have
+caught it. The ordering still needs the arm runner and nothing local substitutes
+for it — but most of what that job has ever caught is not an ordering bug, it is
+code that does not compile off x86-64, and a compile is a compile anywhere.
+
 ## What this expected to be wrong about, and what it was wrong about
 
 Named in advance, so that being wrong is a finding rather than a surprise. Three

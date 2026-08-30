@@ -90,8 +90,9 @@ currently comes from.
   are version-controlled rather than written the day somebody wants a number.
   E0-P05 and E0-P06 are what move them.
 - **`cargo xtask verify` is local, and local is not everything.** It runs the
-  lints, the host tests, a QEMU boot and the mutation harness. It cannot run the
-  AArch64 tests or the
+  lints, the host tests, an AArch64 cross-*compile* of the four crates the arm
+  job tests, a QEMU boot and the mutation harness. It cannot *run* the AArch64
+  tests or the
   litmus job, which are exactly where L2 means anything — x86-64's total store
   order hides the entire class of bug the ring is exposed to. Those run in CI
   and nothing local substitutes for them.
