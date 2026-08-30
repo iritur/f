@@ -12,6 +12,7 @@
 //! *is* rather than how it is entered lives outside this module, in
 //! `crate::process`, because none of it is particular to this architecture.
 
+pub mod ap;
 pub mod apic;
 pub mod boot;
 pub mod gdt;
@@ -48,10 +49,28 @@ pub mod serial;
 /// `cpuid` also serialises, which is a cost worth naming before it is paid in a
 /// loop. Nothing calls this per interrupt yet.
 ///
-/// *Reversal:* E0-B10 starts the application processors, and each core learns
-/// its own dense index there. From that point the index lives in `GS` and this
-/// function reads it with one `mov` — which is both the cheap answer and the
-/// one that survives sparse ids. `PerCpu` does not change; this function does.
+/// # The reversal this comment predicted, and why it did not happen
+///
+/// It used to say that E0-B10 would move the index into `GS`, where reading it
+/// is one `mov`. E0-B10 has arrived — there is a second core — and the index is
+/// still read from `cpuid`, so the prediction is corrected rather than left
+/// standing.
+///
+/// `GS` is already spoken for. `IA32_KERNEL_GS_BASE` names the ring-3 entry
+/// block and `GS_BASE` is deliberately zero while a process runs, and the swap
+/// between them happens on the system-call path and *only* there: the interrupt
+/// stubs do not `swapgs`. So a core index in `GS` would be correct in a system
+/// call and would read a process's base in the timer handler — which is the one
+/// caller on the critical path and the one that must not be wrong. Making it
+/// right means `swapgs` in every stub, conditional on the saved code selector,
+/// which is a change to the interrupt entry path rather than to this function.
+///
+/// `cpuid` is correct on both paths today, and correct is the requirement.
+///
+/// *Reversal:* the interrupt stubs learning to swap `GS` — which is E1's, along
+/// with the scheduler that makes this function hot enough for the difference to
+/// be measurable — or a machine whose APIC ids are sparse, which is the same
+/// change for a different reason.
 #[must_use]
 pub fn current_cpu() -> usize {
     // SAFETY: `cpuid` is unprivileged and has no memory effect.
@@ -86,6 +105,43 @@ pub(crate) unsafe fn cpuid(leaf: u32) -> (u32, u32, u32) {
         );
     }
     (ebx, ecx, edx)
+}
+
+/// One `cpuid` leaf and subleaf, as `(eax, ebx, ecx, edx)`.
+///
+/// The wider form, for the two leaves whose answer depends on `ecx` going in
+/// and on `eax` coming out. [`cpuid`] stays as it is because every other caller
+/// in this kernel wants three registers of one leaf, and a four-tuple with a
+/// discarded element at every site would be noise.
+///
+/// # Safety
+///
+/// As [`cpuid`], and `leaf` must be one this processor implements: a leaf above
+/// the maximum reported by leaf zero answers with the maximum leaf's contents
+/// rather than with zeroes, so a caller that has not checked is reading a
+/// different question's answer.
+pub(crate) unsafe fn cpuid_subleaf(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    let eax: u32;
+    let ebx: u32;
+    let ecx: u32;
+    let edx: u32;
+    // SAFETY: `rbx` is reserved by the compiler, so it is saved and restored
+    // around the instruction rather than named as an output. The target
+    // disables the red zone, so using the stack here is sound.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "mov {ebx:e}, ebx",
+            "pop rbx",
+            ebx = lateout(reg) ebx,
+            inout("eax") leaf => eax,
+            inout("ecx") subleaf => ecx,
+            out("edx") edx,
+            options(preserves_flags),
+        );
+    }
+    (eax, ebx, ecx, edx)
 }
 
 /// Read a model-specific register.

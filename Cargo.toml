@@ -49,3 +49,22 @@ panic = "abort"
 lto = true
 codegen-units = 1
 debug = true
+
+# The profile a component's image is built with. `cargo xtask init` links the
+# library this produces against `user/init/link.ld`.
+#
+# It inherits `release` and turns one thing off, and that one thing is the whole
+# reason the profile exists: with link-time optimisation on, a library crate's
+# rlib carries bitcode rather than machine code, because the final artifact is
+# expected to do the optimising. There is no final artifact here — the linker
+# script *is* the last step — so an rlib built that way links to an empty image,
+# silently, and the failure looks like the entry point having moved.
+#
+# `opt-level = "s"` because the image has to fit in the one page the frame maps
+# for it, and `debug = false` because nothing reads a component's symbols: the
+# kernel is handed a flat blob with no headers at all.
+[profile.init]
+inherits = "release"
+lto = false
+opt-level = "s"
+debug = false

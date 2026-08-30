@@ -17,14 +17,28 @@
 //! its four pages is reachable only because a capability authorised the mapping,
 //! which is what turns the table from bookkeeping into a boundary.
 //!
-//! What it does not do yet is take the memory back with the name. Revoking a
-//! frame capability withdraws the capability and leaves the mapping standing;
-//! `arch::x86_64::paging` says why, and the second core is what would fix it.
+//! It takes the memory back with the name, since E0-B10. Revoking a frame
+//! capability that has been mapped clears the entry, invalidates this core's
+//! translation and tells every other running core — and `cap=unmap` is the boot
+//! where a process reads the page afterwards and takes a page fault at an
+//! address it was reading a moment earlier. This module comment used to say the
+//! opposite, and `withdraw` is where the change lives.
 //!
-//! One at a time, on the core that starts it. `run` takes the core for the
-//! process's whole life and returns when it is over. That is not a design; it
-//! is what a system with no scheduler can honestly say, and E0-B10 is where a
-//! second core makes the question real.
+//! # One at a time, on a core that is not the one that built it
+//!
+//! Building a process means allocating, and the frame allocator belongs to one
+//! core; taking a privilege-level transition is something any core can do. So
+//! the work is three functions across two cores — [`prepare`] on the core that
+//! owns the allocator, [`execute`] on the core that runs it, [`reap`] back on
+//! the first — and the boot processor is left free to hold the timer window the
+//! milestone is about.
+//!
+//! Still one process at a time. There is no scheduler and no run queue;
+//! placement is "the other core", which is the whole of the decision because
+//! there is nothing to decide between. Two processes run per boot and they run
+//! in sequence, which is what makes the second one evidence about the first: a
+//! table cleared between them does not let the second resolve a handle the
+//! first held.
 //!
 //! # Why the frame decides when the process stops running
 //!
@@ -61,12 +75,13 @@
 //! of memory in a week and blames whatever was allocating at the time.
 
 use f_abi::cap::{CapType, Handle, rights};
-use f_abi::error;
+use f_abi::{door, error};
 
 use crate::arch::x86_64::multiboot::BootInfo;
-use crate::arch::x86_64::{paging, probe, read_tsc, ring3};
+use crate::arch::x86_64::{apic, paging, probe, read_tsc, ring3};
 use crate::cap::{TABLE_SLOTS, Table};
-use crate::mem::{FRAME_SIZE, FrameAllocator, Order};
+use crate::kprintln;
+use crate::mem::{FRAME_SIZE, Frame, FrameAllocator, Order};
 use crate::percpu::PerCpu;
 
 /// Where a process's text is mapped.
@@ -119,21 +134,21 @@ pub const GRANT_SECOND: u64 = GRANT + FRAME_SIZE;
 /// It is the whole of what a process can say before there is a channel to say
 /// it on. At M5 this is what channel setup replaces: the same handshake,
 /// carrying a ring rather than carrying nothing. RFC 0014.
-const SYS_ANNOUNCE: u64 = 0;
+const SYS_ANNOUNCE: u64 = door::ANNOUNCE;
 
 /// "Have I run long enough?" Answers [`KEEP_GOING`], [`ENOUGH`] or
 /// [`GAVE_UP`].
 ///
 /// Replaced at M5 by a blocking wait on a ring, which is the same question
 /// asked of something that can answer it without being polled.
-const SYS_PROGRESS: u64 = 1;
+const SYS_PROGRESS: u64 = door::PROGRESS;
 
 /// "I am done." The first argument is a status.
 ///
 /// The one of the three with no successor named, because it is the one a
 /// process genuinely cannot do through a ring: submitting "I no longer exist"
 /// and then waiting for the completion is not a sequence a process can finish.
-const SYS_EXIT: u64 = 2;
+const SYS_EXIT: u64 = door::EXIT;
 
 /// "What is this handle?" Answers a packed kind and rights, or an authority
 /// error.
@@ -144,7 +159,7 @@ const SYS_EXIT: u64 = 2;
 /// has to work before there is any ring to work it through, and each of the
 /// four names the opcode that retires it. This one becomes an opcode on the
 /// component's control ring at M5.
-pub(crate) const SYS_CAP_INSPECT: u64 = 3;
+pub(crate) const SYS_CAP_INSPECT: u64 = door::CAP_INSPECT;
 
 /// "Mint me a weaker one." Takes a handle and a rights bitmap, answers a
 /// handle.
@@ -152,11 +167,11 @@ pub(crate) const SYS_CAP_INSPECT: u64 = 3;
 /// Copy is the identity case — the same rights — and is a derivation like any
 /// other, so that revoking the source reaches it. `kernel/src/cap.rs` argues
 /// that against seL4. Retired by the same control-ring opcode at M5.
-pub(crate) const SYS_CAP_DERIVE: u64 = 4;
+pub(crate) const SYS_CAP_DERIVE: u64 = door::CAP_DERIVE;
 
 /// "Take back everything I handed on from this." Answers how many capabilities
 /// were withdrawn. Retired at M5 with the rest.
-pub(crate) const SYS_CAP_REVOKE: u64 = 5;
+pub(crate) const SYS_CAP_REVOKE: u64 = door::CAP_REVOKE;
 
 /// "Map this frame into this address space." The one call that *uses* a
 /// capability rather than managing one, and therefore the one that makes the
@@ -169,13 +184,13 @@ pub(crate) const SYS_CAP_REVOKE: u64 = 5;
 /// consequence of the door being deliberately narrow, and it goes away with the
 /// call: at M5 this is an `Sqe`, whose `cap` field is the frame handle and
 /// whose `ext` carries the rest with room to spare.
-pub(crate) const SYS_CAP_MAP: u64 = 6;
+pub(crate) const SYS_CAP_MAP: u64 = door::CAP_MAP;
 
 /// The answer to [`SYS_PROGRESS`] while the process should carry on.
-const KEEP_GOING: u64 = 0;
+const KEEP_GOING: u64 = door::KEEP_GOING as u64;
 
 /// The answer once the frame has taken as many ticks from ring 3 as it wanted.
-const ENOUGH: u64 = 1;
+const ENOUGH: u64 = door::ENOUGH as u64;
 
 /// The answer when the frame has given up waiting for those ticks.
 ///
@@ -183,7 +198,7 @@ const ENOUGH: u64 = 1;
 /// is allowed to read directly. A process that polls forever because the timer
 /// stopped is a machine that hangs in boot with no output, which is the failure
 /// `apic::wait` already refuses to have and this refuses for the same reason.
-const GAVE_UP: u64 = 2;
+const GAVE_UP: u64 = door::GAVE_UP as u64;
 
 /// What [`ring3::enter`] returns when the process was killed.
 const KILLED: u64 = 1;
@@ -294,6 +309,13 @@ struct State {
     giveup: u64,
     /// What its capability calls were answered with.
     caps: Tally,
+    /// Its top-level page table.
+    ///
+    /// Here rather than only in [`Job`] because a capability call may have to
+    /// edit the address space the caller is running in — withdrawing a mapping
+    /// a revoked capability authorised — and the call arrives with a handle and
+    /// nothing else. Zero when no process is running.
+    root: u64,
     /// The frame allocator, as an address.
     ///
     /// An address and not a `*const FrameAllocator`, because [`PerCpu`] is
@@ -320,6 +342,7 @@ static STATE: PerCpu<State> = PerCpu::new(State {
     wanted: 0,
     giveup: 0,
     caps: Tally::ZERO,
+    root: 0,
     frames: 0,
     features: paging::Features::NONE,
 });
@@ -381,6 +404,16 @@ pub enum Provoke {
     Mistyped,
     /// Derive until the table is full.
     Flood,
+    /// Map a frame, have the capability behind it revoked, and read the page
+    /// anyway.
+    ///
+    /// The eighth, and the only one of them that is supposed to end in a fault
+    /// rather than a refusal — because what it tests is not whether the frame
+    /// says no, it is whether the *processor* does. Every other capability
+    /// escape is answered by the table; this one is answered by a page table
+    /// entry that is no longer there, on a core that has been told it is no
+    /// longer there. E0-B10.
+    Unmap,
 }
 
 /// What a provocation is supposed to produce.
@@ -466,6 +499,7 @@ impl Provoke {
             (&b"cap=rights"[..], Self::Rights),
             (&b"cap=type"[..], Self::Mistyped),
             (&b"cap=flood"[..], Self::Flood),
+            (&b"cap=unmap"[..], Self::Unmap),
         ] {
             if boot.has_parameter(parameter) {
                 return provoke;
@@ -474,24 +508,28 @@ impl Provoke {
         Self::Kernel
     }
 
-    /// The word the process is handed on entry.
+    /// Which violation this is, as the process is told it.
+    ///
+    /// Half of what the process is handed: [`f_abi::door::Entry`] carries this
+    /// in its low half and the first granted capability in its high one.
     #[must_use]
-    pub const fn selector(self) -> u64 {
+    pub const fn selector(self) -> u32 {
         match self {
-            Self::Kernel => probe::PROVOKE_KERNEL,
-            Self::Null => probe::PROVOKE_NULL,
-            Self::Text => probe::PROVOKE_TEXT,
-            Self::Stack => probe::PROVOKE_STACK,
-            Self::Privileged => probe::PROVOKE_PRIV,
-            Self::Call => probe::PROVOKE_CALL,
-            Self::Exit => probe::PROVOKE_EXIT,
-            Self::Grant => probe::PROVOKE_CAP_GRANT,
-            Self::Unowned => probe::PROVOKE_CAP_UNOWNED,
-            Self::Forge => probe::PROVOKE_CAP_FORGE,
-            Self::Stale => probe::PROVOKE_CAP_STALE,
-            Self::Rights => probe::PROVOKE_CAP_RIGHTS,
-            Self::Mistyped => probe::PROVOKE_CAP_TYPE,
-            Self::Flood => probe::PROVOKE_CAP_FLOOD,
+            Self::Kernel => probe::PROVOKE_KERNEL as u32,
+            Self::Null => probe::PROVOKE_NULL as u32,
+            Self::Text => probe::PROVOKE_TEXT as u32,
+            Self::Stack => probe::PROVOKE_STACK as u32,
+            Self::Privileged => probe::PROVOKE_PRIV as u32,
+            Self::Call => probe::PROVOKE_CALL as u32,
+            Self::Exit => probe::PROVOKE_EXIT as u32,
+            Self::Grant => probe::PROVOKE_CAP_GRANT as u32,
+            Self::Unowned => probe::PROVOKE_CAP_UNOWNED as u32,
+            Self::Forge => probe::PROVOKE_CAP_FORGE as u32,
+            Self::Stale => probe::PROVOKE_CAP_STALE as u32,
+            Self::Rights => probe::PROVOKE_CAP_RIGHTS as u32,
+            Self::Mistyped => probe::PROVOKE_CAP_TYPE as u32,
+            Self::Flood => probe::PROVOKE_CAP_FLOOD as u32,
+            Self::Unmap => probe::PROVOKE_CAP_UNMAP as u32,
         }
     }
 
@@ -513,6 +551,7 @@ impl Provoke {
             Self::Rights => "asking for rights its capability does not carry",
             Self::Mistyped => "presenting a capability of the wrong kind",
             Self::Flood => "deriving until the table is full",
+            Self::Unmap => "reading a page after the capability that mapped it was revoked",
         }
     }
 
@@ -520,7 +559,14 @@ impl Provoke {
     #[must_use]
     pub const fn expects(self) -> Expect {
         match self {
-            Self::Kernel | Self::Null | Self::Text | Self::Stack => Expect::Fault(PAGE_FAULT),
+            // Four isolation provocations and one capability one. `Unmap` is
+            // in this list rather than below it because a revoked mapping is
+            // supposed to stop being a mapping: the refusal it earns is a page
+            // fault, from the processor, and an exit would mean the page was
+            // still there.
+            Self::Kernel | Self::Null | Self::Text | Self::Stack | Self::Unmap => {
+                Expect::Fault(PAGE_FAULT)
+            }
             Self::Privileged => Expect::Fault(GENERAL_PROTECTION),
             Self::Call => Expect::Exit(1),
             // Every capability escape is refused rather than fatal, which is
@@ -551,8 +597,17 @@ impl Provoke {
     /// something the process was entitled to, and a capability system that is
     /// too strict fails silently, as a component that mysteriously does not
     /// work.
+    /// `generation` is the one this process's capabilities were granted at,
+    /// which is one more than the number of processes that ran on this core
+    /// before it. It is a parameter rather than a constant because of the
+    /// forging sweep: a handle at a *lower* generation than the slot holds is
+    /// refused as revoked rather than as unknown, and that is not an accident
+    /// of the encoding — it is the frame saying "you had this once", which is
+    /// exactly what a stale handle from the previous process on this core is.
+    /// A suite that expected the same tally whatever had run before would be a
+    /// suite that could not tell those two refusals apart.
     #[must_use]
-    pub const fn expects_caps(self) -> Tally {
+    pub const fn expects_caps(self, generation: u16) -> Tally {
         /// `(ok, no_such, right_not_held, revoked, wrong_type, resource)`, with
         /// `other` always zero — an answer this suite did not name is a failure
         /// however many of them there are.
@@ -590,8 +645,15 @@ impl Provoke {
             // Four generations over every slot, plus four words nobody issued.
             // Four handles are live at that point — the three grants and the
             // one the preamble derived — so exactly four of the hundred and
-            // thirty-two resolve.
-            Self::Forge => tally(base + SWEEP_LIVE, SWEEP_REFUSED, 0, 0, 0, 0),
+            // thirty-two resolve, at the generation this process was granted at.
+            //
+            // Every generation *below* that one, on those same four slots, is a
+            // handle the previous process on this core held. It is refused as
+            // revoked, and counting it separately is what makes the boot say so.
+            Self::Forge => {
+                let stale = SWEEP_LIVE * (generation as u32 - 1);
+                tally(base + SWEEP_LIVE, SWEEP_REFUSED - stale, 0, stale, 0, 0)
+            }
 
             // Derive a grandchild, revoke the root, then use both leaves.
             Self::Stale => tally(base + 2, 0, 0, 2, 0, 0),
@@ -605,6 +667,12 @@ impl Provoke {
 
             // Every free slot, then the refusal.
             Self::Flood => tally(base + FLOOD_MINTS, 0, 0, 0, 0, 1),
+
+            // The preamble's three, and the revoke that withdraws what the
+            // third of them mapped. Nothing is refused: the frame answers every
+            // call this process makes, and what stops it is the page fault the
+            // fourth answer caused.
+            Self::Unmap => tally(base + 1, 0, 0, 0, 0, 0),
         }
     }
 
@@ -626,11 +694,17 @@ pub enum Error {
     Space(paging::BuildError),
     /// There was no frame for its text or its stack.
     NoFrames,
-    /// The program does not fit in one page. It is assembled into the kernel
-    /// image, so this is a build-time fact discovered at boot — and a program
-    /// that outgrows a page needs a second mapping rather than a larger
-    /// constant.
+    /// The program does not fit in one page. The frame maps one page of text,
+    /// so a program that outgrows it needs a loader that reads its headers
+    /// rather than a larger constant — E5. `cargo xtask init` checks the same
+    /// bound at build time, so a component reaching this is one that arrived
+    /// some other way.
     TooLarge,
+    /// There is no program to run: a module of no length, or an empty slice
+    /// where a caller meant to pass one. Refused rather than run, because a
+    /// process entered at a page of zeroes executes whatever a zero byte means
+    /// on this architecture and reports something inexplicable.
+    NoProgram,
     /// The process ended and nothing recorded how, which is a bug in the frame
     /// rather than in the process.
     NoDeath,
@@ -642,6 +716,10 @@ pub enum Error {
     /// The free count did not come back. Something the process owned was not
     /// given back, and continuing would hide it.
     Leaked,
+    /// The core the process was handed to could not arm its own timer, so there
+    /// was nothing to count ticks out of ring 3 with and the process would have
+    /// polled forever.
+    NoTimer,
 }
 
 impl Error {
@@ -652,9 +730,11 @@ impl Error {
             Self::Space(inner) => inner.message(),
             Self::NoFrames => "no frame for the process's text or stack",
             Self::TooLarge => "the process's program does not fit in one page",
+            Self::NoProgram => "there is no program for the process to run",
             Self::NoSlot => "the capability table had no room for a process's own grants",
             Self::NoDeath => "the process ended and the frame did not record how",
             Self::Leaked => "a process's frames were not all given back",
+            Self::NoTimer => "the core a process was handed to could not arm its timer",
         }
     }
 }
@@ -662,6 +742,8 @@ impl Error {
 /// What one run of a process produced.
 #[derive(Clone, Copy)]
 pub struct Report {
+    /// Which core ran it.
+    pub cpu: usize,
     /// The physical address of its top-level table.
     pub root: u64,
     /// How many of the kernel's top-level slots it carried a copy of.
@@ -678,6 +760,12 @@ pub struct Report {
     pub death: Death,
     /// How many capabilities the frame granted it.
     pub granted: usize,
+    /// The generation those capabilities were issued at.
+    ///
+    /// One more than the number of processes that have run on this core, and
+    /// therefore the number that says how much of this core's history a handle
+    /// could be stale by. [`Provoke::expects_caps`] is the only reader.
+    pub generation: u16,
     /// What its capability calls were answered with.
     pub caps: Tally,
     /// Capabilities still in its table when it ended, before the table was
@@ -708,7 +796,7 @@ impl Report {
         // preamble every process runs — so a tally that is wrong for a `user=`
         // boot means the capability path broke, and reporting that as the
         // isolation provocation failing would send the reader to the wrong file.
-        let expected = provoke.expects_caps();
+        let expected = provoke.expects_caps(self.generation);
         if self.caps != expected {
             if self.caps.ok != expected.ok {
                 return Err("the frame answered a different number of capability calls than the \
@@ -746,34 +834,156 @@ impl Report {
     }
 }
 
-/// Build a process, run it until it ends, and give its memory back.
+/// What a core has been asked to run.
+///
+/// Separate from [`State`] because the two are written by different cores and
+/// read at different times: this is the boot processor telling a core what to
+/// do, and [`State`] is that core's record of what happened. Merging them would
+/// mean one struct half of which is stale on whichever core is looking at it.
+#[derive(Clone, Copy)]
+struct Job {
+    /// The process's top-level table, which is what goes in `CR3`.
+    root: u64,
+    /// Where its program starts.
+    entry: u64,
+    /// The stack pointer it starts with.
+    stack: u64,
+    /// The one word it is told on entry: which provocation to commit.
+    argument: u64,
+    /// The rate the running core arms its own timer at.
+    hz: u32,
+    /// How many ticks that timer asks for. It is a bound rather than a
+    /// schedule: the process ends long before it is reached, and the run is
+    /// stopped at that point.
+    target: u64,
+}
+
+/// Per core, because a core runs one process at a time and is told about it
+/// before it starts.
+static JOB: PerCpu<Job> =
+    PerCpu::new(Job { root: 0, entry: 0, stack: 0, argument: 0, hz: 0, target: 0 });
+
+/// What the core that ran a process found out, for the core that prepared it.
+///
+/// Everything here is in the running core's own shard and is read by the boot
+/// processor only after that core has said it is finished — which it says with
+/// a `Release` store, so these writes are visible to the `Acquire` that reads
+/// it. `smp` owns that pair and argues for it.
+#[derive(Clone, Copy)]
+struct Outcome {
+    /// [`KILLED`], [`EXITED`], or zero if the process never started.
+    ended: u64,
+    /// Timer ticks the running core took out of ring 3.
+    ticks: u64,
+    /// Capabilities still in its table when it ended, before it was cleared.
+    held: usize,
+    /// Why the core could not run it, if it could not.
+    failed: Option<Error>,
+}
+
+/// Per core, and written only by the core that ran the process.
+static OUTCOME: PerCpu<Outcome> =
+    PerCpu::new(Outcome { ended: 0, ticks: 0, held: 0, failed: None });
+
+/// What the frame is asking of one run of a process.
+///
+/// Five values that all say the same kind of thing — what this run is for —
+/// and they are a struct because [`prepare`] otherwise takes eight arguments,
+/// three of which are numbers of the same type. A call site that passes `hz`
+/// where `target` goes is a boot that waits for a thousand ticks or arms a
+/// timer at a hundred hertz, and nothing about either would look wrong.
+#[derive(Clone, Copy)]
+pub struct Plan {
+    /// The program to run.
+    ///
+    /// Two of them exist. `arch::x86_64::probe` is the frame's own adversary,
+    /// assembled into the kernel image, and it is what every `user=` and `cap=`
+    /// boot runs — it has to be in the image, because a suite that could only
+    /// test a component somebody supplied would be a suite that stops working
+    /// when nobody supplies one. The other is whatever the loader placed in
+    /// memory, which from E0-B10 is `user/init`.
+    ///
+    /// Making it a parameter rather than a switch is the whole of what the
+    /// loader changed here: the frame now runs *a* program, and where it came
+    /// from is the caller's business.
+    pub program: &'static [u8],
+    /// Which violation the process is to commit.
+    pub provoke: Provoke,
+    /// How many timer ticks the frame takes out of ring 3 before it tells the
+    /// process it has run long enough.
+    pub wanted: u64,
+    /// The rate the core running it arms its own timer at.
+    pub hz: u32,
+    /// How many ticks that timer asks for. A bound rather than a schedule: the
+    /// process ends long before it is reached.
+    pub target: u64,
+    /// Which core is to run it.
+    pub cpu: usize,
+}
+
+/// A process that has been built and not yet run, and the memory it will have
+/// to give back.
+///
+/// Held by the core that prepared it rather than by the core that runs it, and
+/// that split is the whole shape of this milestone. Allocating and freeing are
+/// the frame allocator's, and the frame allocator belongs to one core; running
+/// is a core taking a privilege-level transition, and that can be any core. So
+/// the boot processor builds the process, another core runs it, and the boot
+/// processor gives it back.
+pub struct Prepared {
+    space: paging::UserSpace,
+    /// Text, stack, the frame behind its frame capability, and the region
+    /// behind its untyped one — in that order, and every one of them owed back.
+    pages: [Frame; 4],
+    /// The free count before any of it was taken.
+    before: u64,
+    /// How many capabilities the frame put in its table.
+    granted: usize,
+    /// The generation it granted them at.
+    generation: u16,
+    /// Which core is to run it.
+    cpu: usize,
+}
+
+/// Build a process on `cpu`'s behalf: an address space, four pages, a table of
+/// capabilities and a job.
+///
+/// Nothing runs as a result of this. The core named by `cpu` is left holding
+/// everything it needs and nothing has told it to start, which is
+/// [`crate::smp::run_on`]'s to do.
 ///
 /// `wanted` is how many timer ticks the frame takes out of ring 3 before it
-/// tells the process it has run long enough, and `giveup` is a timestamp-counter
-/// value past which it stops waiting for them.
+/// tells the process it has run long enough.
+///
+/// # Why another core's shards are written here
+///
+/// Because they cannot be written by their owner. A core cannot build its own
+/// first process for the same reason it cannot start itself: everything it
+/// would need to do it with — the allocator, the kernel's address space, the
+/// program — is reachable only from a core that is already running. `PerCpu::at`
+/// exists for exactly this case and says so.
 ///
 /// # Errors
 ///
-/// [`Error`], every variant of which fails the boot. There is nothing to fall
-/// back to: a process that cannot be built is a milestone that has not been
-/// reached, and one whose frames do not come back is a leak that is cheaper to
-/// find now than after there are thousands of them.
+/// [`Error`], every variant of which fails the boot.
 ///
 /// # Safety
 ///
 /// Call on the boot processor, with the kernel's address space in `CR3`,
-/// `frames` rebound onto its direct map, [`ring3::init`] done on this core, and
-/// interrupts enabled with the timer armed — the whole point is that it keeps
-/// ticking while this runs.
-pub unsafe fn run(
+/// `frames` rebound onto its direct map, and `cpu` a core that is up and idle.
+/// The `&mut` on `frames` must not be used again until [`reap`]: its address is
+/// handed to the running core, which reads through it while the process is
+/// alive.
+pub unsafe fn prepare(
     frames: &mut FrameAllocator,
     kernel: &paging::AddressSpace,
     features: paging::Features,
-    provoke: Provoke,
-    wanted: u64,
-    giveup: u64,
-) -> Result<Report, Error> {
-    let program = probe::program();
+    plan: Plan,
+) -> Result<Prepared, Error> {
+    let Plan { program, provoke, wanted, hz, target, cpu } = plan;
+    if program.is_empty() {
+        return Err(Error::NoProgram);
+    }
     if program.len() as u64 > FRAME_SIZE {
         return Err(Error::TooLarge);
     }
@@ -821,13 +1031,21 @@ pub unsafe fn run(
     // order the process is written against, and nothing else will ever be put
     // in from this side: everything the table holds after this line is
     // something the process derived.
-    let table = crate::cap::mine();
-    // SAFETY: this core's table, with no process running — so neither the
-    // system-call path nor the fault path can be holding a reference to it.
+    let table = crate::cap::of(cpu);
+    // SAFETY: the table of a core that is idle, with no process running on it —
+    // so neither the system-call path nor the fault path over there can be
+    // holding a reference to it. This is the write `PerCpu::at` exists for.
     let held = unsafe { &mut *table };
     held.clear_all();
     let space_rights = rights::READ | rights::WRITE | rights::DERIVE | rights::REVOKE;
-    held.grant(CapType::AddressSpace, space_rights, space.root(), 0).map_err(|_| Error::NoSlot)?;
+    // The first grant, and the one the process is told about: everything else it
+    // holds follows from this handle by index. `f_abi::door::Entry` argues why
+    // it is told rather than left to assume, and the answer is this function
+    // running twice on one core — the second process finds the same slots at a
+    // later generation.
+    let first = held
+        .grant(CapType::AddressSpace, space_rights, space.root(), 0)
+        .map_err(|_| Error::NoSlot)?;
     // Deliberately without `WRITE`, and it is the whole of the rights half of
     // the negative suite: a process that could map this writable would have
     // exceeded what it was granted, and `cap=rights` is the run that tries.
@@ -838,48 +1056,144 @@ pub unsafe fn run(
         .map_err(|_| Error::NoSlot)?;
     let granted_count = held.used();
 
-    let state = STATE.mine();
-    // SAFETY: this core's slot, with no process running, so neither the fault
-    // path nor the system-call path can be holding it.
+    let state = STATE.at(cpu);
+    // SAFETY: the slot of an idle core, so neither the fault path nor the
+    // system-call path over there can be holding it.
     unsafe {
         state.write(State {
             announced: false,
             refused: 0,
             death: Death::Running,
             wanted,
-            giveup,
+            // Filled in by the core that runs it, out of the timer window it
+            // opens: a give-up bound is a deadline, and a deadline computed on
+            // one core for a window that has not been opened on another is a
+            // number about the wrong interval.
+            giveup: 0,
             caps: Tally::ZERO,
+            root: space.root(),
             // An address derived from the caller's `&mut`, which is not used
-            // again until `enter` has returned — so the borrow it came from is
-            // dormant for exactly as long as the capability calls may use it.
-            // That is the whole of why a process may reach the frame allocator
-            // at all, and why it is put back to zero below.
+            // again until `reap` — so the borrow it came from is dormant for
+            // exactly as long as the running core may use it. That is the whole
+            // of why a process may reach the frame allocator at all, and why it
+            // is put back to zero when the process ends.
+            //
+            // It crosses a core now, which the single-core version did not have
+            // to say anything about. What makes it sound is that nothing on
+            // either side *mutates* through it while the process is alive:
+            // `map_user_live` and `unmap_user_live` both take a shared
+            // reference, the allocator is untouched on this core from here
+            // until `reap`, and the two cores are separated at both ends by the
+            // release-acquire pair in `smp`.
             frames: core::ptr::from_ref::<FrameAllocator>(frames) as usize,
             features,
         });
     }
-    let ticks = IN_RING3.mine();
-    // SAFETY: volatile through the raw pointer, before the handler that is the
-    // only other writer can have anything to count.
+
+    let ticks = IN_RING3.at(cpu);
+    // SAFETY: volatile through the raw pointer, into the slot of a core whose
+    // timer handler — the only other writer — has nothing to count yet.
     unsafe { ticks.write_volatile(0) };
 
-    // SAFETY: `space` carries a copy of the kernel's upper half, so the
+    let outcome = OUTCOME.at(cpu);
+    // SAFETY: as above; the core is idle and has not been given the job.
+    unsafe { outcome.write(Outcome { ended: 0, ticks: 0, held: 0, failed: None }) };
+
+    let job = JOB.at(cpu);
+    // SAFETY: as above. Written last of the three, and published to the running
+    // core by the `Release` store `smp::run_on` makes after this returns.
+    unsafe {
+        job.write(Job {
+            root: space.root(),
+            entry: TEXT,
+            stack: STACK_TOP,
+            argument: door::Entry::new(provoke.selector(), first).bits(),
+            hz,
+            target,
+        })
+    };
+
+    Ok(Prepared {
+        space,
+        pages: [text, stack, granted, untyped],
+        before,
+        granted: granted_count,
+        generation: first.generation(),
+        cpu,
+    })
+}
+
+/// Run the process this core was given, and record what happened.
+///
+/// # Why this core arms its own timer
+///
+/// Because the frame answers "have you run long enough?" by counting ticks
+/// taken *out of ring 3*, and only this core's timer can take one out of this
+/// core's ring 3. Before there was a second core the answer came from the same
+/// timer the milestone was measuring, and the two questions were one; they are
+/// two now, and keeping them one would mean a process on this core waiting for
+/// ticks that are interrupting a different one.
+///
+/// The two timers are independent, which is the point of the exit criterion:
+/// core 0's jitter measurement runs to its own schedule while this core holds
+/// a process at ring 3, and neither is a term in the other.
+///
+/// It prints nothing. See `smp::arrive`.
+///
+/// # Safety
+///
+/// Call on a core [`prepare`] has been called for, with interrupts disabled,
+/// the kernel's address space in `CR3`, and `kernel_root` that address space's
+/// top-level table. `ring3::init` must have run on this core.
+pub unsafe fn execute(kernel_root: u64) {
+    let slot = OUTCOME.mine();
+    // SAFETY: this core's slot, with no process running on it.
+    let job = unsafe { JOB.mine().read() };
+
+    // SAFETY: this core was brought up and adopted the boot processor's clocks,
+    // `idt::init` has installed the timer's vector on it, and interrupts are
+    // disabled on entry — `start` enables them and `stop` disables them again.
+    let window = match unsafe { apic::start(job.hz, job.target) } {
+        Ok(window) => window,
+        Err(_) => {
+            // SAFETY: this core's slot, no process running.
+            unsafe {
+                slot.write(Outcome { ended: 0, ticks: 0, held: 0, failed: Some(Error::NoTimer) })
+            };
+            return;
+        }
+    };
+
+    let state = STATE.mine();
+    // SAFETY: this core's slot. Interrupts are enabled, but the only handler
+    // that touches this shard is the fault path, which cannot run before a
+    // process exists — and one does not yet.
+    let mut observed = unsafe { state.read() };
+    observed.giveup = window.giveup();
+    // SAFETY: as above.
+    unsafe { state.write(observed) };
+
+    // SAFETY: `job.root` carries a copy of the kernel's upper half, so the
     // instruction after this one, the stack under it and every kernel mapping
-    // the timer's handler needs are all still there.
-    unsafe { paging::switch(space.root()) };
+    // this core's timer handler needs are all still there.
+    unsafe { paging::switch(job.root) };
 
     // SAFETY: the address space in `CR3` is the process's, both addresses are
-    // mapped in it for ring 3, `ring3::init` ran on this core at boot, and the
-    // caller has guaranteed interrupts are enabled. No process is running: the
-    // previous one, if any, was forgotten below.
-    let outcome = unsafe { ring3::enter(TEXT, STACK_TOP, provoke.selector()) };
+    // mapped in it for ring 3, `ring3::init` ran on this core at bring-up, and
+    // interrupts are enabled with the timer armed. No process is running: this
+    // core has never entered ring 3, or it forgot the last one below.
+    let ended = unsafe { ring3::enter(job.entry, job.stack, job.argument) };
 
     // SAFETY: the kernel's own space, whose kernel window maps this very
     // instruction — which is what makes the switch survivable in both
-    // directions.
-    unsafe { paging::activate(kernel) };
+    // directions. `kernel_root` is the root this core arrived in.
+    unsafe { paging::switch(kernel_root) };
     // SAFETY: on the core that entered, after `enter` returned.
     unsafe { ring3::forget() };
+
+    // SAFETY: on the core `start` was called on, once per `start`. Returns with
+    // interrupts disabled, which is what the caller expects.
+    let _ = unsafe { apic::stop(&window) };
 
     // SAFETY: this core's slot; the process is over, so nothing can be writing.
     let observed = unsafe { state.read() };
@@ -889,20 +1203,50 @@ pub unsafe fn run(
     // through a pointer to a borrow that has ended.
     // SAFETY: as above.
     unsafe { state.write(State { frames: 0, ..observed }) };
-    // SAFETY: volatile, as above; the handler has nothing left to count.
-    let in_ring3 = unsafe { ticks.read_volatile() };
+    // SAFETY: volatile, as `IN_RING3` requires; the handler has nothing left to
+    // count.
+    let ticks = unsafe { IN_RING3.mine().read_volatile() };
 
     // SAFETY: this core's table, with the process over.
     let table = unsafe { &mut *crate::cap::mine() };
-    let still_held = table.used();
+    let held = table.used();
     // Everything the process was given and everything it derived, forgotten in
     // one step. Generations survive it, so a handle this process held cannot
     // resolve in the next one — which is the boundary the generation exists for
     // and the one it would be most tempting to reset at.
     table.clear_all();
 
+    // SAFETY: this core's slot, with the process over.
+    unsafe { slot.write(Outcome { ended, ticks, held, failed: None }) };
+}
+
+/// Give a finished process's memory back, and say what it did.
+///
+/// # Errors
+///
+/// [`Error`], every variant of which fails the boot. There is nothing to fall
+/// back to: a process whose frames do not come back is a leak that is cheaper
+/// to find now than after there are thousands of them.
+///
+/// # Safety
+///
+/// Call on the core that called [`prepare`], after the core it was prepared for
+/// has reported that it is finished — which is what makes reading that core's
+/// shards sound, and what makes the `&mut` on `frames` live again.
+pub unsafe fn reap(frames: &mut FrameAllocator, prepared: Prepared) -> Result<Report, Error> {
+    let cpu = prepared.cpu;
+
+    // SAFETY: the slot of a core that has finished and said so, which is what
+    // the caller has guaranteed. Read by value; nothing over there is writing.
+    let outcome = unsafe { OUTCOME.at(cpu).read() };
+    if let Some(failed) = outcome.failed {
+        return Err(failed);
+    }
+    // SAFETY: as above.
+    let observed = unsafe { STATE.at(cpu).read() };
+
     // The two paths agree, or the frame is lying to itself about one of them.
-    let death = match (outcome, observed.death) {
+    let death = match (outcome.ended, observed.death) {
         (KILLED, death @ Death::Killed { .. }) | (EXITED, death @ Death::Exited(_)) => death,
         _ => return Err(Error::NoDeath),
     };
@@ -913,30 +1257,32 @@ pub unsafe fn run(
     // nothing: a process that could enlarge its own address space would leave
     // tables here that this loop has never heard of, and the free count would
     // not come back.
-    for frame in space.tables().iter().copied().chain([text, stack, granted, untyped]) {
-        // SAFETY: every one of these came from this allocator a few lines
-        // above, the address space they described is no longer in `CR3`, and
-        // the switch that took it out flushed the non-global entries that
-        // reached them. Nothing refers to any of them.
+    for frame in prepared.space.tables().iter().copied().chain(prepared.pages) {
+        // SAFETY: every one of these came from this allocator in `prepare`, the
+        // address space they described is no longer in `CR3` on any core — the
+        // core that ran it switched back before it reported finished — and that
+        // switch flushed the non-global entries that reached them.
         unsafe { frames.free(frame) };
         count += 1;
     }
 
-    if frames.free_count() != before {
+    if frames.free_count() != prepared.before {
         return Err(Error::Leaked);
     }
 
     Ok(Report {
-        root: space.root(),
-        shared_slots: space.shared_slots(),
+        cpu,
+        root: prepared.space.root(),
+        shared_slots: prepared.space.shared_slots(),
         frames: count,
         announced: observed.announced,
         refused: observed.refused,
-        ticks: in_ring3,
+        ticks: outcome.ticks,
         death,
-        granted: granted_count,
+        granted: prepared.granted,
+        generation: prepared.generation,
         caps: observed.caps,
-        held: still_held,
+        held: outcome.held,
     })
 }
 
@@ -1001,7 +1347,7 @@ fn capability(number: u64, first: u64, second: u64, state: &State) -> u64 {
     let result = match number {
         SYS_CAP_INSPECT => inspect(Handle::from_bits(first as u32)),
         SYS_CAP_DERIVE => derive(Handle::from_bits(first as u32), second),
-        SYS_CAP_REVOKE => revoke(Handle::from_bits(first as u32)),
+        SYS_CAP_REVOKE => revoke(Handle::from_bits(first as u32), state),
         SYS_CAP_MAP => map_frame(first, second, state),
         // Unreachable from `syscall`, which matches on exactly these four. Not
         // a panic: a frame that cannot be provoked into faulting by ring 3 is
@@ -1063,10 +1409,85 @@ fn derive(handle: Handle, asked: u64) -> Result<u64, i32> {
 }
 
 /// Withdraw everything derived from a capability, and answer with how many.
-fn revoke(handle: Handle) -> Result<u64, i32> {
+///
+/// # What this does that it did not do before E0-B10
+///
+/// It takes the memory back as well as the name.
+///
+/// Until there was a second core, revoking a frame capability that had been
+/// mapped withdrew the capability and left the mapping standing. It was the
+/// largest gap in the capability system and it was stated in four places rather
+/// than buried, because it is the sentence somebody would otherwise assume the
+/// other way round: a component whose authority had been revoked went on
+/// reading the page through a translation nobody could take away.
+///
+/// Undoing a mapping needs an unmap, an unmap needs a shootdown, and a
+/// shootdown needs somebody to shoot down *to*. That is the whole of why this
+/// waited: not that one core made it hard, but that one core made it
+/// unfalsifiable — a kernel that skipped the interrupt would have passed every
+/// test it could have been given.
+fn revoke(handle: Handle, state: &State) -> Result<u64, i32> {
     // SAFETY: as `derive`.
-    let cleared = unsafe { table_mut() }.revoke(handle)?;
-    Ok(u64::from(cleared))
+    let withdrawn = unsafe { table_mut() }.revoke(handle)?;
+    for page in withdrawn.pages() {
+        withdraw(state, *page)?;
+    }
+    Ok(u64::from(withdrawn.cleared))
+}
+
+/// Take one mapping out of the running process's address space and tell every
+/// other core.
+///
+/// # Why a failure here ends the machine
+///
+/// Because there is nothing smaller to do about it. A shootdown that is not
+/// acknowledged means some core may still hold a translation to a page whose
+/// authority has been withdrawn, and the frame has no way to find out whether
+/// it does. Returning an error to the process would be answering "the authority
+/// is gone" when it is not, which is the one lie a capability system cannot
+/// tell. So it says what happened and stops.
+///
+/// The unmap failing is different in cause and the same in consequence: the
+/// tables and the table of capabilities disagree about what is mapped, which is
+/// a bug in this file rather than in the process, and continuing would mean
+/// building on it.
+fn withdraw(state: &State, page: u64) -> Result<(), i32> {
+    if state.frames == 0 || state.root == 0 {
+        // No process is running, so there is no address space to edit. Reaching
+        // here is a frame bug rather than a process one — a capability call
+        // cannot arrive without a process — and refusing is the smallest
+        // truthful answer.
+        return Err(error::pack(error::ARGUMENT, error::argument::BAD_ADDRESS));
+    }
+
+    // SAFETY: the address is one this core wrote into `State` while it held the
+    // caller's `&mut FrameAllocator`, and that borrow is dormant until the
+    // process ends — the same argument `map_frame` makes, and for the same
+    // duration. Shared, never mutable: an unmap frees nothing.
+    let frames = unsafe { &*(state.frames as *const FrameAllocator) };
+
+    // SAFETY: `state.root` is the top-level table this kernel built for the
+    // running process, `frames` is rebound onto the direct map of the space in
+    // `CR3`, and that space is the one `root` describes.
+    let result = unsafe { paging::unmap_user_live(frames, state.root, page) };
+    if let Err(why) = result {
+        kprintln!();
+        kprintln!("FAIL: a revoked capability's mapping could not be withdrawn: {}", why.message());
+        crate::arch::x86_64::exit_qemu(crate::arch::x86_64::Exit::Failure);
+    }
+
+    // SAFETY: the entry has been cleared and this core's own translation
+    // invalidated by the call above, and every other running core has
+    // interrupts enabled — the boot processor holds a timer window open across
+    // the whole of a process's life, and a started core enables them before it
+    // reports ready.
+    if let Err(cpu) = unsafe { crate::smp::shootdown(page) } {
+        kprintln!();
+        kprintln!("FAIL: core {cpu} did not acknowledge that a revoked page was unmapped");
+        crate::arch::x86_64::exit_qemu(crate::arch::x86_64::Exit::Failure);
+    }
+
+    Ok(())
 }
 
 /// Map a frame into an address space, on the two capabilities that name them.
@@ -1149,6 +1570,19 @@ fn map_frame(first: u64, second: u64, state: &State) -> Result<u64, i32> {
         paging::map_user_live(frames, target.object, virt, object.object, kind, state.features)
     }
     .map_err(|_| error::pack(error::ARGUMENT, error::argument::BAD_ADDRESS))?;
+
+    // After the mapping exists and not before. A slot that recorded an address
+    // the tables do not have would make the next revoke unmap a page this
+    // capability never authorised — and the reverse order is the one that looks
+    // tidier, which is why it is worth a sentence.
+    //
+    // The `&mut` is taken here rather than at the top of this function because
+    // the shared reference above is still live until the mapping is made: two
+    // references to one table, one of them mutable, is the aliasing this file
+    // avoids by sequencing rather than by hoping.
+    // SAFETY: the system-call path, per `table`, and the shared reference taken
+    // above is dead — its last use was the mapping.
+    unsafe { table_mut() }.note_mapping(frame, virt)?;
     Ok(0)
 }
 

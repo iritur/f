@@ -12,6 +12,8 @@ cargo xtask test       # workspace tests, x86-64 and AArch64
 cargo xtask run        # boot the kernel in QEMU; expects exit code 33
 cargo xtask fault pf   # boot into a deliberate fault; pf, ud, df, nx, wx or stack
 cargo xtask user       # seven boots: a process violates one rule each, and is killed
+cargo xtask cap        # eight boots: a process tries to escape its capabilities
+cargo xtask mutate     # build the kernel wrong on purpose; the boot must go red
 cargo xtask cap        # seven boots: a process tries one authority escape each, and is refused
 cargo xtask timer 60   # run the 1 kHz timer and print a jitter histogram
 cargo xtask claims     # the claims registry and what gates
@@ -49,8 +51,11 @@ made executable, `third_party` imported drivers behind a licence boundary.
 - **The licence boundary.** The permissive tree never imports `third_party/`.
   Reachable only over a ring. `LICENSING.md`, RFC 0003.
 - **Kernel state is per-CPU.** Every mutable `static` under `kernel/` is a
-  `PerCpu<T>`, so two cores never reach the same slot and nothing there locks.
-  `kernel/src/percpu.rs`, `ring-scene-boot` section 14.
+  `PerCpu<T>`, and nothing there locks. Two cores reach the same slot in exactly
+  four places — the mailbox and shootdown words in `kernel/src/smp.rs` — each a
+  machine word, each an atomic with its ordering named at the access. A fifth
+  needs an argument. `kernel/src/percpu.rs`, `ring-scene-boot` section 14, RFC
+  0016.
 - **Every file starts with** `// SPDX-License-Identifier: Apache-2.0 OR MIT`.
 - **Numbers need claims.** Any number that reaches `docs/design/` has an entry
   in `claims/` with a baseline, a workload and a one-command reproduction.
@@ -77,6 +82,12 @@ Added when the same mistake happens twice. Each line is a scar.
 - Adding a `TODO.md` task with no `exit:`. A task with no exit is a wish.
 - Reaching for `HashMap` out of habit in `xtask`, which is checked by the same
   determinism lint it implements.
+- Building a bare-metal *library* image with link-time optimisation on. The rlib
+  carries bitcode rather than machine code, so the image links to nothing —
+  silently — and the failure looks like the entry point having moved.
+- Writing code above the frame that only compiles on x86-64, and finding out
+  from the AArch64 job. `cargo xtask test` now cross-checks the four crates that
+  job tests; the ordering still needs the arm runner, the compile does not.
 
 ## How work reaches this repo
 

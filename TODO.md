@@ -133,7 +133,7 @@ load-bearing.*
 - [x] **E0-B05** `S` `PerCpu<T>` in place before the second core exists, per the standing decision.
   The kernel had exactly three mutable statics — the GDT, the task state segment and the IDT — and all three are now slots in a `PerCpu<T>`, indexed by the initial APIC id the processor reports. `gdt::init` and `idt::init` install *this core's* tables and no other core's, which is the shape the application processors need and the reason the safety obligation on both changed from "once" to "once per core". `PerCpu::mine` hands out a raw pointer rather than a reference, because a per-CPU abstraction cannot see an interrupt handler reaching the same slot as the code it interrupted, and a safe `&mut` would be claiming otherwise.
   *exit:* met, from both sides. Boot prints `per-cpu core 0 of 8, slots distinct` before the tables are installed, having proved that a write through one slot is invisible to the other seven — a shard that returns the same pointer for every core looks perfectly correct on a machine with one. `cargo xtask lint-percpu` fails the build on a `static mut`, or on a `static` holding a cell, a lock or an atomic, anywhere under `kernel/` except `percpu.rs`; a probe file carrying four of them reported four findings, and the `PerCpu` and plain `const`-like statics beside them reported none. All six `cargo xtask fault` paths still report, including `df` and `stack`, which are the two that go through the interrupt stack table in the now-per-core task state segment. The cost is eight frames off the free count: seven extra copies of the interrupt table, 28 KiB.
-  Sharded here and not everywhere: the double-fault stack the task state segments name still comes from the linker script and there is exactly one of it, because a stack needs a guard page and a guard page needs the mapper. That belongs to `E0-B10`, and the code says so where it is wrong rather than in this file.
+  Sharded here and not everywhere, at the time: the double-fault stack the task state segments named still came from the linker script and there was exactly one of it, because a stack needs a guard page and a guard page needs the mapper. That belonged to `E0-B10` and the code said so where it was wrong rather than in this file — and `E0-B10` closed it, with a block per core reserved by the same linker script.
 - [x] **E0-B06** `M` GDT, IDT, exception handlers with a register dump worth reading. **(M2)**
   Also fixed a live landmine: `GDTR` still pointed at the boot stub's table in low memory, which E0-B04 stopped mapping. Nothing had noticed because nothing had reloaded a segment or taken an interrupt — and the first thing to do either would have been this handler.
   *exit:* met. `cargo xtask fault pf|ud|df` boots into a deliberate fault; the report names the exception, decodes the error code, gives the faulting instruction and prints all fifteen registers. `df` proves the interrupt stack table: a fault with no usable stack is reported rather than resetting the machine.
@@ -257,8 +257,70 @@ load-bearing.*
   call that entered ring 3 — which is the same address the system call entry and
   the resume point use, because all three are the same claim.
   *needs:* E0-B07
-- [ ] **E0-B10** `M` Load `user/init` from a boot module; start the application processors. **(M3)**
-  *exit:* init runs on core 1; the M2 jitter measurement on core 0 is unaffected.
+- [x] **E0-B10** `M` Load `user/init` from a boot module; start the application processors. **(M3)**
+  `intent/0004-a-second-core/`. Every core the machine has, brought up to the
+  same point the boot processor reached — its own descriptor tables, its own
+  local APIC, its own system-call entry, its own stacks with guard pages under
+  them — and then left waiting. A process is built by the boot processor and run
+  by another one, inside a timer window each of them opens for itself.
+  *exit:* met, in the shape the criterion asks for and with one number it cannot
+  produce. `init` runs on core 1: 224 bytes, from boot module 1, ordinary Rust
+  with no `unsafe` in it, compiled and linked separately, copied into a frame it
+  was granted. The frame's own adversary runs after it, on the same core, which
+  is how every boot now checks what M4 could only assert — a table cleared
+  between processes does not let the second resolve a handle the first held.
+  Core 0's schedule is asserted the way it always was: every tick the window
+  asked for arrived, over a window that now spans another core's ring 3.
+  **What "unaffected" cannot mean here.** The criterion asks whether the second
+  core costs core 0's jitter anything, and this environment cannot answer it.
+  Under TCG the p50 is around 200 µs against a 1 ms period — two orders of
+  magnitude past the 5 µs bound claim 0002 names — and two runs of *one* build
+  moved the p99 by 69%. Two runs before and two after are indistinguishable at
+  that spread, except that the count of ticks a full period late is consistently
+  higher with two vCPUs, which is what an emulator scheduling two of them on a
+  host would do and says nothing about a machine. No number from it is
+  publishable: `F_ENVIRONMENT=container`, and `claims/0002-timer-jitter.toml`
+  stays `pending` for E0-P06 and hardware.
+  **The gap E0-B11 named is closed.** Revoking a frame capability now takes the
+  mapping with it: the entry is cleared, this core's translation invalidated,
+  every other running core told and required to acknowledge. `cap=unmap` is the
+  boot — the process maps a frame, has the capability behind it revoked, reads
+  the page anyway, and takes a page fault at an address it was reading a moment
+  earlier. It is the only one of the eight escapes the frame does not refuse:
+  what stops it is the processor.
+  Two decisions were made rather than assumed, so two RFCs exist. RFC 0016
+  amends what a `PerCpu` shard means — four machine words are reached by a core
+  that does not own them, because a handshake cannot be per-core state, and each
+  is an atomic with its ordering named at the access. RFC 0017 is E0-P08's.
+  Found while building, and the reason a component is now *told* its handles
+  rather than entitled to know them: generations survive `clear_all`, so the
+  second process on a core finds its capabilities at the same indices and a
+  later generation. The component ran correctly and the adversary that followed
+  it was refused on its very first call. `door::Entry` is the answer — one
+  register, the first handle the frame granted — and it made the forging sweep's
+  expectation depend on what ran before, which is better rather than worse: a
+  handle at a generation below the slot's is refused as *revoked* rather than as
+  unknown, so the tally now distinguishes "you had this once" from "this never
+  existed".
+  Also found: **a crate that forbids unsafe code cannot name its own entry
+  point.** `#[unsafe(no_mangle)]` and `#[unsafe(link_section)]` are unsafe
+  *attributes* in this edition and `forbid` cannot be overridden by an `allow`,
+  so `user/init` cannot be a binary. The placement moved to `user/init/link.ld`,
+  which puts the section the entry was compiled into at the image's first byte,
+  and `cargo xtask init` checks that the symbol which landed there is that one.
+  Two things fell out of it and both cost a cycle: with link-time optimisation
+  on, a library's rlib carries bitcode rather than machine code — so the image
+  linked to *nothing*, silently, and the failure looked exactly like the entry
+  point having moved, hence `[profile.init]`; and a `staticlib` crate type is
+  built for the host too, where a `no_std` crate has no panic handler to borrow.
+  And a prediction that did not come true, corrected rather than left standing:
+  `arch::x86_64::mod` said this task would move `current_cpu` into `GS`. It did
+  not. `GS` is already the ring-3 entry block and the swap between its two
+  halves happens on the system-call path and only there — the interrupt stubs do
+  not swap — so a core index in `GS` would be right in a system call and would
+  read a process's base in the timer handler, which is the one caller on the
+  critical path. That is a change to the interrupt entry path, not to that
+  function, and it now says so.
   *needs:* E0-B09
 - [x] **E0-B11** `L` Capability table: typed slots — Untyped, Frame, AddressSpace, Channel, Endpoint, Irq — with derive, copy and recursive revoke. **(M4)**
   `intent/0003-authority-that-can-be-taken-back/`. Thirty-two slots per process,
@@ -268,9 +330,10 @@ load-bearing.*
   is a bounded walk of a fixed array with no recursion in it, and a parent link
   into a slot that has since been refilled reads as broken instead of naming the
   new occupant.
-  *exit:* met. `cargo xtask cap` is E0-P08 as runs: seven boots, six of which
-  try one authority escape each and are refused with the exact code the escape
-  earns, and one — `cap=grant` — which must not be refused at all. The frame is
+  *exit:* met. `cargo xtask cap` is E0-P08 as runs: seven boots at M4 and eight
+  since E0-B10, six of which try one authority escape each and are refused with
+  the exact code the escape earns, and one — `cap=grant` — which must not be
+  refused at all. The frame is
   the judge, not the process: it counts answers by refusal code and compares
   against an exact tally, so a run turned down the right number of times for the
   wrong reasons fails. Every boot also runs the five properties against a real
@@ -289,12 +352,13 @@ load-bearing.*
   recursive revocation — and a revoke a copy escapes does not answer it. The
   cost is that two holders of equal authority are not equal, and it is in the
   module comment rather than discovered later.
-  **What the exit does not say, and it matters.** Revoking a frame capability
-  withdraws the *name* and leaves the *mapping*. Undoing the mapping needs an
-  unmap, which needs a shootdown, which needs the second core — so it is E0-B10's
-  to close, and until then a capability system that can take a name back is not
-  yet one that can take the memory back. Said here rather than in a footnote,
-  because it is the sentence somebody would otherwise assume the other way.
+  **What the exit did not say, and it mattered.** Revoking a frame capability
+  withdrew the *name* and left the *mapping*. Undoing the mapping needs an
+  unmap, which needs a shootdown, which needs the second core — so it was
+  E0-B10's to close, and until then a capability system that could take a name
+  back was not yet one that could take the memory back. Said here rather than in
+  a footnote, because it is the sentence somebody would otherwise assume the
+  other way. **Closed by E0-B10**, and `cap=unmap` is the boot that says so.
   Found while building: `.Lprobe_bad_call` ended by *falling through* into
   `.Lprobe_exit` because that label happened to be next in the file. Seven new
   blocks went in between them, and `user=call` silently started running the
@@ -358,23 +422,47 @@ load-bearing.*
   *needs:* E0-B07, E0-D04
 - [ ] **E0-P07** `M` Litmus tests for the cursor protocol run in CI on x86-64 **and** AArch64.
   *exit:* both jobs green; the AArch64 job is not allowed to be advisory.
-- [>] **E0-P08** `L` The capability negative suite, as code. A process cannot name a capability it was not given, forge a handle, use a revoked handle, exceed granted rights, or panic the kernel by trying. **(M4 exit criterion)**
-  The suite exists and is in the gate: `cargo xtask cap`, seven boots, and the
-  five properties run at every boot against a real table and against five broken
-  on purpose. All five hold. What is left is the second half of the exit, and it
-  is one property short of met.
-  Four of the five have a mutation that makes them fail, checked in as
-  `cap::properties::Flaw` and asserted to be caught by the property it breaks and
-  no other. The fifth cannot have one of that shape: a fixture that panics takes
-  the machine down rather than being caught, and there is no host harness to
-  catch it in — `kernel/Cargo.toml` says why. What it has instead is a
-  compile-time half, `deny(clippy::indexing_slicing, unwrap_used, panic)` over
-  the module, so the constructs that turn a hostile handle into a fault cannot be
-  written; and a runtime half that catches the masked-index form of it.
-  *exit:* all five hold — **met** — and each has a mutation that makes it fail
-  — **four of five**. The fifth needs a mutation harness that builds a kernel
-  with one deliberate defect and asserts the boot goes red, which is a different
-  mechanism from a fixture in the image and should be argued as one.
+- [x] **E0-P08** `L` The capability negative suite, as code. A process cannot name a capability it was not given, forge a handle, use a revoked handle, exceed granted rights, or panic the kernel by trying. **(M4 exit criterion)**
+  Both halves, at last. The suite is in the gate — `cargo xtask cap`, eight
+  boots, and the five properties run at every boot against a real table and
+  against five broken on purpose. All five hold, and all five now have a
+  mutation that makes them fail.
+  Four of the five have a fixture, checked in as `cap::properties::Flaw` and
+  asserted to be caught by the property it breaks and no other. The fifth could
+  not have one of that shape, and that was the whole of what this task still
+  owed: a fixture that panics takes the machine down rather than being caught,
+  and there is no host harness for kernel logic to catch it in —
+  `kernel/Cargo.toml` says why there is not.
+  So the fifth has a **build** instead. `cargo xtask mutate` compiles the kernel
+  with `mutate-unchecked-index`, which removes the bounds check from the
+  capability table's handle lookup, boots it into the forging sweep, and
+  requires the boot to go red *with a kernel panic in the log* — then compiles
+  it without and requires the same boot to go green. Neither half means anything
+  alone: a red boot with a defect proves nothing if the same boot is red without
+  one, and a green boot proves nothing about whether the suite can fail. It runs
+  in `cargo xtask verify` and in CI.
+  Decided rather than assumed, so RFC 0017 exists. The mechanism is a different
+  one from the other four and is argued as one, including the part that is a
+  real cost: the defect is in the shipped source, behind a feature that is off
+  by default, in one function, with an `allow` that names itself and
+  `cargo xtask lint-mutations` refusing to let it become a default. That is the
+  same trade `properties::Flawed` already makes, made a second time.
+  It also differs from the real lookup in exactly one step, which is the lesson
+  E0-B11 recorded the hard way: a fixture that breaks two things at once is
+  caught by whichever check notices first, and the check it was written for
+  stays unexercised. Everything else about a lookup — the generation, the
+  occupancy, the refusal codes — is shared with the function it defects.
+  Worth recording as a scar, because it is invisible until it bites: the module
+  denies `indexing_slicing` rather than *forbidding* it, and that is now
+  load-bearing. Tighten it to `forbid` and the mutation build stops compiling,
+  which means property five quietly loses its second half — the harness would
+  fail to build rather than fail to catch.
+  The compile-time half stays and is not redundant: `deny(indexing_slicing,
+  unwrap_used, expect_used, panic, unreachable)` over the module is what stops
+  the construct being written by accident, and the mutation build is what says
+  it would be noticed if it were.
+  *exit:* met. All five hold, and each has a mutation that makes it fail —
+  four fixtures and one build.
   *needs:* E0-B11
 - [ ] **E0-P09** `M` Exercise the fault-injection hook: one seeded fault class per subsystem that exists, using the protocol-aware site labels already in `env/src/sim.rs`.
   *exit:* a seeded run injects a failure at a named site and the system handles it; the same seed reproduces it.

@@ -157,12 +157,14 @@ static GDT: PerCpu<[u64; SLOTS]> = PerCpu::new([0; SLOTS]);
 /// Per core, which is what forces the table above to be: this is where the
 /// stack pointers live.
 ///
-/// Sharded here and not yet everywhere it needs to be. The double-fault stack
-/// each of these names comes from the linker script, and there is exactly one
-/// of it — so on a second core this table would be private and the stack it
-/// points at would not be. Sharding the stacks belongs with the code that
-/// starts the second core (E0-B10), because a stack needs a guard page under
-/// it and a guard page needs the mapper, which does not exist this early.
+/// Sharded all the way down, since E0-B10. It used to say the opposite: the
+/// double-fault stack every one of these named was the single one the linker
+/// script reserved, so the table was private and the stack under it was not,
+/// and two cores taking a double fault would have written their exception
+/// frames to one address — corrupting the report each was trying to make. The
+/// stacks are now a block per core, reserved by the same linker script for the
+/// reason it gives there, and [`init`] picks the block belonging to the core it
+/// is called on.
 static TSS: PerCpu<Tss> = PerCpu::new(Tss {
     _reserved0: 0,
     privilege_stacks: [0; 3],
@@ -194,9 +196,13 @@ unsafe extern "C" {
 /// descriptors being installed describe the same flat address space the caller
 /// is already running in.
 pub unsafe fn init() {
-    // The stack the double-fault handler switches to. The linker script names
-    // its far end, because a stack grows down from there.
-    let fault_stack_top = (&raw const __fault_stack_top) as u64;
+    // The stack the double-fault handler switches to, and it has to be this
+    // core's. The boot processor's is the one the linker script names outright;
+    // every core that can be started has a block of its own beside it. A shared
+    // one would be two cores writing an exception frame to one address at the
+    // moment each is trying to report why it cannot use its own stack.
+    let fault_stack_top = super::ap::fault_stack_top(super::current_cpu())
+        .unwrap_or((&raw const __fault_stack_top) as u64);
 
     let tss = TSS.mine();
     // SAFETY: this core's slot, on the boot path, and nothing else refers to

@@ -6,6 +6,18 @@ license.workspace = true
 publish.workspace = true
 description = "The first user component. Holds only what it was granted."
 
+# A library and not a binary, which is not a preference. A binary needs an entry
+# point, naming one means `#[unsafe(no_mangle)]`, and that is an unsafe
+# attribute this crate forbids. A library's public functions are exported by
+# construction, so `user/init/link.ld` can find the entry by the section it was
+# compiled into — and `cargo xtask init` links the resulting rlib into a flat
+# image. `src/component.rs` argues it at length.
+#
+# It is deliberately *not* also a `staticlib`, which would be the obvious way to
+# hand the linker one file. A staticlib is built for the host too, where it has
+# no `std` to take a panic handler from and the test profile insists on
+# unwinding — so it fails to build for a target nothing runs it on.
+
 [dependencies]
 f-abi.workspace = true
 f-env.workspace = true

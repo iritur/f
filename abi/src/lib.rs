@@ -13,6 +13,7 @@
 #![no_std]
 
 pub mod cap;
+pub mod door;
 
 /// The version this build speaks.
 ///

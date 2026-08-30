@@ -74,23 +74,29 @@
 //! Sharing has to become structural then: pre-allocate all 256 upper tables at
 //! boot so that every root points at the same ones.
 //!
-//! # What this is still not
+//! # What this is, and what it is still not
 //!
-//! No lazy mapping, no shootdown, and no unmapping — a process's pages are
-//! given back by freeing its frames after its address space stops being the
-//! one in `CR3`, which is sound for one process on one core and is not a
-//! general answer.
+//! There is an unmap now. [`unmap_user_live`] takes a page out of the address
+//! space that is running and invalidates the translation on the core it is
+//! called from; [`crate::smp::shootdown`] tells every other running core and
+//! waits to be told they have. Together they are what closed the largest gap in
+//! the capability system.
 //!
-//! This paragraph used to say those arrive with M4, "when a page belongs to a
-//! capability and a second core has to be told it has gone". M4 has arrived and
-//! only the first half of that came true. A page does belong to a capability
-//! now — [`map_user_live`] is how a process turns one into a mapping — and
-//! there is still no unmap, so **revoking a frame capability withdraws the name
-//! and leaves the mapping**. That is the largest gap in the capability system
-//! and it is here rather than in a footnote because this is the file that would
-//! have to close it. What it needs is the second core: an unmap without a
-//! shootdown is a translation another core is still using, and there is no
-//! honest way to write one before there is somebody to tell.
+//! This paragraph used to say that a page would belong to a capability at M4
+//! and that unmapping would arrive with it. Half of that came true on time: a
+//! page belonged to a capability, [`map_user_live`] was how a process turned one
+//! into a mapping, and **revoking a frame capability withdrew the name and left
+//! the mapping**. It was stated here rather than in a footnote because this is
+//! the file that had to close it — and what it needed was not a smarter unmap
+//! but somebody to tell. An unmap without a shootdown is a translation another
+//! core is still using, and with one core there is nobody to tell and no way to
+//! find out whether the code that would have told them works. E0-B10 brought a
+//! second core and `cap=unmap` is the boot that says the pair holds.
+//!
+//! Still not here: lazy mapping, and any notion of a page being reclaimed while
+//! its owner still exists. A process's pages are given back by freeing its
+//! frames after its address space stops being the one in `CR3`, which is sound
+//! for one process at a time and is not a general answer.
 
 use super::cpuid;
 use crate::mem::{Frame, FrameAllocator, Order};
@@ -370,6 +376,15 @@ pub enum BuildError {
     /// Until a process can pay for a table — E1 — it may map only where its
     /// address space already reaches.
     NoTable,
+    /// An unmap was asked for at an address where nothing is mapped.
+    ///
+    /// Distinct from [`NoTable`](Self::NoTable), which is a table that does not
+    /// exist, because the two mean different things to the caller: one is a
+    /// mapping that has already been withdrawn and the other is an address the
+    /// process never had any way to reach. Withdrawing the same mapping twice
+    /// is a bug in the frame's own bookkeeping, and it should not be able to
+    /// hide behind the refusal a hostile handle earns.
+    NotMapped,
 }
 
 impl BuildError {
@@ -384,6 +399,7 @@ impl BuildError {
             Self::TooManyTables => "a process's address space needs more tables than are tracked",
             Self::NotUserAddress => "a process was offered a page in the kernel's half",
             Self::NoTable => "a process asked to map where its address space has no page table",
+            Self::NotMapped => "an unmap was asked for where nothing is mapped",
         }
     }
 }
@@ -468,13 +484,18 @@ pub unsafe fn build(
 
     // Pages deliberately left out, each one below a stack. The stack above
     // grows down into a fault instead of into whatever was underneath it.
+    //
+    // Two of them are named here, and a pair belongs to every core this kernel
+    // can start. The started cores' guards are a computed geometry rather than
+    // a list, because a list would be fourteen more entries on a machine with
+    // one core: see [`super::ap::is_stack_guard`].
     let guards =
         [(&raw const __fault_stack_guard) as u64, (&raw const __kernel_stack_guard) as u64];
 
     for (start, end, flags) in ranges {
         let mut virt = start;
         while virt < end {
-            if !guards.contains(&virt) {
+            if !guards.contains(&virt) && !super::ap::is_stack_guard(virt) {
                 // SAFETY: as above. The physical address is the virtual one less
                 // the offset the linker script placed the image at.
                 unsafe { map_page(frames, root, virt, virt - vma, flags)? };
@@ -856,6 +877,233 @@ pub unsafe fn map_user_live(
     }
 
     Ok(())
+}
+
+/// Take one page out of the address space that is *running*.
+///
+/// Returns the physical address that was mapped there, so the caller can say
+/// what it withdrew.
+///
+/// # What this does not do, and the caller must
+///
+/// It invalidates the translation on **this** core and no other. A page taken
+/// out of a table is still in every other core's translation buffer until that
+/// core is told, and telling it is a shootdown — which is [`crate::smp`]'s,
+/// because it is a protocol between cores rather than an operation on a page
+/// table. Splitting it that way is deliberate: a function that both edited the
+/// table and sent the interrupts would have to know which cores are running,
+/// and this file has no business knowing that.
+///
+/// Nothing is freed. The frame that was mapped belongs to whoever allocated it,
+/// and a mapping being withdrawn says nothing about who owns the memory behind
+/// it — which is exactly the distinction [`UserSpace`] refuses to blur.
+///
+/// # Errors
+///
+/// [`BuildError::NotUserAddress`] above the lower half, [`BuildError::NoTable`]
+/// where the space has no table for the address, [`BuildError::Overlap`] where
+/// a larger page covers it, and [`BuildError::NotMapped`] where the tables
+/// exist and the leaf is empty.
+///
+/// # Safety
+///
+/// As [`map_user_live`]: `root` must be a top-level table this module built for
+/// a process, `frames` must be rebound onto the direct map, and the space in
+/// `CR3` must be the one `root` describes or the kernel's.
+pub unsafe fn unmap_user_live(
+    frames: &FrameAllocator,
+    root: u64,
+    virt: u64,
+) -> Result<u64, BuildError> {
+    if virt >= 1 << 47 {
+        return Err(BuildError::NotUserAddress);
+    }
+
+    let mut table = root;
+    for shift in [39, 30, 21] {
+        // SAFETY: the caller's guarantee that `table` is a page table of this
+        // process reachable through the direct map. The first is `root`; each
+        // one after it came out of a present, non-leaf entry of the last.
+        let entry = unsafe { read(frames, table, slot_of(virt, shift)) };
+        if entry & PRESENT == 0 {
+            return Err(BuildError::NoTable);
+        }
+        if entry & PAGE_SIZE_BIT != 0 {
+            // A larger page covers this address. Taking it out would withdraw
+            // two mebibytes on a request to withdraw four kibibytes, which is a
+            // refusal rather than an approximation.
+            return Err(BuildError::Overlap);
+        }
+        table = entry & ADDRESS_MASK;
+    }
+
+    // SAFETY: as above; `table` is now the page table for this address.
+    let existing = unsafe { read(frames, table, slot_of(virt, 12)) };
+    if existing & PRESENT == 0 {
+        return Err(BuildError::NotMapped);
+    }
+    // SAFETY: as above, over an entry that was present.
+    unsafe { write(frames, table, slot_of(virt, 12), 0) };
+
+    // The entry is out of the table and still in this core's translation buffer
+    // until this instruction. Every other core is the caller's problem, and the
+    // comment above says so.
+    // SAFETY: invalidating a page is architecturally valid at ring 0 for any
+    // address, mapped or not.
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
+    }
+
+    Ok(existing & ADDRESS_MASK)
+}
+
+/// The tables one on-ramp mapping had to create, so that withdrawing it gives
+/// back exactly what it took.
+///
+/// Three at most: an application processor starts at a low address and the
+/// kernel's own address space has nothing else in its lower half, so every
+/// level below the root is absent when the mapping is made. Recorded rather
+/// than recomputed, because "which of these did I allocate" is not a question
+/// the tables can be asked afterwards — an entry that was already there and one
+/// this made look identical.
+#[derive(Clone, Copy)]
+pub struct OnRamp {
+    page: u64,
+    /// Outermost first: the table an entry was written into, the slot, and the
+    /// frame that entry points at.
+    made: [(u64, usize, u64); 3],
+    count: usize,
+}
+
+impl OnRamp {
+    /// The address the mapping is at, which is also the physical address.
+    #[must_use]
+    pub const fn page(&self) -> u64 {
+        self.page
+    }
+}
+
+/// Map one page of low physical memory at its own address, so that a core
+/// arriving through the trampoline keeps executing when paging comes on.
+///
+/// Present, readable, executable, and neither writable nor reachable from ring
+/// 3. Not [`GLOBAL`] on purpose: this mapping is meant to go away, and a global
+/// entry is one that survives the `CR3` write that would otherwise flush it.
+///
+/// # Errors
+///
+/// [`BuildError::NoFrames`] if a table cannot be allocated, and
+/// [`BuildError::Overlap`] if anything is already mapped at the address — which
+/// for the kernel's otherwise empty lower half would mean this had been called
+/// twice.
+///
+/// # Safety
+///
+/// `space` must be the address space currently in `CR3`, `frames` must be
+/// rebound onto its direct map, and `phys` must be a page nothing else in this
+/// kernel is using.
+pub unsafe fn map_on_ramp(
+    frames: &mut FrameAllocator,
+    space: &AddressSpace,
+    phys: u64,
+) -> Result<OnRamp, BuildError> {
+    let mut ramp = OnRamp { page: phys, made: [(0, 0, 0); 3], count: 0 };
+
+    let mut at = space.root;
+    for shift in [39, 30, 21] {
+        let slot = slot_of(phys, shift);
+        // SAFETY: the caller's guarantee that the tables are reachable through
+        // the direct map. The first is the root; each one after it came out of
+        // a present, non-leaf entry of the last.
+        let existing = unsafe { read(frames, at, slot) };
+        if existing & PRESENT != 0 {
+            if existing & PAGE_SIZE_BIT != 0 {
+                return Err(BuildError::Overlap);
+            }
+            at = existing & ADDRESS_MASK;
+            continue;
+        }
+        // SAFETY: as above.
+        let fresh = unsafe { table(frames) }?;
+        ramp.made[ramp.count] = (at, slot, fresh);
+        ramp.count += 1;
+        // SAFETY: as above, into an entry that was not present.
+        unsafe { write(frames, at, slot, fresh | TABLE) };
+        at = fresh;
+    }
+
+    // SAFETY: as above; `at` is now the page table for this address.
+    let existing = unsafe { read(frames, at, slot_of(phys, 12)) };
+    if existing & PRESENT != 0 {
+        return Err(BuildError::Overlap);
+    }
+    // SAFETY: as above, into an entry that was not present. No `WRITE`, no
+    // `USER` and no `NO_EXECUTE`: the page is read and executed by an arriving
+    // core, and written by nobody through this address.
+    unsafe { write(frames, at, slot_of(phys, 12), phys | PRESENT) };
+
+    // A not-present translation may already be cached as such.
+    // SAFETY: invalidating a page is architecturally valid at ring 0.
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) phys, options(nostack, preserves_flags));
+    }
+
+    Ok(ramp)
+}
+
+/// Take the on-ramp back out, and give back every frame it took.
+///
+/// The free count is the point. An on-ramp that leaked its three tables would
+/// leak them on every boot, which is invisible in every number except the one
+/// `mem::self_test` and `process::run` both check.
+///
+/// # What the caller owes
+///
+/// The same as [`unmap_user_live`]: this invalidates on the calling core only.
+/// Every core that arrived through the on-ramp has to be told, and by the time
+/// this is called there is at least one of them — which is the whole reason the
+/// shootdown had to exist before this function could.
+///
+/// # Safety
+///
+/// As [`map_on_ramp`]; `ramp` must have come from it against this same `space`,
+/// and no core may still be executing out of the page.
+pub unsafe fn unmap_on_ramp(frames: &mut FrameAllocator, space: &AddressSpace, ramp: &OnRamp) {
+    // The leaf first, then the tables above it, so that the mapping is never
+    // reachable through a table that has already been freed.
+    let mut at = space.root;
+    let mut reached = true;
+    for shift in [39, 30, 21] {
+        // SAFETY: the caller's guarantee; these are the tables `map_on_ramp`
+        // walked, reachable through the direct map.
+        let entry = unsafe { read(frames, at, slot_of(ramp.page, shift)) };
+        if entry & PRESENT == 0 || entry & PAGE_SIZE_BIT != 0 {
+            reached = false;
+            break;
+        }
+        at = entry & ADDRESS_MASK;
+    }
+    if reached {
+        // SAFETY: as above.
+        unsafe { write(frames, at, slot_of(ramp.page, 12), 0) };
+    }
+
+    // SAFETY: invalidating a page is architecturally valid at ring 0.
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) ramp.page, options(nostack, preserves_flags));
+    }
+
+    // Innermost first: an entry is cleared before the table that holds it is,
+    // so nothing ever points at a frame that has gone back on the free list.
+    for index in (0..ramp.count).rev() {
+        let (parent, slot, frame) = ramp.made[index];
+        // SAFETY: as above.
+        unsafe { write(frames, parent, slot, 0) };
+        // SAFETY: this frame was allocated by `map_on_ramp` for this mapping
+        // alone, the entry that pointed at it has just been cleared, and the
+        // caller has guaranteed no core is executing through it.
+        unsafe { frames.free(Frame::from_addr(frame)) };
+    }
 }
 
 /// Follow an entry in a process's half, creating a table if there is none.

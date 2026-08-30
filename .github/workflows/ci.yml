@@ -35,6 +35,7 @@ jobs:
       - run: cargo xtask lint-licensing
       - run: cargo xtask lint-unsafe
       - run: cargo xtask lint-percpu
+      - run: cargo xtask lint-mutations
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # The hooks in .claude/ are policy too, and they are the only policy that
@@ -96,8 +97,18 @@ jobs:
       # rights it has, and filling the table to see what happens at the bound.
       # This is the M4 negative suite — E0-P08 — and it belongs in the gate for
       # the reason `docs/the-long-plan.html` gives when it says authority
-      # escapes are caught every build.
+      # escapes are caught every build. Eight since E0-B10, the eighth being the
+      # one the frame does not refuse at all: the process revokes a capability
+      # it is entitled to revoke and then reads the page that revoke unmapped.
       - run: cargo xtask cap
+      # The other half of E0-P08, and the half that says the suite can fail. A
+      # kernel built with one deliberate defect, booted into the forging sweep,
+      # required to go red with a panic in the log — and then the same boot
+      # without the defect, required to go green. Four of the five properties
+      # have a fixture that breaks them and runs at every boot; the fifth cannot
+      # have one, because a fixture that panics takes the machine down rather
+      # than being caught. RFC 0017 argues it.
+      - run: cargo xtask mutate
 
   deps:
     name: dependency policy

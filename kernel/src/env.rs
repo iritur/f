@@ -49,7 +49,10 @@ struct Anchor {
 /// One per core. [`Instant`]s from two of these are not comparable — they have
 /// different origins, and on a multi-socket machine they are counting different
 /// counters — which is the caveat `f_env::Instant` already states and which
-/// becomes load-bearing when E0-B10 starts the second core.
+/// became load-bearing at E0-B10, where the second core arrives. It adopts this
+/// core's measured rate rather than taking its own — `apic::adopt` says why, and
+/// what would reverse it — so the *rates* agree; the origins do not, and nothing
+/// in this kernel compares two cores' instants.
 pub struct Hardware {
     /// Ticks per millisecond, as measured at boot.
     tsc_khz: u64,

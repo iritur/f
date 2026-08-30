@@ -151,6 +151,33 @@ impl Module {
     pub const fn is_empty(self) -> bool {
         self.len() == 0
     }
+
+    /// The bytes the loader placed here.
+    ///
+    /// `'static` and shared, and both halves of that are claims worth reading.
+    /// The memory is reserved before the frame allocator is populated — see
+    /// `main::reserved_ranges` — so it is never handed to anybody and never
+    /// freed, which is what makes the lifetime honest rather than convenient.
+    /// Shared, because nothing in this kernel writes a module: it is copied out
+    /// of, once, into a frame a process owns.
+    ///
+    /// # Safety
+    ///
+    /// The direct map must be live and must cover this module's physical
+    /// extent, and `frames` must already have been rebound onto it — which
+    /// together are what make [`super::paging::PHYS_OFFSET`] plus a physical
+    /// address a readable one. Reading a module before the switch, through the
+    /// boot stub's identity window, would also work and is not what any caller
+    /// does; requiring the later state keeps one answer rather than two.
+    #[must_use]
+    pub unsafe fn bytes(self) -> &'static [u8] {
+        let at = (super::paging::PHYS_OFFSET + self.start) as *const u8;
+        // SAFETY: the caller's guarantee that the direct map covers this extent.
+        // The length came from a validated handoff where `end` is checked to be
+        // greater than `start`, and the region is reserved for the life of the
+        // kernel, so nothing else can be writing it.
+        unsafe { core::slice::from_raw_parts(at, self.len() as usize) }
+    }
 }
 
 /// One region of physical memory, as the loader describes it.
@@ -350,10 +377,11 @@ impl BootInfo {
     /// Modules the loader reported and this kernel did not keep.
     ///
     /// Non-zero means [`MAX_MODULES`] was too small on this machine, and the
-    /// memory those modules occupy is *not* reserved. That is a refusal to
-    /// boot rather than a warning, at the point where a module is first
-    /// depended on — which is E0-B10. It is counted here so that the decision
-    /// has a number to be made from.
+    /// memory those modules occupy is *not* reserved. It is counted here so
+    /// that the decision has a number to be made from, and the decision is made
+    /// where a module's contents are first depended on — `main::component`,
+    /// which refuses to boot rather than reading a component out of memory
+    /// something else may already have been handed.
     #[must_use]
     pub const fn modules_dropped(&self) -> usize {
         self.modules_dropped
