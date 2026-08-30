@@ -79,8 +79,18 @@
 //! No lazy mapping, no shootdown, and no unmapping — a process's pages are
 //! given back by freeing its frames after its address space stops being the
 //! one in `CR3`, which is sound for one process on one core and is not a
-//! general answer. Those arrive with M4, when a page belongs to a capability
-//! and a second core has to be told it has gone.
+//! general answer.
+//!
+//! This paragraph used to say those arrive with M4, "when a page belongs to a
+//! capability and a second core has to be told it has gone". M4 has arrived and
+//! only the first half of that came true. A page does belong to a capability
+//! now — [`map_user_live`] is how a process turns one into a mapping — and
+//! there is still no unmap, so **revoking a frame capability withdraws the name
+//! and leaves the mapping**. That is the largest gap in the capability system
+//! and it is here rather than in a footnote because this is the file that would
+//! have to close it. What it needs is the second core: an unmap without a
+//! shootdown is a translation another core is still using, and there is no
+//! honest way to write one before there is somebody to tell.
 
 use super::cpuid;
 use crate::mem::{Frame, FrameAllocator, Order};
@@ -202,6 +212,17 @@ pub struct Features {
     /// A page-directory-pointer entry may be a gibibyte-sized page. Not a
     /// protection — a saving, and one the direct map takes.
     pub gigabyte_pages: bool,
+}
+
+impl Features {
+    /// Nothing detected yet.
+    ///
+    /// Not a description of any real processor. It is what a per-core slot
+    /// holds before a process has been built on that core, so that "not asked
+    /// yet" has a spelling. Nothing maps with it: [`enable_features`] runs at
+    /// boot and the value it returns is what every mapping is built from, which
+    /// the process path establishes before it enters ring 3.
+    pub const NONE: Self = Self { nx: false, global: false, pcid: false, gigabyte_pages: false };
 }
 
 /// Ask the processor what it offers, then turn on what the mappings need.
@@ -340,6 +361,15 @@ pub enum BuildError {
     /// would be a mapping with [`USER`] set on a kernel table — which is to say
     /// a hole in the isolation, made by arithmetic rather than by intent.
     NotUserAddress,
+    /// A live mapping was asked for at an address whose tables do not exist.
+    ///
+    /// Only [`map_user_live`] produces this, and it is a refusal rather than a
+    /// failure: allocating a page table on a running process's behalf is
+    /// spending memory nobody has accounted for, and the account is what the
+    /// [`CapType::Untyped`](f_abi::cap::CapType::Untyped) capability is for.
+    /// Until a process can pay for a table — E1 — it may map only where its
+    /// address space already reaches.
+    NoTable,
 }
 
 impl BuildError {
@@ -353,6 +383,7 @@ impl BuildError {
             Self::DeviceOutOfWindow => "a device sits beyond the device window",
             Self::TooManyTables => "a process's address space needs more tables than are tracked",
             Self::NotUserAddress => "a process was offered a page in the kernel's half",
+            Self::NoTable => "a process asked to map where its address space has no page table",
         }
     }
 }
@@ -544,12 +575,19 @@ pub unsafe fn map_device(
 
 /// How many tables one process's address space may need.
 ///
-/// A process at M3 has one text page, one guard and one stack page inside a
-/// single two-mebibyte region, which is four tables: the top one, and one at
-/// each level below it. Eight is that with room for a second region, and it is
-/// a bound rather than a limit worth designing around — E0-B11 gives a process
-/// an `AddressSpace` capability with a quota behind it, and this array is what
-/// that replaces.
+/// A process at M4 has one text page, one guard, one stack page and one page it
+/// mapped for itself, all inside a single two-mebibyte region — four tables:
+/// the top one, and one at each level below it. Eight is that with room for a
+/// second region.
+///
+/// It stayed a bound rather than becoming a quota at M4, and that is worth a
+/// sentence because E0-B11 was expected to replace it. A process now holds an
+/// `AddressSpace` capability and can map through it, but
+/// [`map_user_live`] allocates no tables — it maps only where one already
+/// exists — so nothing a process asks for can add to this array. *Reversal:* the
+/// day a process may pay for a table out of an `Untyped` capability, which is
+/// E1, and at that point the array becomes an accounted list rather than a
+/// fixed one.
 pub const MAX_USER_TABLES: usize = 8;
 
 /// What a page in a process's half is for.
@@ -566,6 +604,13 @@ pub enum UserPage {
     Text,
     /// Writable and never executable. A process's stack, and later its data.
     Data,
+    /// Neither writable nor executable. What a frame capability carrying only
+    /// [`rights::READ`](f_abi::cap::rights::READ) may be mapped as, and the
+    /// reason this variant exists: without it the weakest mapping expressible
+    /// here would be [`UserPage::Text`], and a read-only grant would arrive
+    /// executable. A rights bitmap the mapping cannot express is a rights
+    /// bitmap that is not enforced.
+    ReadOnly,
 }
 
 impl UserPage {
@@ -579,18 +624,25 @@ impl UserPage {
         match self {
             Self::Text => PRESENT | USER,
             Self::Data => PRESENT | USER | WRITE | nx,
+            Self::ReadOnly => PRESENT | USER | nx,
         }
     }
 }
 
 /// One process's address space, and the frames it is made of.
 ///
-/// The frame list is the whole of the ownership model at M3, and it is honest
-/// about being small: a process's tables are given back by freeing exactly the
-/// frames that were allocated for them, so the list has to be complete or the
-/// free count does not come back. E0-B11 replaces it with a capability
-/// derivation tree, where the same question is asked of every object rather
-/// than of page tables alone.
+/// The frame list is still the whole of the ownership model for *tables*, and it
+/// is honest about being small: a process's tables are given back by freeing
+/// exactly the frames that were allocated for them, so the list has to be
+/// complete or the free count does not come back.
+///
+/// The capability table that arrived at M4 does not replace it, which is the
+/// opposite of what was expected here. A derivation tree records who may name
+/// an object; this records which frames a teardown has to give back, and the two
+/// are different questions with different answers — a capability can be revoked
+/// while the frame behind it is still mapped, and a frame can be freed that no
+/// capability ever named. Merging them would mean the free count depending on
+/// what a process did with its handles.
 pub struct UserSpace {
     root: u64,
     tables: [Frame; MAX_USER_TABLES],
@@ -722,6 +774,87 @@ pub unsafe fn map_user(
     }
     // SAFETY: as above.
     unsafe { write(frames, pt, slot_of(virt, 12), phys | kind.flags(features)) };
+    Ok(())
+}
+
+/// Map one page into the address space that is *running*, on a capability the
+/// process presented.
+///
+/// The deliberate difference from [`map_user`] is that this one allocates
+/// nothing. Every level has to be there already, and an absent table is
+/// [`BuildError::NoTable`] rather than a frame taken from the kernel's
+/// allocator on a process's say-so. Two things follow from that and both are
+/// the point: nothing new needs freeing when the process dies, so the free
+/// count still has to come back exactly; and a process cannot enlarge its own
+/// address space by asking, which is the quota question `Untyped` exists to
+/// answer and E1 will.
+///
+/// `kind` is the permission the *mapping* gets, and the caller is expected to
+/// have derived it from the rights on the capability rather than from what the
+/// process asked for. That check is `process::map_frame`'s, and it is there
+/// rather than here because this file's job is page tables and the authority
+/// question is not one.
+///
+/// # Errors
+///
+/// [`BuildError::NotUserAddress`] above the lower half,
+/// [`BuildError::NoTable`] where the space has no table, and
+/// [`BuildError::Overlap`] where something is already mapped — including where
+/// a larger page covers the address.
+///
+/// # Safety
+///
+/// `root` must be a top-level table this module built for a process, `frames`
+/// must be rebound onto the direct map of the space currently in `CR3`, and
+/// that space must be the one `root` describes or the kernel's — the tables are
+/// reached through the direct map, which both of them carry.
+pub unsafe fn map_user_live(
+    frames: &FrameAllocator,
+    root: u64,
+    virt: u64,
+    phys: u64,
+    kind: UserPage,
+    features: Features,
+) -> Result<(), BuildError> {
+    if virt >= 1 << 47 {
+        return Err(BuildError::NotUserAddress);
+    }
+
+    let mut table = root;
+    for shift in [39, 30, 21] {
+        // SAFETY: the caller's guarantee that `table` is a page table of this
+        // process reachable through the direct map. The first is `root`; each
+        // one after it came out of a present, non-leaf entry of the last.
+        let entry = unsafe { read(frames, table, slot_of(virt, shift)) };
+        if entry & PRESENT == 0 {
+            return Err(BuildError::NoTable);
+        }
+        if entry & PAGE_SIZE_BIT != 0 {
+            // A larger page already covers this address. Not a table to descend
+            // into, and not somewhere to put a smaller mapping.
+            return Err(BuildError::Overlap);
+        }
+        table = entry & ADDRESS_MASK;
+    }
+
+    // SAFETY: as above; `table` is now the page table for this address.
+    let existing = unsafe { read(frames, table, slot_of(virt, 12)) };
+    if existing & PRESENT != 0 {
+        return Err(BuildError::Overlap);
+    }
+    // SAFETY: as above, into an entry that was not present.
+    unsafe { write(frames, table, slot_of(virt, 12), phys | kind.flags(features)) };
+
+    // The address space this writes into is the one in `CR3`, which is what
+    // separates this function from [`map_user`]. A not-present translation may
+    // have been cached as such, and on a machine where it was, the process's
+    // very next access to its new page would fault on a mapping that is there.
+    // SAFETY: invalidating a page is architecturally valid at ring 0 for any
+    // address, mapped or not.
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
+    }
+
     Ok(())
 }
 
