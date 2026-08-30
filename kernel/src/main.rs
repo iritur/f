@@ -22,6 +22,7 @@
 #![no_main]
 
 pub mod arch;
+pub mod cap;
 pub mod env;
 pub mod jitter;
 pub mod mem;
@@ -317,6 +318,34 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     }
     kprintln!("  env contract  arithmetic ok, seeded ok, hardware ok");
 
+    // M4. The five properties, against a real table and against five tables
+    // broken on purpose — one per property. This runs before ring 3 exists on
+    // this boot, and that order is the point: the negative suite from ring 3
+    // can only report that a hostile handle was refused, and it cannot report
+    // that a table which *stopped* refusing would have been noticed. That is
+    // what the flawed fixtures are for, and a suite whose checks cannot fail is
+    // a suite nobody has tested.
+    match cap::properties::self_test() {
+        Ok(caught) => kprintln!(
+            "  capabilities  {} slots, {} properties hold, {caught} flawed tables caught",
+            cap::TABLE_SLOTS,
+            cap::properties::Property::all().len(),
+        ),
+        Err(why) => {
+            kprintln!("FAIL: capability table: {}", why.message());
+            // Which fixture and which property, when either is involved. A
+            // suite that says only "something is wrong with the suite" is a
+            // suite somebody rewrites rather than reads.
+            if let Some(flaw) = why.flaw() {
+                kprintln!("  flaw          {flaw:?}");
+            }
+            if let Some(property) = why.property() {
+                kprintln!("  property      {property:?}");
+            }
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+
     // M3. The other privilege level, and the first thing in this system that is
     // not the kernel. It runs inside a timer window on purpose: the milestone's
     // exit criterion is not that a process runs and not that the timer runs, it
@@ -510,6 +539,13 @@ fn timed_window(
         report.shared_slots
     );
     kprintln!("  user frames   {} given back, free count unchanged", report.frames);
+    kprintln!(
+        "  user caps     {} granted, {} call(s) answered, {} refused, {} held at the end",
+        report.granted,
+        report.caps.ok,
+        report.caps.refused(),
+        report.held,
+    );
     kprintln!(
         "  user process  announced itself, then ran until the frame had taken {USER_TICKS} \
          tick(s) from ring 3"

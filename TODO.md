@@ -260,8 +260,58 @@ load-bearing.*
 - [ ] **E0-B10** `M` Load `user/init` from a boot module; start the application processors. **(M3)**
   *exit:* init runs on core 1; the M2 jitter measurement on core 0 is unaffected.
   *needs:* E0-B09
-- [ ] **E0-B11** `L` Capability table: typed slots — Untyped, Frame, AddressSpace, Channel, Endpoint, Irq — with derive, copy and recursive revoke. **(M4)**
-  *exit:* E0-P08 passes.
+- [x] **E0-B11** `L` Capability table: typed slots — Untyped, Frame, AddressSpace, Channel, Endpoint, Irq — with derive, copy and recursive revoke. **(M4)**
+  `intent/0003-authority-that-can-be-taken-back/`. Thirty-two slots per process,
+  a handle that is sixteen bits of index and sixteen of generation packed into
+  the `u32` `Sqe.cap` already was, six rights that only ever narrow, and a
+  derivation tree stored as parent handles rather than child lists — so revoke
+  is a bounded walk of a fixed array with no recursion in it, and a parent link
+  into a slot that has since been refilled reads as broken instead of naming the
+  new occupant.
+  *exit:* met. `cargo xtask cap` is E0-P08 as runs: seven boots, six of which
+  try one authority escape each and are refused with the exact code the escape
+  earns, and one — `cap=grant` — which must not be refused at all. The frame is
+  the judge, not the process: it counts answers by refusal code and compares
+  against an exact tally, so a run turned down the right number of times for the
+  wrong reasons fails. Every boot also runs the five properties against a real
+  table **and against five tables broken on purpose**, one per property, and
+  prints how many were caught.
+  Decided rather than assumed, so RFC 0015 exists. RFC 0014 says a call may
+  exist only if it cannot be an opcode on a ring, and this adds four that all
+  could be — at M5. The reading recorded is that rule 1 governs permanent calls
+  and rule 2 governs bridging ones: a ring is named by a `Channel` capability,
+  so the table has to work before there is any ring to work it through, and each
+  of the four names the opcode that retires it.
+  The other decision worth reading is that **a copy is a child, not a sibling**.
+  seL4 puts a copy beside its source, where revoking the source does not reach
+  it. `docs/what-must-be-stated.html` lists *nothing can be revoked* as a
+  structural drawback of the interface this replaces and answers it with
+  recursive revocation — and a revoke a copy escapes does not answer it. The
+  cost is that two holders of equal authority are not equal, and it is in the
+  module comment rather than discovered later.
+  **What the exit does not say, and it matters.** Revoking a frame capability
+  withdraws the *name* and leaves the *mapping*. Undoing the mapping needs an
+  unmap, which needs a shootdown, which needs the second core — so it is E0-B10's
+  to close, and until then a capability system that can take a name back is not
+  yet one that can take the memory back. Said here rather than in a footnote,
+  because it is the sentence somebody would otherwise assume the other way.
+  Found while building: `.Lprobe_bad_call` ended by *falling through* into
+  `.Lprobe_exit` because that label happened to be next in the file. Seven new
+  blocks went in between them, and `user=call` silently started running the
+  capability control as well — a passing boot, with a tally two calls too high,
+  and the only reason it was caught is that the tally is exact rather than a
+  lower bound. A jump that depends on what is written underneath it moves when
+  somebody edits above it.
+  Also found: a fixture that breaks *two* things at once is caught by whichever
+  check notices first, and the check it was written for stays unexercised. The
+  masked-index table also collapsed the generation-versus-occupancy distinction,
+  so it was caught by the revocation property instead of the totality one. The
+  suite reports that as a distinct failure — caught by the wrong property — and
+  the fix was to make every fixture share the real lookup and differ from it in
+  exactly one step.
+  And a lint reported itself: `lint-percpu` reads `&'static mut Table` as a
+  mutable global, because it looks for the text `static mut`. Fixed in the lint
+  rather than worked around in the kernel.
   *needs:* E0-B09
 - [ ] **E0-B12** `L` The first ring: layout, cursor protocol, suppression, two opcodes — `NOP` and `WRITE_SERIAL`. **(M5)**
   *exit:* one million NOPs in batches of 32, under 50 ns per operation, recorded as a gating claim.
@@ -308,8 +358,23 @@ load-bearing.*
   *needs:* E0-B07, E0-D04
 - [ ] **E0-P07** `M` Litmus tests for the cursor protocol run in CI on x86-64 **and** AArch64.
   *exit:* both jobs green; the AArch64 job is not allowed to be advisory.
-- [ ] **E0-P08** `L` The capability negative suite, as code. A process cannot name a capability it was not given, forge a handle, use a revoked handle, exceed granted rights, or panic the kernel by trying. **(M4 exit criterion)**
-  *exit:* all five hold; each has a mutation that makes it fail, checked in as a fixture.
+- [>] **E0-P08** `L` The capability negative suite, as code. A process cannot name a capability it was not given, forge a handle, use a revoked handle, exceed granted rights, or panic the kernel by trying. **(M4 exit criterion)**
+  The suite exists and is in the gate: `cargo xtask cap`, seven boots, and the
+  five properties run at every boot against a real table and against five broken
+  on purpose. All five hold. What is left is the second half of the exit, and it
+  is one property short of met.
+  Four of the five have a mutation that makes them fail, checked in as
+  `cap::properties::Flaw` and asserted to be caught by the property it breaks and
+  no other. The fifth cannot have one of that shape: a fixture that panics takes
+  the machine down rather than being caught, and there is no host harness to
+  catch it in — `kernel/Cargo.toml` says why. What it has instead is a
+  compile-time half, `deny(clippy::indexing_slicing, unwrap_used, panic)` over
+  the module, so the constructs that turn a hostile handle into a fault cannot be
+  written; and a runtime half that catches the masked-index form of it.
+  *exit:* all five hold — **met** — and each has a mutation that makes it fail
+  — **four of five**. The fifth needs a mutation harness that builds a kernel
+  with one deliberate defect and asserts the boot goes red, which is a different
+  mechanism from a fixture in the image and should be argued as one.
   *needs:* E0-B11
 - [ ] **E0-P09** `M` Exercise the fault-injection hook: one seeded fault class per subsystem that exists, using the protocol-aware site labels already in `env/src/sim.rs`.
   *exit:* a seeded run injects a failure at a named site and the system handles it; the same seed reproduces it.

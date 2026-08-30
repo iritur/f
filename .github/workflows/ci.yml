@@ -90,6 +90,14 @@ jobs:
       # violate is a protection nobody has checked, and these are the only
       # checks in the suite that fail if isolation quietly stops holding.
       - run: cargo xtask user
+      # The same argument one milestone up. Seven more boots, each one a
+      # process trying to hold authority it was not granted: naming a slot it
+      # was never given, forging a handle, using a revoked one, exceeding the
+      # rights it has, and filling the table to see what happens at the bound.
+      # This is the M4 negative suite — E0-P08 — and it belongs in the gate for
+      # the reason `docs/the-long-plan.html` gives when it says authority
+      # escapes are caught every build.
+      - run: cargo xtask cap
 
   deps:
     name: dependency policy

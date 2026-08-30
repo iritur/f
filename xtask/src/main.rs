@@ -123,6 +123,7 @@ fn main() -> ExitCode {
         "run" => run(),
         "fault" => fault(args.get(1).map(String::as_str)),
         "user" => user(args.get(1).map(String::as_str)),
+        "cap" => cap(args.get(1).map(String::as_str)),
         "timer" => timer(args.get(1).map(String::as_str)),
         "test" => test(),
         "verify" => verify(),
@@ -166,6 +167,9 @@ cargo xtask <command>
   user [kind]        Boot into a process that violates one isolation property
                      on purpose and check the kernel survives it: kernel, null,
                      text, stack, priv, call or exit. All seven with no argument
+  cap [kind]         Boot into a process that tries to escape its capabilities
+                     and check the frame refuses it: grant, unowned, forge,
+                     stale, rights, type or flood. All seven with no argument
   timer [seconds]    Run the 1 kHz timer and print a jitter histogram. Sixty
                      seconds by default. A measurement, not an assertion
   test               Workspace tests on both x86-64 and AArch64
@@ -511,6 +515,88 @@ fn user(kind: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Every capability property a process is asked to violate, and what it is.
+///
+/// The negative suite from `docs/design/ring-scene-boot.html` section 15, M4,
+/// written as runs: *a process cannot name a capability it was not given,
+/// cannot forge a handle, cannot use a revoked handle, cannot exceed granted
+/// rights, and cannot make the kernel panic by trying.* That is E0-P08's exit
+/// criterion and E0-B11's.
+///
+/// Seven rather than five. `grant` is the positive control, without which a
+/// frame that refused every capability call would pass all five; `flood` is
+/// what "cannot make the kernel panic" turns into once the obvious attempts
+/// are refused, which is filling the table and seeing what happens at the
+/// bound.
+///
+/// The kernel is the judge, as with `user`. It knows exactly which refusal each
+/// attempt earns and refuses to finish if it answered a different number of
+/// calls, or the same number for different reasons — so a run that is turned
+/// down for the wrong reason is a failed boot rather than a passing one.
+const ESCAPES: &[(&str, &str)] = &[
+    ("grant", "use its capabilities correctly: nothing is refused"),
+    ("unowned", "name a slot the frame never filled"),
+    ("forge", "sweep the handle space, in range and past it"),
+    ("stale", "use a capability after the tree it hangs from was revoked"),
+    ("rights", "ask for rights its capability does not carry"),
+    ("type", "present a capability of the wrong kind for the operand"),
+    ("flood", "derive until the table is full"),
+];
+
+/// Boot into a process that tries to escape its capabilities, or all of them in
+/// turn.
+///
+/// Every one of these must end at 33 — the process ended, the kernel did not.
+/// That is the difference from `fault` and the sameness with `user`: an
+/// authority escape is an event the frame handles, and a kernel that dies
+/// answering one has failed the property rather than enforced it.
+fn cap(kind: Option<&str>) -> Result<(), String> {
+    let chosen: Vec<&(&str, &str)> = match kind {
+        None => ESCAPES.iter().collect(),
+        Some(name) => {
+            let found = ESCAPES.iter().find(|(known, _)| *known == name);
+            let Some(found) = found else {
+                let list: Vec<String> =
+                    ESCAPES.iter().map(|(name, what)| format!("  {name:<8} {what}")).collect();
+                return Err(format!("unknown capability escape: {name}\n\n{}", list.join("\n")));
+            };
+            vec![found]
+        }
+    };
+
+    let all = chosen.len() > 1;
+    for (name, what) in chosen {
+        if all {
+            println!("\n--- cap={name}: {what}");
+        }
+        match boot(Some(&format!("cap={name}")))? {
+            Some(33) => println!("\ncap={name}: the frame answered it and the kernel did not die"),
+            Some(35) => {
+                return Err(format!(
+                    "the kernel refused to finish after `cap={name}`. Either the frame answered \
+                     a capability call it should have refused — which is the failure this exists \
+                     to find — or it refused one it should have answered, which is the same \
+                     failure pointing the other way. The serial log above says which."
+                ));
+            }
+            Some(0) => {
+                return Err(format!(
+                    "the machine reset with no output during `cap={name}`. A capability call \
+                     that faults inside the frame is the fifth property failing: a process \
+                     cannot make the kernel panic by trying, and this one did."
+                ));
+            }
+            Some(other) => return Err(format!("qemu exited {other}; expected 33")),
+            None => return Err("qemu terminated by signal".into()),
+        }
+    }
+
+    if all {
+        println!("\nall {} capability properties held", ESCAPES.len());
+    }
+    Ok(())
+}
+
 /// Run the timer for a while and print the jitter histogram it produced.
 ///
 /// # Why this is a command and not part of `verify`
@@ -817,6 +903,14 @@ fn lint_percpu() -> Result<(), String> {
 
         for (line_no, line) in text.lines().enumerate() {
             let code = line.split("//").next().unwrap_or("");
+            // `&'static mut T` is a reference with a lifetime, not a mutable
+            // global, and this lint reported one as the other the first time
+            // the kernel wrote a function returning one. Stripping the lifetime
+            // before looking is the narrowest fix: a textual lint cannot parse,
+            // so what it can do is know the one spelling that is not what it is
+            // looking for.
+            let code = code.replace("'static ", "");
+            let code = code.as_str();
             if code.contains("static mut ") {
                 findings.push(format!("  {}:{}  `static mut`", rel, line_no + 1));
                 continue;

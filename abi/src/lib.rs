@@ -12,6 +12,8 @@
 
 #![no_std]
 
+pub mod cap;
+
 /// The version this build speaks.
 ///
 /// A peer is not required to report this exact value. Setup negotiates the
@@ -158,6 +160,13 @@ pub mod error {
         /// The capability was revoked. Distinguishable from never having held
         /// it, because the two need different handling.
         pub const REVOKED: u16 = 3;
+        /// The capability exists and is held, and names an object of a kind
+        /// this operation does not act on — a frame where a space was asked
+        /// for. In [`super::AUTHORITY`] rather than in [`super::ARGUMENT`]
+        /// because what the caller got wrong is *which authority it is
+        /// exercising*, and a caller that confuses two of its own capabilities
+        /// has a bug an argument error would not name.
+        pub const WRONG_TYPE: u16 = 4;
     }
 
     /// Codes within [`ADMISSION`].
@@ -205,6 +214,17 @@ pub mod error {
         pub const UNKNOWN_FLAG: u16 = 3;
         /// A reserved field was not zero.
         pub const RESERVED_NOT_ZERO: u16 = 4;
+        /// The address is not one this operation can act on: outside the range
+        /// it works over, not aligned to the grain it works in, or already
+        /// occupied. Distinct from [`super::AUTHORITY`], and the distinction is
+        /// load-bearing — a caller that is entitled to the operation and named
+        /// the wrong place needs to know that is what happened.
+        pub const BAD_ADDRESS: u16 = 5;
+        /// The requested rights cannot hold at once. Writable and executable is
+        /// the case that exists: a capability may carry both, because the
+        /// object it names can be used for either, and no single mapping of it
+        /// may have both.
+        pub const RIGHTS_CONFLICT: u16 = 6;
     }
 
     /// Pack a domain and a code into a [`Cqe::result`].
