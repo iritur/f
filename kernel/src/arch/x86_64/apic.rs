@@ -124,6 +124,13 @@ pub const LVT_MASKED: u32 = 1 << 16;
 /// deliver to.
 pub const TIMER_VECTOR: u8 = 32;
 
+/// Where a request to forget a page goes.
+///
+/// The vector immediately after the timer's, and the second one in this kernel
+/// that exists because something is wanted rather than because something might
+/// go wrong. It is delivered core to core: see [`crate::smp::shootdown`].
+pub const SHOOTDOWN_VECTOR: u8 = 33;
+
 /// Where a spurious interrupt goes.
 ///
 /// The top of the vector space, which is convention rather than requirement:
@@ -395,6 +402,160 @@ pub unsafe fn init(
     }
 
     Ok(Found { phys, version: version as u8, max_lvt: (version >> 16) as u8 })
+}
+
+/// Where this core's local APIC registers are, or zero before bring-up.
+///
+/// Handed out for two callers that both need the address and neither of which
+/// should be reading another core's shard to get it: the inter-processor
+/// interrupts in [`super::ap`], and the boot processor telling a core it is
+/// about to start where the window is.
+#[must_use]
+pub fn window() -> u64 {
+    // SAFETY: this core's own slot, read by value. The handler never writes it
+    // and the code that does runs with interrupts disabled.
+    unsafe { APIC.mine().read() }.regs
+}
+
+/// What this core's timestamp counter was measured to run at, in kilohertz.
+///
+/// Zero before [`calibrate`] on the boot processor or [`adopt`] on any other,
+/// which is the only value a caller has to treat specially: a bound computed
+/// from zero is a bound of zero, and every caller here saturates rather than
+/// divides.
+#[must_use]
+pub fn tsc_khz() -> u64 {
+    // SAFETY: as [`window`].
+    unsafe { APIC.mine().read() }.tsc_khz
+}
+
+/// Acknowledge the interrupt this core is handling.
+///
+/// Until this is written the local APIC will not deliver another interrupt at
+/// this priority, which is what makes a handler single-threaded with respect to
+/// itself. [`on_tick`] does its own; this is for the handlers that live outside
+/// this module.
+///
+/// # Safety
+///
+/// Call once, from an interrupt handler, on the core the interrupt was
+/// delivered to. Writing it anywhere else acknowledges somebody else's
+/// interrupt — including, on the spurious vector, an interrupt that the
+/// architecture is explicit must not be acknowledged at all.
+pub unsafe fn end_of_interrupt() {
+    // SAFETY: this core's own slot, read by value; the handler never writes it.
+    let apic = unsafe { APIC.mine().read() };
+    // SAFETY: this core's window, and the value written to this register is
+    // ignored by the hardware.
+    unsafe { write_reg(apic.regs, REG_EOI, 0) };
+}
+
+/// Take ownership of a started core's local APIC.
+///
+/// The difference from [`init`] is everything that is not per core. The
+/// register window is not mapped again — every core's local APIC answers at the
+/// same physical address, through its own hardware, so one mapping serves all
+/// of them and a second would be a second name for the same page. The legacy
+/// controllers are not remapped again either: there is one pair on the machine
+/// and the boot processor has already silenced them.
+///
+/// What is per core is done here, in the same order [`init`] does it: accept
+/// every priority, mask the timer before anything can deliver to a vector this
+/// core has not installed, and software-enable last.
+///
+/// `clocks` are the boot processor's measurement. They are adopted rather than
+/// re-measured because measuring them means owning the 8254, which is one chip
+/// for the machine — two cores calibrating against it at once would each
+/// measure the other's interference. The assumption underneath is that the
+/// timestamp counter runs at the same rate on every core, which is what
+/// `cpuid`'s invariant-TSC bit promises and what every machine this kernel
+/// boots on provides.
+///
+/// *Reversal:* a machine where the counters are not invariant across cores, at
+/// which point calibration becomes per core and needs a clock that is not the
+/// 8254 to calibrate against.
+///
+/// # Errors
+///
+/// As [`init`], less the mapping.
+///
+/// # Safety
+///
+/// Call once, on the core being brought up, with interrupts disabled, after
+/// [`super::idt::init`] on the same core, and with `regs` the window the boot
+/// processor mapped — which is [`window`] read on that core.
+pub unsafe fn adopt(regs: u64, clocks: Clocks) -> Result<(), InitError> {
+    // SAFETY: `cpuid` is unprivileged and has no memory effect.
+    let (_, _, edx) = unsafe { cpuid(1) };
+    if edx & (1 << 9) == 0 {
+        return Err(InitError::Absent);
+    }
+
+    // SAFETY: `IA32_APIC_BASE` exists on every processor reporting a local
+    // APIC, which the check above has just established.
+    let base = unsafe { read_msr(IA32_APIC_BASE) };
+    if base & APIC_BASE_EXTD != 0 {
+        return Err(InitError::ExtendedMode);
+    }
+    if base & APIC_BASE_ENABLE == 0 {
+        // SAFETY: setting the enable bit of a register that exists, preserving
+        // every other bit — including the base address and the flag saying this
+        // is not the boot processor.
+        unsafe { write_msr(IA32_APIC_BASE, base | APIC_BASE_ENABLE) };
+    }
+    // The window the boot processor mapped has to be this core's registers too.
+    // It is the same physical address on every core, and checking that rather
+    // than assuming it is what turns a firmware surprise into a refusal.
+    if base & APIC_BASE_ADDRESS != regs_phys(regs) {
+        return Err(InitError::IdentityMismatch);
+    }
+
+    // SAFETY: `regs` is a mapped window and `REG_ID` is a defined register in
+    // its first page.
+    let id = unsafe { read_reg(regs, REG_ID) } >> 24;
+    if id as usize != super::current_cpu() {
+        return Err(InitError::IdentityMismatch);
+    }
+
+    // SAFETY: as above.
+    unsafe { write_reg(regs, REG_TASK_PRIORITY, 0) };
+    // SAFETY: as above. Masked before anything can be delivered to a vector.
+    unsafe { write_reg(regs, REG_LVT_TIMER, LVT_MASKED) };
+    // SAFETY: as above. Last, because it is the step that starts delivery.
+    unsafe { write_reg(regs, REG_SPURIOUS, SPURIOUS_ENABLE | u32::from(SPURIOUS_VECTOR)) };
+
+    let slot = APIC.mine();
+    // SAFETY: this core's own slot, on its boot path, with interrupts disabled
+    // — so no handler can be holding it — and nothing else names this shard.
+    unsafe {
+        slot.write(Apic {
+            regs,
+            tsc_khz: clocks.tsc_khz,
+            apic_khz: clocks.apic_khz,
+            backend: clocks.backend,
+        });
+    }
+
+    // SAFETY: this core's slot, written immediately above, with no handler able
+    // to have touched it because interrupts are still disabled.
+    let stored = unsafe { (*slot).regs };
+    // SAFETY: `stored` is the window above and `REG_SPURIOUS` is defined in it.
+    let echo = unsafe { read_reg(stored, REG_SPURIOUS) };
+    if echo != SPURIOUS_ENABLE | u32::from(SPURIOUS_VECTOR) {
+        return Err(InitError::NotResponding);
+    }
+
+    Ok(())
+}
+
+/// The physical address behind a device-window address.
+///
+/// The device window is a straight offset — [`paging::map_device`] returns
+/// `DEVICE_OFFSET + phys` — so this is the inverse, and it exists so that
+/// [`adopt`] can check the window it was handed against what this core's own
+/// `IA32_APIC_BASE` says, rather than trusting the caller about hardware.
+const fn regs_phys(regs: u64) -> u64 {
+    (regs - paging::DEVICE_OFFSET) & !(0xFFF)
 }
 
 /// What the two clocks turned out to run at.

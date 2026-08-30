@@ -7,11 +7,16 @@
 //! `unsafe_code = "forbid"`, and `cargo xtask lint-unsafe` fails the build if
 //! any crate outside the frame acquires it.
 //!
-//! At M3 this becomes a real process loaded from a boot module. At M4 it is the
-//! first thing to be handed a capability table and asked to prove it cannot
-//! exceed it.
+//! At E0-B10 that stopped being the whole of it. [`component`] is this crate as
+//! something that *runs*: a flat image, linked by `user/init/link.ld`, handed to
+//! the machine by the boot loader as a file and copied into a frame the process
+//! was granted. The kernel does not contain it. What is left here is the part
+//! that can be tested on the host, which is the protocol arithmetic — and that
+//! split is worth keeping, because it is the only part a host test can reach.
 
 #![no_std]
+
+pub mod component;
 
 use f_abi::{Sqe, class, flags};
 

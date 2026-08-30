@@ -21,6 +21,21 @@ missing_docs = "deny"
 undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
 
+# Deliberate defects, off by default and never on in anything that ships.
+#
+# There is exactly one, and it exists because property five of the capability
+# negative suite — *a process cannot make the kernel panic by trying* — cannot
+# have a fixture of the shape the other four have. A table that panics takes the
+# machine down rather than being caught, so the mutation has to be a build
+# instead: `cargo xtask mutate` makes one, boots it, and requires the boot to go
+# red. `kernel/src/cap.rs` argues it at the function it defects.
+#
+# `cargo xtask lint-mutations` fails the build if any of these appears in a
+# default feature list, which is the one way a defect could reach an image
+# nobody meant to build.
+[features]
+mutate-unchecked-index = []
+
 [[bin]]
 name = "f-kernel"
 path = "src/main.rs"

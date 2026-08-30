@@ -2,10 +2,21 @@
 //! The program that is not the kernel.
 //!
 //! Sixty-odd instructions of x86-64, assembled into `.rodata` and copied into a
-//! frame the process owns. It is here rather than in `user/init` because
-//! E0-B10 is what loads a real component from a boot module: until then, a
-//! process needs *something* to run, and the honest smallest something is a
-//! flat blob with no loader, no relocations and no dependency on any crate.
+//! frame the process owns.
+//!
+//! It was here rather than in `user/init` because there was no loader: a
+//! process needed *something* to run, and the honest smallest something is a
+//! flat blob with no relocations and no dependency on any crate. E0-B10 brought
+//! the loader, and this stayed — which is the part worth reading. A suite that
+//! could only test a component somebody supplied would be a suite that stops
+//! working when nobody supplies one, and more to the point this program is
+//! written in assembly *so that it can attempt things Rust will not express*:
+//! forging a handle out of arithmetic, executing its own stack, running an
+//! instruction only ring 0 may. `user/init` is what a component looks like;
+//! this is what the frame has to survive.
+//!
+//! Both run on every boot, the component first. `kernel::process::Plan` carries
+//! whichever program a run is for.
 //!
 //! # What it is for
 //!
@@ -28,7 +39,9 @@
 //!
 //! # The calling convention, such as it is
 //!
-//! One word arrives in `rdi`: which violation to commit. `rax` carries the call
+//! One word arrives in `rdi`, and it is [`f_abi::door::Entry`]: which violation
+//! to commit in its low half, and the first capability the frame granted in its
+//! high half. `rax` carries the call
 //! number into `syscall` and the answer out of it; `rdi` and `rsi` are the two
 //! arguments. The frame preserves what the C ABI calls callee-saved — `rbx`,
 //! `rbp` and `r12` through `r15` — because the dispatcher is an ordinary
@@ -86,6 +99,9 @@ pub const PROVOKE_CAP_TYPE: u64 = 12;
 /// Derive until the table is full.
 pub const PROVOKE_CAP_FLOOD: u64 = 13;
 
+/// Read a mapping after the capability it was made through has been revoked.
+pub const PROVOKE_CAP_UNMAP: u64 = 14;
+
 unsafe extern "C" {
     /// First byte of the program.
     static user_probe_start: u8;
@@ -121,7 +137,21 @@ user_probe_start:
     // every reference to itself is relative to the instruction pointer. The
     // only absolute address in the program is the kernel one it is not allowed
     // to read, and that is an immediate rather than a reference.
-    movq %rdi, %rbx
+    // The one word the frame hands over. Its low half is which violation to
+    // commit; its high half is the first capability the frame granted, from
+    // which the other two follow by index. `f_abi::door::Entry` is the packing
+    // and argues why a component is told rather than entitled to know: a second
+    // process on this core finds its capabilities at a later generation, and one
+    // that assumed otherwise would be refused for a reason that looks nothing
+    // like the mistake.
+    //
+    // Kept in the three registers a call preserves, because everything else is
+    // destroyed by `syscall`.
+    movq %rdi, %r13
+    shrq $32, %r13              // the address space capability
+    movl %r13d, %r12d
+    incl %r12d                  // the frame capability, one slot along
+    movl %edi, %ebx             // which violation, zero-extended
 
     // "I am here." The frame answers by recording that it happened; it prints
     // nothing until the process is over, because the timer is running and a
@@ -156,9 +186,6 @@ user_probe_start:
     // A process is entitled to know its own starting handles; it is not
     // entitled to compute any others, which is what the sweep below tries.
 .Lprobe_provoke:
-    movl ${cap_space}, %r13d
-    movl ${cap_frame}, %r12d
-
     // "What is this?" — the one call that asks rather than acts.
     movl ${sys_inspect}, %eax
     movl %r12d, %edi
@@ -221,6 +248,8 @@ user_probe_start:
     je .Lcap_mistyped
     cmpq $13, %rbx
     je .Lcap_flood
+    cmpq $14, %rbx
+    je .Lcap_unmap
     jmp .Lprobe_exit
 
     // The direct map. The page is there, it is not marked for ring 3, and the
@@ -429,6 +458,27 @@ user_probe_start:
     jns .Lcap_flood
     jmp .Lprobe_exit
 
+    // The one escape the frame does not answer. Everything above is refused by
+    // the capability table and the process carries on; this asks for something
+    // it is entitled to — revoking a capability it holds the right to revoke —
+    // and then uses a page whose authority that revoke withdrew.
+    //
+    // The preamble mapped the derived copy at `grant_page` and read it, six
+    // instructions ago, successfully. So the fault here is not "this page was
+    // never there": it is the same page, in the same address space, on the same
+    // core, after the name behind it was taken back. Until E0-B10 this read
+    // succeeded, and the boot log said the capability had been revoked.
+.Lcap_unmap:
+    movl ${sys_revoke}, %eax
+    movq %r12, %rdi
+    xorl %esi, %esi
+    syscall
+    testq %rax, %rax
+    js .Lprobe_survived
+    movl ${grant_page}, %eax
+    movq (%rax), %rax
+    jmp .Lprobe_survived
+
 .Lprobe_exit:
     movl $2, %eax
     xorl %edi, %edi
@@ -455,12 +505,6 @@ user_probe_end:
     sys_derive = const crate::process::SYS_CAP_DERIVE as u32,
     sys_revoke = const crate::process::SYS_CAP_REVOKE as u32,
     sys_map = const crate::process::SYS_CAP_MAP as u32,
-
-    // The handles the frame grants, in the order it grants them. A process is
-    // entitled to know its own starting handles — the alternative would be a
-    // component that has to be told them, which is a channel, which is M5.
-    cap_space = const Handle::new(0, Handle::FIRST_GENERATION).bits(),
-    cap_frame = const Handle::new(1, Handle::FIRST_GENERATION).bits(),
 
     // Handles that name nothing. In range and never filled; one past the last
     // slot; and the largest index the packing can express.

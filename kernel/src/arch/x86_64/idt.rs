@@ -187,6 +187,12 @@ unsafe extern "C" {
     /// one below: it is a device vector, not the thirty-third exception.
     static isr_timer: u8;
 
+    /// The stub for another core asking this one to forget a page.
+    ///
+    /// A label rather than a table entry, for the same reason as the timer's:
+    /// it is a device vector rather than the thirty-fourth exception.
+    static isr_shootdown: u8;
+
     /// The stub for an interrupt the local APIC could not explain.
     ///
     /// A label rather than an entry in the table above, because it is not the
@@ -222,7 +228,7 @@ pub unsafe fn init() {
         unsafe { slot.write(Gate::new(handler, ist)) };
     }
 
-    // The two non-exception gates. The spurious one is not optional: the local
+    // The three non-exception gates. The spurious one is not optional: the local
     // APIC has to be told a vector to deliver an unexplainable interrupt to,
     // and a machine with no gate there answers one with a fault about the
     // fault. The timer's is the first gate in this table that exists because
@@ -230,6 +236,7 @@ pub unsafe fn init() {
     // go wrong.
     let devices = [
         (apic::TIMER_VECTOR as usize, (&raw const isr_timer) as u64),
+        (apic::SHOOTDOWN_VECTOR as usize, (&raw const isr_shootdown) as u64),
         (apic::SPURIOUS_VECTOR as usize, (&raw const isr_spurious) as u64),
     ];
     for (vector, handler) in devices {
@@ -331,6 +338,16 @@ pub unsafe extern "C" fn interrupt_dispatch(frame: *mut Frame) {
         // SAFETY: reached from the timer's own gate, on the core the timer was
         // armed on, with interrupts disabled by that gate.
         unsafe { apic::on_tick() };
+        return;
+    }
+
+    // Another core asking this one to forget a page. The second vector here
+    // that is not about something having gone wrong, and the only one that is
+    // sent by this kernel rather than by a device: `smp` says what it is for.
+    if frame.vector == u64::from(apic::SHOOTDOWN_VECTOR) {
+        // SAFETY: the shootdown vector's own gate, on the core it was delivered
+        // to, with interrupts disabled by that gate.
+        unsafe { crate::smp::answer() };
         return;
     }
 
@@ -561,6 +578,12 @@ isr_31:
 isr_timer:
     pushq $0
     pushq $32
+    jmp isr_common
+
+    .globl isr_shootdown
+isr_shootdown:
+    pushq $0
+    pushq $33
     jmp isr_common
 
     .globl isr_spurious

@@ -37,6 +37,28 @@ GUARD_SIZE  = 4K;
 STACK_SIZE  = 64K;
 FAULT_STACK_SIZE = 16K;
 
+/* The stacks an application processor arrives on: one block per core this
+ * kernel shards for, less the boot processor, which has the two above.
+ *
+ * They are reserved in the image rather than allocated at bring-up, and the
+ * reason is an ordering problem with no good answer at run time. A stack needs
+ * a guard page under it; a guard page is a hole in the kernel window; and the
+ * only code that can leave a hole there is the mapper that *builds* the kernel
+ * window, which runs long before any core is started. Allocating an AP stack
+ * later would mean either a stack with no guard or a second mapper.
+ *
+ * The cost is stated rather than hidden: AP_CORES * AP_STACK_STRIDE of `.bss`
+ * is reserved on every machine, including a single-core one where none of it is
+ * ever touched. At the numbers below that is 392 KiB.
+ *
+ * AP_CORES must equal `percpu::MAX_CPUS - 1`. `smp::self_test` checks it at
+ * boot against the symbols exported at the foot of this file, rather than
+ * trusting this comment. */
+AP_CORES = 7;
+AP_STACK_SIZE = 32K;
+AP_FAULT_STACK_SIZE = 16K;
+AP_STACK_STRIDE = GUARD_SIZE + AP_STACK_SIZE + GUARD_SIZE + AP_FAULT_STACK_SIZE;
+
 SECTIONS {
     /* Below 1 MiB is firmware, the legacy device hole and the real-mode
      * interrupt table. No loader will place an image there. */
@@ -133,6 +155,18 @@ SECTIONS {
         __kernel_stack_bottom = .;
         . += STACK_SIZE;
         __kernel_stack_top = .;
+
+        /* One block per application processor, all laid out identically so
+         * that the kernel finds core `n`'s stacks by multiplying rather than
+         * by keeping a table beside this one that could disagree with it:
+         *
+         *     [guard][stack][guard][fault stack]
+         *
+         * The two guards are the two pages `paging::build` skips for each
+         * core, and each sits below the stack it protects. */
+        __ap_stacks_start = .;
+        . += AP_CORES * AP_STACK_STRIDE;
+        __ap_stacks_end = .;
     }
 
     . = ALIGN(4096);
@@ -145,6 +179,18 @@ SECTIONS {
 
     /* Exported so that one number defines the split, in one file. */
     __kernel_vma = KERNEL_VMA;
+
+    /* The application-processor stack geometry, as absolute symbols, so that
+     * the kernel computes from this file's numbers instead of keeping a second
+     * copy of them in Rust. `smp::self_test` derives the block layout from
+     * these and checks it covers exactly `__ap_stacks_start .. __ap_stacks_end`
+     * — which turns a change here into a boot that fails and says so, rather
+     * than a stack that quietly overlaps its neighbour's guard. */
+    __ap_cores = AP_CORES;
+    __ap_stack_stride = AP_STACK_STRIDE;
+    __ap_guard_size = GUARD_SIZE;
+    __ap_stack_size = AP_STACK_SIZE;
+    __ap_fault_stack_size = AP_FAULT_STACK_SIZE;
 
     /DISCARD/ : {
         *(.eh_frame)

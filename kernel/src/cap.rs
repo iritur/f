@@ -141,7 +141,34 @@ struct Slot {
     object: u64,
     /// See [`Found::extent`].
     extent: u64,
+    /// Where this capability's object has been mapped, or [`NOT_MAPPED`].
+    ///
+    /// The one thing in a slot that is not about *naming*, and it is here for a
+    /// reason worth stating rather than deducing. Revocation withdraws a name;
+    /// a mapping the withdrawn name authorised is a translation, and nothing
+    /// else in this kernel knows those two are the same object. Recording the
+    /// address in the slot is what makes revocation able to reach the mapping —
+    /// and having it *in the slot* rather than in a table beside it is what
+    /// stops the two disagreeing, which is the argument the parent link already
+    /// makes about child lists.
+    ///
+    /// One address and not a list. A capability may be mapped once here, and a
+    /// second attempt is refused rather than recorded. That is a real bound and
+    /// it is not the general answer — a frame capability legitimately mapped at
+    /// two addresses is an ordinary thing to want — but the general answer is a
+    /// mapping database, which is a structure with an owner and a quota, which
+    /// is E1's `Untyped`. Refusing is the honest small version: it cannot lose
+    /// a mapping.
+    mapped: u64,
 }
+
+/// What [`Slot::mapped`] says when the capability authorises no mapping.
+///
+/// Not zero, because zero is an address — the null page is unmapped in every
+/// process this kernel runs, but "unmapped in practice" is not the same claim
+/// as "cannot be an address", and a sentinel that is also a legal value is the
+/// bug this constant exists to not have.
+const NOT_MAPPED: u64 = u64::MAX;
 
 impl Slot {
     /// An empty slot that has never held anything.
@@ -152,11 +179,39 @@ impl Slot {
         parent: Handle::NULL.bits(),
         object: 0,
         extent: 0,
+        mapped: NOT_MAPPED,
     };
 
     /// Is anything here now?
     const fn occupied(self) -> bool {
         self.kind != 0
+    }
+}
+
+/// What a revocation withdrew.
+///
+/// Two answers, because they are two different facts about the same event: how
+/// many capabilities stopped existing, which is what a process is told, and
+/// which mappings those capabilities had authorised, which is what the frame
+/// still has work to do about.
+#[derive(Clone, Copy)]
+pub struct Revoked {
+    /// How many capabilities were cleared.
+    pub cleared: u32,
+    pages: [u64; TABLE_SLOTS],
+    count: usize,
+}
+
+impl Revoked {
+    /// The addresses whose mappings the withdrawn capabilities authorised.
+    ///
+    /// Bounded by [`TABLE_SLOTS`] because a mapping is recorded in a slot and
+    /// there are only so many slots — so this cannot be a list that outgrows
+    /// the array it is in, which is the failure mode a revocation sweep must
+    /// not have.
+    #[must_use]
+    pub fn pages(&self) -> &[u64] {
+        self.pages.get(..self.count).unwrap_or(&[])
     }
 }
 
@@ -186,6 +241,24 @@ static TABLE: PerCpu<Table> = PerCpu::new(Table::EMPTY);
 #[must_use]
 pub fn mine() -> *mut Table {
     TABLE.mine()
+}
+
+/// A pointer to another core's table.
+///
+/// The escape hatch [`PerCpu::at`] documents, used for the one case it names:
+/// a core cannot fill its own first capability table, because everything that
+/// would go in it — an address space, frames, an untyped region — comes from an
+/// allocator that belongs to a core that is already running. So the boot
+/// processor fills it before handing the core a process. See
+/// `process::prepare`.
+///
+/// # Panics
+///
+/// If `cpu` is not a core this kernel shards for, which is [`PerCpu::at`]'s
+/// panic and its reasoning.
+#[must_use]
+pub fn of(cpu: usize) -> *mut Table {
+    TABLE.at(cpu)
 }
 
 impl Table {
@@ -255,7 +328,7 @@ impl Table {
     /// that happened to it.
     pub fn inspect(&self, handle: Handle) -> Result<Found, i32> {
         let index = self.resolve(handle)?;
-        let slot = self.slots.get(index).copied().ok_or(no_such())?;
+        let slot = self.slot(index)?;
         let kind = CapType::from_wire(slot.kind).ok_or(no_such())?;
         Ok(Found { kind, rights: slot.rights, object: slot.object, extent: slot.extent })
     }
@@ -316,20 +389,66 @@ impl Table {
         self.place(kind, asked, object, extent, handle)
     }
 
-    /// Clear everything derived from a capability, however deep.
+    /// Clear everything derived from a capability, however deep, and say which
+    /// mappings went with it.
     ///
     /// The capability itself survives: revoke withdraws what was handed on, and
     /// a holder that wants to give up its own authority is asking a different
-    /// question. Returns how many capabilities were cleared.
+    /// question.
+    ///
+    /// # Why the mappings come back rather than being undone here
+    ///
+    /// Because undoing one is a page table edit followed by an interrupt to
+    /// every other core, and this file knows about neither. It knows which
+    /// authority has been withdrawn, which is the question it is for; the
+    /// caller knows which address space and which cores. `process::withdraw` is
+    /// where the two meet.
     ///
     /// # Errors
     ///
     /// As [`Table::inspect`], plus [`error::authority::RIGHT_NOT_HELD`] when
     /// the capability does not carry [`rights::REVOKE`].
-    pub fn revoke(&mut self, handle: Handle) -> Result<u32, i32> {
+    pub fn revoke(&mut self, handle: Handle) -> Result<Revoked, i32> {
         self.invoke_any(handle, rights::REVOKE)?;
         let doomed = self.descendants(handle);
-        Ok(self.sweep(doomed))
+
+        let mut withdrawn = Revoked { cleared: 0, pages: [0; TABLE_SLOTS], count: 0 };
+        for index in 0..TABLE_SLOTS {
+            if doomed & bit(index) == 0 {
+                continue;
+            }
+            if let Some(slot) = self.slots.get(index)
+                && slot.mapped != NOT_MAPPED
+                && let Some(at) = withdrawn.pages.get_mut(withdrawn.count)
+            {
+                *at = slot.mapped;
+                withdrawn.count += 1;
+            }
+        }
+
+        withdrawn.cleared = self.sweep(doomed);
+        Ok(withdrawn)
+    }
+
+    /// Record that this capability's object is now mapped at `virt`.
+    ///
+    /// Called by the frame after a mapping has actually been made, never
+    /// before: a slot that recorded an address the tables do not have would
+    /// make the next revoke unmap somebody else's page.
+    ///
+    /// # Errors
+    ///
+    /// As [`Table::inspect`], plus [`error::argument::BAD_ADDRESS`] when this
+    /// capability is already mapped somewhere. [`Slot::mapped`] says why that
+    /// is a refusal rather than a list.
+    pub fn note_mapping(&mut self, handle: Handle, virt: u64) -> Result<(), i32> {
+        let index = self.resolve(handle)?;
+        let slot = self.slots.get_mut(index).ok_or(no_such())?;
+        if slot.mapped != NOT_MAPPED {
+            return Err(error::pack(error::ARGUMENT, error::argument::BAD_ADDRESS));
+        }
+        slot.mapped = virt;
+        Ok(())
     }
 
     // ---- the parts the flawed fixtures in `properties` also build from -----
@@ -347,10 +466,61 @@ impl Table {
         }
         let index = handle.index() as usize;
         // Checked, never masked. A mask is the bug this returns an error for.
+        //
+        // Absent under `mutate-unchecked-index`, which is the deliberate defect
+        // property five's mutation harness builds. See [`Table::slot`].
+        #[cfg(not(feature = "mutate-unchecked-index"))]
         if index >= TABLE_SLOTS {
             return Err(no_such());
         }
         self.resolve_at(index, handle)
+    }
+
+    /// The slot at `index`, or the refusal an index that names none earns.
+    ///
+    /// The one place this table is subscripted, which is what makes property
+    /// five checkable at all: *a process cannot panic the kernel by trying*
+    /// reduces, in this module, to two constructs — an index that was masked
+    /// rather than checked, and one that was neither — and both of them are
+    /// here.
+    #[cfg(not(feature = "mutate-unchecked-index"))]
+    fn slot(&self, index: usize) -> Result<Slot, i32> {
+        self.slots.get(index).copied().ok_or(no_such())
+    }
+
+    /// The same lookup with one deliberate defect in it: the index is used
+    /// rather than checked.
+    ///
+    /// # Why this is in the shipped source and not in a test
+    ///
+    /// Because it is the half of E0-P08 a fixture cannot be. The other four
+    /// properties have a flawed table in [`properties::Flawed`] that breaks them
+    /// at run time and is caught by [`properties::check`]; this one cannot,
+    /// because a fixture that panics takes the machine down rather than being
+    /// caught, and there is no host harness to catch it in — `kernel/Cargo.toml`
+    /// says why there is not.
+    ///
+    /// So the mutation is a *build* rather than a fixture. `cargo xtask mutate`
+    /// builds the kernel with `mutate-unchecked-index`, boots it into the
+    /// forging sweep, and requires the boot to go red with a kernel panic; then
+    /// builds it without and requires the same boot to go green. That pair is
+    /// what makes the property falsifiable, and neither half of it means
+    /// anything alone.
+    ///
+    /// It differs from the real lookup in exactly one step, which is the lesson
+    /// E0-B11 recorded the hard way: a fixture that breaks two things at once is
+    /// caught by whichever check notices first, and the check it was written for
+    /// stays unexercised. Everything else about a lookup — the generation, the
+    /// occupancy, the refusal codes — is shared with the function above.
+    ///
+    /// The `allow` is the marker. The module denies `indexing_slicing` outright
+    /// so that this construct cannot be written by accident; writing it on
+    /// purpose takes an attribute that says so, and `cargo xtask lint-mutations`
+    /// checks that no build has the feature on by default.
+    #[cfg(feature = "mutate-unchecked-index")]
+    #[allow(clippy::indexing_slicing, reason = "the deliberate defect; see the doc comment")]
+    fn slot(&self, index: usize) -> Result<Slot, i32> {
+        Ok(self.slots[index])
     }
 
     /// The rest of a lookup, once the index is known to be one.
@@ -361,7 +531,7 @@ impl Table {
     /// check it was written for would stay unexercised — which is exactly the
     /// failure `properties::self_test` reports as a wrong property.
     fn resolve_at(&self, index: usize, handle: Handle) -> Result<usize, i32> {
-        let slot = *self.slots.get(index).ok_or(no_such())?;
+        let slot = self.slot(index)?;
 
         if handle.generation() != slot.generation {
             // Older than the slot means it named an occupant that has been
@@ -410,6 +580,7 @@ impl Table {
             slot.object = object;
             slot.extent = extent;
             slot.parent = parent.bits();
+            slot.mapped = NOT_MAPPED;
             let generation = slot.generation;
             // `index` is below TABLE_SLOTS, which is far below u16::MAX.
             return Ok(Handle::new(index as u16, generation));
@@ -507,6 +678,7 @@ impl Table {
         slot.object = 0;
         slot.extent = 0;
         slot.parent = Handle::NULL.bits();
+        slot.mapped = NOT_MAPPED;
         slot.generation = slot.generation.saturating_add(1);
     }
 }
@@ -641,7 +813,13 @@ pub mod properties {
             Table::derive(self, handle, asked)
         }
         fn revoke(&mut self, handle: Handle) -> Result<u32, i32> {
-            Table::revoke(self, handle)
+            // The properties are about authority, not about address spaces, so
+            // the mappings a revocation withdrew are dropped here rather than
+            // checked. A flawed table that got them wrong would be caught by
+            // the property it broke — every one of the five is stated in terms
+            // of what a handle resolves to — and there is no fixture that could
+            // hold a mapping, because these tables belong to no process.
+            Table::revoke(self, handle).map(|revoked| revoked.cleared)
         }
     }
 
@@ -1157,7 +1335,7 @@ pub mod properties {
                 Ok(found) if found.kind == expected => {}
                 _ => return Err(Failure::Types("a derivation produced the wrong type")),
             }
-            if types.revoke(handle) != Ok(1) {
+            if types.revoke(handle).map(|revoked| revoked.cleared) != Ok(1) {
                 return Err(Failure::Types(
                     "revoking a capability did not withdraw the one derived from it",
                 ));

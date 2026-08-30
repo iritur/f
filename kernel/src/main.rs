@@ -28,6 +28,7 @@ pub mod jitter;
 pub mod mem;
 pub mod percpu;
 pub mod process;
+pub mod smp;
 
 use core::panic::PanicInfo;
 
@@ -318,6 +319,50 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     }
     kprintln!("  env contract  arithmetic ok, seeded ok, hardware ok");
 
+    // E0-B10. Every other core the machine has, brought up to the same point
+    // this one reached above — its own descriptor tables, its own local APIC,
+    // its own system-call entry — and then left waiting for something to do.
+    //
+    // Nothing an arriving core does is printed by the core that does it. Two
+    // cores writing to one serial port produce interleaved bytes and the boot
+    // log is a fixture, so a started core records what it found in its own
+    // shards and this is where the count is said.
+    //
+    // SAFETY: the boot processor, once, with the kernel's address space active,
+    // `frames` rebound onto its direct map, after `apic::init` and
+    // `apic::calibrate` on this core, and with interrupts disabled.
+    match unsafe { smp::start(&mut frames, &space, clocks) } {
+        Ok(found) => {
+            if found.cores == 1 {
+                kprintln!("  cores         1 — this machine has no other, and nothing waits");
+            } else {
+                kprintln!(
+                    "  cores         {} of {} shards, each with its own tables and stacks",
+                    found.cores,
+                    percpu::MAX_CPUS
+                );
+            }
+            // Said rather than left implicit. A machine with more cores than
+            // this kernel shards for runs correctly on the ones it started and
+            // leaves the rest asleep, and a log that reported only the number
+            // started would be hiding which of those two it was.
+            if found.present > found.cores {
+                kprintln!(
+                    "  note          the processor reports {} — {} left asleep, past MAX_CPUS",
+                    found.present,
+                    found.present - found.cores
+                );
+            }
+        }
+        Err(why) => {
+            kprintln!("FAIL: bringing up a core: {}", why.message());
+            if let Some(cpu) = why.core() {
+                kprintln!("  core          {cpu}");
+            }
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+
     // M4. The five properties, against a real table and against five tables
     // broken on purpose — one per property. This runs before ring 3 exists on
     // this boot, and that order is the point: the negative suite from ring 3
@@ -389,6 +434,19 @@ const PROBE_TICKS: u64 = 100;
 /// why at length.
 const USER_TICKS: u64 = 8;
 
+/// How long the core that built a process waits for the core running it, in
+/// microseconds.
+///
+/// Five seconds, which is four orders of magnitude past the eight milliseconds
+/// the process is meant to take. It is not a timeout on a slow process — the
+/// process has its own bound, and it is the one that decides how long ring 3
+/// gets — it is the answer to a core that has stopped answering at all, and the
+/// only thing on the other side of it is a boot that hangs with no output.
+///
+/// A count of *time* and not of ticks, unlike everything else about the window,
+/// because what is being waited for is a core rather than a schedule.
+const PROCESS_MICROS: u64 = 5_000_000;
+
 /// Measure both clocks against the 8254 and say which mechanism will drive the
 /// timer.
 ///
@@ -427,7 +485,8 @@ fn calibrate() -> arch::x86_64::apic::Clocks {
     clocks
 }
 
-/// Open a timer window, run a process inside it, and report both.
+/// Open a timer window, run every process this boot has inside it, and report
+/// all of it afterwards.
 ///
 /// # The two runs, and why they are still two
 ///
@@ -440,22 +499,41 @@ fn calibrate() -> arch::x86_64::apic::Clocks {
 /// should — `claims/0002-timer-jitter.toml` is where a measurement becomes
 /// something anybody is allowed to quote.
 ///
-/// # Why the process runs *here*
+/// # Why the processes run on another core
 ///
-/// M3's exit criterion is not that a process runs and not that the timer runs.
-/// It is that both are true at once: a process runs, faults deliberately, and
-/// is killed cleanly *while core 0 holds its jitter bound throughout*. So the
-/// process is entered with the timer already armed, ticks taken out of ring 3
-/// are counted separately from ticks in total, and the same assertion that has
-/// covered every boot since M2 — every tick the schedule asked for arrived —
-/// now covers a window that contained user space.
+/// M3's exit criterion was that a process runs, faults deliberately and is
+/// killed cleanly *while core 0 holds its jitter bound throughout*. It was met
+/// with both happening on one core, which is the strongest version of the claim
+/// available with one core and a weaker version of the question: a timer that
+/// keeps its schedule across a privilege-level transition is not the same
+/// property as a timer that keeps its schedule while another core is busy.
 ///
-/// What this cannot assert is the bound itself. The 5 µs p99 is not met in this
-/// environment and was not met before user space existed either: QEMU's TCG
-/// backend emulates the timer against a host clock it does not control. E0-P06
-/// owns that number and the claim stays `pending`. What is asserted here is the
-/// part that is this milestone's to break — that ring 3 did not cost the
-/// schedule a tick.
+/// E0-B10 asks the second question. Core 0 opens this window and does nothing
+/// else; the processes are built here, handed to another core, and run there
+/// inside timer windows that core opens for itself. The two schedules are
+/// independent — separate local APICs, separate deadlines, separate histograms
+/// — and neither is a term in the other. What is asserted is what it always
+/// was: every tick this core's schedule asked for arrived.
+///
+/// On a machine with one core the windows are sequential rather than
+/// concurrent, because one core cannot hold two. The processes run first, each
+/// in a window of its own, and this one opens afterwards. That is a weaker boot
+/// and the log says which shape it was.
+///
+/// # Why two processes
+///
+/// The first is the component the loader placed in memory, which from E0-B10 is
+/// `user/init`: ordinary Rust, compiled and linked separately, with no `unsafe`
+/// in it, that the kernel does not contain and cannot see inside. The second is
+/// the frame's own adversary, which provokes whatever the command line asked
+/// for.
+///
+/// Running both on every boot is deliberate. It means the second process starts
+/// on a core where a first one has already lived and died, so every boot checks
+/// what M4 could only assert: that a table cleared between processes does not
+/// let the second resolve a handle the first held. The generations are what make
+/// that true and `cap::Table::clear_all` is where it is written down; this is
+/// where it is exercised.
 fn timed_window(
     boot: &BootInfo,
     frames: &mut mem::FrameAllocator,
@@ -475,10 +553,15 @@ fn timed_window(
         }
     }
 
-    // SAFETY: boot processor, once on this core, after `gdt::init` installed
-    // every descriptor the selectors written here name, and before anything
-    // enters ring 3.
-    unsafe { arch::x86_64::ring3::init() };
+    let component = component(boot);
+    match component {
+        Some(program) => kprintln!(
+            "  init          {} bytes from boot module 1 of {}",
+            program.len(),
+            boot.modules().len()
+        ),
+        None => kprintln!("  init          no boot module; only the frame's own program runs"),
+    }
 
     let asked = process::Provoke::chosen(boot);
     let provoke = if asked.needs_no_execute() && !features.nx {
@@ -498,43 +581,220 @@ fn timed_window(
         None => PROBE_TICKS,
     };
 
-    // SAFETY: this core was brought up and calibrated above, `idt::init` has
-    // installed the timer's vector, and interrupts are disabled on entry —
-    // `start` enables them and `stop` disables them again.
-    let window = match unsafe { arch::x86_64::apic::start(TIMER_HZ, target) } {
-        Ok(window) => window,
-        Err(why) => {
-            kprintln!("FAIL: timer: {}", why.message());
-            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
-        }
-    };
+    // The core that will hold the processes. Another one where there is another
+    // one, and this one where there is not.
+    let me = arch::x86_64::current_cpu();
+    let worker = if smp::started() > 1 { smp::first_worker() } else { me };
+    if worker == me {
+        // Only reachable on a single-core machine, and only there does this
+        // core need a system-call entry: the transition happens on the core the
+        // process runs on, and on every other boot that is not this one.
+        // SAFETY: boot processor, once on this core, after `gdt::init` installed
+        // every descriptor the selectors written there name, and before anything
+        // enters ring 3 on it.
+        unsafe { arch::x86_64::ring3::init() };
+    }
 
     // Nothing between here and `stop` prints. A serial port at 115 200 baud
     // spends most of a millisecond on a line, which at a kilohertz is most of a
     // tick interval — so a window that logged what happened inside it would be
-    // a measurement of the logging.
-    //
-    // SAFETY: the boot processor, with the kernel's address space in `CR3`,
-    // `frames` rebound onto its direct map, `ring3::init` done above, and
-    // interrupts enabled by `start` with the timer armed.
-    let outcome =
-        unsafe { process::run(frames, space, features, provoke, USER_TICKS, window.giveup()) };
+    // a measurement of the logging. Both reports are collected and said
+    // afterwards.
+    let concurrent = worker != me;
+    let window = if concurrent {
+        // This window is open across the whole of the other core's, which is
+        // the property the milestone is about. Interrupts are enabled from
+        // here, and that is not incidental either: the core running a process
+        // may have to ask this one to forget a mapping, and a core with
+        // interrupts disabled cannot answer that.
+        //
+        // SAFETY: this core was brought up and calibrated, `idt::init` has
+        // installed the timer's vector, and interrupts are disabled on entry —
+        // `start` enables them and `stop` disables them again.
+        match unsafe { arch::x86_64::apic::start(TIMER_HZ, target) } {
+            Ok(window) => Some(window),
+            Err(why) => {
+                kprintln!("FAIL: timer: {}", why.message());
+                arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+            }
+        }
+    } else {
+        None
+    };
 
-    // SAFETY: on the core `start` was called on, while its run is still armed.
-    let _ = unsafe { arch::x86_64::apic::wait(&window) };
-    // SAFETY: as above, once per `start`.
-    let summary = unsafe { arch::x86_64::apic::stop(&window) };
+    let first = component.map(|program| {
+        let plan = process::Plan {
+            program,
+            // The expectation of a process that does nothing wrong, which is
+            // exactly what this component is written to be. It is the same
+            // expectation the frame already had, rather than a second one:
+            // `user/init/src/component.rs` says why that matters.
+            provoke: process::Provoke::Exit,
+            wanted: USER_TICKS,
+            hz: TIMER_HZ,
+            target,
+            cpu: worker,
+        };
+        run_one(frames, space, features, clocks, plan)
+    });
 
-    let report = match outcome {
-        Ok(report) => report,
+    let plan = process::Plan {
+        program: arch::x86_64::probe::program(),
+        provoke,
+        wanted: USER_TICKS,
+        hz: TIMER_HZ,
+        target,
+        cpu: worker,
+    };
+    let second = run_one(frames, space, features, clocks, plan);
+
+    let summary = match window {
+        Some(window) => {
+            // SAFETY: on the core `start` was called on, while its run is still
+            // armed.
+            let _ = unsafe { arch::x86_64::apic::wait(&window) };
+            // SAFETY: as above, once per `start`.
+            unsafe { arch::x86_64::apic::stop(&window) }
+        }
+        // One core: the processes have finished and their windows are closed,
+        // so this one has nothing to overlap with and simply runs.
+        None => run_window(target),
+    };
+
+    if let Some(report) = first {
+        kprintln!(
+            "  init process  core {}, {} call(s) answered, {} refused, ended with status {}",
+            report.cpu,
+            report.caps.ok,
+            report.caps.refused(),
+            match report.death {
+                process::Death::Exited(status) => status,
+                _ => u64::MAX,
+            }
+        );
+        if let Err(why) = report.verdict(process::Provoke::Exit, USER_TICKS) {
+            kprintln!("FAIL: init: {why}");
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+
+    report(&second, provoke);
+
+    // A short run is a failure however it is dressed up: the timer stopped
+    // firing and the histogram is of whatever happened before it did. Since
+    // E0-B10 it is also the assertion that a core holding a process at ring 3
+    // cost this core's schedule nothing — the window it covers is the one the
+    // other core ran inside.
+    if summary.ticks != summary.target {
+        kprintln!("FAIL: timer stopped after {} of {} ticks", summary.ticks, summary.target);
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+
+    if seconds.is_none() {
+        kprintln!(
+            "  timer         {} ticks at {} Hz, {}",
+            summary.ticks,
+            summary.hz,
+            if concurrent { "across another core's ring 3" } else { "after ring 3, on one core" }
+        );
+        return;
+    }
+
+    kprintln!();
+    kprintln!(
+        "TIMER — {} ticks at {} Hz via {}",
+        summary.ticks,
+        summary.hz,
+        summary.backend.label()
+    );
+    kprintln!("    tsc           {} kHz", summary.tsc_khz);
+    kprintln!("    apic timer    {} kHz", clocks.apic_khz);
+    kprintln!("    from ring 3   {} tick(s) on core {}", second.ticks, second.cpu);
+    kprintln!("    missed        {} tick(s) a full period or more late", summary.missed);
+
+    let mut serial = arch::x86_64::serial::Serial;
+    summary.late.report(summary.tsc_khz, &mut serial);
+    kprintln!();
+}
+
+/// The program the loader placed in memory, if it placed one.
+///
+/// # Why a dropped module is fatal here and not at M1
+///
+/// `BootInfo` counts the modules it could not keep rather than refusing the
+/// handoff, because at M1 nothing depended on a module's contents and the
+/// memory they occupy was reserved either way. This is the milestone that
+/// depends on one, and a module the kernel did not keep is a module whose
+/// memory *was not* reserved — so the frame allocator may already have handed
+/// it to somebody. Booting past that means reading a component out of memory
+/// something else is writing.
+fn component(boot: &BootInfo) -> Option<&'static [u8]> {
+    if boot.modules_dropped() > 0 {
+        kprintln!(
+            "FAIL: the loader placed {} module(s) this kernel did not keep, so their memory \
+             was never reserved",
+            boot.modules_dropped()
+        );
+        kprintln!("  raise         arch::x86_64::multiboot::MAX_MODULES");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+
+    let module = *boot.modules().first()?;
+    // SAFETY: the direct map is live and `frames` was rebound onto it long
+    // before this runs, and every module is in the reserved list — see
+    // `reserved_ranges` — so nothing else owns these bytes.
+    Some(unsafe { module.bytes() })
+}
+
+/// Build one process, hand it to a core, and take its memory back.
+///
+/// Prints nothing: it runs inside the timer window, and the window is the one
+/// thing in this boot that a serial port would measurably disturb.
+fn run_one(
+    frames: &mut mem::FrameAllocator,
+    space: &paging::AddressSpace,
+    features: paging::Features,
+    clocks: arch::x86_64::apic::Clocks,
+    plan: process::Plan,
+) -> process::Report {
+    // SAFETY: boot processor, kernel address space in `CR3`, `frames` rebound
+    // onto its direct map, and `plan.cpu` a core that is up and idle. `frames`
+    // is not touched again until `reap`.
+    let built = unsafe { process::prepare(frames, space, features, plan) };
+    let prepared = match built {
+        Ok(prepared) => prepared,
         Err(why) => {
             kprintln!("FAIL: process: {}", why.message());
             arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
         }
     };
 
+    // SAFETY: `plan.cpu` reports ready, everything `process::execute` depends on
+    // was put in its shards by `prepare`, and interrupts are enabled unless this
+    // is the single-core shape — where they are disabled, which is what the
+    // same-core branch of `run_on` requires.
+    let ran = unsafe { smp::run_on(plan.cpu, space.root(), clocks.tsc_khz, PROCESS_MICROS) };
+    if let Err(cpu) = ran {
+        kprintln!("FAIL: core {cpu} did not finish the process it was given");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+
+    // SAFETY: on the core that prepared it, after the core that ran it has
+    // reported finished — which is what `run_on` returning `Ok` means.
+    match unsafe { process::reap(frames, prepared) } {
+        Ok(report) => report,
+        Err(why) => {
+            kprintln!("FAIL: process: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+}
+
+/// Say what the frame's own program did, and check it did what it was told.
+fn report(report: &process::Report, provoke: process::Provoke) {
     kprintln!(
-        "  user space    root {:#018x}, {} kernel slot(s) shared",
+        "  user space    core {}, root {:#018x}, {} kernel slot(s) shared",
+        report.cpu,
         report.root,
         report.shared_slots
     );
@@ -559,7 +819,7 @@ fn timed_window(
             "  user death    asked to end with status {status}, after {} refused call(s)",
             report.refused
         ),
-        // `process::run` turns this into `Error::NoDeath` before it returns, so
+        // `process::reap` turns this into `Error::NoDeath` before it returns, so
         // reaching it means the two paths disagree about disagreeing.
         process::Death::Running => {
             kprintln!("FAIL: the process ended and the frame did not notice");
@@ -574,36 +834,28 @@ fn timed_window(
         kprintln!("FAIL: {why}");
         arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
     }
+}
 
-    // A short run is a failure however it is dressed up: the timer stopped
-    // firing and the histogram is of whatever happened before it did. It is
-    // also, since M3, the assertion that ring 3 did not cost the schedule
-    // anything — the window it covers is the one the process ran inside.
-    if summary.ticks != summary.target {
-        kprintln!("FAIL: timer stopped after {} of {} ticks", summary.ticks, summary.target);
-        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
-    }
-
-    if seconds.is_none() {
-        kprintln!("  timer         {} ticks at {} Hz", summary.ticks, summary.hz);
-        return;
-    }
-
-    kprintln!();
-    kprintln!(
-        "TIMER — {} ticks at {} Hz via {}",
-        summary.ticks,
-        summary.hz,
-        summary.backend.label()
-    );
-    kprintln!("    tsc           {} kHz", summary.tsc_khz);
-    kprintln!("    apic timer    {} kHz", clocks.apic_khz);
-    kprintln!("    from ring 3   {} tick(s) of the run", report.ticks);
-    kprintln!("    missed        {} tick(s) a full period or more late", summary.missed);
-
-    let mut serial = arch::x86_64::serial::Serial;
-    summary.late.report(summary.tsc_khz, &mut serial);
-    kprintln!();
+/// Open this core's timer window, wait it out and close it.
+///
+/// Only the single-core shape uses it, and only because there the window has
+/// nothing to overlap with: the processes have already run and finished, so
+/// there is nothing to do inside it but wait.
+fn run_window(target: u64) -> arch::x86_64::apic::Summary {
+    // SAFETY: this core was brought up and calibrated, `idt::init` has installed
+    // the timer's vector, and interrupts are disabled on entry —
+    // `process::execute` left them that way when it stopped its own window.
+    let window = match unsafe { arch::x86_64::apic::start(TIMER_HZ, target) } {
+        Ok(window) => window,
+        Err(why) => {
+            kprintln!("FAIL: timer: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+    // SAFETY: on the core `start` was called on, while its run is still armed.
+    let _ = unsafe { arch::x86_64::apic::wait(&window) };
+    // SAFETY: as above, once per `start`.
+    unsafe { arch::x86_64::apic::stop(&window) }
 }
 
 /// Fault deliberately, if the command line asked.
@@ -756,9 +1008,12 @@ fn report_memory(magic: u32, info: u32) -> BootInfo {
         );
     }
     if boot.modules_dropped() > 0 {
-        // Not fatal yet, because nothing depends on a module at M1. It becomes
-        // fatal at E0-B10, where the first one is loaded and where an
-        // unreserved module is memory handed out from under its owner.
+        // Noted here and fatal later, in `component`, which is where a module's
+        // contents are first depended on. Reporting it twice is deliberate: the
+        // number belongs in the memory report beside the modules it is about,
+        // and the refusal belongs where the dependency is — an unreserved
+        // module is memory handed out from under its owner, and the sentence
+        // that says so should be next to the code that would read it.
         kprintln!(
             "  note          {} module(s) beyond what is tracked, and NOT reserved",
             boot.modules_dropped()

@@ -124,6 +124,8 @@ fn main() -> ExitCode {
         "fault" => fault(args.get(1).map(String::as_str)),
         "user" => user(args.get(1).map(String::as_str)),
         "cap" => cap(args.get(1).map(String::as_str)),
+        "init" => init_image().map(|path| println!("{}", relative(&path))),
+        "mutate" => mutate(),
         "timer" => timer(args.get(1).map(String::as_str)),
         "test" => test(),
         "verify" => verify(),
@@ -132,6 +134,7 @@ fn main() -> ExitCode {
         "lint-licensing" => lint_licensing(),
         "lint-unsafe" => lint_unsafe(),
         "lint-percpu" => lint_percpu(),
+        "lint-mutations" => lint_mutations(),
         "claims" => claims_list(),
         "claim" => claim_run(args.get(1).map(String::as_str)),
         "bench" => bench(args.get(1).map(String::as_str)),
@@ -169,12 +172,19 @@ cargo xtask <command>
                      text, stack, priv, call or exit. All seven with no argument
   cap [kind]         Boot into a process that tries to escape its capabilities
                      and check the frame refuses it: grant, unowned, forge,
-                     stale, rights, type or flood. All seven with no argument
+                     stale, rights, type, flood or unmap. All eight with no
+                     argument
+  init               Build user/init into the flat image the loader hands over,
+                     and check it is one
+  mutate             Build the kernel with a deliberate defect, boot it, and
+                     require the boot to go red — then require the same boot to
+                     go green without it
   timer [seconds]    Run the 1 kHz timer and print a jitter histogram. Sixty
                      seconds by default. A measurement, not an assertion
   test               Workspace tests on both x86-64 and AArch64
-  verify             lint, then test, then boot. The one command a session runs
-                     to check its own work before a human is asked to
+  verify             lint, then test, then boot, then mutate. The one command a
+                     session runs to check its own work before a human is asked
+                     to
   lint               Every policy check below, in order
 
   lint-determinism   No direct source of nondeterminism outside the allow-list
@@ -182,6 +192,7 @@ cargo xtask <command>
                      permissive tree
   lint-unsafe        No `unsafe` outside the frame crates
   lint-percpu        No kernel-global mutable state outside `PerCpu`
+  lint-mutations     No deliberate defect is on by default
 
   claims             List the claims registry and whether each one gates
   claim <name>       Run one claim's workload and report against its threshold
@@ -265,17 +276,32 @@ fn kernel_elf32() -> PathBuf {
 }
 
 fn build() -> Result<(), String> {
-    sh(
-        "cargo",
-        &[
-            "build",
-            "-p",
-            "f-kernel",
-            "--target",
-            KERNEL_TARGET,
-            "-Zbuild-std=core,compiler_builtins",
-        ],
-    )?;
+    build_with(&[])
+}
+
+/// Build the kernel with one of its deliberate defects turned on.
+///
+/// The only caller that passes anything is [`mutate`], and the feature list is
+/// a parameter rather than a flag because there will be more than one defect:
+/// each property that cannot have a fixture needs a build that breaks it, and
+/// they have to be buildable one at a time. A build with two defects in it is
+/// caught by whichever one the boot notices first, which is the failure E0-B11
+/// recorded about fixtures and which applies here for the same reason.
+fn build_with(features: &[&str]) -> Result<(), String> {
+    let mut args = vec![
+        "build",
+        "-p",
+        "f-kernel",
+        "--target",
+        KERNEL_TARGET,
+        "-Zbuild-std=core,compiler_builtins",
+    ];
+    let list = features.join(",");
+    if !features.is_empty() {
+        args.push("--features");
+        args.push(&list);
+    }
+    sh("cargo", &args)?;
     to_elf32()
 }
 
@@ -311,23 +337,255 @@ fn to_elf32() -> Result<(), String> {
     }
 }
 
+/// Where the `init` image is built, and where the boot loader is told to find
+/// it.
+///
+/// Its own target directory, because it is compiled with different flags from
+/// everything else in the workspace — see [`init_image`] — and two sets of flags
+/// sharing a target directory is two full rebuilds every time the build
+/// alternates between them.
+fn init_dir() -> PathBuf {
+    root().join("target").join("init")
+}
+
+/// The `init` image, as the loader will hand it over: a flat blob, no headers.
+fn init_bin() -> PathBuf {
+    init_dir().join("init.bin")
+}
+
+/// Where a component's text is mapped. `kernel::process::TEXT`.
+///
+/// Stated here as well as there and in `user/init/link.ld` because the three
+/// are linked separately and there is nothing to share a constant through. The
+/// check in [`init_image`] is what makes the duplication safe: it reads the
+/// address the linker actually used.
+const INIT_TEXT: u64 = 0x0040_0000;
+
+/// How large a component's image may be.
+///
+/// One page, because the frame maps one page of text for it. A component that
+/// outgrows this needs a loader that maps as many pages as its headers ask for,
+/// which is E5 and a real ELF loader; until then the bound is real and the
+/// build says so rather than the boot.
+const INIT_MAX: u64 = 4096;
+
+/// Build `user/init` into a flat image and check that it is one.
+///
+/// # Why this is not `cargo build`
+///
+/// Three reasons, and each of them is why the step exists rather than being a
+/// flag on the kernel's own build.
+///
+/// The flags differ. The kernel is linked into the top two gibibytes and uses
+/// the `kernel` code model; a component sits at four mebibytes and uses the
+/// small one, and `.cargo/config.toml` cannot express both for one target. So
+/// `RUSTFLAGS` is set here, which replaces the target's configured flags
+/// wholesale, and the build gets a target directory of its own so the two do
+/// not invalidate each other.
+///
+/// The crate is a library, not a binary. `user/init` forbids unsafe code, so it
+/// cannot write `#[unsafe(no_mangle)]` and therefore cannot be a binary with an
+/// entry point. It is linked here instead, by `user/init/link.ld`, which finds
+/// the entry by the section its function was compiled into.
+///
+/// And the result has to be checked. Three things are asserted, all of which
+/// would otherwise be discovered at boot as a process that does something
+/// inexplicable: that the symbol at the image's first byte is the entry rather
+/// than whatever the linker happened to place there, that there is no writable
+/// data — the text page is mapped read-only, so a mutable global would fault on
+/// first write — and that the whole thing fits in the one page the frame maps.
+fn init_image() -> Result<PathBuf, String> {
+    let lld = llvm_tool("rust-lld")?;
+    let objcopy = llvm_tool("llvm-objcopy")?;
+    let nm = llvm_tool("llvm-nm")?;
+
+    let dir = init_dir();
+    let target = dir.to_str().ok_or("the init target directory is not valid UTF-8")?.to_string();
+
+    // `relocation-model=static` for the same reason the kernel uses it: this is
+    // a fixed-address image, and without it the crate compiles as position
+    // independent and wants a relocation table nothing will process.
+    let status = Command::new("cargo")
+        .args([
+            "build",
+            "-p",
+            "f-init",
+            "--target",
+            KERNEL_TARGET,
+            // Not `--release`. The root Cargo.toml says at length why a
+            // component's image gets a profile of its own, and the short
+            // version is that link-time optimisation leaves an rlib with no
+            // machine code in it — which links to an empty image and looks
+            // like the entry point having moved.
+            "--profile",
+            "init",
+            "-Zbuild-std=core,compiler_builtins",
+            "--target-dir",
+            &target,
+        ])
+        .env("RUSTFLAGS", "-C relocation-model=static")
+        .current_dir(root())
+        .status()
+        .map_err(|e| format!("could not run cargo: {e}"))?;
+    if !status.success() {
+        return Err("building user/init failed".into());
+    }
+
+    let archive = dir.join(KERNEL_TARGET).join("init").join("libf_init.rlib");
+    if !archive.exists() {
+        return Err(format!(
+            "user/init did not produce {}\n\n\
+             That is the library `link.ld` links. If it is missing, the crate has\n\
+             stopped being a library — see the note in user/init/Cargo.toml.",
+            relative(&archive)
+        ));
+    }
+
+    let elf = dir.join("init.elf");
+    // One library and nothing else on the command line, which is a claim about
+    // the component rather than a shortcut: everything it calls across a crate
+    // boundary is `#[inline]` in `f_abi::door`, so a copy is compiled into this
+    // crate and there is nothing left to resolve. If that stopped being true the
+    // linker would say so — an undefined symbol is an error here, not a warning
+    // — which is why this is safe to state rather than to check.
+    //
+    // `--whole-archive` because nothing refers to anything: the entry is called
+    // by the kernel, so without it the linker would pull in no members at all
+    // and produce an empty image. `--gc-sections` then takes back everything the
+    // entry does not reach, and the `KEEP()` in the script is what stops it
+    // taking the entry too.
+    let status = Command::new(&lld)
+        .args(["-flavor", "gnu", "-T", "user/init/link.ld", "--gc-sections", "--whole-archive"])
+        .arg("-o")
+        .arg(&elf)
+        .arg(&archive)
+        .current_dir(root())
+        .status()
+        .map_err(|e| format!("could not run rust-lld: {e}"))?;
+    if !status.success() {
+        return Err("linking user/init against user/init/link.ld failed".into());
+    }
+
+    // The symbol at the first byte. `link.ld` places the entry there by naming
+    // the section pattern its function is compiled into; this is what says the
+    // pattern still matches. A toolchain that changes how it names sections
+    // makes this fail with a sentence, rather than making a boot jump into the
+    // middle of some other function.
+    let nm = nm.to_str().ok_or("llvm-nm's path is not valid UTF-8")?.to_string();
+    let elf_path = elf.to_str().ok_or("the init elf path is not valid UTF-8")?.to_string();
+    let symbols = capture(&nm, &["--defined-only", "--numeric-sort", &elf_path])?;
+    let at_start: Vec<&str> = symbols
+        .lines()
+        .filter_map(|line| {
+            let (address, rest) = line.split_once(' ')?;
+            let address = u64::from_str_radix(address.trim(), 16).ok()?;
+            if address == INIT_TEXT { rest.split_whitespace().nth(1) } else { None }
+        })
+        .collect();
+    if !at_start.iter().any(|name| name.contains("9component5start")) {
+        return Err(format!(
+            "the first byte of the init image is not `component::start`.\n\n\
+             What is there: {}\n\n\
+             `user/init/link.ld` places the entry by matching the section its\n\
+             function is compiled into, and the pattern has stopped matching —\n\
+             most likely because the toolchain changed how it names them. The\n\
+             pattern is in that file and the reasoning is in\n\
+             user/init/src/component.rs.",
+            if at_start.is_empty() { "nothing".to_string() } else { at_start.join(", ") }
+        ));
+    }
+
+    // Nothing writable. The frame maps this page read-only and executable, so a
+    // mutable global is a fault on the first write to it — with no message, in a
+    // component that has no way to print one. `llvm-nm` names the section class
+    // of every symbol in one letter, and four of those letters are writable.
+    let writable: Vec<&str> = symbols
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let class = fields.nth(1)?;
+            let name = fields.next()?;
+            matches!(class, "d" | "D" | "b" | "B" | "g" | "G" | "s" | "S").then_some(name)
+        })
+        .collect();
+    if !writable.is_empty() {
+        return Err(format!(
+            "the init image has writable data: {}\n\n\
+             Its text page is mapped read-only, so the first write to any of these\n\
+             is a page fault in a component with no way to report one. A component\n\
+             that genuinely needs writable state has to be given a frame for it —\n\
+             which is a capability, and which E1's quota is about.",
+            writable.join(", ")
+        ));
+    }
+    let objcopy = objcopy.to_str().ok_or("llvm-objcopy's path is not valid UTF-8")?.to_string();
+    let bin = init_bin();
+    let bin_path = bin.to_str().ok_or("the init image path is not valid UTF-8")?.to_string();
+    capture(&objcopy, &["-O", "binary", &elf_path, &bin_path])?;
+
+    let bytes = std::fs::metadata(&bin)
+        .map_err(|e| format!("could not measure the init image: {e}"))?
+        .len();
+    if bytes == 0 {
+        return Err("the init image is empty: the linker discarded everything".into());
+    }
+    if bytes > INIT_MAX {
+        return Err(format!(
+            "the init image is {bytes} bytes and the frame maps one page ({INIT_MAX}) for it.\n\n\
+             A component that outgrows a page needs a loader that reads its headers, \n\
+             which is E5. Until then this is a real bound."
+        ));
+    }
+
+    Ok(bin)
+}
+
 /// Boot the kernel and return the exit status QEMU reported.
 ///
-/// One definition of the machine, three callers. It was two copies until the
+/// One definition of the machine, every caller. It was two copies until the
 /// timer needed a third, and three copies of a machine definition is three
 /// chances for a run to be compared against a differently-shaped one.
 ///
-/// `append` is the kernel command line, which is the only thing the three
-/// callers differ by.
+/// `append` is the kernel command line, and `features` are the deliberate
+/// defects to build the kernel with — empty for every caller but [`mutate`].
+/// When `capture` is set the serial output is collected and returned as well as
+/// printed, which is what lets a caller assert on *how* a boot went wrong
+/// rather than only that it did.
 fn boot(append: Option<&str>) -> Result<Option<i32>, String> {
-    build()?;
+    machine(append, &[], false).map(|(code, _)| code)
+}
+
+/// [`boot`], with the serial log.
+fn boot_captured(append: Option<&str>, features: &[&str]) -> Result<(Option<i32>, String), String> {
+    machine(append, features, true)
+}
+
+/// Build a kernel and run it. The one place the emulator is described.
+fn machine(
+    append: Option<&str>,
+    features: &[&str],
+    capture: bool,
+) -> Result<(Option<i32>, String), String> {
+    build_with(features)?;
     let kernel = kernel_elf32();
     if !kernel.exists() {
         return Err(format!("kernel image not found at {}", kernel.display()));
     }
+    let init = init_image()?;
 
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.args(["-kernel", kernel.to_str().ok_or("kernel path is not valid UTF-8")?]);
+
+    // The first boot module, which from E0-B10 is `user/init`. Multiboot 1 calls
+    // these modules and QEMU's own loader spells the first one `-initrd`; the
+    // kernel sees a validated extent and nothing about how it arrived.
+    //
+    // Passed on every boot, including the ones that provoke something. The
+    // provocations run the kernel's own adversary, which is a different program
+    // — see `kernel::process::Plan` — and the component runs first regardless,
+    // because "a second process cannot use the first one's handles" is a
+    // property every boot should be checking rather than a special run.
+    qemu.args(["-initrd", init.to_str().ok_or("the init image path is not valid UTF-8")?]);
 
     if let Some(append) = append {
         qemu.args(["-append", append]);
@@ -347,7 +605,16 @@ fn boot(append: Option<&str>) -> Result<Option<i32>, String> {
     //
     // `isa-debug-exit` turns a kernel run into something an integration test can
     // assert on: the kernel chooses its own exit code and QEMU reports it.
+    //
+    // `-smp 2` is pinned for the same reason the memory size is: the kernel
+    // prints how many cores it started, so the machine's core count is part of
+    // its output. Two rather than one because from E0-B10 the process runs on a
+    // core that is not the one holding the timer, and two rather than more
+    // because a second core is what makes that sentence true — every core past
+    // it would be started, counted, and left with nothing to do.
     qemu.args([
+        "-smp",
+        "2",
         "-m",
         "128M",
         "-serial",
@@ -359,12 +626,20 @@ fn boot(append: Option<&str>) -> Result<Option<i32>, String> {
         "-no-reboot",
     ]);
 
-    let status = qemu
-        .current_dir(root())
-        .status()
-        .map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
+    qemu.current_dir(root());
 
-    Ok(status.code())
+    if !capture {
+        let status = qemu.status().map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
+        return Ok((status.code(), String::new()));
+    }
+
+    // Captured *and* printed. A harness that swallowed the log would be one
+    // whose failures could not be read, and the whole reason to capture it is
+    // to assert on a line in it.
+    let out = qemu.output().map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
+    let log = String::from_utf8_lossy(&out.stdout).into_owned();
+    print!("{log}");
+    Ok((out.status.code(), log))
 }
 
 fn run() -> Result<(), String> {
@@ -429,6 +704,137 @@ fn fault(kind: Option<&str>) -> Result<(), String> {
         Some(other) => Err(format!("qemu exited {other}; expected 35")),
         None => Err("qemu terminated by signal".into()),
     }
+}
+
+/// The deliberate defects this kernel can be built with, and the boot each of
+/// them has to be caught by.
+///
+/// One so far. It exists because the fifth property of the capability negative
+/// suite — *a process cannot make the kernel panic by trying* — is the one that
+/// cannot have a fixture of the shape the other four have: a table that panics
+/// takes the machine down rather than being caught, and there is no host
+/// harness for kernel logic to catch it in.
+///
+/// So the mutation is a build. Each entry names the feature to turn on, the
+/// boot that must find it, and the sentence the log has to contain — because
+/// "the boot went red" is not the assertion. A boot that went red for some
+/// other reason would satisfy an exit code and prove nothing.
+const MUTATIONS: &[(&str, &str, &str, &str)] = &[(
+    "mutate-unchecked-index",
+    "cap=forge",
+    "KERNEL PANIC",
+    "the capability table subscripts a handle's index instead of checking it",
+)];
+
+/// Build the kernel with one defect in it, boot it, and require the boot to go
+/// red — then build it without and require the same boot to go green.
+///
+/// # Why this is a command and not a test
+///
+/// For the reason `fault` is: what it asserts is a *failure*, and the only
+/// place a kernel failure is observable is the exit code of a machine. The
+/// difference from `fault` is what is being broken. `fault` provokes the
+/// hardware into a fault the kernel is supposed to report; this breaks the
+/// kernel's own code and requires the suite to notice.
+///
+/// # Why both halves
+///
+/// Neither means anything alone. A red boot with a defect proves nothing if the
+/// same boot is red without one — that is a broken build, not a caught defect —
+/// and a green boot without a defect proves nothing about whether the suite can
+/// fail. The pair is the smallest thing that is evidence, and it is the second
+/// half of E0-P08's exit criterion: every property holds, *and* each has a
+/// mutation that makes it fail.
+///
+/// The mutated boot runs first so that the tree is left holding a clean build.
+fn mutate() -> Result<(), String> {
+    for (feature, provocation, expected, what) in MUTATIONS {
+        println!("\n--- {feature}: {what}");
+
+        println!("\n[1/2] with the defect — the boot must go red");
+        let (code, log) = boot_captured(Some(provocation), &[feature])?;
+        match code {
+            Some(33) => {
+                return Err(format!(
+                    "`{provocation}` passed on a kernel built with `{feature}`.\n\n\
+                     That is the property failing rather than holding: the defect is\n\
+                     {what}, and the suite did not notice. Either the boot no longer\n\
+                     reaches the defect, or the check that would have caught it has\n\
+                     stopped being made."
+                ));
+            }
+            Some(35) | Some(0) => {}
+            Some(other) => return Err(format!("qemu exited {other}; expected a failure")),
+            None => return Err("qemu terminated by signal".into()),
+        }
+        if !log.contains(expected) {
+            return Err(format!(
+                "`{provocation}` on a kernel built with `{feature}` went red, and not for\n\
+                 the reason it was supposed to: the log does not contain `{expected}`.\n\n\
+                 A boot that fails some other way satisfies the exit code and proves\n\
+                 nothing. The serial log is above."
+            ));
+        }
+        println!("\n{feature}: caught — the boot went red with `{expected}`");
+
+        println!("\n[2/2] without it — the same boot must go green");
+        match boot(Some(provocation))? {
+            Some(33) => println!("\n{feature}: and the same boot passes without the defect"),
+            Some(35) => {
+                return Err(format!(
+                    "`{provocation}` fails on a kernel with no defect in it, so the red\n\
+                     boot above says nothing about `{feature}`. Fix the build first."
+                ));
+            }
+            Some(other) => return Err(format!("qemu exited {other}; expected 33")),
+            None => return Err("qemu terminated by signal".into()),
+        }
+    }
+
+    println!("\nall {} mutation(s) caught", MUTATIONS.len());
+    Ok(())
+}
+
+/// A deliberate defect must never be on by default.
+///
+/// The feature exists so that a build can be broken on purpose. The one way
+/// that could reach an image nobody meant to break is a default feature list,
+/// so this reads the manifest and refuses one — which is the same shape as the
+/// other four policy lints: a rule that lives only in a comment is a rule
+/// somebody edits around.
+fn lint_mutations() -> Result<(), String> {
+    let manifest = root().join("kernel").join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .map_err(|e| format!("could not read {}: {e}", relative(&manifest)))?;
+
+    let mut in_features = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_features = trimmed == "[features]";
+            continue;
+        }
+        if !in_features {
+            continue;
+        }
+        let Some((name, value)) = trimmed.split_once('=') else { continue };
+        if name.trim() != "default" {
+            continue;
+        }
+        for (feature, _, _, _) in MUTATIONS {
+            if value.contains(feature) {
+                return Err(format!(
+                    "kernel/Cargo.toml has `{feature}` in its default features.\n\n\
+                     That feature is a deliberate defect. It is meant to be turned on by\n\
+                     `cargo xtask mutate` for exactly two boots and by nothing else; on by\n\
+                     default it is a kernel that panics on a hostile handle, shipped."
+                ));
+            }
+        }
+    }
+
+    println!("lint-mutations: ok  (no deliberate defect is on by default)");
+    Ok(())
 }
 
 /// Every isolation property a process is asked to violate, and what it is.
@@ -523,11 +929,21 @@ fn user(kind: Option<&str>) -> Result<(), String> {
 /// rights, and cannot make the kernel panic by trying.* That is E0-P08's exit
 /// criterion and E0-B11's.
 ///
-/// Seven rather than five. `grant` is the positive control, without which a
+/// Eight rather than five. `grant` is the positive control, without which a
 /// frame that refused every capability call would pass all five; `flood` is
 /// what "cannot make the kernel panic" turns into once the obvious attempts
 /// are refused, which is filling the table and seeing what happens at the
-/// bound.
+/// bound; and `unmap` is the one the exit criterion did not name because at M4
+/// it could not be run.
+///
+/// `unmap` is the odd one and worth reading the kernel's side of. The other
+/// seven are refused by the capability table and the process carries on. This
+/// one is not refused at all: the process revokes a capability it is entitled
+/// to revoke, and then reads a page that revoke withdrew — so what stops it is
+/// a page fault rather than an error code. "Cannot use a revoked handle" and
+/// "cannot use the memory a revoked handle mapped" are two properties, and
+/// until there was a second core to shoot a translation down on, only the first
+/// of them held. E0-B10.
 ///
 /// The kernel is the judge, as with `user`. It knows exactly which refusal each
 /// attempt earns and refuses to finish if it answered a different number of
@@ -541,6 +957,7 @@ const ESCAPES: &[(&str, &str)] = &[
     ("rights", "ask for rights its capability does not carry"),
     ("type", "present a capability of the wrong kind for the operand"),
     ("flood", "derive until the table is full"),
+    ("unmap", "read a page after the capability that mapped it was revoked"),
 ];
 
 /// Boot into a process that tries to escape its capabilities, or all of them in
@@ -674,6 +1091,11 @@ fn verify() -> Result<(), String> {
     lint_all()?;
     test()?;
     run()?;
+    // Last, and part of the loop rather than beside it. It is the half of
+    // E0-P08 that says the suite can fail: everything above proves the
+    // properties hold on this tree, and this proves that a tree where one of
+    // them did not would be caught. It leaves a clean build behind it.
+    mutate()?;
     println!("\nverify: all green");
     println!(
         "         Local only. The AArch64 tests and the litmus job run in CI and\n         \
@@ -687,6 +1109,7 @@ fn lint_all() -> Result<(), String> {
     lint_licensing()?;
     lint_unsafe()?;
     lint_percpu()?;
+    lint_mutations()?;
     // The same check the CI policy job runs. It lives here because a local
     // `lint` that is a subset of the gate teaches people the gate is passing
     // when it is not — which is how a formatting failure reached CI on a tree
