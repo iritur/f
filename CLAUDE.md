@@ -12,7 +12,7 @@ cargo xtask test       # workspace tests, x86-64 and AArch64
 cargo xtask run        # boot the kernel in QEMU; expects exit code 33
 cargo xtask fault pf   # boot into a deliberate fault; pf, ud, df, nx, wx or stack
 cargo xtask user       # seven boots: a process violates one rule each, and is killed
-cargo xtask cap        # eight boots: a process tries to escape its capabilities
+cargo xtask cap        # nine boots: a process tries to escape its capabilities
 cargo xtask mutate     # build the kernel wrong on purpose; the boot must go red
 cargo xtask timer 60   # run the 1 kHz timer and print a jitter histogram
 cargo xtask unsafe     # the number A-05 reports: lines inside `unsafe`, as a share

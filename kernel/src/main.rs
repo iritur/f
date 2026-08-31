@@ -31,6 +31,7 @@ pub mod percpu;
 pub mod process;
 pub mod ring;
 pub mod smp;
+pub mod state;
 
 use core::panic::PanicInfo;
 
@@ -426,6 +427,24 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         }
     }
 
+    // RFC 0013, and E0-B14. Published *before* the subsystems that fill it,
+    // because a node names a live word rather than a value copied in later —
+    // the tree has to exist for the store to have somewhere to go.
+    //
+    // Nothing time-derived goes in, deliberately. The boot log is what
+    // `cargo xtask trace` hashes, and a tick count in it would make two runs of
+    // one commit disagree for a reason that has nothing to do with the kernel.
+    // *Reversal:* a boot log that is no longer the reproduction artefact.
+    let tree = match state::Tree::publish(&mut frames) {
+        Ok(tree) => tree,
+        Err(why) => {
+            kprintln!("FAIL: the state tree: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+    tree.set(state::node::TOPOLOGY_STARTED, smp::started() as u64);
+    tree.set(state::node::CAPS_SLOTS, cap::TABLE_SLOTS as u64);
+
     // M5, the first piece of it. One channel laid out by `f_abi::layout` in a
     // real frame, a batch of four published with one store, and both opcodes
     // answered — including the one this build does not implement, which is the
@@ -459,6 +478,11 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
                 report.doorbells,
                 report.per_thousand,
             );
+            // Into the tree at the one place these numbers are established. Two
+            // homes for a count is the second copy that can disagree with the
+            // first, which is what RFC 0013 refuses.
+            tree.set(state::node::RING_EXECUTED, u64::from(report.drained.executed));
+            tree.set(state::node::RING_REFUSED, u64::from(report.drained.refused));
         }
         Err(why) => {
             kprintln!("FAIL: the frame's ring: {}", why.message());
@@ -466,11 +490,32 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         }
     }
 
+    // Last of the frame's own numbers, because the allocator is still handing
+    // out frames until the line above. The self-test is what says the hash
+    // works: two readings with nothing in between must agree, and a reading
+    // after a deliberate change must not — a hash over bytes nothing writes
+    // agrees with itself forever, which is indistinguishable from one that
+    // works. Before the first process, because nothing may map a tree this
+    // kernel has not yet agreed with.
+    tree.set(state::node::MEMORY_TOTAL, frames.total_count());
+    tree.set(state::node::MEMORY_FREE, frames.free_count());
+    match tree.self_test() {
+        Ok(hash) => kprintln!(
+            "  state tree    {} nodes, snapshot {hash:#018x}, stable across a re-read",
+            state::NODES
+        ),
+        Err(why) => {
+            kprintln!("FAIL: the state tree: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+    tree.render();
+
     // M3. The other privilege level, and the first thing in this system that is
     // not the kernel. It runs inside a timer window on purpose: the milestone's
     // exit criterion is not that a process runs and not that the timer runs, it
     // is that both are true at once.
-    timed_window(&boot, &mut frames, &space, features, clocks);
+    timed_window(&boot, &mut frames, &space, features, clocks, tree.physical());
 
     // A fault on purpose, when asked for one. This is how the report path is
     // tested: `cargo xtask fault <kind>` boots with the parameter, and the run
@@ -712,6 +757,7 @@ fn timed_window(
     space: &paging::AddressSpace,
     features: paging::Features,
     clocks: arch::x86_64::apic::Clocks,
+    tree: u64,
 ) {
     // The arithmetic before the machinery, for the same reason `env::self_test`
     // runs before the contract check: a selector layout that is wrong is a
@@ -802,6 +848,7 @@ fn timed_window(
             // expectation the frame already had, rather than a second one:
             // `user/init/src/component.rs` says why that matters.
             provoke: process::Provoke::Exit,
+            tree,
             wanted: USER_TICKS,
             hz: TIMER_HZ,
             target,
@@ -813,6 +860,7 @@ fn timed_window(
     let plan = process::Plan {
         program: arch::x86_64::probe::program(),
         provoke,
+        tree,
         wanted: USER_TICKS,
         hz: TIMER_HZ,
         target,

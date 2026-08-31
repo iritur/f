@@ -15,6 +15,7 @@
 pub mod cap;
 pub mod door;
 pub mod layout;
+pub mod state;
 
 /// The frame's opcode space.
 ///

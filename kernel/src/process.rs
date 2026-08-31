@@ -121,6 +121,14 @@ pub const STACK_TOP: u64 = STACK + FRAME_SIZE;
 /// [`paging::map_user_live`], which refuses rather than allocates.
 pub const GRANT: u64 = STACK_TOP + FRAME_SIZE;
 
+/// Where a process maps the frame's published state tree.
+///
+/// The third page in this region, and still inside the two mebibytes one table
+/// covers — so reading the frame's own counters costs a process no page table
+/// and no allocation, which is what makes RFC 0013's *read, never delivered*
+/// affordable enough to leave on.
+pub const TREE: u64 = GRANT_SECOND + FRAME_SIZE;
+
 /// A second address in the same region, used only by provocations whose mapping
 /// is supposed to be refused.
 ///
@@ -414,6 +422,15 @@ pub enum Provoke {
     /// entry that is no longer there, on a core that has been told it is no
     /// longer there. E0-B10.
     Unmap,
+    /// Store into the state tree it was granted read-only.
+    ///
+    /// The one provocation whose target exists to be *read*. E0-B14 grants
+    /// every process the frame's published tree without `WRITE`, and a mapping
+    /// that is read-only only in intention would be discovered by the first
+    /// component that scribbled on the kernel's own counters. The process maps
+    /// it, reads it — which the preamble already did, so the fault below cannot
+    /// be the page merely being absent — and then writes.
+    State,
 }
 
 /// What a provocation is supposed to produce.
@@ -427,21 +444,30 @@ pub enum Expect {
 
 /// How many capabilities the frame hands a process at M4.
 ///
-/// Its address space, one frame, and one untyped region — in that order, so
-/// their handles are the first three slots and the process can be written
-/// against them. Three, and every one of them is something the process needs
-/// and nothing more: there is no capability here for the frame it is running
-/// out of, because a process that could remap its own text is a process for
-/// which write-exclusive-or-execute is advisory.
-pub const GRANTS: usize = 3;
+/// Its address space, one frame, one untyped region, and the frame's published
+/// state tree — in that order, so their handles are the first four slots and the
+/// process can be written against them. Four, and every one of them is something
+/// the process needs and nothing more: there is no capability here for the frame
+/// it is running out of, because a process that could remap its own text is a
+/// process for which write-exclusive-or-execute is advisory.
+///
+/// The fourth is `E0-B14`'s, and it is the first grant in this system that
+/// exists so a process can *observe* rather than so it can act. It carries no
+/// `WRITE`, which `cap=state` is the boot that tries.
+pub const GRANTS: usize = 4;
 
 /// Capability calls every process makes before it does whatever it was told to.
 ///
-/// Inspect the frame capability, derive a copy of it, map the copy. Three, and
-/// they are the positive path: a process that cannot use a capability correctly
-/// cannot meaningfully fail to abuse one, and a suite of nothing but refusals
-/// passes on a frame that refuses everything.
-const PREAMBLE_OK: u32 = 3;
+/// Inspect the frame capability, derive a copy of it, map the copy, then map
+/// the state tree. Four, and they are the positive path: a process that cannot
+/// use a capability correctly cannot meaningfully fail to abuse one, and a suite
+/// of nothing but refusals passes on a frame that refuses everything.
+///
+/// The fourth maps the granted handle directly rather than deriving a copy of
+/// it first, and that is not an inconsistency: the derive in the third call is
+/// there to be exercised, and doing it twice would exercise it twice while
+/// making every live-handle count in this file one larger for no reason.
+const PREAMBLE_OK: u32 = 4;
 
 /// Generations the forging sweep tries at each slot.
 ///
@@ -530,6 +556,7 @@ impl Provoke {
             Self::Mistyped => probe::PROVOKE_CAP_TYPE as u32,
             Self::Flood => probe::PROVOKE_CAP_FLOOD as u32,
             Self::Unmap => probe::PROVOKE_CAP_UNMAP as u32,
+            Self::State => probe::PROVOKE_CAP_STATE as u32,
         }
     }
 
@@ -552,6 +579,7 @@ impl Provoke {
             Self::Mistyped => "presenting a capability of the wrong kind",
             Self::Flood => "deriving until the table is full",
             Self::Unmap => "reading a page after the capability that mapped it was revoked",
+            Self::State => "writing to the state tree it was granted read-only",
         }
     }
 
@@ -564,7 +592,7 @@ impl Provoke {
             // supposed to stop being a mapping: the refusal it earns is a page
             // fault, from the processor, and an exit would mean the page was
             // still there.
-            Self::Kernel | Self::Null | Self::Text | Self::Stack | Self::Unmap => {
+            Self::Kernel | Self::Null | Self::Text | Self::Stack | Self::Unmap | Self::State => {
                 Expect::Fault(PAGE_FAULT)
             }
             Self::Privileged => Expect::Fault(GENERAL_PROTECTION),
@@ -643,8 +671,8 @@ impl Provoke {
             Self::Unowned => tally(base, 2, 0, 0, 0, 0),
 
             // Four generations over every slot, plus four words nobody issued.
-            // Four handles are live at that point — the three grants and the
-            // one the preamble derived — so exactly four of the hundred and
+            // Five handles are live at that point — the four grants and the one
+            // the preamble derived — so exactly five of the hundred and
             // thirty-two resolve, at the generation this process was granted at.
             //
             // Every generation *below* that one, on those same four slots, is a
@@ -673,6 +701,12 @@ impl Provoke {
             // call this process makes, and what stops it is the page fault the
             // fourth answer caused.
             Self::Unmap => tally(base + 1, 0, 0, 0, 0, 0),
+
+            // Nothing is refused: the frame answers every call this process
+            // makes, and what stops it is the store the *processor* refuses. A
+            // capability error here would mean the mapping never happened,
+            // which is the fault passing for the wrong reason.
+            Self::State => tally(base, 0, 0, 0, 0, 0),
         }
     }
 
@@ -909,6 +943,9 @@ pub struct Plan {
     pub program: &'static [u8],
     /// Which violation the process is to commit.
     pub provoke: Provoke,
+    /// The physical address of the frame the state tree is published in.
+    /// Unit: bytes, physical.
+    pub tree: u64,
     /// How many timer ticks the frame takes out of ring 3 before it tells the
     /// process it has run long enough.
     pub wanted: u64,
@@ -980,7 +1017,7 @@ pub unsafe fn prepare(
     features: paging::Features,
     plan: Plan,
 ) -> Result<Prepared, Error> {
-    let Plan { program, provoke, wanted, hz, target, cpu } = plan;
+    let Plan { program, provoke, tree, wanted, hz, target, cpu } = plan;
     if program.is_empty() {
         return Err(Error::NoProgram);
     }
@@ -1027,7 +1064,7 @@ pub unsafe fn prepare(
     }
     .map_err(Error::Space)?;
 
-    // The table, before the process exists to reach it. Three grants, in the
+    // The table, before the process exists to reach it. Four grants, in the
     // order the process is written against, and nothing else will ever be put
     // in from this side: everything the table holds after this line is
     // something the process derived.
@@ -1054,6 +1091,11 @@ pub unsafe fn prepare(
         .map_err(|_| Error::NoSlot)?;
     held.grant(CapType::Untyped, space_rights, untyped.addr(), FRAME_SIZE)
         .map_err(|_| Error::NoSlot)?;
+    // The state tree, read-only and never freed. Not in `pages` for exactly
+    // that reason: it is machine-wide and outlives every process that reads it,
+    // and a tree a `reap` could give back would be a mapping a reader still
+    // holds. Rights without `WRITE`, and `cap=state` is the boot that tries.
+    held.grant(CapType::Frame, frame_rights, tree, FRAME_SIZE).map_err(|_| Error::NoSlot)?;
     let granted_count = held.used();
 
     let state = STATE.at(cpu);

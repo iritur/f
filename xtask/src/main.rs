@@ -1152,7 +1152,7 @@ fn trace_check() -> Result<(), String> {
     println!("\n  disagreed, as required — the check can fail");
 
     println!(
-        "\nreproduce: ok — {first:#018x}\n\
+        "\ntrace: ok — {first:#018x}\n\
          Two boots on one machine. The pair that matters is two runners, and that\n\
          is the CI job: same image, same commit, same seed, hashes compared."
     );
@@ -1452,6 +1452,7 @@ const ESCAPES: &[(&str, &str)] = &[
     ("type", "present a capability of the wrong kind for the operand"),
     ("flood", "derive until the table is full"),
     ("unmap", "read a page after the capability that mapped it was revoked"),
+    ("state", "write to the state tree it was granted read-only"),
 ];
 
 /// Boot into a process that tries to escape its capabilities, or all of them in

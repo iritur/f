@@ -102,6 +102,9 @@ pub const PROVOKE_CAP_FLOOD: u64 = 13;
 /// Read a mapping after the capability it was made through has been revoked.
 pub const PROVOKE_CAP_UNMAP: u64 = 14;
 
+/// Store into the state tree, which was granted read-only. E0-B14.
+pub const PROVOKE_CAP_STATE: u64 = 15;
+
 unsafe extern "C" {
     /// First byte of the program.
     static user_probe_start: u8;
@@ -222,6 +225,28 @@ user_probe_start:
     movl ${grant_page}, %eax
     movq (%rax), %rax
 
+    // And the fourth: the frame's state tree, mapped read-only from the handle
+    // it was granted at rather than from a copy. E0-B14. The derive above
+    // exists to be exercised and doing it twice would exercise it twice, while
+    // making every live-handle count in `process.rs` one larger for nothing.
+    //
+    // The handle is two slots along from the address space: space, frame,
+    // untyped, tree, in the order `process::prepare` grants them.
+    movl %r13d, %r15d
+    addl $3, %r15d
+    movl ${sys_map}, %eax
+    movq %r13, %rdi
+    shlq $32, %rdi
+    orq %r15, %rdi
+    movl ${tree_read}, %esi
+    syscall
+    testq %rax, %rax
+    js .Lprobe_survived
+
+    // Touch that too, for the same reason.
+    movl ${tree_page}, %eax
+    movq (%rax), %rax
+
     cmpq $0, %rbx
     je .Lprobe_read_kernel
     cmpq $1, %rbx
@@ -250,7 +275,20 @@ user_probe_start:
     je .Lcap_flood
     cmpq $14, %rbx
     je .Lcap_unmap
+    cmpq $15, %rbx
+    je .Lcap_state
     jmp .Lprobe_exit
+
+    // The state tree, which the preamble mapped read-only and read. Writing to
+    // it must fault. The read happened first and it succeeded, so a fault here
+    // is about the *permission* and not about the address — a provocation that
+    // faulted because the page was absent would report the write protection
+    // holding when nothing had tested it, which is E0-B12's forged-slot-zero
+    // lesson in a new place.
+.Lcap_state:
+    movl ${tree_page}, %eax
+    movq $0, (%rax)
+    jmp .Lprobe_survived
 
     // The direct map. The page is there, it is not marked for ring 3, and the
     // fault that follows says "protection violation" rather than "not present"
@@ -526,13 +564,15 @@ user_probe_end:
     grant2_read = const (crate::process::GRANT_SECOND as u32) | rights::READ as u32,
     grant2_write =
         const (crate::process::GRANT_SECOND as u32) | (rights::READ | rights::WRITE) as u32,
+    tree_page = const crate::process::TREE as u32,
+    tree_read = const (crate::process::TREE as u32) | rights::READ as u32,
     options(att_syntax)
 );
 
 /// A slot in range, at the generation slots are issued at, that the frame never
 /// fills.
 ///
-/// Nine: past the three the frame grants and past anything the preamble
+/// Nine: past the four the frame grants and past anything the preamble
 /// derives, so it is empty on every run. The point of choosing a plausible slot
 /// rather than a wild one is that this handle is well-formed in every respect
 /// except the one that matters — it is what a component would produce by

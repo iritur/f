@@ -46,7 +46,7 @@ must not work:
   isolation rule each. Six must fault and the kernel must survive every one; the
   seventh must not fault, which is what stops the other six passing for the
   wrong reason. In the CI gate.
-- `cargo xtask cap` — eight boots in which a process tries to hold authority it
+- `cargo xtask cap` — nine boots in which a process tries to hold authority it
   was not granted. Seven are refused by the capability table with the exact code
   each escape earns; the eighth is not refused at all — the process revokes a
   capability it is entitled to revoke, reads the page that revoke unmapped, and
@@ -71,6 +71,13 @@ currently comes from.
 
 ## The honest gaps
 
+- **The state tree publishes twelve nodes and nothing that varies with time.**
+  Frame counts, cores, ring tallies, capability slots. Not the timer's counters,
+  not a stamp, not a hash of anything live — the boot log is what
+  `cargo xtask trace` hashes, and a tick count in it would make two runs of one
+  commit disagree for a reason with nothing to do with the kernel. The exclusion
+  is a decision with a reversal condition, not a gap: it lifts when the boot log
+  stops being the reproduction artefact.
 - **The user-interrupt doorbell is written and has never executed.** `Path` and
   `Bell` build it, negotiation gates it on `feature::USER_INTERRUPT_DOORBELL`,
   and `Bell::new` refuses to construct it on a machine that does not report the
