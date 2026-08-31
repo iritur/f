@@ -22,13 +22,32 @@ on:
     branches: [main]
   pull_request:
 
+# Every job runs in the development image, which is the same image a laptop
+# runs. `docker/README.md` states the rule: no step may exist that is not in
+# the repository, and a developer's machine is a step. With the image shared,
+# "works on my machine" and "works in CI" become one statement rather than two
+# that happen to agree — and the per-job tool installation disappears, which is
+# where a meaningful part of the ten-minute budget was going.
+#
+# `:latest` and not a digest, and that is a known gap rather than an oversight.
+# docker/README.md's "Reproducibility, honestly" section says the same thing
+# about the image generally: it is repeatable — everyone gets the same tools —
+# without being reproducible in the sense E2-P06 uses the word. Pinning CI to a
+# digest is one edit here and belongs with that decision, not ahead of it.
+#
+# The image is published by image.yml, which must have run at least once before
+# any of this works. On a fresh fork that is one `workflow_dispatch`.
+env:
+  F_IMAGE: ghcr.io/iritur/f-dev:latest
+  F_IMAGE_FULL: ghcr.io/iritur/f-dev:full
+
 jobs:
   policy:
     name: policy checks
     runs-on: ubuntu-latest
+    container: ghcr.io/iritur/f-dev:latest
     steps:
       - uses: actions/checkout@v7
-      - run: rustup show
       # Each of these encodes an architectural decision. A failure names the
       # RFC it comes from.
       - run: cargo xtask lint-determinism
@@ -47,6 +66,7 @@ jobs:
   test-x86:
     name: tests (x86-64, total store order)
     runs-on: ubuntu-latest
+    container: ghcr.io/iritur/f-dev:latest
     steps:
       - uses: actions/checkout@v7
       - run: cargo test -p f-abi -p f-env -p f-ring -p f-init
@@ -54,6 +74,11 @@ jobs:
   test-aarch64:
     name: tests (AArch64, weak memory)
     runs-on: ubuntu-24.04-arm
+    # The arm64 half of the same multi-architecture tag. Naming one tag on both
+    # runners is what stops the two jobs from drifting into two environments
+    # with one name — which would be the worst possible state for the job whose
+    # entire purpose is to disagree with the other one.
+    container: ghcr.io/iritur/f-dev:latest
     steps:
       - uses: actions/checkout@v7
       # This job is not a portability nicety. x86-64 total-store-order hides
@@ -64,6 +89,7 @@ jobs:
   litmus:
     name: memory-ordering litmus (AArch64)
     runs-on: ubuntu-24.04-arm
+    container: ghcr.io/iritur/f-dev:latest
     steps:
       - uses: actions/checkout@v7
       # These are stress tests, not a model check. RustMC lands at M5 and is
@@ -74,6 +100,7 @@ jobs:
   coverage:
     name: coverage instrumentation
     runs-on: ubuntu-latest
+    container: ghcr.io/iritur/f-dev:latest
     steps:
       - uses: actions/checkout@v7
       # Prints a line per crate and a total, and writes summary.json beside the
@@ -116,9 +143,12 @@ jobs:
   kernel:
     name: kernel boots
     runs-on: ubuntu-latest
+    # QEMU arrives with the image. This job used to install it per run, which
+    # is the per-job tool installation E0-P14 exists to delete: an emulator
+    # whose version nobody chose, resolved fresh on every boot of the gate.
+    container: ghcr.io/iritur/f-dev:latest
     steps:
       - uses: actions/checkout@v7
-      - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
       - run: cargo xtask run
       # The negative half, and the reason it is in the gate rather than in
       # somebody's habits: seven boots, each one a process deliberately doing
@@ -155,6 +185,12 @@ jobs:
   deps:
     name: dependency policy
     runs-on: ubuntu-latest
+    # The `full` image, which carries cargo-deny at the version docker/Dockerfile
+    # pins. The action installed its own copy, so the version this job enforced
+    # policy with was chosen by neither this repository nor its container —
+    # which is the ambient dependency the image exists to remove, in the one job
+    # whose whole subject is dependencies.
+    container: ghcr.io/iritur/f-dev:full
     steps:
       - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - run: cargo deny check
