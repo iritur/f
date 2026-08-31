@@ -41,6 +41,20 @@ impl Serial {
         }
     }
 
+    /// Write bytes exactly as given, with no line-ending translation.
+    ///
+    /// [`Write::write_str`] below turns a newline into a carriage return and a
+    /// newline, because that is what a terminal wants from a `println`. This
+    /// does not, and the difference is the point: these bytes come out of a
+    /// channel's inline arena on behalf of an opcode, and a device that
+    /// rewrote its payload would be a device that cannot carry one. What
+    /// arrives is what was asked for.
+    pub fn write_bytes(&self, bytes: &[u8]) {
+        for byte in bytes {
+            self.write_byte(*byte);
+        }
+    }
+
     fn write_byte(&self, byte: u8) {
         // Spin until the transmit holding register is empty. Bounded in
         // practice by the UART, and this path exists only for M0 and panics.

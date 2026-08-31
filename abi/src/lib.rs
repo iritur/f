@@ -14,6 +14,62 @@
 
 pub mod cap;
 pub mod door;
+pub mod layout;
+
+/// The frame's opcode space.
+///
+/// # Why an opcode space lives in the wire crate at all
+///
+/// Section 05 says the opcode space is per-service and not global: a storage
+/// ring and a compositor ring share the envelope, not the vocabulary. That
+/// makes most opcode spaces the property of whichever component defines them,
+/// and none of this crate's business.
+///
+/// The frame's is the exception, and only because of who the peers are. Every
+/// component in the system has a ring to the frame, and no component is built
+/// from the frame's source — that is the whole point of the boundary. So the
+/// frame's vocabulary is exactly what this crate exists to hold: a fixed-width
+/// value with the same meaning on both sides of a trust boundary, where a
+/// disagreement is silent.
+///
+/// # Two, and what the second one is for
+///
+/// [`NOP`] is the protocol with the work removed, which is what makes it the
+/// thing worth measuring: `claims/0001-ring-submit-latency.toml` is a claim
+/// about submission cost, and any opcode that did something would be a claim
+/// about that something instead.
+///
+/// [`WRITE_SERIAL`] is the smallest opcode that is not a measurement fixture.
+/// It reads a caller-chosen range of the inline arena — untrusted shared memory
+/// whose bounds the service has to check on every entry — and has a side effect
+/// a boot log can show. One opcode that touches nothing and one that touches
+/// the only device this milestone has is the smallest pair that exercises the
+/// whole path.
+///
+/// An opcode this build does not know is refused with
+/// [`error::argument::UNKNOWN_OPCODE`] and never ignored: R04.
+pub mod op {
+    /// Do nothing, successfully. Completes with `result` zero.
+    pub const NOP: u8 = 0;
+
+    /// Write bytes from the inline arena to the frame's serial port.
+    ///
+    /// [`Sqe::offset`](crate::Sqe::offset) is the first byte, counted from the
+    /// start of the arena and not from the start of the mapping;
+    /// [`Sqe::len`](crate::Sqe::len) is how many. Completes with the count
+    /// actually written, which is how a partial write is stated rather than
+    /// inferred.
+    pub const WRITE_SERIAL: u8 = 1;
+
+    /// Does this build implement `opcode`?
+    ///
+    /// The negative answer is the one that matters: it is what turns an unknown
+    /// opcode into a refusal instead of a silently skipped entry.
+    #[must_use]
+    pub const fn known(opcode: u8) -> bool {
+        matches!(opcode, NOP | WRITE_SERIAL)
+    }
+}
 
 /// The version this build speaks.
 ///
@@ -139,7 +195,18 @@ pub mod flags {
     pub const DRAIN: u8 = 1 << 1;
     /// `buf_set`/`buf_index` name a registered buffer rather than an address.
     pub const FIXED_BUF: u8 = 1 << 2;
-    /// Produce no completion. Fire and forget.
+    /// Produce no completion **when the operation succeeds**. Fire and forget.
+    ///
+    /// A refusal still completes, and the asymmetry is deliberate rather than
+    /// an implementation convenience. The flag means *I do not need to be told
+    /// this worked* — a caller writing a log line has nothing to do with the
+    /// completion and every one it reaps is a cache line it paid for. It does
+    /// not mean *do not tell me if this was malformed*: an entry refused for an
+    /// unknown opcode or a bad address is a caller with a bug, and the one
+    /// thing worse than a bug is a bug the system agreed to keep quiet about.
+    ///
+    /// The same rule io_uring reached, under the name `CQE_SKIP_SUCCESS`, and
+    /// for the same reason.
     pub const NO_CQE: u8 = 1 << 3;
 }
 
