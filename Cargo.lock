@@ -42,6 +42,7 @@ name = "f-ring"
 version = "0.0.1"
 dependencies = [
  "f-abi",
+ "f-env",
 ]
 
 [[package]]

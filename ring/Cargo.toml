@@ -9,6 +9,13 @@ description = "The universal system interface. One implementation, used by both 
 [dependencies]
 f-abi.workspace = true
 
+# A dev-dependency and never a dependency. The ring must not consult an Env
+# on its hot path — a fault check inside `submit` is a branch on the one path
+# this whole design exists to keep short. What the tests do instead is drive
+# the ring from outside while a seeded Env decides what the world does to it.
+[dev-dependencies]
+f-env.workspace = true
+
 [lints.rust]
 # The frame. Overrides the workspace forbid — see the note in the root Cargo.toml.
 unsafe_code = "allow"

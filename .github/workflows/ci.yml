@@ -94,6 +94,12 @@ jobs:
       # the entire class of ordering bug the ring is exposed to, so this is the
       # only configuration in which the ring tests mean anything.
       - run: cargo test -p f-abi -p f-env -p f-ring -p f-init
+      # E0-P09. Seeded fault injection against the two subsystems that have a
+      # host harness — the ring at publish and drain, the channel header at
+      # negotiation. On the arm runner as well as x86-64: the assertions are
+      # about refusals rather than ordering, but the ring under fault is the
+      # last place to assume one architecture speaks for the other.
+      - run: cargo test -p f-ring --test faults
 
   litmus:
     name: memory-ordering litmus (AArch64)
