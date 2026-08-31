@@ -1855,6 +1855,7 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
     println!("status    {status}");
     println!("milestone {milestone}");
     println!("baseline  {}", field("system").unwrap_or_else(|| "unset".into()));
+    println!("runner    {}", field("runner").unwrap_or_else(|| "unset".into()));
     println!();
 
     // The workload binary is named after the claim, minus the registry prefix.
@@ -1863,9 +1864,16 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
 
     sh("cargo", &["run", "--release", "-p", "f-bench", "--bin", &bin])?;
 
+    // The harness itself refuses in a non-measurement environment and says so
+    // in its own output — `f_bench::Environment`, E0-P15. Repeating the
+    // decision here would be a second copy of a rule that has to hold in one
+    // place, so this only names where the decision was taken.
     match status.as_str() {
         "gating" => {
-            println!("\nthis claim gates the build; a regression here fails CI");
+            println!(
+                "\nthis claim gates the build; a regression here fails CI — but only\n\
+                 where the run was permitted to record. A refusal above is not a pass."
+            );
             Ok(())
         }
         "pending" => {

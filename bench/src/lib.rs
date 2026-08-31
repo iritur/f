@@ -264,6 +264,118 @@ impl fmt::Display for Histogram {
     }
 }
 
+/// Environments in which a timing number is worth recording.
+///
+/// An allow-list rather than a deny-list, and the direction is the whole point.
+/// A deny-list records by default, so every environment nobody thought of — a
+/// new CI runner, a colleague's laptop, a virtual machine on a shared host —
+/// produces a publishable-looking number until somebody notices. This list
+/// records nothing by default, so adding an environment is a reviewable diff
+/// with a reason in it, the way `DETERMINISM_ALLOW` in `xtask` is.
+///
+/// The names match `runner` in `claims/*.toml`, because they are the same
+/// statement: the claim says which class of machine can defend it, and this
+/// says which class of machine is allowed to speak.
+const MEASUREMENT_ENVIRONMENTS: &[(&str, &str)] =
+    &[("runner-class-A", "pinned bare metal, thermally stable — claims/README.md")];
+
+/// Whether this machine may record a timing measurement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Environment {
+    /// A machine whose numbers a claim can rest on.
+    Measurement {
+        /// The `F_ENVIRONMENT` value, which is also a `runner` class in `claims/`.
+        name: String,
+        /// Why this class is defensible.
+        why: &'static str,
+    },
+    /// Anything else. The workload still runs; the number is not recorded.
+    Refused {
+        /// What `F_ENVIRONMENT` said, or `"unset"`.
+        name: String,
+        /// What is wrong with measuring here, in a sentence a reader can check.
+        why: &'static str,
+    },
+}
+
+/// Why an unset variable refuses.
+const WHY_UNSET: &str = "an environment that has not declared itself is not a measurement \
+                         environment — set F_ENVIRONMENT";
+
+/// Why the development container refuses.
+const WHY_CONTAINER: &str = "QEMU under TCG emulates the timer against a host clock it does not control, and the \
+     container shares its cores, cache and memory bandwidth with whatever else the machine \
+     is doing — docker/README.md";
+
+/// Why a shared cloud runner refuses.
+const WHY_CI: &str = "a shared cloud instance cannot produce defensible tail latency — \
+                      claims/0001-ring-submit-latency.toml";
+
+/// Why anything unrecognised refuses.
+const WHY_UNKNOWN: &str = "not in MEASUREMENT_ENVIRONMENTS in bench/src/lib.rs; adding it is a \
+                           reviewable diff with a reason in it";
+
+impl Environment {
+    /// Read `F_ENVIRONMENT` and classify it.
+    #[must_use]
+    pub fn detect() -> Self {
+        Self::classify(std::env::var("F_ENVIRONMENT").ok().as_deref())
+    }
+
+    /// The decision, separated from the environment it reads.
+    ///
+    /// Pure so that it can be tested. Setting a process environment variable
+    /// from a test is `unsafe` in this edition and races every other test in
+    /// the binary, so the choice is between a pure function and an untested
+    /// policy — and this policy's whole job is to be right about a case nobody
+    /// will exercise by hand.
+    #[must_use]
+    pub fn classify(value: Option<&str>) -> Self {
+        let Some(name) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+            // Fail closed, and this is the case the rule exists for. An unset
+            // variable is not evidence of bare metal; it is the state of every
+            // machine that has never been told what it is, which includes every
+            // new CI runner and every laptop. Recording by default here is
+            // exactly how a number with no environment attached reaches a
+            // document.
+            return Self::Refused { name: "unset".to_string(), why: WHY_UNSET };
+        };
+
+        if let Some((matched, why)) = MEASUREMENT_ENVIRONMENTS.iter().find(|(n, _)| *n == name) {
+            return Self::Measurement { name: (*matched).to_string(), why };
+        }
+
+        let why = match name {
+            "container" => WHY_CONTAINER,
+            "ci" => WHY_CI,
+            _ => WHY_UNKNOWN,
+        };
+        Self::Refused { name: name.to_string(), why }
+    }
+
+    /// Whether a number taken here may be recorded.
+    #[must_use]
+    pub fn records(&self) -> bool {
+        matches!(self, Self::Measurement { .. })
+    }
+
+    /// The name this environment reported.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Measurement { name, .. } | Self::Refused { name, .. } => name,
+        }
+    }
+
+    /// Why it records, or why it will not.
+    #[must_use]
+    pub fn why(&self) -> &'static str {
+        match self {
+            Self::Measurement { why, .. } | Self::Refused { why, .. } => why,
+        }
+    }
+}
+
 /// A metric that may not be available on this machine yet.
 ///
 /// Reporting `Unavailable` is the honest option and is what the claims registry
@@ -332,6 +444,12 @@ pub struct Sample {
     /// today, and the gap is stated here rather than discovered by whoever
     /// first tries to publish an energy number.
     pub idle_residency: Metric,
+    /// Whether this machine is permitted to record what it just measured.
+    ///
+    /// Read once, when the run begins, rather than when it ends: a check
+    /// performed after the work is a check somebody can be tempted to skip
+    /// having seen the number.
+    pub environment: Environment,
 }
 
 impl Sample {
@@ -349,6 +467,7 @@ impl Sample {
             // the kernel stops spinning, and it does not stop until RFC 0006's
             // policy is implemented at E5-B07.
             idle_residency: Metric::Unavailable("nothing idles yet; RFC 0006, E5-B07"),
+            environment: Environment::detect(),
         }
     }
 
@@ -363,10 +482,28 @@ impl Sample {
     /// printing only p50/p99/p99.9 was that rule stated and not kept.
     pub fn report(&self) {
         println!("claim   {}", self.claim);
+        println!("machine {}", self.environment.name());
         println!();
         print!("{}", self.latency.render());
         println!();
-        println!("latency {}", self.latency);
+
+        if self.environment.records() {
+            println!("latency {}", self.latency);
+        } else {
+            // The drawing above still prints, and that is deliberate. It is how
+            // anybody debugs a workload, and refusing to draw it would push
+            // people to a second harness that does. What is refused is the
+            // *summary* — the one line that gets copied into a document,
+            // quoted in a review, or pasted into a chat with the environment
+            // left behind. A distribution nobody can quote in a sentence is not
+            // the failure mode this rule exists for.
+            println!(
+                "latency refused — {} is not a measurement environment",
+                self.environment.name()
+            );
+            println!("        {}", self.environment.why());
+        }
+
         println!("insn/op {}", self.instructions_per_op);
         println!("J/op    {}", self.joules_per_op);
         println!("idle    {}", self.idle_residency);
@@ -392,6 +529,18 @@ impl Sample {
     ///
     /// If the directory cannot be created or the file cannot be written.
     pub fn persist(&self, dir: &Path) -> std::io::Result<PathBuf> {
+        if !self.environment.records() {
+            // `Other` rather than a bool return or a silent no-op: a caller
+            // that ignores this gets nothing written and no file to point at,
+            // which is the same outcome, and a caller that reports it gets a
+            // sentence naming the machine. A silent no-op would leave a stale
+            // file from an earlier run looking like this one's result.
+            return Err(std::io::Error::other(format!(
+                "{} is not a measurement environment: {}",
+                self.environment.name(),
+                self.environment.why()
+            )));
+        }
         std::fs::create_dir_all(dir)?;
         let path = dir.join(format!("{}.local.jsonl", self.claim));
 
@@ -589,6 +738,79 @@ mod tests {
     #[test]
     fn an_empty_histogram_draws_nothing_and_does_not_panic() {
         assert_eq!(Histogram::new().render().trim(), "(no observations)");
+    }
+
+    #[test]
+    fn an_undeclared_environment_refuses() {
+        // The case the allow-list exists for, and the one nobody exercises by
+        // hand: a machine that has never been told what it is. Every new CI
+        // runner and every fresh laptop starts here, so a deny-list would have
+        // recorded on all of them.
+        let e = Environment::classify(None);
+        assert!(!e.records());
+        assert_eq!(e.name(), "unset");
+
+        // An empty or whitespace value is the same state wearing a value. A
+        // CI expression that resolves to nothing is the ordinary way this
+        // happens, and it must not read as a declaration.
+        assert!(!Environment::classify(Some("")).records());
+        assert!(!Environment::classify(Some("   ")).records());
+        assert_eq!(Environment::classify(Some("")).name(), "unset");
+    }
+
+    #[test]
+    fn the_development_container_refuses_and_says_why() {
+        let e = Environment::classify(Some("container"));
+        assert!(!e.records());
+        assert_eq!(e.name(), "container");
+        assert!(
+            e.why().contains("docker/README.md"),
+            "a refusal must point at the document that argues it, got: {}",
+            e.why()
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_environment_refuses_rather_than_records() {
+        // The direction of the list. Something nobody has classified is not
+        // thereby bare metal, and it must not be treated as such just because
+        // this file has never heard of it.
+        for name in ["laptop", "runner-class-B", "gitlab", "wsl2"] {
+            let e = Environment::classify(Some(name));
+            assert!(!e.records(), "{name} recorded, and nothing says it may");
+            assert_eq!(e.name(), name);
+        }
+    }
+
+    #[test]
+    fn a_declared_measurement_environment_records() {
+        // The other half, and the reason this is not simply "refuse always":
+        // the rule has to let the real runner through, and the name it lets
+        // through is the same `runner` class the claims name.
+        let e = Environment::classify(Some("runner-class-A"));
+        assert!(e.records());
+        assert_eq!(e.name(), "runner-class-A");
+    }
+
+    #[test]
+    fn a_refused_environment_writes_no_distribution() {
+        // The refusal has to reach the artefact and not only the terminal. A
+        // harness that prints a refusal and writes the file anyway has left a
+        // number on disk for something else to pick up.
+        let mut sample = Sample::new("test-claim");
+        sample.environment = Environment::classify(Some("container"));
+        sample.latency.record(42);
+
+        let dir = std::env::temp_dir().join("f-bench-refusal-test");
+        let err = sample.persist(&dir).expect_err("a refused environment must not write");
+        assert!(
+            err.to_string().contains("container"),
+            "the error must name the machine, got: {err}"
+        );
+        assert!(
+            !dir.join("test-claim.local.jsonl").exists(),
+            "a refused run must leave no file behind"
+        );
     }
 
     #[test]
