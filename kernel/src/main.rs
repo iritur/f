@@ -28,6 +28,7 @@ pub mod jitter;
 pub mod mem;
 pub mod percpu;
 pub mod process;
+pub mod ring;
 pub mod smp;
 
 use core::panic::PanicInfo;
@@ -420,6 +421,31 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             if let Some(property) = why.property() {
                 kprintln!("  property      {property:?}");
             }
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+
+    // M5, the first piece of it. One channel laid out by `f_abi::layout` in a
+    // real frame, a batch of four published with one store, and both opcodes
+    // answered — including the one this build does not implement, which is the
+    // half of a protocol that is easy to leave untested.
+    //
+    // Before ring 3 for the same reason the capability suite is: this runs
+    // against the kernel's own memory, where a failure can be reported. A ring
+    // that only ever ran with a process at the other end could not tell a
+    // service that refuses a bad entry from one that never saw it.
+    match ring::self_test(&mut frames, hardware.now().as_nanos()) {
+        Ok(report) => kprintln!(
+            "  ring          {} entries in {} B, {} B arena, {} published with one store, \
+             {} refused, forged slot caught",
+            report.entries,
+            report.bytes,
+            report.arena,
+            report.drained.executed,
+            report.drained.refused,
+        ),
+        Err(why) => {
+            kprintln!("FAIL: the frame's ring: {}", why.message());
             arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
         }
     }

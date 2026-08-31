@@ -75,6 +75,7 @@ struct Backing<const N: usize> {
     head: Cursor,
     tail: Cursor,
     flags: AtomicU32,
+    index: [AtomicU32; N],
     entries: [UnsafeCell<Sqe>; N],
 }
 
@@ -84,12 +85,19 @@ impl<const N: usize> Backing<N> {
             head: Cursor::new(),
             tail: Cursor::new(),
             flags: AtomicU32::new(0),
+            index: [const { AtomicU32::new(0) }; N],
             entries: [const { UnsafeCell::new(Sqe::ZERO) }; N],
         }
     }
 
     fn chan(&self) -> Channel<'_> {
-        Channel { head: &self.head, tail: &self.tail, flags: &self.flags, entries: &self.entries }
+        Channel {
+            head: &self.head,
+            tail: &self.tail,
+            flags: &self.flags,
+            index: &self.index,
+            entries: &self.entries,
+        }
     }
 }
 

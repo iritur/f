@@ -39,6 +39,7 @@ struct Shared {
     head: Cursor,
     tail: Cursor,
     flags: AtomicU32,
+    index: Vec<AtomicU32>,
     entries: Vec<UnsafeCell<Sqe>>,
 }
 
@@ -54,12 +55,19 @@ impl Shared {
             head: Cursor::new(),
             tail: Cursor::new(),
             flags: AtomicU32::new(0),
+            index: (0..n).map(|_| AtomicU32::new(0)).collect(),
             entries: (0..n).map(|_| UnsafeCell::new(Sqe::ZERO)).collect(),
         }
     }
 
     fn chan(&self) -> Channel<'_> {
-        Channel { head: &self.head, tail: &self.tail, flags: &self.flags, entries: &self.entries }
+        Channel {
+            head: &self.head,
+            tail: &self.tail,
+            flags: &self.flags,
+            index: &self.index,
+            entries: &self.entries,
+        }
     }
 }
 
@@ -219,4 +227,102 @@ fn a_hostile_cursor_never_panics() {
             "head={bad} must be reported as Corrupt"
         );
     }
+}
+
+/// **The load-bearing invariant, for the batch path.**
+///
+/// A batch publishes N entries with one `Release` store, and stages each of
+/// them as *two* writes — the entry, and the index-ring slot naming it. Both
+/// are `Relaxed`, and both are covered by that single store: `Release` is a
+/// one-way barrier, so no prior write may be observed after it by a thread that
+/// `Acquire`-loads the same location.
+///
+/// That argument is correct and it is also exactly the kind of argument that is
+/// correct until somebody edits the code. The indirection is new and the
+/// failure it introduces is silent on x86-64: a consumer that reads a stale
+/// index-ring slot follows it to a slot the producer has not written yet, and
+/// gets a whole, well-formed, *wrong* entry — no tearing, no corruption, no
+/// panic. Total store order hides it completely.
+///
+/// So the payload is self-describing. Each entry carries the value the
+/// indirection is supposed to lead to, and a consumer that followed a stale
+/// index sees a mismatch rather than a plausible number.
+#[test]
+fn a_batch_publishes_its_indirection_with_its_entries() {
+    const RING: usize = 64;
+    const BATCH: u64 = 16;
+    const COUNT: u64 = 120_000;
+
+    let shared = Arc::new(Shared::new(RING));
+    let barrier = Arc::new(Barrier::new(2));
+
+    let producing = {
+        let shared = Arc::clone(&shared);
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            let mut producer = Producer::new(shared.chan()).expect("power of two");
+            barrier.wait();
+            let mut sent = 0u64;
+            while sent < COUNT {
+                let mut batch = producer.batch();
+                while batch.staged() < BATCH as u32 && sent + u64::from(batch.staged()) < COUNT {
+                    let value = sent + u64::from(batch.staged());
+                    let mut sqe = Sqe::ZERO;
+                    sqe.user_data = value;
+                    sqe.offset = value;
+                    sqe.ext = [value, !value];
+                    match batch.push(sqe) {
+                        Ok(()) => {}
+                        Err(f_ring::RingError::Full) => break,
+                        Err(e) => panic!("producer saw {e:?}"),
+                    }
+                }
+                let staged = u64::from(batch.staged());
+                batch.publish().expect("publishing must not fail");
+                if staged == 0 {
+                    std::hint::spin_loop();
+                }
+                sent += staged;
+            }
+        })
+    };
+
+    let consuming = {
+        let shared = Arc::clone(&shared);
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            let consumer = Consumer::new(shared.chan()).expect("power of two");
+            barrier.wait();
+            let mut expect = 0u64;
+            while expect < COUNT {
+                match consumer.pop() {
+                    Ok(Some(sqe)) => {
+                        assert_eq!(
+                            sqe.user_data, expect,
+                            "STALE INDIRECTION: the entry reached through the index ring is not \
+                             the one published at this position. Either the index store in \
+                             ring::Producer::stage escaped the Release in Batch::publish, or \
+                             the consumer's index load acquired ordering it must not need."
+                        );
+                        assert_eq!(
+                            sqe.offset, sqe.user_data,
+                            "TORN PUBLISH: offset does not match user_data. The single Release \
+                             store in Batch::publish no longer covers every staged write."
+                        );
+                        assert_eq!(
+                            sqe.ext,
+                            [sqe.user_data, !sqe.user_data],
+                            "TORN PUBLISH: ext words do not match user_data. See above."
+                        );
+                        expect += 1;
+                    }
+                    Ok(None) => std::hint::spin_loop(),
+                    Err(e) => panic!("consumer saw {e:?}"),
+                }
+            }
+        })
+    };
+
+    producing.join().expect("producer thread");
+    consuming.join().expect("consumer thread");
 }

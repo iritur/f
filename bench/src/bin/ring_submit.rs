@@ -33,8 +33,11 @@ fn main() {
     let flags = AtomicU32::new(0);
     let entries: Vec<UnsafeCell<Sqe>> = (0..RING).map(|_| UnsafeCell::new(Sqe::ZERO)).collect();
 
-    let chan = || Channel { head: &head, tail: &tail, flags: &flags, entries: &entries };
-    let producer = Producer::new(chan()).expect("ring size is a power of two");
+    let index: Vec<AtomicU32> = (0..RING).map(|_| AtomicU32::new(0)).collect();
+
+    let chan =
+        || Channel { head: &head, tail: &tail, flags: &flags, index: &index, entries: &entries };
+    let mut producer = Producer::new(chan()).expect("ring size is a power of two");
     let consumer = Consumer::new(chan()).expect("ring size is a power of two");
 
     // A draining consumer, so the doorbell is suppressed and this measures the
@@ -50,14 +53,24 @@ fn main() {
         let _ = consumer.pop();
     }
 
+    // The batch is the measurement, and it was not always. This loop used to
+    // call `submit` thirty-two times, which pays a `Release` store and a peer
+    // flags load per entry — and `claims/0001-ring-submit-latency.toml` names
+    // exactly that in its diagnosis section, under `flat_batch`: *the batch is
+    // not being amortised; you are publishing per entry*. A workload with the
+    // symptom the claim tells you to look for is a workload that cannot detect
+    // it. Thirty-two entries are staged and made visible with one store, which
+    // is what `batch = 32` in the claim file has always meant.
     let batches = ITERATIONS / BATCH;
     for i in 0..batches {
         let start = Instant::now();
+        let mut batch = producer.batch();
         for slot in 0..BATCH {
             let mut sqe = Sqe::ZERO;
             sqe.user_data = (i * BATCH + slot) as u64;
-            black_box(producer.submit(black_box(sqe))).expect("ring must not fill");
+            batch.push(black_box(sqe)).expect("ring must not fill");
         }
+        black_box(batch.publish()).expect("the cursors must stay sane");
         let elapsed = start.elapsed().as_nanos() as u64;
 
         // Per-operation cost, recorded per observation rather than averaged
