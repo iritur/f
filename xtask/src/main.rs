@@ -140,6 +140,7 @@ fn main() -> ExitCode {
         "lint-percpu" => lint_percpu(),
         "lint-mutations" => lint_mutations(),
         "lint-claims" => lint_claims(),
+        "release" => release(args.get(1).map(String::as_str) == Some("--dry-run")),
         "history" => match args.get(1).map(String::as_str) {
             Some("append") => history_append(),
             Some(other) => Err(format!("unknown option for history: {other}")),
@@ -211,6 +212,8 @@ cargo xtask <command>
 
   panic              Three endings CI must tell apart: a clean boot, a
                      deliberate panic, and a boot that never finishes
+
+  release --dry-run  The release manifest, and what is missing from it
 
   history            The measurement history, one record per commit
   history append     Add this commit's record. Run on main, never on a branch
@@ -2084,6 +2087,183 @@ fn toml_field(text: &str, key: &str) -> Option<String> {
         let rest = line.strip_prefix(key)?;
         rest.trim_start().starts_with('=').then(|| toml_scalar(line))?
     })
+}
+
+/// One line of the release manifest.
+struct Content {
+    /// What the release contract calls it.
+    name: &'static str,
+    /// Where it comes from, when it exists.
+    source: ContentSource,
+    /// The task that produces it, when it does not exist yet.
+    owed_to: Option<&'static str>,
+}
+
+/// Where a manifest entry's content comes from.
+enum ContentSource {
+    /// A file in the tree.
+    File(&'static str),
+    /// Every file under a directory with this extension.
+    Tree(&'static str, &'static str),
+    /// Produced by the build rather than read from the tree.
+    Built(&'static str),
+    /// Nothing produces it yet.
+    Absent,
+}
+
+/// The eight things a release contains.
+///
+/// In the order `docs/the-long-plan.html` section 08 lists them, and named the
+/// way it names them, so the table there and this list can be read against each
+/// other. An entry disappearing from one and not the other is the failure this
+/// ordering exists to make obvious.
+const CONTENTS: &[Content] = &[
+    Content {
+        name: "the source, at a tag",
+        source: ContentSource::Built("git archive of HEAD"),
+        owed_to: None,
+    },
+    Content {
+        name: "the claims snapshot",
+        source: ContentSource::File("claims/snapshot.json"),
+        owed_to: None,
+    },
+    Content {
+        name: "the baseline configuration",
+        source: ContentSource::Absent,
+        owed_to: Some(
+            "E1-D06. claims/0001 names `linux-6.x-tuned` in prose, which is exactly \
+             the decay the contract warns about: prose ages into a stock \
+             comparison without anybody deciding it should, because prose \
+             cannot be re-run",
+        ),
+    },
+    Content {
+        name: "the seed corpus and scenario set",
+        source: ContentSource::Absent,
+        owed_to: Some("E1-P01, the deterministic simulator, and E1-P03's sweeps"),
+    },
+    Content {
+        name: "a content-addressed system image",
+        source: ContentSource::Built("target/<target>/debug/f-kernel.elf32"),
+        owed_to: None,
+    },
+    Content {
+        name: "the dependency manifest and provenance",
+        source: ContentSource::File("Cargo.lock"),
+        owed_to: None,
+    },
+    Content {
+        name: "the honest-status page",
+        source: ContentSource::File("docs/TESTING-STATUS.md"),
+        owed_to: None,
+    },
+    Content {
+        name: "the decision record",
+        source: ContentSource::Tree("docs/rfc", "md"),
+        owed_to: None,
+    },
+];
+
+/// `sha256sum`, when the machine has it.
+///
+/// Not a hard requirement and not vendored. The release *package* is content
+/// addressed and E0-R01 owns producing it; what this command needs a hash for
+/// is to show that the image it would ship is a specific one. A machine without
+/// coreutils gets the manifest with the hash column absent and a line saying
+/// why, which is more useful than either refusing to run or growing a hash
+/// implementation in the build tooling.
+fn sha256(path: &Path) -> Option<String> {
+    let out = Command::new("sha256sum").arg(path).current_dir(root()).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()?.split_whitespace().next().map(str::to_string)
+}
+
+fn release(dry_run: bool) -> Result<(), String> {
+    if !dry_run {
+        return Err("`cargo xtask release` builds the package, and that is E0-R01.\n\n\
+             What exists today is `cargo xtask release --dry-run`, which prints the\n\
+             manifest this would produce and names the task owing each missing\n\
+             piece. RELEASING.md states the contract the package has to satisfy."
+            .into());
+    }
+
+    let describe = capture("git", &["describe", "--tags", "--always", "--dirty"])
+        .unwrap_or_else(|_| "unknown".into());
+    let commit = capture("git", &["rev-parse", "HEAD"]).unwrap_or_else(|_| "unknown".into());
+
+    println!("release manifest (dry run)\n");
+    println!("  version   {}", describe.trim());
+    println!("  commit    {}", commit.trim());
+    println!("  contract  RELEASING.md\n");
+
+    let mut missing = 0usize;
+    for content in CONTENTS {
+        match &content.source {
+            ContentSource::File(path) => {
+                let full = root().join(path);
+                if full.exists() {
+                    let size = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+                    let hash = sha256(&full).unwrap_or_else(|| "-".into());
+                    println!("  [ok]  {:<36} {path}", content.name);
+                    println!("        {size} bytes  sha256 {}", &hash[..hash.len().min(16)]);
+                } else {
+                    missing += 1;
+                    println!("  [--]  {:<36} {path} does not exist", content.name);
+                }
+            }
+            ContentSource::Tree(dir, extension) => {
+                let count = std::fs::read_dir(root().join(dir))
+                    .map(|entries| {
+                        entries
+                            .filter_map(Result::ok)
+                            .filter(|e| e.path().extension().is_some_and(|x| x == *extension))
+                            .count()
+                    })
+                    .unwrap_or(0);
+                if count == 0 {
+                    missing += 1;
+                    println!("  [--]  {:<36} {dir}/ is empty", content.name);
+                } else {
+                    println!("  [ok]  {:<36} {dir}/  {count} file(s)", content.name);
+                }
+            }
+            ContentSource::Built(how) => {
+                println!("  [ok]  {:<36} built: {how}", content.name);
+            }
+            ContentSource::Absent => {
+                missing += 1;
+                println!("  [--]  {:<36} nothing produces this yet", content.name);
+                if let Some(owed) = content.owed_to {
+                    println!("        owed to {owed}");
+                }
+            }
+        }
+    }
+
+    println!("\n  {} of {} contents present", CONTENTS.len() - missing, CONTENTS.len());
+
+    // The gates, listed rather than run. Running `verify` from inside a dry run
+    // would make a manifest print cost a full boot, and the point of this
+    // command is that it is cheap enough to run while thinking.
+    println!(
+        "\nwhat would stop this release (RELEASING.md, and not checked here):\n\
+        \x20 1. `cargo xtask verify` not green\n\
+        \x20 2. a gating claim red, or a claim with no reproduction from a clean checkout\n\
+        \x20 3. a document number `cargo xtask lint` cannot trace to the registry\n\
+        \x20 4. docs/TESTING-STATUS.md not re-read against the tree\n\
+        \x20 5. an RFC reversed this cycle that was edited rather than superseded"
+    );
+
+    if missing > 0 {
+        println!(
+            "\nThis is not yet a releasable package, and the missing rows say why.\n\
+             E0-R01 builds it; E0-R04 is release 0.1."
+        );
+    }
+    Ok(())
 }
 
 /// The measurement history.

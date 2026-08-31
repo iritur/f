@@ -112,8 +112,11 @@ load-bearing.*
   `apic::wait`'s comment said the idle policy did not exist. It does now, so the comment says what is actually still missing: the table, and the implementation.
 - [ ] **E0-D07** `M` Adopt the twelve rules in `CONTRIBUTING.md`, and mechanise the three that can be.
   *exit:* `xtask lint` gains a unit-and-epoch check on public `abi` fields, a claims-ownership check, and a no-callback check; each fails a deliberately broken fixture.
-- [ ] **E0-D08** `M` Write `RELEASING.md` — what a release is, what it contains, how a stranger reproduces it.
-  *exit:* document merged; `cargo xtask release --dry-run` prints the manifest it would produce.
+- [x] **E0-D08** `M` Write `RELEASING.md` — what a release is, what it contains, how a stranger reproduces it.
+  *exit:* met. `RELEASING.md` is merged, and `cargo xtask release --dry-run` prints the manifest: eight contents in the order `docs/the-long-plan.html` section 08 lists them, six present today, each absent one naming the task that owes it. `cargo xtask release` without the flag refuses and says E0-R01 owns building the package.
+  The command lists what would stop a release and deliberately **does not check** any of it. Running `verify` from inside a manifest print would make it cost a full boot, and this command's value is being cheap enough to run while thinking about whether a release is close.
+  **It found a gap in the plan on its first run**, which is the argument for the command existing at all. *The baseline configuration* is one of the eight things the release contract requires, and no task in this file produced it — `claims/0001` names `linux-6.x-tuned` in prose, which is precisely the decay the contract warns about: prose ages into a stock comparison without anybody deciding it should. Now **E1-D06**, rather than a silent scope cut (A-07).
+  The dry run hashes with `sha256sum` when the machine has it and prints the manifest without the hash column when it does not. A build tool growing a hash implementation, or refusing to print a manifest because coreutils is absent, are both worse than a missing column — and the package's own content addressing is E0-R01's job, not this command's.
 - [x] **E0-D09** `S` Record the target-JSON decision: use `targets/x86_64-f.json` or delete it.
   Deleted. Nothing built it — its only two references in the whole tree were `BOOTSTRAP.md`'s gap table and this line — and everything it said that the built-in `x86_64-unknown-none` does not is two codegen flags already set in `.cargo/config.toml`, beside the paragraph explaining why the image does not link without them. The usual argument for a custom target does not apply here either: the build already passes `-Zbuild-std`, so the JSON was never buying the thing a JSON usually buys, and an unbuilt second copy of a target definition cannot fail loudly when the spec schema moves under it.
   *exit:* met. The file is gone; the reason and the reversal condition — a data layout, a linker flavour or an atomic width that the built-in plus rustflags cannot express — are a doc comment on `KERNEL_TARGET` in `xtask/src/main.rs`. The `BOOTSTRAP.md` gap row is struck through and marked done, which is where the question was actually being asked from.
@@ -568,6 +571,10 @@ everything after this cheap to debug.*
 - [ ] **E1-D04** `M` Record the driver-container shape: declaratively routed capabilities, typed protocol, declared restart policy.
   *exit:* one manifest schema, with a worked example for virtio-blk.
 - [ ] **E1-D05** `S` Deadline inheritance bounds — how far a caller's deadline propagates, and what stops a component claiming urgency forever.
+- [ ] **E1-D06** `M` The tuned-Linux baseline, as configuration rather than as prose.
+  Found by `cargo xtask release --dry-run` at E0-D08: the release contract requires the baseline configuration in the package, and nothing in this file produced it. `claims/0001` says `linux-6.x-tuned` with a sentence of notes, which is the decay the contract exists to prevent — a tuned comparison becomes a stock comparison as the baseline ages and nobody re-checks it, and prose cannot be re-checked because it cannot be run.
+  Belongs in E1 rather than E0: the first claim it has to configure a baseline *for* is the datapath set at `E1-P10`, and a baseline written before there is a workload to tune it against is a guess with a filename. `A-04` is the standing item that keeps it honest afterwards.
+  *exit:* the tuned baseline is a file in the tree that a stranger can apply to a machine and get the configuration a claim was compared against; `cargo xtask release --dry-run` reports it present.
   *exit:* the rule is written before the first starvation bug, as the resource document asks.
 
 ### Build
