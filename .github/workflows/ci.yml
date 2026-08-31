@@ -291,6 +291,39 @@ jobs:
       # be green for the wrong reason.
       - run: cargo xtask reproduce
 
+  # The fourth thing the gate was always supposed to run, and the one that was
+  # missing: lint, test, run — and claims.
+  #
+  # What this job can assert today is everything about the registry except a
+  # number. Every claim names an owner that exists (R09), every document
+  # citation matches the value the claim holds, the snapshot regenerates without
+  # a diff, and the release manifest still resolves. What it cannot assert is
+  # that a gating claim holds, because no claim gates yet: 0001 and 0002 are
+  # `pending` on a measurement environment that does not exist, and 0003 is
+  # `tracked` on purpose. That is E0-P05 and E0-P06, and it is the reason
+  # E0-P01's exit is only half met.
+  claims:
+    name: claims registry
+    runs-on: ubuntu-latest
+    container: ghcr.io/iritur/f-dev:latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo xtask claims
+      - run: cargo xtask lint-claim-owners
+      - run: cargo xtask lint-claims
+      # The snapshot is committed, and a stale one is a commit claiming numbers
+      # it does not hold. `xtask claims` above rewrote it; if that changed the
+      # file, the tree and the registry disagreed.
+      - name: the committed snapshot is current
+        run: |
+          if ! git diff --quiet -- claims/snapshot.json; then
+            echo "claims/snapshot.json is stale. Run \`cargo xtask claims\` and commit it."
+            git diff -- claims/snapshot.json
+            exit 1
+          fi
+          echo "snapshot is current"
+      - run: cargo xtask release --dry-run
+
   deps:
     name: dependency policy
     runs-on: ubuntu-latest

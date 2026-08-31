@@ -413,15 +413,18 @@ load-bearing.*
 
 ### Prove
 
-- [ ] **E0-P01** `M` CI pull-request gate under ten minutes: lint, test, run, claims.
+- [>] **E0-P01** `M` CI pull-request gate under ten minutes: lint, test, run, claims.
   Half the budget was being spent twice: `ci` triggered on both `push` and
   `pull_request`, so every commit on a branch with a pull request open built the
   whole matrix — both AArch64 runners and the QEMU boot — against an identical
   tree. Fixed; the gate is now the pull request, and `main` is checked again
   after a merge because a merge commit is a tree nobody tested. Still open: the
   claims job, the ten-minute measurement, and the red half of the exit.
-  *exit:* the workflow is green on a pull request that changes one line, and red on a pull request that regresses a gating claim.
-  *needs:* E0-B01
+  The claims job exists now, and it is the fourth thing the gate was always supposed to run beside lint, test and run. It asserts everything about the registry except a number: every claim names an owner that exists (R09), every document citation matches the value the claim holds, the committed snapshot is not stale — a stale one is a commit asserting numbers it does not hold — and the release manifest still resolves.
+  *exit:* **half met, and the other half is blocked on a claim that gates.** The green half is written and runs; the red half — "red on a pull request that regresses a gating claim" — cannot be built, because no claim gates. 0001 and 0002 are `pending` on a measurement environment that does not exist here, and 0003 is `tracked` on purpose. That is `E0-P05` and `E0-P06`, and it is a real dependency this task's `needs:` did not name.
+  The ten-minute measurement is also unmade, and the gate is now ten jobs rather than seven — `trace`, `reproduction` and `claims` were added this cycle. Whether it still fits the budget is a question only a run can answer, and it is worth asking early: `trace` boots the kernel twice and `reproduction` boots it four more times, which is the largest single addition the gate has taken.
+  Marked `[>]` with `E0-P07` and `E0-P14`, all three waiting on the same thing: publish the image, open a pull request, read the result.
+  *needs:* E0-B01, E0-P05, E0-P14
 - [>] **E0-P02** `M` **The reproduction check.** Two runs of the same `(seed, commit)` on two different runners produce a byte-identical execution trace hash.
   `cargo xtask reproduce` boots the commit twice, hashes each serial log, and requires the two to agree — then builds the kernel with **one unseeded read of the timestamp counter** on the boot path and requires two runs to *disagree*. Both halves, for the reason `mutate` gives: a reproduction check that has only ever passed is indistinguishable from one that cannot fail, and this one is unusually easy to get wrong in that direction — a trace hashed over something that never varies agrees with itself forever.
   **The defect is the shape of the bug this whole apparatus exists for**, and it is worth looking at. It does not make the kernel fail. It boots, every assertion holds, it prints `M0 ok` and exits 33. `run`, `user`, `cap`, `panic` and `mutate` are all green on it. The only thing wrong is that two runs no longer agree — and until this command existed, nothing in the tree would ever have said so. That is why the defect is not in `MUTATIONS`: every entry there makes a boot go red, and this one makes a boot go green twice with two different answers.
