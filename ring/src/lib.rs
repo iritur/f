@@ -276,7 +276,37 @@ impl<'m> Producer<'m> {
     /// `Acquire` because a `true` answer is about to be acted on by ringing a
     /// doorbell, and the consumer's decision to sleep must not be observed
     /// before whatever it did to prepare for sleeping.
+    ///
+    /// # The fence, and why this is the only place in the ring with one
+    ///
+    /// The two ends run Dekker's algorithm here and nowhere else. The producer
+    /// **stores** `head` and then **loads** `flags`; the consumer **stores**
+    /// `flags` and then **loads** `head`. Each is a store to one location
+    /// followed by a load of a *different* one, and that is the single
+    /// reordering total store order permits — the store sits in the store
+    /// buffer while the load is satisfied ahead of it. `Release` and `Acquire`
+    /// do not forbid it; they are one-way barriers and this needs a two-way
+    /// one.
+    ///
+    /// Without the fence, both sides can look and see nothing: the producer
+    /// reads `flags` before its own publish is visible and concludes the
+    /// consumer is awake, while the consumer reads `head` before that publish
+    /// and concludes the ring is empty. The consumer sleeps holding work
+    /// nobody will ring for. That is a **lost wakeup**, and it is not a data
+    /// race — every value read is a value that was legitimately written. It is
+    /// a hang.
+    ///
+    /// The consumer's half of the barrier already exists:
+    /// [`Consumer::arm_wakeup`] is a `SeqCst` read-modify-write, which is a
+    /// full barrier. This is the missing half. RFC 0020, and unlike the
+    /// `Release`/`Acquire` pair this one is observable on x86-64 — store-load
+    /// is exactly what that architecture reorders — so
+    /// `a_sleeping_consumer_is_never_left_holding_work` catches it here rather
+    /// than only on the arm runner.
     fn doorbell_wanted(&self) -> bool {
+        #[cfg(not(feature = "mutate-no-doorbell-fence"))]
+        core::sync::atomic::fence(Ordering::SeqCst);
+
         self.chan.flags.load(Ordering::Acquire) & chan::NEED_WAKEUP != 0
     }
 }

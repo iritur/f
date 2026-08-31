@@ -285,6 +285,20 @@ jobs:
             exit 1
           fi
 
+      # The doorbell fence, and this one runs on *both* runners. Store-load is
+      # the reordering total store order performs, so the lost wakeup RFC 0020
+      # describes is visible on an ordinary x86-64 machine — it is the one
+      # defect in this file that does not need the arm runner to be seen.
+      # Locally it costs 58 971 lost wakeups in 500 000 rounds.
+      - run: |
+          if cargo test -p f-ring --test litmus --release --features f-ring/mutate-no-doorbell-fence; then
+            echo "The litmus suite passed with the StoreLoad fence removed from"
+            echo "ring::Producer::doorbell_wanted. Either the harness stopped lining"
+            echo "the two threads up inside the window — a std::sync::Barrier will do"
+            echo "that — or suppression no longer runs Dekker's algorithm. RFC 0020."
+            exit 1
+          fi
+
   coverage:
     name: coverage instrumentation
     needs: [environment, manifest]

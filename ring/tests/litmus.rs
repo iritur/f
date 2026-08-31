@@ -548,3 +548,123 @@ fn a_hostile_client_cursor_never_panics() {
         );
     }
 }
+
+/// Line two threads up at the same instant, `arrivals` deep.
+///
+/// A spin barrier rather than [`std::sync::Barrier`], and the difference is the
+/// whole test below. A parked-thread barrier ends in a futex wakeup, which
+/// takes microseconds; the window this test has to land in is one store buffer
+/// deep, which is nanoseconds. Threads woken from a futex are lined up several
+/// thousand times too loosely ever to be inside it together, so the test would
+/// report a clean run on a build with the fence removed — a check that cannot
+/// fail, which is the failure this tree keeps finding in its own work.
+///
+/// It also makes the test roughly two hundred times faster, which is how it can
+/// afford enough rounds to be worth believing.
+fn meet(gate: &AtomicU32, nth: usize) {
+    let target = 2 * (nth as u32 + 1);
+    gate.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    while gate.load(std::sync::atomic::Ordering::SeqCst) < target {
+        std::hint::spin_loop();
+    }
+}
+
+/// **The lost wakeup.**
+///
+/// The one place in the ring where the two ends run Dekker's algorithm. The
+/// producer stores `head` and then loads `flags`; the consumer stores `flags`
+/// and then loads `head`. Store-then-load-of-a-different-location is the single
+/// reordering total store order permits, and `Release`/`Acquire` do not forbid
+/// it — they are one-way barriers, and this needs a two-way one.
+///
+/// The bad outcome is both ends seeing nothing. The producer reads `flags`
+/// before its own publish is visible and concludes the consumer is awake; the
+/// consumer reads `head` before that publish and concludes the ring is empty.
+/// Then it sleeps, holding work nobody will ring for. Every value read was
+/// legitimately written, so this is not a data race and no sanitiser finds it.
+/// It is a hang.
+///
+/// # Why this one is unlike every other test in this file
+///
+/// The rest guard a `Release`/`Acquire` pair that x86-64 satisfies for free,
+/// which is why the AArch64 job exists and why this file keeps saying so.
+/// Store-load is the reordering x86-64 *does* perform, so this defect is
+/// visible on an ordinary laptop — and `mutate-no-doorbell-fence` is expected
+/// to fail here rather than only on the arm runner.
+#[test]
+fn a_sleeping_consumer_is_never_left_holding_work() {
+    const ROUNDS: usize = 500_000;
+
+    let shared = Arc::new(Shared::new(8));
+    let gate = Arc::new(AtomicU32::new(0));
+    // What each side saw. Written before the round's closing meet and read
+    // after it, so the barrier is what orders them and reading them is not part
+    // of the race being measured.
+    let rang = Arc::new(AtomicU32::new(0));
+
+    let producing = {
+        let shared = Arc::clone(&shared);
+        let gate = Arc::clone(&gate);
+        let rang = Arc::clone(&rang);
+        thread::spawn(move || {
+            let producer = Producer::new(shared.chan()).expect("power of two");
+            for round in 0..ROUNDS {
+                meet(&gate, round * 2);
+                let wanted = producer.submit(Sqe::ZERO).expect("a healthy ring");
+                rang.store(u32::from(wanted), std::sync::atomic::Ordering::Relaxed);
+                meet(&gate, round * 2 + 1);
+            }
+        })
+    };
+
+    let consuming = {
+        let shared = Arc::clone(&shared);
+        let gate = Arc::clone(&gate);
+        let rang = Arc::clone(&rang);
+        thread::spawn(move || {
+            let consumer = Consumer::new(shared.chan()).expect("power of two");
+            let mut lost = 0usize;
+            let mut first = ROUNDS;
+
+            for round in 0..ROUNDS {
+                // Disarmed outside the window, so that the only store to
+                // `flags` inside it is the arming one the algorithm races.
+                consumer.disarm_wakeup();
+
+                meet(&gate, round * 2);
+                consumer.arm_wakeup();
+                let got = consumer.pop().expect("a healthy ring").is_some();
+                meet(&gate, round * 2 + 1);
+
+                let rung = rang.load(std::sync::atomic::Ordering::Relaxed) != 0;
+                if !rung && !got {
+                    lost += 1;
+                    first = first.min(round);
+                }
+
+                // Reset for the next round. Both threads are past the closing
+                // meet and neither touches the ring again until the next one.
+                shared.head.set(0);
+                shared.tail.set(0);
+            }
+
+            // Counted rather than panicked on sight, because the rate is the
+            // useful number. It says how many rounds a real system would run
+            // before it hung, and a defect that appears once in a hundred
+            // thousand is exactly the kind that reaches production.
+            assert_eq!(
+                lost, 0,
+                "LOST WAKEUP in {lost} of {ROUNDS} rounds, first at {first}. The producer \
+                 published an entry, read NEED_WAKEUP as clear and rang nothing, while the \
+                 consumer armed NEED_WAKEUP, saw an empty ring, and would now sleep. The entry \
+                 is stranded and nothing will come for it. The StoreLoad fence in \
+                 ring::Producer::doorbell_wanted has been removed or weakened — Release and \
+                 Acquire do not forbid this reordering, and it is the one total store order \
+                 performs. RFC 0020."
+            );
+        })
+    };
+
+    producing.join().expect("producer thread");
+    consuming.join().expect("consumer thread");
+}

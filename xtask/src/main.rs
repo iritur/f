@@ -999,7 +999,12 @@ const TRACE_DEFECT: &str = "mutate-unseeded-time";
 ///
 /// One list, because `lint-mutations` has one job — no defect is ever on by
 /// default — and a second list is how the second defect gets forgotten.
-const DEFECTS: &[&str] = &[TRACE_DEFECT, "mutate-unchecked-index", "mutate-relaxed-completion"];
+const DEFECTS: &[&str] = &[
+    TRACE_DEFECT,
+    "mutate-unchecked-index",
+    "mutate-relaxed-completion",
+    "mutate-no-doorbell-fence",
+];
 
 /// The seed every reproduction run uses.
 ///

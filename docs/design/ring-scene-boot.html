@@ -212,7 +212,14 @@ td.num{font-family:var(--mono); font-variant-numeric:tabular-nums; white-space:n
 self.sqe[(head & self.mask) <span class="k">as</span> usize].write(entry);      <span class="c">// 1. payload</span>
 self.head.store(head.wrapping_add(1), Ordering::<span class="k">Release</span>);  <span class="c">// 2. publish</span>
 
-<span class="c">// 3. wake the peer only if it told us it is going to sleep</span>
+<span class="c">// 3. the two ends run Dekker here: we store head then load flags,</span>
+<span class="c">//    the peer stores flags then loads head. Store-load is the one</span>
+<span class="c">//    reordering TSO permits, and Release/Acquire do not forbid it.</span>
+<span class="c">//    Without this fence both sides see nothing and the peer sleeps</span>
+<span class="c">//    holding work. RFC 0020.</span>
+fence(Ordering::<span class="k">SeqCst</span>);
+
+<span class="c">// 4. wake the peer only if it told us it is going to sleep</span>
 <span class="k">if</span> self.flags.load(Ordering::<span class="k">Acquire</span>) & NEED_WAKEUP != 0 {
     self.doorbell();
 }</pre>
@@ -224,6 +231,7 @@ self.head.store(head.wrapping_add(1), Ordering::<span class="k">Release</span>);
     <ul class="list">
       <li>While actively draining the ring, the consumer clears <code>NEED_WAKEUP</code>. Producers see this and skip the doorbell entirely.</li>
       <li>Before sleeping, the consumer sets <code>NEED_WAKEUP</code>, then re-checks the ring once more before actually sleeping &mdash; this second check closes the race where a producer published between the drain and the flag write.</li>
+      <li>The consumer's flag write is a <code>SeqCst</code> read-modify-write and the producer has the fence above. Both halves are needed, and the second check does <em>not</em> substitute for them: it closes the case where the consumer's flag write is late, and not the case where the consumer's ring read is early. <b>RFC 0020</b>, which was written because this list said the second check was enough.</li>
     </ul>
     <p>Under load this drives doorbell count to zero and the channel becomes pure polling. Under idle it costs exactly one doorbell to restart. The same idea is proven in <code>io_uring</code>'s polled mode and in virtio's event-index mechanism; it is not novel and it should not be reinvented.</p>
     <div class="claim"><b>On a deadline-class core the consumer should never sleep at all.</b> It parks with user-level monitor-and-wait &mdash; <code>UMONITOR</code>/<code>UMWAIT</code> on x86, <code>WFE</code> on ARM &mdash; armed on the cursor's own address, so the core drops to low power but wakes on the store itself. No interrupt, no scheduler, no jitter tail. This is one of the seven capabilities named in section 13 of the architecture document, and it is the easiest of them to adopt: the instructions have shipped for years and are almost entirely unused.</div>

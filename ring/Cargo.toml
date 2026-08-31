@@ -28,6 +28,13 @@ f-env.workspace = true
 # file exists.
 mutate-relaxed-completion = []
 
+# The second, and the one that is observable on x86-64: it removes the
+# `SeqCst` fence between publishing an entry and reading the consumer's
+# NEED_WAKEUP flag. Store-load is the one reordering total store order permits,
+# so this defect is caught on the ordinary runner and not only on the arm one.
+# `ring/tests/litmus.rs` is what must fail. RFC 0020.
+mutate-no-doorbell-fence = []
+
 [lints.rust]
 # The frame. Overrides the workspace forbid — see the note in the root Cargo.toml.
 unsafe_code = "allow"
