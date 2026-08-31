@@ -126,6 +126,10 @@ load-bearing.*
 - [x] **E0-D09** `S` Record the target-JSON decision: use `targets/x86_64-f.json` or delete it.
   Deleted. Nothing built it — its only two references in the whole tree were `BOOTSTRAP.md`'s gap table and this line — and everything it said that the built-in `x86_64-unknown-none` does not is two codegen flags already set in `.cargo/config.toml`, beside the paragraph explaining why the image does not link without them. The usual argument for a custom target does not apply here either: the build already passes `-Zbuild-std`, so the JSON was never buying the thing a JSON usually buys, and an unbuilt second copy of a target definition cannot fail loudly when the spec schema moves under it.
   *exit:* met. The file is gone; the reason and the reversal condition — a data layout, a linker flavour or an atomic width that the built-in plus rustflags cannot express — are a doc comment on `KERNEL_TARGET` in `xtask/src/main.rs`. The `BOOTSTRAP.md` gap row is struck through and marked done, which is where the question was actually being asked from.
+- [ ] **E0-D10** `M` Name the measurement machine — `runner-class-A` as a specification, not a hope.
+  Found by reading this file's own graph: `E0-P05`, `E0-P06`, the red half of `E0-P01` and release 0.1 all wait on `runner-class-A`, and no task produces one. The class is named in `MEASUREMENT_ENVIRONMENTS` and in both pending claims' `[hardware]` sections, which is the same decay `E1-D06` exists to prevent — a machine that is only a name in prose cannot be obtained, and every epoch adds claims to the same queue (`E1-P10` adds four). `E5-D01` does this job for the phase-05 workstation; this is the same task for the claims runner, three releases earlier.
+  *exit:* a machine exists that `F_ENVIRONMENT=runner-class-A` truthfully describes, and its specification is a file in the tree — hardware, kernel command line, and how each of RFC 0007's four reservation components is obtained on it — complete enough that a stranger could assemble an equivalent. `E0-P05` and `E0-P06` own their numbers; this task owns there being somewhere to take them.
+  *needs:* E0-D04 (RFC 0007 defines what the machine must be able to reserve)
 
 ### Build
 
@@ -400,7 +404,7 @@ load-bearing.*
   The kernel proves it on every boot. One frame, laid out by `f_abi::layout`, header written into the region and read back *out of the bytes* before being adopted — so the arithmetic is checked against memory rather than against itself. A batch of four publishes with one store; the service answers three and refuses the fourth for an unknown opcode; `"the ring is open"` reaches the boot log out of the channel's arena, on the line between the quotes, because an opcode put it there. Then a slot number is forged into the index ring and the channel must be reported corrupt.
   That last phase is worth recording, because the first version of it passed while checking nothing. It forged slot **zero**, and the consumer reads the position *its own cursor* names — four, after four entries were drained. A boot that reports a caught forgery it never looked for is `E0-B16`'s lesson in a new place: a check that cannot fail is worse than no check, and only running it the wrong way round finds out.
   Not done here, and deliberately: the channel is not yet *between two components*. Both ends are the kernel and the region is a frame rather than a shared mapping, which is `E0-B13`. A task that invented the mapping as well would have tested the layout and the mapping against each other and neither against the specification.
-  **What `[>]` costs, said out loud.** `cargo xtask todo` reads this marker, so four tasks — `E0-B13`, `E0-B14`, `E0-B15`, `E0-P05` — now report as waiting on a measurement none of them needs. Three of them need the *code*, and the code is here and green. Only `E0-P05` needs the number. The exit line above was written to include `E0-P05`'s exit word for word, which is the actual defect: one criterion belonging to two tasks means one of them is always lying about its state. Fixing that is a change to what an exit *is* and belongs to whoever next argues about the exit vocabulary, not to a build task quietly rewriting its own success condition. Until then, read the graph's four blocked entries as blocked on `runner-class-A` and not on anything in this tree.
+  **What `[>]` costs, said out loud.** `cargo xtask todo` reads this marker, so four tasks — `E0-B13`, `E0-B14`, `E0-B15`, `E0-P05` — now report as waiting on a measurement none of them needs. Three of them need the *code*, and the code is here and green. Only `E0-P05` needs the number. The exit line above was written to include `E0-P05`'s exit word for word, which is the actual defect: one criterion belonging to two tasks means one of them is always lying about its state. Fixing that is a change to what an exit *is* and belongs to whoever next argues about the exit vocabulary, not to a build task quietly rewriting its own success condition. Until then, read the graph's four blocked entries as blocked on `runner-class-A` — the machine `E0-D10` now owns — and not on anything in this tree.
   *needs:* E0-B11
 - [ ] **E0-B13** `M` Bind `Producer`/`Consumer` to a mapped shared region with a validated, negotiated `ChannelHeader`, replacing the borrowed-memory placeholder.
   *exit:* the hostile-header tests in `ring/tests` run against a real mapping; every invalid header tears the channel down without a panic.
@@ -461,16 +465,16 @@ load-bearing.*
   An absent metric serialises as `null` and not as zero. Zero is a measurement, and an absent metric that reads as zero is a claim nobody made.
 - [ ] **E0-P05** `S` Claim 0001, ring submit latency, moves from `pending` to measured and `gating`.
   *exit:* `cargo xtask claims` reports it green; a deliberate 20% regression fails the build.
-  *needs:* E0-B12, E0-P04
+  *needs:* E0-B12, E0-P04, E0-D10 (the machine the number is taken on)
 - [ ] **E0-P06** `M` Claim 0002, timer jitter: p99 under 5 µs for a 1 kHz timer over 60 seconds, gating from M2 onward.
   *exit:* recorded with the reservation conditions from RFC 0007 named in the claim.
-  *needs:* E0-B07, E0-D04
+  *needs:* E0-B07, E0-D04, E0-D10 (the machine the number is taken on)
 - [>] **E0-P07** `M` Litmus tests for the cursor protocol run in CI on x86-64 **and** AArch64.
   The job is now a two-entry matrix rather than an AArch64-only job, so the litmus suite runs `--release` on both architectures. The x86-64 half is not redundant: it is the **control**, and it is what makes a red arm run mean "this is about weak memory" rather than "this test is broken". Without it a failure on the arm runner has two explanations and no way to choose between them.
   `fail-fast: false` on the matrix, deliberately. The default would cancel the AArch64 job the moment x86-64 went red, throwing away the one result that distinguishes *the ring is broken* from *the ring is broken on weak memory* — different bugs, different fixes.
   Neither job carries `continue-on-error`, and the comment in `ci.yml` says why it may not: an advisory job that goes red is a job that gets ignored on the second Tuesday, and this one exists to be believed. Checked mechanically while writing it — no job in `ci.yml` is advisory.
   *exit:* **not met from here.** "Both jobs green" is a property of workflow runs, and nothing in this environment can run GitHub Actions; what can be said is that the suite passes `--release` locally on x86-64, three tests, and that the workflow now asks for both. Marked `[>]` alongside `E0-P14`, which has the same blocker and clears on the same event: a green run of this gate.
-  The standing gap is unchanged and worth restating rather than letting the green ticks imply otherwise: these are **stress tests, not a model check**. RustMC at M5 is what explores what RC11 permits; two runners plus the unit tests are what exists until then.
+  The standing gap is unchanged and worth restating rather than letting the green ticks imply otherwise: these are **stress tests, not a model check**. RustMC — `E0-P16`, now that M5 is here — is what explores what RC11 permits; two runners plus the unit tests are what exists until then.
 - [x] **E0-P08** `L` The capability negative suite, as code. A process cannot name a capability it was not given, forge a handle, use a revoked handle, exceed granted rights, or panic the kernel by trying. **(M4 exit criterion)**
   Both halves, at last. The suite is in the gate — `cargo xtask cap`, eight
   boots, and the five properties run at every boot against a real table and
@@ -559,8 +563,13 @@ load-bearing.*
   What is refused is the **summary**, not the drawing. The distribution still prints, because it is how anybody debugs a workload and refusing to draw it would push people to a second harness that does. The one line that gets copied into a document, quoted in a review or pasted into a chat with the environment left behind is the line that does not appear. And the refusal reaches the artefact as well as the terminal: `Sample::persist` writes nothing and returns an error naming the machine, because a harness that prints a refusal and writes the file anyway has left a number on disk for something else to pick up.
   *exit:* met, all three ways. In the container: `latency refused — container is not a measurement environment`, with QEMU's emulated timer and the shared cores named, and no file written. Unset: refused, naming the omission. `F_ENVIRONMENT=runner-class-A`: `latency n=31250 min=3 p50=6 p99=15 p99.9=247 max=51425`, written to `claims/ring-submit-latency.local.jsonl`.
   *needs:* E0-B16, E0-P04
-
-### Release
+- [ ] **E0-P16** `M` RustMC on the cursor protocol: the model check the litmus tests are not.
+  Promised "at M5" by `docs/TESTING-STATUS.md` and `docs/design/proving-ground.html` since before there was a ring, and M5 arrived at `E0-B12` with no task ID owning it — a promised layer with no owner, which is the decay this file polices everywhere else. The surface doubled at the same moment: the completion ring is a second `Release`/`Acquire` pair, and the batch path covers two relaxed writes per entry with one store. The litmus tests sample what one machine happened to do; RustMC explores what RC11 permits, which is the only kind of evidence that reaches the interleaving no runner has produced yet.
+  *exit:* RustMC runs over the ring's four halves — `Producer`/`Consumer`, `Poster`/`Collector`, single-entry and batch — on a schedule in CI; and it can fail: weakening the publishing store to `Relaxed` is caught by the checker, the same both-halves standard `mutate` and `E0-P02` already meet.
+- [ ] **E0-P17** `S` Litmus stress for the completion ring, on both architectures.
+  RFC 0018 built `Poster`/`Collector` as the mirror of `Producer`/`Consumer` and inherited the ordering argument wholesale — and every test in `ring/tests/litmus.rs` still drives the submission half only, so the inherited argument is the one kind of claim that suite exists not to take on faith. The standing rule is that a new `Release`/`Acquire` pair owes a stress test that fails under the weaker ordering; the completion ring added two.
+  *exit:* litmus tests drive `Poster`/`Collector` under contention with self-describing payloads, on x86-64 and AArch64 in CI, and weakening the posting store to `Relaxed` has been shown to make them fail — the same both-halves standard the suite's other tests meet.
+  *needs:* E0-B12
 
 - [ ] **E0-R01** `M` `cargo xtask release` produces the full package: source tag, claims snapshot, content-addressed QEMU image, seed corpus, baseline configurations, and a dependency manifest.
   *exit:* the package builds twice on two machines and hashes identically.
@@ -580,6 +589,10 @@ load-bearing.*
 
 - [x] **E0-B20** `S` Gibibyte pages for the direct map where the processor has them.
   *exit:* met. `-cpu max` reports "direct map in 1 GiB pages"; the default `qemu64` model has no such feature and falls back to 2 MiB, so both paths are exercised without a flag.
+
+- [ ] **E0-B21** `S` An xtask verb computes the unsafe percentage A-05 reports.
+  A-05 fires for the first time at release 0.1 and there is no tool behind it: nothing counts lines inside `unsafe` against RFC 0001's under-5% target and 10% reversal trigger, so the first report would be somebody's grep — a rule kept by attention, which is the failure `lint-unsafe` already exists to prevent for the same policy. Cheap now and central later: E1 imports drivers behind the boundary, and `E5-D02` must state a fallback's cost to this exact metric in advance rather than discover it.
+  *exit:* an `xtask` verb prints lines-inside-`unsafe` as a percentage of the frame crates and of the whole tree, and A-05 names the verb as its mechanism rather than leaving the method to whoever remembers.
 
 > ### Gate G0
 > A capability-restricted user process communicates with the kernel entirely
@@ -609,11 +622,11 @@ everything after this cheap to debug.*
 - [ ] **E1-D04** `M` Record the driver-container shape: declaratively routed capabilities, typed protocol, declared restart policy.
   *exit:* one manifest schema, with a worked example for virtio-blk.
 - [ ] **E1-D05** `S` Deadline inheritance bounds — how far a caller's deadline propagates, and what stops a component claiming urgency forever.
+  *exit:* the rule is written before the first starvation bug, as the resource document asks.
 - [ ] **E1-D06** `M` The tuned-Linux baseline, as configuration rather than as prose.
   Found by `cargo xtask release --dry-run` at E0-D08: the release contract requires the baseline configuration in the package, and nothing in this file produced it. `claims/0001` says `linux-6.x-tuned` with a sentence of notes, which is the decay the contract exists to prevent — a tuned comparison becomes a stock comparison as the baseline ages and nobody re-checks it, and prose cannot be re-checked because it cannot be run.
   Belongs in E1 rather than E0: the first claim it has to configure a baseline *for* is the datapath set at `E1-P10`, and a baseline written before there is a workload to tune it against is a guess with a filename. `A-04` is the standing item that keeps it honest afterwards.
   *exit:* the tuned baseline is a file in the tree that a stranger can apply to a machine and get the configuration a claim was compared against; `cargo xtask release --dry-run` reports it present.
-  *exit:* the rule is written before the first starvation bug, as the resource document asks.
 
 ### Build
 
@@ -631,7 +644,7 @@ everything after this cheap to debug.*
   *needs:* E1-B01
 - [ ] **E1-B05** `L` Component supervisor: spawn from a manifest, restart policy, control ring delivery.
   *exit:* E1-P06 passes.
-  *needs:* E1-D01, E1-D04
+  *needs:* E1-D01, E1-D04, E1-B13 (a supervisor is the component the fixed table breaks on)
 - [ ] **E1-B06** `M` Deadline propagation across rings; every resource scheduler orders by the same field.
   *exit:* a hard-class read overtakes queued batch work in a device queue, measurably.
   *needs:* E1-B02, E1-D05
@@ -647,12 +660,27 @@ everything after this cheap to debug.*
 - [ ] **E1-B10** `M` Registered buffer sets, and the shared-virtual-memory path behind its feature bit.
   *exit:* both paths pass the same ownership tests; the registration cost is measured.
   *needs:* E1-D03
+- [ ] **E1-B11** `S` A splittable generator behind `Env`, before the simulator multiplies streams.
+  `SeededEnv` runs on xorshift64 and `sim.rs` finalises its site draws with FNV-1a — both chosen for reproducibility, neither for statistical quality, and both say so. One seeded test cannot feel the difference; a nightly sweep of thousands of seeds across correlated streams can, and a sweep whose streams are secretly correlated explores less than it reports. A splittable design — SplitMix64-derived streams under a PCG- or SFC-class generator — is the standard answer, and the `Env` trait makes it a one-crate change. Seeds bind to a commit, so nothing recorded breaks: a new generator is a new commit. Before `E1-P01` and not after, because the seed corpus the simulator accumulates is priced in the generator it was drawn from.
+  *exit:* `SeededEnv` and the site-draw finaliser share one derivation; the existing per-site independence test still holds and a new one bounds cross-stream correlation; `E1-P01` is built on it rather than migrated to it.
+- [ ] **E1-B12** `L` The allocator the design names: buddy orders, per-CPU free lists, huge pages by default.
+  `deadline-all-the-way-down` section 03 has specified this since before M1 and no task owned it — `mem.rs` says "this is the M1 floor" and points at a design document, which is a promise with no owner now that the floor is load-bearing. `Order` has been in every signature since M1, so the call sites are ready; what arrives here is orders above zero with split and coalesce, per-CPU lists so two cores allocating never meet, and `Order::HUGE` as the default grain. The drivers can run on order-0 frames through scatter-gather, so this does not gate them; what it buys is the huge-page default and uncontended allocation, both of which the datapath claims will price.
+  *exit:* order-9 and order-18 allocations succeed, split and coalesce under an adversarial alloc/free workload; allocation takes no cross-core traffic on the hot path, counted rather than asserted; the M1 free-list pair is retired rather than kept beside it.
+  *needs:* E0-B10
+- [ ] **E1-B13** `M` The capability table becomes an object: growth paid by `Untyped`, quota made real.
+  `cap.rs` records its own reversal condition — a component that legitimately holds more than [`TABLE_SLOTS`], which is E1's first real supervisor — and the supervisor is this epoch. So the table stops being a fixed `PerCpu` array and becomes storage an `Untyped` capability pays for, which is the same change as giving a process a quota. The revocation walk stays iterative and bounded; what changes is whose memory bounds it.
+  *exit:* a process holds more than the fixed count with the growth debited from its `Untyped`; the five properties and the whole negative suite pass at the new size; a process that cannot pay is refused with `QUOTA_EXHAUSTED` rather than served from kernel reserve.
+  *needs:* E1-D01
+- [ ] **E1-B14** `M` Shootdown batching, bought by a number or closed by one.
+  Every revoke-unmap today is one page, one IPI, one spin on an acknowledgement — correct, and priced for a kernel that unmaps rarely. The datapath changes the rate: registered buffers cycle, and a driver restart unmaps a component's whole grant page by page. Batching is what mature kernels do here, and it is also exactly what rule 3 forbids designing before the measurement exists — so the workload comes first and the number decides.
+  *exit:* an unmap-under-churn workload exists beside the `E1-P10` claims and records shootdowns, IPIs and p99 unmap cost; then either batching lands with the improvement measured on the same workload, or this task closes `[~]` with the number that says one-page-one-IPI was already under the bound.
+  *needs:* E1-B02
 
 ### Prove — this is the epoch where the testing environment becomes real
 
 - [ ] **E1-P01** `XL` **The deterministic simulator.** Virtual time, seeded scheduling and ordering, device models for blk, net and gpu, and component substitution.
   *exit:* a whole boot-to-workload run executes under simulation and reproduces byte-identically from `(seed, commit)`.
-  *needs:* E0-P02
+  *needs:* E0-P02, E1-B11 (the seed corpus is priced in the generator it was drawn from)
 - [ ] **E1-P02** `L` Fault classes in the simulator: allocation failure, translation fault, device page-fault latency, peer death mid-operation, torn doorbell, partial write, delayed completion.
   *exit:* each class has a scenario, and each scenario has a system response that is asserted rather than observed.
   *needs:* E1-P01
@@ -681,6 +709,10 @@ everything after this cheap to debug.*
   *needs:* E1-B09
 - [ ] **E1-P11** `M` Cross-architecture CI: the AArch64 job builds and runs the same suite under emulation.
   *exit:* green, and no test is skipped on AArch64 without a recorded reason.
+- [ ] **E1-P12** `M` Kani on the ring's validation paths: panic-freedom proved, not sampled.
+  `E1-P07` proves the capability properties; the same tooling reaches the other structure a hostile peer feeds bytes to. `pop`, `take`, `Layout::adopt` and `execute` each promise that nothing a peer writes produces a panic, and today that promise rests on fuzzing that samples and a clippy wall that guards this crate's own code. A bounded proof over arbitrary header bytes, cursors and entries is cheap for code this small, and it is the difference between "no fuzzer found one" and "there is none".
+  *exit:* the proofs run in CI on the schedule `E1-P07` establishes; reintroducing the unchecked index that `mutate` removes fails a proof, not only a boot.
+  *needs:* E1-P07
 
 ### Release
 

@@ -14,7 +14,6 @@ cargo xtask fault pf   # boot into a deliberate fault; pf, ud, df, nx, wx or sta
 cargo xtask user       # seven boots: a process violates one rule each, and is killed
 cargo xtask cap        # eight boots: a process tries to escape its capabilities
 cargo xtask mutate     # build the kernel wrong on purpose; the boot must go red
-cargo xtask cap        # seven boots: a process tries one authority escape each, and is refused
 cargo xtask timer 60   # run the 1 kHz timer and print a jitter histogram
 cargo xtask claims     # the claims registry and what gates
 cargo xtask todo E0    # what is available to start now, ranked by what it unblocks

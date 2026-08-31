@@ -8,12 +8,12 @@ assumed closed.
 |---|---|---|
 | **L0** Determinism substrate | **Built** | `env/src/lib.rs`, `env/src/contract.rs`, `xtask lint-determinism`, and a boot that runs the contract against the seeded and the hardware `Env` on the same run — `kernel/src/env.rs`, `kernel/src/main.rs` |
 | **L1** Deterministic simulation | **Hook only** | `env/src/sim.rs` — seeded fault injection with protocol-aware site labels. No device models, no seed sweeps, and nothing has yet injected a fault at a named site: E0-P09. Full simulator at phase 01. |
-| **L2** Concurrency and memory model | **Stress tests only** | `ring/tests/litmus.rs` plus an AArch64 CI job. **Not** a model check — RustMC at M5. |
+| **L2** Concurrency and memory model | **Stress tests only** | `ring/tests/litmus.rs` plus an AArch64 CI job. **Not** a model check — RustMC is E0-P16, open. |
 | **L3** Proof | **Absent** | Verus on the frame at phase 02; Kani on capability properties at M4. The frame must stop moving first. The nearest thing that exists is not proof and should not be mistaken for it: five capability properties checked at every boot against a real table and five broken on purpose, plus one build broken on purpose — evidence that the checks can fail, not that they are exhaustive. |
 | **L4** Fuzzing | **Instrumentation only** | `xtask coverage`. No SQE generator, no snapshot harness, no hostile-peer fuzzer. Phase 01. |
 | **L5** Performance regression | **Harness only** | `bench/` records distributions with p50/p99/p99.9 and marks the counters it cannot read as absent. No change-point detection — that needs commit history to reason about, phase 02. |
 | **L6** Hardware in the loop | **Absent** | Photodiode rig at phase 03, when there is a compositor to measure. Correctly deferred. |
-| **L7** Claims registry | **Built, two entries, both `pending`** | `claims/`, `xtask claims`, `xtask claim <name>` |
+| **L7** Claims registry | **Built, three entries, none gating** | `claims/`, `xtask claims`, `xtask claim <name>` — 0001 and 0002 `pending`, 0003 `tracked` on purpose |
 
 ## What was deliberately built early
 
@@ -72,23 +72,24 @@ currently comes from.
 ## The honest gaps
 
 - **The litmus tests are empirical, not exhaustive.** They will not reliably
-  catch a rare interleaving. RustMC explores what the memory model *permits*;
-  stress tests explore what one machine happened to do. Do not mistake a green
-  litmus job for a proof of the ordering.
-- **`instructions_per_op` and `joules_per_op` still report `Unavailable`, and
-  the reason they give has expired.** They say the counters are not wired until
-  M2. M2 arrived at E0-B07 and they are still not wired; E0-P04 owns it. The
+  catch a rare interleaving. RustMC (E0-P16) explores what the memory model
+  *permits*; stress tests explore what one machine happened to do. Do not
+  mistake a green litmus job for a proof of the ordering.
+- **`instructions_per_op` and `joules_per_op` still report `Unavailable`.** The
   harness carries the fields and marks them absent rather than omitting them, so
-  a claim cannot quietly narrow to wall-clock only — but the string in
-  `bench/src/lib.rs` names a milestone that has been and gone, which is the
-  smaller version of the failure this page exists to prevent.
-- **Both claims are `pending`, and neither gates anything.** 0001 measures the
-  host: no user interrupts, no registered buffers, no deadline class. 0002 has a
+  a claim cannot quietly narrow to wall-clock only. The reasons now name owners
+  rather than a milestone — the PMU is read where the machine is real, at
+  E0-P05; the first defensible energy number is E5-P03's, by external meter —
+  because the previous strings said "until M2" and outlived M2 by three
+  milestones before this page caught it.
+- **No claim gates.** 0001 and 0002 are `pending`: 0001 measures the host — no
+  user interrupts, no registered buffers, no deadline class — and 0002 has a
   threshold and no number, because the only environment available emulates the
-  timer against a host clock it does not control — `F_ENVIRONMENT=container` is
-  how the harness already knows. They exist so the workload and the threshold
-  are version-controlled rather than written the day somebody wants a number.
-  E0-P05 and E0-P06 are what move them.
+  timer against a host clock it does not control; `F_ENVIRONMENT=container` is
+  how the harness already knows. 0003 is `tracked` and gates nothing by design.
+  They exist so the workload and the threshold are version-controlled rather
+  than written the day somebody wants a number. E0-P05 and E0-P06 are what move
+  the pending two, and both now wait on E0-D10 — the machine.
 - **`cargo xtask verify` is local, and local is not everything.** It runs the
   lints, the host tests, an AArch64 cross-*compile* of the four crates the arm
   job tests, a QEMU boot and the mutation harness. It cannot *run* the AArch64
