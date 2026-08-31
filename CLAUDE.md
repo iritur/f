@@ -15,6 +15,7 @@ cargo xtask user       # seven boots: a process violates one rule each, and is k
 cargo xtask cap        # eight boots: a process tries to escape its capabilities
 cargo xtask mutate     # build the kernel wrong on purpose; the boot must go red
 cargo xtask timer 60   # run the 1 kHz timer and print a jitter histogram
+cargo xtask unsafe     # the number A-05 reports: lines inside `unsafe`, as a share
 cargo xtask claims     # the claims registry and what gates
 cargo xtask todo E0    # what is available to start now, ranked by what it unblocks
 cargo xtask coverage   # host tests with instrumentation

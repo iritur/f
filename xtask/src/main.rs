@@ -149,6 +149,7 @@ fn main() -> ExitCode {
         "lint-callbacks" => lint_callbacks(),
         "lint-claim-owners" => lint_claim_owners(),
         "lint-snapshot" => lint_snapshot(),
+        "unsafe" => unsafe_report(args.get(1).map(String::as_str) == Some("--by-file")),
         "release" => release(args.get(1).map(String::as_str) == Some("--dry-run")),
         "history" => match args.get(1).map(String::as_str) {
             Some("append") => history_append(),
@@ -221,6 +222,11 @@ cargo xtask <command>
   lint-units         R03: every public abi field states its unit
   lint-callbacks     R05: no interface registers a callback
   lint-claim-owners  R09: every claim names the document that owns it
+  lint-snapshot      claims/snapshot.json holds what the registry holds
+
+  unsafe             The number A-05 reports: lines inside `unsafe` as a share
+                     of the frame crates and of the whole tree, against
+                     RFC 0001's under-5% target and 10% reversal trigger
 
   reproduce          Two runs of this commit must produce one trace hash,
                      and one unseeded read of time must break that
@@ -2068,6 +2074,432 @@ fn lint_unsafe() -> Result<(), String> {
         findings.join("\n"),
         UNSAFE_ALLOW.join(", ")
     ))
+}
+
+/// The share of the tree RFC 0001 aims to stay under.
+/// Unit: percent of code lines.
+const UNSAFE_TARGET: f64 = 5.0;
+
+/// The share at which RFC 0001 says the partition is not real and the decision
+/// reverses.
+/// Unit: percent of code lines.
+const UNSAFE_REVERSAL: f64 = 10.0;
+
+/// Report lines inside `unsafe` as a share of the code that could contain them.
+///
+/// `A-05` reports this number every release and, until this verb existed, the
+/// method was whoever remembered — a rule kept by attention, which is exactly
+/// what `lint-unsafe` exists to prevent for the same policy. A number nobody
+/// can recompute is not a measurement, it is a memory.
+///
+/// # What counts
+///
+/// A **code line** is a line with something left on it once comments, string
+/// literals and character literals have been taken out. Blank and comment-only
+/// lines are not code: counting them would make this number improve every time
+/// somebody wrote a paragraph, and this tree is written to be argued with.
+///
+/// A code line is **inside `unsafe`** when it is in the body of an `unsafe`
+/// block or an `unsafe fn`, or is an `unsafe impl` or `unsafe trait` header.
+/// The line that opens a block counts, because `unsafe { *p }` is the whole
+/// obligation on one line; so does a signature, because `unsafe fn` is a
+/// promise the caller has to keep and the reader has to read.
+///
+/// # Why a scanner and not a parser
+///
+/// Because the parser would be a syntax crate, in the one tool whose job is to
+/// police what the tree depends on, for a number that changes by tenths. The
+/// scanner understands comments, strings, raw strings, and the difference
+/// between `'a'` and the lifetime in `Producer<'m>` — the four things that make
+/// a naive `grep` wrong. It does not understand macros that expand to `unsafe`,
+/// and there are none.
+///
+/// *Reversal:* the first time this number is disputed at a boundary that
+/// matters — a release argument, or a fallback's cost at `E5-D02` — replace it
+/// with a real parse and record the difference between the two answers.
+///
+/// # Why this reports and does not gate
+///
+/// Because RFC 0001's trigger is *"exceeds 10% of the codebase by phase 02"*,
+/// and the phase is half the condition. At phase 00 this tree is a kernel and
+/// almost nothing else, so the share is high and says little; what the trigger
+/// is about is the trajectory once E1 puts drivers above the frame. A verb that
+/// went red today would be a gate with no path to green, and this file's own
+/// history says what happens to those. `A-05` is where the number is argued,
+/// every release, out loud.
+///
+/// *Reversal:* phase 02, where the same number stops being a trajectory and
+/// becomes the verdict RFC 0001 describes. At that point this becomes a gate
+/// and `lint_all` gains a line.
+///
+/// # Errors
+///
+/// Only if a file outside the frame contains `unsafe`, which `lint-unsafe`
+/// refuses first — two tools disagreeing about where the frame is would make
+/// this number quietly wrong rather than loudly.
+fn unsafe_report(by_file: bool) -> Result<(), String> {
+    // One row per frame crate, in the order the allow-list names them, so the
+    // report and the policy cannot drift into two different lists.
+    let mut rows: Vec<(&str, usize, usize)> =
+        UNSAFE_ALLOW.iter().map(|crate_dir| (*crate_dir, 0, 0)).collect();
+    let (mut frame_unsafe, mut frame_code) = (0usize, 0usize);
+    let (mut tree_unsafe, mut tree_code) = (0usize, 0usize);
+    let mut files: Vec<(String, usize, usize)> = Vec::new();
+
+    for path in rust_sources()? {
+        let rel = relative(&path);
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+        let (inside, code) = unsafe_share(&text);
+
+        if inside != 0 {
+            files.push((rel.clone(), inside, code));
+        }
+        tree_unsafe += inside;
+        tree_code += code;
+
+        if let Some(row) = rows.iter_mut().find(|(dir, _, _)| rel.starts_with(dir)) {
+            row.1 += inside;
+            row.2 += code;
+            frame_unsafe += inside;
+            frame_code += code;
+        } else if inside != 0 {
+            // `lint-unsafe` is the check that this cannot happen. Saying so
+            // here rather than silently adding the lines to the denominator:
+            // two tools disagreeing about where the frame is would make this
+            // number quietly wrong rather than loudly.
+            return Err(format!(
+                "{rel} has {inside} line(s) inside `unsafe` outside the frame.\n\
+                 `cargo xtask lint-unsafe` should have refused this first."
+            ));
+        }
+    }
+
+    println!(
+        "unsafe: {} of the frame, {} of the tree",
+        pct(frame_unsafe, frame_code),
+        pct(tree_unsafe, tree_code)
+    );
+    println!();
+
+    if by_file {
+        // Sorted by how much each file contributes, because A-05 asks why the
+        // number moved and the answer is almost always one file.
+        files.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        for (rel, inside, code) in &files {
+            println!("  {:<40} {:>5} of {:>5}  {:>6}", rel, inside, code, pct(*inside, *code));
+        }
+        println!();
+    }
+
+    for (dir, inside, code) in &rows {
+        println!(
+            "  {:<10} {:>6} of {:>6} code line(s)  {:>6}",
+            dir,
+            inside,
+            code,
+            pct(*inside, *code)
+        );
+    }
+    println!(
+        "  {:<10} {:>6} of {:>6} code line(s)  {:>6}",
+        "frame",
+        frame_unsafe,
+        frame_code,
+        pct(frame_unsafe, frame_code)
+    );
+    println!(
+        "  {:<10} {:>6} of {:>6} code line(s)  {:>6}",
+        "tree",
+        tree_unsafe,
+        tree_code,
+        pct(tree_unsafe, tree_code)
+    );
+    println!();
+
+    let share = share_of(tree_unsafe, tree_code);
+    if share < UNSAFE_TARGET {
+        println!("  Under RFC 0001's {UNSAFE_TARGET}% target. The reversal trigger is");
+        println!("  {UNSAFE_REVERSAL}% by phase 02. A-05 reports this at every release.");
+        return Ok(());
+    }
+
+    println!(
+        "  Over RFC 0001's {UNSAFE_TARGET}% target, and over the {UNSAFE_REVERSAL}% figure in"
+    );
+    println!("  its reversal condition — which is a phase-02 condition and not");
+    println!("  a phase-00 one, so this is a trajectory and not yet a verdict.");
+    println!();
+    println!("  What the number is made of matters more than the number: this");
+    println!("  tree is almost entirely a kernel, and page tables, an APIC and");
+    println!("  port I/O are unsafe nearly line for line. The denominator is what");
+    println!("  E1 changes, by putting drivers above the frame. A-05 reports this");
+    println!("  at every release; the thing to say is which way it moved and why.");
+    Ok(())
+}
+
+/// The share, as a number. Zero code is zero share and never a division.
+fn share_of(part: usize, whole: usize) -> f64 {
+    if whole == 0 { 0.0 } else { part as f64 * 100.0 / whole as f64 }
+}
+
+/// The share, as something to print.
+fn pct(part: usize, whole: usize) -> String {
+    format!("{:.1}%", share_of(part, whole))
+}
+
+/// Code lines inside `unsafe`, and code lines, for one file.
+///
+/// The brace depth is tracked rather than the text indented-matched, because a
+/// closing brace on a line of its own is the ordinary case and a text match
+/// would end the region at the first one whatever it closed.
+fn unsafe_share(text: &str) -> (usize, usize) {
+    let mut code = 0usize;
+    let mut inside = 0usize;
+    let mut depth: i32 = 0;
+    // The depths at which an `unsafe` region opened. A stack, because an
+    // `unsafe fn` may contain an `unsafe` block, and the inner one closing does
+    // not end the outer one.
+    let mut opened: Vec<i32> = Vec::new();
+    // An `unsafe` keyword seen but not yet followed by its brace. Kept across
+    // lines, because a signature may wrap; cleared at a `;`, because
+    // `unsafe fn f();` in a trait has no body to attach to.
+    let mut pending = false;
+    let mut carry = Carry::default();
+
+    for line in text.lines() {
+        let bare = strip_to_code(line, &mut carry);
+        let bare = bare.trim();
+        if bare.is_empty() {
+            continue;
+        }
+        code += 1;
+
+        let mut here = !opened.is_empty();
+        let bytes = bare.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' => {
+                    depth += 1;
+                    if pending {
+                        opened.push(depth);
+                        pending = false;
+                        here = true;
+                    }
+                }
+                b'}' => {
+                    if opened.last() == Some(&depth) {
+                        opened.pop();
+                    }
+                    depth -= 1;
+                }
+                b';' => pending = false,
+                _ => {
+                    if bytes[i..].starts_with(b"unsafe") && is_word(bytes, i, 6) {
+                        // `#[unsafe(no_mangle)]` is the 2024 attribute form and
+                        // opens no block. Reading it as one attached the next
+                        // brace in the file — the body of the function being
+                        // annotated — and counted `kmain` entire. Found by the
+                        // number itself: the kernel came out at 32%, which was
+                        // the first thing about the answer that looked wrong.
+                        if bytes.get(i + 6) == Some(&b'(') {
+                            i += 6;
+                            continue;
+                        }
+                        pending = true;
+                        here = true;
+                        i += 6;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        if here {
+            inside += 1;
+        }
+    }
+
+    (inside, code)
+}
+
+/// Whether the `len` bytes at `at` stand alone as a word.
+///
+/// Without this, `unsafe_code` and `unsafe_op_in_unsafe_fn` in attributes read
+/// as the keyword, and every crate that suppresses a lint about `unsafe` would
+/// be counted as using it.
+fn is_word(bytes: &[u8], at: usize, len: usize) -> bool {
+    let before = at == 0 || !is_word_byte(bytes[at - 1]);
+    let after = bytes.get(at + len).is_none_or(|b| !is_word_byte(*b));
+    before && after
+}
+
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// What a line is in the middle of when the one before it ended.
+///
+/// Both halves are load-bearing and the second was found the hard way: this
+/// file's own error messages are string literals continued across lines with a
+/// trailing backslash, and one of them contains the words `lint-unsafe`. A
+/// scanner that started each line fresh read that as the keyword, in the tool
+/// whose whole job is to say where the keyword is.
+#[derive(Clone, Copy, Default)]
+struct Carry {
+    comment: bool,
+    string: Option<Quote>,
+}
+
+/// The kind of string a line ended inside.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Quote {
+    /// An ordinary literal, where a backslash escapes the next byte.
+    Escaped,
+    /// A raw literal closed by a quote and this many `#`, where it does not.
+    Raw(usize),
+}
+
+/// One line with its comments, strings and character literals removed.
+///
+/// A quoted brace is not a brace and a commented `unsafe` is not one either.
+/// Every case here is one this tree actually contains: `kprintln!` format
+/// strings carry braces, doc comments carry the word, string literals run over
+/// several lines, and `Producer<'m>` is the lifetime that a naive
+/// character-literal rule would read as an unterminated quote and swallow the
+/// rest of the line for.
+fn strip_to_code(line: &str, carry: &mut Carry) -> String {
+    let mut out = String::with_capacity(line.len());
+    let bytes = line.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if carry.comment {
+            if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                carry.comment = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if let Some(quote) = carry.string {
+            match run_to_close(bytes, i, quote) {
+                Some(end) => {
+                    carry.string = None;
+                    i = end;
+                    // A placeholder, so a line that is only a string is still
+                    // code rather than blank.
+                    out.push('"');
+                }
+                None => return out,
+            }
+            continue;
+        }
+
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => break,
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                carry.comment = true;
+                i += 2;
+            }
+            b'r' if !word_byte_before(bytes, i) && raw_string_hashes(bytes, i).is_some() => {
+                let hashes = raw_string_hashes(bytes, i).unwrap_or(0);
+                let opened = i + 1 + hashes + 1;
+                match run_to_close(bytes, opened, Quote::Raw(hashes)) {
+                    Some(end) => i = end,
+                    None => {
+                        carry.string = Some(Quote::Raw(hashes));
+                        out.push('"');
+                        return out;
+                    }
+                }
+                out.push('"');
+            }
+            b'"' => match run_to_close(bytes, i + 1, Quote::Escaped) {
+                Some(end) => {
+                    i = end;
+                    out.push('"');
+                }
+                None => {
+                    carry.string = Some(Quote::Escaped);
+                    out.push('"');
+                    return out;
+                }
+            },
+            b'\'' => match char_literal_end(bytes, i) {
+                Some(end) => {
+                    i = end;
+                    out.push('\'');
+                }
+                // A lifetime. The quote is not an opening quote and the rest of
+                // the line is ordinary code.
+                None => {
+                    i += 1;
+                }
+            },
+            b => {
+                out.push(b as char);
+                i += 1;
+            }
+        }
+    }
+
+    out
+}
+
+/// Where a string open at `from` closes on this line, or `None` if it does not.
+fn run_to_close(bytes: &[u8], from: usize, quote: Quote) -> Option<usize> {
+    let mut i = from;
+    while i < bytes.len() {
+        match quote {
+            Quote::Escaped if bytes[i] == b'\\' => {
+                // A backslash at the end of the line is a continuation, and the
+                // literal carries on. Stepping over two bytes takes the index
+                // past the end, which is the same answer.
+                i += 2;
+                continue;
+            }
+            Quote::Escaped if bytes[i] == b'"' => return Some(i + 1),
+            Quote::Raw(hashes)
+                if bytes[i] == b'"' && (1..=hashes).all(|k| bytes.get(i + k) == Some(&b'#')) =>
+            {
+                return Some(i + 1 + hashes);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn word_byte_before(bytes: &[u8], at: usize) -> bool {
+    at > 0 && is_word_byte(bytes[at - 1])
+}
+
+/// The number of `#` in a raw string starting at `at`, if one starts there.
+fn raw_string_hashes(bytes: &[u8], at: usize) -> Option<usize> {
+    let mut j = at + 1;
+    let mut hashes = 0;
+    while bytes.get(j) == Some(&b'#') {
+        hashes += 1;
+        j += 1;
+    }
+    if bytes.get(j) == Some(&b'"') { Some(hashes) } else { None }
+}
+
+/// Where a character literal starting at `at` ends, or `None` for a lifetime.
+fn char_literal_end(bytes: &[u8], at: usize) -> Option<usize> {
+    if bytes.get(at + 1) == Some(&b'\\') {
+        // An escape: scan for the closing quote, which is at most a few bytes
+        // away — `'\u{1F600}'` is the longest form.
+        let window = bytes.len().min(at + 12);
+        let closing = bytes[at + 2..window].iter().position(|b| *b == b'\'');
+        return closing.map(|offset| at + 2 + offset + 1);
+    }
+    if bytes.get(at + 2) == Some(&b'\'') { Some(at + 3) } else { None }
 }
 
 /// No kernel-global mutable state outside `PerCpu`.

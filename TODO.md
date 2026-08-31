@@ -594,9 +594,12 @@ load-bearing.*
 - [x] **E0-B20** `S` Gibibyte pages for the direct map where the processor has them.
   *exit:* met. `-cpu max` reports "direct map in 1 GiB pages"; the default `qemu64` model has no such feature and falls back to 2 MiB, so both paths are exercised without a flag.
 
-- [ ] **E0-B21** `S` An xtask verb computes the unsafe percentage A-05 reports.
+- [x] **E0-B21** `S` An xtask verb computes the unsafe percentage A-05 reports.
   A-05 fires for the first time at release 0.1 and there is no tool behind it: nothing counts lines inside `unsafe` against RFC 0001's under-5% target and 10% reversal trigger, so the first report would be somebody's grep — a rule kept by attention, which is the failure `lint-unsafe` already exists to prevent for the same policy. Cheap now and central later: E1 imports drivers behind the boundary, and `E5-D02` must state a fallback's cost to this exact metric in advance rather than discover it.
-  *exit:* an `xtask` verb prints lines-inside-`unsafe` as a percentage of the frame crates and of the whole tree, and A-05 names the verb as its mechanism rather than leaving the method to whoever remembers.
+  *exit:* met. `cargo xtask unsafe` prints both shares and a row per frame crate; `--by-file` prints every file that contributes, sorted by how much. A-05 names the verb and carries the standing number.
+  It reports and does not gate, and that is a decision rather than an omission: RFC 0001's trigger is *"exceeds 10% of the codebase **by phase 02**"*, and the phase is half the condition. A verb that went red at phase 00 would be a gate with no path to green, which this file records the fate of twice. The reversal is written on the verb: at phase 02 the same number stops being a trajectory and `lint_all` gains a line.
+  **The first answer was wrong, and the number is what caught it.** The kernel came out at 32%, which was the first thing about the result that looked implausible. `#[unsafe(no_mangle)]` is the 2024 attribute form and opens no block; the scanner read it as one, attached the next brace in the file — the body of the function being annotated — and counted `kmain` entire. A second scanner defect went the same way: this file's own error messages are string literals continued across lines with a trailing backslash, and one of them contains the words `lint-unsafe`, which a line-at-a-time scanner read as the keyword. Both are why the counting rule is written down and why the verb understands comments, raw strings and the difference between `'a'` and the lifetime in `Producer<'m>`.
+  Also fixed in passing: `lint-snapshot` existed since `E0-P01` and was not in `cargo xtask help`. A verb nobody can find is a verb nobody runs.
 
 > ### Gate G0
 > A capability-restricted user process communicates with the kernel entirely
@@ -1105,7 +1108,9 @@ than an exit, because they do not close.
   *cadence:* once per epoch.
 - [ ] **A-04** Re-tune every claim's baseline, or the tuned-Linux comparison quietly becomes a stock-Linux comparison.
   *cadence:* once per epoch, and whenever the baseline's own version moves.
-- [ ] **A-05** Report the unsafe-code percentage against the under-5% target. RFC 0001 reverses at 10%.
+- [ ] **A-05** Report the unsafe-code percentage against the under-5% target. RFC 0001 reverses at 10%, by phase 02.
+  *mechanism:* `cargo xtask unsafe`, and `--by-file` for the reason it moved, which is almost always one file. The counting rule is a doc comment on the verb rather than a convention: lines inside an `unsafe` block, an `unsafe fn` body or an `unsafe impl` header, over lines with code on them, with comments and string literals taken out.
+  *standing:* **14.2% of the tree and 21.4% of the frame** at `E0-B21`, against a 5% target. Over the figure in RFC 0001's reversal condition and not over the condition, which is a phase-02 one. What the number is made of is the report: `paging.rs` is 64.6% and `port.rs` is 95.7%, and a tree that is almost entirely a kernel has no denominator yet. E1 is what supplies one, by putting drivers above the frame. `docs/design/lineage-and-debts.html` says F holds its frame "to a few percent" — an intent the code is not at, and the gap is this item's to report rather than the document's to quietly restate.
   *cadence:* every release.
 - [ ] **A-06** Nightly sweeps and weekly checking stay green or stay loud. A muted job is a deleted job with extra steps.
   *cadence:* daily and weekly; muting one is a reviewable diff.
