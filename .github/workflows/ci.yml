@@ -101,15 +101,41 @@ jobs:
       # last place to assume one architecture speaks for the other.
       - run: cargo test -p f-ring --test faults
 
+  # Both architectures, both non-advisory, and that is the whole of E0-P07.
+  #
+  # The AArch64 half is where the ordering means anything: total store order on
+  # x86-64 hides the entire class of bug the ring is exposed to, so a Relaxed
+  # store that corrupts data on ARM passes every one of these tests on an x86
+  # laptop. Neither job carries `continue-on-error`, and neither may: an
+  # advisory job that goes red is a job that gets ignored on the second Tuesday,
+  # and this one exists to be believed.
+  #
+  # The x86-64 half is not redundant. It is the control — it is what says a
+  # failure on the arm runner is about the architecture rather than about the
+  # test — and it runs `--release` for the reason the arm job does: optimisation
+  # changes what a stress test explores, and the ordering these guard is exactly
+  # what an optimiser is entitled to move.
   litmus:
-    name: memory-ordering litmus (AArch64)
-    runs-on: ubuntu-24.04-arm
+    name: memory-ordering litmus (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     container: ghcr.io/iritur/f-dev:latest
+    strategy:
+      # Both results, always. `fail-fast` would cancel the AArch64 job the
+      # moment x86-64 went red, which throws away the one number that
+      # distinguishes "the ring is broken" from "the ring is broken on weak
+      # memory" — and those are different bugs with different fixes.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86-64, total store order
+            runner: ubuntu-latest
+          - arch: AArch64, weak memory
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
       # These are stress tests, not a model check. RustMC lands at M5 and is
-      # what actually explores what RC11 permits. Until then this job plus the
-      # AArch64 unit tests are the coverage, and the gap is real.
+      # what actually explores what RC11 permits. Until then these two jobs plus
+      # the AArch64 unit tests are the coverage, and the gap is real.
       - run: cargo test -p f-ring --test litmus --release
 
   coverage:

@@ -444,8 +444,12 @@ load-bearing.*
 - [ ] **E0-P06** `M` Claim 0002, timer jitter: p99 under 5 µs for a 1 kHz timer over 60 seconds, gating from M2 onward.
   *exit:* recorded with the reservation conditions from RFC 0007 named in the claim.
   *needs:* E0-B07, E0-D04
-- [ ] **E0-P07** `M` Litmus tests for the cursor protocol run in CI on x86-64 **and** AArch64.
-  *exit:* both jobs green; the AArch64 job is not allowed to be advisory.
+- [>] **E0-P07** `M` Litmus tests for the cursor protocol run in CI on x86-64 **and** AArch64.
+  The job is now a two-entry matrix rather than an AArch64-only job, so the litmus suite runs `--release` on both architectures. The x86-64 half is not redundant: it is the **control**, and it is what makes a red arm run mean "this is about weak memory" rather than "this test is broken". Without it a failure on the arm runner has two explanations and no way to choose between them.
+  `fail-fast: false` on the matrix, deliberately. The default would cancel the AArch64 job the moment x86-64 went red, throwing away the one result that distinguishes *the ring is broken* from *the ring is broken on weak memory* — different bugs, different fixes.
+  Neither job carries `continue-on-error`, and the comment in `ci.yml` says why it may not: an advisory job that goes red is a job that gets ignored on the second Tuesday, and this one exists to be believed. Checked mechanically while writing it — no job in `ci.yml` is advisory.
+  *exit:* **not met from here.** "Both jobs green" is a property of workflow runs, and nothing in this environment can run GitHub Actions; what can be said is that the suite passes `--release` locally on x86-64, three tests, and that the workflow now asks for both. Marked `[>]` alongside `E0-P14`, which has the same blocker and needs the same one action to clear it: publish the image, open a pull request, read the result.
+  The standing gap is unchanged and worth restating rather than letting the green ticks imply otherwise: these are **stress tests, not a model check**. RustMC at M5 is what explores what RC11 permits; two runners plus the unit tests are what exists until then.
 - [x] **E0-P08** `L` The capability negative suite, as code. A process cannot name a capability it was not given, forge a handle, use a revoked handle, exceed granted rights, or panic the kernel by trying. **(M4 exit criterion)**
   Both halves, at last. The suite is in the gate — `cargo xtask cap`, eight
   boots, and the five properties run at every boot against a real table and
