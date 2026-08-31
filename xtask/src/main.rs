@@ -213,6 +213,47 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }
 
+/// Where cargo puts build output, which is not always `./target`.
+///
+/// `CARGO_TARGET_DIR` moves it, and moving it is not an exotic configuration:
+/// it is the whole performance story of the development container on Windows,
+/// where `target/` lives in a named volume rather than in the bind mount
+/// because a Rust target directory is tens of thousands of small files and
+/// every one of them crossing the filesystem boundary is a syscall nobody
+/// needs. `docker/compose.yaml` says so where it mounts it.
+///
+/// Assuming `./target` was wrong in three different ways and each failed
+/// differently, which is why this is one function rather than three fixes.
+/// `kernel_elf64` pointed at an image the build had not written, so the boot
+/// failed claiming the kernel had not been built. `init_dir` put the component
+/// image somewhere the loader was not told about. And the coverage run set
+/// `LLVM_PROFILE_FILE` to a *relative* path, which is resolved by each test
+/// binary against its own working directory rather than by cargo against the
+/// workspace — so the profiles scattered into whichever crate directory the
+/// harness happened to run in, and `bench/target/coverage/` in a tree whose
+/// `.gitignore` only covers the root one is the evidence it left behind.
+///
+/// A relative `CARGO_TARGET_DIR` is resolved against the **current working
+/// directory**, not against the workspace root. That is what cargo documents
+/// and does, and the two differ the moment anyone runs `cargo xtask` from a
+/// subdirectory — cargo would write the image one place and this would look
+/// for it in another, which is the same class of failure this function exists
+/// to remove. Matching cargo is the whole job; being tidier than cargo here
+/// would be a second source of truth.
+fn target_dir() -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(value) if !value.is_empty() => {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir().unwrap_or_else(|_| root()).join(path)
+            }
+        }
+        _ => root().join("target"),
+    }
+}
+
 fn sh(program: &str, args: &[&str]) -> Result<(), String> {
     let status = Command::new(program)
         .args(args)
@@ -267,7 +308,7 @@ fn llvm_tool(name: &str) -> Result<PathBuf, String> {
 
 /// The kernel, as the linker produced it.
 fn kernel_elf64() -> PathBuf {
-    root().join("target").join(KERNEL_TARGET).join("debug").join("f-kernel")
+    target_dir().join(KERNEL_TARGET).join("debug").join("f-kernel")
 }
 
 /// The kernel, in the container format the loader will accept.
@@ -345,7 +386,7 @@ fn to_elf32() -> Result<(), String> {
 /// sharing a target directory is two full rebuilds every time the build
 /// alternates between them.
 fn init_dir() -> PathBuf {
-    root().join("target").join("init")
+    target_dir().join("init")
 }
 
 /// The `init` image, as the loader will hand it over: a flat blob, no headers.
@@ -1181,13 +1222,17 @@ fn lint_all() -> Result<(), String> {
 }
 
 fn rust_sources() -> Result<Vec<PathBuf>, String> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    fn walk(dir: &Path, build: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if path.is_dir() {
-                if !matches!(name, "target" | ".git" | "third_party" | "docs") {
-                    walk(&path, out)?;
+                // `build` as well as the name: with CARGO_TARGET_DIR set to
+                // something inside the tree, the output directory is not
+                // called `target` and every lint in this file would otherwise
+                // read generated sources and report findings against them.
+                if !matches!(name, "target" | ".git" | "third_party" | "docs") && path != build {
+                    walk(&path, build, out)?;
                 }
             } else if path.extension().is_some_and(|e| e == "rs") {
                 out.push(path);
@@ -1196,7 +1241,8 @@ fn rust_sources() -> Result<Vec<PathBuf>, String> {
         Ok(())
     }
     let mut out = Vec::new();
-    walk(&root(), &mut out).map_err(|e| format!("walking the tree: {e}"))?;
+    let build = target_dir();
+    walk(&root(), &build, &mut out).map_err(|e| format!("walking the tree: {e}"))?;
     out.sort();
     Ok(out)
 }
@@ -1838,10 +1884,15 @@ fn bench(name: Option<&str>) -> Result<(), String> {
 /// See `docs/design/proving-ground.html` layer 4.
 fn coverage() -> Result<(), String> {
     println!("running host tests with coverage instrumentation");
+    // Absolute, because this is read by each *test binary* and resolved against
+    // that binary's own working directory rather than by cargo against the
+    // workspace. A relative path here scatters profiles into whichever crate
+    // directory the harness ran in - see `target_dir`.
+    let profiles = target_dir().join("coverage");
     let status = Command::new("cargo")
         .args(["test", "-p", "f-abi", "-p", "f-env", "-p", "f-ring", "-p", "f-bench"])
         .env("RUSTFLAGS", "-Cinstrument-coverage")
-        .env("LLVM_PROFILE_FILE", "target/coverage/f-%p-%m.profraw")
+        .env("LLVM_PROFILE_FILE", profiles.join("f-%p-%m.profraw"))
         .current_dir(root())
         .status()
         .map_err(|e| format!("could not run cargo: {e}"))?;
@@ -1850,9 +1901,10 @@ fn coverage() -> Result<(), String> {
         return Err("instrumented tests failed".into());
     }
     println!(
-        "\nraw profiles in target/coverage/.\n\
+        "\nraw profiles in {}/.\n\
          Summarise with `cargo install cargo-llvm-cov` and `cargo llvm-cov report`.\n\
-         The fuzzing harness at phase 01 consumes the same instrumentation."
+         The fuzzing harness at phase 01 consumes the same instrumentation.",
+        relative(&profiles)
     );
     Ok(())
 }
