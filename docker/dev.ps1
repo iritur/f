@@ -10,6 +10,7 @@
     .\docker\dev.ps1 build         # build the image (once, and after a pin bump)
     .\docker\dev.ps1 shell         # an interactive shell in /work
 
+    .\docker\dev.ps1 verify        # cargo xtask verify — the whole local loop
     .\docker\dev.ps1 lint          # cargo xtask lint
     .\docker\dev.ps1 test          # cargo xtask test
     .\docker\dev.ps1 run           # cargo xtask run   (kernel in QEMU)
@@ -133,6 +134,11 @@ switch ($Command.ToLower()) {
 
     "shell"    { Require-Docker; Exec  -Service "dev"  -ComposeArgs @("/bin/bash") }
 
+    # `verify` is the command CLAUDE.md tells a session to run before asking for
+    # review, and it was the one verb this wrapper did not have — so the
+    # supported environment could not run the supported check without falling
+    # through to `x`. Added when the README started telling a newcomer to use it.
+    "verify"   { Require-Docker; Xtask -Service "dev"  -ComposeArgs @("verify") }
     "lint"     { Require-Docker; Xtask -Service "dev"  -ComposeArgs @("lint") }
     "test"     { Require-Docker; Xtask -Service "dev"  -ComposeArgs @("test") }
     "run"      { Require-Docker; Xtask -Service "dev"  -ComposeArgs @("run") }

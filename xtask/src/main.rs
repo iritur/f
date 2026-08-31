@@ -130,10 +130,22 @@ fn main() -> ExitCode {
         "init" => init_image().map(|path| println!("{}", relative(&path))),
         "mutate" => mutate(),
         "panic" => panic_path(),
+        "trace" => match args.get(1).map(String::as_str) {
+            Some("--hash") => trace_hash_only(),
+            Some(other) => Err(format!("unknown option for trace: {other}")),
+            None => trace_check(),
+        },
+        // `reproduce` used to mean the determinism check above, and it now
+        // means what `RELEASING.md`, the long plan and `proving-ground` all use
+        // the word for: re-running a published number. The old spelling gets a
+        // message naming where it went rather than an alias, because an alias
+        // rots and a signpost is read exactly when it is needed.
         "reproduce" => match args.get(1).map(String::as_str) {
-            Some("--trace") => trace_only(),
-            Some(other) => Err(format!("unknown option for reproduce: {other}")),
-            None => reproduce(),
+            Some("--trace") => Err("`reproduce --trace` moved. The determinism check is now
+                 `cargo xtask trace`, and one hash is `cargo xtask trace --hash`.
+                 `reproduce` takes a claim name — see `cargo xtask reproduce`."
+                .into()),
+            other => reproduce(other),
         },
         "timer" => timer(args.get(1).map(String::as_str)),
         "test" => test(),
@@ -149,6 +161,7 @@ fn main() -> ExitCode {
         "lint-callbacks" => lint_callbacks(),
         "lint-claim-owners" => lint_claim_owners(),
         "lint-snapshot" => lint_snapshot(),
+        "lint-reproduce" => lint_reproduce(),
         "unsafe" => unsafe_report(args.get(1).map(String::as_str) == Some("--by-file")),
         "release" => release(args.get(1).map(String::as_str) == Some("--dry-run")),
         "history" => match args.get(1).map(String::as_str) {
@@ -228,9 +241,14 @@ cargo xtask <command>
                      of the frame crates and of the whole tree, against
                      RFC 0001's under-5% target and 10% reversal trigger
 
-  reproduce          Two runs of this commit must produce one trace hash,
+  trace              Two runs of this commit must produce one trace hash,
                      and one unseeded read of time must break that
-  reproduce --trace  Print this run's trace hash and nothing else
+  trace --hash       Print this run's trace hash and nothing else
+
+  reproduce          Every claim, its published reproduction command, the
+                     machine class it needs, and whether this one may record
+  reproduce <claim>  Re-run one claim's own reproduction, from this checkout
+  lint-reproduce     Every claim's reproduction command resolves in this tree
 
   panic              Three endings CI must tell apart: a clean boot, a
                      deliberate panic, and a boot that never finishes
@@ -1076,7 +1094,7 @@ fn trace(features: &[&str]) -> Result<u64, String> {
 /// every assertion holds, it prints `M0 ok`, it exits 33. Every other check in
 /// this tree is green on it. The only thing wrong is that two runs no longer
 /// agree — and until this command existed, nothing would ever have said so.
-fn reproduce() -> Result<(), String> {
+fn trace_check() -> Result<(), String> {
     println!("reproduction check — seed {TRACE_SEED}\n");
 
     println!("[1/2] the same commit, twice — the traces must agree");
@@ -1123,7 +1141,7 @@ fn reproduce() -> Result<(), String> {
 /// For the CI job, where two runners each produce a line and a third job
 /// compares them. Nothing else is printed, so the artefact is the hash rather
 /// than a log a comparison would have to parse.
-fn trace_only() -> Result<(), String> {
+fn trace_hash_only() -> Result<(), String> {
     println!("{:#018x}", trace(&[])?);
     Ok(())
 }
@@ -1670,7 +1688,7 @@ fn verify() -> Result<(), String> {
     // is here rather than only in CI because the failure it catches is one
     // nothing else in this loop can see: a boot that goes green twice with two
     // different answers passes `run`, `user`, `cap` and `mutate` alike.
-    reproduce()?;
+    trace_check()?;
     // Last, and part of the loop rather than beside it. It is the half of
     // E0-P08 that says the suite can fail: everything above proves the
     // properties hold on this tree, and this proves that a tree where one of
@@ -1703,6 +1721,7 @@ fn lint_all() -> Result<(), String> {
     // it. `xtask claims` rewrites the snapshot by design, so this has to come
     // first or it grades its own homework.
     lint_snapshot()?;
+    lint_reproduce()?;
     // The same check the CI policy job runs. It lives here because a local
     // `lint` that is a subset of the gate teaches people the gate is passing
     // when it is not — which is how a formatting failure reached CI on a tree
@@ -2957,6 +2976,33 @@ fn toml_field(text: &str, key: &str) -> Option<String> {
     })
 }
 
+/// One scalar from inside one named table.
+///
+/// [`toml_field`] answers with the first matching key *anywhere* in the file,
+/// which is right for `status` and `milestone` and wrong the moment two tables
+/// share a key name. `command` lives in `[reproduce]` and `path` lives in
+/// `[workload]` and also in `[owner]` under the name `document`; asking for a
+/// key without saying which table is asking for whichever table happens to come
+/// first, which is a correct answer by accident.
+fn toml_table_field(text: &str, table: &str, key: &str) -> Option<String> {
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            inside = trimmed.trim_end().trim_end_matches('\r') == format!("[{table}]");
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix(key) else { continue };
+        if rest.trim_start().starts_with('=') {
+            return toml_scalar(trimmed);
+        }
+    }
+    None
+}
+
 /// One line of the release manifest.
 struct Content {
     /// What the release contract calls it.
@@ -3712,19 +3758,74 @@ fn boot_nanos(log: &str) -> Option<u64> {
         .and_then(|value| value.parse().ok())
 }
 
+/// How one claim's workload is actually run.
+///
+/// One table, because the alternative is what was here before: a chain of `if
+/// name ==` inside the runner and a separate belief, held nowhere in
+/// particular, about which claims have a workload at all. A registry entry
+/// whose published reproduction command dispatches to nothing is a claim only
+/// its author can re-derive, which is the opposite of what the registry is for.
+///
+/// `lint-reproduce` reads this table and the registry together, so the two
+/// cannot drift.
+enum Route {
+    /// A benchmark binary under `bench/src/bin/`, named here because the name
+    /// is not derivable: `ring-submit-latency` runs `ring_submit`, and a
+    /// derivation that happened to work for one claim was already carrying a
+    /// `strip_prefix` special case for it.
+    Bench(&'static str),
+    /// Ten boots of the kernel. Not a program: the measurement is taken inside
+    /// the kernel because nothing outside it can see where boot begins.
+    Boots,
+    /// The timer, for as many seconds as the claim's `[workload]` asks for.
+    Timer,
+}
+
+const ROUTES: &[(&str, Route)] = &[
+    ("ring-submit-latency", Route::Bench("ring_submit")),
+    ("timer-jitter", Route::Timer),
+    ("boot-to-m0", Route::Boots),
+];
+
+/// The registry file one claim name resolves to.
+///
+/// Exact match first, then a unique suffix, and an ambiguous suffix is an error
+/// naming the candidates. What this replaces read the directory unsorted and
+/// unfiltered and took the first `ends_with` hit — so it could match
+/// `claims/README.md` or `claims/runner-class-A.md`, and among two real
+/// candidates it picked whichever the filesystem happened to hand back first.
+/// Nothing had two candidates yet, which is exactly when a resolution bug is
+/// cheap to fix.
+fn find_claim(name: &str) -> Result<PathBuf, String> {
+    let files = claim_files()?;
+    let stem = |p: &PathBuf| p.file_stem().map(|s| s.to_string_lossy().into_owned());
+
+    if let Some(exact) = files.iter().find(|p| stem(p).as_deref() == Some(name)) {
+        return Ok(exact.clone());
+    }
+
+    let matches: Vec<&PathBuf> = files
+        .iter()
+        .filter(|p| stem(p).is_some_and(|s| s.ends_with(name) && !name.is_empty()))
+        .collect();
+
+    match matches.as_slice() {
+        [] => Err(format!("no claim named {name} in claims/. `cargo xtask claims` lists them.")),
+        [one] => Ok((*one).clone()),
+        many => Err(format!(
+            "{name} names {} claims: {}. Say which.",
+            many.len(),
+            many.iter().filter_map(|p| stem(p)).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
 fn claim_run(name: Option<&str>) -> Result<(), String> {
     let Some(name) = name else {
         return Err("usage: cargo xtask claim <name>   (see `cargo xtask claims`)".into());
     };
 
-    let dir = root().join("claims");
-    let file = std::fs::read_dir(&dir)
-        .map_err(|e| format!("reading claims/: {e}"))?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .find(|p| p.file_stem().is_some_and(|s| s.to_string_lossy().ends_with(name)))
-        .ok_or_else(|| format!("no claim named {name} in claims/"))?;
-
+    let file = find_claim(name)?;
     let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
     let field = |key: &str| toml_field(&text, key);
 
@@ -3738,20 +3839,36 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
     println!("runner    {}", field("runner").unwrap_or_else(|| "unset".into()));
     println!();
 
-    // Not every claim's workload is a benchmark binary. `boot-to-m0` measures
-    // the kernel booting, which is a boot rather than a program — and the
-    // measurement is taken inside the kernel because nothing outside it can see
-    // where boot begins. Dispatching on the name keeps `cargo xtask claim
-    // <name>` as the one reproduction command the registry publishes,
-    // regardless of what the workload turns out to be.
-    if name == "boot-to-m0" {
-        claim_boot_to_m0()?;
-    } else {
-        // The workload binary is named after the claim, minus the registry prefix.
-        let bin = name.replace('-', "_");
-        let bin =
-            bin.strip_prefix("ring_submit_latency").map_or(bin.clone(), |_| "ring_submit".into());
-        sh("cargo", &["run", "--release", "-p", "f-bench", "--bin", &bin])?;
+    // Not every claim's workload is a benchmark binary, which is why there is a
+    // table rather than a naming convention. `boot-to-m0` is ten boots and
+    // `timer-jitter` is the timer; only one of the three is a program under
+    // `bench/src/bin/`. Dispatching through `ROUTES` keeps `cargo xtask claim
+    // <name>` as the one reproduction command the registry publishes, whatever
+    // the workload turns out to be.
+    //
+    // The convention this replaced was `name.replace('-', "_")` with a
+    // `strip_prefix` fixup for the one claim it did not fit, and it silently
+    // did not fit a second: `cargo xtask claim timer-jitter` asked cargo for a
+    // binary called `timer_jitter`, which has never existed.
+    let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let route =
+        ROUTES.iter().find(|(claim, _)| stem.ends_with(claim)).map(|(_, route)| route).ok_or_else(
+            || {
+                format!(
+                    "claim {name} has no entry in ROUTES in xtask/src/main.rs, so its\n\
+                 published reproduction command runs nothing. Add one, or the claim\n\
+                 is a number only its author can re-derive."
+                )
+            },
+        )?;
+
+    match route {
+        Route::Boots => claim_boot_to_m0()?,
+        Route::Bench(bin) => sh("cargo", &["run", "--release", "-p", "f-bench", "--bin", bin])?,
+        Route::Timer => {
+            let seconds = toml_table_field(&text, "workload", "seconds");
+            timer(seconds.as_deref())?;
+        }
     }
 
     // The harness itself refuses in a non-measurement environment and says so
@@ -4468,4 +4585,215 @@ section  = \"06\"
         assert!(lint_callbacks().is_ok(), "an interface has acquired a callback");
         assert!(lint_claim_owners().is_ok(), "a claim has lost its owner");
     }
+}
+
+/// One registry entry, reduced to what a stranger needs to re-run it.
+struct Reproduction {
+    name: String,
+    file: String,
+    command: String,
+    runner: String,
+    status: String,
+}
+
+fn reproductions() -> Result<Vec<Reproduction>, String> {
+    let mut out = Vec::new();
+    for file in claim_files()? {
+        let rel = relative(&file);
+        let text = std::fs::read_to_string(&file).map_err(|e| format!("reading {rel}: {e}"))?;
+        out.push(Reproduction {
+            name: toml_field(&text, "name").unwrap_or_default(),
+            file: rel,
+            command: toml_table_field(&text, "reproduce", "command").unwrap_or_default(),
+            runner: toml_table_field(&text, "hardware", "runner").unwrap_or_default(),
+            status: toml_field(&text, "status").unwrap_or_else(|| "unknown".into()),
+        });
+    }
+    Ok(out)
+}
+
+/// Re-run one published claim from this checkout, or list what there is to run.
+///
+/// # What this is for
+///
+/// A stranger with the repository and nothing else. `RELEASING.md` promises
+/// that every published number can be re-derived by somebody who was not
+/// there, and until this verb existed that promise was three different commands
+/// in three registry files, one of which did not run.
+///
+/// It is a **dispatcher over the registry**, deliberately, and not a
+/// reimplementation of each claim. The claim file says how it is reproduced;
+/// this reads that and does it. Anything else and there are two accounts of how
+/// a number was taken, which is the decay the whole registry exists to prevent.
+///
+/// # Why an honest refusal exits zero
+///
+/// Because on every machine this project can currently reach, refusal is the
+/// path that runs. `F_ENVIRONMENT` is `container` in the development image and
+/// unset everywhere else, and `f_bench::Environment` fails closed on both — so
+/// the workload runs, a distribution is drawn, and recording is refused. That
+/// is correct behaviour and not a failure. Painting it red would make every
+/// local run of this command a red run, which is precisely how a check gets
+/// muted.
+///
+/// The three endings are therefore distinguished in words rather than in the
+/// exit code, and there is no shared "ok": *the number was recorded*, *the
+/// route ran and the number was not recorded*, and an error, which means the
+/// route itself broke.
+///
+/// # Errors
+///
+/// No such claim, an ambiguous name, or a workload that did not complete.
+fn reproduce(name: Option<&str>) -> Result<(), String> {
+    let Some(name) = name else {
+        return reproduce_list();
+    };
+
+    let file = find_claim(name)?;
+    let rel = relative(&file);
+    let text = std::fs::read_to_string(&file).map_err(|e| format!("reading {rel}: {e}"))?;
+
+    let claim = toml_field(&text, "name").unwrap_or_else(|| name.to_string());
+    let status = toml_field(&text, "status").unwrap_or_else(|| "unknown".into());
+    let runner = toml_table_field(&text, "hardware", "runner").unwrap_or_else(|| "unset".into());
+    let command = toml_table_field(&text, "reproduce", "command").unwrap_or_else(|| "unset".into());
+
+    // The tree being reproduced from, named. A number quoted from a tree nobody
+    // can identify is the failure `release --dry-run` was carrying until
+    // E0-P01; here it is a warning rather than fatal, because reproducing on a
+    // branch is a legitimate thing to be doing — what matters is that the
+    // printed record says so.
+    let commit = capture("git", &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    let dirty = capture("git", &["status", "--porcelain"]).is_ok_and(|s| !s.trim().is_empty());
+
+    println!("claim     {claim}");
+    println!("file      {rel}");
+    println!("status    {status}");
+    println!(
+        "commit    {}{}",
+        commit.trim(),
+        if dirty { "  (dirty — not a quotable tree)" } else { "" }
+    );
+    println!("needs     {runner}");
+    println!("command   {command}");
+
+    let environment = f_bench::Environment::detect();
+    println!("machine   {} — {}", environment.name(), environment.why());
+    println!();
+
+    claim_run(Some(name))?;
+
+    println!();
+    if environment.records() {
+        println!("reproduce: route ok — the number was recorded.");
+        return Ok(());
+    }
+
+    println!(
+        "reproduce: route ok, and the number was not recorded.\n\n\
+         This machine is `{}`, and {}.\n\n\
+         What would record it: a machine meeting `claims/{runner}.md` with all four\n\
+         of RFC 0007's reservation components obtained by partition, and\n\
+         `F_ENVIRONMENT={runner}` set on it. That file's own warning applies —\n\
+         the variable is an assertion, not a measurement, so read the checklist\n\
+         in it before setting one.",
+        environment.name(),
+        environment.why()
+    );
+    Ok(())
+}
+
+/// Every claim, its command, the machine it needs, and whether this is one.
+fn reproduce_list() -> Result<(), String> {
+    let environment = f_bench::Environment::detect();
+    println!("this machine is `{}` — {}", environment.name(), environment.why());
+    println!();
+
+    for entry in reproductions()? {
+        let mine = if entry.runner == environment.name() { "yes" } else { "no" };
+        println!(
+            "  {:<22} {:<8} needs {:<16} here? {mine}",
+            entry.name, entry.status, entry.runner
+        );
+        println!("  {:<22} {}", "", entry.command);
+        println!();
+    }
+
+    println!("run one with: cargo xtask reproduce <claim>");
+    Ok(())
+}
+
+/// Every claim's published reproduction command resolves inside this tree.
+///
+/// `RELEASING.md`'s second gate says a claim in the snapshot with no
+/// reproduction command that runs from a clean checkout is a release that does
+/// not go out. That was prose. This is the executable half, and it asserts four
+/// things a stranger's afternoon depends on:
+///
+/// - the command exists at all;
+/// - it is `cargo xtask claim <this claim's own name>`, so no claim can publish
+///   a command that names somebody else's, and none can name a step outside the
+///   tree — the long plan's rule, applied to the one place it is easiest to
+///   break;
+/// - the name resolves through `ROUTES` to something that runs;
+/// - and the runner class it requires has a specification file beside it, so
+///   `[hardware] runner` cannot name a machine nobody has described.
+///
+/// The last of those is what `E0-D10` made checkable. Before
+/// `claims/runner-class-A.md` existed there was nothing for this to point at.
+///
+/// # Errors
+///
+/// Any claim failing any of the four, with the file named.
+fn lint_reproduce() -> Result<(), String> {
+    let mut findings = Vec::new();
+
+    for entry in reproductions()? {
+        if entry.name.is_empty() {
+            findings.push(format!("  {}: no `name`", entry.file));
+            continue;
+        }
+        let expected = format!("cargo xtask claim {}", entry.name);
+        if entry.command.is_empty() {
+            findings.push(format!("  {}: no `[reproduce] command`", entry.file));
+        } else if entry.command != expected {
+            findings.push(format!(
+                "  {}: reproduces with `{}`, and the registry's one command is `{expected}`",
+                entry.file, entry.command
+            ));
+        }
+        if !ROUTES.iter().any(|(claim, _)| *claim == entry.name) {
+            findings.push(format!(
+                "  {}: `{}` has no ROUTES entry, so its command runs nothing",
+                entry.file, entry.name
+            ));
+        }
+        if entry.runner.is_empty() {
+            findings.push(format!("  {}: no `[hardware] runner`", entry.file));
+        } else {
+            let spec = root().join("claims").join(format!("{}.md", entry.runner));
+            if !spec.exists() {
+                findings.push(format!(
+                    "  {}: needs `{}`, and claims/{}.md does not exist",
+                    entry.file, entry.runner, entry.runner
+                ));
+            }
+        }
+    }
+
+    if findings.is_empty() {
+        println!(
+            "lint-reproduce: ok  ({} claim(s) reproduce from this tree)",
+            reproductions()?.len()
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{} claim(s) cannot be reproduced from this tree:\n{}\n\n\
+         RELEASING.md gate 2: a claim in the snapshot whose reproduction does not\n\
+         run from a clean checkout is a number a stranger cannot check, which is\n\
+         the one thing the registry exists to prevent.",
+        findings.len(),
+        findings.join("\n")
+    ))
 }

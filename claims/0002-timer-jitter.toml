@@ -62,7 +62,7 @@ runner = "runner-class-A"       # pinned bare metal, thermally stable
 notes  = "Requires /dev/kvm at minimum, and bare metal to be defensible. QEMU's TCG backend refuses tsc-deadline and x2apic by name and emulates the APIC timer against a host clock it does not control, so a container run measures the emulator: p99 lateness there is hundreds of microseconds and the distribution is of QEMU. The development image sets F_ENVIRONMENT=container for exactly this reason."
 
 [reproduce]
-command = "cargo xtask timer 60"
+command = "cargo xtask claim timer-jitter"
 
 [diagnosis]
 # Recorded here so a red result carries its own first debugging step, rather

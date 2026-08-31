@@ -399,7 +399,7 @@ jobs:
   # produce one trace hash.
   #
   # Two jobs and not a loop in one job, because the claim is about two machines.
-  # A pair of boots on one runner is the weaker half and `cargo xtask reproduce`
+  # A pair of boots on one runner is the weaker half and `cargo xtask trace`
   # already does it locally; what a second runner adds is everything a machine
   # can differ in — core count, host load, kernel version, CPU model — and those
   # are exactly the things a boot must not be reading.
@@ -420,7 +420,7 @@ jobs:
         runner_id: [a, b]
     steps:
       - uses: actions/checkout@v7
-      - run: cargo xtask reproduce --trace | tee trace-${{ matrix.runner_id }}.txt
+      - run: cargo xtask trace --hash | tee trace-${{ matrix.runner_id }}.txt
       - uses: actions/upload-artifact@v4
         with:
           name: trace-${{ matrix.runner_id }}
@@ -462,7 +462,7 @@ jobs:
       # must make two runs disagree. Without it, a trace hashed over something
       # that never varies would agree with itself forever and this gate would
       # be green for the wrong reason.
-      - run: cargo xtask reproduce
+      - run: cargo xtask trace
 
   # The fourth thing the gate was always supposed to run, and the one that was
   # missing: lint, test, run — and claims.
