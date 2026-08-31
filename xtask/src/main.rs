@@ -13,6 +13,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
+/// Content addressing and archiving, with no dependency outside the tree.
+/// Split out because it is algorithm rather than policy, and because the rest
+/// of this file is a list of decisions while that one is a list of constants.
+mod pack;
+
 /// The target the kernel is built for.
 ///
 /// A built-in target and not a JSON file in `targets/`, which is a decision
@@ -163,7 +168,7 @@ fn main() -> ExitCode {
         "lint-snapshot" => lint_snapshot(),
         "lint-reproduce" => lint_reproduce(),
         "unsafe" => unsafe_report(args.get(1).map(String::as_str) == Some("--by-file")),
-        "release" => release(args.get(1).map(String::as_str) == Some("--dry-run")),
+        "release" => release(args.get(1).map(String::as_str)),
         "history" => match args.get(1).map(String::as_str) {
             Some("append") => history_append(),
             Some(other) => Err(format!("unknown option for history: {other}")),
@@ -253,7 +258,10 @@ cargo xtask <command>
   panic              Three endings CI must tell apart: a clean boot, a
                      deliberate panic, and a boot that never finishes
 
-  release --dry-run  The release manifest, and what is missing from it
+  release            Build the package: the contract's contents, a MANIFEST,
+                     and one content address over the whole of it
+  release --dry-run  The manifest it would produce, without building
+  release --twice    Package the same tree twice and require one address
 
   history            The measurement history, one record per commit
   history append     Add this commit's record. Run on main, never on a branch
@@ -338,6 +346,21 @@ fn capture(program: &str, args: &[&str]) -> Result<String, String> {
         return Err(format!("{program} {} failed", args.join(" ")));
     }
     String::from_utf8(out.stdout).map_err(|e| format!("{program} printed non-UTF-8: {e}"))
+}
+
+/// [`capture`], for output that is not text.
+///
+/// `git archive` writes a tar to standard output, and a tar is not UTF-8.
+fn capture_bytes(program: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = Command::new(program)
+        .args(args)
+        .current_dir(root())
+        .output()
+        .map_err(|e| format!("could not run {program}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("{program} {} failed", args.join(" ")));
+    }
+    Ok(out.stdout)
 }
 
 /// [`capture`], with environment variables set for the child.
@@ -3011,6 +3034,35 @@ struct Content {
     source: ContentSource,
     /// The task that produces it, when it does not exist yet.
     owed_to: Option<&'static str>,
+    /// Whether a release may go out without it, and until when.
+    required: Requirement,
+}
+
+/// Whether a release may go out without one of its contents.
+///
+/// The contract lists eight things a release contains, and two of them —
+/// the tuned-Linux baseline and the seed corpus — are owed to `E1` tasks that
+/// argue, correctly, that they cannot be written yet. That left `E0-R01` with
+/// one of two bad options: ship a package the contract says is incomplete, or
+/// quietly shorten the list. `A-07` exists because of the second.
+///
+/// So the requirement is a predicate over the registry rather than a fixed
+/// list. A **pending** claim publishes no number, so nothing it would compare
+/// against is owed yet; the moment that claim leaves `pending` the content
+/// becomes required and the packager refuses, naming the task that owes it.
+/// The scope cut becomes a gate with a known trigger date, and the trigger is a
+/// change to `claims/`, not to this file.
+///
+/// RFC 0021 is the argument, because a future contributor reading
+/// `RELEASING.md` would otherwise reasonably conclude the list is
+/// unconditional.
+enum Requirement {
+    /// Always. Most contents.
+    Always,
+    /// Not while this claim is `pending`, because a claim that publishes no
+    /// number cannot be missing the thing its number would be measured
+    /// against.
+    WhilePending(&'static str),
 }
 
 /// Where a manifest entry's content comes from.
@@ -3036,11 +3088,13 @@ const CONTENTS: &[Content] = &[
         name: "the source, at a tag",
         source: ContentSource::Built("git archive of HEAD"),
         owed_to: None,
+        required: Requirement::Always,
     },
     Content {
         name: "the claims snapshot",
         source: ContentSource::File("claims/snapshot.json"),
         owed_to: None,
+        required: Requirement::Always,
     },
     Content {
         name: "the baseline configuration",
@@ -3051,57 +3105,127 @@ const CONTENTS: &[Content] = &[
              comparison without anybody deciding it should, because prose \
              cannot be re-run",
         ),
+        // Not owed while 0001 is `pending`, because a claim that publishes no
+        // number cannot be missing the baseline its number would be compared
+        // against. `ratio_vs_baseline = { min = 5.0 }` is in that claim's
+        // thresholds, so the day it stops being pending this row goes red and
+        // names E1-D06 — which is the conversation E0-P05 has to have anyway.
+        required: Requirement::WhilePending("ring-submit-latency"),
     },
     Content {
         name: "the seed corpus and scenario set",
         source: ContentSource::Absent,
         owed_to: Some("E1-P01, the deterministic simulator, and E1-P03's sweeps"),
+        // The same argument, against the same claim: the corpus exists so a
+        // third party can re-run the sweeps a number came out of, and there is
+        // no number.
+        required: Requirement::WhilePending("ring-submit-latency"),
     },
     Content {
         name: "a content-addressed system image",
         source: ContentSource::Built("target/<target>/debug/f-kernel.elf32"),
         owed_to: None,
+        required: Requirement::Always,
     },
     Content {
         name: "the dependency manifest and provenance",
         source: ContentSource::File("Cargo.lock"),
         owed_to: None,
+        required: Requirement::Always,
     },
     Content {
         name: "the honest-status page",
         source: ContentSource::File("docs/TESTING-STATUS.md"),
         owed_to: None,
+        required: Requirement::Always,
     },
     Content {
         name: "the decision record",
         source: ContentSource::Tree("docs/rfc", "md"),
         owed_to: None,
+        required: Requirement::Always,
     },
 ];
 
-/// `sha256sum`, when the machine has it.
+/// Whether one content is owed by *this* release, given the registry.
 ///
-/// Not a hard requirement and not vendored. The release *package* is content
-/// addressed and E0-R01 owns producing it; what this command needs a hash for
-/// is to show that the image it would ship is a specific one. A machine without
-/// coreutils gets the manifest with the hash column absent and a line saying
-/// why, which is more useful than either refusing to run or growing a hash
-/// implementation in the build tooling.
-fn sha256(path: &Path) -> Option<String> {
-    let out = Command::new("sha256sum").arg(path).current_dir(root()).output().ok()?;
-    if !out.status.success() {
-        return None;
+/// Reads the claims registry rather than a constant, so what flips a row from
+/// optional to required is a change to `claims/` and never a change here.
+fn required_now(content: &Content) -> Result<bool, String> {
+    match content.required {
+        Requirement::Always => Ok(true),
+        Requirement::WhilePending(claim) => {
+            let file = find_claim(claim)?;
+            let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
+            let status = toml_field(&text, "status").unwrap_or_else(|| "unknown".into());
+            Ok(status != "pending")
+        }
     }
-    String::from_utf8(out.stdout).ok()?.split_whitespace().next().map(str::to_string)
 }
 
-fn release(dry_run: bool) -> Result<(), String> {
-    if !dry_run {
-        return Err("`cargo xtask release` builds the package, and that is E0-R01.\n\n\
-             What exists today is `cargo xtask release --dry-run`, which prints the\n\
-             manifest this would produce and names the task owing each missing\n\
-             piece. RELEASING.md states the contract the package has to satisfy."
-            .into());
+/// Every file one content contributes, as `(name in the archive, bytes)`.
+///
+/// Sorted by name at the end, and that sort is load-bearing rather than tidy:
+/// `read_dir` order is the filesystem's business and differs between two
+/// machines holding the same files. It is the one same-machine-invisible
+/// difference a build-it-twice check cannot see, which is why it is also the
+/// one this file tests directly.
+fn content_files(content: &Content) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let read = |rel: &str| -> Result<Vec<u8>, String> {
+        std::fs::read(root().join(rel)).map_err(|e| format!("reading {rel}: {e}"))
+    };
+
+    let mut files = match &content.source {
+        ContentSource::File(path) => vec![((*path).to_string(), read(path)?)],
+        ContentSource::Tree(dir, extension) => {
+            let mut out = Vec::new();
+            let entries =
+                std::fs::read_dir(root().join(dir)).map_err(|e| format!("reading {dir}/: {e}"))?;
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if !path.extension().is_some_and(|x| x == *extension) {
+                    continue;
+                }
+                let rel = relative(&path);
+                let bytes = std::fs::read(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+                out.push((rel, bytes));
+            }
+            out
+        }
+        ContentSource::Built(_) => Vec::new(),
+        ContentSource::Absent => Vec::new(),
+    };
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(files)
+}
+
+/// Build the release package, or print the manifest it would produce.
+///
+/// # What the package is
+///
+/// One `.tar`, and the contract's eight contents inside it, plus a `MANIFEST`
+/// naming every file and its SHA-256. The archive is built by `pack::Tar`,
+/// which has no clock and no user in it; the hashes are `pack::sha256`, which
+/// has no dependency. Both of those are the same requirement stated twice: a
+/// content address that depends on which machine computed it is not one.
+///
+/// Not compressed, deliberately. A deflate stream carries its encoder's version
+/// and level in the output, so compressing here would put a dependency's
+/// *version* inside the content address. Whoever ships the file may compress
+/// it; that is an envelope, and the address is of the content.
+///
+/// # Errors
+///
+/// A missing content the registry says is required, a tree git cannot
+/// identify, or a name the archive format cannot hold.
+fn release(mode: Option<&str>) -> Result<(), String> {
+    let dry_run = mode == Some("--dry-run");
+    let twice = mode == Some("--twice");
+    if let Some(other) = mode
+        && !dry_run
+        && !twice
+    {
+        return Err(format!("unknown option for release: {other}"));
     }
 
     // Not `unwrap_or("unknown")`, which is what these two were. The version and
@@ -3126,35 +3250,53 @@ fn release(dry_run: bool) -> Result<(), String> {
     let describe = identify("version", &["describe", "--tags", "--always", "--dirty"])?;
     let commit = identify("commit", &["rev-parse", "HEAD"])?;
 
-    println!("release manifest (dry run)\n");
+    if twice {
+        let first = build_package(&describe, &commit)?;
+        let second = build_package(&describe, &commit)?;
+        if first.0 != second.0 {
+            return Err(format!(
+                "two builds of the same tree produced two packages:\n  \
+                 {}\n  {}\n\n\
+                 Something with a clock, a user or a directory order in it has reached\n\
+                 the archive. `pack::Tar` has none of the three, so look at what was\n\
+                 put into it — the kernel image is the likeliest, because a debug build\n\
+                 carries its absolute build path in DWARF and in cargo's -Cmetadata.",
+                first.0, second.0
+            ));
+        }
+        println!("release: the same tree packages identically — {}", first.0);
+        println!(
+            "\n  This is the weaker half of E0-R01's exit and it is worth saying so.\n\
+             \x20 Directory order, uid, path and clock are all constant within one\n\
+             \x20 machine, so two runs here agree for reasons that say little about two\n\
+             \x20 machines agreeing. The release workflow is what asks the real question."
+        );
+        return Ok(());
+    }
+
+    println!("release manifest{}\n", if dry_run { " (dry run)" } else { "" });
     println!("  version   {describe}");
     println!("  commit    {commit}");
     println!("  contract  RELEASING.md\n");
 
     let mut missing = 0usize;
     for content in CONTENTS {
+        let owed = required_now(content)?;
         match &content.source {
             ContentSource::File(path) => {
                 let full = root().join(path);
                 if full.exists() {
-                    let size = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
-                    let hash = sha256(&full).unwrap_or_else(|| "-".into());
+                    let bytes = std::fs::read(&full).map_err(|e| e.to_string())?;
+                    let hash = pack::hex(&pack::sha256(&bytes));
                     println!("  [ok]  {:<36} {path}", content.name);
-                    println!("        {size} bytes  sha256 {}", &hash[..hash.len().min(16)]);
+                    println!("        {} bytes  sha256 {}", bytes.len(), &hash[..16]);
                 } else {
                     missing += 1;
                     println!("  [--]  {:<36} {path} does not exist", content.name);
                 }
             }
-            ContentSource::Tree(dir, extension) => {
-                let count = std::fs::read_dir(root().join(dir))
-                    .map(|entries| {
-                        entries
-                            .filter_map(Result::ok)
-                            .filter(|e| e.path().extension().is_some_and(|x| x == *extension))
-                            .count()
-                    })
-                    .unwrap_or(0);
+            ContentSource::Tree(dir, _) => {
+                let count = content_files(content)?.len();
                 if count == 0 {
                     missing += 1;
                     println!("  [--]  {:<36} {dir}/ is empty", content.name);
@@ -3167,9 +3309,21 @@ fn release(dry_run: bool) -> Result<(), String> {
             }
             ContentSource::Absent => {
                 missing += 1;
-                println!("  [--]  {:<36} nothing produces this yet", content.name);
-                if let Some(owed) = content.owed_to {
-                    println!("        owed to {owed}");
+                let mark = if owed { "!!" } else { "--" };
+                println!("  [{mark}]  {:<36} nothing produces this yet", content.name);
+                if let Some(task) = content.owed_to {
+                    println!("        owed to {task}");
+                }
+                if let Requirement::WhilePending(claim) = content.required {
+                    if owed {
+                        println!(
+                            "        REQUIRED NOW: {claim} is no longer `pending`, so the\n\
+                             \x20       number it publishes has something to be compared against\n\
+                             \x20       and this content is owed. RFC 0021."
+                        );
+                    } else {
+                        println!("        not owed while {claim} is `pending` — RFC 0021");
+                    }
                 }
             }
         }
@@ -3177,25 +3331,119 @@ fn release(dry_run: bool) -> Result<(), String> {
 
     println!("\n  {} of {} contents present", CONTENTS.len() - missing, CONTENTS.len());
 
-    // The gates, listed rather than run. Running `verify` from inside a dry run
-    // would make a manifest print cost a full boot, and the point of this
-    // command is that it is cheap enough to run while thinking.
-    println!(
-        "\nwhat would stop this release (RELEASING.md, and not checked here):\n\
-        \x20 1. `cargo xtask verify` not green\n\
-        \x20 2. a gating claim red, or a claim with no reproduction from a clean checkout\n\
-        \x20 3. a document number `cargo xtask lint` cannot trace to the registry\n\
-        \x20 4. docs/TESTING-STATUS.md not re-read against the tree\n\
-        \x20 5. an RFC reversed this cycle that was edited rather than superseded"
-    );
-
-    if missing > 0 {
+    if dry_run {
+        // The gates, listed rather than run. Running `verify` from inside a dry
+        // run would make a manifest print cost a full boot, and the point of
+        // this command is that it is cheap enough to run while thinking.
         println!(
-            "\nThis is not yet a releasable package, and the missing rows say why.\n\
-             E0-R01 builds it; E0-R04 is release 0.1."
+            "\nwhat would stop this release (RELEASING.md, and not checked here):\n\
+            \x20 1. `cargo xtask verify` not green\n\
+            \x20 2. a gating claim red, or a claim with no reproduction from a clean checkout\n\
+            \x20 3. a document number `cargo xtask lint` cannot trace to the registry\n\
+            \x20 4. docs/TESTING-STATUS.md not re-read against the tree\n\
+            \x20 5. an RFC reversed this cycle that was edited rather than superseded"
         );
+        if missing > 0 {
+            println!(
+                "\n`cargo xtask release` builds the package; the rows above say what would\n\
+                 be in it. `--twice` checks that the same tree packages identically."
+            );
+        }
+        return Ok(());
     }
+
+    let (address, path, count, bytes) = build_package(&describe, &commit)?;
+    println!("\n  {count} file(s), {bytes} bytes");
+    println!("  {}", relative(&path));
+    println!("\nrelease: {address}");
+    println!(
+        "\n  The address is over the content, not the envelope: no clock, no user,\n\
+         \x20 no directory order and no compressor version is in it. Two machines at\n\
+         \x20 this commit must produce this string, and `cargo xtask release --twice`\n\
+         \x20 is the local half of asking."
+    );
     Ok(())
+}
+
+/// Assemble the archive and return `(address, path, files, bytes)`.
+fn build_package(describe: &str, commit: &str) -> Result<(String, PathBuf, usize, usize), String> {
+    // Every file that will be in the package, gathered before anything is
+    // written, so a refusal leaves no half-built archive behind.
+    let mut files: Vec<(String, bool, Vec<u8>)> = Vec::new();
+    let mut manifest = String::new();
+    manifest.push_str("# The release package, as a list of what is in it.\n#\n");
+    manifest.push_str("# Every line is a file and its SHA-256. The package's own address is\n");
+    manifest
+        .push_str("# the SHA-256 of the archive these are in. RELEASING.md is the contract.\n\n");
+    manifest.push_str(&format!("version {describe}\ncommit  {commit}\n\n"));
+
+    for content in CONTENTS {
+        let owed = required_now(content)?;
+        let gathered = content_files(content)?;
+
+        if gathered.is_empty() && !matches!(content.source, ContentSource::Built(_)) {
+            if owed {
+                return Err(format!(
+                    "the release contract requires `{}` and nothing produces it.\n\n\
+                     {}\n\n\
+                     A package missing a content the contract names is not a smaller\n\
+                     release, it is a release nobody can check. RFC 0021.",
+                    content.name,
+                    content.owed_to.unwrap_or("No task owes it, which is worse.")
+                ));
+            }
+            manifest.push_str(&format!("# absent, and not owed yet: {}\n", content.name));
+            continue;
+        }
+
+        for (name, bytes) in gathered {
+            let hash = pack::hex(&pack::sha256(&bytes));
+            manifest.push_str(&format!("{hash}  {name}\n"));
+            files.push((name, false, bytes));
+        }
+    }
+
+    // The source, as git sees it at this commit. Not a walk of the working
+    // tree: `git archive` takes its file list from the tree object and its
+    // mtimes from the commit, so it cannot pick up an untracked file and cannot
+    // vary with when the checkout happened.
+    let source = capture_bytes("git", &["archive", "--format=tar", commit])?;
+    let source_hash = pack::hex(&pack::sha256(&source));
+    manifest.push_str(&format!("{source_hash}  source.tar\n"));
+    files.push(("source.tar".to_string(), false, source));
+
+    // The kernel image, which is built rather than read. Last, so that a build
+    // failure does not happen after an archive has been assembled.
+    build()?;
+    let image = kernel_elf32();
+    let bytes = std::fs::read(&image).map_err(|e| format!("reading {}: {e}", relative(&image)))?;
+    let hash = pack::hex(&pack::sha256(&bytes));
+    let name = "image/f-kernel.elf32".to_string();
+    manifest.push_str(&format!("{hash}  {name}\n"));
+    files.push((name, true, bytes));
+
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut tar = pack::Tar::new();
+    tar.file("MANIFEST", false, manifest.as_bytes())?;
+    let count = files.len();
+    let mut total = manifest.len();
+    for (name, executable, bytes) in files {
+        total += bytes.len();
+        tar.file(&name, executable, &bytes)?;
+    }
+    let archive = tar.finish();
+
+    let address = pack::hex(&pack::sha256(&archive));
+    // `target/package/` and not `target/release/`: that second one is cargo's
+    // release *profile* directory, and putting an artefact of ours in it means
+    // one `cargo build --release` away from a collision nobody expected.
+    let out = target_dir().join("package");
+    std::fs::create_dir_all(&out).map_err(|e| format!("creating {}: {e}", relative(&out)))?;
+    let path = out.join(format!("f-{describe}.tar"));
+    std::fs::write(&path, &archive).map_err(|e| format!("writing {}: {e}", relative(&path)))?;
+
+    Ok((address, path, count + 1, total))
 }
 
 /// The measurement history.

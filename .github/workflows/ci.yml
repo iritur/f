@@ -496,6 +496,19 @@ jobs:
       - run: cargo xtask lint-claim-owners
       - run: cargo xtask lint-claims
       - run: cargo xtask release --dry-run
+      # The package, built twice on this runner. It is the weaker half of
+      # E0-R01's exit and the comment in `--twice` says so: directory order,
+      # uid, path and clock are all constant within one machine, so agreeing
+      # here says little about two machines agreeing. What it does catch is the
+      # one same-machine difference — a `read_dir` order that reached the
+      # archive — and it costs one kernel build.
+      #
+      # The two-machine half needs two runners at one commit, and it needs them
+      # to build at the same absolute path: the image is a debug build, so its
+      # DWARF carries the checkout path and cargo's -Cmetadata derives from the
+      # package id, which contains it. That is a release-workflow question and
+      # not a pull-request one, and E0-R01 is marked `[>]` for it.
+      - run: cargo xtask release --twice
 
   deps:
     name: dependency policy
