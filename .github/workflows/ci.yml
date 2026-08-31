@@ -55,6 +55,15 @@ jobs:
       - run: cargo xtask lint-unsafe
       - run: cargo xtask lint-percpu
       - run: cargo xtask lint-mutations
+      # The three rules from docs/what-must-be-stated.html section 15 that
+      # could be made executable. CONTRIBUTING.md carries all twelve and says
+      # which is which: a rule listed as mechanised that is not is worse than
+      # one honestly listed as review, because it is a check somebody believes
+      # is happening.
+      - run: cargo xtask lint-claims
+      - run: cargo xtask lint-units
+      - run: cargo xtask lint-callbacks
+      - run: cargo xtask lint-claim-owners
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # The hooks in .claude/ are policy too, and they are the only policy that

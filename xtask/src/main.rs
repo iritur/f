@@ -140,6 +140,9 @@ fn main() -> ExitCode {
         "lint-percpu" => lint_percpu(),
         "lint-mutations" => lint_mutations(),
         "lint-claims" => lint_claims(),
+        "lint-units" => lint_units(),
+        "lint-callbacks" => lint_callbacks(),
+        "lint-claim-owners" => lint_claim_owners(),
         "release" => release(args.get(1).map(String::as_str) == Some("--dry-run")),
         "history" => match args.get(1).map(String::as_str) {
             Some("append") => history_append(),
@@ -209,6 +212,9 @@ cargo xtask <command>
   lint-percpu        No kernel-global mutable state outside `PerCpu`
   lint-mutations     No deliberate defect is on by default
   lint-claims        No document cites a claim value the claim no longer has
+  lint-units         R03: every public abi field states its unit
+  lint-callbacks     R05: no interface registers a callback
+  lint-claim-owners  R09: every claim names the document that owns it
 
   panic              Three endings CI must tell apart: a clean boot, a
                      deliberate panic, and a boot that never finishes
@@ -1489,6 +1495,13 @@ fn lint_all() -> Result<(), String> {
     lint_percpu()?;
     lint_mutations()?;
     lint_claims()?;
+    // The three rules from `docs/what-must-be-stated.html` section 15 that
+    // could be made executable. The other nine are review, and CONTRIBUTING.md
+    // says which is which — a rule listed as mechanised that is not is worse
+    // than one honestly listed as review.
+    lint_units()?;
+    lint_callbacks()?;
+    lint_claim_owners()?;
     // The same check the CI policy job runs. It lives here because a local
     // `lint` that is a subset of the gate teaches people the gate is passing
     // when it is not — which is how a formatting failure reached CI on a tree
@@ -1555,6 +1568,234 @@ fn rust_sources() -> Result<Vec<PathBuf>, String> {
 
 fn relative(path: &Path) -> String {
     path.strip_prefix(root()).unwrap_or(path).to_string_lossy().replace('\\', "/")
+}
+
+/// R03. Every quantity crossing the ABI states its unit, its epoch and its
+/// zero.
+///
+/// # Why an explicit marker rather than a vocabulary of unit words
+///
+/// A vocabulary check — does this doc comment mention nanoseconds, bytes,
+/// indices — passes on a sentence that happens to contain the word and fails on
+/// a sentence that says the same thing differently. It is a lint that trains
+/// people to include a keyword, which is worse than no lint because it looks
+/// like coverage.
+///
+/// `Unit:` is a marker somebody has to write on purpose. It is greppable, it
+/// cannot be satisfied by accident, and — the part that matters — it makes the
+/// *dimensionless* case explicit too. `Unit: none` is a statement that this
+/// field is an identifier rather than a quantity, which is exactly the claim
+/// R03 exists to force somebody to make out loud. `deadline: u64` shipped with
+/// no unit, no epoch and no zero, in the one crate whose entire purpose is to
+/// be correct against code written by somebody else, and it did so because
+/// nobody had to say anything.
+///
+/// The epoch and the zero are not separately checked, and that is a stated
+/// limit rather than an oversight: they are only meaningful for some units, and
+/// a lint demanding all three of an index would be teaching people to write
+/// three words to get past it. What this catches is the field nobody said
+/// anything about.
+fn unit_findings(rel: &str, text: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    let lines: Vec<&str> = text.lines().collect();
+
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        // A public struct field: `pub name: Type,` at field indentation. Not a
+        // `pub fn`, `pub const`, `pub struct` or `pub mod`.
+        let Some(rest) = trimmed.strip_prefix("pub ") else { continue };
+        if rest.starts_with("fn ")
+            || rest.starts_with("const ")
+            || rest.starts_with("struct ")
+            || rest.starts_with("enum ")
+            || rest.starts_with("mod ")
+            || rest.starts_with("use ")
+            || rest.starts_with("unsafe ")
+            || rest.starts_with("type ")
+        {
+            continue;
+        }
+        let Some((name, _)) = rest.split_once(':') else { continue };
+        let name = name.trim();
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+            continue;
+        }
+
+        // Walk back over this field's doc comment and attributes.
+        let mut doc = String::new();
+        let mut cursor = index;
+        while cursor > 0 {
+            cursor -= 1;
+            let above = lines[cursor].trim_start();
+            if above.starts_with("///") {
+                doc.insert_str(0, above.trim_start_matches("///"));
+                doc.insert(0, '\n');
+            } else if above.starts_with('#') || above.is_empty() {
+                continue;
+            } else {
+                break;
+            }
+        }
+
+        if !doc.to_ascii_lowercase().contains("unit:") {
+            findings.push(format!("  {rel}:{}  `{name}` states no unit", index + 1));
+        }
+    }
+    findings
+}
+
+/// R05. Nothing is delivered asynchronously.
+///
+/// Every event is a ring entry drained at a polling point, which is what keeps
+/// the determinism contract whole and is the reason this system never needs the
+/// concept of async-signal-safety. A callback is the shape that quietly
+/// reverses it: once one interface takes a function to call later, the argument
+/// for the next one is that the first one exists.
+///
+/// The check is textual and names what it looks for, which bounds what it can
+/// claim. A callback smuggled through a type alias or a trait object built
+/// elsewhere goes past it. That is the same limit `SHARED_STATE` states about
+/// itself, and it is worth stating rather than pretending is closed: this
+/// catches the construct being written, not every possible spelling of it.
+fn callback_findings(rel: &str, text: &str) -> Vec<String> {
+    /// Spellings of "call this later", and what each one is.
+    const SHAPES: &[(&str, &str)] = &[
+        ("dyn Fn", "a boxed closure is a callback with a vtable"),
+        ("impl Fn", "an interface taking a closure is an interface delivering asynchronously"),
+        ("extern \"C\" fn", "a function pointer across the ABI is a callback the peer installs"),
+        ("callback", "named as one"),
+        ("register_handler", "installing a handler is installing a callback"),
+        ("on_event", "an event hook is a delivery this system does not have"),
+    ];
+
+    let mut findings = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let code = line.split("//").next().unwrap_or("");
+        // Public surface only. A closure inside an implementation is an
+        // ordinary closure; what R05 is about is what an *interface* offers.
+        if !code.contains("pub ") {
+            continue;
+        }
+        for (shape, why) in SHAPES {
+            if code.contains(shape) {
+                findings.push(format!("  {rel}:{}  `{shape}` — {why}", index + 1));
+            }
+        }
+    }
+    findings
+}
+
+/// R09. Every headline claim names the subsystem that owns it.
+///
+/// Energy was in the first paragraph of the thesis and had no owning subsystem
+/// across five design documents, which is how half a claim goes missing without
+/// anybody deciding to drop it. A claim with an owner is a claim somebody can
+/// be asked about.
+///
+/// The owning document is required to *exist*, because a citation nobody can
+/// follow is the failure wearing the fix's clothes.
+fn claim_owner_findings(rel: &str, text: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+
+    let Some(document) = toml_field(text, "document") else {
+        findings
+            .push(format!("  {rel}  no [owner] document — R09, every claim names what owns it"));
+        return findings;
+    };
+    if toml_field(text, "section").is_none() {
+        findings.push(format!("  {rel}  [owner] names a document but no section"));
+    }
+    if !root().join(&document).exists() {
+        findings.push(format!("  {rel}  [owner] cites {document}, which does not exist"));
+    }
+    findings
+}
+
+/// R03, over the one crate whose layout is load-bearing against code we do not
+/// control.
+fn lint_units() -> Result<(), String> {
+    let mut findings = Vec::new();
+    for path in rust_sources()? {
+        let rel = relative(&path);
+        if !rel.starts_with("abi/") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+        findings.extend(unit_findings(&rel, &text));
+    }
+
+    if findings.is_empty() {
+        println!("lint-units: ok  (every public abi field states a unit)");
+        return Ok(());
+    }
+    Err(format!(
+        "{} public field(s) in abi/ state no unit:\n{}\n\n\
+         R03: every quantity crossing the ABI states its unit, its epoch and its\n\
+         zero. `deadline: u64` shipped with none of the three, in the one crate\n\
+         whose whole purpose is to be correct against somebody else's code.\n\n\
+         Add `Unit: <what>` to the doc comment. A field that is an identifier\n\
+         rather than a quantity says `Unit: none` and why — that is a claim\n\
+         worth making out loud rather than a hole worth leaving.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// R05, over the interface crates.
+fn lint_callbacks() -> Result<(), String> {
+    let mut findings = Vec::new();
+    for path in rust_sources()? {
+        let rel = relative(&path);
+        // The crates that define what a peer may ask for. `env/` is excluded
+        // deliberately: `Env` is a trait the *system* implements and calls into,
+        // which is dependency injection rather than delivery, and a rule that
+        // could not tell the two apart would be a rule nobody could satisfy.
+        if !(rel.starts_with("abi/") || rel.starts_with("ring/")) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+        findings.extend(callback_findings(&rel, &text));
+    }
+
+    if findings.is_empty() {
+        println!("lint-callbacks: ok  (no interface registers a callback)");
+        return Ok(());
+    }
+    Err(format!(
+        "{} interface(s) deliver asynchronously:\n{}\n\n\
+         R05: every event is a ring entry drained at a polling point. That is what\n\
+         keeps the determinism contract whole, and it is why this system never\n\
+         needs the concept of async-signal-safety.\n\n\
+         The replacement is an opcode and a completion, not a smaller callback.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// R09, over the registry.
+fn lint_claim_owners() -> Result<(), String> {
+    let mut findings = Vec::new();
+    let files = claim_files()?;
+    for path in &files {
+        let rel = relative(path);
+        let text = std::fs::read_to_string(path).map_err(|e| format!("reading {rel}: {e}"))?;
+        findings.extend(claim_owner_findings(&rel, &text));
+    }
+
+    if findings.is_empty() {
+        println!("lint-claim-owners: ok  ({} claim(s) name an owner)", files.len());
+        return Ok(());
+    }
+    Err(format!(
+        "{} claim(s) name no owner:\n{}\n\n\
+         R09: every headline claim names the subsystem that owns it. Energy was in\n\
+         the first paragraph of the thesis and had no owning subsystem across five\n\
+         design documents — which is how half a claim goes missing without anybody\n\
+         deciding to drop it.\n\n\
+         Add an [owner] table naming a document that exists and a section in it.",
+        findings.len(),
+        findings.join("\n")
+    ))
 }
 
 fn lint_determinism() -> Result<(), String> {
@@ -3399,5 +3640,127 @@ mod tests {
         // of the file, which makes every later key look absent.
         assert_eq!(toml_field(TASK, "expect").as_deref(), Some("VERDICT: refuse"));
         assert_eq!(toml_multiline(TASK, "statement"), None);
+    }
+}
+
+/// Each mechanised rule, against something that breaks it.
+///
+/// # Why the fixtures are strings and not files
+///
+/// A broken file on disk is checked by every other lint in this file too, so a
+/// fixture that violates R03 also has to satisfy the SPDX header rule, the
+/// unsafe rule and the determinism rule — or be excluded from all of them, at
+/// which point it is excluded from the rule it exists to break as well. That is
+/// the trap `lint-mutations` already had to design around.
+///
+/// A string handed to the same function the lint calls has neither problem, and
+/// it makes the fixture and the assertion visible in one place. What it does
+/// not cover is the file walk — whether the lint reaches the right files — and
+/// that gap is real and stated rather than papered over.
+#[cfg(test)]
+mod mechanised_rules {
+    use super::*;
+
+    #[test]
+    fn a_field_with_no_unit_is_caught() {
+        let broken = "\
+pub struct Sqe {
+    /// Absolute deadline.
+    pub deadline: u64,
+}
+";
+        let findings = unit_findings("abi/src/lib.rs", broken);
+        assert_eq!(findings.len(), 1, "expected one finding, got {findings:?}");
+        assert!(findings[0].contains("deadline"), "the finding must name the field: {findings:?}");
+    }
+
+    #[test]
+    fn a_field_that_states_its_unit_passes() {
+        let sound = "\
+pub struct Sqe {
+    /// Absolute deadline. Unit: nanoseconds, monotonic, in this channel's
+    /// epoch. Zero is NO_DEADLINE.
+    pub deadline: u64,
+    /// Operation selector. Unit: none — an opcode is an identifier.
+    pub opcode: u8,
+}
+";
+        assert!(unit_findings("abi/src/lib.rs", sound).is_empty());
+    }
+
+    #[test]
+    fn the_unit_check_ignores_what_is_not_a_field() {
+        // A lint that fired on every `pub fn` would be turned off within a week,
+        // and a lint people turn off catches nothing.
+        let sound = "\
+pub fn submit(entry: Sqe) -> bool { true }
+pub const ABI_VERSION: u32 = 1;
+pub struct Cursor {
+    /// Free-running index. Unit: entries since the channel opened.
+    pub value: u32,
+}
+";
+        assert!(
+            unit_findings("abi/src/lib.rs", sound).is_empty(),
+            "{:?}",
+            unit_findings("abi/src/lib.rs", sound)
+        );
+    }
+
+    #[test]
+    fn a_public_callback_is_caught() {
+        let broken = "\
+pub fn on_completion(f: impl Fn(Cqe)) {}
+";
+        let findings = callback_findings("ring/src/lib.rs", broken);
+        assert!(!findings.is_empty(), "a public closure parameter must be caught");
+    }
+
+    #[test]
+    fn a_private_closure_is_not_a_callback() {
+        // R05 is about what an interface *offers*. A closure inside an
+        // implementation is an ordinary closure, and a rule that could not tell
+        // the two apart would be a rule nobody could satisfy.
+        let sound = "\
+fn drain(each: impl Fn(Cqe)) {}
+let f = |x: u32| x + 1;
+";
+        assert!(callback_findings("ring/src/lib.rs", sound).is_empty());
+    }
+
+    #[test]
+    fn a_claim_with_no_owner_is_caught() {
+        let broken = "name = \"ring-submit-latency\"\nstatus = \"pending\"\n";
+        let findings = claim_owner_findings("claims/0001-x.toml", broken);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("no [owner]"));
+    }
+
+    #[test]
+    fn a_claim_citing_a_document_that_does_not_exist_is_caught() {
+        // The half that makes the rule worth having. A citation nobody can
+        // follow is the failure wearing the fix's clothes, and it is the state
+        // a claim drifts into when a document is renamed.
+        let broken = "\
+[owner]
+document = \"docs/design/no-such-document.html\"
+section  = \"06\"
+";
+        let findings = claim_owner_findings("claims/0001-x.toml", broken);
+        assert!(
+            findings.iter().any(|f| f.contains("does not exist")),
+            "expected the missing document to be reported: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn the_registry_as_it_stands_satisfies_all_three() {
+        // Not a tautology, and the reason it is here: the three fixtures above
+        // prove each lint *can* fail, and this proves the tree is on the other
+        // side of that line. A lint that has never passed and a lint that has
+        // never failed are equally uninformative.
+        assert!(lint_units().is_ok(), "abi/ no longer satisfies R03");
+        assert!(lint_callbacks().is_ok(), "an interface has acquired a callback");
+        assert!(lint_claim_owners().is_ok(), "a claim has lost its owner");
     }
 }

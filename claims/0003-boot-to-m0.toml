@@ -17,6 +17,15 @@ start-up. Recorded per boot across a run of boots, as a distribution.
 system  = "none"
 notes   = "There is no baseline and there should not be one. A Linux boot and this are not the same event — this reaches a serial line and a frame allocator, not a userland — so a ratio here would be a comparison of two different definitions dressed as a result. The comparison that would mean something is against this project's own earlier self, which is what a tracked claim and a stored history give."
 
+[owner]
+# R09: every headline claim names the subsystem that owns it. A claim with
+# an owner is a claim somebody can be asked about; energy was in the first
+# paragraph of the thesis and had no owner across five documents, which is
+# how half a claim goes missing without anybody deciding to drop it.
+document = "docs/the-long-plan.html"
+section  = "08"
+notes    = "Nothing in the design documents owns boot time, and this claim does not pretend otherwise. What owns it is the release contract: boot time is part of what a stranger observes reproducing anything at all, and section 08 is where that obligation is stated. A claim whose owner is a process rather than a subsystem is a claim that should stay `tracked`."
+
 [workload]
 path    = "xtask: cargo xtask claim boot-to-m0"
 repeat  = 10

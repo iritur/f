@@ -38,15 +38,23 @@ pub const CHANNEL_MAGIC: u64 = 0x465f_4348_414e_0001;
 #[derive(Clone, Copy, Debug)]
 pub struct Sqe {
     /// Operation. The opcode space is per-service, not global.
+    /// Unit: none — an opcode is an identifier, not a quantity.
     pub opcode: u8,
-    /// See the `flags` module.
+    /// See the `flags` module. Unit: none — a bitmask of the `flags`
+    /// constants. Zero is no flags, which is always a valid submission.
     pub flags: u8,
     /// Scheduling class and priority. See `docs/design/deadline-all-the-way-down.html`.
+    /// Unit: none — a class identifier in the high bits and a priority
+    /// ordinal in the low bits. Zero is the default class.
     pub class: u16,
     /// Index into the caller's capability table. A forged value fails the
     /// bounds check and kills the channel.
+    /// Unit: capability-table slots, zero-based, in the submitter's own
+    /// table. Zero is a valid slot and not a null — an absent capability is
+    /// an opcode that does not read this field.
     pub cap: u32,
     /// Returned verbatim in the completion. Opaque to the service.
+    /// Unit: none — chosen by the submitter and never interpreted here.
     pub user_data: u64,
     /// Absolute deadline, in **monotonic nanoseconds in this channel's epoch**:
     /// the clock `f_env::Instant` reports, which is the only clock in the system
@@ -56,19 +64,30 @@ pub struct Sqe {
     /// caller's deadline across a ring so that blocking on a service does not
     /// invert priority. The unit, the epoch and the zero are part of the ABI —
     /// see `docs/rfc/0009-three-clocks.md`, which exists because they were not.
+    /// Unit: nanoseconds. Epoch: this channel's, on the monotonic clock
+    /// `f_env::Instant` reports. Zero is [`NO_DEADLINE`] and is not a
+    /// deadline in the past.
     pub deadline: u64,
     /// Operation-specific position.
+    /// Unit: per-opcode, and the opcode owns saying which — bytes for a
+    /// transfer, entries for an enumeration. Zero is the beginning.
     pub offset: u64,
     /// Registered buffer set. On hardware with shared virtual memory this and
     /// `buf_index` collapse to a plain address in the submitter's own space.
+    /// Unit: registered-set identifiers. Zero is a valid set.
     pub buf_set: u32,
     /// Index within the buffer set.
+    /// Unit: buffers within `buf_set`, zero-based.
     pub buf_index: u32,
-    /// Length in bytes.
+    /// Length in bytes. Unit: bytes. Zero is a zero-length operation, which
+    /// is valid and distinct from an absent one.
     pub len: u32,
-    /// Reserved. Must be zero.
+    /// Reserved. Must be zero — a non-zero value is refused rather than
+    /// ignored, per R04. Unit: none; this is not a quantity and is not
+    /// expected to become one without an ABI version.
     pub _reserved: u32,
     /// Operation-specific payload.
+    /// Unit: per-opcode, and an opcode that reads this states what it holds.
     pub ext: [u64; 2],
 }
 
@@ -83,6 +102,7 @@ pub const NO_DEADLINE: u64 = 0;
 #[derive(Clone, Copy, Debug)]
 pub struct Cqe {
     /// Echoed from the submission.
+    /// Unit: none — the submitter's own value, returned unchanged.
     pub user_data: u64,
     /// Non-negative values are success, and their meaning is per-opcode — for a
     /// transfer it is the count actually transferred, which is how partial
@@ -91,14 +111,23 @@ pub struct Cqe {
     /// Negative values are structured errors rather than an errno: see the
     /// [`error`] module and [`Cqe::error`]. Cancellation is
     /// [`cflags::CANCELLED`] and is never an error code.
+    /// Unit: per-opcode on the non-negative side — for a transfer it is
+    /// bytes, which is how partial completion is stated rather than
+    /// inferred. Zero is success with nothing transferred.
     pub result: i32,
-    /// See the `cflags` module.
+    /// See the `cflags` module. Unit: none — a bitmask of the `cflags`
+    /// constants. Zero is an ordinary, final, uncancelled completion.
     pub flags: u32,
     /// When the service actually finished the work, on the same clock as
     /// [`Sqe::deadline`]. Eight bytes that give whole-system deadline
     /// accounting with no instrumentation build.
+    /// Unit: nanoseconds, monotonic, in this channel's epoch — the same
+    /// clock and the same epoch as [`Sqe::deadline`], which is the whole
+    /// point of it. Zero means the service did not stamp one.
     pub timestamp: u64,
     /// Operation-specific payload.
+    /// Unit: per-domain for an error — RFC 0010 says the detail a domain
+    /// carries — and per-opcode otherwise.
     pub ext: u64,
 }
 
@@ -289,9 +318,12 @@ pub mod feature {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Negotiated {
     /// The highest version both sides can speak.
+    /// Unit: none — an ABI version ordinal. Zero is not a version.
     pub version: u32,
     /// The features both sides offered. A feature outside this set must not be
     /// used on this channel even where the local build implements it.
+    /// Unit: none — a bitmask of feature bits. Zero is the base protocol,
+    /// which every conforming peer speaks.
     pub features: u64,
 }
 
@@ -303,28 +335,46 @@ pub struct Negotiated {
 #[derive(Clone, Copy, Debug)]
 pub struct ChannelHeader {
     /// Must equal [`CHANNEL_MAGIC`].
+    /// Unit: none — a constant, checked before anything else in the mapping
+    /// is trusted. There is no zero: a zeroed header is a refused one.
     pub magic: u64,
     /// Features the writer implements and offers.
+    /// Unit: none — a bitmask. Zero is the base protocol.
     pub features: u64,
     /// The subset of `features` the writer cannot proceed without.
+    /// Unit: none — a bitmask, and a subset of `features`. Zero is a peer
+    /// that requires nothing, which is the ordinary case.
     pub features_required: u64,
     /// The highest version the writer speaks.
+    /// Unit: none — an ABI version ordinal. Zero is not a version and is
+    /// refused.
     pub abi_version: u32,
     /// The oldest version the writer still speaks. Setup meets in the middle
     /// rather than demanding equality, which is what makes a component
     /// updatable independently of the frame.
+    /// Unit: none — an ABI version ordinal, and never above `abi_version`.
     pub abi_version_min: u32,
     /// Entries in each ring. Always a power of two.
+    /// Unit: entries. Zero is refused rather than treated as empty — a ring
+    /// with no slots is a mapping a peer got wrong.
     pub ring_size: u32,
     /// Byte offset of the submission entry array from the start of the mapping.
+    /// Unit: bytes from the first byte of the mapping. Zero would overlap
+    /// this header and is refused.
     pub sqe_offset: u32,
     /// Byte offset of the completion ring.
+    /// Unit: bytes from the first byte of the mapping, on the same origin as
+    /// `sqe_offset`. Zero is refused for the same reason.
     pub cqe_offset: u32,
     /// Incremented by a peer that restarts. A mismatch means every outstanding
     /// token is stale and must be discarded rather than matched.
+    /// Unit: restarts of the writing peer. Zero is a peer that has not
+    /// restarted, which is the state every channel opens in.
     pub epoch: u32,
     /// Reserved. Must be zero. Where a future field lands — gated by a feature
     /// bit wherever that is possible, so that adding one is not a version bump.
+    /// Unit: none. Every word must be zero, and a non-zero one is refused
+    /// rather than ignored, per R04.
     pub _reserved: [u32; 4],
 }
 

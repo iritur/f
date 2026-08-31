@@ -43,6 +43,39 @@ only one core is running — see `kernel/src/percpu.rs` and section 14 of
 the cost of breaking it is not paid until the day a second core boots, which is
 the worst day to start paying it.
 
+## The twelve rules
+
+These come from `docs/what-must-be-stated.html` section 15, which derived them
+by looking at nine gaps in the design corpus and asking what discipline was
+missing in each. That is why they are worth more than the nine fixes: the gaps
+were not independent accidents, they were places where a discipline this
+project already applies elsewhere was not applied here.
+
+The last column is the part this repository cares about. **A rule listed as
+mechanised that is not mechanised is worse than one honestly listed as review**,
+because it is a check somebody believes is happening.
+
+| | | Enforced by |
+|---|---|---|
+| **R01** Name the mechanism, not the intention | A drawback is answered when something makes it unavailable. "We will be careful about X" is a plan, and plans are what the systems being criticised also had. | review |
+| **R02** A boundary the hardware speculates through is not a confidentiality boundary | The one place this architecture is currently weaker than the system it criticises, and it entered by nobody stating the rule. | review, until RFC 0005 and the topology check |
+| **R03** Every quantity crossing the ABI states its unit, its epoch and its zero | `deadline: u64` shipped with none of the three, in the one crate whose entire purpose is to be correct against code written by somebody else. | **`cargo xtask lint-units`** |
+| **R04** Fail closed | Unknown opcode, unknown flag, non-zero reserved field: refuse. Ignoring an unknown bit is how a protocol acquires two incompatible interpretations and no error. | review, plus the hostile-peer fuzzer at E1 |
+| **R05** Nothing is delivered asynchronously | Every event is a ring entry drained at a polling point. This is what keeps the determinism contract whole, and it is why this system never needs the concept of async-signal-safety. | **`cargo xtask lint-callbacks`** |
+| **R06** Nothing is inherited | Authority arrives by grant and never by descent. Inheritance is how a capability system quietly becomes an ambient one. | review, and E0-P08's negative suite for the part that runs |
+| **R07** A refusal names its domain | The architecture asks callers to handle refusals as ordinary control flow. A caller that cannot tell *why* it was refused cannot do that. | the ABI: `abi::error`, RFC 0010 |
+| **R08** Do not use the word *deadline* for a promise nothing can refuse | The word is the whole discipline. A hard class without admission control is a hint with a better name, and that is precisely how deadline scheduling became decorative elsewhere. | review; a hard-class path with no admission test is a bug |
+| **R09** Every headline claim names the subsystem that owns it | Energy was in the first paragraph of the thesis and had no owning subsystem across five documents. That is how half a claim goes missing without anyone deciding to drop it. | **`cargo xtask lint-claim-owners`** |
+| **R10** Peers negotiate; they never demand equality | Lockstep versioning contradicts the component model, and the component model is what three separate arguments rest on. | the ABI: `ChannelHeader::negotiate`, RFC 0011 |
+| **R11** The apparatus ships with the thing it measures | Determinism and coverage instrumentation were built early for exactly this reason, and the reasoning was written down. The state tree is the same argument and was deferred anyway. | process: a milestone that produces a number also produces its instrument |
+| **R12** A concession is written as a cost, never hidden in a metric | "Full system rollback: one reboot" is a concession dressed as a target. Reservations leaving capacity idle belongs beside the latency claim, not in a rebuttal after somebody runs a throughput benchmark. | review; the claims registry carries the cost beside the number |
+
+Three are executable, and each has a fixture in `xtask` that breaks it — a lint
+that has never failed is indistinguishable from a lint that cannot. The other
+nine are review, and saying so is the point: **R01 applies to this table**. A
+rule with "review" beside it is a rule somebody has to apply, which is a plan,
+and this table is honest about which rows are plans.
+
 ## Where a change starts
 
 Not in the editor. `intent/` holds one directory per change — what somebody
