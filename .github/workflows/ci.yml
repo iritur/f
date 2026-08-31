@@ -76,7 +76,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # Prints a line per crate and a total, and writes summary.json beside the
+      # profiles. Nothing here gates: a coverage threshold rewards tests written
+      # to touch lines rather than to catch anything, so the number is published
+      # and watched instead. What gates is in claims/.
       - run: cargo xtask coverage
+      # Kept with the run rather than only printed into a log that ages out, so
+      # that "coverage fell" is a question anyone can answer from two artifacts
+      # rather than from memory. E0-P11 is what turns this into a history.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-summary
+          path: target/coverage/summary.json
+          if-no-files-found: error
 
   kernel:
     name: kernel boots

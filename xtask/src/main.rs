@@ -275,6 +275,21 @@ fn capture(program: &str, args: &[&str]) -> Result<String, String> {
     String::from_utf8(out.stdout).map_err(|e| format!("{program} printed non-UTF-8: {e}"))
 }
 
+/// [`capture`], with environment variables set for the child.
+///
+/// Separate rather than a fifth argument on `capture` because every other
+/// caller wants the ambient environment, and threading an always-empty slice
+/// through them would be noise at each site to save one function here.
+fn capture_with(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String, String> {
+    let mut command = Command::new(program);
+    command.args(args).envs(env.iter().copied()).current_dir(root());
+    let out = command.output().map_err(|e| format!("could not run {program}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("{program} {} failed", args.join(" ")));
+    }
+    String::from_utf8(out.stdout).map_err(|e| format!("{program} printed non-UTF-8: {e}"))
+}
+
 /// A tool from the pinned toolchain's own sysroot.
 ///
 /// `llvm-tools` is a component in `rust-toolchain.toml`, so a tool found this
@@ -1882,31 +1897,299 @@ fn bench(name: Option<&str>) -> Result<(), String> {
 /// worthless, and adding instrumentation to a mature kernel is painful — it
 /// costs almost nothing while the kernel is two thousand lines.
 /// See `docs/design/proving-ground.html` layer 4.
+/// The crates whose host tests carry the coverage measurement.
+///
+/// Not the kernel: it has no host harness at all — `kernel/Cargo.toml` says
+/// why — and not `xtask`, which is the tooling rather than the system.
+const COVERED: [&str; 4] = ["f-abi", "f-env", "f-ring", "f-bench"];
+
+/// One crate's share of the coverage report.
+struct CrateCoverage {
+    name: String,
+    lines: u64,
+    missed: u64,
+}
+
+impl CrateCoverage {
+    fn percent(&self) -> f64 {
+        if self.lines == 0 {
+            100.0
+        } else {
+            (self.lines - self.missed) as f64 * 100.0 / self.lines as f64
+        }
+    }
+}
+
+/// Host tests under coverage instrumentation, reported per crate.
+///
+/// Every tool this uses comes from the pinned toolchain's own sysroot, the same
+/// way [`llvm_tool`] takes the linker and `objcopy`. That is the whole reason
+/// `cargo-llvm-cov` is not required here: a coverage number produced by a tool
+/// installed separately is a number whose version nobody pinned, and this
+/// repository has a container specifically to stop that. It also keeps this
+/// command working in the `dev` image rather than only in `full`.
 fn coverage() -> Result<(), String> {
-    println!("running host tests with coverage instrumentation");
+    let profdata = llvm_tool("llvm-profdata")?;
+    let llvm_cov = llvm_tool("llvm-cov")?;
+
     // Absolute, because this is read by each *test binary* and resolved against
     // that binary's own working directory rather than by cargo against the
     // workspace. A relative path here scatters profiles into whichever crate
-    // directory the harness ran in - see `target_dir`.
+    // directory the harness ran in — see `target_dir`.
     let profiles = target_dir().join("coverage");
+
+    // A stale profile from an earlier build measures code that is no longer
+    // there, and `llvm-profdata` merges it in without complaint. The directory
+    // is rebuilt rather than added to.
+    if profiles.exists() {
+        std::fs::remove_dir_all(&profiles)
+            .map_err(|e| format!("clearing {}: {e}", relative(&profiles)))?;
+    }
+    std::fs::create_dir_all(&profiles)
+        .map_err(|e| format!("creating {}: {e}", relative(&profiles)))?;
+
+    let mut args: Vec<&str> = vec!["test"];
+    for name in COVERED {
+        args.push("-p");
+        args.push(name);
+    }
+
+    // Set on every cargo invocation below, not just the first. A second
+    // invocation without it is a *different* build with a different fingerprint,
+    // so cargo would rebuild everything uninstrumented and then report those
+    // binaries — objects with no counters in them, against a profile that has
+    // them, which llvm-cov reports as zero coverage rather than as an error.
+    let instrument: [(&str, &str); 1] = [("RUSTFLAGS", "-Cinstrument-coverage")];
+
+    println!("running host tests with coverage instrumentation");
     let status = Command::new("cargo")
-        .args(["test", "-p", "f-abi", "-p", "f-env", "-p", "f-ring", "-p", "f-bench"])
-        .env("RUSTFLAGS", "-Cinstrument-coverage")
+        .args(&args)
+        .envs(instrument)
         .env("LLVM_PROFILE_FILE", profiles.join("f-%p-%m.profraw"))
         .current_dir(root())
         .status()
         .map_err(|e| format!("could not run cargo: {e}"))?;
-
     if !status.success() {
         return Err("instrumented tests failed".into());
     }
+
+    // The same invocation with `--no-run`, which compiles nothing new and
+    // reports where the harness put each binary. `llvm-cov` needs the objects
+    // as well as the profile: a profile alone says which counters fired and not
+    // which source line they belong to.
+    let mut probe = args.clone();
+    probe.push("--no-run");
+    probe.push("--message-format=json");
+    let manifest = capture_with("cargo", &probe, &instrument)?;
+    let binaries = executables(&manifest);
+    if binaries.is_empty() {
+        return Err("cargo reported no test executables to measure".into());
+    }
+
+    let mut raw: Vec<PathBuf> = std::fs::read_dir(&profiles)
+        .map_err(|e| format!("reading {}: {e}", relative(&profiles)))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "profraw"))
+        .collect();
+    raw.sort();
+    if raw.is_empty() {
+        return Err(format!(
+            "no .profraw files in {}\n\n\
+             The tests ran but wrote no profiles, so the instrumented build did\n\
+             not take effect. Check that RUSTFLAGS is not already set in the\n\
+             environment or in a cargo config, which replaces rather than adds.",
+            relative(&profiles)
+        ));
+    }
+
+    let merged = profiles.join("f.profdata");
+    let mut merge = Command::new(&profdata);
+    merge.arg("merge").arg("-sparse");
+    for path in &raw {
+        merge.arg(path);
+    }
+    merge.arg("-o").arg(&merged);
+    let status = merge
+        .current_dir(root())
+        .status()
+        .map_err(|e| format!("could not run llvm-profdata: {e}"))?;
+    if !status.success() {
+        return Err("llvm-profdata could not merge the raw profiles".into());
+    }
+
+    let mut report = Command::new(&llvm_cov);
+    report.arg("report").arg(format!("--instr-profile={}", merged.display()));
+    for path in &binaries {
+        report.arg("-object").arg(path);
+    }
+    // The standard library and every dependency are not this project's code.
+    // `/tests/` is excluded for a sharper reason: an integration test measures
+    // its own execution and reports itself as covered, which raises the number
+    // without covering anything. The question being asked is how much of the
+    // library the tests reach.
+    report.arg("--ignore-filename-regex=(/rustc/|/.cargo/registry/|/tests/)");
+    let out =
+        report.current_dir(root()).output().map_err(|e| format!("could not run llvm-cov: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "llvm-cov could not produce a report: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let text =
+        String::from_utf8(out.stdout).map_err(|e| format!("llvm-cov printed non-UTF-8: {e}"))?;
+
+    let crates = summarise(&text)?;
+    if crates.is_empty() {
+        return Err(format!(
+            "llvm-cov reported no files belonging to this workspace\n\n\
+             It measured {} object(s) against {} profile(s), so the run itself\n\
+             happened. What failed is the mapping from a report row back to a\n\
+             crate directory — see `summarise`.",
+            binaries.len(),
+            raw.len()
+        ));
+    }
+
+    let lines: u64 = crates.iter().map(|c| c.lines).sum();
+    let missed: u64 = crates.iter().map(|c| c.missed).sum();
+    let total = CrateCoverage { name: "total".into(), lines, missed };
+
+    println!("\ncoverage — host tests, lines reached\n");
+    for c in &crates {
+        println!(
+            "  {:<10} {:>6.2}%   {:>5} of {:>5}",
+            c.name,
+            c.percent(),
+            c.lines - c.missed,
+            c.lines
+        );
+    }
+    println!("  ----------");
     println!(
-        "\nraw profiles in {}/.\n\
-         Summarise with `cargo install cargo-llvm-cov` and `cargo llvm-cov report`.\n\
-         The fuzzing harness at phase 01 consumes the same instrumentation.",
-        relative(&profiles)
+        "  {:<10} {:>6.2}%   {:>5} of {:>5}",
+        total.name,
+        total.percent(),
+        lines - missed,
+        lines
+    );
+
+    let summary = profiles.join("summary.json");
+    std::fs::write(&summary, coverage_json(&crates, &total))
+        .map_err(|e| format!("writing {}: {e}", relative(&summary)))?;
+
+    println!(
+        "\nstored in {}, which is what CI keeps with the run.\n\
+         No threshold here on purpose: a coverage gate rewards tests written to\n\
+         touch lines rather than to catch anything, so this number is reported\n\
+         so a fall is visible. What gates is in claims/.",
+        relative(&summary)
     );
     Ok(())
+}
+
+/// Every `"executable"` in a stream of cargo JSON messages.
+///
+/// Read the way everything else in this file reads a structured format: for the
+/// one field it needs, in the shape the producer actually emits. `--no-run`
+/// prints one compact JSON object per line, and a test target's `executable` is
+/// a plain string containing no escape a path could need. A full parser here
+/// would be a dependency bought to skip a `split`. The same caveat applies as
+/// to `toml_field`: this is not a JSON parser, and the day something here needs
+/// one it needs a parser rather than a longer version of this.
+fn executables(stream: &str) -> Vec<PathBuf> {
+    let key = "\"executable\":\"";
+    let mut out: Vec<PathBuf> = Vec::new();
+    for line in stream.lines() {
+        let Some(rest) = line.split(key).nth(1) else { continue };
+        let Some(path) = rest.split('"').next() else { continue };
+        if path.is_empty() || path == "null" {
+            continue;
+        }
+        let path = PathBuf::from(path);
+        if !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Fold `llvm-cov report`'s per-file rows into one row per crate.
+///
+/// The crate is the first path component, which is true of every crate in this
+/// workspace — and checked rather than assumed. A row whose first component is
+/// not a directory with a `Cargo.toml` in it came from somewhere else and is
+/// skipped, so a change to the layout shows up as a crate going missing from
+/// the report rather than as a plausible wrong number.
+fn summarise(report: &str) -> Result<Vec<CrateCoverage>, String> {
+    let mut out: Vec<CrateCoverage> = Vec::new();
+
+    for line in report.lines() {
+        let row: Vec<&str> = line.split_whitespace().collect();
+        // filename, regions, missed, cover, functions, missed, executed, lines,
+        // missed lines, cover, and the branch columns after that. Ten is the
+        // shortest row that still carries the two columns this reads.
+        if row.len() < 10 {
+            continue;
+        }
+        let Some(first) = row.first() else { continue };
+        if *first == "Filename" || *first == "TOTAL" || first.starts_with('-') {
+            continue;
+        }
+        let Some(krate) = first.split('/').next() else { continue };
+        if !root().join(krate).join("Cargo.toml").exists() {
+            continue;
+        }
+
+        let cell = |index: usize| -> Result<u64, String> {
+            row.get(index)
+                .ok_or_else(|| format!("llvm-cov row too short: {line}"))?
+                .parse::<u64>()
+                .map_err(|_| format!("llvm-cov row not understood: {line}"))
+        };
+        let lines = cell(7)?;
+        let missed = cell(8)?;
+
+        match out.iter_mut().find(|c| c.name == krate) {
+            Some(existing) => {
+                existing.lines += lines;
+                existing.missed += missed;
+            }
+            None => out.push(CrateCoverage { name: krate.to_string(), lines, missed }),
+        }
+    }
+
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// The summary, in the one shape a CI step or a later history can read.
+///
+/// Written by hand for the same reason it is read by hand: a name and three
+/// numbers per crate do not justify a serialisation dependency in the tooling
+/// crate, and the tooling crate is checked by the same lints it implements.
+fn coverage_json(crates: &[CrateCoverage], total: &CrateCoverage) -> String {
+    let mut s = String::from("{\n  \"crates\": [\n");
+    for (i, c) in crates.iter().enumerate() {
+        let comma = if i + 1 == crates.len() { "" } else { "," };
+        s.push_str(&format!(
+            "    {{ \"name\": \"{}\", \"lines\": {}, \"missed\": {}, \"percent\": {:.2} }}{comma}\n",
+            c.name,
+            c.lines,
+            c.missed,
+            c.percent()
+        ));
+    }
+    s.push_str("  ],\n");
+    s.push_str(&format!(
+        "  \"total\": {{ \"lines\": {}, \"missed\": {}, \"percent\": {:.2} }}\n}}\n",
+        total.lines,
+        total.missed,
+        total.percent()
+    ));
+    s
 }
 
 /// A `"""`-delimited value, which [`toml_scalar`] deliberately does not handle.
