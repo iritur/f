@@ -436,11 +436,12 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // service that refuses a bad entry from one that never saw it.
     match ring::self_test(&mut frames, hardware.now().as_nanos()) {
         Ok(report) => kprintln!(
-            "  ring          {} entries in {} B, {} B arena, {} published with one store, \
-             {} refused, forged slot caught",
+            "  ring          {} entries in {} B, {} B arena, two ends at ABI v{}, \
+             {} published with one store, {} refused, forged slot caught, hostile header refused",
             report.entries,
             report.bytes,
             report.arena,
+            report.version,
             report.drained.executed,
             report.drained.refused,
         ),

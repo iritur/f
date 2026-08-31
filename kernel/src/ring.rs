@@ -10,31 +10,36 @@
 //! service drains it, and every entry is answered — including the one that is
 //! refused, which is the half of a protocol that is easy to leave untested.
 //!
-//! It is not yet a channel *between two components*. Both ends are the kernel,
-//! the region is a frame the kernel allocated rather than a mapping a process
-//! shares, and no header is negotiated with a peer that could disagree. That is
-//! `E0-B13`, and the split is deliberate: this task owes the layout, the cursor
-//! protocol and the opcodes, and a task that also invented the mapping would
-//! have tested both against each other and neither against the specification.
+//! Since `E0-B13` the region is a [`Mapping`], and there are two of them over
+//! the same frame: one end describes the channel and the other adopts it, each
+//! learning where the rings are from the sixty-four bytes at the front and from
+//! nothing else. The arithmetic never travels between the ends, which is the
+//! property that makes the far end replaceable by a component later. The
+//! version and the feature sets are negotiated rather than assumed, per RFC
+//! 0011, and the two conclusions are required to agree — a check a single-ended
+//! round trip cannot make.
 //!
-//! What makes the exercise worth running anyway is that the *validation* is
-//! real. The header is written, read back out of the region, and adopted as if
-//! a peer had written it — so the arithmetic is checked against the bytes and
-//! not against itself. And the last phase forges a slot number in the index
-//! ring, which is the one thing the indirection adds to the attack surface, and
-//! requires the channel to be reported corrupt rather than followed.
+//! It is still not a channel between two *address spaces*. Both ends are this
+//! kernel and the frame is not mapped into a process, which is what a component
+//! needs and what the powerbox grant at `E1-D01` decides the shape of. What
+//! this module can already say is the part that does not depend on that: the
+//! bytes are laid out by the wire format, every number in the header is
+//! disbelieved until checked, and both refusal paths are exercised on the
+//! target rather than only on the host.
+//!
+//! Two phases exist to fail rather than to pass. One forges a slot number in
+//! the index ring — the one thing the indirection adds to the attack surface —
+//! and requires the channel to be reported corrupt rather than followed. The
+//! other breaks the magic in the region's first word and requires the mapping
+//! to be refused, in a build with no unwinding and no allocator, where a panic
+//! is not an exception but the end of the boot.
 //!
 //! See `docs/design/ring-scene-boot.html` sections 02, 03 and 05.
 
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::Ordering;
 
-use f_abi::layout::{self, Layout};
-use f_abi::{ChannelHeader, Cqe, Sqe, error, op};
-use f_ring::{
-    Arena, Channel, Collector, Completions, Consumer, Cursor, Drained, Poster, Producer, RingError,
-    Service, Sink,
-};
+use f_abi::{Sqe, error, op};
+use f_ring::{Collector, Consumer, Drained, Mapping, Poster, Producer, RingError, Service, Sink};
 
 use crate::mem::{FrameAllocator, Order};
 
@@ -88,12 +93,19 @@ pub struct Report {
     pub bytes: u32,
     /// Bytes of inline arena. Unit: bytes.
     pub arena: u32,
+    /// The ABI version the two ends met at.
+    /// Unit: none — an ABI version ordinal. Zero is not a version.
+    pub version: u32,
     /// What the one drain did.
     pub drained: Drained,
     /// Whether the forged index ring was caught. Never false — a false here
     /// would have been a failure — and carried so the boot line can say the
     /// check ran rather than implying it.
     pub forgery_caught: bool,
+    /// Whether a header made hostile on purpose was refused. Never false, and
+    /// carried for the same reason as `forgery_caught`: a boot that reports a
+    /// check it did not run is worse than one that reports nothing.
+    pub header_refused: bool,
 }
 
 /// Why the frame's ring did not come up.
@@ -104,9 +116,15 @@ pub enum Failure {
     /// The layout arithmetic refused a size this module chose. A bug here, not
     /// in a peer.
     Layout,
-    /// The header written into the region did not survive being read back and
-    /// adopted, which means the wire format and the arithmetic disagree.
-    Header,
+    /// A mapping refused its own header. Carries the structured refusal, which
+    /// names whether the wire format, the version window or the layout
+    /// arithmetic is the half that disagreed.
+    Header(i32),
+    /// The two ends adopted the same bytes and came to different conclusions,
+    /// which is the one failure a single-ended round trip cannot see.
+    Disagreed,
+    /// A header made hostile on purpose was adopted rather than refused.
+    HeaderAccepted,
     /// A ring half would not bind to the region.
     Bind,
     /// A staged batch became visible before it was published.
@@ -128,7 +146,9 @@ impl Failure {
         match self {
             Self::NoFrame => "no frame for the channel",
             Self::Layout => "the layout refused a size this kernel chose",
-            Self::Header => "the header did not survive a round trip through the region",
+            Self::Header(_) => "a mapping refused the header in its own region",
+            Self::Disagreed => "the two ends of one region disagreed about the channel",
+            Self::HeaderAccepted => "a hostile header was adopted rather than refused",
             Self::Bind => "a ring half would not bind to the region",
             Self::PublishedEarly => "a staged batch was visible before it was published",
             Self::Ring(_) => "the ring reported an error where the protocol allows none",
@@ -139,110 +159,20 @@ impl Failure {
     }
 }
 
-/// One channel region, and where everything in it is.
+/// Put a payload in the arena, the way a peer would before submitting.
 ///
-/// Every accessor below is a raw-pointer cast into a region this kernel
-/// allocated and no one else holds. They are grouped here rather than spread
-/// through [`self_test`] so that the offsets are computed in one place, from
-/// [`Layout`], and never spelled twice.
-struct Region {
-    base: *mut u8,
-    layout: Layout,
-}
-
-impl Region {
-    /// The address of one offset into the region.
-    fn at(&self, offset: u32) -> *mut u8 {
-        // SAFETY: every offset passed here comes from `Layout`, which refused
-        // to produce one past `total()`, and the region is `total()` bytes or
-        // more — checked in `self_test` before this type is built.
-        unsafe { self.base.add(offset as usize) }
-    }
-
-    fn head(&self) -> &Cursor {
-        // SAFETY: `layout::HEAD` is 64 bytes into a frame-aligned region, so
-        // the pointer meets `Cursor`'s 64-byte alignment. The frame was
-        // allocated zeroed, and a zeroed `Cursor` is a valid one. Nothing else
-        // holds a reference into this region.
-        unsafe { &*self.at(layout::HEAD).cast::<Cursor>() }
-    }
-
-    fn tail(&self) -> &Cursor {
-        // SAFETY: as `head`, at the next line.
-        unsafe { &*self.at(layout::TAIL).cast::<Cursor>() }
-    }
-
-    fn flags(&self) -> &AtomicU32 {
-        // SAFETY: `layout::FLAGS` is four-byte aligned by construction and the
-        // region is zeroed, which is a valid `AtomicU32`.
-        unsafe { &*self.at(layout::FLAGS).cast::<AtomicU32>() }
-    }
-
-    fn cq_head(&self) -> &Cursor {
-        // SAFETY: as `head`. RFC 0018 put this line here.
-        unsafe { &*self.at(layout::CQ_HEAD).cast::<Cursor>() }
-    }
-
-    fn cq_tail(&self) -> &Cursor {
-        // SAFETY: as `head`, at the next line.
-        unsafe { &*self.at(layout::CQ_TAIL).cast::<Cursor>() }
-    }
-
-    fn index(&self) -> &[AtomicU32] {
-        // SAFETY: the index ring is `entries` four-byte slots at a four-byte
-        // aligned offset, inside the region, zeroed, and unaliased.
-        unsafe {
-            core::slice::from_raw_parts(
-                self.at(self.layout.sq_index_offset()).cast::<AtomicU32>(),
-                self.layout.entries() as usize,
-            )
-        }
-    }
-
-    fn entries(&self) -> &[UnsafeCell<Sqe>] {
-        // SAFETY: `Layout` places the entry array on a cache line, which is
-        // `Sqe`'s alignment, and reserves `entries * 64` bytes for it inside
-        // the region. Every byte is zero, and `Sqe::ZERO` is that bit pattern.
-        unsafe {
-            core::slice::from_raw_parts(
-                self.at(self.layout.sqe_offset()).cast::<UnsafeCell<Sqe>>(),
-                self.layout.entries() as usize,
-            )
-        }
-    }
-
-    fn slots(&self) -> &[UnsafeCell<Cqe>] {
-        // SAFETY: as `entries`. A `Cqe` is 32 bytes and needs 32-byte
-        // alignment, which a line-aligned offset satisfies.
-        unsafe {
-            core::slice::from_raw_parts(
-                self.at(self.layout.cqe_offset()).cast::<UnsafeCell<Cqe>>(),
-                self.layout.entries() as usize,
-            )
-        }
-    }
-
-    fn arena(&self) -> &[UnsafeCell<u8>] {
-        // SAFETY: the arena is the tail of the region, `arena_len()` bytes of
-        // it, and a byte needs no alignment.
-        unsafe {
-            core::slice::from_raw_parts(
-                self.at(self.layout.arena_offset()).cast::<UnsafeCell<u8>>(),
-                self.layout.arena_len() as usize,
-            )
-        }
-    }
-
-    /// Put a payload in the arena, the way a peer would before submitting.
-    fn place(&self, at: u64, bytes: &[u8]) {
-        let arena = self.arena();
-        for (i, byte) in bytes.iter().enumerate() {
-            // SAFETY: the caller places a payload that fits — `self_test` is
-            // the only caller and the arena is 2 KiB against a 16-byte payload.
-            // Nothing else is reading the arena at this point: the service has
-            // not been drained yet.
-            unsafe { arena[at as usize + i].get().write(*byte) };
-        }
+/// A free function rather than a method on a region type, because the region
+/// is `f_ring`'s now. Every offset this module used to compute for itself comes
+/// out of the header the mapping carries, and what is left here is the one
+/// thing a *peer* does: stage bytes where a submission will point at them.
+fn place(mapping: &Mapping, at: u64, bytes: &[u8]) {
+    let arena = mapping.arena_cells();
+    for (i, byte) in bytes.iter().enumerate() {
+        // SAFETY: the caller places a payload that fits — `run` is the only
+        // caller and the arena is 2 KiB against a 16-byte payload. Nothing else
+        // is reading the arena at this point: the service has not been drained
+        // yet.
+        unsafe { arena[at as usize + i].get().write(*byte) };
     }
 }
 
@@ -273,51 +203,47 @@ pub fn self_test(frames: &mut FrameAllocator, now: u64) -> Result<Report, Failur
 
 /// The body of [`self_test`], with the frame's lifetime handled by the caller.
 fn run(base: *mut u8, region_bytes: u64, now: u64) -> Result<Report, Failure> {
-    // ---------------------------------------------------------------- layout
+    // ----------------------------------------------------------------- setup
     //
-    // Laid out with no arena, then adopted back with the region's true length,
-    // which is what fills the arena in. That is the same path a peer's channel
-    // takes and it is deliberately not the shortcut of computing the arena here
-    // — the arena's extent is a property of the mapping, and asking the mapping
-    // is the only way to learn it that stays correct when the mapper is not us.
-    let described = Layout::new(ENTRIES, 0).ok_or(Failure::Layout)?;
-    let header = described.describe(0, 0, 0);
-
-    // SAFETY: the region is frame-aligned, so it meets `ChannelHeader`'s
-    // 64-byte alignment, and is at least one frame long — far more than the
-    // header's 64 bytes. Nothing else holds a pointer into it.
-    unsafe { base.cast::<ChannelHeader>().write(header) };
-
-    // Read back out of the region rather than reused from above. The value that
-    // matters is the one in the bytes, and a round trip through memory is what
-    // would catch a layout whose Rust type and whose wire image disagree.
-    // SAFETY: just written, aligned, and `ChannelHeader` is plain data.
-    let written = unsafe { base.cast::<ChannelHeader>().read() };
-
+    // One end describes the region and the other adopts it, and they are two
+    // separate binds over the same bytes rather than one value used twice. That
+    // is the whole shape of a channel: the arithmetic never travels between the
+    // peers, only the sixty-four bytes at the front do. `Mapping::describe`
+    // itself goes out through the wire format and back in, so a header this
+    // build writes and cannot read is a boot failure rather than a peer's
+    // problem much later.
     let region_len = u32::try_from(region_bytes).map_err(|_| Failure::Layout)?;
-    let layout = Layout::adopt(&written, region_len).map_err(|_| Failure::Header)?;
+
+    // SAFETY: the frame was allocated zeroed by `self_test`, is frame-aligned —
+    // which is stronger than the cache-line alignment the layout needs — and is
+    // `region_bytes` long. Nothing outside this function holds a pointer into
+    // it, and both mappings below hand out only atomics and `UnsafeCell`s,
+    // which is what makes two ends over one region sound.
+    let near = unsafe { Mapping::describe(base, region_len, ENTRIES, 0, 0, 0) }
+        .map_err(Failure::Header)?;
+    // SAFETY: as above. This is the far end, and it learns where everything is
+    // from the header alone.
+    let far = unsafe { Mapping::adopt(base, region_len, 0, 0) }.map_err(Failure::Header)?;
+
+    if near.layout() != far.layout() || near.negotiated() != far.negotiated() {
+        return Err(Failure::Disagreed);
+    }
+    let layout = far.layout();
     if layout.entries() != ENTRIES || layout.total() != region_len {
-        return Err(Failure::Header);
+        return Err(Failure::Header(0));
     }
 
-    let region = Region { base, layout };
-    region.place(PAYLOAD_AT, PAYLOAD);
+    place(&near, PAYLOAD_AT, PAYLOAD);
 
     // ------------------------------------------------------------------ bind
-    let channel = || Channel {
-        head: region.head(),
-        tail: region.tail(),
-        flags: region.flags(),
-        index: region.index(),
-        entries: region.entries(),
-    };
-    let completions =
-        || Completions { head: region.cq_head(), tail: region.cq_tail(), slots: region.slots() };
-
-    let mut producer = Producer::new(channel()).ok_or(Failure::Bind)?;
-    let consumer = Consumer::new(channel()).ok_or(Failure::Bind)?;
-    let poster = Poster::new(completions()).ok_or(Failure::Bind)?;
-    let collector = Collector::new(completions()).ok_or(Failure::Bind)?;
+    //
+    // The service takes the near end and the client the far one, which is the
+    // arrangement a component will have. Nothing below can tell the difference,
+    // and that is the point.
+    let mut producer = Producer::new(far.channel()).ok_or(Failure::Bind)?;
+    let consumer = Consumer::new(near.channel()).ok_or(Failure::Bind)?;
+    let poster = Poster::new(near.completions()).ok_or(Failure::Bind)?;
+    let collector = Collector::new(far.completions()).ok_or(Failure::Bind)?;
 
     // --------------------------------------------------------------- publish
     //
@@ -353,7 +279,7 @@ fn run(base: *mut u8, region_bytes: u64, now: u64) -> Result<Report, Failure> {
     // because this function formatted them — which is the whole demonstration,
     // and would be invisible if the payload were printed afterwards.
     crate::kprint!("  ring wrote    \"");
-    let mut service = Service::new(consumer, poster, Arena::new(region.arena()), SerialSink);
+    let mut service = Service::new(consumer, poster, near.arena(), SerialSink);
     let drained = service.drain(ENTRIES, now).map_err(Failure::Ring)?;
     crate::kprintln!("\" through WRITE_SERIAL");
 
@@ -390,18 +316,44 @@ fn run(base: *mut u8, region_bytes: u64, now: u64) -> Result<Report, Failure> {
     // reason.
     let position = (drained.executed & layout.mask()) as usize;
     producer.submit(entry(5, op::NOP)).map_err(Failure::Ring)?;
-    region.index()[position].store(FORGED_SLOT, Ordering::Relaxed);
+    far.channel().index[position].store(FORGED_SLOT, Ordering::Relaxed);
     let forgery_caught = matches!(service.drain(1, now), Err(RingError::Corrupt));
     if !forgery_caught {
         return Err(Failure::ForgeryFollowed);
+    }
+
+    let version = far.negotiated().version;
+
+    // ------------------------------------------------------- a hostile header
+    //
+    // Last, and after the channel is finished with, because this phase writes
+    // over the header the mappings above were adopted from. `ring/tests/headers`
+    // covers the fifteen ways a header can lie; what this one adds is that the
+    // refusal happens *here* — on real memory, in a build with no unwinding and
+    // no allocator, where a panic is not an exception but the end of the boot.
+    // A refusal path that has only ever been taken on the host is a refusal path
+    // with a target it has never run on.
+    //
+    // SAFETY: aligned, inside the frame, and every reference into the region is
+    // dead — `service` and both mappings are past their last use.
+    unsafe { base.cast::<u64>().write_volatile(!f_abi::CHANNEL_MAGIC) };
+    // SAFETY: as the binds above. The bytes are now hostile, which is the
+    // subject rather than a safety obligation: `adopt` dereferences nothing
+    // derived from them unless it returns, and here it must not.
+    let refused = unsafe { Mapping::adopt(base, region_len, 0, 0) };
+    let header_refused = refused.is_err();
+    if !header_refused {
+        return Err(Failure::HeaderAccepted);
     }
 
     Ok(Report {
         entries: layout.entries(),
         bytes: layout.total(),
         arena: layout.arena_len(),
+        version,
         drained,
         forgery_caught,
+        header_refused,
     })
 }
 

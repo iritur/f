@@ -31,6 +31,10 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use f_abi::{Cqe, Sqe, chan, error, flags, op};
 
+mod mapping;
+
+pub use mapping::Mapping;
+
 /// A cursor on its own cache line.
 ///
 /// The padding is load-bearing, not decorative. See the module docs.
