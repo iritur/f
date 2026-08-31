@@ -459,10 +459,13 @@ impl Sample {
         Self {
             claim,
             latency: Histogram::new(),
-            // Wired at M2 alongside the performance counters. Until then the
-            // claim reports the gap rather than pretending it does not exist.
-            instructions_per_op: Metric::Unavailable("PMU not wired until M2"),
-            joules_per_op: Metric::Unavailable("energy counters not wired until M2"),
+            // Both are secondary metrics of claim 0001, so the gap is reported
+            // per run rather than hidden. The reasons name the tasks that end
+            // them, not a milestone: the previous strings said "until M2", and
+            // outlived M2 by three milestones before anybody noticed
+            // (docs/TESTING-STATUS.md).
+            instructions_per_op: Metric::Unavailable("PMU not wired; E0-P05's machine has one"),
+            joules_per_op: Metric::Unavailable("no energy counter; external meter at E5-P03"),
             // Not a wiring gap: there is no idle state to be resident in until
             // the kernel stops spinning, and it does not stop until RFC 0006's
             // policy is implemented at E5-B07.
