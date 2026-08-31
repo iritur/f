@@ -1,5 +1,9 @@
-# Unanchored, so this catches the per-crate `abi/target/`, `env/target/` and
-# the rest that `xtask coverage` writes into, not just the workspace root.
+# Unanchored rather than `/target/`, and deliberately kept that way. It was
+# first written to catch the per-crate `abi/target/`, `env/target/` and the
+# rest, which `xtask coverage` used to scatter profiles into because it set a
+# *relative* `LLVM_PROFILE_FILE` — E0-B17 fixed the cause. The pattern stays
+# because a stray build directory is still not a source, and an ignore rule
+# that only worked by accident is worth keeping on purpose.
 target/
 
 # `.cargo/config.toml` is tracked, and has to be: it carries the `xtask` alias

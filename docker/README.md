@@ -167,10 +167,39 @@ jobs:
 
 which deletes the per-job tool installation, makes "works on my machine"
 structurally the same statement as "works in CI", and gives the pull-request
-gate its ten-minute budget back. The AArch64 jobs need a second architecture
-build of the same image, which is one `--platform linux/arm64` away.
+gate its ten-minute budget back.
 
-This is a change to `.github/workflows/ci.yml` and has not been applied.
+**Applied**, and the gate builds the image itself. The `apt-get install
+qemu-system-x86` in the kernel job is gone, and so is the dependency job's
+action-installed `cargo-deny` — that job runs the `full` image's copy, at the
+version this `Dockerfile` pins, which matters more there than anywhere else
+because it is the job whose whole subject is dependencies.
+
+**The image is a job in `ci.yml`, not a workflow somebody dispatches.** The
+first attempt at this got it wrong in an instructive way: `ci.yml` named a tag
+that a separate `image.yml` published on pushes to `main`, so the gate had a
+prerequisite no run of the gate produced. On a tree where that workflow had
+never fired, all ten jobs failed at "Initialize containers" with `manifest
+unknown` — before a single step ran. That is this file's own rule, broken by
+the change quoting it: a workflow somebody has to remember to dispatch is
+institutional knowledge with a YAML file in front of it. `image.yml` is gone;
+the gate owns its environment.
+
+The tag is derived from the files that define the environment —
+`env-<hash of Dockerfile, entrypoint, rust-toolchain.toml>` — rather than from
+the commit. A commit that does not touch the environment is a cache hit, and CI
+is pinned to an immutable tag rather than to `:latest`, which closes half the
+gap the section below admits to.
+
+The AArch64 half is not one `--platform linux/arm64` away, and the note above
+was optimistic about it. Building arm64 under binfmt emulation means installing
+a Rust nightly and a QEMU inside an emulated userland: tens of minutes, and
+failures with nothing to do with this tree. The `image` job builds each
+architecture natively — `ubuntu-latest` and `ubuntu-24.04-arm` — and a
+`manifest` job assembles one multi-architecture tag, so both CI jobs name the
+same image. That matters for the AArch64 job in particular: its entire purpose
+is to disagree with the x86-64 one, and two environments sharing one name is
+the worst possible state for a job whose job is disagreement.
 
 ## Rebuilding, and when
 
@@ -179,6 +208,30 @@ This is a change to `.github/workflows/ci.yml` and has not been applied.
 | `rust-toolchain.toml` changed | `.\docker\dev.ps1 build` — and per `claims/README.md`, a pin bump requires a full claims re-run |
 | A system package is needed | edit `docker/Dockerfile`, then `build` |
 | Something is inexplicably broken | `.\docker\dev.ps1 clean` then `build`. This drops the target and registry volumes and costs one index download |
+
+## Git trusts the tree it is handed
+
+`git config --system --add safe.directory '*'`, in the Dockerfile, and it is
+worth knowing why rather than finding it by grep.
+
+Git refuses a repository whose working tree is owned by another uid — a real
+defence on a shared machine, where somebody else's checkout can run hooks as
+you. Neither half of that holds here. The image is handed exactly one tree, by
+whoever ran it, and every uid inside it is an artefact of how the tree arrived:
+a bind mount carries the host's ownership, and a CI runner checks out as one
+uid and then runs the container's steps as another.
+
+It is set here rather than in each caller because the failure it causes does
+not look like itself. `git diff` is one of the few commands that tolerates
+running outside a repository, so it renders the refusal as *warning: Not a git
+repository* and exits non-zero — which is how the claims job came to report a
+byte-identical file as stale, and how `cargo xtask release` came within one
+step of printing a manifest for a tree it could not name.
+
+What would reverse it: an image handed a tree it did not ask for — building an
+untrusted pull request in a runner shared with other work. Then the ownership
+check is load-bearing again, and the safe directory should be named rather than
+`*`.
 
 ## Reproducibility, honestly
 

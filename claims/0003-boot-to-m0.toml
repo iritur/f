@@ -1,0 +1,57 @@
+# Tracked, not gating. Boot time is a number this project should watch and has
+# no business defending: nothing in the thesis rests on it, and a threshold on
+# it would fire the first time a milestone added a page table walk that the
+# design wanted. What it is good for is noticing a tenfold change nobody
+# intended — which is what `tracked` means in claims/README.md.
+name       = "boot-to-m0"
+status     = "tracked"          # pending | tracked | gating
+milestone  = "M0"
+
+statement  = """
+The kernel reaches `M0 ok` in under 50 ms from its first instruction, measured
+on the timestamp counter and excluding the loader and the emulator's own
+start-up. Recorded per boot across a run of boots, as a distribution.
+"""
+
+[baseline]
+system  = "none"
+notes   = "There is no baseline and there should not be one. A Linux boot and this are not the same event — this reaches a serial line and a frame allocator, not a userland — so a ratio here would be a comparison of two different definitions dressed as a result. The comparison that would mean something is against this project's own earlier self, which is what a tracked claim and a stored history give."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it. A claim with
+# an owner is a claim somebody can be asked about; energy was in the first
+# paragraph of the thesis and had no owner across five documents, which is
+# how half a claim goes missing without anybody deciding to drop it.
+document = "docs/the-long-plan.html"
+section  = "08"
+notes    = "Nothing in the design documents owns boot time, and this claim does not pretend otherwise. What owns it is the release contract: boot time is part of what a stranger observes reproducing anything at all, and section 08 is where that obligation is stated. A claim whose owner is a process rather than a subsystem is a claim that should stay `tracked`."
+
+[workload]
+path    = "xtask: cargo xtask claim boot-to-m0"
+repeat  = 10
+batch   = 1
+notes   = "Ten boots, each a fresh machine, one observation each. Ten rather than one because a single boot is not a distribution and this registry does not store summaries; ten rather than a hundred because each one is a full emulator start-up and this is a tracked number, not a gating one."
+
+[metrics]
+primary   = "ns_to_m0_p50"
+secondary = ["ns_to_m0_p99", "ns_to_m0_max"]
+
+[threshold]
+# Deliberately loose, and deliberately present. A tracked claim with no
+# threshold at all records a number nobody would notice going wrong; this one is
+# set where a change is certainly a mistake rather than where it is interesting.
+ns_to_m0_p50 = { max = 50_000_000 }
+
+[hardware]
+runner = "runner-class-A"
+notes  = "Under emulation this measures TCG, and F_ENVIRONMENT refuses to record it — see bench/src/lib.rs, MEASUREMENT_ENVIRONMENTS. The boot still runs and the distribution is still drawn, because a number worth looking at and a number worth publishing are different things."
+
+[reproduce]
+command = "cargo xtask claim boot-to-m0"
+
+[diagnosis]
+# A red result here almost never means the boot got slower. Recorded so that the
+# first debugging step is not "profile the boot".
+step_change = "a milestone added work to the boot path; check TODO.md before profiling anything"
+bimodal = "the emulator, not the kernel — TCG start-up varies with what else the host is doing, which is why this claim names a runner class"
+zero_or_absent = "tsc_khz was never calibrated, so the conversion has no divisor; the boot got as far as printing but not as far as the APIC"

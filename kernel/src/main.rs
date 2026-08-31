@@ -66,6 +66,13 @@ const SEED: u64 = 0xF00D_BEEF_CAFE_1234;
 /// screen.
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
+    // First, before the serial port. Everything after this line is boot, and a
+    // stamp taken later would be measuring the part of boot somebody chose to
+    // include. The counter is free-running and needs no calibration to *read*;
+    // what needs calibration is turning the delta into nanoseconds, and that
+    // has happened by the time anything asks.
+    let entered = arch::x86_64::read_tsc();
+
     let serial = arch::x86_64::serial::Serial;
     serial.init();
 
@@ -112,6 +119,21 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     for _ in 0..8 {
         mixed ^= seeded.next_u64();
     }
+
+    // A deliberate defect, off by default, and the one E0-P02 is built around.
+    //
+    // Every other check in this tree would pass with this on. The kernel boots,
+    // every assertion holds, `M0 ok` is printed and the exit code is 33 — the
+    // only thing that changes is that two runs of the same commit no longer
+    // agree, and nothing except a reproduction check looks at that. RFC 0017
+    // argues why a defect like this lives in the shipped source behind a feature
+    // rather than in a patch somebody applies; this is the second instance, and
+    // the argument is the same one.
+    #[cfg(feature = "mutate-unseeded-time")]
+    {
+        mixed ^= arch::x86_64::read_tsc();
+    }
+
     kprintln!("  env digest    {mixed:#018x}");
     kprintln!("  env clock     {} ns", seeded.now().as_nanos());
 
@@ -119,14 +141,25 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // possible form of the reproducibility contract, asserted at boot so that a
     // regression in the substrate is caught on the very next run rather than
     // months later when the simulator stops reproducing.
-    let mut check = SeededEnv::new(SEED, 100);
-    let mut expect: u64 = 0;
-    for _ in 0..8 {
-        expect ^= check.next_u64();
-    }
-    if expect != mixed {
-        kprintln!("FAIL: determinism substrate is not reproducible");
-        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    //
+    // The whole block is compiled out under the reproduction defect, not just
+    // the comparison. That defect must make two runs *differ*, not make one run
+    // fail — a boot that goes red is caught by every check in the tree, and the
+    // question E0-P02 asks is whether anything catches a boot that goes green
+    // twice with two different answers. Compiling out only the `if` would leave
+    // the computation behind as an unused-variable warning, and a defect build
+    // that does not compile cleanly is a defect build somebody will disable.
+    #[cfg(not(feature = "mutate-unseeded-time"))]
+    {
+        let mut check = SeededEnv::new(SEED, 100);
+        let mut expect: u64 = 0;
+        for _ in 0..8 {
+            expect ^= check.next_u64();
+        }
+        if expect != mixed {
+            kprintln!("FAIL: determinism substrate is not reproducible");
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
     }
 
     kprintln!("  determinism   ok");
@@ -402,8 +435,105 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // is expected to end in a dump and a failure exit rather than in `M0 ok`.
     provoke(&boot, features);
 
+    // The two endings a harness has to tell apart from success and from each
+    // other, each reachable on purpose. `cargo xtask panic` boots all three.
+    deliberate_stop(&boot);
+
+    boot_time(&boot, entered);
+
     kprintln!("M0 ok");
     arch::x86_64::exit_qemu(arch::x86_64::Exit::Success)
+}
+
+/// How long this boot took, when the command line asks for it.
+///
+/// # Why this is not simply printed
+///
+/// The boot log is a fixture. Two runs of the same commit produce the same
+/// bytes, and that property is asserted — it is what E0-B02 closed on and what
+/// every reproduction check since rests on. A duration in it would be a
+/// different number on every run, so the log would stop being comparable and
+/// the one contract M0 actually makes would be gone.
+///
+/// This is the same answer `timer=` already gives for the jitter histogram, and
+/// the reason is worth stating twice because the temptation is to print it
+/// once: a boot log carrying a measurement is a fixture that fails at random.
+///
+/// The number is nanoseconds from the first instruction of `kmain` to here, on
+/// the timestamp counter, converted with the frequency `apic::calibrate`
+/// measured. It excludes the loader and the emulator's own start-up, which is
+/// the honest boundary: this is what the *kernel* took, and nothing here can
+/// see what happened before it was entered.
+fn boot_time(boot: &BootInfo, entered: u64) {
+    if !boot.has_parameter(b"boottime") {
+        return;
+    }
+
+    let khz = arch::x86_64::apic::tsc_khz();
+    if khz == 0 {
+        kprintln!("  boot time     unavailable: the timestamp counter was never calibrated");
+        return;
+    }
+
+    let ticks = arch::x86_64::read_tsc().saturating_sub(entered);
+    // Divide first and scale the remainder, for the reason E0-B08 recorded:
+    // `ticks * 1_000_000 / khz` overflows a u64 after about ninety minutes of
+    // uptime at 3.4 GHz, and wraps rather than failing. A boot is nowhere near
+    // that, and doing the arithmetic the other way here would leave the pattern
+    // that is wrong elsewhere sitting in the tree looking correct.
+    let micros = ticks / khz;
+    let remainder = ticks % khz;
+    let nanos = micros.saturating_mul(1_000).saturating_add(remainder * 1_000 / khz);
+
+    // A line the harness parses, deliberately shaped so that a person reading
+    // the log knows it is not part of the fixture.
+    kprintln!("  boot time     {nanos} ns to M0 (measurement run; not the fixture log)");
+}
+
+/// Panic or hang, when the command line asks for one.
+///
+/// # Why a kernel ships the ability to fail on purpose
+///
+/// The same argument RFC 0017 makes for the mutation build, and the same one
+/// `cargo xtask fault` already rests on: a failure path nothing exercises is a
+/// failure path nobody has checked. Three endings have to be distinguishable by
+/// a machine — a clean run, a panic, and a run that never ends — and the only
+/// way to know they are is to produce all three.
+///
+/// The third is the one that motivates this. A hang is not a failure the kernel
+/// can report, by definition: it is the absence of any report. Whether it is
+/// noticed is a property of the *harness* rather than of the kernel, and it
+/// cannot be tested without something that actually hangs. Before this, a
+/// kernel that stopped making progress would have held a runner until the CI
+/// job's own timeout killed it, which is indistinguishable from a slow build.
+///
+/// Both are behind a boot parameter, absent from every ordinary run, and
+/// neither is reachable without one. That is a weaker guarantee than the
+/// mutation build's cargo feature and is enough here: this decides nothing and
+/// computes nothing, so the worst a mistake can do is stop a boot that asked to
+/// be stopped.
+fn deliberate_stop(boot: &BootInfo) {
+    if boot.has_parameter(b"hang") {
+        kprintln!("  hanging       on purpose; the harness is expected to time out");
+        // A spin and not a halt. A halted core is one the emulator can see is
+        // idle; the fixture is meant to look like work that is not finishing,
+        // which is what a livelock looks like and is the harder case for a
+        // harness to call.
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
+    if boot.has_parameter(b"panic") {
+        // A message with a value in it. A panic that prints only a location
+        // proves the handler ran. One that formats a number proves the handler
+        // can still reach the formatting machinery — which is the part most
+        // likely to be what broke, and the part a real panic message needs.
+        panic!(
+            "deliberate panic from the boot path, with {} KiB reported usable",
+            boot.mem_upper_kib()
+        );
+    }
 }
 
 /// The rate everything about M2 is stated at.
@@ -1176,5 +1306,8 @@ fn panic(info: &PanicInfo) -> ! {
     kprintln!();
     kprintln!("KERNEL PANIC");
     kprintln!("  {info}");
-    arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure)
+    // `Panic` and not `Failure`. A kernel that reports a failed assertion and a
+    // kernel that panicked are different events, and the exit code is the only
+    // channel that survives the panic having interrupted the log.
+    arch::x86_64::exit_qemu(arch::x86_64::Exit::Panic)
 }

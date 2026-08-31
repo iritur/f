@@ -205,6 +205,19 @@ pub enum Exit {
     Success = 0x10,
     /// Something failed. The serial log carries the detail.
     Failure = 0x11,
+    /// The frame panicked.
+    ///
+    /// Separate from [`Failure`](Exit::Failure) because the two are different
+    /// events, and a harness that cannot tell them apart cannot say which one
+    /// it got. `Failure` is the kernel deciding an assertion did not hold and
+    /// stopping deliberately — a report, working as designed. A panic is the
+    /// frame reaching a state it has no opinion about, which is a bug in the
+    /// frame, and it can happen anywhere including inside the code that would
+    /// have reported a `Failure`.
+    ///
+    /// The distinction has to be in the exit code rather than in the log,
+    /// because the log is the thing a panic is most likely to have interrupted.
+    Panic = 0x12,
 }
 
 /// Terminate the machine.

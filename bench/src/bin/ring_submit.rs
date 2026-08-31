@@ -15,6 +15,7 @@
 
 use std::cell::UnsafeCell;
 use std::hint::black_box;
+use std::path::Path;
 use std::sync::atomic::AtomicU32;
 use std::time::Instant;
 
@@ -69,6 +70,21 @@ fn main() {
     }
 
     sample.report();
+
+    // Beside the claim it belongs to rather than in the build directory: the
+    // distribution is the artefact, and a `cargo clean` should not be able to
+    // delete a measurement. `.gitignore` keeps it local — `Sample::persist`
+    // says why that is a boundary and not an oversight.
+    match sample.persist(Path::new("claims")) {
+        Ok(path) => println!("\nfull distribution written to {}", path.display()),
+        // Not fatal, and deliberately so. The measurement happened; the
+        // percentiles and the drawn distribution are already on the terminal.
+        // Failing the run here would throw away a good measurement over a
+        // read-only directory, and a harness that discards results to report a
+        // filesystem problem is worse than one that reports both.
+        Err(e) => println!("\ncould not write the distribution: {e}"),
+    }
+
     println!();
     println!("note: host measurement only — see the module docs for what this");
     println!("      does not establish. Claim remains `pending`.");

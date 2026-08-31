@@ -599,7 +599,7 @@ slot.seq.store(pos.wrapping_add(1), Ordering::<span class="k">Release</span>);</
       <div class="msb">
         <h3>Interrupts and time</h3>
         <p>GDT, IDT, exception handlers with a register dump you will read hundreds of times. Local APIC, TSC-deadline timer, calibrated against a known reference.</p>
-        <div class="done"><b>Done when</b> a 1 kHz timer runs for 60 seconds and you have a jitter histogram with p99 under 5 &micro;s. This is the first real-time measurement in the project and it exists in week three &mdash; from here on, every milestone reports it, and a regression fails the build.</div>
+        <div class="done"><b>Done when</b> a 1 kHz timer runs for 60 seconds and you have a jitter histogram with p99 under <span data-claim="timer-jitter:threshold.ns_late_p99.max">5000</span>&nbsp;ns. This is the first real-time measurement in the project and it exists in week three &mdash; from here on, every milestone reports it, and a regression fails the build.</div>
         <div class="msmeta"><b>~1 week</b> &middot; the most important milestone on this list</div>
       </div>
     </div>
@@ -626,7 +626,7 @@ slot.seq.store(pos.wrapping_add(1), Ordering::<span class="k">Release</span>);</
       <div class="msb">
         <h3>The first ring</h3>
         <p>Everything in part I: the layout, the cursor protocol with correct acquire/release ordering, notification suppression. Exactly two opcodes to start &mdash; <code>NOP</code> and <code>WRITE_SERIAL</code>.</p>
-        <div class="done"><b>Done when</b> one million NOPs submitted in batches of 32 report under 50 ns per operation, and the number is recorded in CI as a regression gate. If it comes in above 200 ns, re-read section 02 before changing anything else.</div>
+        <div class="done"><b>Done when</b> one million NOPs submitted in batches of 32 report under <span data-claim="ring-submit-latency:threshold.ns_per_op_p99.max">50</span>&nbsp;ns per operation, and the number is recorded in CI as a regression gate. If it comes in above 200 ns, re-read section 02 before changing anything else.</div>
         <div class="msmeta"><b>~2 weeks</b></div>
       </div>
     </div>

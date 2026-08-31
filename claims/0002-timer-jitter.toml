@@ -35,6 +35,15 @@ cache     = "last-level cache partition where the hardware offers one, and exclu
 memory    = "pre-faulted huge pages, never reclaimed, migrated or compacted while the reservation lives"
 notes     = "The two obvious ways to produce a good-looking number here are an idle machine and a waived component. Both are excluded by recording how each of the four was obtained, beside the histogram, on every run."
 
+[owner]
+# R09: every headline claim names the subsystem that owns it. A claim with
+# an owner is a claim somebody can be asked about; energy was in the first
+# paragraph of the thesis and had no owner across five documents, which is
+# how half a claim goes missing without anybody deciding to drop it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "02"
+notes    = "Admission control owns this number, not the timer. A jitter figure is a property of what was allowed onto the core, which is why RFC 0007's reservation table is in the [reservation] section below rather than in a note."
+
 [workload]
 path    = "kernel/src/arch/x86_64/apic.rs"
 hz      = 1_000

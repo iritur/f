@@ -6,5 +6,12 @@ license.workspace = true
 description = "Build orchestration as Rust rather than as a Makefile."
 publish = false
 
+# The measurement harness, so that a claim run from here records the same way a
+# claim run from a benchmark binary does. The alternative was a second histogram
+# and a second environment check living in the tooling, which is how a registry
+# ends up with two definitions of what a percentile is.
+[dependencies]
+f-bench.workspace = true
+
 [lints]
 workspace = true

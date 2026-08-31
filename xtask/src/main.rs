@@ -7,8 +7,11 @@
 //! `lint-percpu`.
 
 use std::collections::BTreeMap;
+use std::fmt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
+use std::time::Duration;
 
 /// The target the kernel is built for.
 ///
@@ -126,6 +129,12 @@ fn main() -> ExitCode {
         "cap" => cap(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
         "mutate" => mutate(),
+        "panic" => panic_path(),
+        "reproduce" => match args.get(1).map(String::as_str) {
+            Some("--trace") => trace_only(),
+            Some(other) => Err(format!("unknown option for reproduce: {other}")),
+            None => reproduce(),
+        },
         "timer" => timer(args.get(1).map(String::as_str)),
         "test" => test(),
         "verify" => verify(),
@@ -135,7 +144,22 @@ fn main() -> ExitCode {
         "lint-unsafe" => lint_unsafe(),
         "lint-percpu" => lint_percpu(),
         "lint-mutations" => lint_mutations(),
-        "claims" => claims_list(),
+        "lint-claims" => lint_claims(),
+        "lint-units" => lint_units(),
+        "lint-callbacks" => lint_callbacks(),
+        "lint-claim-owners" => lint_claim_owners(),
+        "lint-snapshot" => lint_snapshot(),
+        "release" => release(args.get(1).map(String::as_str) == Some("--dry-run")),
+        "history" => match args.get(1).map(String::as_str) {
+            Some("append") => history_append(),
+            Some(other) => Err(format!("unknown option for history: {other}")),
+            None => history(),
+        },
+        "claims" => match args.get(1).map(String::as_str) {
+            Some("--render") => render_claims(),
+            Some(other) => Err(format!("unknown option for claims: {other}")),
+            None => claims_list(),
+        },
         "claim" => claim_run(args.get(1).map(String::as_str)),
         "bench" => bench(args.get(1).map(String::as_str)),
         "evals" => evals_list(),
@@ -193,8 +217,25 @@ cargo xtask <command>
   lint-unsafe        No `unsafe` outside the frame crates
   lint-percpu        No kernel-global mutable state outside `PerCpu`
   lint-mutations     No deliberate defect is on by default
+  lint-claims        No document cites a claim value the claim no longer has
+  lint-units         R03: every public abi field states its unit
+  lint-callbacks     R05: no interface registers a callback
+  lint-claim-owners  R09: every claim names the document that owns it
 
-  claims             List the claims registry and whether each one gates
+  reproduce          Two runs of this commit must produce one trace hash,
+                     and one unseeded read of time must break that
+  reproduce --trace  Print this run's trace hash and nothing else
+
+  panic              Three endings CI must tell apart: a clean boot, a
+                     deliberate panic, and a boot that never finishes
+
+  release --dry-run  The release manifest, and what is missing from it
+
+  history            The measurement history, one record per commit
+  history append     Add this commit's record. Run on main, never on a branch
+
+  claims             List the claims registry, and write claims/snapshot.json
+  claims --render    Rewrite every cited claim value in docs/ from the registry
   claim <name>       Run one claim's workload and report against its threshold
   bench [name]       Run a benchmark binary directly
   coverage           Host tests with coverage instrumentation
@@ -213,6 +254,47 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }
 
+/// Where cargo puts build output, which is not always `./target`.
+///
+/// `CARGO_TARGET_DIR` moves it, and moving it is not an exotic configuration:
+/// it is the whole performance story of the development container on Windows,
+/// where `target/` lives in a named volume rather than in the bind mount
+/// because a Rust target directory is tens of thousands of small files and
+/// every one of them crossing the filesystem boundary is a syscall nobody
+/// needs. `docker/compose.yaml` says so where it mounts it.
+///
+/// Assuming `./target` was wrong in three different ways and each failed
+/// differently, which is why this is one function rather than three fixes.
+/// `kernel_elf64` pointed at an image the build had not written, so the boot
+/// failed claiming the kernel had not been built. `init_dir` put the component
+/// image somewhere the loader was not told about. And the coverage run set
+/// `LLVM_PROFILE_FILE` to a *relative* path, which is resolved by each test
+/// binary against its own working directory rather than by cargo against the
+/// workspace — so the profiles scattered into whichever crate directory the
+/// harness happened to run in, and `bench/target/coverage/` in a tree whose
+/// `.gitignore` only covers the root one is the evidence it left behind.
+///
+/// A relative `CARGO_TARGET_DIR` is resolved against the **current working
+/// directory**, not against the workspace root. That is what cargo documents
+/// and does, and the two differ the moment anyone runs `cargo xtask` from a
+/// subdirectory — cargo would write the image one place and this would look
+/// for it in another, which is the same class of failure this function exists
+/// to remove. Matching cargo is the whole job; being tidier than cargo here
+/// would be a second source of truth.
+fn target_dir() -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(value) if !value.is_empty() => {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir().unwrap_or_else(|_| root()).join(path)
+            }
+        }
+        _ => root().join("target"),
+    }
+}
+
 fn sh(program: &str, args: &[&str]) -> Result<(), String> {
     let status = Command::new(program)
         .args(args)
@@ -228,6 +310,21 @@ fn capture(program: &str, args: &[&str]) -> Result<String, String> {
         .current_dir(root())
         .output()
         .map_err(|e| format!("could not run {program}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("{program} {} failed", args.join(" ")));
+    }
+    String::from_utf8(out.stdout).map_err(|e| format!("{program} printed non-UTF-8: {e}"))
+}
+
+/// [`capture`], with environment variables set for the child.
+///
+/// Separate rather than a fifth argument on `capture` because every other
+/// caller wants the ambient environment, and threading an always-empty slice
+/// through them would be noise at each site to save one function here.
+fn capture_with(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String, String> {
+    let mut command = Command::new(program);
+    command.args(args).envs(env.iter().copied()).current_dir(root());
+    let out = command.output().map_err(|e| format!("could not run {program}: {e}"))?;
     if !out.status.success() {
         return Err(format!("{program} {} failed", args.join(" ")));
     }
@@ -267,7 +364,7 @@ fn llvm_tool(name: &str) -> Result<PathBuf, String> {
 
 /// The kernel, as the linker produced it.
 fn kernel_elf64() -> PathBuf {
-    root().join("target").join(KERNEL_TARGET).join("debug").join("f-kernel")
+    target_dir().join(KERNEL_TARGET).join("debug").join("f-kernel")
 }
 
 /// The kernel, in the container format the loader will accept.
@@ -345,7 +442,7 @@ fn to_elf32() -> Result<(), String> {
 /// sharing a target directory is two full rebuilds every time the build
 /// alternates between them.
 fn init_dir() -> PathBuf {
-    root().join("target").join("init")
+    target_dir().join("init")
 }
 
 /// The `init` image, as the loader will hand it over: a flat blob, no headers.
@@ -551,21 +648,131 @@ fn init_image() -> Result<PathBuf, String> {
 /// When `capture` is set the serial output is collected and returned as well as
 /// printed, which is what lets a caller assert on *how* a boot went wrong
 /// rather than only that it did.
+/// What to do with the emulator's serial output.
+///
+/// Three, not a bool, because the two capturing cases differ in a way a caller
+/// cares about. A claim that boots ten times wants the log — it parses a line
+/// out of it — and does not want two hundred lines of identical boot banner on
+/// the terminal. Every other capturing caller is capturing precisely so a
+/// failure can be read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Capture {
+    /// Let it go to the terminal; keep nothing.
+    Off,
+    /// Keep it and print it.
+    Printed,
+    /// Keep it and say nothing.
+    Quiet,
+}
+
+/// How a run of the emulator ended.
+///
+/// Three outcomes, not two, because a harness that models "finished" and
+/// "did not finish yet" has nowhere to put a boot that will never finish. The
+/// distinction is the whole of E0-P12: CI has to be able to tell a clean exit,
+/// a deliberate stop, and a hang apart from each other, and a hang is the one
+/// the kernel cannot report on its own behalf.
+#[derive(Debug, PartialEq, Eq)]
+enum Ending {
+    /// QEMU exited and reported this code.
+    Exited(i32),
+    /// QEMU was terminated by a signal without reporting.
+    Signalled,
+    /// The run outlived its budget and the harness killed it.
+    TimedOut(u64),
+}
+
+impl Ending {
+    /// The exit code, when there was one.
+    fn code(&self) -> Option<i32> {
+        match self {
+            Self::Exited(code) => Some(*code),
+            Self::Signalled | Self::TimedOut(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for Ending {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exited(code) => write!(f, "exited {code}"),
+            Self::Signalled => write!(f, "terminated by a signal"),
+            Self::TimedOut(seconds) => write!(f, "still running after {seconds}s, and killed"),
+        }
+    }
+}
+
+/// How long a boot may take before the harness stops waiting for it.
+///
+/// Generous, and generous on purpose. This is not a performance bound and must
+/// never become one — the container emulates the machine in software, CI
+/// runners are shared, and a boot that is merely slow must not be reported as a
+/// hang. What it bounds is the difference between *slow* and *never*, and a
+/// wrong answer in the tight direction turns a green run red for no reason.
+///
+/// A run that asks for a long timer window gets that window plus this, because
+/// `timer=60` is sixty seconds of intended work and the budget is for
+/// everything around it.
+const BOOT_TIMEOUT: u64 = 180;
+
 fn boot(append: Option<&str>) -> Result<Option<i32>, String> {
-    machine(append, &[], false).map(|(code, _)| code)
+    match machine(append, &[], Capture::Off)?.0 {
+        Ending::TimedOut(seconds) => Err(format!(
+            "the boot was still running after {seconds}s and was killed\n\n\
+             Nothing here reports a hang, so this is the harness noticing rather\n\
+             than the kernel. `cargo xtask panic` exercises the same path against\n\
+             a fixture that hangs on purpose."
+        )),
+        ending => Ok(ending.code()),
+    }
+}
+
+/// [`boot`], returning how the run ended rather than only its code.
+///
+/// For the one caller that has to be able to assert a *timeout* happened, which
+/// [`boot`] deliberately turns into an error because for every other caller a
+/// hang is a failure and not a result.
+fn boot_ending(append: Option<&str>, seconds: u64) -> Result<(Ending, String), String> {
+    machine_with(append, &[], Capture::Printed, seconds)
 }
 
 /// [`boot`], with the serial log.
 fn boot_captured(append: Option<&str>, features: &[&str]) -> Result<(Option<i32>, String), String> {
-    machine(append, features, true)
+    let (ending, log) = machine(append, features, Capture::Printed)?;
+    match ending {
+        Ending::TimedOut(seconds) => Err(format!(
+            "the boot was still running after {seconds}s and was killed\n\n\
+             The log up to that point is above."
+        )),
+        ending => Ok((ending.code(), log)),
+    }
 }
 
 /// Build a kernel and run it. The one place the emulator is described.
 fn machine(
     append: Option<&str>,
     features: &[&str],
-    capture: bool,
-) -> Result<(Option<i32>, String), String> {
+    capture: Capture,
+) -> Result<(Ending, String), String> {
+    machine_with(append, features, capture, BOOT_TIMEOUT)
+}
+
+/// [`machine`], capturing the log and printing none of it.
+fn machine_quiet(append: Option<&str>) -> Result<(Ending, String), String> {
+    machine_with(append, &[], Capture::Quiet, BOOT_TIMEOUT)
+}
+
+/// [`machine`], with a budget of its own.
+///
+/// Separate so that the one caller who is deliberately waiting on something
+/// that will never finish can say how long it is prepared to wait, without
+/// every other caller having to state a number it does not care about.
+fn machine_with(
+    append: Option<&str>,
+    features: &[&str],
+    capture: Capture,
+    timeout: u64,
+) -> Result<(Ending, String), String> {
     build_with(features)?;
     let kernel = kernel_elf32();
     if !kernel.exists() {
@@ -628,18 +835,72 @@ fn machine(
 
     qemu.current_dir(root());
 
-    if !capture {
-        let status = qemu.status().map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
-        return Ok((status.code(), String::new()));
+    // Spawned rather than run to completion, because a boot that never ends has
+    // to be a result this function can return. `status()` and `output()` both
+    // wait forever, which makes a hang the harness's problem to survive rather
+    // than its problem to report — and in CI it presents as a job that timed
+    // out somewhere during "build", with no log and no clue.
+    if capture != Capture::Off {
+        qemu.stdout(Stdio::piped());
     }
+    let mut child = qemu.spawn().map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
+
+    // The reader runs on its own thread because a piped child can fill the pipe
+    // and block on a write while this thread sleeps waiting for it to exit — a
+    // deadlock that only appears once the log grows past the buffer, which is to
+    // say once somebody adds a line.
+    let reader = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            let mut buffer = String::new();
+            let _ = out.read_to_string(&mut buffer);
+            buffer
+        })
+    });
+
+    // Counted sleeps rather than a deadline read off a clock, and not in order
+    // to route around the determinism lint — `xtask/` is exempt from it. It is
+    // that no clock is needed here and reaching for one would be worse. Sleep
+    // drift makes the real budget *at least* the nominal one, which errs
+    // towards waiting too long; a deadline computed from a monotonic reading
+    // can expire early on a loaded machine and call a slow boot a hang. This
+    // bound separates "slow" from "never", and only one of its two failure
+    // directions is survivable.
+    const TICK_MS: u64 = 20;
+    let mut ticks = timeout.saturating_mul(1000 / TICK_MS);
+
+    let ending = loop {
+        match child.try_wait().map_err(|e| format!("waiting for qemu: {e}"))? {
+            Some(status) => break status.code().map_or(Ending::Signalled, Ending::Exited),
+            None if ticks == 0 => {
+                // Killed rather than left running. A harness that reports a
+                // timeout and leaks the process behind it turns one hang into a
+                // machine that gets slower all afternoon.
+                let _ = child.kill();
+                let _ = child.wait();
+                break Ending::TimedOut(timeout);
+            }
+            None => {
+                ticks -= 1;
+                std::thread::sleep(Duration::from_millis(TICK_MS));
+            }
+        }
+    };
 
     // Captured *and* printed. A harness that swallowed the log would be one
     // whose failures could not be read, and the whole reason to capture it is
     // to assert on a line in it.
-    let out = qemu.output().map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
-    let log = String::from_utf8_lossy(&out.stdout).into_owned();
-    print!("{log}");
-    Ok((out.status.code(), log))
+    let log = match reader {
+        Some(handle) => {
+            let log = handle.join().unwrap_or_default();
+            if capture == Capture::Printed {
+                print!("{log}");
+            }
+            log
+        }
+        None => String::new(),
+    };
+
+    Ok((ending, log))
 }
 
 fn run() -> Result<(), String> {
@@ -719,6 +980,142 @@ fn fault(kind: Option<&str>) -> Result<(), String> {
 /// boot that must find it, and the sentence the log has to contain — because
 /// "the boot went red" is not the assertion. A boot that went red for some
 /// other reason would satisfy an exit code and prove nothing.
+/// The deliberate defect that makes two runs of one commit disagree.
+///
+/// Separate from [`MUTATIONS`] because it is a different kind of defect and
+/// belongs to a different command. Every mutation in that table makes a boot go
+/// *red*, and `mutate` asserts exactly that. This one makes a boot go green
+/// twice with two different answers, which no exit code and no assertion in the
+/// tree can see — only a comparison of two runs can.
+const TRACE_DEFECT: &str = "mutate-unseeded-time";
+
+/// Every feature in the tree that is a deliberate defect.
+///
+/// One list, because `lint-mutations` has one job — no defect is ever on by
+/// default — and a second list is how the second defect gets forgotten.
+const DEFECTS: &[&str] = &[TRACE_DEFECT, "mutate-unchecked-index"];
+
+/// The seed every reproduction run uses.
+///
+/// Fixed and stated here rather than defaulted inside the kernel, because the
+/// contract is about a *pair* — `(seed, commit)` — and a pair with an implicit
+/// half is a pair nobody can quote. When the kernel takes a seed on its command
+/// line this becomes the value passed, and the contract does not change.
+const TRACE_SEED: &str = "0xf00dbeefcafe1234";
+
+/// A stable hash of an execution trace.
+///
+/// FNV-1a, and the choice is deliberate rather than lazy. What this has to be
+/// is *identical on two machines at one commit*, which rules out anything the
+/// standard library reserves the right to change and anything seeded per
+/// process — `DefaultHasher` is both. It does not have to be
+/// collision-resistant: nothing adversarial produces these traces, and a
+/// content-addressed *release* is a different problem with a different answer
+/// (`sha256`, E0-R01). What it has to be is written down, which is why it is
+/// eight lines here rather than a dependency.
+fn trace_hash(log: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in log.as_bytes() {
+        // Carriage returns are stripped. The serial console emits CRLF and a
+        // pipe on one host may normalise where another does not, which would
+        // make two identical executions hash differently for a reason that has
+        // nothing to do with the kernel.
+        if *byte == b'\r' {
+            continue;
+        }
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// One trace, printed as the single line a comparison needs.
+fn trace(features: &[&str]) -> Result<u64, String> {
+    let (ending, log) = machine_with(None, features, Capture::Quiet, BOOT_TIMEOUT)?;
+    match ending {
+        Ending::Exited(33) => Ok(trace_hash(&log)),
+        other => {
+            print!("{log}");
+            Err(format!("the traced boot {other}; expected 33"))
+        }
+    }
+}
+
+/// The reproduction check.
+///
+/// # What is being claimed
+///
+/// That two runs of the same `(seed, commit)` produce a byte-identical
+/// execution trace. Locally that is two boots on one machine, which is the
+/// weaker half; the CI job runs the same command on two runners and compares
+/// the hashes, which is the claim the task actually makes.
+///
+/// # Why the defect half is not optional
+///
+/// A reproduction check that has only ever passed is indistinguishable from one
+/// that cannot fail, and this one is unusually easy to get wrong in that
+/// direction: if the trace were hashed over something that does not vary — a
+/// constant banner, an empty string — it would agree with itself forever. So
+/// the command also builds the kernel with one unseeded read of the timestamp
+/// counter on the boot path and *requires* the two runs to disagree.
+///
+/// That defect is worth looking at, because it is the shape of the bug this
+/// whole apparatus exists for. It does not make the kernel fail. It boots,
+/// every assertion holds, it prints `M0 ok`, it exits 33. Every other check in
+/// this tree is green on it. The only thing wrong is that two runs no longer
+/// agree — and until this command existed, nothing would ever have said so.
+fn reproduce() -> Result<(), String> {
+    println!("reproduction check — seed {TRACE_SEED}\n");
+
+    println!("[1/2] the same commit, twice — the traces must agree");
+    let first = trace(&[])?;
+    let second = trace(&[])?;
+    println!("  run 1  {first:#018x}");
+    println!("  run 2  {second:#018x}");
+    if first != second {
+        return Err("two runs of this commit produced different traces.\n\n\
+             This is the determinism contract failing, and it is the failure every\n\
+             other layer of the test apparatus rests on: a seed stops being a bug\n\
+             report, the simulator stops reproducing, and a claim stops being\n\
+             re-derivable. Something on the boot path is reading a clock, a counter\n\
+             or an address that the seeded `Env` does not own. RFC 0004."
+            .to_string());
+    }
+    println!("\n  agreed: {first:#018x}");
+
+    println!("\n[2/2] with one unseeded read of time — the traces must disagree");
+    let a = trace(&[TRACE_DEFECT])?;
+    let b = trace(&[TRACE_DEFECT])?;
+    println!("  run 1  {a:#018x}");
+    println!("  run 2  {b:#018x}");
+    if a == b {
+        return Err(format!(
+            "the kernel built with `{TRACE_DEFECT}` still reproduced itself.\n\n\
+             That means this check cannot fail, which makes the green result above\n\
+             worth nothing. Either the defect is no longer reached on the boot path,\n\
+             or the trace is being hashed over something that does not contain it."
+        ));
+    }
+    println!("\n  disagreed, as required — the check can fail");
+
+    println!(
+        "\nreproduce: ok — {first:#018x}\n\
+         Two boots on one machine. The pair that matters is two runners, and that\n\
+         is the CI job: same image, same commit, same seed, hashes compared."
+    );
+    Ok(())
+}
+
+/// Print one trace hash and nothing else.
+///
+/// For the CI job, where two runners each produce a line and a third job
+/// compares them. Nothing else is printed, so the artefact is the hash rather
+/// than a log a comparison would have to parse.
+fn trace_only() -> Result<(), String> {
+    println!("{:#018x}", trace(&[])?);
+    Ok(())
+}
+
 const MUTATIONS: &[(&str, &str, &str, &str)] = &[(
     "mutate-unchecked-index",
     "cap=forge",
@@ -763,7 +1160,18 @@ fn mutate() -> Result<(), String> {
                      stopped being made."
                 ));
             }
-            Some(35) | Some(0) => {}
+            // 37 is `Exit::Panic`, which is what this mutation actually
+            // produces: the defect removes a bounds check, so the boot dies in
+            // the indexing rather than in a check that decided something was
+            // wrong. 35 is a kernel that reported a failed assertion, and 0 is
+            // a machine that reset without reporting at all — both are still
+            // accepted, because a future mutation could legitimately produce
+            // either and this list is meant to grow.
+            //
+            // Before E0-P12 a panic *was* 35, so this arm could not tell the
+            // three apart. The log assertion below is what carried the whole
+            // weight; it still does, and now it is not carrying it alone.
+            Some(37) | Some(35) | Some(0) => {}
             Some(other) => return Err(format!("qemu exited {other}; expected a failure")),
             None => return Err("qemu terminated by signal".into()),
         }
@@ -821,7 +1229,7 @@ fn lint_mutations() -> Result<(), String> {
         if name.trim() != "default" {
             continue;
         }
-        for (feature, _, _, _) in MUTATIONS {
+        for feature in DEFECTS {
             if value.contains(feature) {
                 return Err(format!(
                     "kernel/Cargo.toml has `{feature}` in its default features.\n\n\
@@ -833,7 +1241,7 @@ fn lint_mutations() -> Result<(), String> {
         }
     }
 
-    println!("lint-mutations: ok  (no deliberate defect is on by default)");
+    println!("lint-mutations: ok  ({} deliberate defect(s), none on by default)", DEFECTS.len());
     Ok(())
 }
 
@@ -1014,6 +1422,89 @@ fn cap(kind: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// The three endings CI has to tell apart, each produced by a fixture.
+///
+/// # Why all three and not just the panic
+///
+/// A panic assertion on its own proves nothing. If a clean boot also exited 37,
+/// the assertion would pass and mean nothing; if a hang also exited 37, the
+/// same. What is being established is that the three are *distinguishable*, and
+/// that is a claim about a set rather than about any one member — the same
+/// shape as `mutate`, where a red boot with a defect proves nothing unless the
+/// same boot is green without one.
+///
+/// The timeout budget for the hang is deliberately small. This is the one place
+/// where waiting the full [`BOOT_TIMEOUT`] would buy nothing: the fixture is
+/// known to spin forever, so every second past the point the kernel has clearly
+/// started is a second of gate time spent confirming it is still spinning.
+const HANG_BUDGET: u64 = 20;
+
+fn panic_path() -> Result<(), String> {
+    println!("three endings, three fixtures. CI has to tell them apart.\n");
+
+    // 1. A clean boot. The control, and the reason the other two mean anything.
+    println!("--- clean: the ordinary boot ---");
+    let (ending, log) = boot_ending(None, BOOT_TIMEOUT)?;
+    if ending != Ending::Exited(33) {
+        return Err(format!("a clean boot {ending}; expected exit 33"));
+    }
+    if !log.contains("M0 ok") {
+        return Err("a clean boot exited 33 without reporting M0 ok".into());
+    }
+    println!("\nclean: exited 33, and said M0 ok");
+
+    // 2. A panic. Exit 37, from `Exit::Panic`, and a log that names it.
+    println!("\n--- panic: a deliberate panic on the boot path ---");
+    let (ending, log) = boot_ending(Some("panic"), BOOT_TIMEOUT)?;
+    if ending != Ending::Exited(37) {
+        return Err(format!(
+            "the panic fixture {ending}; expected exit 37\n\n\
+             37 is `Exit::Panic`. If this reports 35 the panic handler is still\n\
+             exiting with `Exit::Failure`, and CI cannot tell a panic from a\n\
+             kernel that reported a failed assertion."
+        ));
+    }
+    if !log.contains("KERNEL PANIC") {
+        return Err("the panic fixture exited 37 with no panic report in the log\n\n\
+             The exit code alone says a panic happened and nothing about where.\n\
+             The handler is supposed to print before it exits."
+            .into());
+    }
+    // The message, not only the banner. A handler that cannot format its
+    // argument prints the banner and then nothing useful, which is the failure
+    // most worth catching here — see `deliberate_stop`.
+    if !log.contains("KiB reported usable") {
+        return Err("the panic report reached the banner and not the message\n\n\
+             The fixture panics with a formatted value precisely so that this\n\
+             assertion covers the formatting machinery and not just the branch."
+            .into());
+    }
+    println!("\npanic: exited 37, reported KERNEL PANIC, and formatted its message");
+
+    // 3. A hang. No exit code at all, and the harness has to be the one to say
+    //    so — this is the ending the kernel cannot report on its own behalf.
+    println!("\n--- hang: a boot that never finishes ---");
+    let (ending, _) = boot_ending(Some("hang"), HANG_BUDGET)?;
+    match ending {
+        Ending::TimedOut(seconds) => {
+            println!("\nhang: still running after {seconds}s, killed by the harness");
+        }
+        other => {
+            return Err(format!(
+                "the hang fixture {other}; expected the harness to time out\n\n\
+                 A fixture that spins forever and yet exits means either the\n\
+                 fixture is not reached or something is exiting on its behalf."
+            ));
+        }
+    }
+
+    println!(
+        "\npanic path ok — 33 clean, 37 panic, timeout hang.\n\
+         Three endings, mutually distinguishable, each from a fixture."
+    );
+    Ok(())
+}
+
 /// Run the timer for a while and print the jitter histogram it produced.
 ///
 /// # Why this is a command and not part of `verify`
@@ -1123,6 +1614,18 @@ fn verify() -> Result<(), String> {
     lint_all()?;
     test()?;
     run()?;
+    // Before `mutate`, and for the same reason `mutate` is in the loop at all.
+    // Everything above this line establishes that the tree is green; these two
+    // establish that a tree which was not would be *noticed*. This one covers
+    // the reporting channel itself — a clean exit, a panic and a hang have to
+    // arrive at CI as three different things, and a kernel cannot report the
+    // third on its own behalf.
+    panic_path()?;
+    // The determinism contract, and the check every other layer rests on. It
+    // is here rather than only in CI because the failure it catches is one
+    // nothing else in this loop can see: a boot that goes green twice with two
+    // different answers passes `run`, `user`, `cap` and `mutate` alike.
+    reproduce()?;
     // Last, and part of the loop rather than beside it. It is the half of
     // E0-P08 that says the suite can fail: everything above proves the
     // properties hold on this tree, and this proves that a tree where one of
@@ -1142,6 +1645,19 @@ fn lint_all() -> Result<(), String> {
     lint_unsafe()?;
     lint_percpu()?;
     lint_mutations()?;
+    lint_claims()?;
+    // The three rules from `docs/what-must-be-stated.html` section 15 that
+    // could be made executable. The other nine are review, and CONTRIBUTING.md
+    // says which is which — a rule listed as mechanised that is not is worse
+    // than one honestly listed as review.
+    lint_units()?;
+    lint_callbacks()?;
+    lint_claim_owners()?;
+    // A generated file that is committed is a claim about the generator, and
+    // the only moment it can be checked cheaply is before anything regenerates
+    // it. `xtask claims` rewrites the snapshot by design, so this has to come
+    // first or it grades its own homework.
+    lint_snapshot()?;
     // The same check the CI policy job runs. It lives here because a local
     // `lint` that is a subset of the gate teaches people the gate is passing
     // when it is not — which is how a formatting failure reached CI on a tree
@@ -1181,13 +1697,17 @@ fn lint_all() -> Result<(), String> {
 }
 
 fn rust_sources() -> Result<Vec<PathBuf>, String> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    fn walk(dir: &Path, build: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if path.is_dir() {
-                if !matches!(name, "target" | ".git" | "third_party" | "docs") {
-                    walk(&path, out)?;
+                // `build` as well as the name: with CARGO_TARGET_DIR set to
+                // something inside the tree, the output directory is not
+                // called `target` and every lint in this file would otherwise
+                // read generated sources and report findings against them.
+                if !matches!(name, "target" | ".git" | "third_party" | "docs") && path != build {
+                    walk(&path, build, out)?;
                 }
             } else if path.extension().is_some_and(|e| e == "rs") {
                 out.push(path);
@@ -1196,13 +1716,242 @@ fn rust_sources() -> Result<Vec<PathBuf>, String> {
         Ok(())
     }
     let mut out = Vec::new();
-    walk(&root(), &mut out).map_err(|e| format!("walking the tree: {e}"))?;
+    let build = target_dir();
+    walk(&root(), &build, &mut out).map_err(|e| format!("walking the tree: {e}"))?;
     out.sort();
     Ok(out)
 }
 
 fn relative(path: &Path) -> String {
     path.strip_prefix(root()).unwrap_or(path).to_string_lossy().replace('\\', "/")
+}
+
+/// R03. Every quantity crossing the ABI states its unit, its epoch and its
+/// zero.
+///
+/// # Why an explicit marker rather than a vocabulary of unit words
+///
+/// A vocabulary check — does this doc comment mention nanoseconds, bytes,
+/// indices — passes on a sentence that happens to contain the word and fails on
+/// a sentence that says the same thing differently. It is a lint that trains
+/// people to include a keyword, which is worse than no lint because it looks
+/// like coverage.
+///
+/// `Unit:` is a marker somebody has to write on purpose. It is greppable, it
+/// cannot be satisfied by accident, and — the part that matters — it makes the
+/// *dimensionless* case explicit too. `Unit: none` is a statement that this
+/// field is an identifier rather than a quantity, which is exactly the claim
+/// R03 exists to force somebody to make out loud. `deadline: u64` shipped with
+/// no unit, no epoch and no zero, in the one crate whose entire purpose is to
+/// be correct against code written by somebody else, and it did so because
+/// nobody had to say anything.
+///
+/// The epoch and the zero are not separately checked, and that is a stated
+/// limit rather than an oversight: they are only meaningful for some units, and
+/// a lint demanding all three of an index would be teaching people to write
+/// three words to get past it. What this catches is the field nobody said
+/// anything about.
+fn unit_findings(rel: &str, text: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    let lines: Vec<&str> = text.lines().collect();
+
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        // A public struct field: `pub name: Type,` at field indentation. Not a
+        // `pub fn`, `pub const`, `pub struct` or `pub mod`.
+        let Some(rest) = trimmed.strip_prefix("pub ") else { continue };
+        if rest.starts_with("fn ")
+            || rest.starts_with("const ")
+            || rest.starts_with("struct ")
+            || rest.starts_with("enum ")
+            || rest.starts_with("mod ")
+            || rest.starts_with("use ")
+            || rest.starts_with("unsafe ")
+            || rest.starts_with("type ")
+        {
+            continue;
+        }
+        let Some((name, _)) = rest.split_once(':') else { continue };
+        let name = name.trim();
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+            continue;
+        }
+
+        // Walk back over this field's doc comment and attributes.
+        let mut doc = String::new();
+        let mut cursor = index;
+        while cursor > 0 {
+            cursor -= 1;
+            let above = lines[cursor].trim_start();
+            if above.starts_with("///") {
+                doc.insert_str(0, above.trim_start_matches("///"));
+                doc.insert(0, '\n');
+            } else if above.starts_with('#') || above.is_empty() {
+                continue;
+            } else {
+                break;
+            }
+        }
+
+        if !doc.to_ascii_lowercase().contains("unit:") {
+            findings.push(format!("  {rel}:{}  `{name}` states no unit", index + 1));
+        }
+    }
+    findings
+}
+
+/// R05. Nothing is delivered asynchronously.
+///
+/// Every event is a ring entry drained at a polling point, which is what keeps
+/// the determinism contract whole and is the reason this system never needs the
+/// concept of async-signal-safety. A callback is the shape that quietly
+/// reverses it: once one interface takes a function to call later, the argument
+/// for the next one is that the first one exists.
+///
+/// The check is textual and names what it looks for, which bounds what it can
+/// claim. A callback smuggled through a type alias or a trait object built
+/// elsewhere goes past it. That is the same limit `SHARED_STATE` states about
+/// itself, and it is worth stating rather than pretending is closed: this
+/// catches the construct being written, not every possible spelling of it.
+fn callback_findings(rel: &str, text: &str) -> Vec<String> {
+    /// Spellings of "call this later", and what each one is.
+    const SHAPES: &[(&str, &str)] = &[
+        ("dyn Fn", "a boxed closure is a callback with a vtable"),
+        ("impl Fn", "an interface taking a closure is an interface delivering asynchronously"),
+        ("extern \"C\" fn", "a function pointer across the ABI is a callback the peer installs"),
+        ("callback", "named as one"),
+        ("register_handler", "installing a handler is installing a callback"),
+        ("on_event", "an event hook is a delivery this system does not have"),
+    ];
+
+    let mut findings = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let code = line.split("//").next().unwrap_or("");
+        // Public surface only. A closure inside an implementation is an
+        // ordinary closure; what R05 is about is what an *interface* offers.
+        if !code.contains("pub ") {
+            continue;
+        }
+        for (shape, why) in SHAPES {
+            if code.contains(shape) {
+                findings.push(format!("  {rel}:{}  `{shape}` — {why}", index + 1));
+            }
+        }
+    }
+    findings
+}
+
+/// R09. Every headline claim names the subsystem that owns it.
+///
+/// Energy was in the first paragraph of the thesis and had no owning subsystem
+/// across five design documents, which is how half a claim goes missing without
+/// anybody deciding to drop it. A claim with an owner is a claim somebody can
+/// be asked about.
+///
+/// The owning document is required to *exist*, because a citation nobody can
+/// follow is the failure wearing the fix's clothes.
+fn claim_owner_findings(rel: &str, text: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+
+    let Some(document) = toml_field(text, "document") else {
+        findings
+            .push(format!("  {rel}  no [owner] document — R09, every claim names what owns it"));
+        return findings;
+    };
+    if toml_field(text, "section").is_none() {
+        findings.push(format!("  {rel}  [owner] names a document but no section"));
+    }
+    if !root().join(&document).exists() {
+        findings.push(format!("  {rel}  [owner] cites {document}, which does not exist"));
+    }
+    findings
+}
+
+/// R03, over the one crate whose layout is load-bearing against code we do not
+/// control.
+fn lint_units() -> Result<(), String> {
+    let mut findings = Vec::new();
+    for path in rust_sources()? {
+        let rel = relative(&path);
+        if !rel.starts_with("abi/") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+        findings.extend(unit_findings(&rel, &text));
+    }
+
+    if findings.is_empty() {
+        println!("lint-units: ok  (every public abi field states a unit)");
+        return Ok(());
+    }
+    Err(format!(
+        "{} public field(s) in abi/ state no unit:\n{}\n\n\
+         R03: every quantity crossing the ABI states its unit, its epoch and its\n\
+         zero. `deadline: u64` shipped with none of the three, in the one crate\n\
+         whose whole purpose is to be correct against somebody else's code.\n\n\
+         Add `Unit: <what>` to the doc comment. A field that is an identifier\n\
+         rather than a quantity says `Unit: none` and why — that is a claim\n\
+         worth making out loud rather than a hole worth leaving.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// R05, over the interface crates.
+fn lint_callbacks() -> Result<(), String> {
+    let mut findings = Vec::new();
+    for path in rust_sources()? {
+        let rel = relative(&path);
+        // The crates that define what a peer may ask for. `env/` is excluded
+        // deliberately: `Env` is a trait the *system* implements and calls into,
+        // which is dependency injection rather than delivery, and a rule that
+        // could not tell the two apart would be a rule nobody could satisfy.
+        if !(rel.starts_with("abi/") || rel.starts_with("ring/")) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+        findings.extend(callback_findings(&rel, &text));
+    }
+
+    if findings.is_empty() {
+        println!("lint-callbacks: ok  (no interface registers a callback)");
+        return Ok(());
+    }
+    Err(format!(
+        "{} interface(s) deliver asynchronously:\n{}\n\n\
+         R05: every event is a ring entry drained at a polling point. That is what\n\
+         keeps the determinism contract whole, and it is why this system never\n\
+         needs the concept of async-signal-safety.\n\n\
+         The replacement is an opcode and a completion, not a smaller callback.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// R09, over the registry.
+fn lint_claim_owners() -> Result<(), String> {
+    let mut findings = Vec::new();
+    let files = claim_files()?;
+    for path in &files {
+        let rel = relative(path);
+        let text = std::fs::read_to_string(path).map_err(|e| format!("reading {rel}: {e}"))?;
+        findings.extend(claim_owner_findings(&rel, &text));
+    }
+
+    if findings.is_empty() {
+        println!("lint-claim-owners: ok  ({} claim(s) name an owner)", files.len());
+        return Ok(());
+    }
+    Err(format!(
+        "{} claim(s) name no owner:\n{}\n\n\
+         R09: every headline claim names the subsystem that owns it. Energy was in\n\
+         the first paragraph of the thesis and had no owning subsystem across five\n\
+         design documents — which is how half a claim goes missing without anybody\n\
+         deciding to drop it.\n\n\
+         Add an [owner] table naming a document that exists and a section in it.",
+        findings.len(),
+        findings.join("\n")
+    ))
 }
 
 fn lint_determinism() -> Result<(), String> {
@@ -1737,6 +2486,649 @@ fn toml_field(text: &str, key: &str) -> Option<String> {
     })
 }
 
+/// One line of the release manifest.
+struct Content {
+    /// What the release contract calls it.
+    name: &'static str,
+    /// Where it comes from, when it exists.
+    source: ContentSource,
+    /// The task that produces it, when it does not exist yet.
+    owed_to: Option<&'static str>,
+}
+
+/// Where a manifest entry's content comes from.
+enum ContentSource {
+    /// A file in the tree.
+    File(&'static str),
+    /// Every file under a directory with this extension.
+    Tree(&'static str, &'static str),
+    /// Produced by the build rather than read from the tree.
+    Built(&'static str),
+    /// Nothing produces it yet.
+    Absent,
+}
+
+/// The eight things a release contains.
+///
+/// In the order `docs/the-long-plan.html` section 08 lists them, and named the
+/// way it names them, so the table there and this list can be read against each
+/// other. An entry disappearing from one and not the other is the failure this
+/// ordering exists to make obvious.
+const CONTENTS: &[Content] = &[
+    Content {
+        name: "the source, at a tag",
+        source: ContentSource::Built("git archive of HEAD"),
+        owed_to: None,
+    },
+    Content {
+        name: "the claims snapshot",
+        source: ContentSource::File("claims/snapshot.json"),
+        owed_to: None,
+    },
+    Content {
+        name: "the baseline configuration",
+        source: ContentSource::Absent,
+        owed_to: Some(
+            "E1-D06. claims/0001 names `linux-6.x-tuned` in prose, which is exactly \
+             the decay the contract warns about: prose ages into a stock \
+             comparison without anybody deciding it should, because prose \
+             cannot be re-run",
+        ),
+    },
+    Content {
+        name: "the seed corpus and scenario set",
+        source: ContentSource::Absent,
+        owed_to: Some("E1-P01, the deterministic simulator, and E1-P03's sweeps"),
+    },
+    Content {
+        name: "a content-addressed system image",
+        source: ContentSource::Built("target/<target>/debug/f-kernel.elf32"),
+        owed_to: None,
+    },
+    Content {
+        name: "the dependency manifest and provenance",
+        source: ContentSource::File("Cargo.lock"),
+        owed_to: None,
+    },
+    Content {
+        name: "the honest-status page",
+        source: ContentSource::File("docs/TESTING-STATUS.md"),
+        owed_to: None,
+    },
+    Content {
+        name: "the decision record",
+        source: ContentSource::Tree("docs/rfc", "md"),
+        owed_to: None,
+    },
+];
+
+/// `sha256sum`, when the machine has it.
+///
+/// Not a hard requirement and not vendored. The release *package* is content
+/// addressed and E0-R01 owns producing it; what this command needs a hash for
+/// is to show that the image it would ship is a specific one. A machine without
+/// coreutils gets the manifest with the hash column absent and a line saying
+/// why, which is more useful than either refusing to run or growing a hash
+/// implementation in the build tooling.
+fn sha256(path: &Path) -> Option<String> {
+    let out = Command::new("sha256sum").arg(path).current_dir(root()).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()?.split_whitespace().next().map(str::to_string)
+}
+
+fn release(dry_run: bool) -> Result<(), String> {
+    if !dry_run {
+        return Err("`cargo xtask release` builds the package, and that is E0-R01.\n\n\
+             What exists today is `cargo xtask release --dry-run`, which prints the\n\
+             manifest this would produce and names the task owing each missing\n\
+             piece. RELEASING.md states the contract the package has to satisfy."
+            .into());
+    }
+
+    // Not `unwrap_or("unknown")`, which is what these two were. The version and
+    // the commit are the only fields saying *which tree this is*; a manifest
+    // printing `unknown` for both is not a degraded manifest, it is a confident
+    // statement about nothing. That degradation was live rather than
+    // theoretical — git refuses a container's foreign-owned working tree, so
+    // this job would have printed a clean-looking manifest for an unidentified
+    // tree, and passed.
+    let identify = |what: &str, args: &[&str]| {
+        capture("git", args).map(|out| out.trim().to_string()).map_err(|e| {
+            format!(
+                "cannot read the {what} from git: {e}\n\n\
+                 A release manifest names the tree it describes, so this is fatal rather \
+                 than `unknown`.\n\
+                 In a container this is usually git refusing a working tree owned by \
+                 another uid. docker/Dockerfile marks the tree safe; an image built \
+                 before that does not."
+            )
+        })
+    };
+    let describe = identify("version", &["describe", "--tags", "--always", "--dirty"])?;
+    let commit = identify("commit", &["rev-parse", "HEAD"])?;
+
+    println!("release manifest (dry run)\n");
+    println!("  version   {describe}");
+    println!("  commit    {commit}");
+    println!("  contract  RELEASING.md\n");
+
+    let mut missing = 0usize;
+    for content in CONTENTS {
+        match &content.source {
+            ContentSource::File(path) => {
+                let full = root().join(path);
+                if full.exists() {
+                    let size = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+                    let hash = sha256(&full).unwrap_or_else(|| "-".into());
+                    println!("  [ok]  {:<36} {path}", content.name);
+                    println!("        {size} bytes  sha256 {}", &hash[..hash.len().min(16)]);
+                } else {
+                    missing += 1;
+                    println!("  [--]  {:<36} {path} does not exist", content.name);
+                }
+            }
+            ContentSource::Tree(dir, extension) => {
+                let count = std::fs::read_dir(root().join(dir))
+                    .map(|entries| {
+                        entries
+                            .filter_map(Result::ok)
+                            .filter(|e| e.path().extension().is_some_and(|x| x == *extension))
+                            .count()
+                    })
+                    .unwrap_or(0);
+                if count == 0 {
+                    missing += 1;
+                    println!("  [--]  {:<36} {dir}/ is empty", content.name);
+                } else {
+                    println!("  [ok]  {:<36} {dir}/  {count} file(s)", content.name);
+                }
+            }
+            ContentSource::Built(how) => {
+                println!("  [ok]  {:<36} built: {how}", content.name);
+            }
+            ContentSource::Absent => {
+                missing += 1;
+                println!("  [--]  {:<36} nothing produces this yet", content.name);
+                if let Some(owed) = content.owed_to {
+                    println!("        owed to {owed}");
+                }
+            }
+        }
+    }
+
+    println!("\n  {} of {} contents present", CONTENTS.len() - missing, CONTENTS.len());
+
+    // The gates, listed rather than run. Running `verify` from inside a dry run
+    // would make a manifest print cost a full boot, and the point of this
+    // command is that it is cheap enough to run while thinking.
+    println!(
+        "\nwhat would stop this release (RELEASING.md, and not checked here):\n\
+        \x20 1. `cargo xtask verify` not green\n\
+        \x20 2. a gating claim red, or a claim with no reproduction from a clean checkout\n\
+        \x20 3. a document number `cargo xtask lint` cannot trace to the registry\n\
+        \x20 4. docs/TESTING-STATUS.md not re-read against the tree\n\
+        \x20 5. an RFC reversed this cycle that was edited rather than superseded"
+    );
+
+    if missing > 0 {
+        println!(
+            "\nThis is not yet a releasable package, and the missing rows say why.\n\
+             E0-R01 builds it; E0-R04 is release 0.1."
+        );
+    }
+    Ok(())
+}
+
+/// The measurement history.
+///
+/// # Why a file in the tree, and why `main` writes it
+///
+/// The task this satisfies asks for a history that survives a rebase, and that
+/// requirement rules out the obvious design. A history every branch appends to
+/// conflicts on every rebase — each side has added a line at the end of the
+/// same file — and worse, a rebase *rewrites* the commits those lines name, so
+/// the surviving history refers to objects that no longer exist.
+///
+/// So branches do not write it. `cargo xtask history append` is run by the
+/// post-merge job on `main`, against a commit that is already permanent. A
+/// feature branch can be rebased any number of times without touching this
+/// file, because it never had a line in it to conflict over.
+///
+/// The cost, stated: a measurement taken on a branch is not in the history
+/// until that branch merges. That is the right way round — a number from a
+/// commit that was later rewritten is a number about a tree nobody has.
+fn history_path() -> PathBuf {
+    root().join("claims").join("history.jsonl")
+}
+
+/// The schema version of a history line.
+///
+/// Written into every record because this file is meant to be read years later
+/// by change-point detection that does not exist yet, and the one thing such a
+/// reader cannot recover is what an old line meant. Bumping this is how a
+/// format change stays readable rather than silently reinterpreted.
+const HISTORY_SCHEMA: u32 = 1;
+
+fn history() -> Result<(), String> {
+    let path = history_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("history: nothing recorded yet ({})", relative(&path));
+        println!(
+            "\n`cargo xtask history append` writes one record for the current commit.\n\
+             It is run by CI on main, not on a branch: see the note in xtask."
+        );
+        return Ok(());
+    };
+
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    println!("history: {} record(s) in {}", lines.len(), relative(&path));
+    for line in lines.iter().rev().take(10).rev() {
+        println!("  {line}");
+    }
+    if lines.len() > 10 {
+        println!("  … {} earlier record(s)", lines.len() - 10);
+    }
+    println!(
+        "\nAppend-only. Change-point detection at phase 02 reads this; until then\n\
+         its job is to exist from the first measurement rather than from the\n\
+         first time somebody wants a trend."
+    );
+    Ok(())
+}
+
+/// Append one record for the current commit.
+fn history_append() -> Result<(), String> {
+    let commit = capture("git", &["rev-parse", "HEAD"])?.trim().to_string();
+
+    // What this run was actually allowed to record. A history that stored
+    // refused measurements as zeroes or as absent-without-comment would be a
+    // history whose gaps are unreadable later, and the gaps are the part a
+    // change-point detector most needs to not trip over.
+    let environment = std::env::var("F_ENVIRONMENT").unwrap_or_else(|_| "unset".into());
+
+    let mut record = format!(
+        "{{\"schema\":{HISTORY_SCHEMA},\"commit\":\"{commit}\",\"environment\":\"{environment}\""
+    );
+
+    // Coverage, when this run produced it. Not a timing measurement, so no
+    // environment refuses it — a line count is the same on any machine, which
+    // is exactly why it is the one thing a shared CI runner can contribute.
+    let coverage = target_dir().join("coverage").join("summary.json");
+    match std::fs::read_to_string(&coverage) {
+        Ok(text) => {
+            let percent = text
+                .split("\"total\"")
+                .nth(1)
+                .and_then(|rest| rest.split("\"percent\":").nth(1))
+                .and_then(|rest| rest.split('}').next())
+                .map(|value| value.trim().to_string());
+            match percent {
+                Some(percent) => record.push_str(&format!(",\"coverage_percent\":{percent}")),
+                None => record.push_str(",\"coverage_percent\":null"),
+            }
+        }
+        Err(_) => record.push_str(",\"coverage_percent\":null"),
+    }
+
+    // Every distribution this run was permitted to write. In a refusing
+    // environment there are none, and the record says so by carrying an empty
+    // list rather than by being absent.
+    let mut claims: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root().join("claims")) {
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.to_string_lossy().ends_with(".local.jsonl"))
+            .collect();
+        files.sort();
+        for path in files {
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            // The header line, which carries the summary. The bucket lines stay
+            // in the local file: a history that inlined every distribution
+            // would be megabytes of a file whose whole value is being readable.
+            if let Some(header) = text.lines().next() {
+                claims.push(header.to_string());
+            }
+        }
+    }
+    record.push_str(&format!(",\"claims\":[{}]}}\n", claims.join(",")));
+
+    let path = history_path();
+    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        existing.push('\n');
+    }
+    existing.push_str(&record);
+    std::fs::write(&path, existing).map_err(|e| format!("writing {}: {e}", relative(&path)))?;
+
+    print!("appended to {}:\n  {record}", relative(&path));
+    if claims.is_empty() {
+        println!(
+            "\nNo distributions in this record. `{environment}` is not a measurement\n\
+             environment, so nothing timing-related was permitted to be written —\n\
+             E0-P15. The record still exists, because a gap that is stated is\n\
+             something a trend can reason about and a gap that is missing is not."
+        );
+    }
+    Ok(())
+}
+
+/// Where the machine-readable snapshot of the registry is written.
+///
+/// In `claims/` beside the entries rather than in the build directory: it is a
+/// statement about the registry, and `cargo clean` should not be able to delete
+/// the answer to "what did this commit claim". It is generated, so it is
+/// regenerated rather than edited, and `xtask lint` fails when it is stale.
+fn snapshot_path() -> PathBuf {
+    root().join("claims").join("snapshot.json")
+}
+
+/// Every claim file, in registry order.
+fn claim_files() -> Result<Vec<PathBuf>, String> {
+    let dir = root().join("claims");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("reading claims/: {e}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "toml"))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+/// A claim's `name`, which is the key everything else refers to it by.
+fn claim_name(text: &str, path: &Path) -> String {
+    toml_field(text, "name")
+        .unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().to_string())
+}
+
+/// One value out of a claim file, addressed the way a document refers to it.
+///
+/// Two shapes, because the registry has two. A bare key is a top-level scalar —
+/// `status`, `milestone`. A dotted key is a threshold bound:
+/// `threshold.ns_per_op_p99.max` reads `max` out of
+/// `ns_per_op_p99 = { max = 50 }` under `[threshold]`.
+///
+/// Not a TOML parser, and the same caveat as everywhere else in this file: it
+/// reads the shape these files are written in. What makes that safe here is
+/// that a reference which does not resolve is an error rather than an empty
+/// string — a document rendering a blank where a number should be is the one
+/// outcome this whole mechanism exists to prevent.
+fn claim_value(text: &str, key: &str) -> Option<String> {
+    let mut parts = key.split('.');
+    let head = parts.next()?;
+    let rest: Vec<&str> = parts.collect();
+
+    if rest.is_empty() {
+        return toml_field(text, head);
+    }
+    if rest.len() != 2 {
+        return None;
+    }
+
+    // Find the `[head]` table, then the `rest[0] = { ... }` line inside it.
+    let mut in_table = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_table = trimmed == format!("[{head}]");
+            continue;
+        }
+        if !in_table {
+            continue;
+        }
+        let Some((lhs, rhs)) = trimmed.split_once('=') else { continue };
+        if lhs.trim() != rest[0] {
+            continue;
+        }
+        // `{ max = 50 }` — one inline table, one bound per side.
+        let inner = rhs.trim().trim_start_matches('{').trim_end_matches('}');
+        for entry in inner.split(',') {
+            let Some((bound, value)) = entry.split_once('=') else { continue };
+            if bound.trim() == rest[1] {
+                return Some(value.trim().trim_matches('"').replace('_', ""));
+            }
+        }
+    }
+    None
+}
+
+/// The registry, as one JSON object per claim.
+///
+/// Emitted whenever `xtask claims` runs, so the snapshot cannot be older than
+/// the last time anybody looked at the registry.
+fn write_snapshot() -> Result<PathBuf, String> {
+    let path = snapshot_path();
+    let out = snapshot_text()?;
+    std::fs::write(&path, out).map_err(|e| format!("writing {}: {e}", relative(&path)))?;
+    Ok(path)
+}
+
+/// The snapshot the registry currently implies, as bytes, without writing it.
+///
+/// Split out so that the question *is the committed file current* can be asked
+/// without answering it by overwriting the evidence.
+fn snapshot_text() -> Result<String, String> {
+    let mut out = String::from("{\n  \"claims\": [\n");
+    let files = claim_files()?;
+
+    for (i, path) in files.iter().enumerate() {
+        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let comma = if i + 1 == files.len() { "" } else { "," };
+        let field = |key: &str| claim_value(&text, key).unwrap_or_else(|| "unknown".into());
+        out.push_str(&format!(
+            "    {{ \"name\": \"{}\", \"status\": \"{}\", \"milestone\": \"{}\", \
+             \"file\": \"{}\" }}{comma}\n",
+            claim_name(&text, path),
+            field("status"),
+            field("milestone"),
+            relative(path),
+        ));
+    }
+    out.push_str("  ]\n}\n");
+    Ok(out)
+}
+
+/// Fail if `claims/snapshot.json` is not what the registry currently implies.
+///
+/// # Why this is a lint and not a line of CI shell
+///
+/// It was a line of CI shell — `git diff --quiet -- claims/snapshot.json` — and
+/// it went red for a reason that had nothing to do with the snapshot. Inside a
+/// container git refuses a working tree owned by another uid, and `git diff` is
+/// one of the few commands that tolerates running outside a repository at all,
+/// so it reports that refusal as *warning: Not a git repository* and exits
+/// non-zero. The gate then said the snapshot was stale. It was byte-identical.
+/// A check that reports the wrong failure is worse than no check, because the
+/// reader spends their time on the file the message named.
+///
+/// Comparing the bytes needs no repository, no ownership and no second tool. It
+/// also runs on a laptop, which the shell conditional never did: it was a rule
+/// only CI could apply, and a rule you cannot run before pushing is one you
+/// find out about from a red build.
+fn lint_snapshot() -> Result<(), String> {
+    let path = snapshot_path();
+    let expected = snapshot_text()?;
+    let actual =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+
+    // Compared with CR stripped. `.gitattributes` commits this file `eol=lf`,
+    // but a checkout that ignored that should fail on the claim that changed
+    // rather than on every line at once.
+    if expected.replace('\r', "") == actual.replace('\r', "") {
+        println!("lint-snapshot: ok  ({} is current)", relative(&path));
+        return Ok(());
+    }
+
+    let mut report = format!(
+        "{} does not match claims/.\n\nA committed snapshot that disagrees with the \
+         registry is a commit publishing numbers the tree does not hold.\n",
+        relative(&path)
+    );
+    for (n, (want, have)) in expected.lines().zip(actual.lines()).enumerate() {
+        if want != have {
+            let line = n + 1;
+            report.push_str(&format!(
+                "\n  line {line}\n    registry: {want}\n    file:     {have}\n"
+            ));
+        }
+    }
+    let (want, have) = (expected.lines().count(), actual.lines().count());
+    if want != have {
+        report.push_str(&format!("\n  the registry implies {want} line(s), the file has {have}\n"));
+    }
+    report.push_str("\nRun `cargo xtask claims` and commit the result.");
+    Err(report)
+}
+
+/// A reference to a claim value, found in a document.
+struct Reference {
+    /// Which document, for the message.
+    file: String,
+    /// `<claim>:<key>`, verbatim, for the message.
+    key: String,
+    /// What the document currently says.
+    rendered: String,
+    /// What the registry says.
+    actual: String,
+}
+
+/// Every `data-claim` reference in `docs/`, resolved against the registry.
+///
+/// # Why a placeholder and not a build step that generates the whole page
+///
+/// Because the documents are written by hand and should stay that way. What is
+/// wrong with a restated number is not that prose contains numbers, it is that
+/// nothing connects the two — so a claim can go red, or move, and the sentence
+/// arguing from it stays confidently in place. A marked span is the smallest
+/// thing that creates the connection: the prose is still prose, and the number
+/// in it has an owner.
+fn claim_references() -> Result<Vec<Reference>, String> {
+    // name -> file text, read once.
+    let mut registry: BTreeMap<String, String> = BTreeMap::new();
+    for path in claim_files()? {
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        registry.insert(claim_name(&text, &path), text);
+    }
+
+    let mut found = Vec::new();
+    for path in documents()? {
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let file = relative(&path);
+
+        for (key, rendered) in spans(&text) {
+            let (claim, field) = key
+                .split_once(':')
+                .ok_or_else(|| format!("{file}: data-claim=\"{key}\" is not <claim>:<key>"))?;
+            let source = registry
+                .get(claim)
+                .ok_or_else(|| format!("{file}: data-claim=\"{key}\" names no claim in claims/"))?;
+            let actual = claim_value(source, field).ok_or_else(|| {
+                format!("{file}: data-claim=\"{key}\" resolves to nothing in {claim}")
+            })?;
+            found.push(Reference { file: file.clone(), key: key.clone(), rendered, actual });
+        }
+    }
+    Ok(found)
+}
+
+/// Every `<span data-claim="...">text</span>` in a document, as key and text.
+fn spans(text: &str) -> Vec<(String, String)> {
+    const OPEN: &str = "<span data-claim=\"";
+    let mut out = Vec::new();
+    for piece in text.split(OPEN).skip(1) {
+        let Some((key, rest)) = piece.split_once('"') else { continue };
+        let Some(rest) = rest.split_once('>').map(|(_, r)| r) else { continue };
+        let Some((rendered, _)) = rest.split_once("</span>") else { continue };
+        out.push((key.to_string(), rendered.to_string()));
+    }
+    out
+}
+
+/// The documents that may cite a claim.
+fn documents() -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    for dir in [root().join("docs"), root().join("docs").join("design")] {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "html") {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// Rewrite every `data-claim` span to the value the registry holds.
+fn render_claims() -> Result<(), String> {
+    let stale: Vec<Reference> =
+        claim_references()?.into_iter().filter(|r| r.rendered != r.actual).collect();
+
+    if stale.is_empty() {
+        println!("claims render: nothing to do — every citation already matches the registry");
+        return Ok(());
+    }
+
+    let mut by_file: BTreeMap<String, Vec<&Reference>> = BTreeMap::new();
+    for reference in &stale {
+        by_file.entry(reference.file.clone()).or_default().push(reference);
+    }
+
+    for (file, references) in &by_file {
+        let path = root().join(file);
+        let mut text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        for reference in references {
+            let from =
+                format!("<span data-claim=\"{}\">{}</span>", reference.key, reference.rendered);
+            let to = format!("<span data-claim=\"{}\">{}</span>", reference.key, reference.actual);
+            text = text.replace(&from, &to);
+            println!("  {file}  {}  {} -> {}", reference.key, reference.rendered, reference.actual);
+        }
+        std::fs::write(&path, text).map_err(|e| format!("writing {file}: {e}"))?;
+    }
+
+    println!("\nrendered {} citation(s) from claims/", stale.len());
+    Ok(())
+}
+
+/// Fail if a document cites a claim value it no longer has.
+///
+/// This is the half that makes the mechanism worth having. Rendering on demand
+/// would let a document sit stale until somebody remembered to re-render; a
+/// check in `lint` means changing a threshold and not re-rendering is a red
+/// build, which is the same discipline the determinism and licensing lints
+/// apply to their own policies.
+fn lint_claims() -> Result<(), String> {
+    let references = claim_references()?;
+    let stale: Vec<&Reference> = references.iter().filter(|r| r.rendered != r.actual).collect();
+
+    if stale.is_empty() {
+        println!("lint-claims: ok  ({} citation(s) match the registry)", references.len());
+        return Ok(());
+    }
+
+    let mut report = String::new();
+    for reference in &stale {
+        report.push_str(&format!(
+            "  {}  {}\n    document says {}, claims/ says {}\n",
+            reference.file, reference.key, reference.rendered, reference.actual
+        ));
+    }
+    Err(format!(
+        "{} document citation(s) disagree with the registry:\n{report}\n\
+         A number in a design document is not allowed to be a second copy of a\n\
+         claim. Run `cargo xtask claims --render` to bring them back into line —\n\
+         and if the document was right and the claim is wrong, change the claim,\n\
+         because that is the file with the baseline and the reproduction in it.",
+        stale.len()
+    ))
+}
+
 fn claims_list() -> Result<(), String> {
     let dir = root().join("claims");
     let mut found: BTreeMap<String, String> = BTreeMap::new();
@@ -1762,6 +3154,14 @@ fn claims_list() -> Result<(), String> {
     for (name, status) in &found {
         println!("  {name:<32} {status}");
     }
+
+    // Written every time the registry is listed, so the snapshot cannot be
+    // older than the last time anybody looked. A snapshot regenerated only on
+    // request is a snapshot that is stale exactly when it matters.
+    let snapshot = write_snapshot()?;
+    let citations = claim_references()?;
+    println!("\nsnapshot  {}", relative(&snapshot));
+    println!("cited     {} time(s) in docs/, checked by `cargo xtask lint`", citations.len());
     println!("\nEvery number published in docs/design must correspond to an entry here.");
     Ok(())
 }
@@ -1771,6 +3171,76 @@ fn claims_list() -> Result<(), String> {
 /// A `pending` claim runs its workload and reports, but does not gate — the
 /// distinction matters, because a number produced before the machinery it
 /// describes exists is a sanity check, not evidence.
+/// How many boots claim `boot-to-m0` averages over.
+///
+/// Matches `repeat` in `claims/0003-boot-to-m0.toml`, and is stated in both
+/// places because they are different kinds of statement: the claim says what
+/// the number means, this says what the command does. A mismatch is a claim
+/// describing a run nobody performed, so the command checks.
+const BOOT_SAMPLES: u64 = 10;
+
+/// Claim `boot-to-m0`: ten boots, one observation each.
+///
+/// The measurement is taken *inside* the kernel and printed only when asked
+/// for, which is the same shape `timer=` already has and for the same reason.
+/// The boot log is a fixture — two runs of a commit produce the same bytes, and
+/// that is asserted — so a duration in it would destroy the one contract M0
+/// makes. `boottime` is therefore a parameter, and a run carrying it is not a
+/// fixture run.
+fn claim_boot_to_m0() -> Result<(), String> {
+    let mut sample = f_bench::Sample::new("boot-to-m0");
+
+    for i in 0..BOOT_SAMPLES {
+        // Not captured-and-printed for every boot: ten full boot logs is two
+        // hundred lines of the same thing, and the line being looked for would
+        // be lost in it. `machine_with`'s capture is what makes the parse
+        // possible; the printing is what this suppresses.
+        let (ending, log) = machine_quiet(Some("boottime"))?;
+        match ending {
+            Ending::Exited(33) => {}
+            other => {
+                print!("{log}");
+                return Err(format!("boot {} of {BOOT_SAMPLES} {other}; expected 33", i + 1));
+            }
+        }
+
+        let nanos = boot_nanos(&log).ok_or_else(|| {
+            format!(
+                "boot {} of {BOOT_SAMPLES} reached M0 and reported no boot time\n\n\
+                 The kernel prints `boot time  <n> ns to M0` only when the command\n\
+                 line carries `boottime`. If the line is missing entirely, the\n\
+                 parameter is not reaching the kernel; if it says `unavailable`,\n\
+                 the timestamp counter was never calibrated on this boot.",
+                i + 1
+            )
+        })?;
+        sample.latency.record(nanos);
+        println!("  boot {:>2} of {BOOT_SAMPLES}   {nanos:>12} ns", i + 1);
+    }
+
+    println!();
+    sample.report();
+
+    match sample.persist(&root().join("claims")) {
+        Ok(path) => println!("\nfull distribution written to {}", relative(&path)),
+        Err(e) => println!("\nnot recorded: {e}"),
+    }
+    Ok(())
+}
+
+/// The nanosecond count from a boot log that was asked for one.
+///
+/// Reads the line the kernel writes and nothing else. A log that does not carry
+/// it gives `None` rather than a zero, because a zero here would be a boot that
+/// took no time — a number, and a wrong one, where the honest answer is that
+/// there is no number.
+fn boot_nanos(log: &str) -> Option<u64> {
+    log.lines()
+        .find_map(|line| line.trim().strip_prefix("boot time"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+}
+
 fn claim_run(name: Option<&str>) -> Result<(), String> {
     let Some(name) = name else {
         return Err("usage: cargo xtask claim <name>   (see `cargo xtask claims`)".into());
@@ -1794,23 +3264,49 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
     println!("status    {status}");
     println!("milestone {milestone}");
     println!("baseline  {}", field("system").unwrap_or_else(|| "unset".into()));
+    println!("runner    {}", field("runner").unwrap_or_else(|| "unset".into()));
     println!();
 
-    // The workload binary is named after the claim, minus the registry prefix.
-    let bin = name.replace('-', "_");
-    let bin = bin.strip_prefix("ring_submit_latency").map_or(bin.clone(), |_| "ring_submit".into());
+    // Not every claim's workload is a benchmark binary. `boot-to-m0` measures
+    // the kernel booting, which is a boot rather than a program — and the
+    // measurement is taken inside the kernel because nothing outside it can see
+    // where boot begins. Dispatching on the name keeps `cargo xtask claim
+    // <name>` as the one reproduction command the registry publishes,
+    // regardless of what the workload turns out to be.
+    if name == "boot-to-m0" {
+        claim_boot_to_m0()?;
+    } else {
+        // The workload binary is named after the claim, minus the registry prefix.
+        let bin = name.replace('-', "_");
+        let bin =
+            bin.strip_prefix("ring_submit_latency").map_or(bin.clone(), |_| "ring_submit".into());
+        sh("cargo", &["run", "--release", "-p", "f-bench", "--bin", &bin])?;
+    }
 
-    sh("cargo", &["run", "--release", "-p", "f-bench", "--bin", &bin])?;
-
+    // The harness itself refuses in a non-measurement environment and says so
+    // in its own output — `f_bench::Environment`, E0-P15. Repeating the
+    // decision here would be a second copy of a rule that has to hold in one
+    // place, so this only names where the decision was taken.
     match status.as_str() {
         "gating" => {
-            println!("\nthis claim gates the build; a regression here fails CI");
+            println!(
+                "\nthis claim gates the build; a regression here fails CI — but only\n\
+                 where the run was permitted to record. A refusal above is not a pass."
+            );
             Ok(())
         }
         "pending" => {
             println!(
                 "\nstatus is `pending`: the workload ran, but the machinery this\n\
                  claim describes does not exist yet. Not evidence. Not gating."
+            );
+            Ok(())
+        }
+        "tracked" => {
+            println!(
+                "\nstatus is `tracked`: recorded and watched, and it does not gate.\n\
+                 A tracked number exists so that a change nobody intended is visible;\n\
+                 promoting it to `gating` is a decision, taken in a reviewable diff."
             );
             Ok(())
         }
@@ -1836,25 +3332,299 @@ fn bench(name: Option<&str>) -> Result<(), String> {
 /// worthless, and adding instrumentation to a mature kernel is painful — it
 /// costs almost nothing while the kernel is two thousand lines.
 /// See `docs/design/proving-ground.html` layer 4.
+/// The crates whose host tests carry the coverage measurement.
+///
+/// Not the kernel: it has no host harness at all — `kernel/Cargo.toml` says
+/// why — and not `xtask`, which is the tooling rather than the system.
+const COVERED: [&str; 4] = ["f-abi", "f-env", "f-ring", "f-bench"];
+
+/// One crate's share of the coverage report.
+struct CrateCoverage {
+    name: String,
+    lines: u64,
+    missed: u64,
+}
+
+impl CrateCoverage {
+    fn percent(&self) -> f64 {
+        if self.lines == 0 {
+            100.0
+        } else {
+            (self.lines - self.missed) as f64 * 100.0 / self.lines as f64
+        }
+    }
+}
+
+/// Host tests under coverage instrumentation, reported per crate.
+///
+/// Every tool this uses comes from the pinned toolchain's own sysroot, the same
+/// way [`llvm_tool`] takes the linker and `objcopy`. That is the whole reason
+/// `cargo-llvm-cov` is not required here: a coverage number produced by a tool
+/// installed separately is a number whose version nobody pinned, and this
+/// repository has a container specifically to stop that. It also keeps this
+/// command working in the `dev` image rather than only in `full`.
 fn coverage() -> Result<(), String> {
+    let profdata = llvm_tool("llvm-profdata")?;
+    let llvm_cov = llvm_tool("llvm-cov")?;
+
+    // Absolute, because this is read by each *test binary* and resolved against
+    // that binary's own working directory rather than by cargo against the
+    // workspace. A relative path here scatters profiles into whichever crate
+    // directory the harness ran in — see `target_dir`.
+    let profiles = target_dir().join("coverage");
+
+    // A stale profile from an earlier build measures code that is no longer
+    // there, and `llvm-profdata` merges it in without complaint. The directory
+    // is rebuilt rather than added to.
+    if profiles.exists() {
+        std::fs::remove_dir_all(&profiles)
+            .map_err(|e| format!("clearing {}: {e}", relative(&profiles)))?;
+    }
+    std::fs::create_dir_all(&profiles)
+        .map_err(|e| format!("creating {}: {e}", relative(&profiles)))?;
+
+    let mut args: Vec<&str> = vec!["test"];
+    for name in COVERED {
+        args.push("-p");
+        args.push(name);
+    }
+
+    // Set on every cargo invocation below, not just the first. A second
+    // invocation without it is a *different* build with a different fingerprint,
+    // so cargo would rebuild everything uninstrumented and then report those
+    // binaries — objects with no counters in them, against a profile that has
+    // them, which llvm-cov reports as zero coverage rather than as an error.
+    let instrument: [(&str, &str); 1] = [("RUSTFLAGS", "-Cinstrument-coverage")];
+
     println!("running host tests with coverage instrumentation");
     let status = Command::new("cargo")
-        .args(["test", "-p", "f-abi", "-p", "f-env", "-p", "f-ring", "-p", "f-bench"])
-        .env("RUSTFLAGS", "-Cinstrument-coverage")
-        .env("LLVM_PROFILE_FILE", "target/coverage/f-%p-%m.profraw")
+        .args(&args)
+        .envs(instrument)
+        .env("LLVM_PROFILE_FILE", profiles.join("f-%p-%m.profraw"))
         .current_dir(root())
         .status()
         .map_err(|e| format!("could not run cargo: {e}"))?;
-
     if !status.success() {
         return Err("instrumented tests failed".into());
     }
+
+    // The same invocation with `--no-run`, which compiles nothing new and
+    // reports where the harness put each binary. `llvm-cov` needs the objects
+    // as well as the profile: a profile alone says which counters fired and not
+    // which source line they belong to.
+    let mut probe = args.clone();
+    probe.push("--no-run");
+    probe.push("--message-format=json");
+    let manifest = capture_with("cargo", &probe, &instrument)?;
+    let binaries = executables(&manifest);
+    if binaries.is_empty() {
+        return Err("cargo reported no test executables to measure".into());
+    }
+
+    let mut raw: Vec<PathBuf> = std::fs::read_dir(&profiles)
+        .map_err(|e| format!("reading {}: {e}", relative(&profiles)))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "profraw"))
+        .collect();
+    raw.sort();
+    if raw.is_empty() {
+        return Err(format!(
+            "no .profraw files in {}\n\n\
+             The tests ran but wrote no profiles, so the instrumented build did\n\
+             not take effect. Check that RUSTFLAGS is not already set in the\n\
+             environment or in a cargo config, which replaces rather than adds.",
+            relative(&profiles)
+        ));
+    }
+
+    let merged = profiles.join("f.profdata");
+    let mut merge = Command::new(&profdata);
+    merge.arg("merge").arg("-sparse");
+    for path in &raw {
+        merge.arg(path);
+    }
+    merge.arg("-o").arg(&merged);
+    let status = merge
+        .current_dir(root())
+        .status()
+        .map_err(|e| format!("could not run llvm-profdata: {e}"))?;
+    if !status.success() {
+        return Err("llvm-profdata could not merge the raw profiles".into());
+    }
+
+    let mut report = Command::new(&llvm_cov);
+    report.arg("report").arg(format!("--instr-profile={}", merged.display()));
+    for path in &binaries {
+        report.arg("-object").arg(path);
+    }
+    // The standard library and every dependency are not this project's code.
+    // `/tests/` is excluded for a sharper reason: an integration test measures
+    // its own execution and reports itself as covered, which raises the number
+    // without covering anything. The question being asked is how much of the
+    // library the tests reach.
+    report.arg("--ignore-filename-regex=(/rustc/|/.cargo/registry/|/tests/)");
+    let out =
+        report.current_dir(root()).output().map_err(|e| format!("could not run llvm-cov: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "llvm-cov could not produce a report: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let text =
+        String::from_utf8(out.stdout).map_err(|e| format!("llvm-cov printed non-UTF-8: {e}"))?;
+
+    let crates = summarise(&text)?;
+    if crates.is_empty() {
+        return Err(format!(
+            "llvm-cov reported no files belonging to this workspace\n\n\
+             It measured {} object(s) against {} profile(s), so the run itself\n\
+             happened. What failed is the mapping from a report row back to a\n\
+             crate directory — see `summarise`.",
+            binaries.len(),
+            raw.len()
+        ));
+    }
+
+    let lines: u64 = crates.iter().map(|c| c.lines).sum();
+    let missed: u64 = crates.iter().map(|c| c.missed).sum();
+    let total = CrateCoverage { name: "total".into(), lines, missed };
+
+    println!("\ncoverage — host tests, lines reached\n");
+    for c in &crates {
+        println!(
+            "  {:<10} {:>6.2}%   {:>5} of {:>5}",
+            c.name,
+            c.percent(),
+            c.lines - c.missed,
+            c.lines
+        );
+    }
+    println!("  ----------");
     println!(
-        "\nraw profiles in target/coverage/.\n\
-         Summarise with `cargo install cargo-llvm-cov` and `cargo llvm-cov report`.\n\
-         The fuzzing harness at phase 01 consumes the same instrumentation."
+        "  {:<10} {:>6.2}%   {:>5} of {:>5}",
+        total.name,
+        total.percent(),
+        lines - missed,
+        lines
+    );
+
+    let summary = profiles.join("summary.json");
+    std::fs::write(&summary, coverage_json(&crates, &total))
+        .map_err(|e| format!("writing {}: {e}", relative(&summary)))?;
+
+    println!(
+        "\nstored in {}, which is what CI keeps with the run.\n\
+         No threshold here on purpose: a coverage gate rewards tests written to\n\
+         touch lines rather than to catch anything, so this number is reported\n\
+         so a fall is visible. What gates is in claims/.",
+        relative(&summary)
     );
     Ok(())
+}
+
+/// Every `"executable"` in a stream of cargo JSON messages.
+///
+/// Read the way everything else in this file reads a structured format: for the
+/// one field it needs, in the shape the producer actually emits. `--no-run`
+/// prints one compact JSON object per line, and a test target's `executable` is
+/// a plain string containing no escape a path could need. A full parser here
+/// would be a dependency bought to skip a `split`. The same caveat applies as
+/// to `toml_field`: this is not a JSON parser, and the day something here needs
+/// one it needs a parser rather than a longer version of this.
+fn executables(stream: &str) -> Vec<PathBuf> {
+    let key = "\"executable\":\"";
+    let mut out: Vec<PathBuf> = Vec::new();
+    for line in stream.lines() {
+        let Some(rest) = line.split(key).nth(1) else { continue };
+        let Some(path) = rest.split('"').next() else { continue };
+        if path.is_empty() || path == "null" {
+            continue;
+        }
+        let path = PathBuf::from(path);
+        if !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Fold `llvm-cov report`'s per-file rows into one row per crate.
+///
+/// The crate is the first path component, which is true of every crate in this
+/// workspace — and checked rather than assumed. A row whose first component is
+/// not a directory with a `Cargo.toml` in it came from somewhere else and is
+/// skipped, so a change to the layout shows up as a crate going missing from
+/// the report rather than as a plausible wrong number.
+fn summarise(report: &str) -> Result<Vec<CrateCoverage>, String> {
+    let mut out: Vec<CrateCoverage> = Vec::new();
+
+    for line in report.lines() {
+        let row: Vec<&str> = line.split_whitespace().collect();
+        // filename, regions, missed, cover, functions, missed, executed, lines,
+        // missed lines, cover, and the branch columns after that. Ten is the
+        // shortest row that still carries the two columns this reads.
+        if row.len() < 10 {
+            continue;
+        }
+        let Some(first) = row.first() else { continue };
+        if *first == "Filename" || *first == "TOTAL" || first.starts_with('-') {
+            continue;
+        }
+        let Some(krate) = first.split('/').next() else { continue };
+        if !root().join(krate).join("Cargo.toml").exists() {
+            continue;
+        }
+
+        let cell = |index: usize| -> Result<u64, String> {
+            row.get(index)
+                .ok_or_else(|| format!("llvm-cov row too short: {line}"))?
+                .parse::<u64>()
+                .map_err(|_| format!("llvm-cov row not understood: {line}"))
+        };
+        let lines = cell(7)?;
+        let missed = cell(8)?;
+
+        match out.iter_mut().find(|c| c.name == krate) {
+            Some(existing) => {
+                existing.lines += lines;
+                existing.missed += missed;
+            }
+            None => out.push(CrateCoverage { name: krate.to_string(), lines, missed }),
+        }
+    }
+
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// The summary, in the one shape a CI step or a later history can read.
+///
+/// Written by hand for the same reason it is read by hand: a name and three
+/// numbers per crate do not justify a serialisation dependency in the tooling
+/// crate, and the tooling crate is checked by the same lints it implements.
+fn coverage_json(crates: &[CrateCoverage], total: &CrateCoverage) -> String {
+    let mut s = String::from("{\n  \"crates\": [\n");
+    for (i, c) in crates.iter().enumerate() {
+        let comma = if i + 1 == crates.len() { "" } else { "," };
+        s.push_str(&format!(
+            "    {{ \"name\": \"{}\", \"lines\": {}, \"missed\": {}, \"percent\": {:.2} }}{comma}\n",
+            c.name,
+            c.lines,
+            c.missed,
+            c.percent()
+        ));
+    }
+    s.push_str("  ],\n");
+    s.push_str(&format!(
+        "  \"total\": {{ \"lines\": {}, \"missed\": {}, \"percent\": {:.2} }}\n}}\n",
+        total.lines,
+        total.missed,
+        total.percent()
+    ));
+    s
 }
 
 /// A `"""`-delimited value, which [`toml_scalar`] deliberately does not handle.
@@ -2104,5 +3874,127 @@ mod tests {
         // of the file, which makes every later key look absent.
         assert_eq!(toml_field(TASK, "expect").as_deref(), Some("VERDICT: refuse"));
         assert_eq!(toml_multiline(TASK, "statement"), None);
+    }
+}
+
+/// Each mechanised rule, against something that breaks it.
+///
+/// # Why the fixtures are strings and not files
+///
+/// A broken file on disk is checked by every other lint in this file too, so a
+/// fixture that violates R03 also has to satisfy the SPDX header rule, the
+/// unsafe rule and the determinism rule — or be excluded from all of them, at
+/// which point it is excluded from the rule it exists to break as well. That is
+/// the trap `lint-mutations` already had to design around.
+///
+/// A string handed to the same function the lint calls has neither problem, and
+/// it makes the fixture and the assertion visible in one place. What it does
+/// not cover is the file walk — whether the lint reaches the right files — and
+/// that gap is real and stated rather than papered over.
+#[cfg(test)]
+mod mechanised_rules {
+    use super::*;
+
+    #[test]
+    fn a_field_with_no_unit_is_caught() {
+        let broken = "\
+pub struct Sqe {
+    /// Absolute deadline.
+    pub deadline: u64,
+}
+";
+        let findings = unit_findings("abi/src/lib.rs", broken);
+        assert_eq!(findings.len(), 1, "expected one finding, got {findings:?}");
+        assert!(findings[0].contains("deadline"), "the finding must name the field: {findings:?}");
+    }
+
+    #[test]
+    fn a_field_that_states_its_unit_passes() {
+        let sound = "\
+pub struct Sqe {
+    /// Absolute deadline. Unit: nanoseconds, monotonic, in this channel's
+    /// epoch. Zero is NO_DEADLINE.
+    pub deadline: u64,
+    /// Operation selector. Unit: none — an opcode is an identifier.
+    pub opcode: u8,
+}
+";
+        assert!(unit_findings("abi/src/lib.rs", sound).is_empty());
+    }
+
+    #[test]
+    fn the_unit_check_ignores_what_is_not_a_field() {
+        // A lint that fired on every `pub fn` would be turned off within a week,
+        // and a lint people turn off catches nothing.
+        let sound = "\
+pub fn submit(entry: Sqe) -> bool { true }
+pub const ABI_VERSION: u32 = 1;
+pub struct Cursor {
+    /// Free-running index. Unit: entries since the channel opened.
+    pub value: u32,
+}
+";
+        assert!(
+            unit_findings("abi/src/lib.rs", sound).is_empty(),
+            "{:?}",
+            unit_findings("abi/src/lib.rs", sound)
+        );
+    }
+
+    #[test]
+    fn a_public_callback_is_caught() {
+        let broken = "\
+pub fn on_completion(f: impl Fn(Cqe)) {}
+";
+        let findings = callback_findings("ring/src/lib.rs", broken);
+        assert!(!findings.is_empty(), "a public closure parameter must be caught");
+    }
+
+    #[test]
+    fn a_private_closure_is_not_a_callback() {
+        // R05 is about what an interface *offers*. A closure inside an
+        // implementation is an ordinary closure, and a rule that could not tell
+        // the two apart would be a rule nobody could satisfy.
+        let sound = "\
+fn drain(each: impl Fn(Cqe)) {}
+let f = |x: u32| x + 1;
+";
+        assert!(callback_findings("ring/src/lib.rs", sound).is_empty());
+    }
+
+    #[test]
+    fn a_claim_with_no_owner_is_caught() {
+        let broken = "name = \"ring-submit-latency\"\nstatus = \"pending\"\n";
+        let findings = claim_owner_findings("claims/0001-x.toml", broken);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("no [owner]"));
+    }
+
+    #[test]
+    fn a_claim_citing_a_document_that_does_not_exist_is_caught() {
+        // The half that makes the rule worth having. A citation nobody can
+        // follow is the failure wearing the fix's clothes, and it is the state
+        // a claim drifts into when a document is renamed.
+        let broken = "\
+[owner]
+document = \"docs/design/no-such-document.html\"
+section  = \"06\"
+";
+        let findings = claim_owner_findings("claims/0001-x.toml", broken);
+        assert!(
+            findings.iter().any(|f| f.contains("does not exist")),
+            "expected the missing document to be reported: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn the_registry_as_it_stands_satisfies_all_three() {
+        // Not a tautology, and the reason it is here: the three fixtures above
+        // prove each lint *can* fail, and this proves the tree is on the other
+        // side of that line. A lint that has never passed and a lint that has
+        // never failed are equally uninformative.
+        assert!(lint_units().is_ok(), "abi/ no longer satisfies R03");
+        assert!(lint_callbacks().is_ok(), "an interface has acquired a callback");
+        assert!(lint_claim_owners().is_ok(), "a claim has lost its owner");
     }
 }

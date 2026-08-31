@@ -13,6 +13,15 @@ least 5x less than an equivalent system call on a tuned Linux baseline.
 system  = "linux-6.x-tuned"
 notes   = "io_uring enabled, sched_ext policy chosen for the workload, huge pages on, device features enabled. Configured by someone trying to win."
 
+[owner]
+# R09: every headline claim names the subsystem that owns it. A claim with
+# an owner is a claim somebody can be asked about; energy was in the first
+# paragraph of the thesis and had no owner across five documents, which is
+# how half a claim goes missing without anybody deciding to drop it.
+document = "docs/design/ring-scene-boot.html"
+section  = "06"
+notes    = "The ring is the subsystem, and section 06 is where its cost table lives — the same table this claim's diagnosis section quotes when a result comes in over 150 ns."
+
 [workload]
 path    = "bench/src/bin/ring_submit.rs"
 repeat  = 1_000_000

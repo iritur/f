@@ -22,13 +22,152 @@ on:
     branches: [main]
   pull_request:
 
+# Every job runs in the development image, which is the same image a laptop
+# runs. `docker/README.md` states the rule: no step may exist that is not in
+# the repository, and a developer's machine is a step. With the image shared,
+# "works on my machine" and "works in CI" become one statement rather than two
+# that happen to agree — and the per-job tool installation disappears, which is
+# where a meaningful part of the ten-minute budget was going.
+#
+# The gate builds that image itself, and the first version of this did not.
+# It named a tag a separate `image.yml` published on pushes to `main`, so the
+# gate had a prerequisite that no run of the gate produced: on a tree where
+# that workflow had never fired, all ten jobs failed at "Initialize containers"
+# with `manifest unknown`, before a single step ran. That is the same rule this
+# file is quoting one paragraph up — no step exists that is not in the tree —
+# broken by the change that was citing it. A workflow somebody has to remember
+# to dispatch is institutional knowledge with a YAML file in front of it.
+#
+# So the image is a job here, and every other job waits for it.
+#
+# The tag is derived from the *files that define the environment* rather than
+# from the commit: `env-<hash of Dockerfile, entrypoint, toolchain pin>`. Two
+# consequences, both wanted. A commit that does not touch the environment
+# reuses the image bit for bit, so the build is a cache hit and the job is
+# short. And CI is pinned to an immutable tag rather than to `:latest`, which
+# closes the gap the previous version of this comment admitted to and deferred.
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository_owner }}/f-dev
+
 jobs:
-  policy:
-    name: policy checks
+  # What the environment is, as one string. Computed before anything needs it,
+  # because a job's `container:` is resolved before its steps run and therefore
+  # cannot depend on anything that job does.
+  environment:
+    name: environment tag
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      image: ${{ steps.tag.outputs.image }}
+      image_full: ${{ steps.tag.outputs.image_full }}
     steps:
       - uses: actions/checkout@v7
-      - run: rustup show
+      - id: tag
+        run: |
+          # Exactly the inputs the image is built from — the two files the
+          # build context contains (see .dockerignore) plus the Dockerfile
+          # itself. Anything else changing must not invalidate the image, or
+          # every commit rebuilds it and the cache is decorative.
+          hash=$(echo "${{ hashFiles('docker/Dockerfile', 'docker/entrypoint.sh', 'rust-toolchain.toml') }}" | cut -c1-16)
+          echo "tag=env-$hash" >> "$GITHUB_OUTPUT"
+          echo "image=${REGISTRY}/${IMAGE}:env-$hash" >> "$GITHUB_OUTPUT"
+          # Both names are computed here rather than assembled at each use.
+          # `env` is not a context a job's `container:` key can read — only
+          # github, needs, strategy, matrix, vars and inputs are — so anything a
+          # container is named by has to arrive through `needs`.
+          echo "image_full=${REGISTRY}/${IMAGE}:full-env-$hash" >> "$GITHUB_OUTPUT"
+          echo "environment tag: env-$hash"
+
+  # Two native builds rather than one emulated multi-platform build. Installing
+  # a Rust nightly and a QEMU under binfmt emulation takes tens of minutes and
+  # fails in ways that have nothing to do with this tree; each architecture
+  # builds on its own metal and the manifest is assembled afterwards.
+  #
+  # On a commit that does not touch the environment this is a full cache hit and
+  # costs about a minute. That minute is the price of the gate having no
+  # prerequisite outside itself, and it is the right way round: a gate that is
+  # a little slower is better than a gate that cannot start.
+  image:
+    name: environment image (${{ matrix.suffix }})
+    needs: environment
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            suffix: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            suffix: arm64
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: dev
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ needs.environment.outputs.tag }}-${{ matrix.suffix }}
+          cache-from: type=gha,scope=dev-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=dev-${{ matrix.suffix }}
+      # `full` adds cargo-deny, which the dependency-policy job needs at the
+      # version docker/Dockerfile pins rather than the version an action chose.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: full
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:full-${{ needs.environment.outputs.tag }}-${{ matrix.suffix }}
+          cache-from: type=gha,scope=full-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=full-${{ matrix.suffix }}
+
+  # One name per image, pointing at both architectures. The AArch64 jobs and the
+  # x86-64 ones then name the same tag, which is what stops the two from quietly
+  # becoming two environments with one name — the worst possible state for a
+  # pair of jobs whose whole purpose is to disagree with each other.
+  manifest:
+    name: environment manifest
+    needs: [environment, image]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: assemble
+        run: |
+          base="${REGISTRY}/${IMAGE}"
+          tag="${{ needs.environment.outputs.tag }}"
+          docker buildx imagetools create --tag "$base:$tag" \
+            "$base:$tag-amd64" "$base:$tag-arm64"
+          docker buildx imagetools create --tag "$base:full-$tag" \
+            "$base:full-$tag-amd64" "$base:full-$tag-arm64"
+          echo "environment published as $base:$tag"
+  policy:
+    name: policy checks
+    needs: [environment, manifest]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
       # Each of these encodes an architectural decision. A failure names the
       # RFC it comes from.
       - run: cargo xtask lint-determinism
@@ -36,6 +175,15 @@ jobs:
       - run: cargo xtask lint-unsafe
       - run: cargo xtask lint-percpu
       - run: cargo xtask lint-mutations
+      # The three rules from docs/what-must-be-stated.html section 15 that
+      # could be made executable. CONTRIBUTING.md carries all twelve and says
+      # which is which: a rule listed as mechanised that is not is worse than
+      # one honestly listed as review, because it is a check somebody believes
+      # is happening.
+      - run: cargo xtask lint-claims
+      - run: cargo xtask lint-units
+      - run: cargo xtask lint-callbacks
+      - run: cargo xtask lint-claim-owners
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # The hooks in .claude/ are policy too, and they are the only policy that
@@ -46,44 +194,127 @@ jobs:
 
   test-x86:
     name: tests (x86-64, total store order)
+    needs: [environment, manifest]
     runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
     steps:
       - uses: actions/checkout@v7
       - run: cargo test -p f-abi -p f-env -p f-ring -p f-init
 
   test-aarch64:
     name: tests (AArch64, weak memory)
+    needs: [environment, manifest]
     runs-on: ubuntu-24.04-arm
+    # The arm64 half of the same multi-architecture tag. Naming one tag on both
+    # runners is what stops the two jobs from drifting into two environments
+    # with one name — which would be the worst possible state for the job whose
+    # entire purpose is to disagree with the other one.
+    container: ${{ needs.environment.outputs.image }}
     steps:
       - uses: actions/checkout@v7
       # This job is not a portability nicety. x86-64 total-store-order hides
       # the entire class of ordering bug the ring is exposed to, so this is the
       # only configuration in which the ring tests mean anything.
       - run: cargo test -p f-abi -p f-env -p f-ring -p f-init
+      # E0-P09. Seeded fault injection against the two subsystems that have a
+      # host harness — the ring at publish and drain, the channel header at
+      # negotiation. On the arm runner as well as x86-64: the assertions are
+      # about refusals rather than ordering, but the ring under fault is the
+      # last place to assume one architecture speaks for the other.
+      - run: cargo test -p f-ring --test faults
 
+  # Both architectures, both non-advisory, and that is the whole of E0-P07.
+  #
+  # The AArch64 half is where the ordering means anything: total store order on
+  # x86-64 hides the entire class of bug the ring is exposed to, so a Relaxed
+  # store that corrupts data on ARM passes every one of these tests on an x86
+  # laptop. Neither job carries `continue-on-error`, and neither may: an
+  # advisory job that goes red is a job that gets ignored on the second Tuesday,
+  # and this one exists to be believed.
+  #
+  # The x86-64 half is not redundant. It is the control — it is what says a
+  # failure on the arm runner is about the architecture rather than about the
+  # test — and it runs `--release` for the reason the arm job does: optimisation
+  # changes what a stress test explores, and the ordering these guard is exactly
+  # what an optimiser is entitled to move.
   litmus:
-    name: memory-ordering litmus (AArch64)
-    runs-on: ubuntu-24.04-arm
+    name: memory-ordering litmus (${{ matrix.arch }})
+    needs: [environment, manifest]
+    runs-on: ${{ matrix.runner }}
+    container: ${{ needs.environment.outputs.image }}
+    strategy:
+      # Both results, always. `fail-fast` would cancel the AArch64 job the
+      # moment x86-64 went red, which throws away the one number that
+      # distinguishes "the ring is broken" from "the ring is broken on weak
+      # memory" — and those are different bugs with different fixes.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86-64, total store order
+            runner: ubuntu-latest
+          - arch: AArch64, weak memory
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
       # These are stress tests, not a model check. RustMC lands at M5 and is
-      # what actually explores what RC11 permits. Until then this job plus the
-      # AArch64 unit tests are the coverage, and the gap is real.
+      # what actually explores what RC11 permits. Until then these two jobs plus
+      # the AArch64 unit tests are the coverage, and the gap is real.
       - run: cargo test -p f-ring --test litmus --release
 
   coverage:
     name: coverage instrumentation
+    needs: [environment, manifest]
     runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
     steps:
       - uses: actions/checkout@v7
+      # Prints a line per crate and a total, and writes summary.json beside the
+      # profiles. Nothing here gates: a coverage threshold rewards tests written
+      # to touch lines rather than to catch anything, so the number is published
+      # and watched instead. What gates is in claims/.
       - run: cargo xtask coverage
+      # Kept with the run rather than only printed into a log that ages out, so
+      # that "coverage fell" is a question anyone can answer from two artifacts
+      # rather than from memory. E0-P11 is what turns this into a history.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-summary
+          path: target/coverage/summary.json
+          if-no-files-found: error
+
+      # E0-P11. Only on main, and only after a merge — never on a branch.
+      #
+      # A history every branch appends to conflicts on every rebase (both sides
+      # added a line at the end of one file) and, worse, a rebase rewrites the
+      # commits those lines name, so the surviving history refers to objects
+      # nobody has. Appending only from a commit that is already permanent is
+      # what makes the file survive a rebase: a branch never had a line in it to
+      # conflict over.
+      #
+      # The record is uploaded rather than pushed back. Committing to the
+      # repository from CI is a decision about who may write to main, and it is
+      # not one a workflow file should make on the project's behalf — see
+      # TODO.md E0-P11.
+      - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: cargo xtask history append
+      - uses: actions/upload-artifact@v4
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        with:
+          name: measurement-history
+          path: claims/history.jsonl
+          if-no-files-found: error
 
   kernel:
     name: kernel boots
+    needs: [environment, manifest]
     runs-on: ubuntu-latest
+    # QEMU arrives with the image. This job used to install it per run, which
+    # is the per-job tool installation E0-P14 exists to delete: an emulator
+    # whose version nobody chose, resolved fresh on every boot of the gate.
+    container: ${{ needs.environment.outputs.image }}
     steps:
       - uses: actions/checkout@v7
-      - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
       - run: cargo xtask run
       # The negative half, and the reason it is in the gate rather than in
       # somebody's habits: seven boots, each one a process deliberately doing
@@ -109,10 +340,126 @@ jobs:
       # have one, because a fixture that panics takes the machine down rather
       # than being caught. RFC 0017 argues it.
       - run: cargo xtask mutate
+      # The reporting channel itself, which every job above depends on and none
+      # of them checks. Three endings have to reach CI as three different
+      # things: a clean boot (33), a panic (37), and a boot that never finishes
+      # — which the kernel cannot report on its own behalf, so the harness has
+      # to be the one that notices. Before this, a hung kernel presented as a
+      # job that timed out somewhere during "build", with no log and no clue.
+      - run: cargo xtask panic
+
+  # E0-P02. Two runs of the same (seed, commit) on two different runners must
+  # produce one trace hash.
+  #
+  # Two jobs and not a loop in one job, because the claim is about two machines.
+  # A pair of boots on one runner is the weaker half and `cargo xtask reproduce`
+  # already does it locally; what a second runner adds is everything a machine
+  # can differ in — core count, host load, kernel version, CPU model — and those
+  # are exactly the things a boot must not be reading.
+  #
+  # This job only became possible when every job started running in the same
+  # image (E0-P14). Before that the two runners could have had different QEMU
+  # versions, and QEMU's version is in the boot log: the check would have failed
+  # for a reason that has nothing to do with the kernel, which is the way a
+  # gate gets disabled.
+  trace:
+    name: execution trace (runner ${{ matrix.runner_id }})
+    needs: [environment, manifest]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_id: [a, b]
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo xtask reproduce --trace | tee trace-${{ matrix.runner_id }}.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trace-${{ matrix.runner_id }}
+          path: trace-${{ matrix.runner_id }}.txt
+          if-no-files-found: error
+
+  reproduction:
+    name: the reproduction check
+    needs: [manifest, environment, trace]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: trace-*
+          merge-multiple: true
+      - name: the two runners must agree
+        run: |
+          a=$(cat trace-a.txt)
+          b=$(cat trace-b.txt)
+          echo "runner a  $a"
+          echo "runner b  $b"
+          if [ "$a" != "$b" ]; then
+            echo
+            echo "Two runners produced different traces for one commit."
+            echo
+            echo "This is the determinism contract failing, and it is the failure"
+            echo "every other layer of the test apparatus rests on: a seed stops"
+            echo "being a bug report, the simulator stops reproducing, and a claim"
+            echo "stops being re-derivable. Something on the boot path is reading a"
+            echo "clock, a counter or an address the seeded Env does not own."
+            echo "RFC 0004."
+            exit 1
+          fi
+          echo "agreed: $a"
+      # The other half of the exit, and the half that says this job can fail:
+      # the same command with one unseeded read of time on the boot path, which
+      # must make two runs disagree. Without it, a trace hashed over something
+      # that never varies would agree with itself forever and this gate would
+      # be green for the wrong reason.
+      - run: cargo xtask reproduce
+
+  # The fourth thing the gate was always supposed to run, and the one that was
+  # missing: lint, test, run — and claims.
+  #
+  # What this job can assert today is everything about the registry except a
+  # number. Every claim names an owner that exists (R09), every document
+  # citation matches the value the claim holds, the snapshot regenerates without
+  # a diff, and the release manifest still resolves. What it cannot assert is
+  # that a gating claim holds, because no claim gates yet: 0001 and 0002 are
+  # `pending` on a measurement environment that does not exist, and 0003 is
+  # `tracked` on purpose. That is E0-P05 and E0-P06, and it is the reason
+  # E0-P01's exit is only half met.
+  claims:
+    name: claims registry
+    needs: [environment, manifest]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      # First, and before anything regenerates it. The committed snapshot is a
+      # claim about the registry, and `xtask claims` below rewrites the file by
+      # design — so a freshness check placed after it grades its own homework.
+      #
+      # This was a `git diff --quiet` here in the YAML, which is how it came to
+      # fail on a byte-identical file: git refuses a working tree owned by
+      # another uid, and `git diff` renders that refusal as "Not a git
+      # repository" rather than as a refusal. The comparison now happens in
+      # xtask, where it needs no repository and where a developer can run it.
+      - run: cargo xtask lint-snapshot
+      - run: cargo xtask claims
+      - run: cargo xtask lint-claim-owners
+      - run: cargo xtask lint-claims
+      - run: cargo xtask release --dry-run
 
   deps:
     name: dependency policy
+    needs: [environment, manifest]
     runs-on: ubuntu-latest
+    # The `full` image, which carries cargo-deny at the version docker/Dockerfile
+    # pins. The action installed its own copy, so the version this job enforced
+    # policy with was chosen by neither this repository nor its container —
+    # which is the ambient dependency the image exists to remove, in the one job
+    # whose whole subject is dependencies.
+    container: ${{ needs.environment.outputs.image_full }}
     steps:
       - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - run: cargo deny check
