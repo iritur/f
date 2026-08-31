@@ -26,6 +26,7 @@
 //! See `docs/design/proving-ground.html` layer 5.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 /// Log-linear histogram over nanosecond values.
 ///
@@ -167,6 +168,65 @@ impl Histogram {
         self.max
     }
 
+    /// The distribution, drawn.
+    ///
+    /// One row per octave rather than one per bucket. The recording resolution
+    /// is two significant figures per power of two — 1024 rows, most of them
+    /// empty — and a thousand-row table is not a thing anybody reads, so the
+    /// rendering folds to the octave and says that it did. The full bucket list
+    /// is what [`to_jsonl`](Histogram::to_jsonl) emits and what a third party
+    /// re-analyses; this is for the person watching the run.
+    ///
+    /// Rows are the octaves that hold observations, in order, with no gaps
+    /// elided: an empty octave between two full ones is a bimodal distribution,
+    /// which is the shape `claims/0002-timer-jitter.toml` names in its own
+    /// diagnosis section, and folding it away would hide the diagnosis.
+    #[must_use]
+    pub fn render(&self) -> String {
+        if self.count == 0 {
+            return "  (no observations)\n".to_string();
+        }
+
+        let mut rows: Vec<(usize, u64)> = Vec::new();
+        for octave in 0..(BUCKET_COUNT / SUB_BUCKETS) {
+            let lo = octave * SUB_BUCKETS;
+            let total: u64 = self.buckets[lo..lo + SUB_BUCKETS].iter().sum();
+            rows.push((octave, total));
+        }
+
+        let first = rows.iter().position(|&(_, n)| n > 0).unwrap_or(0);
+        let last = rows.iter().rposition(|&(_, n)| n > 0).unwrap_or(0);
+        let rows = &rows[first..=last];
+        let peak = rows.iter().map(|&(_, n)| n).max().unwrap_or(1).max(1);
+
+        const BAR: u64 = 40;
+        let mut out = String::new();
+        for &(octave, n) in rows {
+            // An octave's own bounds, not the sub-bucket's. Below magnitude
+            // four a sub-bucket index is the value's low bits rather than a
+            // fraction of the octave, so `value_at` and `upper_at` both fold
+            // there — and reading a row's range off them printed `4 .. 15` and
+            // `8 .. 15` as two different rows. The octave is defined by its
+            // magnitude and needs no reconstruction: it is exactly the values
+            // whose leading bit is at that position.
+            let (lo, hi) = if octave == 0 {
+                (0u64, 1u64)
+            } else {
+                (1u64 << octave, (1u64 << (octave + 1)) - 1)
+            };
+            // Saturating at one column, so an octave holding a single
+            // observation is visibly present rather than rounding to nothing.
+            // The tail is the part of this picture that matters, and the tail
+            // is made of small counts.
+            let width = if n == 0 { 0 } else { ((n * BAR) / peak).max(1) };
+            out.push_str(&format!(
+                "  {lo:>12} ..{hi:>13} ns  {n:>9}  {}\n",
+                "#".repeat(width as usize)
+            ));
+        }
+        out
+    }
+
     /// Emit the full bucket list, so a third party can re-analyse rather than
     /// trusting the percentiles computed here.
     #[must_use]
@@ -225,6 +285,25 @@ impl fmt::Display for Metric {
     }
 }
 
+impl Metric {
+    /// The metric as one JSON value.
+    ///
+    /// `null` for an unavailable metric rather than a zero or an omitted key.
+    /// A zero is a measurement and this is not one; an omitted key makes an
+    /// absent metric indistinguishable from a reader that forgot to look, which
+    /// is the silent narrowing `Metric` exists to prevent. The reason is not
+    /// carried here — it is a static string aimed at a person, it is printed
+    /// beside the number, and putting prose in a data file invites somebody to
+    /// parse it.
+    #[must_use]
+    pub fn to_json(self) -> String {
+        match self {
+            Self::Value(v) => format!("{v:.6}"),
+            Self::Unavailable(_) => "null".to_string(),
+        }
+    }
+}
+
 /// One claim's result.
 #[derive(Debug)]
 pub struct Sample {
@@ -274,12 +353,68 @@ impl Sample {
     }
 
     /// Print the result in the form the claims registry ingests.
+    ///
+    /// The distribution is drawn before the percentiles, and that order is the
+    /// point. A percentile line is a summary of the shape above it, and a
+    /// reader who sees only the summary cannot tell a long tail from a second
+    /// mode — which is the difference between "sometimes slow" and "two
+    /// different code paths", and the two have nothing in common as
+    /// diagnoses. `claims/README.md` rule 3 says distributions, not summaries;
+    /// printing only p50/p99/p99.9 was that rule stated and not kept.
     pub fn report(&self) {
         println!("claim   {}", self.claim);
+        println!();
+        print!("{}", self.latency.render());
+        println!();
         println!("latency {}", self.latency);
         println!("insn/op {}", self.instructions_per_op);
         println!("J/op    {}", self.joules_per_op);
         println!("idle    {}", self.idle_residency);
+    }
+
+    /// Write the full distribution where the registry can find it.
+    ///
+    /// One JSON object per line: a header carrying the run's summary and the
+    /// availability of every metric, then one object per non-empty bucket. The
+    /// header is first so a reader that only wants to know whether a run
+    /// happened does not have to consume the distribution to find out, and the
+    /// buckets are the part that cannot be reconstructed later.
+    ///
+    /// The file is `<claim>.local.jsonl`, which `.gitignore` excludes. That is
+    /// deliberate and it is a boundary rather than an oversight: a measurement
+    /// belongs to the machine that took it. What is versioned is the *claim* —
+    /// its threshold, its baseline, its workload — and, once E0-P11 exists, the
+    /// history that CI appends to. A raw distribution from somebody's laptop
+    /// committed alongside them would be a number with no environment attached,
+    /// which is the thing `F_ENVIRONMENT` exists to make impossible.
+    ///
+    /// # Errors
+    ///
+    /// If the directory cannot be created or the file cannot be written.
+    pub fn persist(&self, dir: &Path) -> std::io::Result<PathBuf> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(format!("{}.local.jsonl", self.claim));
+
+        let mut out = String::new();
+        out.push_str(&format!(
+            "{{\"claim\":\"{}\",\"kind\":\"run\",\"n\":{},\"min\":{},\"p50\":{},\
+             \"p99\":{},\"p999\":{},\"max\":{},\"instructions_per_op\":{},\
+             \"joules_per_op\":{},\"idle_residency\":{}}}\n",
+            self.claim,
+            self.latency.count(),
+            self.latency.min(),
+            self.latency.quantile(0.50),
+            self.latency.quantile(0.99),
+            self.latency.quantile(0.999),
+            self.latency.max(),
+            self.instructions_per_op.to_json(),
+            self.joules_per_op.to_json(),
+            self.idle_residency.to_json(),
+        ));
+        out.push_str(&self.latency.to_jsonl(self.claim));
+
+        std::fs::write(&path, out)?;
+        Ok(path)
     }
 }
 
@@ -380,6 +515,89 @@ mod tests {
                  more than one bucket of pessimism"
             );
         }
+    }
+
+    #[test]
+    fn a_drawn_octave_states_its_own_range() {
+        // The bug this checks for printed `4 .. 15` and `8 .. 15` as two
+        // different rows, because it reconstructed the range from sub-bucket
+        // bounds — and below magnitude four a sub-bucket index is the value's
+        // low bits rather than a fraction of the octave, so both folded to the
+        // same number. Two rows claiming the same upper bound is a table that
+        // cannot be read, and it is the only kind of error in a drawing that a
+        // reader has no way to detect.
+        let mut h = Histogram::new();
+        for v in [3u64, 5, 9, 300] {
+            h.record(v);
+        }
+        let drawn = h.render();
+
+        let mut seen: Vec<(u64, u64)> = Vec::new();
+        for line in drawn.lines() {
+            let cells: Vec<&str> = line.split_whitespace().collect();
+            // "<lo> .. <hi> ns <count> [bar]"
+            let (Some(lo), Some(hi)) = (cells.first(), cells.get(2)) else { continue };
+            let (Ok(lo), Ok(hi)) = (lo.parse::<u64>(), hi.parse::<u64>()) else { continue };
+            assert!(lo <= hi, "row {lo}..{hi} is inverted");
+            seen.push((lo, hi));
+        }
+        assert!(seen.len() >= 4, "expected a row per occupied octave, got {seen:?}");
+
+        for pair in seen.windows(2) {
+            let [(_, prev_hi), (next_lo, _)] = pair else { continue };
+            assert_eq!(
+                *next_lo,
+                prev_hi + 1,
+                "octaves must tile without gap or overlap, got {seen:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_observation_survives_into_the_drawing() {
+        // A drawing that loses observations is worse than no drawing: it looks
+        // like the distribution and is not it. The bar widths are a rendering
+        // choice, the counts are not.
+        let mut h = Histogram::new();
+        for i in 1..=5_000u64 {
+            h.record(i * 7);
+        }
+        let counted: u64 = h
+            .render()
+            .lines()
+            .filter_map(|line| line.split_whitespace().nth(4))
+            .filter_map(|cell| cell.parse::<u64>().ok())
+            .sum();
+        assert_eq!(counted, h.count(), "the drawing must account for every observation");
+    }
+
+    #[test]
+    fn a_single_observation_is_still_drawn() {
+        // The tail is made of small counts, and a bar that rounds to zero
+        // columns is a tail that is present in the data and absent from the
+        // picture — which is the failure this whole crate is about.
+        let mut h = Histogram::new();
+        for _ in 0..100_000 {
+            h.record(10);
+        }
+        h.record(1_000_000);
+        let drawn = h.render();
+        let last = drawn.lines().next_back().unwrap_or_default();
+        assert!(last.contains('#'), "the one slow observation drew no bar: {last}");
+    }
+
+    #[test]
+    fn an_empty_histogram_draws_nothing_and_does_not_panic() {
+        assert_eq!(Histogram::new().render().trim(), "(no observations)");
+    }
+
+    #[test]
+    fn an_absent_metric_is_null_rather_than_zero() {
+        // Zero is a measurement. An absent metric that serialises as zero is a
+        // claim nobody made, and it is the exact silent narrowing `Metric`
+        // exists to prevent.
+        assert_eq!(Metric::Unavailable("no counters").to_json(), "null");
+        assert_eq!(Metric::Value(1.5).to_json(), "1.500000");
     }
 
     #[test]
