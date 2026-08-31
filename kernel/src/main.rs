@@ -402,8 +402,58 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // is expected to end in a dump and a failure exit rather than in `M0 ok`.
     provoke(&boot, features);
 
+    // The two endings a harness has to tell apart from success and from each
+    // other, each reachable on purpose. `cargo xtask panic` boots all three.
+    deliberate_stop(&boot);
+
     kprintln!("M0 ok");
     arch::x86_64::exit_qemu(arch::x86_64::Exit::Success)
+}
+
+/// Panic or hang, when the command line asks for one.
+///
+/// # Why a kernel ships the ability to fail on purpose
+///
+/// The same argument RFC 0017 makes for the mutation build, and the same one
+/// `cargo xtask fault` already rests on: a failure path nothing exercises is a
+/// failure path nobody has checked. Three endings have to be distinguishable by
+/// a machine — a clean run, a panic, and a run that never ends — and the only
+/// way to know they are is to produce all three.
+///
+/// The third is the one that motivates this. A hang is not a failure the kernel
+/// can report, by definition: it is the absence of any report. Whether it is
+/// noticed is a property of the *harness* rather than of the kernel, and it
+/// cannot be tested without something that actually hangs. Before this, a
+/// kernel that stopped making progress would have held a runner until the CI
+/// job's own timeout killed it, which is indistinguishable from a slow build.
+///
+/// Both are behind a boot parameter, absent from every ordinary run, and
+/// neither is reachable without one. That is a weaker guarantee than the
+/// mutation build's cargo feature and is enough here: this decides nothing and
+/// computes nothing, so the worst a mistake can do is stop a boot that asked to
+/// be stopped.
+fn deliberate_stop(boot: &BootInfo) {
+    if boot.has_parameter(b"hang") {
+        kprintln!("  hanging       on purpose; the harness is expected to time out");
+        // A spin and not a halt. A halted core is one the emulator can see is
+        // idle; the fixture is meant to look like work that is not finishing,
+        // which is what a livelock looks like and is the harder case for a
+        // harness to call.
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
+    if boot.has_parameter(b"panic") {
+        // A message with a value in it. A panic that prints only a location
+        // proves the handler ran. One that formats a number proves the handler
+        // can still reach the formatting machinery — which is the part most
+        // likely to be what broke, and the part a real panic message needs.
+        panic!(
+            "deliberate panic from the boot path, with {} KiB reported usable",
+            boot.mem_upper_kib()
+        );
+    }
 }
 
 /// The rate everything about M2 is stated at.
@@ -1176,5 +1226,8 @@ fn panic(info: &PanicInfo) -> ! {
     kprintln!();
     kprintln!("KERNEL PANIC");
     kprintln!("  {info}");
-    arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure)
+    // `Panic` and not `Failure`. A kernel that reports a failed assertion and a
+    // kernel that panicked are different events, and the exit code is the only
+    // channel that survives the panic having interrupted the log.
+    arch::x86_64::exit_qemu(arch::x86_64::Exit::Panic)
 }

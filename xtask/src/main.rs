@@ -7,8 +7,11 @@
 //! `lint-percpu`.
 
 use std::collections::BTreeMap;
+use std::fmt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
+use std::time::Duration;
 
 /// The target the kernel is built for.
 ///
@@ -126,6 +129,7 @@ fn main() -> ExitCode {
         "cap" => cap(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
         "mutate" => mutate(),
+        "panic" => panic_path(),
         "timer" => timer(args.get(1).map(String::as_str)),
         "test" => test(),
         "verify" => verify(),
@@ -193,6 +197,9 @@ cargo xtask <command>
   lint-unsafe        No `unsafe` outside the frame crates
   lint-percpu        No kernel-global mutable state outside `PerCpu`
   lint-mutations     No deliberate defect is on by default
+
+  panic              Three endings CI must tell apart: a clean boot, a
+                     deliberate panic, and a boot that never finishes
 
   claims             List the claims registry and whether each one gates
   claim <name>       Run one claim's workload and report against its threshold
@@ -607,13 +614,87 @@ fn init_image() -> Result<PathBuf, String> {
 /// When `capture` is set the serial output is collected and returned as well as
 /// printed, which is what lets a caller assert on *how* a boot went wrong
 /// rather than only that it did.
+/// How a run of the emulator ended.
+///
+/// Three outcomes, not two, because a harness that models "finished" and
+/// "did not finish yet" has nowhere to put a boot that will never finish. The
+/// distinction is the whole of E0-P12: CI has to be able to tell a clean exit,
+/// a deliberate stop, and a hang apart from each other, and a hang is the one
+/// the kernel cannot report on its own behalf.
+#[derive(Debug, PartialEq, Eq)]
+enum Ending {
+    /// QEMU exited and reported this code.
+    Exited(i32),
+    /// QEMU was terminated by a signal without reporting.
+    Signalled,
+    /// The run outlived its budget and the harness killed it.
+    TimedOut(u64),
+}
+
+impl Ending {
+    /// The exit code, when there was one.
+    fn code(&self) -> Option<i32> {
+        match self {
+            Self::Exited(code) => Some(*code),
+            Self::Signalled | Self::TimedOut(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for Ending {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exited(code) => write!(f, "exited {code}"),
+            Self::Signalled => write!(f, "terminated by a signal"),
+            Self::TimedOut(seconds) => write!(f, "still running after {seconds}s, and killed"),
+        }
+    }
+}
+
+/// How long a boot may take before the harness stops waiting for it.
+///
+/// Generous, and generous on purpose. This is not a performance bound and must
+/// never become one — the container emulates the machine in software, CI
+/// runners are shared, and a boot that is merely slow must not be reported as a
+/// hang. What it bounds is the difference between *slow* and *never*, and a
+/// wrong answer in the tight direction turns a green run red for no reason.
+///
+/// A run that asks for a long timer window gets that window plus this, because
+/// `timer=60` is sixty seconds of intended work and the budget is for
+/// everything around it.
+const BOOT_TIMEOUT: u64 = 180;
+
 fn boot(append: Option<&str>) -> Result<Option<i32>, String> {
-    machine(append, &[], false).map(|(code, _)| code)
+    match machine(append, &[], false)?.0 {
+        Ending::TimedOut(seconds) => Err(format!(
+            "the boot was still running after {seconds}s and was killed\n\n\
+             Nothing here reports a hang, so this is the harness noticing rather\n\
+             than the kernel. `cargo xtask panic` exercises the same path against\n\
+             a fixture that hangs on purpose."
+        )),
+        ending => Ok(ending.code()),
+    }
+}
+
+/// [`boot`], returning how the run ended rather than only its code.
+///
+/// For the one caller that has to be able to assert a *timeout* happened, which
+/// [`boot`] deliberately turns into an error because for every other caller a
+/// hang is a failure and not a result.
+fn boot_ending(append: Option<&str>, seconds: u64) -> Result<(Ending, String), String> {
+    machine_with(append, &[], true, seconds)
 }
 
 /// [`boot`], with the serial log.
 fn boot_captured(append: Option<&str>, features: &[&str]) -> Result<(Option<i32>, String), String> {
-    machine(append, features, true)
+    let (ending, log) = machine(append, features, true)?;
+    match ending {
+        Ending::TimedOut(seconds) => Err(format!(
+            "the boot was still running after {seconds}s and was killed\n\n\
+             The log up to that point is above."
+        )),
+        ending => Ok((ending.code(), log)),
+    }
 }
 
 /// Build a kernel and run it. The one place the emulator is described.
@@ -621,7 +702,21 @@ fn machine(
     append: Option<&str>,
     features: &[&str],
     capture: bool,
-) -> Result<(Option<i32>, String), String> {
+) -> Result<(Ending, String), String> {
+    machine_with(append, features, capture, BOOT_TIMEOUT)
+}
+
+/// [`machine`], with a budget of its own.
+///
+/// Separate so that the one caller who is deliberately waiting on something
+/// that will never finish can say how long it is prepared to wait, without
+/// every other caller having to state a number it does not care about.
+fn machine_with(
+    append: Option<&str>,
+    features: &[&str],
+    capture: bool,
+    timeout: u64,
+) -> Result<(Ending, String), String> {
     build_with(features)?;
     let kernel = kernel_elf32();
     if !kernel.exists() {
@@ -684,18 +779,70 @@ fn machine(
 
     qemu.current_dir(root());
 
-    if !capture {
-        let status = qemu.status().map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
-        return Ok((status.code(), String::new()));
+    // Spawned rather than run to completion, because a boot that never ends has
+    // to be a result this function can return. `status()` and `output()` both
+    // wait forever, which makes a hang the harness's problem to survive rather
+    // than its problem to report — and in CI it presents as a job that timed
+    // out somewhere during "build", with no log and no clue.
+    if capture {
+        qemu.stdout(Stdio::piped());
     }
+    let mut child = qemu.spawn().map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
+
+    // The reader runs on its own thread because a piped child can fill the pipe
+    // and block on a write while this thread sleeps waiting for it to exit — a
+    // deadlock that only appears once the log grows past the buffer, which is to
+    // say once somebody adds a line.
+    let reader = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            let mut buffer = String::new();
+            let _ = out.read_to_string(&mut buffer);
+            buffer
+        })
+    });
+
+    // Counted sleeps rather than a deadline read off a clock, and not in order
+    // to route around the determinism lint — `xtask/` is exempt from it. It is
+    // that no clock is needed here and reaching for one would be worse. Sleep
+    // drift makes the real budget *at least* the nominal one, which errs
+    // towards waiting too long; a deadline computed from a monotonic reading
+    // can expire early on a loaded machine and call a slow boot a hang. This
+    // bound separates "slow" from "never", and only one of its two failure
+    // directions is survivable.
+    const TICK_MS: u64 = 20;
+    let mut ticks = timeout.saturating_mul(1000 / TICK_MS);
+
+    let ending = loop {
+        match child.try_wait().map_err(|e| format!("waiting for qemu: {e}"))? {
+            Some(status) => break status.code().map_or(Ending::Signalled, Ending::Exited),
+            None if ticks == 0 => {
+                // Killed rather than left running. A harness that reports a
+                // timeout and leaks the process behind it turns one hang into a
+                // machine that gets slower all afternoon.
+                let _ = child.kill();
+                let _ = child.wait();
+                break Ending::TimedOut(timeout);
+            }
+            None => {
+                ticks -= 1;
+                std::thread::sleep(Duration::from_millis(TICK_MS));
+            }
+        }
+    };
 
     // Captured *and* printed. A harness that swallowed the log would be one
     // whose failures could not be read, and the whole reason to capture it is
     // to assert on a line in it.
-    let out = qemu.output().map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
-    let log = String::from_utf8_lossy(&out.stdout).into_owned();
-    print!("{log}");
-    Ok((out.status.code(), log))
+    let log = match reader {
+        Some(handle) => {
+            let log = handle.join().unwrap_or_default();
+            print!("{log}");
+            log
+        }
+        None => String::new(),
+    };
+
+    Ok((ending, log))
 }
 
 fn run() -> Result<(), String> {
@@ -819,7 +966,18 @@ fn mutate() -> Result<(), String> {
                      stopped being made."
                 ));
             }
-            Some(35) | Some(0) => {}
+            // 37 is `Exit::Panic`, which is what this mutation actually
+            // produces: the defect removes a bounds check, so the boot dies in
+            // the indexing rather than in a check that decided something was
+            // wrong. 35 is a kernel that reported a failed assertion, and 0 is
+            // a machine that reset without reporting at all — both are still
+            // accepted, because a future mutation could legitimately produce
+            // either and this list is meant to grow.
+            //
+            // Before E0-P12 a panic *was* 35, so this arm could not tell the
+            // three apart. The log assertion below is what carried the whole
+            // weight; it still does, and now it is not carrying it alone.
+            Some(37) | Some(35) | Some(0) => {}
             Some(other) => return Err(format!("qemu exited {other}; expected a failure")),
             None => return Err("qemu terminated by signal".into()),
         }
@@ -1070,6 +1228,89 @@ fn cap(kind: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// The three endings CI has to tell apart, each produced by a fixture.
+///
+/// # Why all three and not just the panic
+///
+/// A panic assertion on its own proves nothing. If a clean boot also exited 37,
+/// the assertion would pass and mean nothing; if a hang also exited 37, the
+/// same. What is being established is that the three are *distinguishable*, and
+/// that is a claim about a set rather than about any one member — the same
+/// shape as `mutate`, where a red boot with a defect proves nothing unless the
+/// same boot is green without one.
+///
+/// The timeout budget for the hang is deliberately small. This is the one place
+/// where waiting the full [`BOOT_TIMEOUT`] would buy nothing: the fixture is
+/// known to spin forever, so every second past the point the kernel has clearly
+/// started is a second of gate time spent confirming it is still spinning.
+const HANG_BUDGET: u64 = 20;
+
+fn panic_path() -> Result<(), String> {
+    println!("three endings, three fixtures. CI has to tell them apart.\n");
+
+    // 1. A clean boot. The control, and the reason the other two mean anything.
+    println!("--- clean: the ordinary boot ---");
+    let (ending, log) = boot_ending(None, BOOT_TIMEOUT)?;
+    if ending != Ending::Exited(33) {
+        return Err(format!("a clean boot {ending}; expected exit 33"));
+    }
+    if !log.contains("M0 ok") {
+        return Err("a clean boot exited 33 without reporting M0 ok".into());
+    }
+    println!("\nclean: exited 33, and said M0 ok");
+
+    // 2. A panic. Exit 37, from `Exit::Panic`, and a log that names it.
+    println!("\n--- panic: a deliberate panic on the boot path ---");
+    let (ending, log) = boot_ending(Some("panic"), BOOT_TIMEOUT)?;
+    if ending != Ending::Exited(37) {
+        return Err(format!(
+            "the panic fixture {ending}; expected exit 37\n\n\
+             37 is `Exit::Panic`. If this reports 35 the panic handler is still\n\
+             exiting with `Exit::Failure`, and CI cannot tell a panic from a\n\
+             kernel that reported a failed assertion."
+        ));
+    }
+    if !log.contains("KERNEL PANIC") {
+        return Err("the panic fixture exited 37 with no panic report in the log\n\n\
+             The exit code alone says a panic happened and nothing about where.\n\
+             The handler is supposed to print before it exits."
+            .into());
+    }
+    // The message, not only the banner. A handler that cannot format its
+    // argument prints the banner and then nothing useful, which is the failure
+    // most worth catching here — see `deliberate_stop`.
+    if !log.contains("KiB reported usable") {
+        return Err("the panic report reached the banner and not the message\n\n\
+             The fixture panics with a formatted value precisely so that this\n\
+             assertion covers the formatting machinery and not just the branch."
+            .into());
+    }
+    println!("\npanic: exited 37, reported KERNEL PANIC, and formatted its message");
+
+    // 3. A hang. No exit code at all, and the harness has to be the one to say
+    //    so — this is the ending the kernel cannot report on its own behalf.
+    println!("\n--- hang: a boot that never finishes ---");
+    let (ending, _) = boot_ending(Some("hang"), HANG_BUDGET)?;
+    match ending {
+        Ending::TimedOut(seconds) => {
+            println!("\nhang: still running after {seconds}s, killed by the harness");
+        }
+        other => {
+            return Err(format!(
+                "the hang fixture {other}; expected the harness to time out\n\n\
+                 A fixture that spins forever and yet exits means either the\n\
+                 fixture is not reached or something is exiting on its behalf."
+            ));
+        }
+    }
+
+    println!(
+        "\npanic path ok — 33 clean, 37 panic, timeout hang.\n\
+         Three endings, mutually distinguishable, each from a fixture."
+    );
+    Ok(())
+}
+
 /// Run the timer for a while and print the jitter histogram it produced.
 ///
 /// # Why this is a command and not part of `verify`
@@ -1179,6 +1420,13 @@ fn verify() -> Result<(), String> {
     lint_all()?;
     test()?;
     run()?;
+    // Before `mutate`, and for the same reason `mutate` is in the loop at all.
+    // Everything above this line establishes that the tree is green; these two
+    // establish that a tree which was not would be *noticed*. This one covers
+    // the reporting channel itself — a clean exit, a panic and a hang have to
+    // arrive at CI as three different things, and a kernel cannot report the
+    // third on its own behalf.
+    panic_path()?;
     // Last, and part of the loop rather than beside it. It is the half of
     // E0-P08 that says the suite can fail: everything above proves the
     // properties hold on this tree, and this proves that a tree where one of

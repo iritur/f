@@ -122,6 +122,13 @@ jobs:
       # have one, because a fixture that panics takes the machine down rather
       # than being caught. RFC 0017 argues it.
       - run: cargo xtask mutate
+      # The reporting channel itself, which every job above depends on and none
+      # of them checks. Three endings have to reach CI as three different
+      # things: a clean boot (33), a panic (37), and a boot that never finishes
+      # — which the kernel cannot report on its own behalf, so the harness has
+      # to be the one that notices. Before this, a hung kernel presented as a
+      # job that timed out somewhere during "build", with no log and no clue.
+      - run: cargo xtask panic
 
   deps:
     name: dependency policy
