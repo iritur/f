@@ -66,6 +66,13 @@ const SEED: u64 = 0xF00D_BEEF_CAFE_1234;
 /// screen.
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
+    // First, before the serial port. Everything after this line is boot, and a
+    // stamp taken later would be measuring the part of boot somebody chose to
+    // include. The counter is free-running and needs no calibration to *read*;
+    // what needs calibration is turning the delta into nanoseconds, and that
+    // has happened by the time anything asks.
+    let entered = arch::x86_64::read_tsc();
+
     let serial = arch::x86_64::serial::Serial;
     serial.init();
 
@@ -406,8 +413,55 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // other, each reachable on purpose. `cargo xtask panic` boots all three.
     deliberate_stop(&boot);
 
+    boot_time(&boot, entered);
+
     kprintln!("M0 ok");
     arch::x86_64::exit_qemu(arch::x86_64::Exit::Success)
+}
+
+/// How long this boot took, when the command line asks for it.
+///
+/// # Why this is not simply printed
+///
+/// The boot log is a fixture. Two runs of the same commit produce the same
+/// bytes, and that property is asserted — it is what E0-B02 closed on and what
+/// every reproduction check since rests on. A duration in it would be a
+/// different number on every run, so the log would stop being comparable and
+/// the one contract M0 actually makes would be gone.
+///
+/// This is the same answer `timer=` already gives for the jitter histogram, and
+/// the reason is worth stating twice because the temptation is to print it
+/// once: a boot log carrying a measurement is a fixture that fails at random.
+///
+/// The number is nanoseconds from the first instruction of `kmain` to here, on
+/// the timestamp counter, converted with the frequency `apic::calibrate`
+/// measured. It excludes the loader and the emulator's own start-up, which is
+/// the honest boundary: this is what the *kernel* took, and nothing here can
+/// see what happened before it was entered.
+fn boot_time(boot: &BootInfo, entered: u64) {
+    if !boot.has_parameter(b"boottime") {
+        return;
+    }
+
+    let khz = arch::x86_64::apic::tsc_khz();
+    if khz == 0 {
+        kprintln!("  boot time     unavailable: the timestamp counter was never calibrated");
+        return;
+    }
+
+    let ticks = arch::x86_64::read_tsc().saturating_sub(entered);
+    // Divide first and scale the remainder, for the reason E0-B08 recorded:
+    // `ticks * 1_000_000 / khz` overflows a u64 after about ninety minutes of
+    // uptime at 3.4 GHz, and wraps rather than failing. A boot is nowhere near
+    // that, and doing the arithmetic the other way here would leave the pattern
+    // that is wrong elsewhere sitting in the tree looking correct.
+    let micros = ticks / khz;
+    let remainder = ticks % khz;
+    let nanos = micros.saturating_mul(1_000).saturating_add(remainder * 1_000 / khz);
+
+    // A line the harness parses, deliberately shaped so that a person reading
+    // the log knows it is not part of the fixture.
+    kprintln!("  boot time     {nanos} ns to M0 (measurement run; not the fixture log)");
 }
 
 /// Panic or hang, when the command line asks for one.

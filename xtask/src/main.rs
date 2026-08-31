@@ -614,6 +614,23 @@ fn init_image() -> Result<PathBuf, String> {
 /// When `capture` is set the serial output is collected and returned as well as
 /// printed, which is what lets a caller assert on *how* a boot went wrong
 /// rather than only that it did.
+/// What to do with the emulator's serial output.
+///
+/// Three, not a bool, because the two capturing cases differ in a way a caller
+/// cares about. A claim that boots ten times wants the log — it parses a line
+/// out of it — and does not want two hundred lines of identical boot banner on
+/// the terminal. Every other capturing caller is capturing precisely so a
+/// failure can be read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Capture {
+    /// Let it go to the terminal; keep nothing.
+    Off,
+    /// Keep it and print it.
+    Printed,
+    /// Keep it and say nothing.
+    Quiet,
+}
+
 /// How a run of the emulator ended.
 ///
 /// Three outcomes, not two, because a harness that models "finished" and
@@ -665,7 +682,7 @@ impl fmt::Display for Ending {
 const BOOT_TIMEOUT: u64 = 180;
 
 fn boot(append: Option<&str>) -> Result<Option<i32>, String> {
-    match machine(append, &[], false)?.0 {
+    match machine(append, &[], Capture::Off)?.0 {
         Ending::TimedOut(seconds) => Err(format!(
             "the boot was still running after {seconds}s and was killed\n\n\
              Nothing here reports a hang, so this is the harness noticing rather\n\
@@ -682,12 +699,12 @@ fn boot(append: Option<&str>) -> Result<Option<i32>, String> {
 /// [`boot`] deliberately turns into an error because for every other caller a
 /// hang is a failure and not a result.
 fn boot_ending(append: Option<&str>, seconds: u64) -> Result<(Ending, String), String> {
-    machine_with(append, &[], true, seconds)
+    machine_with(append, &[], Capture::Printed, seconds)
 }
 
 /// [`boot`], with the serial log.
 fn boot_captured(append: Option<&str>, features: &[&str]) -> Result<(Option<i32>, String), String> {
-    let (ending, log) = machine(append, features, true)?;
+    let (ending, log) = machine(append, features, Capture::Printed)?;
     match ending {
         Ending::TimedOut(seconds) => Err(format!(
             "the boot was still running after {seconds}s and was killed\n\n\
@@ -701,9 +718,14 @@ fn boot_captured(append: Option<&str>, features: &[&str]) -> Result<(Option<i32>
 fn machine(
     append: Option<&str>,
     features: &[&str],
-    capture: bool,
+    capture: Capture,
 ) -> Result<(Ending, String), String> {
     machine_with(append, features, capture, BOOT_TIMEOUT)
+}
+
+/// [`machine`], capturing the log and printing none of it.
+fn machine_quiet(append: Option<&str>) -> Result<(Ending, String), String> {
+    machine_with(append, &[], Capture::Quiet, BOOT_TIMEOUT)
 }
 
 /// [`machine`], with a budget of its own.
@@ -714,7 +736,7 @@ fn machine(
 fn machine_with(
     append: Option<&str>,
     features: &[&str],
-    capture: bool,
+    capture: Capture,
     timeout: u64,
 ) -> Result<(Ending, String), String> {
     build_with(features)?;
@@ -784,7 +806,7 @@ fn machine_with(
     // wait forever, which makes a hang the harness's problem to survive rather
     // than its problem to report — and in CI it presents as a job that timed
     // out somewhere during "build", with no log and no clue.
-    if capture {
+    if capture != Capture::Off {
         qemu.stdout(Stdio::piped());
     }
     let mut child = qemu.spawn().map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
@@ -836,7 +858,9 @@ fn machine_with(
     let log = match reader {
         Some(handle) => {
             let log = handle.join().unwrap_or_default();
-            print!("{log}");
+            if capture == Capture::Printed {
+                print!("{log}");
+            }
             log
         }
         None => String::new(),
@@ -2080,6 +2104,76 @@ fn claims_list() -> Result<(), String> {
 /// A `pending` claim runs its workload and reports, but does not gate — the
 /// distinction matters, because a number produced before the machinery it
 /// describes exists is a sanity check, not evidence.
+/// How many boots claim `boot-to-m0` averages over.
+///
+/// Matches `repeat` in `claims/0003-boot-to-m0.toml`, and is stated in both
+/// places because they are different kinds of statement: the claim says what
+/// the number means, this says what the command does. A mismatch is a claim
+/// describing a run nobody performed, so the command checks.
+const BOOT_SAMPLES: u64 = 10;
+
+/// Claim `boot-to-m0`: ten boots, one observation each.
+///
+/// The measurement is taken *inside* the kernel and printed only when asked
+/// for, which is the same shape `timer=` already has and for the same reason.
+/// The boot log is a fixture — two runs of a commit produce the same bytes, and
+/// that is asserted — so a duration in it would destroy the one contract M0
+/// makes. `boottime` is therefore a parameter, and a run carrying it is not a
+/// fixture run.
+fn claim_boot_to_m0() -> Result<(), String> {
+    let mut sample = f_bench::Sample::new("boot-to-m0");
+
+    for i in 0..BOOT_SAMPLES {
+        // Not captured-and-printed for every boot: ten full boot logs is two
+        // hundred lines of the same thing, and the line being looked for would
+        // be lost in it. `machine_with`'s capture is what makes the parse
+        // possible; the printing is what this suppresses.
+        let (ending, log) = machine_quiet(Some("boottime"))?;
+        match ending {
+            Ending::Exited(33) => {}
+            other => {
+                print!("{log}");
+                return Err(format!("boot {} of {BOOT_SAMPLES} {other}; expected 33", i + 1));
+            }
+        }
+
+        let nanos = boot_nanos(&log).ok_or_else(|| {
+            format!(
+                "boot {} of {BOOT_SAMPLES} reached M0 and reported no boot time\n\n\
+                 The kernel prints `boot time  <n> ns to M0` only when the command\n\
+                 line carries `boottime`. If the line is missing entirely, the\n\
+                 parameter is not reaching the kernel; if it says `unavailable`,\n\
+                 the timestamp counter was never calibrated on this boot.",
+                i + 1
+            )
+        })?;
+        sample.latency.record(nanos);
+        println!("  boot {:>2} of {BOOT_SAMPLES}   {nanos:>12} ns", i + 1);
+    }
+
+    println!();
+    sample.report();
+
+    match sample.persist(&root().join("claims")) {
+        Ok(path) => println!("\nfull distribution written to {}", relative(&path)),
+        Err(e) => println!("\nnot recorded: {e}"),
+    }
+    Ok(())
+}
+
+/// The nanosecond count from a boot log that was asked for one.
+///
+/// Reads the line the kernel writes and nothing else. A log that does not carry
+/// it gives `None` rather than a zero, because a zero here would be a boot that
+/// took no time — a number, and a wrong one, where the honest answer is that
+/// there is no number.
+fn boot_nanos(log: &str) -> Option<u64> {
+    log.lines()
+        .find_map(|line| line.trim().strip_prefix("boot time"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+}
+
 fn claim_run(name: Option<&str>) -> Result<(), String> {
     let Some(name) = name else {
         return Err("usage: cargo xtask claim <name>   (see `cargo xtask claims`)".into());
@@ -2106,11 +2200,21 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
     println!("runner    {}", field("runner").unwrap_or_else(|| "unset".into()));
     println!();
 
-    // The workload binary is named after the claim, minus the registry prefix.
-    let bin = name.replace('-', "_");
-    let bin = bin.strip_prefix("ring_submit_latency").map_or(bin.clone(), |_| "ring_submit".into());
-
-    sh("cargo", &["run", "--release", "-p", "f-bench", "--bin", &bin])?;
+    // Not every claim's workload is a benchmark binary. `boot-to-m0` measures
+    // the kernel booting, which is a boot rather than a program — and the
+    // measurement is taken inside the kernel because nothing outside it can see
+    // where boot begins. Dispatching on the name keeps `cargo xtask claim
+    // <name>` as the one reproduction command the registry publishes,
+    // regardless of what the workload turns out to be.
+    if name == "boot-to-m0" {
+        claim_boot_to_m0()?;
+    } else {
+        // The workload binary is named after the claim, minus the registry prefix.
+        let bin = name.replace('-', "_");
+        let bin =
+            bin.strip_prefix("ring_submit_latency").map_or(bin.clone(), |_| "ring_submit".into());
+        sh("cargo", &["run", "--release", "-p", "f-bench", "--bin", &bin])?;
+    }
 
     // The harness itself refuses in a non-measurement environment and says so
     // in its own output — `f_bench::Environment`, E0-P15. Repeating the
@@ -2128,6 +2232,14 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
             println!(
                 "\nstatus is `pending`: the workload ran, but the machinery this\n\
                  claim describes does not exist yet. Not evidence. Not gating."
+            );
+            Ok(())
+        }
+        "tracked" => {
+            println!(
+                "\nstatus is `tracked`: recorded and watched, and it does not gate.\n\
+                 A tracked number exists so that a change nobody intended is visible;\n\
+                 promoting it to `gating` is a decision, taken in a reviewable diff."
             );
             Ok(())
         }
