@@ -130,6 +130,11 @@ fn main() -> ExitCode {
         "init" => init_image().map(|path| println!("{}", relative(&path))),
         "mutate" => mutate(),
         "panic" => panic_path(),
+        "reproduce" => match args.get(1).map(String::as_str) {
+            Some("--trace") => trace_only(),
+            Some(other) => Err(format!("unknown option for reproduce: {other}")),
+            None => reproduce(),
+        },
         "timer" => timer(args.get(1).map(String::as_str)),
         "test" => test(),
         "verify" => verify(),
@@ -215,6 +220,10 @@ cargo xtask <command>
   lint-units         R03: every public abi field states its unit
   lint-callbacks     R05: no interface registers a callback
   lint-claim-owners  R09: every claim names the document that owns it
+
+  reproduce          Two runs of this commit must produce one trace hash,
+                     and one unseeded read of time must break that
+  reproduce --trace  Print this run's trace hash and nothing else
 
   panic              Three endings CI must tell apart: a clean boot, a
                      deliberate panic, and a boot that never finishes
@@ -970,6 +979,142 @@ fn fault(kind: Option<&str>) -> Result<(), String> {
 /// boot that must find it, and the sentence the log has to contain — because
 /// "the boot went red" is not the assertion. A boot that went red for some
 /// other reason would satisfy an exit code and prove nothing.
+/// The deliberate defect that makes two runs of one commit disagree.
+///
+/// Separate from [`MUTATIONS`] because it is a different kind of defect and
+/// belongs to a different command. Every mutation in that table makes a boot go
+/// *red*, and `mutate` asserts exactly that. This one makes a boot go green
+/// twice with two different answers, which no exit code and no assertion in the
+/// tree can see — only a comparison of two runs can.
+const TRACE_DEFECT: &str = "mutate-unseeded-time";
+
+/// Every feature in the tree that is a deliberate defect.
+///
+/// One list, because `lint-mutations` has one job — no defect is ever on by
+/// default — and a second list is how the second defect gets forgotten.
+const DEFECTS: &[&str] = &[TRACE_DEFECT, "mutate-unchecked-index"];
+
+/// The seed every reproduction run uses.
+///
+/// Fixed and stated here rather than defaulted inside the kernel, because the
+/// contract is about a *pair* — `(seed, commit)` — and a pair with an implicit
+/// half is a pair nobody can quote. When the kernel takes a seed on its command
+/// line this becomes the value passed, and the contract does not change.
+const TRACE_SEED: &str = "0xf00dbeefcafe1234";
+
+/// A stable hash of an execution trace.
+///
+/// FNV-1a, and the choice is deliberate rather than lazy. What this has to be
+/// is *identical on two machines at one commit*, which rules out anything the
+/// standard library reserves the right to change and anything seeded per
+/// process — `DefaultHasher` is both. It does not have to be
+/// collision-resistant: nothing adversarial produces these traces, and a
+/// content-addressed *release* is a different problem with a different answer
+/// (`sha256`, E0-R01). What it has to be is written down, which is why it is
+/// eight lines here rather than a dependency.
+fn trace_hash(log: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in log.as_bytes() {
+        // Carriage returns are stripped. The serial console emits CRLF and a
+        // pipe on one host may normalise where another does not, which would
+        // make two identical executions hash differently for a reason that has
+        // nothing to do with the kernel.
+        if *byte == b'\r' {
+            continue;
+        }
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// One trace, printed as the single line a comparison needs.
+fn trace(features: &[&str]) -> Result<u64, String> {
+    let (ending, log) = machine_with(None, features, Capture::Quiet, BOOT_TIMEOUT)?;
+    match ending {
+        Ending::Exited(33) => Ok(trace_hash(&log)),
+        other => {
+            print!("{log}");
+            Err(format!("the traced boot {other}; expected 33"))
+        }
+    }
+}
+
+/// The reproduction check.
+///
+/// # What is being claimed
+///
+/// That two runs of the same `(seed, commit)` produce a byte-identical
+/// execution trace. Locally that is two boots on one machine, which is the
+/// weaker half; the CI job runs the same command on two runners and compares
+/// the hashes, which is the claim the task actually makes.
+///
+/// # Why the defect half is not optional
+///
+/// A reproduction check that has only ever passed is indistinguishable from one
+/// that cannot fail, and this one is unusually easy to get wrong in that
+/// direction: if the trace were hashed over something that does not vary — a
+/// constant banner, an empty string — it would agree with itself forever. So
+/// the command also builds the kernel with one unseeded read of the timestamp
+/// counter on the boot path and *requires* the two runs to disagree.
+///
+/// That defect is worth looking at, because it is the shape of the bug this
+/// whole apparatus exists for. It does not make the kernel fail. It boots,
+/// every assertion holds, it prints `M0 ok`, it exits 33. Every other check in
+/// this tree is green on it. The only thing wrong is that two runs no longer
+/// agree — and until this command existed, nothing would ever have said so.
+fn reproduce() -> Result<(), String> {
+    println!("reproduction check — seed {TRACE_SEED}\n");
+
+    println!("[1/2] the same commit, twice — the traces must agree");
+    let first = trace(&[])?;
+    let second = trace(&[])?;
+    println!("  run 1  {first:#018x}");
+    println!("  run 2  {second:#018x}");
+    if first != second {
+        return Err("two runs of this commit produced different traces.\n\n\
+             This is the determinism contract failing, and it is the failure every\n\
+             other layer of the test apparatus rests on: a seed stops being a bug\n\
+             report, the simulator stops reproducing, and a claim stops being\n\
+             re-derivable. Something on the boot path is reading a clock, a counter\n\
+             or an address that the seeded `Env` does not own. RFC 0004."
+            .to_string());
+    }
+    println!("\n  agreed: {first:#018x}");
+
+    println!("\n[2/2] with one unseeded read of time — the traces must disagree");
+    let a = trace(&[TRACE_DEFECT])?;
+    let b = trace(&[TRACE_DEFECT])?;
+    println!("  run 1  {a:#018x}");
+    println!("  run 2  {b:#018x}");
+    if a == b {
+        return Err(format!(
+            "the kernel built with `{TRACE_DEFECT}` still reproduced itself.\n\n\
+             That means this check cannot fail, which makes the green result above\n\
+             worth nothing. Either the defect is no longer reached on the boot path,\n\
+             or the trace is being hashed over something that does not contain it."
+        ));
+    }
+    println!("\n  disagreed, as required — the check can fail");
+
+    println!(
+        "\nreproduce: ok — {first:#018x}\n\
+         Two boots on one machine. The pair that matters is two runners, and that\n\
+         is the CI job: same image, same commit, same seed, hashes compared."
+    );
+    Ok(())
+}
+
+/// Print one trace hash and nothing else.
+///
+/// For the CI job, where two runners each produce a line and a third job
+/// compares them. Nothing else is printed, so the artefact is the hash rather
+/// than a log a comparison would have to parse.
+fn trace_only() -> Result<(), String> {
+    println!("{:#018x}", trace(&[])?);
+    Ok(())
+}
+
 const MUTATIONS: &[(&str, &str, &str, &str)] = &[(
     "mutate-unchecked-index",
     "cap=forge",
@@ -1083,7 +1228,7 @@ fn lint_mutations() -> Result<(), String> {
         if name.trim() != "default" {
             continue;
         }
-        for (feature, _, _, _) in MUTATIONS {
+        for feature in DEFECTS {
             if value.contains(feature) {
                 return Err(format!(
                     "kernel/Cargo.toml has `{feature}` in its default features.\n\n\
@@ -1095,7 +1240,7 @@ fn lint_mutations() -> Result<(), String> {
         }
     }
 
-    println!("lint-mutations: ok  (no deliberate defect is on by default)");
+    println!("lint-mutations: ok  ({} deliberate defect(s), none on by default)", DEFECTS.len());
     Ok(())
 }
 
@@ -1475,6 +1620,11 @@ fn verify() -> Result<(), String> {
     // arrive at CI as three different things, and a kernel cannot report the
     // third on its own behalf.
     panic_path()?;
+    // The determinism contract, and the check every other layer rests on. It
+    // is here rather than only in CI because the failure it catches is one
+    // nothing else in this loop can see: a boot that goes green twice with two
+    // different answers passes `run`, `user`, `cap` and `mutate` alike.
+    reproduce()?;
     // Last, and part of the loop rather than beside it. It is the half of
     // E0-P08 that says the suite can fail: everything above proves the
     // properties hold on this tree, and this proves that a tree where one of

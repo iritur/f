@@ -119,6 +119,21 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     for _ in 0..8 {
         mixed ^= seeded.next_u64();
     }
+
+    // A deliberate defect, off by default, and the one E0-P02 is built around.
+    //
+    // Every other check in this tree would pass with this on. The kernel boots,
+    // every assertion holds, `M0 ok` is printed and the exit code is 33 — the
+    // only thing that changes is that two runs of the same commit no longer
+    // agree, and nothing except a reproduction check looks at that. RFC 0017
+    // argues why a defect like this lives in the shipped source behind a feature
+    // rather than in a patch somebody applies; this is the second instance, and
+    // the argument is the same one.
+    #[cfg(feature = "mutate-unseeded-time")]
+    {
+        mixed ^= arch::x86_64::read_tsc();
+    }
+
     kprintln!("  env digest    {mixed:#018x}");
     kprintln!("  env clock     {} ns", seeded.now().as_nanos());
 
@@ -126,14 +141,25 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // possible form of the reproducibility contract, asserted at boot so that a
     // regression in the substrate is caught on the very next run rather than
     // months later when the simulator stops reproducing.
-    let mut check = SeededEnv::new(SEED, 100);
-    let mut expect: u64 = 0;
-    for _ in 0..8 {
-        expect ^= check.next_u64();
-    }
-    if expect != mixed {
-        kprintln!("FAIL: determinism substrate is not reproducible");
-        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    //
+    // The whole block is compiled out under the reproduction defect, not just
+    // the comparison. That defect must make two runs *differ*, not make one run
+    // fail — a boot that goes red is caught by every check in the tree, and the
+    // question E0-P02 asks is whether anything catches a boot that goes green
+    // twice with two different answers. Compiling out only the `if` would leave
+    // the computation behind as an unused-variable warning, and a defect build
+    // that does not compile cleanly is a defect build somebody will disable.
+    #[cfg(not(feature = "mutate-unseeded-time"))]
+    {
+        let mut check = SeededEnv::new(SEED, 100);
+        let mut expect: u64 = 0;
+        for _ in 0..8 {
+            expect ^= check.next_u64();
+        }
+        if expect != mixed {
+            kprintln!("FAIL: determinism substrate is not reproducible");
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
     }
 
     kprintln!("  determinism   ok");

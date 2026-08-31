@@ -223,6 +223,74 @@ jobs:
       # job that timed out somewhere during "build", with no log and no clue.
       - run: cargo xtask panic
 
+  # E0-P02. Two runs of the same (seed, commit) on two different runners must
+  # produce one trace hash.
+  #
+  # Two jobs and not a loop in one job, because the claim is about two machines.
+  # A pair of boots on one runner is the weaker half and `cargo xtask reproduce`
+  # already does it locally; what a second runner adds is everything a machine
+  # can differ in — core count, host load, kernel version, CPU model — and those
+  # are exactly the things a boot must not be reading.
+  #
+  # This job only became possible when every job started running in the same
+  # image (E0-P14). Before that the two runners could have had different QEMU
+  # versions, and QEMU's version is in the boot log: the check would have failed
+  # for a reason that has nothing to do with the kernel, which is the way a
+  # gate gets disabled.
+  trace:
+    name: execution trace (runner ${{ matrix.runner_id }})
+    runs-on: ubuntu-latest
+    container: ghcr.io/iritur/f-dev:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_id: [a, b]
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo xtask reproduce --trace | tee trace-${{ matrix.runner_id }}.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trace-${{ matrix.runner_id }}
+          path: trace-${{ matrix.runner_id }}.txt
+          if-no-files-found: error
+
+  reproduction:
+    name: the reproduction check
+    needs: trace
+    runs-on: ubuntu-latest
+    container: ghcr.io/iritur/f-dev:latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: trace-*
+          merge-multiple: true
+      - name: the two runners must agree
+        run: |
+          a=$(cat trace-a.txt)
+          b=$(cat trace-b.txt)
+          echo "runner a  $a"
+          echo "runner b  $b"
+          if [ "$a" != "$b" ]; then
+            echo
+            echo "Two runners produced different traces for one commit."
+            echo
+            echo "This is the determinism contract failing, and it is the failure"
+            echo "every other layer of the test apparatus rests on: a seed stops"
+            echo "being a bug report, the simulator stops reproducing, and a claim"
+            echo "stops being re-derivable. Something on the boot path is reading a"
+            echo "clock, a counter or an address the seeded Env does not own."
+            echo "RFC 0004."
+            exit 1
+          fi
+          echo "agreed: $a"
+      # The other half of the exit, and the half that says this job can fail:
+      # the same command with one unseeded read of time on the boot path, which
+      # must make two runs disagree. Without it, a trace hashed over something
+      # that never varies would agree with itself forever and this gate would
+      # be green for the wrong reason.
+      - run: cargo xtask reproduce
+
   deps:
     name: dependency policy
     runs-on: ubuntu-latest

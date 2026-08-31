@@ -35,6 +35,12 @@ multiple_unsafe_ops_per_block = "deny"
 # nobody meant to build.
 [features]
 mutate-unchecked-index = []
+# The defect E0-P02 exists to catch: one unseeded read of the timestamp
+# counter on the boot path. It does not make the kernel fail — that is the
+# point of it, and why it is not in `xtask`'s MUTATIONS table. It makes two
+# runs of the same commit differ, which nothing but a reproduction check
+# would ever notice.
+mutate-unseeded-time = []
 
 [[bin]]
 name = "f-kernel"
