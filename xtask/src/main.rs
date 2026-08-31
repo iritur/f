@@ -139,7 +139,12 @@ fn main() -> ExitCode {
         "lint-unsafe" => lint_unsafe(),
         "lint-percpu" => lint_percpu(),
         "lint-mutations" => lint_mutations(),
-        "claims" => claims_list(),
+        "lint-claims" => lint_claims(),
+        "claims" => match args.get(1).map(String::as_str) {
+            Some("--render") => render_claims(),
+            Some(other) => Err(format!("unknown option for claims: {other}")),
+            None => claims_list(),
+        },
         "claim" => claim_run(args.get(1).map(String::as_str)),
         "bench" => bench(args.get(1).map(String::as_str)),
         "evals" => evals_list(),
@@ -197,11 +202,13 @@ cargo xtask <command>
   lint-unsafe        No `unsafe` outside the frame crates
   lint-percpu        No kernel-global mutable state outside `PerCpu`
   lint-mutations     No deliberate defect is on by default
+  lint-claims        No document cites a claim value the claim no longer has
 
   panic              Three endings CI must tell apart: a clean boot, a
                      deliberate panic, and a boot that never finishes
 
-  claims             List the claims registry and whether each one gates
+  claims             List the claims registry, and write claims/snapshot.json
+  claims --render    Rewrite every cited claim value in docs/ from the registry
   claim <name>       Run one claim's workload and report against its threshold
   bench [name]       Run a benchmark binary directly
   coverage           Host tests with coverage instrumentation
@@ -1470,6 +1477,7 @@ fn lint_all() -> Result<(), String> {
     lint_unsafe()?;
     lint_percpu()?;
     lint_mutations()?;
+    lint_claims()?;
     // The same check the CI policy job runs. It lives here because a local
     // `lint` that is a subset of the gate teaches people the gate is passing
     // when it is not — which is how a formatting failure reached CI on a tree
@@ -2070,6 +2078,260 @@ fn toml_field(text: &str, key: &str) -> Option<String> {
     })
 }
 
+/// Where the machine-readable snapshot of the registry is written.
+///
+/// In `claims/` beside the entries rather than in the build directory: it is a
+/// statement about the registry, and `cargo clean` should not be able to delete
+/// the answer to "what did this commit claim". It is generated, so it is
+/// regenerated rather than edited, and `xtask lint` fails when it is stale.
+fn snapshot_path() -> PathBuf {
+    root().join("claims").join("snapshot.json")
+}
+
+/// Every claim file, in registry order.
+fn claim_files() -> Result<Vec<PathBuf>, String> {
+    let dir = root().join("claims");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("reading claims/: {e}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "toml"))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+/// A claim's `name`, which is the key everything else refers to it by.
+fn claim_name(text: &str, path: &Path) -> String {
+    toml_field(text, "name")
+        .unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().to_string())
+}
+
+/// One value out of a claim file, addressed the way a document refers to it.
+///
+/// Two shapes, because the registry has two. A bare key is a top-level scalar —
+/// `status`, `milestone`. A dotted key is a threshold bound:
+/// `threshold.ns_per_op_p99.max` reads `max` out of
+/// `ns_per_op_p99 = { max = 50 }` under `[threshold]`.
+///
+/// Not a TOML parser, and the same caveat as everywhere else in this file: it
+/// reads the shape these files are written in. What makes that safe here is
+/// that a reference which does not resolve is an error rather than an empty
+/// string — a document rendering a blank where a number should be is the one
+/// outcome this whole mechanism exists to prevent.
+fn claim_value(text: &str, key: &str) -> Option<String> {
+    let mut parts = key.split('.');
+    let head = parts.next()?;
+    let rest: Vec<&str> = parts.collect();
+
+    if rest.is_empty() {
+        return toml_field(text, head);
+    }
+    if rest.len() != 2 {
+        return None;
+    }
+
+    // Find the `[head]` table, then the `rest[0] = { ... }` line inside it.
+    let mut in_table = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_table = trimmed == format!("[{head}]");
+            continue;
+        }
+        if !in_table {
+            continue;
+        }
+        let Some((lhs, rhs)) = trimmed.split_once('=') else { continue };
+        if lhs.trim() != rest[0] {
+            continue;
+        }
+        // `{ max = 50 }` — one inline table, one bound per side.
+        let inner = rhs.trim().trim_start_matches('{').trim_end_matches('}');
+        for entry in inner.split(',') {
+            let Some((bound, value)) = entry.split_once('=') else { continue };
+            if bound.trim() == rest[1] {
+                return Some(value.trim().trim_matches('"').replace('_', ""));
+            }
+        }
+    }
+    None
+}
+
+/// The registry, as one JSON object per claim.
+///
+/// Emitted whenever `xtask claims` runs, so the snapshot cannot be older than
+/// the last time anybody looked at the registry.
+fn write_snapshot() -> Result<PathBuf, String> {
+    let mut out = String::from("{\n  \"claims\": [\n");
+    let files = claim_files()?;
+
+    for (i, path) in files.iter().enumerate() {
+        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let comma = if i + 1 == files.len() { "" } else { "," };
+        let field = |key: &str| claim_value(&text, key).unwrap_or_else(|| "unknown".into());
+        out.push_str(&format!(
+            "    {{ \"name\": \"{}\", \"status\": \"{}\", \"milestone\": \"{}\", \
+             \"file\": \"{}\" }}{comma}\n",
+            claim_name(&text, path),
+            field("status"),
+            field("milestone"),
+            relative(path),
+        ));
+    }
+    out.push_str("  ]\n}\n");
+
+    let path = snapshot_path();
+    std::fs::write(&path, out).map_err(|e| format!("writing {}: {e}", relative(&path)))?;
+    Ok(path)
+}
+
+/// A reference to a claim value, found in a document.
+struct Reference {
+    /// Which document, for the message.
+    file: String,
+    /// `<claim>:<key>`, verbatim, for the message.
+    key: String,
+    /// What the document currently says.
+    rendered: String,
+    /// What the registry says.
+    actual: String,
+}
+
+/// Every `data-claim` reference in `docs/`, resolved against the registry.
+///
+/// # Why a placeholder and not a build step that generates the whole page
+///
+/// Because the documents are written by hand and should stay that way. What is
+/// wrong with a restated number is not that prose contains numbers, it is that
+/// nothing connects the two — so a claim can go red, or move, and the sentence
+/// arguing from it stays confidently in place. A marked span is the smallest
+/// thing that creates the connection: the prose is still prose, and the number
+/// in it has an owner.
+fn claim_references() -> Result<Vec<Reference>, String> {
+    // name -> file text, read once.
+    let mut registry: BTreeMap<String, String> = BTreeMap::new();
+    for path in claim_files()? {
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        registry.insert(claim_name(&text, &path), text);
+    }
+
+    let mut found = Vec::new();
+    for path in documents()? {
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let file = relative(&path);
+
+        for (key, rendered) in spans(&text) {
+            let (claim, field) = key
+                .split_once(':')
+                .ok_or_else(|| format!("{file}: data-claim=\"{key}\" is not <claim>:<key>"))?;
+            let source = registry
+                .get(claim)
+                .ok_or_else(|| format!("{file}: data-claim=\"{key}\" names no claim in claims/"))?;
+            let actual = claim_value(source, field).ok_or_else(|| {
+                format!("{file}: data-claim=\"{key}\" resolves to nothing in {claim}")
+            })?;
+            found.push(Reference { file: file.clone(), key: key.clone(), rendered, actual });
+        }
+    }
+    Ok(found)
+}
+
+/// Every `<span data-claim="...">text</span>` in a document, as key and text.
+fn spans(text: &str) -> Vec<(String, String)> {
+    const OPEN: &str = "<span data-claim=\"";
+    let mut out = Vec::new();
+    for piece in text.split(OPEN).skip(1) {
+        let Some((key, rest)) = piece.split_once('"') else { continue };
+        let Some(rest) = rest.split_once('>').map(|(_, r)| r) else { continue };
+        let Some((rendered, _)) = rest.split_once("</span>") else { continue };
+        out.push((key.to_string(), rendered.to_string()));
+    }
+    out
+}
+
+/// The documents that may cite a claim.
+fn documents() -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    for dir in [root().join("docs"), root().join("docs").join("design")] {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "html") {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// Rewrite every `data-claim` span to the value the registry holds.
+fn render_claims() -> Result<(), String> {
+    let stale: Vec<Reference> =
+        claim_references()?.into_iter().filter(|r| r.rendered != r.actual).collect();
+
+    if stale.is_empty() {
+        println!("claims render: nothing to do — every citation already matches the registry");
+        return Ok(());
+    }
+
+    let mut by_file: BTreeMap<String, Vec<&Reference>> = BTreeMap::new();
+    for reference in &stale {
+        by_file.entry(reference.file.clone()).or_default().push(reference);
+    }
+
+    for (file, references) in &by_file {
+        let path = root().join(file);
+        let mut text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        for reference in references {
+            let from =
+                format!("<span data-claim=\"{}\">{}</span>", reference.key, reference.rendered);
+            let to = format!("<span data-claim=\"{}\">{}</span>", reference.key, reference.actual);
+            text = text.replace(&from, &to);
+            println!("  {file}  {}  {} -> {}", reference.key, reference.rendered, reference.actual);
+        }
+        std::fs::write(&path, text).map_err(|e| format!("writing {file}: {e}"))?;
+    }
+
+    println!("\nrendered {} citation(s) from claims/", stale.len());
+    Ok(())
+}
+
+/// Fail if a document cites a claim value it no longer has.
+///
+/// This is the half that makes the mechanism worth having. Rendering on demand
+/// would let a document sit stale until somebody remembered to re-render; a
+/// check in `lint` means changing a threshold and not re-rendering is a red
+/// build, which is the same discipline the determinism and licensing lints
+/// apply to their own policies.
+fn lint_claims() -> Result<(), String> {
+    let references = claim_references()?;
+    let stale: Vec<&Reference> = references.iter().filter(|r| r.rendered != r.actual).collect();
+
+    if stale.is_empty() {
+        println!("lint-claims: ok  ({} citation(s) match the registry)", references.len());
+        return Ok(());
+    }
+
+    let mut report = String::new();
+    for reference in &stale {
+        report.push_str(&format!(
+            "  {}  {}\n    document says {}, claims/ says {}\n",
+            reference.file, reference.key, reference.rendered, reference.actual
+        ));
+    }
+    Err(format!(
+        "{} document citation(s) disagree with the registry:\n{report}\n\
+         A number in a design document is not allowed to be a second copy of a\n\
+         claim. Run `cargo xtask claims --render` to bring them back into line —\n\
+         and if the document was right and the claim is wrong, change the claim,\n\
+         because that is the file with the baseline and the reproduction in it.",
+        stale.len()
+    ))
+}
+
 fn claims_list() -> Result<(), String> {
     let dir = root().join("claims");
     let mut found: BTreeMap<String, String> = BTreeMap::new();
@@ -2095,6 +2357,14 @@ fn claims_list() -> Result<(), String> {
     for (name, status) in &found {
         println!("  {name:<32} {status}");
     }
+
+    // Written every time the registry is listed, so the snapshot cannot be
+    // older than the last time anybody looked. A snapshot regenerated only on
+    // request is a snapshot that is stale exactly when it matters.
+    let snapshot = write_snapshot()?;
+    let citations = claim_references()?;
+    println!("\nsnapshot  {}", relative(&snapshot));
+    println!("cited     {} time(s) in docs/, checked by `cargo xtask lint`", citations.len());
     println!("\nEvery number published in docs/design must correspond to an entry here.");
     Ok(())
 }
