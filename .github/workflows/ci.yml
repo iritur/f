@@ -435,20 +435,19 @@ jobs:
     container: ${{ needs.environment.outputs.image }}
     steps:
       - uses: actions/checkout@v7
+      # First, and before anything regenerates it. The committed snapshot is a
+      # claim about the registry, and `xtask claims` below rewrites the file by
+      # design — so a freshness check placed after it grades its own homework.
+      #
+      # This was a `git diff --quiet` here in the YAML, which is how it came to
+      # fail on a byte-identical file: git refuses a working tree owned by
+      # another uid, and `git diff` renders that refusal as "Not a git
+      # repository" rather than as a refusal. The comparison now happens in
+      # xtask, where it needs no repository and where a developer can run it.
+      - run: cargo xtask lint-snapshot
       - run: cargo xtask claims
       - run: cargo xtask lint-claim-owners
       - run: cargo xtask lint-claims
-      # The snapshot is committed, and a stale one is a commit claiming numbers
-      # it does not hold. `xtask claims` above rewrote it; if that changed the
-      # file, the tree and the registry disagreed.
-      - name: the committed snapshot is current
-        run: |
-          if ! git diff --quiet -- claims/snapshot.json; then
-            echo "claims/snapshot.json is stale. Run \`cargo xtask claims\` and commit it."
-            git diff -- claims/snapshot.json
-            exit 1
-          fi
-          echo "snapshot is current"
       - run: cargo xtask release --dry-run
 
   deps:

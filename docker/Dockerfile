@@ -61,6 +61,31 @@ ARG GID=1000
 RUN groupadd --gid ${GID} f 2>/dev/null || true \
  && useradd --uid ${UID} --gid ${GID} --create-home --shell /bin/bash f 2>/dev/null || true
 
+# Git trusts the tree it is handed, because in this image it has no way to earn
+# that trust and no reason to withhold it.
+#
+# Git refuses a repository whose worktree is owned by another uid — a defence
+# against a shared machine where somebody else's checkout can run hooks as you.
+# Neither half of that holds here. The image is given exactly one tree, by
+# whoever ran it, and every uid inside it is an artefact of how the tree got
+# mounted: a bind mount carries the host's ownership, and a CI runner checks out
+# as one uid and then runs the container's steps as another. The check is
+# answering a question the invocation has already settled.
+#
+# It is set here, once, rather than in each caller, because the failure it
+# causes is unreadable. `git diff` is one of the few commands that tolerates
+# running outside a repository, so it renders the refusal as *warning: Not a git
+# repository* — which is how a CI job came to report a byte-identical file as
+# stale, and how `xtask release` came within one step of printing a manifest for
+# a tree it could not name. A misdiagnosis this cheap to prevent should not be
+# rediscovered per job.
+#
+# What would reverse this: an image that is handed a tree it did not ask for —
+# building somebody else's pull request in a runner shared with other work. Then
+# the ownership check is load-bearing again and belongs back on, with the safe
+# directory named explicitly instead of `*`.
+RUN git config --system --add safe.directory '*'
+
 # ---------------------------------------------------------------------------
 # toolchain — Rust, installed from the repository's own pin.
 # ---------------------------------------------------------------------------

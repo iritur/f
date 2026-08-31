@@ -209,6 +209,30 @@ the worst possible state for a job whose job is disagreement.
 | A system package is needed | edit `docker/Dockerfile`, then `build` |
 | Something is inexplicably broken | `.\docker\dev.ps1 clean` then `build`. This drops the target and registry volumes and costs one index download |
 
+## Git trusts the tree it is handed
+
+`git config --system --add safe.directory '*'`, in the Dockerfile, and it is
+worth knowing why rather than finding it by grep.
+
+Git refuses a repository whose working tree is owned by another uid — a real
+defence on a shared machine, where somebody else's checkout can run hooks as
+you. Neither half of that holds here. The image is handed exactly one tree, by
+whoever ran it, and every uid inside it is an artefact of how the tree arrived:
+a bind mount carries the host's ownership, and a CI runner checks out as one
+uid and then runs the container's steps as another.
+
+It is set here rather than in each caller because the failure it causes does
+not look like itself. `git diff` is one of the few commands that tolerates
+running outside a repository, so it renders the refusal as *warning: Not a git
+repository* and exits non-zero — which is how the claims job came to report a
+byte-identical file as stale, and how `cargo xtask release` came within one
+step of printing a manifest for a tree it could not name.
+
+What would reverse it: an image handed a tree it did not ask for — building an
+untrusted pull request in a runner shared with other work. Then the ownership
+check is load-bearing again, and the safe directory should be named rather than
+`*`.
+
 ## Reproducibility, honestly
 
 The toolchain, the targets, the components and the three optional tools are

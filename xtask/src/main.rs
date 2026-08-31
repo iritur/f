@@ -148,6 +148,7 @@ fn main() -> ExitCode {
         "lint-units" => lint_units(),
         "lint-callbacks" => lint_callbacks(),
         "lint-claim-owners" => lint_claim_owners(),
+        "lint-snapshot" => lint_snapshot(),
         "release" => release(args.get(1).map(String::as_str) == Some("--dry-run")),
         "history" => match args.get(1).map(String::as_str) {
             Some("append") => history_append(),
@@ -1652,6 +1653,11 @@ fn lint_all() -> Result<(), String> {
     lint_units()?;
     lint_callbacks()?;
     lint_claim_owners()?;
+    // A generated file that is committed is a claim about the generator, and
+    // the only moment it can be checked cheaply is before anything regenerates
+    // it. `xtask claims` rewrites the snapshot by design, so this has to come
+    // first or it grades its own homework.
+    lint_snapshot()?;
     // The same check the CI policy job runs. It lives here because a local
     // `lint` that is a subset of the gate teaches people the gate is passing
     // when it is not — which is how a formatting failure reached CI on a tree
@@ -2581,13 +2587,31 @@ fn release(dry_run: bool) -> Result<(), String> {
             .into());
     }
 
-    let describe = capture("git", &["describe", "--tags", "--always", "--dirty"])
-        .unwrap_or_else(|_| "unknown".into());
-    let commit = capture("git", &["rev-parse", "HEAD"]).unwrap_or_else(|_| "unknown".into());
+    // Not `unwrap_or("unknown")`, which is what these two were. The version and
+    // the commit are the only fields saying *which tree this is*; a manifest
+    // printing `unknown` for both is not a degraded manifest, it is a confident
+    // statement about nothing. That degradation was live rather than
+    // theoretical — git refuses a container's foreign-owned working tree, so
+    // this job would have printed a clean-looking manifest for an unidentified
+    // tree, and passed.
+    let identify = |what: &str, args: &[&str]| {
+        capture("git", args).map(|out| out.trim().to_string()).map_err(|e| {
+            format!(
+                "cannot read the {what} from git: {e}\n\n\
+                 A release manifest names the tree it describes, so this is fatal rather \
+                 than `unknown`.\n\
+                 In a container this is usually git refusing a working tree owned by \
+                 another uid. docker/Dockerfile marks the tree safe; an image built \
+                 before that does not."
+            )
+        })
+    };
+    let describe = identify("version", &["describe", "--tags", "--always", "--dirty"])?;
+    let commit = identify("commit", &["rev-parse", "HEAD"])?;
 
     println!("release manifest (dry run)\n");
-    println!("  version   {}", describe.trim());
-    println!("  commit    {}", commit.trim());
+    println!("  version   {describe}");
+    println!("  commit    {commit}");
     println!("  contract  RELEASING.md\n");
 
     let mut missing = 0usize;
@@ -2876,6 +2900,17 @@ fn claim_value(text: &str, key: &str) -> Option<String> {
 /// Emitted whenever `xtask claims` runs, so the snapshot cannot be older than
 /// the last time anybody looked at the registry.
 fn write_snapshot() -> Result<PathBuf, String> {
+    let path = snapshot_path();
+    let out = snapshot_text()?;
+    std::fs::write(&path, out).map_err(|e| format!("writing {}: {e}", relative(&path)))?;
+    Ok(path)
+}
+
+/// The snapshot the registry currently implies, as bytes, without writing it.
+///
+/// Split out so that the question *is the committed file current* can be asked
+/// without answering it by overwriting the evidence.
+fn snapshot_text() -> Result<String, String> {
     let mut out = String::from("{\n  \"claims\": [\n");
     let files = claim_files()?;
 
@@ -2893,10 +2928,59 @@ fn write_snapshot() -> Result<PathBuf, String> {
         ));
     }
     out.push_str("  ]\n}\n");
+    Ok(out)
+}
 
+/// Fail if `claims/snapshot.json` is not what the registry currently implies.
+///
+/// # Why this is a lint and not a line of CI shell
+///
+/// It was a line of CI shell — `git diff --quiet -- claims/snapshot.json` — and
+/// it went red for a reason that had nothing to do with the snapshot. Inside a
+/// container git refuses a working tree owned by another uid, and `git diff` is
+/// one of the few commands that tolerates running outside a repository at all,
+/// so it reports that refusal as *warning: Not a git repository* and exits
+/// non-zero. The gate then said the snapshot was stale. It was byte-identical.
+/// A check that reports the wrong failure is worse than no check, because the
+/// reader spends their time on the file the message named.
+///
+/// Comparing the bytes needs no repository, no ownership and no second tool. It
+/// also runs on a laptop, which the shell conditional never did: it was a rule
+/// only CI could apply, and a rule you cannot run before pushing is one you
+/// find out about from a red build.
+fn lint_snapshot() -> Result<(), String> {
     let path = snapshot_path();
-    std::fs::write(&path, out).map_err(|e| format!("writing {}: {e}", relative(&path)))?;
-    Ok(path)
+    let expected = snapshot_text()?;
+    let actual =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+
+    // Compared with CR stripped. `.gitattributes` commits this file `eol=lf`,
+    // but a checkout that ignored that should fail on the claim that changed
+    // rather than on every line at once.
+    if expected.replace('\r', "") == actual.replace('\r', "") {
+        println!("lint-snapshot: ok  ({} is current)", relative(&path));
+        return Ok(());
+    }
+
+    let mut report = format!(
+        "{} does not match claims/.\n\nA committed snapshot that disagrees with the \
+         registry is a commit publishing numbers the tree does not hold.\n",
+        relative(&path)
+    );
+    for (n, (want, have)) in expected.lines().zip(actual.lines()).enumerate() {
+        if want != have {
+            let line = n + 1;
+            report.push_str(&format!(
+                "\n  line {line}\n    registry: {want}\n    file:     {have}\n"
+            ));
+        }
+    }
+    let (want, have) = (expected.lines().count(), actual.lines().count());
+    if want != have {
+        report.push_str(&format!("\n  the registry implies {want} line(s), the file has {have}\n"));
+    }
+    report.push_str("\nRun `cargo xtask claims` and commit the result.");
+    Err(report)
 }
 
 /// A reference to a claim value, found in a document.
