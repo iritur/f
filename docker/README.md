@@ -169,27 +169,37 @@ which deletes the per-job tool installation, makes "works on my machine"
 structurally the same statement as "works in CI", and gives the pull-request
 gate its ten-minute budget back.
 
-**Applied.** `.github/workflows/image.yml` publishes the image to
-`ghcr.io/iritur/f-dev`, and every job in `ci.yml` names it. The `apt-get
-install qemu-system-x86` in the kernel job is gone, and so is the dependency
-job's action-installed `cargo-deny` — that job now runs the `full` image's
-copy, at the version `docker/Dockerfile` pins, which matters more there than
-anywhere else because it is the job whose whole subject is dependencies.
+**Applied**, and the gate builds the image itself. The `apt-get install
+qemu-system-x86` in the kernel job is gone, and so is the dependency job's
+action-installed `cargo-deny` — that job runs the `full` image's copy, at the
+version this `Dockerfile` pins, which matters more there than anywhere else
+because it is the job whose whole subject is dependencies.
+
+**The image is a job in `ci.yml`, not a workflow somebody dispatches.** The
+first attempt at this got it wrong in an instructive way: `ci.yml` named a tag
+that a separate `image.yml` published on pushes to `main`, so the gate had a
+prerequisite no run of the gate produced. On a tree where that workflow had
+never fired, all ten jobs failed at "Initialize containers" with `manifest
+unknown` — before a single step ran. That is this file's own rule, broken by
+the change quoting it: a workflow somebody has to remember to dispatch is
+institutional knowledge with a YAML file in front of it. `image.yml` is gone;
+the gate owns its environment.
+
+The tag is derived from the files that define the environment —
+`env-<hash of Dockerfile, entrypoint, rust-toolchain.toml>` — rather than from
+the commit. A commit that does not touch the environment is a cache hit, and CI
+is pinned to an immutable tag rather than to `:latest`, which closes half the
+gap the section below admits to.
 
 The AArch64 half is not one `--platform linux/arm64` away, and the note above
 was optimistic about it. Building arm64 under binfmt emulation means installing
 a Rust nightly and a QEMU inside an emulated userland: tens of minutes, and
-failures with nothing to do with this tree. `image.yml` builds each
-architecture natively — `ubuntu-latest` and `ubuntu-24.04-arm` — and assembles
-one multi-architecture manifest afterwards, so both CI jobs name one tag. That
-matters for the AArch64 job in particular: its entire purpose is to disagree
-with the x86-64 one, and two environments sharing one name is the worst
-possible state for a job whose job is disagreement.
-
-**Before the first run.** `image.yml` triggers on a change to `docker/`, the
-toolchain pin, or itself. On a fresh fork nothing has published the image yet
-and every `ci.yml` job will fail to start; the fix is one manual
-`workflow_dispatch` of `image`.
+failures with nothing to do with this tree. The `image` job builds each
+architecture natively — `ubuntu-latest` and `ubuntu-24.04-arm` — and a
+`manifest` job assembles one multi-architecture tag, so both CI jobs name the
+same image. That matters for the AArch64 job in particular: its entire purpose
+is to disagree with the x86-64 one, and two environments sharing one name is
+the worst possible state for a job whose job is disagreement.
 
 ## Rebuilding, and when
 

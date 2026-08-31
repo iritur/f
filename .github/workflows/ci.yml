@@ -29,23 +29,143 @@ on:
 # that happen to agree — and the per-job tool installation disappears, which is
 # where a meaningful part of the ten-minute budget was going.
 #
-# `:latest` and not a digest, and that is a known gap rather than an oversight.
-# docker/README.md's "Reproducibility, honestly" section says the same thing
-# about the image generally: it is repeatable — everyone gets the same tools —
-# without being reproducible in the sense E2-P06 uses the word. Pinning CI to a
-# digest is one edit here and belongs with that decision, not ahead of it.
+# The gate builds that image itself, and the first version of this did not.
+# It named a tag a separate `image.yml` published on pushes to `main`, so the
+# gate had a prerequisite that no run of the gate produced: on a tree where
+# that workflow had never fired, all ten jobs failed at "Initialize containers"
+# with `manifest unknown`, before a single step ran. That is the same rule this
+# file is quoting one paragraph up — no step exists that is not in the tree —
+# broken by the change that was citing it. A workflow somebody has to remember
+# to dispatch is institutional knowledge with a YAML file in front of it.
 #
-# The image is published by image.yml, which must have run at least once before
-# any of this works. On a fresh fork that is one `workflow_dispatch`.
+# So the image is a job here, and every other job waits for it.
+#
+# The tag is derived from the *files that define the environment* rather than
+# from the commit: `env-<hash of Dockerfile, entrypoint, toolchain pin>`. Two
+# consequences, both wanted. A commit that does not touch the environment
+# reuses the image bit for bit, so the build is a cache hit and the job is
+# short. And CI is pinned to an immutable tag rather than to `:latest`, which
+# closes the gap the previous version of this comment admitted to and deferred.
 env:
-  F_IMAGE: ghcr.io/iritur/f-dev:latest
-  F_IMAGE_FULL: ghcr.io/iritur/f-dev:full
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository_owner }}/f-dev
 
 jobs:
+  # What the environment is, as one string. Computed before anything needs it,
+  # because a job's `container:` is resolved before its steps run and therefore
+  # cannot depend on anything that job does.
+  environment:
+    name: environment tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      image: ${{ steps.tag.outputs.image }}
+      image_full: ${{ steps.tag.outputs.image_full }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: tag
+        run: |
+          # Exactly the inputs the image is built from — the two files the
+          # build context contains (see .dockerignore) plus the Dockerfile
+          # itself. Anything else changing must not invalidate the image, or
+          # every commit rebuilds it and the cache is decorative.
+          hash=$(echo "${{ hashFiles('docker/Dockerfile', 'docker/entrypoint.sh', 'rust-toolchain.toml') }}" | cut -c1-16)
+          echo "tag=env-$hash" >> "$GITHUB_OUTPUT"
+          echo "image=${REGISTRY}/${IMAGE}:env-$hash" >> "$GITHUB_OUTPUT"
+          # Both names are computed here rather than assembled at each use.
+          # `env` is not a context a job's `container:` key can read — only
+          # github, needs, strategy, matrix, vars and inputs are — so anything a
+          # container is named by has to arrive through `needs`.
+          echo "image_full=${REGISTRY}/${IMAGE}:full-env-$hash" >> "$GITHUB_OUTPUT"
+          echo "environment tag: env-$hash"
+
+  # Two native builds rather than one emulated multi-platform build. Installing
+  # a Rust nightly and a QEMU under binfmt emulation takes tens of minutes and
+  # fails in ways that have nothing to do with this tree; each architecture
+  # builds on its own metal and the manifest is assembled afterwards.
+  #
+  # On a commit that does not touch the environment this is a full cache hit and
+  # costs about a minute. That minute is the price of the gate having no
+  # prerequisite outside itself, and it is the right way round: a gate that is
+  # a little slower is better than a gate that cannot start.
+  image:
+    name: environment image (${{ matrix.suffix }})
+    needs: environment
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            suffix: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            suffix: arm64
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: dev
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ needs.environment.outputs.tag }}-${{ matrix.suffix }}
+          cache-from: type=gha,scope=dev-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=dev-${{ matrix.suffix }}
+      # `full` adds cargo-deny, which the dependency-policy job needs at the
+      # version docker/Dockerfile pins rather than the version an action chose.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: full
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:full-${{ needs.environment.outputs.tag }}-${{ matrix.suffix }}
+          cache-from: type=gha,scope=full-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=full-${{ matrix.suffix }}
+
+  # One name per image, pointing at both architectures. The AArch64 jobs and the
+  # x86-64 ones then name the same tag, which is what stops the two from quietly
+  # becoming two environments with one name — the worst possible state for a
+  # pair of jobs whose whole purpose is to disagree with each other.
+  manifest:
+    name: environment manifest
+    needs: [environment, image]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: assemble
+        run: |
+          base="${REGISTRY}/${IMAGE}"
+          tag="${{ needs.environment.outputs.tag }}"
+          docker buildx imagetools create --tag "$base:$tag" \
+            "$base:$tag-amd64" "$base:$tag-arm64"
+          docker buildx imagetools create --tag "$base:full-$tag" \
+            "$base:full-$tag-amd64" "$base:full-$tag-arm64"
+          echo "environment published as $base:$tag"
   policy:
     name: policy checks
+    needs: [environment, manifest]
     runs-on: ubuntu-latest
-    container: ghcr.io/iritur/f-dev:latest
+    container: ${{ needs.environment.outputs.image }}
     steps:
       - uses: actions/checkout@v7
       # Each of these encodes an architectural decision. A failure names the
@@ -74,20 +194,22 @@ jobs:
 
   test-x86:
     name: tests (x86-64, total store order)
+    needs: [environment, manifest]
     runs-on: ubuntu-latest
-    container: ghcr.io/iritur/f-dev:latest
+    container: ${{ needs.environment.outputs.image }}
     steps:
       - uses: actions/checkout@v7
       - run: cargo test -p f-abi -p f-env -p f-ring -p f-init
 
   test-aarch64:
     name: tests (AArch64, weak memory)
+    needs: [environment, manifest]
     runs-on: ubuntu-24.04-arm
     # The arm64 half of the same multi-architecture tag. Naming one tag on both
     # runners is what stops the two jobs from drifting into two environments
     # with one name — which would be the worst possible state for the job whose
     # entire purpose is to disagree with the other one.
-    container: ghcr.io/iritur/f-dev:latest
+    container: ${{ needs.environment.outputs.image }}
     steps:
       - uses: actions/checkout@v7
       # This job is not a portability nicety. x86-64 total-store-order hides
@@ -117,8 +239,9 @@ jobs:
   # what an optimiser is entitled to move.
   litmus:
     name: memory-ordering litmus (${{ matrix.arch }})
+    needs: [environment, manifest]
     runs-on: ${{ matrix.runner }}
-    container: ghcr.io/iritur/f-dev:latest
+    container: ${{ needs.environment.outputs.image }}
     strategy:
       # Both results, always. `fail-fast` would cancel the AArch64 job the
       # moment x86-64 went red, which throws away the one number that
@@ -140,8 +263,9 @@ jobs:
 
   coverage:
     name: coverage instrumentation
+    needs: [environment, manifest]
     runs-on: ubuntu-latest
-    container: ghcr.io/iritur/f-dev:latest
+    container: ${{ needs.environment.outputs.image }}
     steps:
       - uses: actions/checkout@v7
       # Prints a line per crate and a total, and writes summary.json beside the
@@ -183,11 +307,12 @@ jobs:
 
   kernel:
     name: kernel boots
+    needs: [environment, manifest]
     runs-on: ubuntu-latest
     # QEMU arrives with the image. This job used to install it per run, which
     # is the per-job tool installation E0-P14 exists to delete: an emulator
     # whose version nobody chose, resolved fresh on every boot of the gate.
-    container: ghcr.io/iritur/f-dev:latest
+    container: ${{ needs.environment.outputs.image }}
     steps:
       - uses: actions/checkout@v7
       - run: cargo xtask run
@@ -239,8 +364,9 @@ jobs:
   # gate gets disabled.
   trace:
     name: execution trace (runner ${{ matrix.runner_id }})
+    needs: [environment, manifest]
     runs-on: ubuntu-latest
-    container: ghcr.io/iritur/f-dev:latest
+    container: ${{ needs.environment.outputs.image }}
     strategy:
       fail-fast: false
       matrix:
@@ -256,9 +382,9 @@ jobs:
 
   reproduction:
     name: the reproduction check
-    needs: trace
+    needs: [manifest, environment, trace]
     runs-on: ubuntu-latest
-    container: ghcr.io/iritur/f-dev:latest
+    container: ${{ needs.environment.outputs.image }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
@@ -304,8 +430,9 @@ jobs:
   # E0-P01's exit is only half met.
   claims:
     name: claims registry
+    needs: [environment, manifest]
     runs-on: ubuntu-latest
-    container: ghcr.io/iritur/f-dev:latest
+    container: ${{ needs.environment.outputs.image }}
     steps:
       - uses: actions/checkout@v7
       - run: cargo xtask claims
@@ -326,13 +453,14 @@ jobs:
 
   deps:
     name: dependency policy
+    needs: [environment, manifest]
     runs-on: ubuntu-latest
     # The `full` image, which carries cargo-deny at the version docker/Dockerfile
     # pins. The action installed its own copy, so the version this job enforced
     # policy with was chosen by neither this repository nor its container —
     # which is the ambient dependency the image exists to remove, in the one job
     # whose whole subject is dependencies.
-    container: ghcr.io/iritur/f-dev:full
+    container: ${{ needs.environment.outputs.image_full }}
     steps:
       - uses: actions/checkout@v7
       - run: cargo deny check
