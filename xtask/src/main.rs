@@ -999,7 +999,7 @@ const TRACE_DEFECT: &str = "mutate-unseeded-time";
 ///
 /// One list, because `lint-mutations` has one job — no defect is ever on by
 /// default — and a second list is how the second defect gets forgotten.
-const DEFECTS: &[&str] = &[TRACE_DEFECT, "mutate-unchecked-index"];
+const DEFECTS: &[&str] = &[TRACE_DEFECT, "mutate-unchecked-index", "mutate-relaxed-completion"];
 
 /// The seed every reproduction run uses.
 ///
@@ -1217,38 +1217,71 @@ fn mutate() -> Result<(), String> {
 /// other four policy lints: a rule that lives only in a comment is a rule
 /// somebody edits around.
 fn lint_mutations() -> Result<(), String> {
-    let manifest = root().join("kernel").join("Cargo.toml");
-    let text = std::fs::read_to_string(&manifest)
-        .map_err(|e| format!("could not read {}: {e}", relative(&manifest)))?;
+    // Every manifest, not the kernel's alone. The kernel held the only defect
+    // until E0-P17 put one in `ring/`, and a check that reads one file while
+    // the list it checks against covers two is a check that passes by not
+    // looking — the same shape as the forged slot that was never read.
+    for manifest in manifests()? {
+        let rel = relative(&manifest);
+        let text =
+            std::fs::read_to_string(&manifest).map_err(|e| format!("could not read {rel}: {e}"))?;
 
-    let mut in_features = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_features = trimmed == "[features]";
-            continue;
-        }
-        if !in_features {
-            continue;
-        }
-        let Some((name, value)) = trimmed.split_once('=') else { continue };
-        if name.trim() != "default" {
-            continue;
-        }
-        for feature in DEFECTS {
-            if value.contains(feature) {
-                return Err(format!(
-                    "kernel/Cargo.toml has `{feature}` in its default features.\n\n\
-                     That feature is a deliberate defect. It is meant to be turned on by\n\
-                     `cargo xtask mutate` for exactly two boots and by nothing else; on by\n\
-                     default it is a kernel that panics on a hostile handle, shipped."
-                ));
+        let mut in_features = false;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_features = trimmed == "[features]";
+                continue;
+            }
+            if !in_features {
+                continue;
+            }
+            let Some((name, value)) = trimmed.split_once('=') else { continue };
+            if name.trim() != "default" {
+                continue;
+            }
+            for feature in DEFECTS {
+                if value.contains(feature) {
+                    return Err(format!(
+                        "{rel} has `{feature}` in its default features.\n\n\
+                         That feature is a deliberate defect. It is meant to be turned on\n\
+                         for exactly the runs that require it to break something, and by\n\
+                         nothing else; on by default it is the defect, shipped."
+                    ));
+                }
             }
         }
     }
 
     println!("lint-mutations: ok  ({} deliberate defect(s), none on by default)", DEFECTS.len());
     Ok(())
+}
+
+/// Every crate manifest in the workspace, `third_party` excluded.
+///
+/// Excluded because the licence boundary is the isolation boundary: what an
+/// imported crate puts in its own default features is its business, and it is
+/// reachable only over a ring.
+fn manifests() -> Result<Vec<PathBuf>, String> {
+    fn walk(dir: &Path, build: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if path.is_dir() {
+                if !matches!(name, "target" | ".git" | "third_party" | "docs") && path != build {
+                    walk(&path, build, out)?;
+                }
+            } else if name == "Cargo.toml" {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    let build = target_dir();
+    walk(&root(), &build, &mut out).map_err(|e| format!("walking the tree: {e}"))?;
+    out.sort();
+    Ok(out)
 }
 
 /// Every isolation property a process is asked to violate, and what it is.

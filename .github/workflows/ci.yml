@@ -252,14 +252,38 @@ jobs:
         include:
           - arch: x86-64, total store order
             runner: ubuntu-latest
+            # The defect build is not run here, and the reason is the reason
+            # this matrix has two entries: on total store order the weakening
+            # is invisible, so requiring a failure would be requiring a flake.
+            weak: false
           - arch: AArch64, weak memory
             runner: ubuntu-24.04-arm
+            weak: true
     steps:
       - uses: actions/checkout@v7
       # These are stress tests, not a model check. RustMC lands at M5 and is
       # what actually explores what RC11 permits. Until then these two jobs plus
       # the AArch64 unit tests are the coverage, and the gap is real.
       - run: cargo test -p f-ring --test litmus --release
+
+      # The other half, and the standard `mutate` and E0-P02 already meet: a
+      # suite that has only ever passed cannot be told apart from one that
+      # cannot fail. `mutate-relaxed-completion` weakens the completion ring's
+      # publishing store from `Release` to `Relaxed`, and this step requires the
+      # suite to notice. It runs only on the weak-memory runner, because that is
+      # the only machine where the defect is a defect.
+      #
+      # `!` and not `continue-on-error`: what is being asserted is a failure, so
+      # the step must go red when the command *succeeds*. An advisory step here
+      # would be a step that is ignored on the second Tuesday.
+      - if: matrix.weak
+        run: |
+          if cargo test -p f-ring --test litmus --release --features f-ring/mutate-relaxed-completion; then
+            echo "The litmus suite passed with the completion ring's Release store"
+            echo "weakened to Relaxed. Either the defect no longer reaches the store"
+            echo "it names, or the suite stopped driving Poster/Collector."
+            exit 1
+          fi
 
   coverage:
     name: coverage instrumentation

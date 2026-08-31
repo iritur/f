@@ -538,7 +538,19 @@ impl<'m> Poster<'m> {
 
         // The same Release that the submission ring depends on, for the same
         // reason and with the same prohibition on weakening it.
+        #[cfg(not(feature = "mutate-relaxed-completion"))]
         self.cq.head.value.store(head.wrapping_add(1), Ordering::Release);
+
+        // The deliberate defect, and the reason it exists: RFC 0018 inherited
+        // this ordering argument from the submission ring rather than proving
+        // it, and a litmus test that has only ever passed cannot be told apart
+        // from one that cannot fail. `posted_completion_is_fully_visible` is
+        // the test; this is what makes it fail. It is invisible on x86-64,
+        // where total store order hides it, which is why the CI job that
+        // requires the failure runs only on the AArch64 runner.
+        #[cfg(feature = "mutate-relaxed-completion")]
+        self.cq.head.value.store(head.wrapping_add(1), Ordering::Relaxed);
+
         Ok(())
     }
 }

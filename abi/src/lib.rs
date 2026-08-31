@@ -471,6 +471,15 @@ impl Sqe {
 }
 
 impl Cqe {
+    /// A zeroed completion.
+    ///
+    /// The mirror of [`Sqe::ZERO`] and there for the same reason: a completion
+    /// ring is carved out of a mapping that arrives zeroed, so this is the bit
+    /// pattern every slot starts at and the one a fixture initialises to
+    /// without a loop. It is not a *valid* completion — `user_data` of zero
+    /// names no request — and nothing should read it as one.
+    pub const ZERO: Self = Self { user_data: 0, result: 0, flags: 0, timestamp: 0, ext: 0 };
+
     /// Did the operation fail?
     ///
     /// Cancellation is not failure: a cancelled operation reports it in

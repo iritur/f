@@ -31,16 +31,27 @@ use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use f_abi::Sqe;
-use f_ring::{Channel, Consumer, Cursor, Producer};
+use f_abi::{Cqe, Sqe};
+use f_ring::{Channel, Collector, Completions, Consumer, Cursor, Poster, Producer};
 
 /// Shared backing that outlives both threads.
+///
+/// This file keeps a fixture where the rest of the suite moved to
+/// `f_ring::Mapping` at E0-B13, and the reason is `Sync`: a mapping holds a raw
+/// base, so it is neither `Send` nor `Sync`, and every test here hands one ring
+/// half to another thread. What is under test is also different. The header,
+/// the offsets and the extent are E0-B13's subject; the subject here is one
+/// `Release` store and one `Acquire` load, and a fixture that cannot be laid
+/// out wrongly is the right fixture for a question that is not about layout.
 struct Shared {
     head: Cursor,
     tail: Cursor,
     flags: AtomicU32,
     index: Vec<AtomicU32>,
     entries: Vec<UnsafeCell<Sqe>>,
+    cq_head: Cursor,
+    cq_tail: Cursor,
+    slots: Vec<UnsafeCell<Cqe>>,
 }
 
 // SAFETY: the ring protocol is what makes concurrent access sound — the
@@ -57,6 +68,12 @@ impl Shared {
             flags: AtomicU32::new(0),
             index: (0..n).map(|_| AtomicU32::new(0)).collect(),
             entries: (0..n).map(|_| UnsafeCell::new(Sqe::ZERO)).collect(),
+            cq_head: Cursor::new(),
+            cq_tail: Cursor::new(),
+            // As many completion slots as submission entries, per RFC 0018:
+            // a completion ring that can fill is a service that has to drop an
+            // answer somebody is waiting for.
+            slots: (0..n).map(|_| UnsafeCell::new(Cqe::ZERO)).collect(),
         }
     }
 
@@ -68,6 +85,10 @@ impl Shared {
             index: &self.index,
             entries: &self.entries,
         }
+    }
+
+    fn cq(&self) -> Completions<'_> {
+        Completions { head: &self.cq_head, tail: &self.cq_tail, slots: &self.slots }
     }
 }
 
@@ -325,4 +346,205 @@ fn a_batch_publishes_its_indirection_with_its_entries() {
 
     producing.join().expect("producer thread");
     consuming.join().expect("consumer thread");
+}
+
+/// **The load-bearing invariant, on the completion ring.**
+///
+/// RFC 0018 built `Poster`/`Collector` as the mirror of `Producer`/`Consumer`
+/// and inherited the ordering argument wholesale. That is the one kind of claim
+/// this file exists not to take on faith: every test above it drives the
+/// submission half only, so until E0-P17 the completion ring's `Release` store
+/// had an argument and no evidence.
+///
+/// It is not the same code. A completion is 32 bytes rather than 64, it reaches
+/// its slot without the index ring's indirection, and the two ends are the
+/// other way round — the *service* owns `head` here and the client owns `tail`,
+/// which is the reverse of the submission ring. A weakening on this side would
+/// therefore not be caught by anything above.
+///
+/// The payload is self-describing across all four words a completion carries,
+/// so a torn post shows up as a mismatch between fields rather than needing an
+/// oracle: `result` and `timestamp` restate `user_data`, and `ext` restates its
+/// complement. Those span the whole 32 bytes, which is what makes a partially
+/// visible completion visible as one.
+#[test]
+fn posted_completion_is_fully_visible() {
+    const RING: usize = 64;
+    const COUNT: u64 = 200_000;
+
+    let shared = Arc::new(Shared::new(RING));
+    let barrier = Arc::new(Barrier::new(2));
+
+    let posting = {
+        let shared = Arc::clone(&shared);
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            let poster = Poster::new(shared.cq()).expect("power of two");
+            barrier.wait();
+            let mut posted = 0u64;
+            while posted < COUNT {
+                let cqe = Cqe {
+                    user_data: posted,
+                    result: posted as i32,
+                    flags: 0,
+                    timestamp: posted,
+                    ext: !posted,
+                };
+                match poster.post(cqe) {
+                    Ok(()) => posted += 1,
+                    Err(f_ring::RingError::Full) => std::hint::spin_loop(),
+                    Err(e) => panic!("poster saw {e:?}"),
+                }
+            }
+        })
+    };
+
+    let collecting = {
+        let shared = Arc::clone(&shared);
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            let collector = Collector::new(shared.cq()).expect("power of two");
+            barrier.wait();
+            let mut expect = 0u64;
+            while expect < COUNT {
+                match collector.take() {
+                    Ok(Some(cqe)) => {
+                        assert_eq!(
+                            cqe.user_data, expect,
+                            "completions must arrive in the order they were posted"
+                        );
+                        assert_eq!(
+                            cqe.timestamp, cqe.user_data,
+                            "TORN POST: timestamp does not match user_data. The Release store \
+                             on the completion head in ring::Poster::post has been weakened, \
+                             or a field was written after the cursor was advanced."
+                        );
+                        assert_eq!(
+                            cqe.result, cqe.user_data as i32,
+                            "TORN POST: result does not match user_data. See above."
+                        );
+                        assert_eq!(
+                            cqe.ext, !cqe.user_data,
+                            "TORN POST: ext does not match user_data. See above."
+                        );
+                        expect += 1;
+                    }
+                    Ok(None) => std::hint::spin_loop(),
+                    Err(e) => panic!("collector saw {e:?}"),
+                }
+            }
+        })
+    };
+
+    posting.join().expect("poster thread");
+    collecting.join().expect("collector thread");
+}
+
+/// A service must never believe it has more room than the ring has.
+///
+/// The mirror of `occupancy_never_exceeds_capacity`, and the reason it is a
+/// separate test rather than an assertion inside the one above: what is being
+/// raced is the *pair of cursors*, and a test that posts and collects on one
+/// thread never races them. `free()` reads `head` `Relaxed` and `tail`
+/// `Acquire`, which is sound for the owner of `head` and for nobody else — the
+/// same asymmetry `occupancy` has, one ring over, and the same intermittent
+/// `Corrupt` on a healthy ring if a second `Poster` is ever handed out.
+///
+/// A number above capacity here is worse than a wrong number. `Service::drain`
+/// asks `free()` before it takes work, so an over-count is a service that
+/// accepts a submission it cannot answer — and a caller waiting forever for a
+/// completion that was dropped.
+#[test]
+fn free_never_exceeds_capacity() {
+    const RING: usize = 16;
+    const COUNT: usize = 200_000;
+
+    let shared = Arc::new(Shared::new(RING));
+    let barrier = Arc::new(Barrier::new(2));
+
+    let posting = {
+        let shared = Arc::clone(&shared);
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            let poster = Poster::new(shared.cq()).expect("power of two");
+            barrier.wait();
+            for n in 0..COUNT {
+                let mut cqe = Cqe::ZERO;
+                cqe.user_data = n as u64;
+                let _ = poster.post(cqe);
+                match poster.free() {
+                    Ok(room) => {
+                        assert!(room as usize <= RING, "free {room} exceeds ring capacity {RING}")
+                    }
+                    Err(e) => panic!("free reported {e:?} on a healthy ring"),
+                }
+            }
+        })
+    };
+
+    let collecting = {
+        let shared = Arc::clone(&shared);
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            let collector = Collector::new(shared.cq()).expect("power of two");
+            barrier.wait();
+            for _ in 0..COUNT {
+                let _ = collector.take();
+            }
+        })
+    };
+
+    posting.join().expect("poster thread");
+    collecting.join().expect("collector thread");
+}
+
+/// A client writing an impossible cursor must produce `Corrupt`.
+///
+/// The completion ring's untrusted cursor is `tail`, and it is untrusted from
+/// the *service's* side — which is the reversal that makes this worth its own
+/// test rather than a second loop in `a_hostile_cursor_never_panics`. On the
+/// submission ring the kernel disbelieves a client's `head`; here it
+/// disbelieves the same client's `tail`, in the one direction where believing
+/// it would have the service write outside the slots.
+#[test]
+fn a_hostile_client_cursor_never_panics() {
+    let shared = Shared::new(8);
+    let poster = Poster::new(shared.cq()).expect("power of two");
+    let collector = Collector::new(shared.cq()).expect("power of two");
+
+    // `u32::MAX` is deliberately not in this list, and its absence is the
+    // interesting part. Cursors wrap, so with `head` at zero a `tail` of
+    // `u32::MAX` is the *legitimate* state of a ring with one completion
+    // outstanding across the wrap — `cursors_may_wrap` asserts exactly that.
+    // What is impossible is a difference larger than the ring, and that is what
+    // the check tests and all this file may assume. A hostile-cursor test that
+    // included `u32::MAX` here would be asserting that a healthy ring is
+    // corrupt, and it did: this list was written by copying the submission
+    // ring's, where the same value *is* impossible because the roles of the two
+    // cursors are the other way round.
+    for bad in [1u32, 9, 100, u32::MAX / 2, u32::MAX - 9] {
+        // A `tail` further from `head` than the ring is long: the client claims
+        // to have reaped completions the service never posted.
+        shared.cq_tail.set(bad);
+        assert!(
+            matches!(poster.free(), Err(f_ring::RingError::Corrupt)),
+            "cq tail={bad} must be reported as Corrupt"
+        );
+        assert!(
+            matches!(poster.post(Cqe::ZERO), Err(f_ring::RingError::Corrupt)),
+            "cq tail={bad} must be refused rather than written past"
+        );
+    }
+
+    // And the mirror, so the client is not the only end that is disbelieved: a
+    // service cursor claiming more completions than the ring holds must not
+    // send the collector to a slot that was never written.
+    shared.cq_tail.set(0);
+    for bad in [9u32, 100, u32::MAX / 2, u32::MAX] {
+        shared.cq_head.set(bad);
+        assert!(
+            matches!(collector.take(), Err(f_ring::RingError::Corrupt)),
+            "cq head={bad} must be reported as Corrupt"
+        );
+    }
 }
