@@ -26,6 +26,16 @@ requirement made mechanical.
 5. **Regression detection is change-point, not threshold.** Thresholds either
    miss real regressions or fire until everyone mutes them.
 
+## The machine
+
+`runner-class-A.md`, beside this file. Every claim's `[hardware]` block names a
+runner class, and `MEASUREMENT_ENVIRONMENTS` in `bench/src/lib.rs` names the one
+class allowed to record — both of them cited this README for what the class
+*was*, and this README did not say. It says it there now: the capabilities, the
+firmware, the kernel command line, and how each of RFC 0007's four reservation
+components is obtained, with the honest note that a file is not a machine and
+that the environment variable is an assertion rather than a measurement.
+
 ## The first entry
 
 Timer jitter p99, at milestone M2 — the first real measurement the project
