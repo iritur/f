@@ -140,6 +140,11 @@ fn main() -> ExitCode {
         "lint-percpu" => lint_percpu(),
         "lint-mutations" => lint_mutations(),
         "lint-claims" => lint_claims(),
+        "history" => match args.get(1).map(String::as_str) {
+            Some("append") => history_append(),
+            Some(other) => Err(format!("unknown option for history: {other}")),
+            None => history(),
+        },
         "claims" => match args.get(1).map(String::as_str) {
             Some("--render") => render_claims(),
             Some(other) => Err(format!("unknown option for claims: {other}")),
@@ -206,6 +211,9 @@ cargo xtask <command>
 
   panic              Three endings CI must tell apart: a clean boot, a
                      deliberate panic, and a boot that never finishes
+
+  history            The measurement history, one record per commit
+  history append     Add this commit's record. Run on main, never on a branch
 
   claims             List the claims registry, and write claims/snapshot.json
   claims --render    Rewrite every cited claim value in docs/ from the registry
@@ -2076,6 +2084,140 @@ fn toml_field(text: &str, key: &str) -> Option<String> {
         let rest = line.strip_prefix(key)?;
         rest.trim_start().starts_with('=').then(|| toml_scalar(line))?
     })
+}
+
+/// The measurement history.
+///
+/// # Why a file in the tree, and why `main` writes it
+///
+/// The task this satisfies asks for a history that survives a rebase, and that
+/// requirement rules out the obvious design. A history every branch appends to
+/// conflicts on every rebase — each side has added a line at the end of the
+/// same file — and worse, a rebase *rewrites* the commits those lines name, so
+/// the surviving history refers to objects that no longer exist.
+///
+/// So branches do not write it. `cargo xtask history append` is run by the
+/// post-merge job on `main`, against a commit that is already permanent. A
+/// feature branch can be rebased any number of times without touching this
+/// file, because it never had a line in it to conflict over.
+///
+/// The cost, stated: a measurement taken on a branch is not in the history
+/// until that branch merges. That is the right way round — a number from a
+/// commit that was later rewritten is a number about a tree nobody has.
+fn history_path() -> PathBuf {
+    root().join("claims").join("history.jsonl")
+}
+
+/// The schema version of a history line.
+///
+/// Written into every record because this file is meant to be read years later
+/// by change-point detection that does not exist yet, and the one thing such a
+/// reader cannot recover is what an old line meant. Bumping this is how a
+/// format change stays readable rather than silently reinterpreted.
+const HISTORY_SCHEMA: u32 = 1;
+
+fn history() -> Result<(), String> {
+    let path = history_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("history: nothing recorded yet ({})", relative(&path));
+        println!(
+            "\n`cargo xtask history append` writes one record for the current commit.\n\
+             It is run by CI on main, not on a branch: see the note in xtask."
+        );
+        return Ok(());
+    };
+
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    println!("history: {} record(s) in {}", lines.len(), relative(&path));
+    for line in lines.iter().rev().take(10).rev() {
+        println!("  {line}");
+    }
+    if lines.len() > 10 {
+        println!("  … {} earlier record(s)", lines.len() - 10);
+    }
+    println!(
+        "\nAppend-only. Change-point detection at phase 02 reads this; until then\n\
+         its job is to exist from the first measurement rather than from the\n\
+         first time somebody wants a trend."
+    );
+    Ok(())
+}
+
+/// Append one record for the current commit.
+fn history_append() -> Result<(), String> {
+    let commit = capture("git", &["rev-parse", "HEAD"])?.trim().to_string();
+
+    // What this run was actually allowed to record. A history that stored
+    // refused measurements as zeroes or as absent-without-comment would be a
+    // history whose gaps are unreadable later, and the gaps are the part a
+    // change-point detector most needs to not trip over.
+    let environment = std::env::var("F_ENVIRONMENT").unwrap_or_else(|_| "unset".into());
+
+    let mut record = format!(
+        "{{\"schema\":{HISTORY_SCHEMA},\"commit\":\"{commit}\",\"environment\":\"{environment}\""
+    );
+
+    // Coverage, when this run produced it. Not a timing measurement, so no
+    // environment refuses it — a line count is the same on any machine, which
+    // is exactly why it is the one thing a shared CI runner can contribute.
+    let coverage = target_dir().join("coverage").join("summary.json");
+    match std::fs::read_to_string(&coverage) {
+        Ok(text) => {
+            let percent = text
+                .split("\"total\"")
+                .nth(1)
+                .and_then(|rest| rest.split("\"percent\":").nth(1))
+                .and_then(|rest| rest.split('}').next())
+                .map(|value| value.trim().to_string());
+            match percent {
+                Some(percent) => record.push_str(&format!(",\"coverage_percent\":{percent}")),
+                None => record.push_str(",\"coverage_percent\":null"),
+            }
+        }
+        Err(_) => record.push_str(",\"coverage_percent\":null"),
+    }
+
+    // Every distribution this run was permitted to write. In a refusing
+    // environment there are none, and the record says so by carrying an empty
+    // list rather than by being absent.
+    let mut claims: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root().join("claims")) {
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.to_string_lossy().ends_with(".local.jsonl"))
+            .collect();
+        files.sort();
+        for path in files {
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            // The header line, which carries the summary. The bucket lines stay
+            // in the local file: a history that inlined every distribution
+            // would be megabytes of a file whose whole value is being readable.
+            if let Some(header) = text.lines().next() {
+                claims.push(header.to_string());
+            }
+        }
+    }
+    record.push_str(&format!(",\"claims\":[{}]}}\n", claims.join(",")));
+
+    let path = history_path();
+    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        existing.push('\n');
+    }
+    existing.push_str(&record);
+    std::fs::write(&path, existing).map_err(|e| format!("writing {}: {e}", relative(&path)))?;
+
+    print!("appended to {}:\n  {record}", relative(&path));
+    if claims.is_empty() {
+        println!(
+            "\nNo distributions in this record. `{environment}` is not a measurement\n\
+             environment, so nothing timing-related was permitted to be written —\n\
+             E0-P15. The record still exists, because a gap that is stated is\n\
+             something a trend can reason about and a gap that is missing is not."
+        );
+    }
+    Ok(())
 }
 
 /// Where the machine-readable snapshot of the registry is written.

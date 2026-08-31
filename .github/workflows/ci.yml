@@ -91,6 +91,28 @@ jobs:
           path: target/coverage/summary.json
           if-no-files-found: error
 
+      # E0-P11. Only on main, and only after a merge — never on a branch.
+      #
+      # A history every branch appends to conflicts on every rebase (both sides
+      # added a line at the end of one file) and, worse, a rebase rewrites the
+      # commits those lines name, so the surviving history refers to objects
+      # nobody has. Appending only from a commit that is already permanent is
+      # what makes the file survive a rebase: a branch never had a line in it to
+      # conflict over.
+      #
+      # The record is uploaded rather than pushed back. Committing to the
+      # repository from CI is a decision about who may write to main, and it is
+      # not one a workflow file should make on the project's behalf — see
+      # TODO.md E0-P11.
+      - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: cargo xtask history append
+      - uses: actions/upload-artifact@v4
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        with:
+          name: measurement-history
+          path: claims/history.jsonl
+          if-no-files-found: error
+
   kernel:
     name: kernel boots
     runs-on: ubuntu-latest
