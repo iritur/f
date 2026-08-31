@@ -31,8 +31,10 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use f_abi::{Cqe, Sqe, chan, error, flags, op};
 
+mod doorbell;
 mod mapping;
 
+pub use doorbell::{Bell, Hardware, Path, Ringer, Silent};
 pub use mapping::Mapping;
 
 /// A cursor on its own cache line.
@@ -949,7 +951,11 @@ mod tests {
 
     // Fixed-size backing so the tests need no allocator, and so this module
     // stays buildable in a `no_std` test configuration later.
-    struct Backing<const N: usize> {
+    //
+    // `pub(crate)` because `doorbell`'s tests drive a real ring through a real
+    // producer and consumer, and a second fixture there would be a second
+    // opinion about what a well-formed channel is.
+    pub(crate) struct Backing<const N: usize> {
         head: Cursor,
         tail: Cursor,
         flags: AtomicU32,
@@ -966,7 +972,7 @@ mod tests {
     const ARENA: usize = CHUNK * 2 + 16;
 
     impl<const N: usize> Backing<N> {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 head: Cursor::new(),
                 tail: Cursor::new(),
@@ -982,7 +988,7 @@ mod tests {
             }
         }
 
-        fn chan(&self) -> Channel<'_> {
+        pub(crate) fn chan(&self) -> Channel<'_> {
             Channel {
                 head: &self.head,
                 tail: &self.tail,

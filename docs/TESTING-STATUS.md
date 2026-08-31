@@ -71,6 +71,20 @@ currently comes from.
 
 ## The honest gaps
 
+- **The user-interrupt doorbell is written and has never executed.** `Path` and
+  `Bell` build it, negotiation gates it on `feature::USER_INTERRUPT_DOORBELL`,
+  and `Bell::new` refuses to construct it on a machine that does not report the
+  hardware — which is every machine this project can reach. QEMU's TCG backend
+  implements no part of Intel's UINTR and no `-cpu` model advertises the bit, so
+  what is tested is the *refusal* and the selection logic, and the instruction
+  has never run. E1-B09 owns the hardware. Do not read the suppression test
+  passing on three paths as three paths having run: two have.
+- **The doorbell number is a boot count, not a measurement.** The boot line
+  reports doorbells per thousand operations over the two operations the
+  self-test performs. That is enough to show the count exists and is not always
+  one; it is not *doorbells per operation under load*, which needs a workload
+  and a machine, and it is deliberately not registered as a claim. E0-B15's exit
+  says so.
 - **The litmus tests are empirical, not exhaustive.** They will not reliably
   catch a rare interleaving. RustMC (E0-P16) explores what the memory model
   *permits*; stress tests explore what one machine happened to do. Do not

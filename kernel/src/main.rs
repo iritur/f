@@ -23,6 +23,7 @@
 
 pub mod arch;
 pub mod cap;
+pub mod doorbell;
 pub mod env;
 pub mod jitter;
 pub mod mem;
@@ -435,16 +436,30 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // that only ever ran with a process at the other end could not tell a
     // service that refuses a bad entry from one that never saw it.
     match ring::self_test(&mut frames, hardware.now().as_nanos()) {
-        Ok(report) => kprintln!(
-            "  ring          {} entries in {} B, {} B arena, two ends at ABI v{}, \
-             {} published with one store, {} refused, forged slot caught, hostile header refused",
-            report.entries,
-            report.bytes,
-            report.arena,
-            report.version,
-            report.drained.executed,
-            report.drained.refused,
-        ),
+        Ok(report) => {
+            kprintln!(
+                "  ring          {} entries in {} B, {} B arena, two ends at ABI v{}, \
+                 {} published with one store, {} refused, forged slot caught, \
+                 hostile header refused",
+                report.entries,
+                report.bytes,
+                report.arena,
+                report.version,
+                report.drained.executed,
+                report.drained.refused,
+            );
+            // A second line rather than a longer one. The doorbell answers a
+            // different question — whether an interrupt arrived — and a reader
+            // looking for a suppression figure should not have to find it
+            // inside a sentence about arena sizes.
+            kprintln!(
+                "  doorbell      {:?}, {} delivered, {} per 1000 operations, \
+                 a draining consumer was not rung",
+                report.path,
+                report.doorbells,
+                report.per_thousand,
+            );
+        }
         Err(why) => {
             kprintln!("FAIL: the frame's ring: {}", why.message());
             arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);

@@ -192,6 +192,7 @@ unsafe extern "C" {
     /// A label rather than a table entry, for the same reason as the timer's:
     /// it is a device vector rather than the thirty-fourth exception.
     static isr_shootdown: u8;
+    static isr_doorbell: u8;
 
     /// The stub for an interrupt the local APIC could not explain.
     ///
@@ -228,7 +229,7 @@ pub unsafe fn init() {
         unsafe { slot.write(Gate::new(handler, ist)) };
     }
 
-    // The three non-exception gates. The spurious one is not optional: the local
+    // The four non-exception gates. The spurious one is not optional: the local
     // APIC has to be told a vector to deliver an unexplainable interrupt to,
     // and a machine with no gate there answers one with a fault about the
     // fault. The timer's is the first gate in this table that exists because
@@ -237,6 +238,7 @@ pub unsafe fn init() {
     let devices = [
         (apic::TIMER_VECTOR as usize, (&raw const isr_timer) as u64),
         (apic::SHOOTDOWN_VECTOR as usize, (&raw const isr_shootdown) as u64),
+        (apic::DOORBELL_VECTOR as usize, (&raw const isr_doorbell) as u64),
         (apic::SPURIOUS_VECTOR as usize, (&raw const isr_spurious) as u64),
     ];
     for (vector, handler) in devices {
@@ -348,6 +350,17 @@ pub unsafe extern "C" fn interrupt_dispatch(frame: *mut Frame) {
         // SAFETY: the shootdown vector's own gate, on the core it was delivered
         // to, with interrupts disabled by that gate.
         unsafe { crate::smp::answer() };
+        return;
+    }
+
+    // A doorbell. The third vector here that is not about something having gone
+    // wrong, and the one with the least to do: the whole content of the signal
+    // is that it arrived, and its effect — a halted core is no longer halted —
+    // happened before this ran.
+    if frame.vector == u64::from(apic::DOORBELL_VECTOR) {
+        // SAFETY: the doorbell vector's own gate, on the core it was delivered
+        // to, with interrupts disabled by that gate.
+        unsafe { crate::doorbell::answer() };
         return;
     }
 
@@ -584,6 +597,12 @@ isr_timer:
 isr_shootdown:
     pushq $0
     pushq $33
+    jmp isr_common
+
+    .globl isr_doorbell
+isr_doorbell:
+    pushq $0
+    pushq $34
     jmp isr_common
 
     .globl isr_spurious

@@ -39,7 +39,10 @@
 use core::sync::atomic::Ordering;
 
 use f_abi::{Sqe, error, op};
-use f_ring::{Collector, Consumer, Drained, Mapping, Poster, Producer, RingError, Service, Sink};
+use f_ring::{
+    Bell, Collector, Consumer, Drained, Hardware, Mapping, Path, Poster, Producer, RingError,
+    Service, Sink,
+};
 
 use crate::mem::{FrameAllocator, Order};
 
@@ -106,6 +109,21 @@ pub struct Report {
     /// carried for the same reason as `forgery_caught`: a boot that reports a
     /// check it did not run is worse than one that reports nothing.
     pub header_refused: bool,
+    /// The doorbell path this channel chose, from what was agreed and what the
+    /// hardware reports.
+    pub path: Path,
+    /// Doorbells actually delivered to this core during the self-test.
+    /// Unit: doorbells. One — the suppression protocol sends exactly one, and
+    /// a boot that delivered none would have failed rather than reported zero.
+    pub doorbells: u64,
+    /// Doorbells per thousand operations, over the two the doorbell phase runs.
+    ///
+    /// Not the number `E0-B15` owes and not registered as a claim: two
+    /// operations is not a load, and *doorbells per operation under load* is a
+    /// question about a workload on a machine that can answer it. This is what
+    /// the boot can honestly say — that the count exists and is not always one.
+    /// Unit: doorbells per thousand operations.
+    pub per_thousand: u64,
 }
 
 /// Why the frame's ring did not come up.
@@ -137,6 +155,15 @@ pub enum Failure {
     Answer(i32),
     /// A forged slot number in the index ring was followed rather than refused.
     ForgeryFollowed,
+    /// The channel negotiated a doorbell path this build cannot take. Carries
+    /// the path, which is the only thing there is to say about it.
+    NoPath(Path),
+    /// A doorbell was sent to a consumer that had said it was draining.
+    RangUnasked,
+    /// A consumer that had asked to be woken was not rung.
+    NotRung,
+    /// A doorbell was sent and never arrived.
+    NotDelivered,
 }
 
 impl Failure {
@@ -155,6 +182,10 @@ impl Failure {
             Self::Drain(_) => "the drain did not answer what was submitted",
             Self::Answer(_) => "a completion did not say what the opcode promised",
             Self::ForgeryFollowed => "a forged index-ring slot was followed rather than refused",
+            Self::NoPath(_) => "the doorbell path this channel agreed cannot be taken here",
+            Self::RangUnasked => "a doorbell was sent to a consumer that was draining",
+            Self::NotRung => "a sleeping consumer was not rung",
+            Self::NotDelivered => "a doorbell was sent and never arrived",
         }
     }
 }
@@ -242,6 +273,12 @@ fn run(base: *mut u8, region_bytes: u64, now: u64) -> Result<Report, Failure> {
     // and that is the point.
     let mut producer = Producer::new(far.channel()).ok_or(Failure::Bind)?;
     let consumer = Consumer::new(near.channel()).ok_or(Failure::Bind)?;
+    // A second handle on the consumer's end, used for one thing: setting and
+    // clearing NEED_WAKEUP in the doorbell phase, after `consumer` itself has
+    // been given to the service. It never pops, and that restriction is the
+    // whole justification — two halves that both drained would be the protocol
+    // misuse `Producer::occupancy` documents one ring over.
+    let armer = Consumer::new(near.channel()).ok_or(Failure::Bind)?;
     let poster = Poster::new(near.completions()).ok_or(Failure::Bind)?;
     let collector = Collector::new(far.completions()).ok_or(Failure::Bind)?;
 
@@ -324,6 +361,70 @@ fn run(base: *mut u8, region_bytes: u64, now: u64) -> Result<Report, Failure> {
 
     let version = far.negotiated().version;
 
+    // -------------------------------------------------------------- doorbell
+    //
+    // The suppression protocol, and one interrupt actually arriving. `f_ring`
+    // owns *when* to ring and this owns *that it rang*, which is the split the
+    // whole doorbell design rests on: three implementations of one function,
+    // and a number that compares them.
+    //
+    // Last on this channel rather than first, and the reason is the forgery
+    // phase above: what that made untrustworthy is the index ring, and what
+    // this phase reads is the flags word and the producer's own cursor. Neither
+    // was touched. Running it earlier would have moved the cursor the forgery
+    // computes its position from — which is the mistake E0-B12 recorded, in the
+    // one place it would recur.
+    //
+    // The path is chosen the way section 03 asks: from what was agreed and what
+    // the hardware reports, and those are two questions rather than one. This
+    // machine offers no user interrupts — QEMU's TCG backend implements none of
+    // Intel's UINTR and no `-cpu` model advertises the bit — so the honest
+    // `Hardware` here says so, and `Path::select` lands on the kernel path
+    // without anything being downgraded behind anyone's back.
+    let hardware = Hardware { user_interrupts: false, cross_core_interrupts: true };
+    let path = Path::select(far.negotiated(), hardware);
+    let mut bell =
+        Bell::new(path, hardware, crate::doorbell::Ipi::to_self()).map_err(Failure::NoPath)?;
+
+    // A draining consumer is never rung. First, because it is the property that
+    // holds under load and the one a broken suppression check would still pass
+    // if it only ever tested the other direction.
+    armer.disarm_wakeup();
+    let before = crate::doorbell::delivered();
+    bell.submitted(producer.submit(entry(6, op::NOP)).map_err(Failure::Ring)?);
+    if bell.rings() != 0 || crate::doorbell::delivered() != before {
+        return Err(Failure::RangUnasked);
+    }
+
+    // And a sleeping one is rung exactly once — with the interrupt delivered,
+    // not merely sent. Interrupts are off through the whole of boot until the
+    // timer window, so this opens a window for them: the legacy controllers are
+    // masked, the APIC timer is masked until `apic::start`, and every vector the
+    // local APIC can deliver to has a gate. The only interrupt that can arrive
+    // in here is the one this line sends.
+    armer.arm_wakeup();
+    bell.submitted(producer.submit(entry(7, op::NOP)).map_err(Failure::Ring)?);
+    if bell.rings() != 1 {
+        return Err(Failure::NotRung);
+    }
+
+    // SAFETY: as argued above — every deliverable vector has a gate, and this
+    // is the boot core with nothing armed but what was just sent.
+    unsafe { core::arch::asm!("sti", options(nostack)) };
+    let deadline = crate::arch::x86_64::read_tsc()
+        .saturating_add(crate::arch::x86_64::apic::tsc_khz().saturating_mul(10));
+    while crate::doorbell::delivered() == before && crate::arch::x86_64::read_tsc() < deadline {
+        core::hint::spin_loop();
+    }
+    // SAFETY: the window is closed here and boot carries on with interrupts off,
+    // which is the state every line after this one was written against.
+    unsafe { core::arch::asm!("cli", options(nostack)) };
+
+    let doorbells = crate::doorbell::delivered().wrapping_sub(before);
+    if doorbells == 0 {
+        return Err(Failure::NotDelivered);
+    }
+
     // ------------------------------------------------------- a hostile header
     //
     // Last, and after the channel is finished with, because this phase writes
@@ -347,6 +448,9 @@ fn run(base: *mut u8, region_bytes: u64, now: u64) -> Result<Report, Failure> {
     }
 
     Ok(Report {
+        path,
+        doorbells,
+        per_thousand: bell.per_thousand(),
         entries: layout.entries(),
         bytes: layout.total(),
         arena: layout.arena_len(),

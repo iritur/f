@@ -131,6 +131,17 @@ pub const TIMER_VECTOR: u8 = 32;
 /// go wrong. It is delivered core to core: see [`crate::smp::shootdown`].
 pub const SHOOTDOWN_VECTOR: u8 = 33;
 
+/// Where a doorbell goes.
+///
+/// The third vector in this kernel that exists because something is wanted, and
+/// the one that carries the least: the shootdown next door says *which page*
+/// and needs two shared words to say it, and a doorbell says only *stop
+/// halting*. The entry is already in the ring and the cursor that publishes it
+/// is already visible, so the signal has no content — which is why
+/// `crate::doorbell` needs no shared state and adds no fifth address two cores
+/// reach.
+pub const DOORBELL_VECTOR: u8 = 34;
+
 /// Where a spurious interrupt goes.
 ///
 /// The top of the vector space, which is convention rather than requirement:
