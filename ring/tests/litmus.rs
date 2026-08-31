@@ -21,8 +21,26 @@
 //! They are **not** a model check. Layer 2 of the testing plan calls for
 //! RustMC — a stateless model checker built on GenMC that explores what the
 //! RC11 memory model *permits*, rather than what one machine happened to do.
-//! That lands at M5. Until then these tests plus an AArch64 CI job are the
-//! coverage, and the gap should be stated rather than assumed away.
+//! This file said "that lands at M5" until E0-P16 went looking: M5 arrived at
+//! E0-B12 and the checker did not, and it is not a crate — it needs GenMC built
+//! against an LLVM the pinned toolchain's rustc agrees with. Until it exists,
+//! these tests plus an AArch64 CI job are the coverage, and the gap should be
+//! stated rather than assumed away.
+//!
+//! # The half that stands in for it
+//!
+//! Every ordering these tests guard has a deliberate defect behind a cargo
+//! feature, and CI requires the suite to *fail* with it on. A stress test that
+//! has only ever passed cannot be told apart from one that cannot fail, and
+//! until there is a checker that is the whole difference:
+//!
+//! - `mutate-relaxed-submission` weakens the submission ring's publishing
+//!   store. Caught on AArch64 only.
+//! - `mutate-relaxed-completion` weakens the completion ring's. Also AArch64
+//!   only.
+//! - `mutate-no-doorbell-fence` removes the StoreLoad fence in the suppression
+//!   protocol. Caught everywhere, because store-load is the reordering total
+//!   store order performs — RFC 0020.
 //!
 //! See `docs/design/proving-ground.html` layer 2.
 

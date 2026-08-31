@@ -1002,6 +1002,7 @@ const TRACE_DEFECT: &str = "mutate-unseeded-time";
 const DEFECTS: &[&str] = &[
     TRACE_DEFECT,
     "mutate-unchecked-index",
+    "mutate-relaxed-submission",
     "mutate-relaxed-completion",
     "mutate-no-doorbell-fence",
 ];

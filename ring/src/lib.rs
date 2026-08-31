@@ -219,7 +219,17 @@ impl<'m> Producer<'m> {
         // Publishes the writes above. Paired with the consumer Acquire load,
         // this is a complete happens-before edge. Never weaken it to Relaxed:
         // it will pass every test on x86 and corrupt data on AArch64.
+        #[cfg(not(feature = "mutate-relaxed-submission"))]
         self.chan.head.value.store(head.wrapping_add(1), Ordering::Release);
+
+        // The deliberate defect the sentence above warns about, made runnable.
+        // E0-P16's exit names exactly this weakening as what a model checker
+        // must catch; the checker does not exist, and until it does the
+        // AArch64 litmus job is what requires the suite to notice. That is
+        // evidence about the stress suite and not about what RC11 permits, and
+        // it should be described as exactly that.
+        #[cfg(feature = "mutate-relaxed-submission")]
+        self.chan.head.value.store(head.wrapping_add(1), Ordering::Relaxed);
 
         Ok(self.doorbell_wanted())
     }
@@ -383,7 +393,15 @@ impl Batch<'_, '_> {
 
         // The one store the whole batch pays for. Everything staged above is
         // ordered before it, on every architecture.
+        #[cfg(not(feature = "mutate-relaxed-submission"))]
         self.producer.chan.head.value.store(self.base.wrapping_add(self.staged), Ordering::Release);
+
+        // The batch path's half of the same defect. Both, because the batch is
+        // where the indirection's two relaxed writes per entry are covered by
+        // one store — the weakening that is hardest to reason about and the one
+        // `a_batch_publishes_its_indirection_with_its_entries` exists for.
+        #[cfg(feature = "mutate-relaxed-submission")]
+        self.producer.chan.head.value.store(self.base.wrapping_add(self.staged), Ordering::Relaxed);
 
         Ok(self.producer.doorbell_wanted())
     }

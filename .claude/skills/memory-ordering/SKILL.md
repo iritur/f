@@ -24,10 +24,16 @@ weakening the ordering and running it before you commit either.
 
 ## Where the coverage ends
 
-The litmus job is stress, not model checking. RustMC lands at M5 and is what
-actually explores what RC11 permits. Until then the AArch64 unit tests plus the
-litmus job are the coverage, and the gap is real — say so rather than implying
-the ring is verified.
+The litmus job is stress, not model checking. RustMC is what actually explores
+what RC11 permits, and it is `E0-P16`, open — M5 arrived at `E0-B12` and the
+checker did not, so "lands at M5" is a sentence that stopped being true. Until
+it exists the AArch64 unit tests plus the litmus job are the coverage, and the
+gap is real — say so rather than implying the ring is verified.
+
+What the litmus suite does have is the other half: each of its three deliberate
+defects is a cargo feature, and CI requires the suite to fail with it on. A
+stress test that has only ever passed cannot be told apart from one that cannot
+fail, and that distinction is the only thing standing in for a model check.
 
 ## Reviewing concurrent code here
 

@@ -278,6 +278,15 @@ jobs:
       # would be a step that is ignored on the second Tuesday.
       - if: matrix.weak
         run: |
+          if cargo test -p f-ring --test litmus --release --features f-ring/mutate-relaxed-submission; then
+            echo "The litmus suite passed with the submission ring's Release store"
+            echo "weakened to Relaxed. This is the weakening E0-P16's exit names, and"
+            echo "until a model checker exists this job is the only thing asking for it."
+            exit 1
+          fi
+
+      - if: matrix.weak
+        run: |
           if cargo test -p f-ring --test litmus --release --features f-ring/mutate-relaxed-completion; then
             echo "The litmus suite passed with the completion ring's Release store"
             echo "weakened to Relaxed. Either the defect no longer reaches the store"

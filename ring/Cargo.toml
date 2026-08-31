@@ -17,22 +17,33 @@ f-abi.workspace = true
 f-env.workspace = true
 
 [features]
-# A deliberate defect, and never on by default — `cargo xtask lint-mutations`
-# is what says so, and it reads every manifest in the workspace rather than the
-# kernel's alone, because this is the second defect and a second list is how a
-# defect gets forgotten.
+# Three deliberate defects, and none of them is ever on by default —
+# `cargo xtask lint-mutations` is what says so, and it reads every manifest in
+# the workspace rather than the kernel's alone, because these are the second,
+# third and fourth defects in the tree and a second list is how one gets
+# forgotten.
 #
-# It weakens the completion ring's publishing store from `Release` to
-# `Relaxed`. `ring/tests/litmus.rs` is what must then fail — on AArch64, where
-# it means something. On x86-64 it will pass, which is the whole reason that
-# file exists.
+# Each exists so that a litmus test can be shown to fail. A stress test that has
+# only ever passed cannot be told apart from one that cannot fail, and until
+# `E0-P16` produces a model checker that distinction is the whole of what stands
+# in for one. CI turns each on in turn and requires the suite to go red.
+
+# The submission ring's publishing store, `Release` to `Relaxed`, in both the
+# single-entry and the batch path. E0-P16's exit names this exact weakening as
+# what a model checker must catch; there is no checker, so the AArch64 litmus
+# job is what asks for it — which is evidence about the stress suite and not
+# about what RC11 permits, and should be described as that.
+mutate-relaxed-submission = []
+
+# The same, on the completion ring, which RFC 0018 built as the mirror and gave
+# the ordering argument to by inheritance.
 mutate-relaxed-completion = []
 
-# The second, and the one that is observable on x86-64: it removes the
+# The odd one out, and the only one observable on x86-64: it removes the
 # `SeqCst` fence between publishing an entry and reading the consumer's
-# NEED_WAKEUP flag. Store-load is the one reordering total store order permits,
-# so this defect is caught on the ordinary runner and not only on the arm one.
-# `ring/tests/litmus.rs` is what must fail. RFC 0020.
+# NEED_WAKEUP flag. Store-load is the one reordering total store order performs,
+# so this is caught on the ordinary runner rather than only on the arm one —
+# 58 971 lost wakeups in 500 000 rounds. RFC 0020.
 mutate-no-doorbell-fence = []
 
 [lints.rust]
