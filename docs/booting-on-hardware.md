@@ -47,9 +47,19 @@ an emulator convenience, and on hardware the serial log is the whole result.
 ## The two files
 
 ```
-target/x86_64-unknown-none/debug/f-kernel.elf32   the kernel, ELF32, multiboot 1
-target/init/init.bin                              user/init, a flat blob, no headers
+target/x86_64-unknown-none/release/f-kernel.elf32   the kernel, ELF32, multiboot 1
+target/init/init.bin                                user/init, a flat blob, no headers
 ```
+
+The *release* image, on purpose. `cargo xtask` builds and tests the debug one,
+and on a 128 MiB emulator the difference does not matter — but the frame
+allocator writes one word into every frame of RAM at boot, and on a machine
+with real memory the debug build nearly doubles the wait (measured medians at
+4 GiB: 3818 ms debug, 2220 ms release). `f-on-metal.sh build` produces both
+and boots both under QEMU before anything reaches the firmware; the optimised
+build is the less exercised one, and the first time it was ever booted it lost
+every core but the first to a miscompiled `cpuid` wrapper the debug suite
+could not see.
 
 `target/` lives in a Docker volume and is not visible from Windows, so copy it
 out first:

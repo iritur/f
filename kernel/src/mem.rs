@@ -320,10 +320,25 @@ impl FrameAllocator {
 
     /// Add a region of usable memory, minus anything reserved.
     ///
-    /// Filtering is per frame rather than by interval arithmetic. A machine has
-    /// tens of thousands of frames and a handful of reserved ranges, so the loop
-    /// costs nothing at boot and cannot get the subtraction wrong — which
-    /// interval arithmetic, done once, at four in the morning, can.
+    /// Filtering is per frame rather than by interval arithmetic, because the
+    /// per-frame test cannot get the subtraction wrong — which interval
+    /// arithmetic, done once, at four in the morning, can.
+    ///
+    /// It used to say the loop "costs nothing at boot" because "a machine has
+    /// tens of thousands of frames and a handful of reserved ranges". The first
+    /// machine this ever ran on outside an emulator had **four million** frames,
+    /// and the scan below ran once per frame per range. That sentence was an
+    /// assumption about hardware written on a 128 MiB emulator, and
+    /// `docs/first-boot-on-hardware.md` is where it was measured.
+    ///
+    /// So there is a ceiling now, and it is deliberately *not* a rewrite into
+    /// interval arithmetic: the per-frame filter still decides, unchanged. It is
+    /// simply not asked where its answer cannot be in doubt. Overlapping
+    /// requires `frame < r.end`, so a frame at or above every reserved end
+    /// overlaps nothing, and one comparison replaces the whole scan for the
+    /// overwhelming majority of frames — reserved ranges are few and clustered
+    /// low, and on the second pass the largest of them is everything the first
+    /// pass already took.
     ///
     /// Frames arrive dirty. Most of memory is in fact zero at boot, but "the
     /// firmware probably left it that way" is not a property to hand a
@@ -341,10 +356,16 @@ impl FrameAllocator {
         let region_end = base.saturating_add(len);
         let mut frame = base.next_multiple_of(FRAME_SIZE);
 
+        // The highest byte any reserved range reaches. Computed once here rather
+        // than tested per frame; `0` for an empty list, which makes every frame
+        // take the fast path, which is correct because there is nothing to
+        // overlap.
+        let ceiling = reserved.iter().map(|r| r.end).max().unwrap_or(0);
+
         while frame.saturating_add(FRAME_SIZE) <= region_end {
             let end = frame + FRAME_SIZE;
-            let usable =
-                frame >= LOW_MEMORY_LIMIT && !reserved.iter().any(|r| r.overlaps(frame, end));
+            let usable = frame >= LOW_MEMORY_LIMIT
+                && (frame >= ceiling || !reserved.iter().any(|r| r.overlaps(frame, end)));
 
             if usable {
                 if end > self.limit {

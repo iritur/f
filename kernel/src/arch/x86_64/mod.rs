@@ -85,26 +85,35 @@ pub fn current_cpu() -> usize {
 /// None beyond the instruction itself, which is unprivileged and has no memory
 /// effect. `unsafe` because it is `asm!`.
 pub(crate) unsafe fn cpuid(leaf: u32) -> (u32, u32, u32) {
-    let ebx: u32;
+    let ebx: u64;
     let ecx: u32;
     let edx: u32;
-    // SAFETY: `rbx` is reserved by the compiler, so it is saved and restored
-    // around the instruction rather than named as an output. The target
-    // disables the red zone, so using the stack here is sound.
+    // SAFETY: `rbx` cannot be named as an operand, so it is saved and restored
+    // around the instruction. The exchange, not a `mov` before a `pop`, is
+    // what makes that correct: the allocator may hand the output operand `rbx`
+    // itself — under optimisation it prefers to, because that deletes the copy
+    // — and then a restore after the capture would overwrite the result with
+    // whatever the caller had in `rbx`. The `xchg` is right under both
+    // allocations: a scratch register swaps result for saved value, and `rbx`
+    // itself degenerates to three no-ops with the result already where the
+    // output lives. Sixty-four-bit moves, because a thirty-two-bit save would
+    // zero the caller's upper half. This was E0's one miscompiled-boot bug:
+    // the release image's application processors computed their shard index
+    // from the restored `rbx` — zero, fresh out of the trampoline — and
+    // reported ready in the boot processor's slot.
     unsafe {
         core::arch::asm!(
-            "push rbx",
+            "mov {ebx:r}, rbx",
             "cpuid",
-            "mov {ebx:e}, ebx",
-            "pop rbx",
-            ebx = lateout(reg) ebx,
+            "xchg {ebx:r}, rbx",
+            ebx = out(reg) ebx,
             inout("eax") leaf => _,
             out("ecx") ecx,
             out("edx") edx,
-            options(preserves_flags),
+            options(nostack, preserves_flags),
         );
     }
-    (ebx, ecx, edx)
+    (ebx as u32, ecx, edx)
 }
 
 /// One `cpuid` leaf and subleaf, as `(eax, ebx, ecx, edx)`.
@@ -122,26 +131,24 @@ pub(crate) unsafe fn cpuid(leaf: u32) -> (u32, u32, u32) {
 /// different question's answer.
 pub(crate) unsafe fn cpuid_subleaf(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
     let eax: u32;
-    let ebx: u32;
+    let ebx: u64;
     let ecx: u32;
     let edx: u32;
-    // SAFETY: `rbx` is reserved by the compiler, so it is saved and restored
-    // around the instruction rather than named as an output. The target
-    // disables the red zone, so using the stack here is sound.
+    // SAFETY: as [`cpuid`], exchange and all — the save/capture/restore
+    // sequence this replaced was wrong in the same way there as here.
     unsafe {
         core::arch::asm!(
-            "push rbx",
+            "mov {ebx:r}, rbx",
             "cpuid",
-            "mov {ebx:e}, ebx",
-            "pop rbx",
-            ebx = lateout(reg) ebx,
+            "xchg {ebx:r}, rbx",
+            ebx = out(reg) ebx,
             inout("eax") leaf => eax,
             inout("ecx") subleaf => ecx,
             out("edx") edx,
-            options(preserves_flags),
+            options(nostack, preserves_flags),
         );
     }
-    (eax, ebx, ecx, edx)
+    (eax, ebx as u32, ecx, edx)
 }
 
 /// Read a model-specific register.
