@@ -62,6 +62,35 @@ which leaves both under `.\target-export\`.
 
 ## The short way, on Arch
 
+### Getting it onto the machine
+
+If you will build there, clone — `build` needs the checkout anyway:
+
+```sh
+git clone https://github.com/iritur/f && cd f
+sudo ./tools/f-on-metal.sh check
+```
+
+If you built elsewhere and are copying the two artefacts over, the script runs
+standalone and says so when it is not in a checkout:
+
+```sh
+curl -O https://raw.githubusercontent.com/iritur/f/main/tools/f-on-metal.sh
+chmod +x f-on-metal.sh
+sudo ./f-on-metal.sh install --kernel f-kernel.elf32 --init init.bin
+```
+
+**Read it before running it.** It writes to your bootloader, and a script you
+pipe straight from a URL into a root shell is one you have not read. There is
+deliberately no `curl … | sudo sh` line on this page.
+
+There is no gist and no shortened URL, on purpose: a copy of this script drifts
+from the tree it encodes — `BAUD` and `MAX_CPUS` here must match
+`serial.rs` and `percpu.rs` — and a stale copy that edits a bootloader is worse
+than an inconvenient URL. The raw link above is also shorter than a gist's.
+
+### What it does
+
 `tools/f-on-metal.sh` does Procedure A and the checks around it. Run `check`
 first — it changes nothing and reports what would go wrong, which is worth more
 than the install step, because the failure modes here are silent:

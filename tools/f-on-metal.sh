@@ -26,8 +26,20 @@ set -euo pipefail
 PROG=$(basename "$0")
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
-KERNEL_DEFAULT="$REPO/target/x86_64-unknown-none/debug/f-kernel.elf32"
-INIT_DEFAULT="$REPO/target/init/init.bin"
+# This is useful on its own — downloaded to the target machine, which already
+# has the two artefacts and no checkout — so it must not pretend to be inside a
+# repository when it is not. Without this, REPO resolves to "/" and the defaults
+# become //target/..., which is a path nobody can act on and an error nobody can
+# read.
+if [ -f "$REPO/kernel/Cargo.toml" ] && [ -f "$REPO/rust-toolchain.toml" ]; then
+    IN_REPO=1
+    KERNEL_DEFAULT="$REPO/target/x86_64-unknown-none/debug/f-kernel.elf32"
+    INIT_DEFAULT="$REPO/target/init/init.bin"
+else
+    IN_REPO=0
+    KERNEL_DEFAULT="./f-kernel.elf32"
+    INIT_DEFAULT="./init.bin"
+fi
 
 # Where the artefacts land, and the file that generates the menu entries.
 # A dedicated 45_f rather than a block inside 40_custom, because a whole file is
@@ -177,7 +189,13 @@ cmd_check() {
             printf 'artefact        %s (%s bytes)\n' "$f" "$(stat -c%s "$f")"
         else
             ylw "artefact        missing: $f"
-            ylw "                run '$PROG build', or pass --kernel/--init"
+            if [ "$IN_REPO" -eq 1 ]; then
+                ylw "                run '$PROG build', or pass --kernel/--init"
+            else
+                ylw "                no checkout here, so copy the two files from the machine"
+                ylw "                that built them and pass --kernel/--init, or clone:"
+                ylw "                  git clone https://github.com/iritur/f"
+            fi
             warn=$((warn + 1))
         fi
     done
@@ -194,6 +212,14 @@ cmd_check() {
 # ----------------------------------------------------------------------------
 
 cmd_build() {
+    if [ "$IN_REPO" -eq 0 ]; then
+        die "build needs the repository, and this copy is not inside one.
+
+       git clone https://github.com/iritur/f
+       cd f && sudo ./tools/f-on-metal.sh build
+
+       Or build elsewhere and use: $PROG install --kernel <path> --init <path>"
+    fi
     need_root
     bold "== toolchain =="
     pacman -S --needed --noconfirm rustup git qemu-system-x86
