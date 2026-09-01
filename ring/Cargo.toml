@@ -45,11 +45,12 @@ mutate-relaxed-submission = []
 # the ordering argument to by inheritance. Not caught either.
 mutate-relaxed-completion = []
 
-# The odd one out, and the only one observable on x86-64: it removes the
-# `SeqCst` fence between publishing an entry and reading the consumer's
-# NEED_WAKEUP flag. Store-load is the one reordering total store order performs,
-# so this is caught on the ordinary runner rather than only on the arm one —
-# 58 971 lost wakeups in 500 000 rounds. RFC 0020.
+# The odd one out, and the only one that is caught: it removes the `SeqCst`
+# fence between publishing an entry and reading the consumer's NEED_WAKEUP flag.
+# Store-load is the one reordering total store order performs and the one
+# AArch64 forbids — `stlr`/`ldar` are RCsc — so this is the single defect here
+# whose gate is on the *x86* runner. 58 971 lost wakeups in 500 000 rounds
+# there; a clean pass on the arm runner. RFC 0020.
 mutate-no-doorbell-fence = []
 
 [lints.rust]

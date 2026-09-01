@@ -109,8 +109,16 @@ currently comes from.
   So the standing position is sharper than "the gap is real": the suite has been
   shown not to catch the exact defect it was written to guard against, on the
   exact hardware that defect is about. `mutate-no-doorbell-fence` is the one
-  defect that *is* caught and does gate — store-load is a reordering the hardware
-  performs rather than one it might, at eight rounds in a thousand.
+  defect that *is* caught and does gate — at eight rounds in a thousand, on the
+  **x86-64** runner.
+
+  That last word is the second surprise. Store-load is the one reordering total
+  store order performs and the one AArch64 forbids: `Release`/`Acquire` become
+  `stlr`/`ldar` there, which are RCsc, so a Store-Release followed by a
+  Load-Acquire is already ordered and removing the fence changes nothing
+  observable. The one defect in this suite that does not need the arm runner is
+  the one that needs the x86 runner instead. Which machine can see a defect is a
+  property of the reordering it depends on, not of how serious it is.
 - **`instructions_per_op` and `joules_per_op` still report `Unavailable`.** The
   harness carries the fields and marks them absent rather than omitting them, so
   a claim cannot quietly narrow to wall-clock only. The reasons now name owners

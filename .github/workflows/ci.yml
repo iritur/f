@@ -252,8 +252,13 @@ jobs:
         include:
           - arch: x86-64, total store order
             runner: ubuntu-latest
+            # Whether this machine actually performs the store-load reordering
+            # the doorbell defect below depends on. x86-64 does; AArch64's
+            # `stlr`/`ldar` forbid it. See that step.
+            store_load: true
           - arch: AArch64, weak memory
             runner: ubuntu-24.04-arm
+            store_load: false
     steps:
       - uses: actions/checkout@v7
       # These are stress tests, not a model check. RustMC lands at M5 and is
@@ -284,21 +289,39 @@ jobs:
       # this exact weakening as what a *model checker* must catch, and the
       # honest reading of this run is that nothing short of one will.
       #
-      # The doorbell fence below is different and is still a gate: store-load is
-      # a reordering the hardware performs rather than one it might, and it is
-      # caught at eight rounds in a thousand on an ordinary laptop.
+      # The doorbell fence below is different and is still a gate — but on the
+      # other runner, which is the part nobody would have guessed.
 
-      # The doorbell fence, and this one runs on *both* runners. Store-load is
-      # the reordering total store order performs, so the lost wakeup RFC 0020
-      # describes is visible on an ordinary x86-64 machine — it is the one
-      # defect in this file that does not need the arm runner to be seen.
-      # Locally it costs 58 971 lost wakeups in 500 000 rounds.
-      - run: |
+      # The doorbell fence, on **x86-64 only**, and the asymmetry is the whole
+      # lesson of this job.
+      #
+      # Every other defect in this file needs the arm runner because total store
+      # order hides it. This one is the exact inverse: it needs the *x86* runner,
+      # because store-load is the one reordering total store order performs, and
+      # it is the one AArch64 forbids. `Release` and `Acquire` compile to plain
+      # `mov` on x86-64 — nothing stops the producer's load of `flags` being
+      # satisfied out of the store buffer ahead of its store to `head` — and to
+      # `stlr` and `ldar` on AArch64, which are RCsc: a Store-Release followed by
+      # a Load-Acquire is ordered by the architecture, so the fence RFC 0020 adds
+      # is redundant there and removing it changes nothing observable.
+      #
+      # That is not reasoning applied after the fact. It ran on both: 58 971 lost
+      # wakeups in 500 000 rounds on x86-64, and a clean pass on the arm runner
+      # with the fence removed. The architecture manual is why the result
+      # generalises; the run is the evidence.
+      #
+      # So which runner catches which defect is a property of the reordering,
+      # not of the defect's severity — and a gate placed on the wrong runner goes
+      # red for a reason that has nothing to do with the code.
+      - if: matrix.store_load
+        run: |
           if cargo test -p f-ring --test litmus --release --features f-ring/mutate-no-doorbell-fence; then
-            echo "The litmus suite passed with the StoreLoad fence removed from"
-            echo "ring::Producer::doorbell_wanted. Either the harness stopped lining"
-            echo "the two threads up inside the window — a std::sync::Barrier will do"
-            echo "that — or suppression no longer runs Dekker's algorithm. RFC 0020."
+            echo "The litmus suite passed on x86-64 with the StoreLoad fence removed"
+            echo "from ring::Producer::doorbell_wanted. This is the one machine that"
+            echo "performs the reordering, so the harness is the first suspect: a"
+            echo "std::sync::Barrier in place of the spin barrier lines the two threads"
+            echo "up microseconds apart, and the window is one store buffer deep."
+            echo "Failing that, suppression no longer runs Dekker's algorithm. RFC 0020."
             exit 1
           fi
 

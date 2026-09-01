@@ -88,6 +88,22 @@ wakeup, which takes microseconds, and the window is one store buffer deep; two
 threads lined up that loosely are never inside it together, and the test would
 have reported a clean run on a broken build.
 
+**And the runner had to be the right one, which is the inverse of what this
+project's instincts say.** With the fence removed, the arm runner passes. That
+is the architecture and not a weak test: on AArch64 a `Release` store is `stlr`
+and an `Acquire` load is `ldar`, and those are RCsc — a Store-Release followed
+by a Load-Acquire is ordered by the architecture, so on that machine the fence
+is redundant and its absence is unobservable. On x86-64 both compile to a plain
+`mov`, nothing stops the load being satisfied out of the store buffer ahead of
+the store, and the defect is loud. So the CI gate for this one is on x86-64,
+alone among the orderings in this crate.
+
+None of which makes the fence an x86 workaround. What the fence buys is
+correctness under the *language's* model, where the reordering is permitted
+whatever any one backend currently emits; that today only one of two
+architectures exhibits it is a fact about those two backends, not a licence to
+depend on them.
+
 ## What would reverse this
 
 The event-index design landing, at which point the algorithm this fence protects

@@ -310,11 +310,20 @@ impl<'m> Producer<'m> {
     ///
     /// The consumer's half of the barrier already exists:
     /// [`Consumer::arm_wakeup`] is a `SeqCst` read-modify-write, which is a
-    /// full barrier. This is the missing half. RFC 0020, and unlike the
-    /// `Release`/`Acquire` pair this one is observable on x86-64 — store-load
-    /// is exactly what that architecture reorders — so
-    /// `a_sleeping_consumer_is_never_left_holding_work` catches it here rather
-    /// than only on the arm runner.
+    /// full barrier. This is the missing half. RFC 0020.
+    ///
+    /// Unlike every other ordering in this crate, the absence of this fence is
+    /// observable on **x86-64** and not on AArch64. Store-load is the one
+    /// reordering total store order performs, and `stlr`/`ldar` are RCsc, so a
+    /// Store-Release followed by a Load-Acquire is already ordered on the arm.
+    /// `a_sleeping_consumer_is_never_left_holding_work` therefore catches this
+    /// on the ordinary runner and passes on the weak-memory one.
+    ///
+    /// That does not make the fence an x86 workaround. What it buys is
+    /// correctness under the *language's* model, where the reordering is
+    /// permitted whatever a particular backend currently emits — and a fence
+    /// kept only because one architecture is observed to need it is a fence the
+    /// next architecture removes.
     fn doorbell_wanted(&self) -> bool {
         #[cfg(not(feature = "mutate-no-doorbell-fence"))]
         core::sync::atomic::fence(Ordering::SeqCst);

@@ -35,15 +35,25 @@
 //! is a result rather than a gap in the wiring:
 //!
 //! - `mutate-no-doorbell-fence` removes the StoreLoad fence in the suppression
-//!   protocol. **Caught, on both runners, and it gates.** Store-load is a
-//!   reordering total store order actually performs, so this shows up on an
-//!   ordinary laptop at eight rounds in a thousand — RFC 0020.
+//!   protocol. **Caught on x86-64, and it gates there** — eight rounds in a
+//!   thousand. Not caught on AArch64, and that is the architecture rather than
+//!   the test: `Release`/`Acquire` compile to `stlr`/`ldar`, which are RCsc, so
+//!   a Store-Release followed by a Load-Acquire is already ordered and removing
+//!   the fence changes nothing observable there. RFC 0020.
 //! - `mutate-relaxed-submission` and `mutate-relaxed-completion` weaken the two
 //!   publishing stores. **Not caught.** They were run as gates on the AArch64
 //!   runner for exactly one CI run — the machine where the weakening is a real
 //!   defect — and the suite passed with both.
 //!
-//! That second result is this file's own first paragraph arriving as evidence,
+//! The first of those is the inverse of everything else in this file, and worth
+//! sitting with: which runner catches a defect is a property of *which
+//! reordering it depends on*, not of how bad it is. Store-load is the one
+//! reordering total store order performs and the one AArch64 forbids, so the
+//! only defect here that does not need the arm runner is the one that needs the
+//! x86 runner instead. A gate placed on the intuitive runner would have been
+//! green for the wrong reason.
+//!
+//! The second result is this file's own first paragraph arriving as evidence,
 //! and it is worth more than a green tick would have been. These tests sample
 //! what one machine happened to do. They did not catch a `Release` store
 //! weakened to `Relaxed` on hardware that is entitled to reorder it, and no
