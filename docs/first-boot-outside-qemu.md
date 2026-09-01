@@ -196,6 +196,8 @@ place, and no bootstrap problem — which means initialising it must write one w
 into every frame. On a 16 GiB machine that is 4 million writes and 16 GiB of
 memory traffic, and no amount of filtering removes it. A different structure
 would trade that for a different cost; this page is not the place to choose one.
+*(One was chosen the same day, after this machine measured the write at two to
+three minutes under the hypervisor: RFC 0023.)*
 
 ## Follow-up, the same day: the optimised image had never booted either
 
