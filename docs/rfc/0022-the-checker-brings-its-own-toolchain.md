@@ -53,6 +53,35 @@ thing the last section of this template exists to catch.
 three whose cost is bounded and nameable: one more image target, built by one
 job, pinned by RustMC's requirements rather than ours.
 
+### The feasibility fact, measured rather than inferred
+
+A second toolchain is only an option if this tree's source compiles under it, and
+that was the one thing that could have made this decision unworkable rather than
+merely awkward. It was measured before this RFC was accepted.
+
+`nightly-2025-08-20` is rustc 1.91.0-nightly with **LLVM 21.1.0**, which
+confirms RustMC's stated requirement from the toolchain rather than from its
+README. Under it, `f-ring` builds — library and test targets, `f-env`
+dev-dependency included — and its whole suite passes: 27 + 4 + 6 + 8 tests and
+the doctests, `--release`, all green. Nothing in `ring` or `abi` needs a compiler
+newer than the checker's.
+
+Two things about the environment came out of taking that measurement, and both
+matter to whoever builds the image target.
+
+**The development image will not accept a second toolchain at run time, by
+design.** `/opt/rustup` is `a+rX` and the entrypoint drops root deliberately, so
+the pinned toolchain cannot drift from under a build. A checker toolchain
+therefore has to be *built into an image* rather than installed beside the first
+one — which is the shape this RFC already proposed, now arrived at twice.
+
+**`RUSTC` alone does not move a build to another toolchain.** `rustdoc` is
+resolved separately, and left to `PATH` it comes back through `rust-toolchain.toml`
+as the pinned compiler, meeting rlibs built by the other one; the doctest target
+fails with `E0514` and an error naming a compiler nobody asked for. Irrelevant
+inside a properly built image, and a trap for anyone reproducing the measurement
+by hand.
+
 ### What the measurement changed about the task
 
 `cargo rustmc test` compiles a **crate's test targets** to LLVM IR and explores
@@ -79,6 +108,14 @@ newcomer, and the second one is a year older than the first. Whoever adds it
 owes `docker/README.md` a paragraph saying which is which and why the old one is
 not a mistake.
 
+**Hard, and the cost that will actually be felt:** `ring` and `abi` acquire a
+second compiler they must keep compiling under, and it is the older one. Today
+that costs nothing — measured, not assumed — but it is a standing constraint on
+two crates whose whole job is to be the thing everything else is built on, and
+the constraint is invisible until the checking job goes red. It belongs in the
+last section as well as this one, because it is both a consequence and the
+condition that would end this.
+
 **Foreclosed, and stated rather than discovered:** the checker verifies the
 protocol **as written**, not the IR this tree ships. Different rustc, different
 IR. What survives that difference is exactly the part being checked — atomic
@@ -94,16 +131,11 @@ Then delete the second toolchain and check with one. This is the outcome to
 prefer and the reason the checking job is kept isolated enough to make deleting
 it cheap.
 
-**`f-ring` failing to compile under `nightly-2025-08-20`.** This is not yet
-known, and it is the one fact that would make this decision unworkable rather
-than merely awkward. The evidence available says it should: `ring` and `abi` are
-edition-2024 crates with no `#![feature]` gates, and edition 2024 has been stable
-since 1.85. But the evidence is an inference and the measurement is one command:
-
-```
-cargo +nightly-2025-08-20 build -p f-ring
-```
-
-If it fails, this RFC is superseded and "wait" comes back — with a trigger it
-does not currently have, which is that the checker's own pin must reach a rustc
-this tree's source compiles under.
+**`ring` acquiring a dependency on a rustc newer than the checker's pin.** This
+is the live one, and it is the direction the tree drifts by default. The checker
+pins `nightly-2025-08-20`; every language feature stabilised after August 2025 is
+a feature this crate may not use without cutting the checker off from it. That is
+a real constraint on `ring` and `abi` specifically, it is not one anybody would
+notice violating, and the checking job going red with a parse error is what
+noticing looks like. If that becomes an obstruction rather than an annoyance, the
+answer is to reverse this and wait, not to keep the checker and hobble the crate.
