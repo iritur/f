@@ -27,6 +27,20 @@
 //! these tests plus an AArch64 CI job are the coverage, and the gap should be
 //! stated rather than assumed away.
 //!
+//! Whether such an LLVM exists is now measured rather than open: the pinned
+//! rustc bundles LLVM 22.1.8, RustMC requires LLVM 21 and its own year-old
+//! nightly, and upstream GenMC stops at 20. No configuration meets in the
+//! middle, so the checker brings its own toolchain — RFC 0022.
+//!
+//! **And when it arrives it will not run the tests in this file.** `cargo
+//! rustmc test` explores a crate's test targets exhaustively, and exhaustive
+//! exploration of 500 000 rounds across two threads is not a long run but a
+//! non-terminating one. What E0-P16 owes is a second, much smaller set — two
+//! threads, one or two entries, a handful of operations — living beside these
+//! rather than replacing them. The two answer different questions: one explores
+//! what RC11 permits, and this one explores what a real store buffer does at a
+//! volume no exhaustive search will reach.
+//!
 //! # The half that stands in for it, and how far it reaches
 //!
 //! Every ordering these tests guard has a deliberate defect behind a cargo

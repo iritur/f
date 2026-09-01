@@ -30,6 +30,16 @@ checker did not, so "lands at M5" is a sentence that stopped being true. Until
 it exists the AArch64 unit tests plus the litmus job are the coverage, and the
 gap is real — say so rather than implying the ring is verified.
 
+Two things about that gap are now settled rather than open. The checker cannot
+share this tree's toolchain — the pinned rustc bundles LLVM 22.1.8 and RustMC
+requires LLVM 21 — so it brings its own, under RFC 0022. And it will not run the
+litmus tests: `cargo rustmc test` explores a crate's test targets exhaustively,
+so a model check needs its own small tests, two threads and a couple of entries,
+beside the stress ones rather than instead of them. If you are writing a new
+`Release`/`Acquire` pair, you owe a stress test today and a small exhaustible
+test whenever `E0-P16` lands; write the stress one so that shrinking it later is
+a matter of constants rather than a rewrite.
+
 The suite has three deliberate defects behind cargo features, and **one of them
 is a gate**: `mutate-no-doorbell-fence`, on the **x86-64** runner only. The two
 that weaken a publishing store to `Relaxed` were gates for one run and the suite
