@@ -8,7 +8,7 @@ assumed closed.
 |---|---|---|
 | **L0** Determinism substrate | **Built** | `env/src/lib.rs`, `env/src/contract.rs`, `xtask lint-determinism`, and a boot that runs the contract against the seeded and the hardware `Env` on the same run — `kernel/src/env.rs`, `kernel/src/main.rs` |
 | **L1** Deterministic simulation | **Hook only** | `env/src/sim.rs` — seeded fault injection with protocol-aware site labels. No device models, no seed sweeps, and nothing has yet injected a fault at a named site: E0-P09. Full simulator at phase 01. |
-| **L2** Concurrency and memory model | **Stress tests only** | `ring/tests/litmus.rs` plus an AArch64 CI job. **Not** a model check — RustMC is E0-P16, open. |
+| **L2** Concurrency and memory model | **Stress tests only** | `ring/tests/litmus.rs` plus an AArch64 CI job. **Not** a model check — RustMC is E0-P16, open, and now blocked on work rather than on a question: it needs its own toolchain (LLVM 21 against this tree's 22.1.8, RFC 0022) and its own small tests, because a checker cannot exhaust a 500 000-round stress test. |
 | **L3** Proof | **Absent** | Verus on the frame at phase 02; Kani on capability properties at M4. The frame must stop moving first. The nearest thing that exists is not proof and should not be mistaken for it: five capability properties checked at every boot against a real table and five broken on purpose, plus one build broken on purpose — evidence that the checks can fail, not that they are exhaustive. |
 | **L4** Fuzzing | **Instrumentation only** | `xtask coverage`. No SQE generator, no snapshot harness, no hostile-peer fuzzer. Phase 01. |
 | **L5** Performance regression | **Harness only** | `bench/` records distributions with p50/p99/p99.9 and marks the counters it cannot read as absent. No change-point detection — that needs commit history to reason about, phase 02. |
@@ -97,6 +97,12 @@ currently comes from.
   RustMC (E0-P16) explores what the memory model *permits*; stress tests explore
   what one machine happened to do. Do not mistake a green litmus job for a proof
   of the ordering.
+  When RustMC does land it will carry a caveat of its own, and it is better
+  stated here in advance than discovered next to a result: it runs under its own
+  toolchain (RFC 0022), so it checks the protocol **as written** and not the
+  machine code this tree ships. Atomic orderings are specified by the language
+  rather than chosen by the backend, which is why that is a small gap — but it
+  is a gap, and a citation of a model-check result owes the reader this sentence.
 
   This stopped being an argument and became a measurement. `mutate-relaxed-submission`
   and `mutate-relaxed-completion` weaken the two publishing stores from `Release`
