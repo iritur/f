@@ -27,20 +27,29 @@
 //! these tests plus an AArch64 CI job are the coverage, and the gap should be
 //! stated rather than assumed away.
 //!
-//! # The half that stands in for it
+//! # The half that stands in for it, and how far it reaches
 //!
 //! Every ordering these tests guard has a deliberate defect behind a cargo
-//! feature, and CI requires the suite to *fail* with it on. A stress test that
-//! has only ever passed cannot be told apart from one that cannot fail, and
-//! until there is a checker that is the whole difference:
+//! feature, because a stress test that has only ever passed cannot be told
+//! apart from one that cannot fail. Two of the three are *not* gates, and that
+//! is a result rather than a gap in the wiring:
 //!
-//! - `mutate-relaxed-submission` weakens the submission ring's publishing
-//!   store. Caught on AArch64 only.
-//! - `mutate-relaxed-completion` weakens the completion ring's. Also AArch64
-//!   only.
 //! - `mutate-no-doorbell-fence` removes the StoreLoad fence in the suppression
-//!   protocol. Caught everywhere, because store-load is the reordering total
-//!   store order performs — RFC 0020.
+//!   protocol. **Caught, on both runners, and it gates.** Store-load is a
+//!   reordering total store order actually performs, so this shows up on an
+//!   ordinary laptop at eight rounds in a thousand — RFC 0020.
+//! - `mutate-relaxed-submission` and `mutate-relaxed-completion` weaken the two
+//!   publishing stores. **Not caught.** They were run as gates on the AArch64
+//!   runner for exactly one CI run — the machine where the weakening is a real
+//!   defect — and the suite passed with both.
+//!
+//! That second result is this file's own first paragraph arriving as evidence,
+//! and it is worth more than a green tick would have been. These tests sample
+//! what one machine happened to do. They did not catch a `Release` store
+//! weakened to `Relaxed` on hardware that is entitled to reorder it, and no
+//! amount of iterating the harness would make that a *guarantee* — it would
+//! only move the probability. E0-P16 is the task that closes this, and the
+//! shape of what it must close is now measured rather than assumed.
 //!
 //! See `docs/design/proving-ground.html` layer 2.
 

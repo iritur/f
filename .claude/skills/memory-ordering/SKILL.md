@@ -30,10 +30,16 @@ checker did not, so "lands at M5" is a sentence that stopped being true. Until
 it exists the AArch64 unit tests plus the litmus job are the coverage, and the
 gap is real — say so rather than implying the ring is verified.
 
-What the litmus suite does have is the other half: each of its three deliberate
-defects is a cargo feature, and CI requires the suite to fail with it on. A
-stress test that has only ever passed cannot be told apart from one that cannot
-fail, and that distinction is the only thing standing in for a model check.
+The suite has three deliberate defects behind cargo features, and **one of them
+is a gate**: `mutate-no-doorbell-fence`, which CI requires the suite to fail
+with, on both runners. The two that weaken a publishing store to `Relaxed` were
+gates for one run and the suite *passed* with them on, on the arm runner. Do not
+re-add them as gates without new evidence — that result is the measured size of
+the gap, and it is what `E0-P16` exists to close.
+
+The rule that follows: if you weaken an ordering and the litmus suite stays
+green, **you have learned nothing**. Green there is not evidence the ordering
+was unnecessary; it is evidence the suite is a sampler.
 
 ## Reviewing concurrent code here
 

@@ -92,10 +92,25 @@ currently comes from.
   one; it is not *doorbells per operation under load*, which needs a workload
   and a machine, and it is deliberately not registered as a claim. E0-B15's exit
   says so.
-- **The litmus tests are empirical, not exhaustive.** They will not reliably
-  catch a rare interleaving. RustMC (E0-P16) explores what the memory model
-  *permits*; stress tests explore what one machine happened to do. Do not
-  mistake a green litmus job for a proof of the ordering.
+- **The litmus tests are empirical, not exhaustive, and now there is a number
+  for how much that costs.** They will not reliably catch a rare interleaving.
+  RustMC (E0-P16) explores what the memory model *permits*; stress tests explore
+  what one machine happened to do. Do not mistake a green litmus job for a proof
+  of the ordering.
+
+  This stopped being an argument and became a measurement. `mutate-relaxed-submission`
+  and `mutate-relaxed-completion` weaken the two publishing stores from `Release`
+  to `Relaxed`, and CI required the suite to fail with them on, on the AArch64
+  runner — the machine where that weakening is a real defect. **The suite
+  passed.** Both steps were removed as gates, because a gate asserting a
+  probabilistic test catches a specific reordering goes red on a Tuesday for
+  reasons nobody can reproduce.
+
+  So the standing position is sharper than "the gap is real": the suite has been
+  shown not to catch the exact defect it was written to guard against, on the
+  exact hardware that defect is about. `mutate-no-doorbell-fence` is the one
+  defect that *is* caught and does gate — store-load is a reordering the hardware
+  performs rather than one it might, at eight rounds in a thousand.
 - **`instructions_per_op` and `joules_per_op` still report `Unavailable`.** The
   harness carries the fields and marks them absent rather than omitting them, so
   a claim cannot quietly narrow to wall-clock only. The reasons now name owners
