@@ -60,6 +60,58 @@ out first:
 
 which leaves both under `.\target-export\`.
 
+## The short way, on Arch
+
+### Getting it onto the machine
+
+If you will build there, clone — `build` needs the checkout anyway:
+
+```sh
+git clone https://github.com/iritur/f && cd f
+sudo ./tools/f-on-metal.sh check
+```
+
+If you built elsewhere and are copying the two artefacts over, the script runs
+standalone and says so when it is not in a checkout:
+
+```sh
+curl -O https://raw.githubusercontent.com/iritur/f/main/tools/f-on-metal.sh
+chmod +x f-on-metal.sh
+sudo ./f-on-metal.sh install --kernel f-kernel.elf32 --init init.bin
+```
+
+**Read it before running it.** It writes to your bootloader, and a script you
+pipe straight from a URL into a root shell is one you have not read. There is
+deliberately no `curl … | sudo sh` line on this page.
+
+There is no gist and no shortened URL, on purpose: a copy of this script drifts
+from the tree it encodes — `BAUD` and `MAX_CPUS` here must match
+`serial.rs` and `percpu.rs` — and a stale copy that edits a bootloader is worse
+than an inconvenient URL. The raw link above is also shorter than a gist's.
+
+### What it does
+
+`tools/f-on-metal.sh` does Procedure A and the checks around it. Run `check`
+first — it changes nothing and reports what would go wrong, which is worth more
+than the install step, because the failure modes here are silent:
+
+```sh
+./tools/f-on-metal.sh check      # what this machine would do. No changes.
+sudo ./tools/f-on-metal.sh build      # toolchain, build, and boot it under QEMU here first
+sudo ./tools/f-on-metal.sh install    # add the entries beside Arch
+sudo ./tools/f-on-metal.sh uninstall  # and take them away again
+```
+
+It refuses an ELF64 image — the easiest mistake, since cargo leaves one beside
+the `.elf32` — backs up `grub.cfg` before regenerating, never touches
+`GRUB_DEFAULT`, and writes `/etc/grub.d/45_f` rather than appending to
+`40_custom`, so a second run cannot leave two entries behind. `build` boots the
+result under QEMU on the target machine before you ask the firmware to, which
+means a failure on metal has one fewer explanation.
+
+The manual procedure is below, and it is what the script does; read it if the
+script refuses something and you want to disagree with it.
+
 ## Procedure A — a GRUB entry on a machine that already runs Linux
 
 This is the recommended route, and on `runner-class-A` it is the only one that
@@ -181,14 +233,69 @@ logical processor in the package — SMT siblings included. With SMT on, which
 `runner-class-A` requires, eight threads is four physical cores.
 
 Cores past the eighth are **left asleep on purpose**. `start` clamps with
-`present.min(MAX_CPUS)`, and the boot log prints `cores` and `present`
-separately so that a sixteen-thread machine reporting two cores is visible
-rather than silent.
+`present.min(MAX_CPUS)`, and a boot that clamps says so on a line of its own —
+which is what you will see on any machine worth measuring on. On a 64-thread
+part:
 
-The cost that sets the number: every `PerCpu<T>` is `MAX_CPUS * size_of::<T>()`
-of `.bss` whether the cores exist or not, and at eight the largest shard — the
-interrupt descriptor table — is 32 KiB. Raising it is a memory decision as much
-as a topology one.
+```
+  cores         8 of 8 shards, each with its own tables and stacks
+  note          the processor reports 64 — 56 left asleep, past MAX_CPUS
+```
+
+**That `note` is correct behaviour, not a fault.** It appears only when
+`present > cores`, because a log that reported just the number started would be
+hiding which of the two it was.
+
+### Why it is eight, and what raising it would cost
+
+This is the first question that line provokes, so the answer is here rather than
+waiting to be re-derived. The constant was raised to 64 for a Threadripper
+2990WX, measured, and put back.
+
+The cost is linear, and exactly so — these are arrays indexed by the constant
+plus `linker.ld`'s `AP_CORES * AP_STACK_STRIDE`:
+
+```
+resident(N) = 438 566 + 64 072 × N bytes          62.6 KiB per core
+```
+
+| MAX_CPUS | resident | AP spin on a 64-thread machine |
+|---|---|---|
+| 2 | 553 KiB | 10 ms |
+| **8** | **929 KiB** | **73 ms** |
+| 16 | 1.40 MiB | 156 ms |
+| 32 | 2.37 MiB | 322 ms |
+| 64 | 4.33 MiB | 655 ms |
+
+Built at 8, 16 and 64; the model came from the first and third and predicted the
+second to the byte. Most of the 62.6 KiB is not `PerCpu` — 56 KiB is one guarded
+AP stack block, reserved in the image because a guard page needs the mapper that
+builds the kernel window. The ~10.4 ms is a hardcoded sequential spin in
+`ap::wake`: 10 ms after `INIT`, 200 µs after each `STARTUP`, whatever the core
+actually does.
+
+**The two costs have different shapes.** Memory tracks the *constant* and is
+paid on every machine, including single-core ones. Boot time tracks
+`present.min(MAX_CPUS)` — the cores that exist — so a high ceiling on a small
+machine costs memory and no time at all. Measured: the same kernel booted
+`-smp 1/2/8` in 1054/990/879 ms, all noise around each other.
+
+It stays at eight because a ceiling is not a speedup. Nothing here schedules
+work above two cores, so the cores a larger ceiling admits would have nothing to
+do. When it does pay it will pay as **admission capacity** — RFC 0007 reserves a
+core whole, with its SMT sibling and a cache partition — rather than as
+throughput.
+
+What the 64 build did establish, and worth knowing before someone assumes
+otherwise: the sharding scales. It brought up `64 of 64 shards, each with its
+own tables and stacks` and reached `M0 ok`, and at `-smp 96` it started 64 and
+reported the other 32 asleep. **Under emulation, which is not evidence about
+hardware** — that is what this page is for.
+
+`AP_CORES` in `linker.ld` must equal `MAX_CPUS - 1`, and
+`arch::x86_64::ap::self_test` checks it at boot against the linker's own
+symbols, so changing one and forgetting the other is a refused boot naming the
+problem rather than a corrupted stack.
 
 Two assumptions come with it, both named in the code rather than discovered
 here: the count is **one package's**, so a two-socket machine is undercounted;

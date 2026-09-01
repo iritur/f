@@ -89,7 +89,10 @@ currently comes from.
   reading before that boot rather than after: the trace hash **will** differ on
   hardware, because the memory map and core count are in the log by design and
   QEMU's are pinned; and `MAX_CPUS` is eight logical processors, so a larger
-  machine has the rest left asleep and says so in `cores` versus `present`.
+  machine has the rest left asleep and says so on its own `note` line. Eight is
+  a measured choice rather than a leftover — `docs/booting-on-hardware.md` has
+  the cost curve and why raising it buys admission capacity that nothing can
+  use yet.
 - **The user-interrupt doorbell is written and has never executed.** `Path` and
   `Bell` build it, negotiation gates it on `feature::USER_INTERRUPT_DOORBELL`,
   and `Bell::new` refuses to construct it on a machine that does not report the

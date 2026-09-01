@@ -47,10 +47,59 @@ use crate::arch::x86_64::current_cpu;
 /// topology one: at eight, the largest shard in the kernel — the interrupt
 /// descriptor table — is 32 KiB of `.bss`.
 ///
-/// *Reversal:* raise it when E5 names a machine with more cores than this, or
-/// when the kernel learns to size the shards from the core count the firmware
-/// reports, which is the same change made properly and needs an allocator that
-/// runs before the descriptor tables do.
+/// # What it costs, measured
+///
+/// The whole cost is linear, and exactly so — these are arrays indexed by this
+/// constant, plus `linker.ld`'s `AP_CORES * AP_STACK_STRIDE`, which is why the
+/// fit is not a fit:
+///
+/// ```text
+/// resident(N) = 438 566 + 64 072 * N bytes      62.6 KiB per core
+/// ```
+///
+/// Built at 8, 16 and 64: the model was derived from the first and third and
+/// predicted the second to the byte, 1 463 718. Most of the 62.6 KiB is not
+/// `PerCpu` at all — 56 KiB of it is one guarded application-processor stack
+/// block, reserved in the image because a guard page needs the mapper that
+/// builds the kernel window, and that runs long before any core starts.
+///
+/// Bring-up costs a further ~10.4 ms per core, and that one is a hardcoded
+/// sequential spin: `ap::wake` waits 10 ms after `INIT` and 200 µs after each
+/// `STARTUP`, whatever the core actually does.
+///
+/// **The two costs have different shapes, which is the part worth keeping.**
+/// Memory tracks *this constant* and is paid on every machine, including a
+/// single-core one that touches none of it. Boot time tracks
+/// `present.min(MAX_CPUS)` — the cores that actually exist — so a high ceiling
+/// on a small machine costs memory and no time at all.
+///
+/// # Why it is still eight
+///
+/// It was raised to 64 for a Threadripper 2990WX, measured, and put back. The
+/// numbers above are that experiment; the reasoning is that a ceiling is not a
+/// speedup. Nothing here schedules work above two cores — `init` runs on one,
+/// the timer on another, and every core past that is started, given tables and
+/// a stack, and parked — so the cores a larger ceiling admits would have had
+/// nothing to do, at 62.6 KiB and 10.4 ms each.
+///
+/// When it does pay, it will pay as *admission capacity* rather than as
+/// throughput: RFC 0007 reserves a core whole, with its SMT sibling and a cache
+/// partition, so more cores means more reserved workloads coexisting and not
+/// any one of them running faster. Worth having the right word before the first
+/// number is published.
+///
+/// *Reversal:* raise it when a scheduler can place work on the cores it admits,
+/// or when E5 names a machine with more cores than this, or when the kernel
+/// learns to size the shards from the core count the firmware reports — the
+/// last being the same change made properly, and the only one of the three that
+/// stops this being a straight line with no knee in it. It needs an allocator
+/// that runs before the descriptor tables do.
+///
+/// `AP_CORES` in `kernel/linker.ld` must equal this less one, and
+/// [`crate::arch::x86_64::ap::self_test`] checks that at boot against the
+/// linker's own symbols rather than trusting either comment — so raising one
+/// and forgetting the other is a refused boot naming the problem, not a
+/// corrupted stack.
 pub const MAX_CPUS: usize = 8;
 
 /// One `T` per core, reachable only by the core it belongs to.
