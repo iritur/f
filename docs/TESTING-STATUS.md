@@ -78,6 +78,18 @@ currently comes from.
   commit disagree for a reason with nothing to do with the kernel. The exclusion
   is a decision with a reversal condition, not a gap: it lifts when the boot log
   stops being the reproduction artefact.
+- **This kernel has never run on hardware.** Not once, on anything. Every
+  assertion the boot log makes — the APIC enumeration, the memory map, the
+  UART, the application-processor startup, `M0 ok` itself — is an assertion
+  about QEMU, and the emulator is the only witness any of it has ever had. This
+  is the largest single gap on this page and it is easy to miss, because
+  nothing here is *failing*: the tests pass, the boots are green, and the
+  subject of every one of them is an emulator. `E0-P18` owns closing it and
+  `docs/booting-on-hardware.md` is the procedure. Two consequences worth
+  reading before that boot rather than after: the trace hash **will** differ on
+  hardware, because the memory map and core count are in the log by design and
+  QEMU's are pinned; and `MAX_CPUS` is eight logical processors, so a larger
+  machine has the rest left asleep and says so in `cores` versus `present`.
 - **The user-interrupt doorbell is written and has never executed.** `Path` and
   `Bell` build it, negotiation gates it on `feature::USER_INTERRUPT_DOORBELL`,
   and `Bell::new` refuses to construct it on a machine that does not report the
