@@ -88,6 +88,51 @@ grub_path() {
 }
 
 # ----------------------------------------------------------------------------
+# Is there a real UART at 0x3f8?
+#
+# 0 yes, 1 no, 2 could not tell — and the third is the reason this is a function
+# rather than a grep. The first version asked dmesg, with stderr discarded, and
+# `dmesg` is root-only wherever `kernel.dmesg_restrict` is 1, which is the
+# default on Arch. So every non-root run reported a missing serial port on a
+# machine that had one: a check answering a question it had not been able to
+# ask. "I could not tell" is a different answer from "there is none" and must
+# never be rendered as one.
+#
+# sysfs first, because it needs no privilege and describes the current state
+# rather than a boot-time log that can wrap out of the ring buffer.
+SERIAL_WHY=""
+serial_at_3f8() {
+    local port type
+    if [ -r /sys/class/tty/ttyS0/type ] && [ -r /sys/class/tty/ttyS0/port ]; then
+        type=$(cat /sys/class/tty/ttyS0/type 2>/dev/null || echo 0)
+        port=$(tr 'a-f' 'A-F' < /sys/class/tty/ttyS0/port 2>/dev/null || echo "")
+        # The 8250 driver registers the legacy addresses whether or not anything
+        # answers at them, so `port` alone proves nothing — a machine with no
+        # serial hardware still shows 0x3F8 here. `type` is the probe result:
+        # 0 is PORT_UNKNOWN, and anything else is a UART it actually identified
+        # (4 is a 16550A).
+        if [ "$type" != "0" ] && [ "${port#0x}" = "3F8" ]; then
+            SERIAL_WHY="/sys/class/tty/ttyS0: type=$type port=$port"
+            return 0
+        fi
+        SERIAL_WHY="/sys/class/tty/ttyS0: type=$type — 0 means nothing answered at $port"
+        return 1
+    fi
+
+    if dmesg >/dev/null 2>&1; then
+        if dmesg 2>/dev/null | grep -qiE 'ttyS0 at I/O 0x3f8'; then
+            SERIAL_WHY="dmesg: the 8250 driver found a UART at 0x3f8"
+            return 0
+        fi
+        SERIAL_WHY="dmesg: no 8250 UART reported at 0x3f8"
+        return 1
+    fi
+
+    SERIAL_WHY="no sysfs entry, and dmesg is refused — kernel.dmesg_restrict is 1. Re-run with sudo."
+    return 2
+}
+
+# ----------------------------------------------------------------------------
 
 cmd_check() {
     bold "== what this machine would do =="
@@ -130,14 +175,46 @@ cmd_check() {
         fail=$((fail + 1))
     fi
 
-    local mb=""
-    for d in /boot/grub/i386-pc /boot/grub/x86_64-efi; do
+    # Two places, and the difference is the whole diagnosis. /boot/grub/<target>/
+    # is what the installed GRUB loads at boot; /usr/lib/grub/<target>/ is what
+    # the distribution package ships, which grub-install copies from. Present in
+    # the second and absent from the first means GRUB was never deployed to this
+    # /boot — a fixable state, and a completely different problem from a GRUB
+    # build that has no multiboot support at all.
+    local mb="" pkg=""
+    for d in /boot/grub/i386-pc /boot/grub/x86_64-efi /boot/grub2/i386-pc /boot/grub2/x86_64-efi; do
         [ -f "$d/multiboot.mod" ] && mb="$d/multiboot.mod"
     done
+    for d in /usr/lib/grub/i386-pc /usr/lib/grub/x86_64-efi; do
+        [ -f "$d/multiboot.mod" ] && pkg="$d/multiboot.mod"
+    done
+
     if [ -n "$mb" ]; then
         echo "multiboot mod   $mb"
+    elif [ -n "$pkg" ]; then
+        red "multiboot mod   not deployed to /boot, though the package has it:"
+        red "                  $pkg"
+        red ""
+        red "                GRUB's modules were never installed to this /boot, so the"
+        red "                bootloader running on this machine cannot load a multiboot"
+        red "                kernel. Deploy them:"
+        if [ -d /sys/firmware/efi ]; then
+            red "                  grub-install --target=x86_64-efi --efi-directory=<your ESP>"
+            red "                  grub-mkconfig -o /boot/grub/grub.cfg"
+            red "                (the ESP is usually /boot or /efi — check 'findmnt /boot')"
+        else
+            red "                  grub-install --target=i386-pc /dev/sdX"
+            red "                  grub-mkconfig -o /boot/grub/grub.cfg"
+        fi
+        red ""
+        red "                If this machine actually boots by something else — systemd-boot"
+        red "                is the common one on Arch — then GRUB is installed as a package"
+        red "                and not in use, and that is the thing to settle first."
+        fail=$((fail + 1))
     else
-        red "multiboot mod   not found. GRUB cannot load a multiboot 1 kernel without it."
+        red "multiboot mod   not found in /boot/grub or /usr/lib/grub."
+        red "                This GRUB cannot load a multiboot 1 kernel. On Arch:"
+        red "                  pacman -S grub"
         fail=$((fail + 1))
     fi
 
@@ -153,11 +230,19 @@ cmd_check() {
     # -- the console, which is the whole interface ---------------------------
     echo
     bold "-- serial, and this is the one that matters --"
-    if dmesg 2>/dev/null | grep -qiE 'ttyS0 at I/O 0x3f8'; then
-        grn "serial          real 16550 at 0x3f8 (COM1) — detected by the kernel"
+    local src=0
+    serial_at_3f8 || src=$?
+    if [ "$src" -eq 0 ]; then
+        grn "serial          a real UART at 0x3f8 (COM1) — the kernel probed it"
+        echo "                $SERIAL_WHY"
         echo "                connect at ${BAUD} 8N1"
+    elif [ "$src" -eq 2 ]; then
+        ylw "serial          could not tell"
+        ylw "                $SERIAL_WHY"
+        warn=$((warn + 1))
     else
         red "serial          no UART detected at 0x3f8"
+        red "                $SERIAL_WHY"
         red ""
         red "                F has NO VIDEO OUTPUT. The multiboot header requests no"
         red "                framebuffer and the kernel writes to no display. Without a"
@@ -340,9 +425,10 @@ EOF
     echo
     grn "done. Arch is still the default entry — nothing about its boot changed."
 
-    if ! dmesg 2>/dev/null | grep -qiE 'ttyS0 at I/O 0x3f8'; then
+    if ! serial_at_3f8; then
         echo
-        red "WARNING: no UART detected at 0x3f8 on this machine."
+        red "WARNING: no UART confirmed at 0x3f8 on this machine."
+        red "         $SERIAL_WHY"
         red "F writes to nothing else. If that is still true at boot you will see a"
         red "black screen and be unable to tell success from a triple fault."
         red "Run '$PROG check' for what to do about it."
