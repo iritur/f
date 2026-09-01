@@ -336,11 +336,13 @@ cmd_check() {
 cmd_deploy_grub() {
     need_root
 
-    local disk="" esp="" assume=0
+    local disk="" esp="" assume=0 keep_order=0
+    BOOT_ORDER_BEFORE=""
     while [ $# -gt 0 ]; do
         case "$1" in
-            --disk) disk="$2"; shift 2 ;;
-            --yes)  assume=1;  shift ;;
+            --disk)            disk="$2"; shift 2 ;;
+            --yes)             assume=1;  shift ;;
+            --keep-boot-order) keep_order=1; shift ;;
             *) die "unknown option for deploy-grub: $1" ;;
         esac
     done
@@ -387,9 +389,26 @@ cmd_deploy_grub() {
     echo
     if [ -d /sys/firmware/efi ]; then
         echo "  ESP:            $esp"
-        echo "  This adds GRUB to the ESP beside whatever is already there. It does"
-        echo "  not remove systemd-boot, and it does not change which one the firmware"
-        echo "  boots by default — pick GRUB from the firmware boot menu when you want F."
+        echo
+        echo "  This adds GRUB to the ESP beside whatever is already there and does not"
+        echo "  remove systemd-boot."
+        echo
+        ylw "  It DOES change the firmware boot order. grub-install calls efibootmgr,"
+        ylw "  which adds a GRUB entry and puts it first, so GRUB becomes what boots by"
+        ylw "  default. systemd-boot stays installed and selectable, and GRUB's own menu"
+        ylw "  will list Arch — so the machine still boots — but the front door changes."
+        if [ "$keep_order" -eq 1 ]; then
+            echo
+            grn "  --keep-boot-order given: the current BootOrder will be restored"
+            grn "  afterwards, leaving systemd-boot as the default and GRUB reachable"
+            grn "  from the firmware boot menu."
+        else
+            echo
+            echo "  Pass --keep-boot-order to put the order back afterwards. Either way"
+            echo "  the before and after are printed, with the command to restore it."
+        fi
+        BOOT_ORDER_BEFORE=$(efibootmgr 2>/dev/null | sed -n 's/^BootOrder: //p' || true)
+        [ -n "$BOOT_ORDER_BEFORE" ] && echo "  BootOrder now:  $BOOT_ORDER_BEFORE"
     else
         echo "  Disk:           $disk   <- this gets a bootloader written to it"
         echo "  /boot is on:    $(findmnt -no SOURCE /boot 2>/dev/null || echo '(not a separate mount)')"
@@ -411,6 +430,27 @@ cmd_deploy_grub() {
 
     $cmd
     grub-mkconfig -o /boot/grub/grub.cfg
+
+    # The firmware boot order, honestly. grub-install has just put GRUB first;
+    # say so with both values rather than leaving somebody to discover it at the
+    # next reboot, and hand over the command that undoes it.
+    if [ -d /sys/firmware/efi ] && [ -n "$BOOT_ORDER_BEFORE" ]; then
+        local after
+        after=$(efibootmgr 2>/dev/null | sed -n 's/^BootOrder: //p' || true)
+        echo
+        echo "BootOrder before  $BOOT_ORDER_BEFORE"
+        echo "BootOrder after   ${after:-unknown}"
+        if [ "$after" != "$BOOT_ORDER_BEFORE" ]; then
+            if [ "$keep_order" -eq 1 ]; then
+                efibootmgr -o "$BOOT_ORDER_BEFORE" >/dev/null
+                grn "restored — systemd-boot is still your default; pick GRUB from the"
+                grn "firmware boot menu when you want F."
+            else
+                ylw "GRUB is now the default boot manager. To put it back:"
+                ylw "  efibootmgr -o $BOOT_ORDER_BEFORE"
+            fi
+        fi
+    fi
 
     # Verify rather than assume. The whole point was to make one file exist.
     local now=""
@@ -514,6 +554,11 @@ cmd_install() {
 cat <<'MENU'
 menuentry "F — milestone M0 (serial ${BAUD} 8N1)" --class f {
     echo "F: loading. All output is on COM1 at ${BAUD} 8N1 — there is no video."
+    insmod part_gpt
+    insmod part_msdos
+    insmod fat
+    insmod ext2
+    insmod multiboot
     search --no-floppy --file --set=root ${gp}/f-kernel.elf32
     multiboot ${gp}/f-kernel.elf32
     module ${gp}/init.bin
@@ -521,6 +566,11 @@ menuentry "F — milestone M0 (serial ${BAUD} 8N1)" --class f {
 
 menuentry "F — milestone M0, 60s timer jitter run" --class f {
     echo "F: loading with timer=60. Output on COM1 at ${BAUD} 8N1."
+    insmod part_gpt
+    insmod part_msdos
+    insmod fat
+    insmod ext2
+    insmod multiboot
     search --no-floppy --file --set=root ${gp}/f-kernel.elf32
     multiboot ${gp}/f-kernel.elf32 timer=60
     module ${gp}/init.bin
@@ -621,6 +671,8 @@ deploy-grub options:
   --disk <dev>      BIOS only: the disk to write to. Derived from /boot when it
                     can be, and required when it cannot — LVM, RAID, whole-device.
   --yes             do not prompt
+  --keep-boot-order UEFI only: restore the firmware BootOrder afterwards, so
+                    grub-install does not leave GRUB as the default boot manager
 
 install options:
   --kernel <path>   default $KERNEL_DEFAULT

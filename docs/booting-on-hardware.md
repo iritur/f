@@ -180,6 +180,25 @@ menuentry "F — M0" {
 }
 ```
 
+### On UEFI, `grub-install` changes what boots by default
+
+Worth knowing before rather than after: `grub-install` calls `efibootmgr`, which
+adds a GRUB entry and **puts it first in `BootOrder`**. So GRUB becomes the
+default boot manager. Nothing is removed — systemd-boot stays installed and
+selectable, and GRUB's own menu will list Arch, so the machine still boots — but
+the front door changes, and on a machine somebody else uses that is a surprise.
+
+`f-on-metal.sh deploy-grub` prints the before and after and hands you the
+`efibootmgr -o …` line to undo it. `--keep-boot-order` restores it for you,
+leaving systemd-boot as the default and GRUB reachable from the firmware boot
+menu.
+
+**systemd-boot cannot be used instead.** It loads EFI applications and EFI-stub
+kernels; F is an ELF32 multiboot 1 image and is neither. Teaching F an EFI stub
+would reverse `E0-B02` and cost the `-kernel` path that `run`, `trace`, `fault`,
+`cap`, `user` and `mutate` all launch through. So under UEFI, GRUB goes beside
+systemd-boot rather than replacing it.
+
 For UEFI, substitute:
 
 ```sh
