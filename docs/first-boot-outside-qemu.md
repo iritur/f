@@ -197,6 +197,50 @@ into every frame. On a 16 GiB machine that is 4 million writes and 16 GiB of
 memory traffic, and no amount of filtering removes it. A different structure
 would trade that for a different cost; this page is not the place to choose one.
 
+## Follow-up, the same day: the optimised image had never booted either
+
+Chasing the rest of the boot time led straight to the obvious fix — boot the
+optimised image instead of the debug one — and the obvious fix did not boot:
+
+```
+FAIL: bringing up a core: a core was started and never reached kernel code
+  core          1
+```
+
+Same kernel, same machine, same QEMU; the only difference was `--release`. The
+investigation is worth recording because every intermediate conclusion was
+wrong in an instructive way. The QEMU interrupt log showed the second core
+taking its INIT and then nothing, which looked like a lost startup interrupt;
+the compiled trampoline install, the IPI sequence and its delays, and the
+mailbox polling loop were all read in disassembly and all correct. Freezing
+the failed machine settled it: the second core was *running kernel code*,
+parked and healthy — polling the boot processor's mailbox slot instead of its
+own.
+
+The bug was `cpuid()`'s inline assembly. It saved `rbx` with a push, captured
+the result with `mov {out:e}, ebx`, and restored with a pop — and under
+optimisation the register allocator hands the output operand `ebx` itself,
+because that makes the capture a deletable no-op. The pop then overwrites the
+result with whatever the caller had in `rbx`, which on a core fresh out of the
+trampoline is zero. So `current_cpu()` on the application processor returned
+0: it read the right handoff (a second inlined copy happened to get a
+different register), reported ready in core 0's slot, and parked watching
+core 0's mailbox, while the boot processor watched slot 1 for a word that
+never came. The fix is an exchange instead of a capture-then-restore, which is
+correct under both allocations. Debug builds never coalesce the copy, which is
+why eleven weeks of green runs said nothing about it.
+
+This is Finding 1's shape with the sign flipped: a path nobody had ever
+executed, except this one was wrong. The optimised build of this kernel had
+never been booted by anything — `cargo xtask` builds, tests and ships the
+debug image — so the miscompile sat in every release build ever produced and
+no fixture could have seen it. `f-on-metal.sh build` now builds the optimised
+image *and boots it under QEMU* before installing it, because it is the image
+hardware gets: measured at 4 GiB, five runs, the debug image boots in a median
+of 3818 ms and the optimised one in 2220 ms, and the gap widens with memory.
+What the release *package* carries is still `RELEASING.md`'s decision and is
+still not made here.
+
 ## What this did not establish
 
 - **It is not bare metal.** VMware runs guest instructions natively, so the CPU

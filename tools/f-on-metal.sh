@@ -35,7 +35,14 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # read.
 if [ -f "$REPO/kernel/Cargo.toml" ] && [ -f "$REPO/rust-toolchain.toml" ]; then
     IN_REPO=1
-    KERNEL_DEFAULT="$REPO/target/x86_64-unknown-none/debug/f-kernel.elf32"
+    # The optimised image, not the debug one `cargo xtask` builds and tests.
+    # The difference is boot time on a machine with real memory: the frame
+    # allocator writes one word into every frame of RAM, and the debug build
+    # nearly doubles that wait (medians at 4 GiB under QEMU: 3818 ms debug,
+    # 2220 ms optimised). `cmd_build` builds this image and boots it under
+    # QEMU before anything is installed — the optimised build is the less
+    # travelled one, and the first time it was ever booted it did not work.
+    KERNEL_DEFAULT="$REPO/target/x86_64-unknown-none/release/f-kernel.elf32"
     INIT_DEFAULT="$REPO/target/init/init.bin"
 else
     IN_REPO=0
@@ -497,7 +504,37 @@ cmd_build() {
     # on metal has one fewer explanation.
     bold "== build, and boot it under QEMU first =="
     sudo -u "$as_user" sh -c "cd '$REPO' && cargo xtask run"
-    grn "built, and it boots under emulation on this machine."
+
+    # The image this script installs is the optimised one, and nothing above
+    # built it: `cargo xtask` builds and boots the debug image on purpose, and
+    # what the release package carries is RELEASING.md's decision, not this
+    # script's. It is built here, and then *booted* here, because it is the
+    # less travelled build — the first time an optimised image of this kernel
+    # was ever booted, 2026-09-01, a miscompiled `cpuid` wrapper cost the
+    # machine every core but the first, and the debug suite had been green
+    # throughout. Emulation catching that class here is the whole reason this
+    # step exists.
+    bold "== the optimised image this script installs =="
+    sudo -u "$as_user" sh -c "cd '$REPO' \
+        && cargo build -p f-kernel --target x86_64-unknown-none \
+            -Zbuild-std=core,compiler_builtins --release \
+        && sysroot=\$(rustc --print sysroot) \
+        && host=\$(rustc -vV | sed -n 's/^host: //p') \
+        && \"\$sysroot/lib/rustlib/\$host/bin/llvm-objcopy\" -O elf32-i386 \
+            target/x86_64-unknown-none/release/f-kernel \
+            target/x86_64-unknown-none/release/f-kernel.elf32"
+
+    bold "== and boot that too, before the firmware is asked to =="
+    qemu-system-x86_64 -kernel "$KERNEL_DEFAULT" -initrd "$INIT_DEFAULT" \
+        -smp 2 -m 128M -serial null -display none \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot \
+        >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -eq 33 ] \
+        || die "the optimised image did not reach M0 ok under QEMU (exit $rc).
+       The debug image just booted, so this is an optimisation-dependent
+       kernel bug. Do not install it; report the exit code instead."
+    grn "built, and both images boot under emulation on this machine."
 }
 
 # ----------------------------------------------------------------------------
