@@ -262,6 +262,7 @@ cargo xtask <command>
                      and one content address over the whole of it
   release --dry-run  The manifest it would produce, without building
   release --twice    Package the same tree twice and require one address
+  release --address  The address alone, one line, for two runners to compare
 
   history            The measurement history, one record per commit
   history append     Add this commit's record. Run on main, never on a branch
@@ -3222,9 +3223,11 @@ fn content_files(content: &Content) -> Result<Vec<(String, Vec<u8>)>, String> {
 fn release(mode: Option<&str>) -> Result<(), String> {
     let dry_run = mode == Some("--dry-run");
     let twice = mode == Some("--twice");
+    let address_only = mode == Some("--address");
     if let Some(other) = mode
         && !dry_run
         && !twice
+        && !address_only
     {
         return Err(format!("unknown option for release: {other}"));
     }
@@ -3270,8 +3273,25 @@ fn release(mode: Option<&str>) -> Result<(), String> {
             "\n  This is the weaker half of E0-R01's exit and it is worth saying so.\n\
              \x20 Directory order, uid, path and clock are all constant within one\n\
              \x20 machine, so two runs here agree for reasons that say little about two\n\
-             \x20 machines agreeing. The release workflow is what asks the real question."
+             \x20 machines agreeing. `--address` on two runners is the other half."
         );
+        return Ok(());
+    }
+
+    // The address and nothing else, so that two runners can each write one line
+    // and a third job can compare them. `trace --hash` is the same shape for the
+    // same reason: what crosses a machine boundary is an artefact, and an
+    // artefact a job has to parse is one a job can parse wrong.
+    //
+    // Deliberately no path, no version and no timestamp in this output, though
+    // all three would be useful in a failure. The build path is a property of
+    // the runner rather than of the release, and a release record naming where
+    // it happened invites the reading that a different path is an acceptable
+    // difference. It is not: it changes the address, which is the whole finding
+    // this verb exists to expose. The workflow records the path beside this
+    // line, where it belongs.
+    if address_only {
+        println!("{}", build_package(&describe, &commit)?.0);
         return Ok(());
     }
 
