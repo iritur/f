@@ -41,7 +41,17 @@ its SHA-256, and one content address over the archive. Nothing in the package
 carries a clock, a user name, a directory order or a compressor version, because
 the thing being asserted is that two machines at one commit produce the same
 bytes — `cargo xtask release --twice` is the local half of asking, and the
-release workflow is the real one.
+`package` and `address` jobs in the pull-request gate are the other: one line
+per runner, `cargo xtask release --address`, compared by a third job.
+
+Both runners have to check out at the same absolute path, and that constraint is
+measured rather than argued. The image is a debug build, so it carries the path
+it was built at in DWARF and in cargo's `-Cmetadata`; the same tree packaged at
+`/work` and at `/elsewhere` produces two different addresses. A container job's
+workspace is `/__w/<repo>/<repo>`, fixed by the runner rather than chosen, so
+this holds without anything having to arrange it — and the comparison checks it
+anyway, so that a difference in paths is never reported as a difference in the
+package. `CARGO_TARGET_DIR` is not one of the paths that matters.
 
 Two of the eight are not owed yet, and that is a decision rather than an
 omission: **a content is required when the claim that needs it publishes a

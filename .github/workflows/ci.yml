@@ -520,12 +520,119 @@ jobs:
       # one same-machine difference — a `read_dir` order that reached the
       # archive — and it costs one kernel build.
       #
-      # The two-machine half needs two runners at one commit, and it needs them
-      # to build at the same absolute path: the image is a debug build, so its
-      # DWARF carries the checkout path and cargo's -Cmetadata derives from the
-      # package id, which contains it. That is a release-workflow question and
-      # not a pull-request one, and E0-R01 is marked `[>]` for it.
+      # The two-machine half is the `package` job below. This step stays,
+      # because when that one goes red this is what says which kind of red:
+      # agreeing here and disagreeing there is a difference *between machines*,
+      # and disagreeing in both places is one this machine can reproduce. Same
+      # argument as the x86-64 litmus job being the control for the arm one.
       - run: cargo xtask release --twice
+
+  # E0-R01's other half: two runners at one commit must produce one content
+  # address. `release --twice` above is the same-machine half and says in its
+  # own output why that is the weaker question.
+  #
+  # Two jobs and not two builds in one, for the reason the trace pair is two
+  # jobs: the claim is about two machines, and the things a machine can differ
+  # in — core count, host load, filesystem, `read_dir` order — are exactly the
+  # things a content address must not be reading.
+  #
+  # This needs both runners to check out at the same absolute path, and that is
+  # measured rather than assumed. The same tree at `/work` and at `/elsewhere`,
+  # same image, same commit, packages to two different addresses:
+  #
+  #     /work        e544abc2009007758433d33c51e00650190b045d060f09677be29c4be76cbc13
+  #     /elsewhere   91189800d63270033f6160ab4b0c0b2290a4ea67149edec9399e17f3c98b611a
+  #
+  # Both are from one tree state and neither can be re-derived later, because
+  # this comment is inside the source archive the address is taken over: writing
+  # the number changed it. That is a property of recording an address in the
+  # tree it addresses, and it is why these two are evidence of a difference
+  # rather than constants to check against.
+  #
+  # The kernel image is a debug build, so its DWARF carries the path it was
+  # built at and cargo's -Cmetadata derives from a package id containing it.
+  # A container job's workspace is `/__w/<repo>/<repo>`, fixed by the runner
+  # rather than chosen here, so the precondition holds by construction — and the
+  # comparison below checks it anyway, because a precondition that holds by
+  # construction is one nobody notices stopping.
+  #
+  # `CARGO_TARGET_DIR` is *not* one of the paths that matters, and that was
+  # measured too: the same source path with the target directory moved to
+  # `/tmp/t` gives the same address. Worth knowing before someone relocates the
+  # target directory for caching and expects this job to care.
+  package:
+    name: package address (runner ${{ matrix.runner_id }})
+    needs: [environment, manifest]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_id: [a, b]
+    steps:
+      - uses: actions/checkout@v7
+      # Two lines: the address, then where it was built. The path is the one
+      # known confounder, so the comparison needs it to tell "the package is not
+      # hermetic" from "these two ran in different places" — different findings,
+      # different fixes, and only one of them is about this repository.
+      - name: package this commit, and record where it was built
+        run: |
+          cargo xtask release --address > package-${{ matrix.runner_id }}.txt
+          pwd >> package-${{ matrix.runner_id }}.txt
+          cat package-${{ matrix.runner_id }}.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.runner_id }}
+          path: package-${{ matrix.runner_id }}.txt
+          if-no-files-found: error
+
+  # No checkout: this job compares two text files and needs nothing from the
+  # tree. A checkout that nothing reads is a step whose failure would be a
+  # mystery.
+  address:
+    name: the content address check
+    needs: [manifest, environment, package]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          merge-multiple: true
+      - name: the two runners must agree
+        run: |
+          a=$(sed -n 1p package-a.txt); pa=$(sed -n 2p package-a.txt)
+          b=$(sed -n 1p package-b.txt); pb=$(sed -n 2p package-b.txt)
+          echo "runner a  $a  at $pa"
+          echo "runner b  $b  at $pb"
+          if [ "$pa" != "$pb" ]; then
+            echo
+            echo "The two runners built at different paths, so this comparison"
+            echo "cannot say anything about the package. A container job's"
+            echo "workspace is /__w/<repo>/<repo> and both of these should be it."
+            echo "Fix the workflow; the address difference below, if any, is a"
+            echo "consequence and not a finding."
+            exit 1
+          fi
+          if [ "$a" != "$b" ]; then
+            echo
+            echo "Two machines packaged one commit and got two addresses."
+            echo
+            echo "The archive has no clock, no uid, no user name, no directory"
+            echo "order and no compressor in it — pack::Tar is written that way"
+            echo "and tested for it — so the difference came from something put"
+            echo "*into* it. The kernel image is the likeliest: it is the only"
+            echo "content that is built rather than read, and a debug build"
+            echo "carries its build path in DWARF. Both runners built at $pa,"
+            echo "so the path is not it."
+            echo
+            echo "A release whose address depends on which machine built it is"
+            echo "not content addressed, and every claim that cites a release by"
+            echo "address is citing something two people cannot both obtain."
+            echo "RELEASING.md, E0-R01."
+            exit 1
+          fi
+          echo "agreed: $a"
 
   deps:
     name: dependency policy
