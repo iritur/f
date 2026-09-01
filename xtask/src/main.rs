@@ -13,6 +13,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
+/// Content addressing and archiving, with no dependency outside the tree.
+/// Split out because it is algorithm rather than policy, and because the rest
+/// of this file is a list of decisions while that one is a list of constants.
+mod pack;
+
 /// The target the kernel is built for.
 ///
 /// A built-in target and not a JSON file in `targets/`, which is a decision
@@ -130,10 +135,22 @@ fn main() -> ExitCode {
         "init" => init_image().map(|path| println!("{}", relative(&path))),
         "mutate" => mutate(),
         "panic" => panic_path(),
+        "trace" => match args.get(1).map(String::as_str) {
+            Some("--hash") => trace_hash_only(),
+            Some(other) => Err(format!("unknown option for trace: {other}")),
+            None => trace_check(),
+        },
+        // `reproduce` used to mean the determinism check above, and it now
+        // means what `RELEASING.md`, the long plan and `proving-ground` all use
+        // the word for: re-running a published number. The old spelling gets a
+        // message naming where it went rather than an alias, because an alias
+        // rots and a signpost is read exactly when it is needed.
         "reproduce" => match args.get(1).map(String::as_str) {
-            Some("--trace") => trace_only(),
-            Some(other) => Err(format!("unknown option for reproduce: {other}")),
-            None => reproduce(),
+            Some("--trace") => Err("`reproduce --trace` moved. The determinism check is now
+                 `cargo xtask trace`, and one hash is `cargo xtask trace --hash`.
+                 `reproduce` takes a claim name — see `cargo xtask reproduce`."
+                .into()),
+            other => reproduce(other),
         },
         "timer" => timer(args.get(1).map(String::as_str)),
         "test" => test(),
@@ -149,7 +166,9 @@ fn main() -> ExitCode {
         "lint-callbacks" => lint_callbacks(),
         "lint-claim-owners" => lint_claim_owners(),
         "lint-snapshot" => lint_snapshot(),
-        "release" => release(args.get(1).map(String::as_str) == Some("--dry-run")),
+        "lint-reproduce" => lint_reproduce(),
+        "unsafe" => unsafe_report(args.get(1).map(String::as_str) == Some("--by-file")),
+        "release" => release(args.get(1).map(String::as_str)),
         "history" => match args.get(1).map(String::as_str) {
             Some("append") => history_append(),
             Some(other) => Err(format!("unknown option for history: {other}")),
@@ -221,15 +240,28 @@ cargo xtask <command>
   lint-units         R03: every public abi field states its unit
   lint-callbacks     R05: no interface registers a callback
   lint-claim-owners  R09: every claim names the document that owns it
+  lint-snapshot      claims/snapshot.json holds what the registry holds
 
-  reproduce          Two runs of this commit must produce one trace hash,
+  unsafe             The number A-05 reports: lines inside `unsafe` as a share
+                     of the frame crates and of the whole tree, against
+                     RFC 0001's under-5% target and 10% reversal trigger
+
+  trace              Two runs of this commit must produce one trace hash,
                      and one unseeded read of time must break that
-  reproduce --trace  Print this run's trace hash and nothing else
+  trace --hash       Print this run's trace hash and nothing else
+
+  reproduce          Every claim, its published reproduction command, the
+                     machine class it needs, and whether this one may record
+  reproduce <claim>  Re-run one claim's own reproduction, from this checkout
+  lint-reproduce     Every claim's reproduction command resolves in this tree
 
   panic              Three endings CI must tell apart: a clean boot, a
                      deliberate panic, and a boot that never finishes
 
-  release --dry-run  The release manifest, and what is missing from it
+  release            Build the package: the contract's contents, a MANIFEST,
+                     and one content address over the whole of it
+  release --dry-run  The manifest it would produce, without building
+  release --twice    Package the same tree twice and require one address
 
   history            The measurement history, one record per commit
   history append     Add this commit's record. Run on main, never on a branch
@@ -314,6 +346,21 @@ fn capture(program: &str, args: &[&str]) -> Result<String, String> {
         return Err(format!("{program} {} failed", args.join(" ")));
     }
     String::from_utf8(out.stdout).map_err(|e| format!("{program} printed non-UTF-8: {e}"))
+}
+
+/// [`capture`], for output that is not text.
+///
+/// `git archive` writes a tar to standard output, and a tar is not UTF-8.
+fn capture_bytes(program: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = Command::new(program)
+        .args(args)
+        .current_dir(root())
+        .output()
+        .map_err(|e| format!("could not run {program}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("{program} {} failed", args.join(" ")));
+    }
+    Ok(out.stdout)
 }
 
 /// [`capture`], with environment variables set for the child.
@@ -993,7 +1040,13 @@ const TRACE_DEFECT: &str = "mutate-unseeded-time";
 ///
 /// One list, because `lint-mutations` has one job — no defect is ever on by
 /// default — and a second list is how the second defect gets forgotten.
-const DEFECTS: &[&str] = &[TRACE_DEFECT, "mutate-unchecked-index"];
+const DEFECTS: &[&str] = &[
+    TRACE_DEFECT,
+    "mutate-unchecked-index",
+    "mutate-relaxed-submission",
+    "mutate-relaxed-completion",
+    "mutate-no-doorbell-fence",
+];
 
 /// The seed every reproduction run uses.
 ///
@@ -1064,7 +1117,7 @@ fn trace(features: &[&str]) -> Result<u64, String> {
 /// every assertion holds, it prints `M0 ok`, it exits 33. Every other check in
 /// this tree is green on it. The only thing wrong is that two runs no longer
 /// agree — and until this command existed, nothing would ever have said so.
-fn reproduce() -> Result<(), String> {
+fn trace_check() -> Result<(), String> {
     println!("reproduction check — seed {TRACE_SEED}\n");
 
     println!("[1/2] the same commit, twice — the traces must agree");
@@ -1099,7 +1152,7 @@ fn reproduce() -> Result<(), String> {
     println!("\n  disagreed, as required — the check can fail");
 
     println!(
-        "\nreproduce: ok — {first:#018x}\n\
+        "\ntrace: ok — {first:#018x}\n\
          Two boots on one machine. The pair that matters is two runners, and that\n\
          is the CI job: same image, same commit, same seed, hashes compared."
     );
@@ -1111,7 +1164,7 @@ fn reproduce() -> Result<(), String> {
 /// For the CI job, where two runners each produce a line and a third job
 /// compares them. Nothing else is printed, so the artefact is the hash rather
 /// than a log a comparison would have to parse.
-fn trace_only() -> Result<(), String> {
+fn trace_hash_only() -> Result<(), String> {
     println!("{:#018x}", trace(&[])?);
     Ok(())
 }
@@ -1211,38 +1264,71 @@ fn mutate() -> Result<(), String> {
 /// other four policy lints: a rule that lives only in a comment is a rule
 /// somebody edits around.
 fn lint_mutations() -> Result<(), String> {
-    let manifest = root().join("kernel").join("Cargo.toml");
-    let text = std::fs::read_to_string(&manifest)
-        .map_err(|e| format!("could not read {}: {e}", relative(&manifest)))?;
+    // Every manifest, not the kernel's alone. The kernel held the only defect
+    // until E0-P17 put one in `ring/`, and a check that reads one file while
+    // the list it checks against covers two is a check that passes by not
+    // looking — the same shape as the forged slot that was never read.
+    for manifest in manifests()? {
+        let rel = relative(&manifest);
+        let text =
+            std::fs::read_to_string(&manifest).map_err(|e| format!("could not read {rel}: {e}"))?;
 
-    let mut in_features = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_features = trimmed == "[features]";
-            continue;
-        }
-        if !in_features {
-            continue;
-        }
-        let Some((name, value)) = trimmed.split_once('=') else { continue };
-        if name.trim() != "default" {
-            continue;
-        }
-        for feature in DEFECTS {
-            if value.contains(feature) {
-                return Err(format!(
-                    "kernel/Cargo.toml has `{feature}` in its default features.\n\n\
-                     That feature is a deliberate defect. It is meant to be turned on by\n\
-                     `cargo xtask mutate` for exactly two boots and by nothing else; on by\n\
-                     default it is a kernel that panics on a hostile handle, shipped."
-                ));
+        let mut in_features = false;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_features = trimmed == "[features]";
+                continue;
+            }
+            if !in_features {
+                continue;
+            }
+            let Some((name, value)) = trimmed.split_once('=') else { continue };
+            if name.trim() != "default" {
+                continue;
+            }
+            for feature in DEFECTS {
+                if value.contains(feature) {
+                    return Err(format!(
+                        "{rel} has `{feature}` in its default features.\n\n\
+                         That feature is a deliberate defect. It is meant to be turned on\n\
+                         for exactly the runs that require it to break something, and by\n\
+                         nothing else; on by default it is the defect, shipped."
+                    ));
+                }
             }
         }
     }
 
     println!("lint-mutations: ok  ({} deliberate defect(s), none on by default)", DEFECTS.len());
     Ok(())
+}
+
+/// Every crate manifest in the workspace, `third_party` excluded.
+///
+/// Excluded because the licence boundary is the isolation boundary: what an
+/// imported crate puts in its own default features is its business, and it is
+/// reachable only over a ring.
+fn manifests() -> Result<Vec<PathBuf>, String> {
+    fn walk(dir: &Path, build: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if path.is_dir() {
+                if !matches!(name, "target" | ".git" | "third_party" | "docs") && path != build {
+                    walk(&path, build, out)?;
+                }
+            } else if name == "Cargo.toml" {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    let build = target_dir();
+    walk(&root(), &build, &mut out).map_err(|e| format!("walking the tree: {e}"))?;
+    out.sort();
+    Ok(out)
 }
 
 /// Every isolation property a process is asked to violate, and what it is.
@@ -1366,6 +1452,7 @@ const ESCAPES: &[(&str, &str)] = &[
     ("type", "present a capability of the wrong kind for the operand"),
     ("flood", "derive until the table is full"),
     ("unmap", "read a page after the capability that mapped it was revoked"),
+    ("state", "write to the state tree it was granted read-only"),
 ];
 
 /// Boot into a process that tries to escape its capabilities, or all of them in
@@ -1625,7 +1712,7 @@ fn verify() -> Result<(), String> {
     // is here rather than only in CI because the failure it catches is one
     // nothing else in this loop can see: a boot that goes green twice with two
     // different answers passes `run`, `user`, `cap` and `mutate` alike.
-    reproduce()?;
+    trace_check()?;
     // Last, and part of the loop rather than beside it. It is the half of
     // E0-P08 that says the suite can fail: everything above proves the
     // properties hold on this tree, and this proves that a tree where one of
@@ -1658,6 +1745,7 @@ fn lint_all() -> Result<(), String> {
     // it. `xtask claims` rewrites the snapshot by design, so this has to come
     // first or it grades its own homework.
     lint_snapshot()?;
+    lint_reproduce()?;
     // The same check the CI policy job runs. It lives here because a local
     // `lint` that is a subset of the gate teaches people the gate is passing
     // when it is not — which is how a formatting failure reached CI on a tree
@@ -2068,6 +2156,432 @@ fn lint_unsafe() -> Result<(), String> {
         findings.join("\n"),
         UNSAFE_ALLOW.join(", ")
     ))
+}
+
+/// The share of the tree RFC 0001 aims to stay under.
+/// Unit: percent of code lines.
+const UNSAFE_TARGET: f64 = 5.0;
+
+/// The share at which RFC 0001 says the partition is not real and the decision
+/// reverses.
+/// Unit: percent of code lines.
+const UNSAFE_REVERSAL: f64 = 10.0;
+
+/// Report lines inside `unsafe` as a share of the code that could contain them.
+///
+/// `A-05` reports this number every release and, until this verb existed, the
+/// method was whoever remembered — a rule kept by attention, which is exactly
+/// what `lint-unsafe` exists to prevent for the same policy. A number nobody
+/// can recompute is not a measurement, it is a memory.
+///
+/// # What counts
+///
+/// A **code line** is a line with something left on it once comments, string
+/// literals and character literals have been taken out. Blank and comment-only
+/// lines are not code: counting them would make this number improve every time
+/// somebody wrote a paragraph, and this tree is written to be argued with.
+///
+/// A code line is **inside `unsafe`** when it is in the body of an `unsafe`
+/// block or an `unsafe fn`, or is an `unsafe impl` or `unsafe trait` header.
+/// The line that opens a block counts, because `unsafe { *p }` is the whole
+/// obligation on one line; so does a signature, because `unsafe fn` is a
+/// promise the caller has to keep and the reader has to read.
+///
+/// # Why a scanner and not a parser
+///
+/// Because the parser would be a syntax crate, in the one tool whose job is to
+/// police what the tree depends on, for a number that changes by tenths. The
+/// scanner understands comments, strings, raw strings, and the difference
+/// between `'a'` and the lifetime in `Producer<'m>` — the four things that make
+/// a naive `grep` wrong. It does not understand macros that expand to `unsafe`,
+/// and there are none.
+///
+/// *Reversal:* the first time this number is disputed at a boundary that
+/// matters — a release argument, or a fallback's cost at `E5-D02` — replace it
+/// with a real parse and record the difference between the two answers.
+///
+/// # Why this reports and does not gate
+///
+/// Because RFC 0001's trigger is *"exceeds 10% of the codebase by phase 02"*,
+/// and the phase is half the condition. At phase 00 this tree is a kernel and
+/// almost nothing else, so the share is high and says little; what the trigger
+/// is about is the trajectory once E1 puts drivers above the frame. A verb that
+/// went red today would be a gate with no path to green, and this file's own
+/// history says what happens to those. `A-05` is where the number is argued,
+/// every release, out loud.
+///
+/// *Reversal:* phase 02, where the same number stops being a trajectory and
+/// becomes the verdict RFC 0001 describes. At that point this becomes a gate
+/// and `lint_all` gains a line.
+///
+/// # Errors
+///
+/// Only if a file outside the frame contains `unsafe`, which `lint-unsafe`
+/// refuses first — two tools disagreeing about where the frame is would make
+/// this number quietly wrong rather than loudly.
+fn unsafe_report(by_file: bool) -> Result<(), String> {
+    // One row per frame crate, in the order the allow-list names them, so the
+    // report and the policy cannot drift into two different lists.
+    let mut rows: Vec<(&str, usize, usize)> =
+        UNSAFE_ALLOW.iter().map(|crate_dir| (*crate_dir, 0, 0)).collect();
+    let (mut frame_unsafe, mut frame_code) = (0usize, 0usize);
+    let (mut tree_unsafe, mut tree_code) = (0usize, 0usize);
+    let mut files: Vec<(String, usize, usize)> = Vec::new();
+
+    for path in rust_sources()? {
+        let rel = relative(&path);
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+        let (inside, code) = unsafe_share(&text);
+
+        if inside != 0 {
+            files.push((rel.clone(), inside, code));
+        }
+        tree_unsafe += inside;
+        tree_code += code;
+
+        if let Some(row) = rows.iter_mut().find(|(dir, _, _)| rel.starts_with(dir)) {
+            row.1 += inside;
+            row.2 += code;
+            frame_unsafe += inside;
+            frame_code += code;
+        } else if inside != 0 {
+            // `lint-unsafe` is the check that this cannot happen. Saying so
+            // here rather than silently adding the lines to the denominator:
+            // two tools disagreeing about where the frame is would make this
+            // number quietly wrong rather than loudly.
+            return Err(format!(
+                "{rel} has {inside} line(s) inside `unsafe` outside the frame.\n\
+                 `cargo xtask lint-unsafe` should have refused this first."
+            ));
+        }
+    }
+
+    println!(
+        "unsafe: {} of the frame, {} of the tree",
+        pct(frame_unsafe, frame_code),
+        pct(tree_unsafe, tree_code)
+    );
+    println!();
+
+    if by_file {
+        // Sorted by how much each file contributes, because A-05 asks why the
+        // number moved and the answer is almost always one file.
+        files.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        for (rel, inside, code) in &files {
+            println!("  {:<40} {:>5} of {:>5}  {:>6}", rel, inside, code, pct(*inside, *code));
+        }
+        println!();
+    }
+
+    for (dir, inside, code) in &rows {
+        println!(
+            "  {:<10} {:>6} of {:>6} code line(s)  {:>6}",
+            dir,
+            inside,
+            code,
+            pct(*inside, *code)
+        );
+    }
+    println!(
+        "  {:<10} {:>6} of {:>6} code line(s)  {:>6}",
+        "frame",
+        frame_unsafe,
+        frame_code,
+        pct(frame_unsafe, frame_code)
+    );
+    println!(
+        "  {:<10} {:>6} of {:>6} code line(s)  {:>6}",
+        "tree",
+        tree_unsafe,
+        tree_code,
+        pct(tree_unsafe, tree_code)
+    );
+    println!();
+
+    let share = share_of(tree_unsafe, tree_code);
+    if share < UNSAFE_TARGET {
+        println!("  Under RFC 0001's {UNSAFE_TARGET}% target. The reversal trigger is");
+        println!("  {UNSAFE_REVERSAL}% by phase 02. A-05 reports this at every release.");
+        return Ok(());
+    }
+
+    println!(
+        "  Over RFC 0001's {UNSAFE_TARGET}% target, and over the {UNSAFE_REVERSAL}% figure in"
+    );
+    println!("  its reversal condition — which is a phase-02 condition and not");
+    println!("  a phase-00 one, so this is a trajectory and not yet a verdict.");
+    println!();
+    println!("  What the number is made of matters more than the number: this");
+    println!("  tree is almost entirely a kernel, and page tables, an APIC and");
+    println!("  port I/O are unsafe nearly line for line. The denominator is what");
+    println!("  E1 changes, by putting drivers above the frame. A-05 reports this");
+    println!("  at every release; the thing to say is which way it moved and why.");
+    Ok(())
+}
+
+/// The share, as a number. Zero code is zero share and never a division.
+fn share_of(part: usize, whole: usize) -> f64 {
+    if whole == 0 { 0.0 } else { part as f64 * 100.0 / whole as f64 }
+}
+
+/// The share, as something to print.
+fn pct(part: usize, whole: usize) -> String {
+    format!("{:.1}%", share_of(part, whole))
+}
+
+/// Code lines inside `unsafe`, and code lines, for one file.
+///
+/// The brace depth is tracked rather than the text indented-matched, because a
+/// closing brace on a line of its own is the ordinary case and a text match
+/// would end the region at the first one whatever it closed.
+fn unsafe_share(text: &str) -> (usize, usize) {
+    let mut code = 0usize;
+    let mut inside = 0usize;
+    let mut depth: i32 = 0;
+    // The depths at which an `unsafe` region opened. A stack, because an
+    // `unsafe fn` may contain an `unsafe` block, and the inner one closing does
+    // not end the outer one.
+    let mut opened: Vec<i32> = Vec::new();
+    // An `unsafe` keyword seen but not yet followed by its brace. Kept across
+    // lines, because a signature may wrap; cleared at a `;`, because
+    // `unsafe fn f();` in a trait has no body to attach to.
+    let mut pending = false;
+    let mut carry = Carry::default();
+
+    for line in text.lines() {
+        let bare = strip_to_code(line, &mut carry);
+        let bare = bare.trim();
+        if bare.is_empty() {
+            continue;
+        }
+        code += 1;
+
+        let mut here = !opened.is_empty();
+        let bytes = bare.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' => {
+                    depth += 1;
+                    if pending {
+                        opened.push(depth);
+                        pending = false;
+                        here = true;
+                    }
+                }
+                b'}' => {
+                    if opened.last() == Some(&depth) {
+                        opened.pop();
+                    }
+                    depth -= 1;
+                }
+                b';' => pending = false,
+                _ => {
+                    if bytes[i..].starts_with(b"unsafe") && is_word(bytes, i, 6) {
+                        // `#[unsafe(no_mangle)]` is the 2024 attribute form and
+                        // opens no block. Reading it as one attached the next
+                        // brace in the file — the body of the function being
+                        // annotated — and counted `kmain` entire. Found by the
+                        // number itself: the kernel came out at 32%, which was
+                        // the first thing about the answer that looked wrong.
+                        if bytes.get(i + 6) == Some(&b'(') {
+                            i += 6;
+                            continue;
+                        }
+                        pending = true;
+                        here = true;
+                        i += 6;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        if here {
+            inside += 1;
+        }
+    }
+
+    (inside, code)
+}
+
+/// Whether the `len` bytes at `at` stand alone as a word.
+///
+/// Without this, `unsafe_code` and `unsafe_op_in_unsafe_fn` in attributes read
+/// as the keyword, and every crate that suppresses a lint about `unsafe` would
+/// be counted as using it.
+fn is_word(bytes: &[u8], at: usize, len: usize) -> bool {
+    let before = at == 0 || !is_word_byte(bytes[at - 1]);
+    let after = bytes.get(at + len).is_none_or(|b| !is_word_byte(*b));
+    before && after
+}
+
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// What a line is in the middle of when the one before it ended.
+///
+/// Both halves are load-bearing and the second was found the hard way: this
+/// file's own error messages are string literals continued across lines with a
+/// trailing backslash, and one of them contains the words `lint-unsafe`. A
+/// scanner that started each line fresh read that as the keyword, in the tool
+/// whose whole job is to say where the keyword is.
+#[derive(Clone, Copy, Default)]
+struct Carry {
+    comment: bool,
+    string: Option<Quote>,
+}
+
+/// The kind of string a line ended inside.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Quote {
+    /// An ordinary literal, where a backslash escapes the next byte.
+    Escaped,
+    /// A raw literal closed by a quote and this many `#`, where it does not.
+    Raw(usize),
+}
+
+/// One line with its comments, strings and character literals removed.
+///
+/// A quoted brace is not a brace and a commented `unsafe` is not one either.
+/// Every case here is one this tree actually contains: `kprintln!` format
+/// strings carry braces, doc comments carry the word, string literals run over
+/// several lines, and `Producer<'m>` is the lifetime that a naive
+/// character-literal rule would read as an unterminated quote and swallow the
+/// rest of the line for.
+fn strip_to_code(line: &str, carry: &mut Carry) -> String {
+    let mut out = String::with_capacity(line.len());
+    let bytes = line.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if carry.comment {
+            if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                carry.comment = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if let Some(quote) = carry.string {
+            match run_to_close(bytes, i, quote) {
+                Some(end) => {
+                    carry.string = None;
+                    i = end;
+                    // A placeholder, so a line that is only a string is still
+                    // code rather than blank.
+                    out.push('"');
+                }
+                None => return out,
+            }
+            continue;
+        }
+
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => break,
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                carry.comment = true;
+                i += 2;
+            }
+            b'r' if !word_byte_before(bytes, i) && raw_string_hashes(bytes, i).is_some() => {
+                let hashes = raw_string_hashes(bytes, i).unwrap_or(0);
+                let opened = i + 1 + hashes + 1;
+                match run_to_close(bytes, opened, Quote::Raw(hashes)) {
+                    Some(end) => i = end,
+                    None => {
+                        carry.string = Some(Quote::Raw(hashes));
+                        out.push('"');
+                        return out;
+                    }
+                }
+                out.push('"');
+            }
+            b'"' => match run_to_close(bytes, i + 1, Quote::Escaped) {
+                Some(end) => {
+                    i = end;
+                    out.push('"');
+                }
+                None => {
+                    carry.string = Some(Quote::Escaped);
+                    out.push('"');
+                    return out;
+                }
+            },
+            b'\'' => match char_literal_end(bytes, i) {
+                Some(end) => {
+                    i = end;
+                    out.push('\'');
+                }
+                // A lifetime. The quote is not an opening quote and the rest of
+                // the line is ordinary code.
+                None => {
+                    i += 1;
+                }
+            },
+            b => {
+                out.push(b as char);
+                i += 1;
+            }
+        }
+    }
+
+    out
+}
+
+/// Where a string open at `from` closes on this line, or `None` if it does not.
+fn run_to_close(bytes: &[u8], from: usize, quote: Quote) -> Option<usize> {
+    let mut i = from;
+    while i < bytes.len() {
+        match quote {
+            Quote::Escaped if bytes[i] == b'\\' => {
+                // A backslash at the end of the line is a continuation, and the
+                // literal carries on. Stepping over two bytes takes the index
+                // past the end, which is the same answer.
+                i += 2;
+                continue;
+            }
+            Quote::Escaped if bytes[i] == b'"' => return Some(i + 1),
+            Quote::Raw(hashes)
+                if bytes[i] == b'"' && (1..=hashes).all(|k| bytes.get(i + k) == Some(&b'#')) =>
+            {
+                return Some(i + 1 + hashes);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn word_byte_before(bytes: &[u8], at: usize) -> bool {
+    at > 0 && is_word_byte(bytes[at - 1])
+}
+
+/// The number of `#` in a raw string starting at `at`, if one starts there.
+fn raw_string_hashes(bytes: &[u8], at: usize) -> Option<usize> {
+    let mut j = at + 1;
+    let mut hashes = 0;
+    while bytes.get(j) == Some(&b'#') {
+        hashes += 1;
+        j += 1;
+    }
+    if bytes.get(j) == Some(&b'"') { Some(hashes) } else { None }
+}
+
+/// Where a character literal starting at `at` ends, or `None` for a lifetime.
+fn char_literal_end(bytes: &[u8], at: usize) -> Option<usize> {
+    if bytes.get(at + 1) == Some(&b'\\') {
+        // An escape: scan for the closing quote, which is at most a few bytes
+        // away — `'\u{1F600}'` is the longest form.
+        let window = bytes.len().min(at + 12);
+        let closing = bytes[at + 2..window].iter().position(|b| *b == b'\'');
+        return closing.map(|offset| at + 2 + offset + 1);
+    }
+    if bytes.get(at + 2) == Some(&b'\'') { Some(at + 3) } else { None }
 }
 
 /// No kernel-global mutable state outside `PerCpu`.
@@ -2486,6 +3000,33 @@ fn toml_field(text: &str, key: &str) -> Option<String> {
     })
 }
 
+/// One scalar from inside one named table.
+///
+/// [`toml_field`] answers with the first matching key *anywhere* in the file,
+/// which is right for `status` and `milestone` and wrong the moment two tables
+/// share a key name. `command` lives in `[reproduce]` and `path` lives in
+/// `[workload]` and also in `[owner]` under the name `document`; asking for a
+/// key without saying which table is asking for whichever table happens to come
+/// first, which is a correct answer by accident.
+fn toml_table_field(text: &str, table: &str, key: &str) -> Option<String> {
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            inside = trimmed.trim_end().trim_end_matches('\r') == format!("[{table}]");
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix(key) else { continue };
+        if rest.trim_start().starts_with('=') {
+            return toml_scalar(trimmed);
+        }
+    }
+    None
+}
+
 /// One line of the release manifest.
 struct Content {
     /// What the release contract calls it.
@@ -2494,6 +3035,35 @@ struct Content {
     source: ContentSource,
     /// The task that produces it, when it does not exist yet.
     owed_to: Option<&'static str>,
+    /// Whether a release may go out without it, and until when.
+    required: Requirement,
+}
+
+/// Whether a release may go out without one of its contents.
+///
+/// The contract lists eight things a release contains, and two of them —
+/// the tuned-Linux baseline and the seed corpus — are owed to `E1` tasks that
+/// argue, correctly, that they cannot be written yet. That left `E0-R01` with
+/// one of two bad options: ship a package the contract says is incomplete, or
+/// quietly shorten the list. `A-07` exists because of the second.
+///
+/// So the requirement is a predicate over the registry rather than a fixed
+/// list. A **pending** claim publishes no number, so nothing it would compare
+/// against is owed yet; the moment that claim leaves `pending` the content
+/// becomes required and the packager refuses, naming the task that owes it.
+/// The scope cut becomes a gate with a known trigger date, and the trigger is a
+/// change to `claims/`, not to this file.
+///
+/// RFC 0021 is the argument, because a future contributor reading
+/// `RELEASING.md` would otherwise reasonably conclude the list is
+/// unconditional.
+enum Requirement {
+    /// Always. Most contents.
+    Always,
+    /// Not while this claim is `pending`, because a claim that publishes no
+    /// number cannot be missing the thing its number would be measured
+    /// against.
+    WhilePending(&'static str),
 }
 
 /// Where a manifest entry's content comes from.
@@ -2519,11 +3089,13 @@ const CONTENTS: &[Content] = &[
         name: "the source, at a tag",
         source: ContentSource::Built("git archive of HEAD"),
         owed_to: None,
+        required: Requirement::Always,
     },
     Content {
         name: "the claims snapshot",
         source: ContentSource::File("claims/snapshot.json"),
         owed_to: None,
+        required: Requirement::Always,
     },
     Content {
         name: "the baseline configuration",
@@ -2534,57 +3106,127 @@ const CONTENTS: &[Content] = &[
              comparison without anybody deciding it should, because prose \
              cannot be re-run",
         ),
+        // Not owed while 0001 is `pending`, because a claim that publishes no
+        // number cannot be missing the baseline its number would be compared
+        // against. `ratio_vs_baseline = { min = 5.0 }` is in that claim's
+        // thresholds, so the day it stops being pending this row goes red and
+        // names E1-D06 — which is the conversation E0-P05 has to have anyway.
+        required: Requirement::WhilePending("ring-submit-latency"),
     },
     Content {
         name: "the seed corpus and scenario set",
         source: ContentSource::Absent,
         owed_to: Some("E1-P01, the deterministic simulator, and E1-P03's sweeps"),
+        // The same argument, against the same claim: the corpus exists so a
+        // third party can re-run the sweeps a number came out of, and there is
+        // no number.
+        required: Requirement::WhilePending("ring-submit-latency"),
     },
     Content {
         name: "a content-addressed system image",
         source: ContentSource::Built("target/<target>/debug/f-kernel.elf32"),
         owed_to: None,
+        required: Requirement::Always,
     },
     Content {
         name: "the dependency manifest and provenance",
         source: ContentSource::File("Cargo.lock"),
         owed_to: None,
+        required: Requirement::Always,
     },
     Content {
         name: "the honest-status page",
         source: ContentSource::File("docs/TESTING-STATUS.md"),
         owed_to: None,
+        required: Requirement::Always,
     },
     Content {
         name: "the decision record",
         source: ContentSource::Tree("docs/rfc", "md"),
         owed_to: None,
+        required: Requirement::Always,
     },
 ];
 
-/// `sha256sum`, when the machine has it.
+/// Whether one content is owed by *this* release, given the registry.
 ///
-/// Not a hard requirement and not vendored. The release *package* is content
-/// addressed and E0-R01 owns producing it; what this command needs a hash for
-/// is to show that the image it would ship is a specific one. A machine without
-/// coreutils gets the manifest with the hash column absent and a line saying
-/// why, which is more useful than either refusing to run or growing a hash
-/// implementation in the build tooling.
-fn sha256(path: &Path) -> Option<String> {
-    let out = Command::new("sha256sum").arg(path).current_dir(root()).output().ok()?;
-    if !out.status.success() {
-        return None;
+/// Reads the claims registry rather than a constant, so what flips a row from
+/// optional to required is a change to `claims/` and never a change here.
+fn required_now(content: &Content) -> Result<bool, String> {
+    match content.required {
+        Requirement::Always => Ok(true),
+        Requirement::WhilePending(claim) => {
+            let file = find_claim(claim)?;
+            let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
+            let status = toml_field(&text, "status").unwrap_or_else(|| "unknown".into());
+            Ok(status != "pending")
+        }
     }
-    String::from_utf8(out.stdout).ok()?.split_whitespace().next().map(str::to_string)
 }
 
-fn release(dry_run: bool) -> Result<(), String> {
-    if !dry_run {
-        return Err("`cargo xtask release` builds the package, and that is E0-R01.\n\n\
-             What exists today is `cargo xtask release --dry-run`, which prints the\n\
-             manifest this would produce and names the task owing each missing\n\
-             piece. RELEASING.md states the contract the package has to satisfy."
-            .into());
+/// Every file one content contributes, as `(name in the archive, bytes)`.
+///
+/// Sorted by name at the end, and that sort is load-bearing rather than tidy:
+/// `read_dir` order is the filesystem's business and differs between two
+/// machines holding the same files. It is the one same-machine-invisible
+/// difference a build-it-twice check cannot see, which is why it is also the
+/// one this file tests directly.
+fn content_files(content: &Content) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let read = |rel: &str| -> Result<Vec<u8>, String> {
+        std::fs::read(root().join(rel)).map_err(|e| format!("reading {rel}: {e}"))
+    };
+
+    let mut files = match &content.source {
+        ContentSource::File(path) => vec![((*path).to_string(), read(path)?)],
+        ContentSource::Tree(dir, extension) => {
+            let mut out = Vec::new();
+            let entries =
+                std::fs::read_dir(root().join(dir)).map_err(|e| format!("reading {dir}/: {e}"))?;
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if !path.extension().is_some_and(|x| x == *extension) {
+                    continue;
+                }
+                let rel = relative(&path);
+                let bytes = std::fs::read(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+                out.push((rel, bytes));
+            }
+            out
+        }
+        ContentSource::Built(_) => Vec::new(),
+        ContentSource::Absent => Vec::new(),
+    };
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(files)
+}
+
+/// Build the release package, or print the manifest it would produce.
+///
+/// # What the package is
+///
+/// One `.tar`, and the contract's eight contents inside it, plus a `MANIFEST`
+/// naming every file and its SHA-256. The archive is built by `pack::Tar`,
+/// which has no clock and no user in it; the hashes are `pack::sha256`, which
+/// has no dependency. Both of those are the same requirement stated twice: a
+/// content address that depends on which machine computed it is not one.
+///
+/// Not compressed, deliberately. A deflate stream carries its encoder's version
+/// and level in the output, so compressing here would put a dependency's
+/// *version* inside the content address. Whoever ships the file may compress
+/// it; that is an envelope, and the address is of the content.
+///
+/// # Errors
+///
+/// A missing content the registry says is required, a tree git cannot
+/// identify, or a name the archive format cannot hold.
+fn release(mode: Option<&str>) -> Result<(), String> {
+    let dry_run = mode == Some("--dry-run");
+    let twice = mode == Some("--twice");
+    if let Some(other) = mode
+        && !dry_run
+        && !twice
+    {
+        return Err(format!("unknown option for release: {other}"));
     }
 
     // Not `unwrap_or("unknown")`, which is what these two were. The version and
@@ -2609,35 +3251,53 @@ fn release(dry_run: bool) -> Result<(), String> {
     let describe = identify("version", &["describe", "--tags", "--always", "--dirty"])?;
     let commit = identify("commit", &["rev-parse", "HEAD"])?;
 
-    println!("release manifest (dry run)\n");
+    if twice {
+        let first = build_package(&describe, &commit)?;
+        let second = build_package(&describe, &commit)?;
+        if first.0 != second.0 {
+            return Err(format!(
+                "two builds of the same tree produced two packages:\n  \
+                 {}\n  {}\n\n\
+                 Something with a clock, a user or a directory order in it has reached\n\
+                 the archive. `pack::Tar` has none of the three, so look at what was\n\
+                 put into it — the kernel image is the likeliest, because a debug build\n\
+                 carries its absolute build path in DWARF and in cargo's -Cmetadata.",
+                first.0, second.0
+            ));
+        }
+        println!("release: the same tree packages identically — {}", first.0);
+        println!(
+            "\n  This is the weaker half of E0-R01's exit and it is worth saying so.\n\
+             \x20 Directory order, uid, path and clock are all constant within one\n\
+             \x20 machine, so two runs here agree for reasons that say little about two\n\
+             \x20 machines agreeing. The release workflow is what asks the real question."
+        );
+        return Ok(());
+    }
+
+    println!("release manifest{}\n", if dry_run { " (dry run)" } else { "" });
     println!("  version   {describe}");
     println!("  commit    {commit}");
     println!("  contract  RELEASING.md\n");
 
     let mut missing = 0usize;
     for content in CONTENTS {
+        let owed = required_now(content)?;
         match &content.source {
             ContentSource::File(path) => {
                 let full = root().join(path);
                 if full.exists() {
-                    let size = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
-                    let hash = sha256(&full).unwrap_or_else(|| "-".into());
+                    let bytes = std::fs::read(&full).map_err(|e| e.to_string())?;
+                    let hash = pack::hex(&pack::sha256(&bytes));
                     println!("  [ok]  {:<36} {path}", content.name);
-                    println!("        {size} bytes  sha256 {}", &hash[..hash.len().min(16)]);
+                    println!("        {} bytes  sha256 {}", bytes.len(), &hash[..16]);
                 } else {
                     missing += 1;
                     println!("  [--]  {:<36} {path} does not exist", content.name);
                 }
             }
-            ContentSource::Tree(dir, extension) => {
-                let count = std::fs::read_dir(root().join(dir))
-                    .map(|entries| {
-                        entries
-                            .filter_map(Result::ok)
-                            .filter(|e| e.path().extension().is_some_and(|x| x == *extension))
-                            .count()
-                    })
-                    .unwrap_or(0);
+            ContentSource::Tree(dir, _) => {
+                let count = content_files(content)?.len();
                 if count == 0 {
                     missing += 1;
                     println!("  [--]  {:<36} {dir}/ is empty", content.name);
@@ -2650,9 +3310,21 @@ fn release(dry_run: bool) -> Result<(), String> {
             }
             ContentSource::Absent => {
                 missing += 1;
-                println!("  [--]  {:<36} nothing produces this yet", content.name);
-                if let Some(owed) = content.owed_to {
-                    println!("        owed to {owed}");
+                let mark = if owed { "!!" } else { "--" };
+                println!("  [{mark}]  {:<36} nothing produces this yet", content.name);
+                if let Some(task) = content.owed_to {
+                    println!("        owed to {task}");
+                }
+                if let Requirement::WhilePending(claim) = content.required {
+                    if owed {
+                        println!(
+                            "        REQUIRED NOW: {claim} is no longer `pending`, so the\n\
+                             \x20       number it publishes has something to be compared against\n\
+                             \x20       and this content is owed. RFC 0021."
+                        );
+                    } else {
+                        println!("        not owed while {claim} is `pending` — RFC 0021");
+                    }
                 }
             }
         }
@@ -2660,25 +3332,119 @@ fn release(dry_run: bool) -> Result<(), String> {
 
     println!("\n  {} of {} contents present", CONTENTS.len() - missing, CONTENTS.len());
 
-    // The gates, listed rather than run. Running `verify` from inside a dry run
-    // would make a manifest print cost a full boot, and the point of this
-    // command is that it is cheap enough to run while thinking.
-    println!(
-        "\nwhat would stop this release (RELEASING.md, and not checked here):\n\
-        \x20 1. `cargo xtask verify` not green\n\
-        \x20 2. a gating claim red, or a claim with no reproduction from a clean checkout\n\
-        \x20 3. a document number `cargo xtask lint` cannot trace to the registry\n\
-        \x20 4. docs/TESTING-STATUS.md not re-read against the tree\n\
-        \x20 5. an RFC reversed this cycle that was edited rather than superseded"
-    );
-
-    if missing > 0 {
+    if dry_run {
+        // The gates, listed rather than run. Running `verify` from inside a dry
+        // run would make a manifest print cost a full boot, and the point of
+        // this command is that it is cheap enough to run while thinking.
         println!(
-            "\nThis is not yet a releasable package, and the missing rows say why.\n\
-             E0-R01 builds it; E0-R04 is release 0.1."
+            "\nwhat would stop this release (RELEASING.md, and not checked here):\n\
+            \x20 1. `cargo xtask verify` not green\n\
+            \x20 2. a gating claim red, or a claim with no reproduction from a clean checkout\n\
+            \x20 3. a document number `cargo xtask lint` cannot trace to the registry\n\
+            \x20 4. docs/TESTING-STATUS.md not re-read against the tree\n\
+            \x20 5. an RFC reversed this cycle that was edited rather than superseded"
         );
+        if missing > 0 {
+            println!(
+                "\n`cargo xtask release` builds the package; the rows above say what would\n\
+                 be in it. `--twice` checks that the same tree packages identically."
+            );
+        }
+        return Ok(());
     }
+
+    let (address, path, count, bytes) = build_package(&describe, &commit)?;
+    println!("\n  {count} file(s), {bytes} bytes");
+    println!("  {}", relative(&path));
+    println!("\nrelease: {address}");
+    println!(
+        "\n  The address is over the content, not the envelope: no clock, no user,\n\
+         \x20 no directory order and no compressor version is in it. Two machines at\n\
+         \x20 this commit must produce this string, and `cargo xtask release --twice`\n\
+         \x20 is the local half of asking."
+    );
     Ok(())
+}
+
+/// Assemble the archive and return `(address, path, files, bytes)`.
+fn build_package(describe: &str, commit: &str) -> Result<(String, PathBuf, usize, usize), String> {
+    // Every file that will be in the package, gathered before anything is
+    // written, so a refusal leaves no half-built archive behind.
+    let mut files: Vec<(String, bool, Vec<u8>)> = Vec::new();
+    let mut manifest = String::new();
+    manifest.push_str("# The release package, as a list of what is in it.\n#\n");
+    manifest.push_str("# Every line is a file and its SHA-256. The package's own address is\n");
+    manifest
+        .push_str("# the SHA-256 of the archive these are in. RELEASING.md is the contract.\n\n");
+    manifest.push_str(&format!("version {describe}\ncommit  {commit}\n\n"));
+
+    for content in CONTENTS {
+        let owed = required_now(content)?;
+        let gathered = content_files(content)?;
+
+        if gathered.is_empty() && !matches!(content.source, ContentSource::Built(_)) {
+            if owed {
+                return Err(format!(
+                    "the release contract requires `{}` and nothing produces it.\n\n\
+                     {}\n\n\
+                     A package missing a content the contract names is not a smaller\n\
+                     release, it is a release nobody can check. RFC 0021.",
+                    content.name,
+                    content.owed_to.unwrap_or("No task owes it, which is worse.")
+                ));
+            }
+            manifest.push_str(&format!("# absent, and not owed yet: {}\n", content.name));
+            continue;
+        }
+
+        for (name, bytes) in gathered {
+            let hash = pack::hex(&pack::sha256(&bytes));
+            manifest.push_str(&format!("{hash}  {name}\n"));
+            files.push((name, false, bytes));
+        }
+    }
+
+    // The source, as git sees it at this commit. Not a walk of the working
+    // tree: `git archive` takes its file list from the tree object and its
+    // mtimes from the commit, so it cannot pick up an untracked file and cannot
+    // vary with when the checkout happened.
+    let source = capture_bytes("git", &["archive", "--format=tar", commit])?;
+    let source_hash = pack::hex(&pack::sha256(&source));
+    manifest.push_str(&format!("{source_hash}  source.tar\n"));
+    files.push(("source.tar".to_string(), false, source));
+
+    // The kernel image, which is built rather than read. Last, so that a build
+    // failure does not happen after an archive has been assembled.
+    build()?;
+    let image = kernel_elf32();
+    let bytes = std::fs::read(&image).map_err(|e| format!("reading {}: {e}", relative(&image)))?;
+    let hash = pack::hex(&pack::sha256(&bytes));
+    let name = "image/f-kernel.elf32".to_string();
+    manifest.push_str(&format!("{hash}  {name}\n"));
+    files.push((name, true, bytes));
+
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut tar = pack::Tar::new();
+    tar.file("MANIFEST", false, manifest.as_bytes())?;
+    let count = files.len();
+    let mut total = manifest.len();
+    for (name, executable, bytes) in files {
+        total += bytes.len();
+        tar.file(&name, executable, &bytes)?;
+    }
+    let archive = tar.finish();
+
+    let address = pack::hex(&pack::sha256(&archive));
+    // `target/package/` and not `target/release/`: that second one is cargo's
+    // release *profile* directory, and putting an artefact of ours in it means
+    // one `cargo build --release` away from a collision nobody expected.
+    let out = target_dir().join("package");
+    std::fs::create_dir_all(&out).map_err(|e| format!("creating {}: {e}", relative(&out)))?;
+    let path = out.join(format!("f-{describe}.tar"));
+    std::fs::write(&path, &archive).map_err(|e| format!("writing {}: {e}", relative(&path)))?;
+
+    Ok((address, path, count + 1, total))
 }
 
 /// The measurement history.
@@ -3241,19 +4007,74 @@ fn boot_nanos(log: &str) -> Option<u64> {
         .and_then(|value| value.parse().ok())
 }
 
+/// How one claim's workload is actually run.
+///
+/// One table, because the alternative is what was here before: a chain of `if
+/// name ==` inside the runner and a separate belief, held nowhere in
+/// particular, about which claims have a workload at all. A registry entry
+/// whose published reproduction command dispatches to nothing is a claim only
+/// its author can re-derive, which is the opposite of what the registry is for.
+///
+/// `lint-reproduce` reads this table and the registry together, so the two
+/// cannot drift.
+enum Route {
+    /// A benchmark binary under `bench/src/bin/`, named here because the name
+    /// is not derivable: `ring-submit-latency` runs `ring_submit`, and a
+    /// derivation that happened to work for one claim was already carrying a
+    /// `strip_prefix` special case for it.
+    Bench(&'static str),
+    /// Ten boots of the kernel. Not a program: the measurement is taken inside
+    /// the kernel because nothing outside it can see where boot begins.
+    Boots,
+    /// The timer, for as many seconds as the claim's `[workload]` asks for.
+    Timer,
+}
+
+const ROUTES: &[(&str, Route)] = &[
+    ("ring-submit-latency", Route::Bench("ring_submit")),
+    ("timer-jitter", Route::Timer),
+    ("boot-to-m0", Route::Boots),
+];
+
+/// The registry file one claim name resolves to.
+///
+/// Exact match first, then a unique suffix, and an ambiguous suffix is an error
+/// naming the candidates. What this replaces read the directory unsorted and
+/// unfiltered and took the first `ends_with` hit — so it could match
+/// `claims/README.md` or `claims/runner-class-A.md`, and among two real
+/// candidates it picked whichever the filesystem happened to hand back first.
+/// Nothing had two candidates yet, which is exactly when a resolution bug is
+/// cheap to fix.
+fn find_claim(name: &str) -> Result<PathBuf, String> {
+    let files = claim_files()?;
+    let stem = |p: &PathBuf| p.file_stem().map(|s| s.to_string_lossy().into_owned());
+
+    if let Some(exact) = files.iter().find(|p| stem(p).as_deref() == Some(name)) {
+        return Ok(exact.clone());
+    }
+
+    let matches: Vec<&PathBuf> = files
+        .iter()
+        .filter(|p| stem(p).is_some_and(|s| s.ends_with(name) && !name.is_empty()))
+        .collect();
+
+    match matches.as_slice() {
+        [] => Err(format!("no claim named {name} in claims/. `cargo xtask claims` lists them.")),
+        [one] => Ok((*one).clone()),
+        many => Err(format!(
+            "{name} names {} claims: {}. Say which.",
+            many.len(),
+            many.iter().filter_map(|p| stem(p)).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
 fn claim_run(name: Option<&str>) -> Result<(), String> {
     let Some(name) = name else {
         return Err("usage: cargo xtask claim <name>   (see `cargo xtask claims`)".into());
     };
 
-    let dir = root().join("claims");
-    let file = std::fs::read_dir(&dir)
-        .map_err(|e| format!("reading claims/: {e}"))?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .find(|p| p.file_stem().is_some_and(|s| s.to_string_lossy().ends_with(name)))
-        .ok_or_else(|| format!("no claim named {name} in claims/"))?;
-
+    let file = find_claim(name)?;
     let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
     let field = |key: &str| toml_field(&text, key);
 
@@ -3267,20 +4088,36 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
     println!("runner    {}", field("runner").unwrap_or_else(|| "unset".into()));
     println!();
 
-    // Not every claim's workload is a benchmark binary. `boot-to-m0` measures
-    // the kernel booting, which is a boot rather than a program — and the
-    // measurement is taken inside the kernel because nothing outside it can see
-    // where boot begins. Dispatching on the name keeps `cargo xtask claim
-    // <name>` as the one reproduction command the registry publishes,
-    // regardless of what the workload turns out to be.
-    if name == "boot-to-m0" {
-        claim_boot_to_m0()?;
-    } else {
-        // The workload binary is named after the claim, minus the registry prefix.
-        let bin = name.replace('-', "_");
-        let bin =
-            bin.strip_prefix("ring_submit_latency").map_or(bin.clone(), |_| "ring_submit".into());
-        sh("cargo", &["run", "--release", "-p", "f-bench", "--bin", &bin])?;
+    // Not every claim's workload is a benchmark binary, which is why there is a
+    // table rather than a naming convention. `boot-to-m0` is ten boots and
+    // `timer-jitter` is the timer; only one of the three is a program under
+    // `bench/src/bin/`. Dispatching through `ROUTES` keeps `cargo xtask claim
+    // <name>` as the one reproduction command the registry publishes, whatever
+    // the workload turns out to be.
+    //
+    // The convention this replaced was `name.replace('-', "_")` with a
+    // `strip_prefix` fixup for the one claim it did not fit, and it silently
+    // did not fit a second: `cargo xtask claim timer-jitter` asked cargo for a
+    // binary called `timer_jitter`, which has never existed.
+    let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let route =
+        ROUTES.iter().find(|(claim, _)| stem.ends_with(claim)).map(|(_, route)| route).ok_or_else(
+            || {
+                format!(
+                    "claim {name} has no entry in ROUTES in xtask/src/main.rs, so its\n\
+                 published reproduction command runs nothing. Add one, or the claim\n\
+                 is a number only its author can re-derive."
+                )
+            },
+        )?;
+
+    match route {
+        Route::Boots => claim_boot_to_m0()?,
+        Route::Bench(bin) => sh("cargo", &["run", "--release", "-p", "f-bench", "--bin", bin])?,
+        Route::Timer => {
+            let seconds = toml_table_field(&text, "workload", "seconds");
+            timer(seconds.as_deref())?;
+        }
     }
 
     // The harness itself refuses in a non-measurement environment and says so
@@ -3997,4 +4834,215 @@ section  = \"06\"
         assert!(lint_callbacks().is_ok(), "an interface has acquired a callback");
         assert!(lint_claim_owners().is_ok(), "a claim has lost its owner");
     }
+}
+
+/// One registry entry, reduced to what a stranger needs to re-run it.
+struct Reproduction {
+    name: String,
+    file: String,
+    command: String,
+    runner: String,
+    status: String,
+}
+
+fn reproductions() -> Result<Vec<Reproduction>, String> {
+    let mut out = Vec::new();
+    for file in claim_files()? {
+        let rel = relative(&file);
+        let text = std::fs::read_to_string(&file).map_err(|e| format!("reading {rel}: {e}"))?;
+        out.push(Reproduction {
+            name: toml_field(&text, "name").unwrap_or_default(),
+            file: rel,
+            command: toml_table_field(&text, "reproduce", "command").unwrap_or_default(),
+            runner: toml_table_field(&text, "hardware", "runner").unwrap_or_default(),
+            status: toml_field(&text, "status").unwrap_or_else(|| "unknown".into()),
+        });
+    }
+    Ok(out)
+}
+
+/// Re-run one published claim from this checkout, or list what there is to run.
+///
+/// # What this is for
+///
+/// A stranger with the repository and nothing else. `RELEASING.md` promises
+/// that every published number can be re-derived by somebody who was not
+/// there, and until this verb existed that promise was three different commands
+/// in three registry files, one of which did not run.
+///
+/// It is a **dispatcher over the registry**, deliberately, and not a
+/// reimplementation of each claim. The claim file says how it is reproduced;
+/// this reads that and does it. Anything else and there are two accounts of how
+/// a number was taken, which is the decay the whole registry exists to prevent.
+///
+/// # Why an honest refusal exits zero
+///
+/// Because on every machine this project can currently reach, refusal is the
+/// path that runs. `F_ENVIRONMENT` is `container` in the development image and
+/// unset everywhere else, and `f_bench::Environment` fails closed on both — so
+/// the workload runs, a distribution is drawn, and recording is refused. That
+/// is correct behaviour and not a failure. Painting it red would make every
+/// local run of this command a red run, which is precisely how a check gets
+/// muted.
+///
+/// The three endings are therefore distinguished in words rather than in the
+/// exit code, and there is no shared "ok": *the number was recorded*, *the
+/// route ran and the number was not recorded*, and an error, which means the
+/// route itself broke.
+///
+/// # Errors
+///
+/// No such claim, an ambiguous name, or a workload that did not complete.
+fn reproduce(name: Option<&str>) -> Result<(), String> {
+    let Some(name) = name else {
+        return reproduce_list();
+    };
+
+    let file = find_claim(name)?;
+    let rel = relative(&file);
+    let text = std::fs::read_to_string(&file).map_err(|e| format!("reading {rel}: {e}"))?;
+
+    let claim = toml_field(&text, "name").unwrap_or_else(|| name.to_string());
+    let status = toml_field(&text, "status").unwrap_or_else(|| "unknown".into());
+    let runner = toml_table_field(&text, "hardware", "runner").unwrap_or_else(|| "unset".into());
+    let command = toml_table_field(&text, "reproduce", "command").unwrap_or_else(|| "unset".into());
+
+    // The tree being reproduced from, named. A number quoted from a tree nobody
+    // can identify is the failure `release --dry-run` was carrying until
+    // E0-P01; here it is a warning rather than fatal, because reproducing on a
+    // branch is a legitimate thing to be doing — what matters is that the
+    // printed record says so.
+    let commit = capture("git", &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    let dirty = capture("git", &["status", "--porcelain"]).is_ok_and(|s| !s.trim().is_empty());
+
+    println!("claim     {claim}");
+    println!("file      {rel}");
+    println!("status    {status}");
+    println!(
+        "commit    {}{}",
+        commit.trim(),
+        if dirty { "  (dirty — not a quotable tree)" } else { "" }
+    );
+    println!("needs     {runner}");
+    println!("command   {command}");
+
+    let environment = f_bench::Environment::detect();
+    println!("machine   {} — {}", environment.name(), environment.why());
+    println!();
+
+    claim_run(Some(name))?;
+
+    println!();
+    if environment.records() {
+        println!("reproduce: route ok — the number was recorded.");
+        return Ok(());
+    }
+
+    println!(
+        "reproduce: route ok, and the number was not recorded.\n\n\
+         This machine is `{}`, and {}.\n\n\
+         What would record it: a machine meeting `claims/{runner}.md` with all four\n\
+         of RFC 0007's reservation components obtained by partition, and\n\
+         `F_ENVIRONMENT={runner}` set on it. That file's own warning applies —\n\
+         the variable is an assertion, not a measurement, so read the checklist\n\
+         in it before setting one.",
+        environment.name(),
+        environment.why()
+    );
+    Ok(())
+}
+
+/// Every claim, its command, the machine it needs, and whether this is one.
+fn reproduce_list() -> Result<(), String> {
+    let environment = f_bench::Environment::detect();
+    println!("this machine is `{}` — {}", environment.name(), environment.why());
+    println!();
+
+    for entry in reproductions()? {
+        let mine = if entry.runner == environment.name() { "yes" } else { "no" };
+        println!(
+            "  {:<22} {:<8} needs {:<16} here? {mine}",
+            entry.name, entry.status, entry.runner
+        );
+        println!("  {:<22} {}", "", entry.command);
+        println!();
+    }
+
+    println!("run one with: cargo xtask reproduce <claim>");
+    Ok(())
+}
+
+/// Every claim's published reproduction command resolves inside this tree.
+///
+/// `RELEASING.md`'s second gate says a claim in the snapshot with no
+/// reproduction command that runs from a clean checkout is a release that does
+/// not go out. That was prose. This is the executable half, and it asserts four
+/// things a stranger's afternoon depends on:
+///
+/// - the command exists at all;
+/// - it is `cargo xtask claim <this claim's own name>`, so no claim can publish
+///   a command that names somebody else's, and none can name a step outside the
+///   tree — the long plan's rule, applied to the one place it is easiest to
+///   break;
+/// - the name resolves through `ROUTES` to something that runs;
+/// - and the runner class it requires has a specification file beside it, so
+///   `[hardware] runner` cannot name a machine nobody has described.
+///
+/// The last of those is what `E0-D10` made checkable. Before
+/// `claims/runner-class-A.md` existed there was nothing for this to point at.
+///
+/// # Errors
+///
+/// Any claim failing any of the four, with the file named.
+fn lint_reproduce() -> Result<(), String> {
+    let mut findings = Vec::new();
+
+    for entry in reproductions()? {
+        if entry.name.is_empty() {
+            findings.push(format!("  {}: no `name`", entry.file));
+            continue;
+        }
+        let expected = format!("cargo xtask claim {}", entry.name);
+        if entry.command.is_empty() {
+            findings.push(format!("  {}: no `[reproduce] command`", entry.file));
+        } else if entry.command != expected {
+            findings.push(format!(
+                "  {}: reproduces with `{}`, and the registry's one command is `{expected}`",
+                entry.file, entry.command
+            ));
+        }
+        if !ROUTES.iter().any(|(claim, _)| *claim == entry.name) {
+            findings.push(format!(
+                "  {}: `{}` has no ROUTES entry, so its command runs nothing",
+                entry.file, entry.name
+            ));
+        }
+        if entry.runner.is_empty() {
+            findings.push(format!("  {}: no `[hardware] runner`", entry.file));
+        } else {
+            let spec = root().join("claims").join(format!("{}.md", entry.runner));
+            if !spec.exists() {
+                findings.push(format!(
+                    "  {}: needs `{}`, and claims/{}.md does not exist",
+                    entry.file, entry.runner, entry.runner
+                ));
+            }
+        }
+    }
+
+    if findings.is_empty() {
+        println!(
+            "lint-reproduce: ok  ({} claim(s) reproduce from this tree)",
+            reproductions()?.len()
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{} claim(s) cannot be reproduced from this tree:\n{}\n\n\
+         RELEASING.md gate 2: a claim in the snapshot whose reproduction does not\n\
+         run from a clean checkout is a number a stranger cannot check, which is\n\
+         the one thing the registry exists to prevent.",
+        findings.len(),
+        findings.join("\n")
+    ))
 }

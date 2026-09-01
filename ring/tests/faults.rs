@@ -9,10 +9,10 @@
 //! # What "one fault class per subsystem that exists" means here
 //!
 //! Two subsystems have a host harness at this milestone, and both are exercised
-//! below: the **ring**, at publish and at drain, and the **channel header**, at
-//! negotiation. The capability table is the third subsystem with fault classes
-//! worth injecting into and it is deliberately absent: it lives in `kernel/`,
-//! which has no host harness at all — `kernel/Cargo.toml` says why — so its
+//! below: the **ring**, at publish and at drain, and the **channel**, at the
+//! moment it binds to a region. The capability table is the third subsystem
+//! with fault classes worth injecting into, and it is deliberately absent:
+//! it lives in `kernel/`, which has no host harness at all — `kernel/Cargo.toml` says why — so its
 //! fault classes belong to the simulator at E1-P02 rather than here. Claiming
 //! them now would mean writing a second capability table to inject into, and a
 //! test of a model of the system is not a test of the system.
@@ -28,15 +28,19 @@
 //! And that the same seed produces the same run. A failing seed is only a bug
 //! report if it reproduces.
 
-use std::cell::UnsafeCell;
-use std::sync::atomic::AtomicU32;
-
-use f_abi::{ABI_VERSION, CHANNEL_MAGIC, ChannelHeader, Sqe};
+use f_abi::layout::Layout;
+use f_abi::{ABI_VERSION, ChannelHeader, Sqe};
 use f_env::sim::{Fault, Faults, SimEnv};
-use f_ring::{Channel, Consumer, Cursor, Producer, RingError};
+use f_ring::{Consumer, Mapping, Producer, RingError};
 
 /// The sites this suite injects at, one per subsystem with a harness.
-const SITES: [&str; 3] = ["ring.publish", "ring.consume", "chan.negotiate"];
+///
+/// `chan.bind` was `chan.negotiate` until E0-B13, and the rename is the change:
+/// the site used to call [`ChannelHeader::negotiate`] on a struct on this
+/// thread's stack, which exercises the arithmetic and nothing else. It now
+/// binds a [`Mapping`] over a real region, so a hostile header is sixty-four
+/// bytes a peer wrote rather than a value this test constructed.
+const SITES: [&str; 3] = ["ring.publish", "ring.consume", "chan.bind"];
 
 /// What happened at one step, in a form two runs can be compared on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -69,61 +73,90 @@ impl From<Result<bool, RingError>> for Outcome {
     }
 }
 
-/// Fixed backing, so the suite needs no allocator and stays close to the shape
-/// the kernel will use.
-struct Backing<const N: usize> {
-    head: Cursor,
-    tail: Cursor,
-    flags: AtomicU32,
-    index: [AtomicU32; N],
-    entries: [UnsafeCell<Sqe>; N],
-}
+/// Entries in the channel this suite drives.
+const ENTRIES: u32 = 8;
 
-impl<const N: usize> Backing<N> {
-    fn new() -> Self {
-        Self {
-            head: Cursor::new(),
-            tail: Cursor::new(),
-            flags: AtomicU32::new(0),
-            index: [const { AtomicU32::new(0) }; N],
-            entries: [const { UnsafeCell::new(Sqe::ZERO) }; N],
-        }
+/// Bytes in the region it is bound in. One frame, the unit the kernel shares.
+const LEN: u32 = 4096;
+
+/// A run of shared bytes at the alignment the layout is stated against.
+///
+/// This replaces the fixture the suite used to carry — a struct with a cursor
+/// field and an entry array, which is a channel the borrow checker had already
+/// proved well-formed. The offsets were Rust's problem there and the wire format
+/// never got consulted, so a header that lied about them had nothing to lie to.
+#[repr(C, align(64))]
+struct Region([u8; LEN as usize]);
+
+impl Region {
+    fn new() -> Box<Self> {
+        Box::new(Self([0; LEN as usize]))
     }
 
-    fn chan(&self) -> Channel<'_> {
-        Channel {
-            head: &self.head,
-            tail: &self.tail,
-            flags: &self.flags,
-            index: &self.index,
-            entries: &self.entries,
-        }
+    fn base(&mut self) -> *mut u8 {
+        self.0.as_mut_ptr()
+    }
+
+    /// Write a header the way a peer would, without going through
+    /// [`Mapping::describe`], which by construction produces only sound ones.
+    fn place(&mut self, header: ChannelHeader) {
+        let base = self.base();
+        // SAFETY: `Region` is 64-byte aligned and 4 KiB long, so a 64-byte
+        // `ChannelHeader` needing 64-byte alignment fits at offset zero, and
+        // the exclusive borrow proves nothing else holds a reference to it.
+        unsafe { base.cast::<ChannelHeader>().write(header) };
     }
 }
 
 /// A header a well-behaved peer would write.
+///
+/// Derived from [`Layout`] rather than spelled out, so a change to the wire
+/// layout moves it instead of leaving a literal every hostile case is measured
+/// against. The old hand-written version had `sqe_offset: 64`, which no build
+/// has ever placed the entry array at — proof that a header nothing binds is a
+/// header nothing checks.
 fn sound_header() -> ChannelHeader {
-    ChannelHeader {
-        magic: CHANNEL_MAGIC,
-        features: 0,
-        features_required: 0,
-        abi_version: ABI_VERSION,
-        abi_version_min: ABI_VERSION,
-        ring_size: 8,
-        sqe_offset: 64,
-        cqe_offset: 64 + 8 * 64,
-        epoch: 0,
-        _reserved: [0; 4],
+    Layout::new(ENTRIES, 0).expect("eight entries is a layout").describe(0, 0, 0)
+}
+
+/// Write a header into a region and try to bind a channel to it.
+///
+/// The whole of the `chan.bind` site. What is being exercised is not
+/// [`ChannelHeader::negotiate`] — that is one of four checks — but the path a
+/// component actually takes: sixty-four bytes in shared memory, then a mapping
+/// that either exists or does not.
+fn bind(region: &mut Region, header: ChannelHeader) -> Outcome {
+    region.place(header);
+    let base = region.base();
+    // SAFETY: 4 KiB, 64-byte aligned, exclusively borrowed. The *contents* are
+    // hostile on most of these calls, which is the subject rather than a safety
+    // obligation: nothing is dereferenced through them unless `adopt` returns.
+    match unsafe { Mapping::adopt(base, LEN, 0, 0) } {
+        Ok(_) => Outcome::Ok,
+        Err(code) => Outcome::Refused(code),
     }
 }
 
 /// One seeded run. Returns the trace, which is the artefact a seed produces.
 fn run(seed: u64, steps: usize) -> Vec<Step> {
     let mut env = SimEnv::new(seed, 10, 250);
-    let backing = Backing::<8>::new();
-    let producer = Producer::new(backing.chan()).expect("a power-of-two ring");
-    let consumer = Consumer::new(backing.chan()).expect("a power-of-two ring");
+
+    // The channel under test, and a second region the header site binds and
+    // rebinds. Two regions rather than one, because a hostile header written
+    // over the live channel would tear down the ring halves this run is still
+    // driving — which is a real behaviour, and a different test from this one.
+    let mut backing = Region::new();
+    let mut headers = Region::new();
+    let base = backing.base();
+    // SAFETY: 4 KiB, 64-byte aligned, zeroed, and borrowed for as long as the
+    // mapping and the halves below live.
+    let mapping =
+        unsafe { Mapping::describe(base, LEN, ENTRIES, 0, 0, 0) }.expect("a sound channel");
+
+    let producer = Producer::new(mapping.channel()).expect("a power-of-two ring");
+    let consumer = Consumer::new(mapping.channel()).expect("a power-of-two ring");
     consumer.disarm_wakeup();
+    let cursors = mapping.channel();
 
     let mut trace = Vec::with_capacity(steps);
     let mut published: u64 = 0;
@@ -163,13 +196,13 @@ fn run(seed: u64, steps: usize) -> Vec<Step> {
             ("ring.publish", Some(Fault::PeerRestart)) => {
                 // The peer restarted mid-channel and its cursor is now
                 // nonsense. The ring must report `Corrupt` and not act on it.
-                backing.head.set(u32::MAX / 2);
+                cursors.head.set(u32::MAX / 2);
                 let outcome = Outcome::from(producer.submit(Sqe::ZERO));
                 trace.push(Step::Injected(site, Fault::PeerRestart, outcome));
                 // Put it back, so one injected fault does not silently make
                 // every later step a repeat of this one.
-                backing.head.set(published as u32);
-                backing.tail.set(drained as u32);
+                cursors.head.set(published as u32);
+                cursors.tail.set(drained as u32);
             }
 
             // --- the ring, at drain ---------------------------------------
@@ -203,16 +236,12 @@ fn run(seed: u64, steps: usize) -> Vec<Step> {
                     published += 1;
                 }
                 trace.push(Step::Injected(site, kind, outcome));
-                backing.head.set(published as u32);
+                cursors.head.set(published as u32);
             }
 
-            // --- the channel header, at negotiation ------------------------
+            // --- the channel header, at binding ---------------------------
             (_, None) => {
-                let header = sound_header();
-                let outcome = match header.negotiate(0, 0) {
-                    Ok(_) => Outcome::Ok,
-                    Err(code) => Outcome::Refused(code),
-                };
+                let outcome = bind(&mut headers, sound_header());
                 trace.push(Step::Clean(site, outcome));
             }
             (_, Some(kind)) => {
@@ -226,11 +255,18 @@ fn run(seed: u64, steps: usize) -> Vec<Step> {
                     // offered — the inconsistency a restart can leave behind.
                     Fault::PeerRestart => header.features_required = 1 << 40,
                 }
-                let outcome = match header.negotiate(0, 0) {
-                    Ok(_) => Outcome::Ok,
-                    Err(code) => Outcome::Refused(code),
-                };
+                let outcome = bind(&mut headers, header);
                 trace.push(Step::Injected(site, kind, outcome));
+
+                // Bound again with a sound header, so the run asserts the
+                // refusal was clean as well as correct. A teardown that left
+                // the region unusable would be a denial of service any peer
+                // could trigger with one bad word.
+                assert_eq!(
+                    bind(&mut headers, sound_header()),
+                    Outcome::Ok,
+                    "the region did not come back after a {kind:?} header"
+                );
             }
         }
     }
@@ -272,7 +308,7 @@ fn a_seeded_run_injects_at_a_named_site_and_the_system_handles_it() {
                 // A malformed header is refused with a structured error, never
                 // accepted and never a panic. RFC 0010: a refusal names its
                 // domain, which is what makes `Refused` actionable.
-                ("chan.negotiate", Outcome::Refused(code)) => {
+                ("chan.bind", Outcome::Refused(code)) => {
                     assert!(*code < 0, "a refusal must be a negative structured error, got {code}");
                 }
                 other => panic!("{kind:?} at {site} produced {other:?}, which nothing handles"),
@@ -303,13 +339,13 @@ fn a_sweep_narrowed_to_one_site_still_finds_what_it_found_there() {
     // answers at that transition must not move. If they did, focusing would be
     // a different experiment rather than a smaller one.
     let mut wide = SimEnv::new(4242, 10, 250);
-    let mut narrow = SimEnv::new(4242, 10, 250).focused_on(&["chan.negotiate"]);
+    let mut narrow = SimEnv::new(4242, 10, 250).focused_on(&["chan.bind"]);
 
     for step in 0..300 {
         let site = SITES[step % SITES.len()];
         let w = wide.should_fail(site);
         let n = narrow.should_fail(site);
-        if site == "chan.negotiate" {
+        if site == "chan.bind" {
             assert_eq!(w, n, "narrowing the sweep changed what it sees at the focused site");
         } else {
             assert!(n.is_none(), "an unfocused site faulted");

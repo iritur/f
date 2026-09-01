@@ -16,6 +16,43 @@ f-abi.workspace = true
 [dev-dependencies]
 f-env.workspace = true
 
+[features]
+# Three deliberate defects, and none of them is ever on by default —
+# `cargo xtask lint-mutations` is what says so, and it reads every manifest in
+# the workspace rather than the kernel's alone, because these are the second,
+# third and fourth defects in the tree and a second list is how one gets
+# forgotten.
+#
+# Each exists so that a litmus test can be shown to fail. A stress test that has
+# only ever passed cannot be told apart from one that cannot fail, and until
+# `E0-P16` produces a model checker that distinction is the whole of what stands
+# in for one.
+#
+# Only one of the three is a CI gate. The two that weaken a publishing store
+# were gates for one run and the suite passed with them on, on the arm runner
+# where the weakening is a real defect — see `ring/tests/litmus.rs`. They stay
+# because they are the fixture a model checker needs, and because running them
+# by hand is still worth doing; they are not asserted to fail, because on this
+# evidence they do not.
+
+# The submission ring's publishing store, `Release` to `Relaxed`, in both the
+# single-entry and the batch path. E0-P16's exit names this exact weakening as
+# what a model checker must catch — and the one CI run that asked the stress
+# suite to catch it instead found that the suite does not.
+mutate-relaxed-submission = []
+
+# The same, on the completion ring, which RFC 0018 built as the mirror and gave
+# the ordering argument to by inheritance. Not caught either.
+mutate-relaxed-completion = []
+
+# The odd one out, and the only one that is caught: it removes the `SeqCst`
+# fence between publishing an entry and reading the consumer's NEED_WAKEUP flag.
+# Store-load is the one reordering total store order performs and the one
+# AArch64 forbids — `stlr`/`ldar` are RCsc — so this is the single defect here
+# whose gate is on the *x86* runner. 58 971 lost wakeups in 500 000 rounds
+# there; a clean pass on the arm runner. RFC 0020.
+mutate-no-doorbell-fence = []
+
 [lints.rust]
 # The frame. Overrides the workspace forbid — see the note in the root Cargo.toml.
 unsafe_code = "allow"

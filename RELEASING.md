@@ -36,6 +36,20 @@ Eight things. The first is obvious and the other seven are the point.
 | **The honest-status page** | What does not work, what was measured on emulated hardware, what is a hook rather than a system. `docs/TESTING-STATUS.md` is that page and it ships with every release. |
 | **The decision record** | Every RFC, **including the superseded ones**, so a reader can see what was reversed and why rather than only what survived. |
 
+`cargo xtask release` builds it: one `.tar`, a `MANIFEST` naming every file and
+its SHA-256, and one content address over the archive. Nothing in the package
+carries a clock, a user name, a directory order or a compressor version, because
+the thing being asserted is that two machines at one commit produce the same
+bytes — `cargo xtask release --twice` is the local half of asking, and the
+release workflow is the real one.
+
+Two of the eight are not owed yet, and that is a decision rather than an
+omission: **a content is required when the claim that needs it publishes a
+number.** The baseline configuration and the seed corpus both serve
+`ring-submit-latency`, which is `pending`; the day it is not, the packager
+refuses and names the task that owes them. RFC 0021, which also states the
+consequence for release 0.1 rather than leaving it to be discovered.
+
 ## What a release is not
 
 - **Not calendar-driven.** A release happens when a gate closes. Dates on a

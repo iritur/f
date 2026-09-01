@@ -24,10 +24,30 @@ weakening the ordering and running it before you commit either.
 
 ## Where the coverage ends
 
-The litmus job is stress, not model checking. RustMC lands at M5 and is what
-actually explores what RC11 permits. Until then the AArch64 unit tests plus the
-litmus job are the coverage, and the gap is real — say so rather than implying
-the ring is verified.
+The litmus job is stress, not model checking. RustMC is what actually explores
+what RC11 permits, and it is `E0-P16`, open — M5 arrived at `E0-B12` and the
+checker did not, so "lands at M5" is a sentence that stopped being true. Until
+it exists the AArch64 unit tests plus the litmus job are the coverage, and the
+gap is real — say so rather than implying the ring is verified.
+
+The suite has three deliberate defects behind cargo features, and **one of them
+is a gate**: `mutate-no-doorbell-fence`, on the **x86-64** runner only. The two
+that weaken a publishing store to `Relaxed` were gates for one run and the suite
+*passed* with them on, on the arm runner. Do not re-add them as gates without new
+evidence — that result is the measured size of the gap, and it is what `E0-P16`
+exists to close.
+
+**Which runner catches a defect is a property of which reordering it depends on,
+not of how serious it is.** Store-load is the one reordering total store order
+performs and the one AArch64 forbids — `stlr`/`ldar` are RCsc, so a
+Store-Release followed by a Load-Acquire is already ordered there. So the
+doorbell fence is caught on x86 and invisible on arm, which is the exact inverse
+of every other ordering in this crate. Check which machine can see a defect
+before deciding which job should assert it.
+
+The rule that follows: if you weaken an ordering and the litmus suite stays
+green, **you have learned nothing**. Green there is not evidence the ordering
+was unnecessary; it is evidence the suite is a sampler.
 
 ## Reviewing concurrent code here
 

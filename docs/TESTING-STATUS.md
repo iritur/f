@@ -46,7 +46,7 @@ must not work:
   isolation rule each. Six must fault and the kernel must survive every one; the
   seventh must not fault, which is what stops the other six passing for the
   wrong reason. In the CI gate.
-- `cargo xtask cap` — eight boots in which a process tries to hold authority it
+- `cargo xtask cap` — nine boots in which a process tries to hold authority it
   was not granted. Seven are refused by the capability table with the exact code
   each escape earns; the eighth is not refused at all — the process revokes a
   capability it is entitled to revoke, reads the page that revoke unmapped, and
@@ -71,10 +71,54 @@ currently comes from.
 
 ## The honest gaps
 
-- **The litmus tests are empirical, not exhaustive.** They will not reliably
-  catch a rare interleaving. RustMC (E0-P16) explores what the memory model
-  *permits*; stress tests explore what one machine happened to do. Do not
-  mistake a green litmus job for a proof of the ordering.
+- **The state tree publishes twelve nodes and nothing that varies with time.**
+  Frame counts, cores, ring tallies, capability slots. Not the timer's counters,
+  not a stamp, not a hash of anything live — the boot log is what
+  `cargo xtask trace` hashes, and a tick count in it would make two runs of one
+  commit disagree for a reason with nothing to do with the kernel. The exclusion
+  is a decision with a reversal condition, not a gap: it lifts when the boot log
+  stops being the reproduction artefact.
+- **The user-interrupt doorbell is written and has never executed.** `Path` and
+  `Bell` build it, negotiation gates it on `feature::USER_INTERRUPT_DOORBELL`,
+  and `Bell::new` refuses to construct it on a machine that does not report the
+  hardware — which is every machine this project can reach. QEMU's TCG backend
+  implements no part of Intel's UINTR and no `-cpu` model advertises the bit, so
+  what is tested is the *refusal* and the selection logic, and the instruction
+  has never run. E1-B09 owns the hardware. Do not read the suppression test
+  passing on three paths as three paths having run: two have.
+- **The doorbell number is a boot count, not a measurement.** The boot line
+  reports doorbells per thousand operations over the two operations the
+  self-test performs. That is enough to show the count exists and is not always
+  one; it is not *doorbells per operation under load*, which needs a workload
+  and a machine, and it is deliberately not registered as a claim. E0-B15's exit
+  says so.
+- **The litmus tests are empirical, not exhaustive, and now there is a number
+  for how much that costs.** They will not reliably catch a rare interleaving.
+  RustMC (E0-P16) explores what the memory model *permits*; stress tests explore
+  what one machine happened to do. Do not mistake a green litmus job for a proof
+  of the ordering.
+
+  This stopped being an argument and became a measurement. `mutate-relaxed-submission`
+  and `mutate-relaxed-completion` weaken the two publishing stores from `Release`
+  to `Relaxed`, and CI required the suite to fail with them on, on the AArch64
+  runner — the machine where that weakening is a real defect. **The suite
+  passed.** Both steps were removed as gates, because a gate asserting a
+  probabilistic test catches a specific reordering goes red on a Tuesday for
+  reasons nobody can reproduce.
+
+  So the standing position is sharper than "the gap is real": the suite has been
+  shown not to catch the exact defect it was written to guard against, on the
+  exact hardware that defect is about. `mutate-no-doorbell-fence` is the one
+  defect that *is* caught and does gate — at eight rounds in a thousand, on the
+  **x86-64** runner.
+
+  That last word is the second surprise. Store-load is the one reordering total
+  store order performs and the one AArch64 forbids: `Release`/`Acquire` become
+  `stlr`/`ldar` there, which are RCsc, so a Store-Release followed by a
+  Load-Acquire is already ordered and removing the fence changes nothing
+  observable. The one defect in this suite that does not need the arm runner is
+  the one that needs the x86 runner instead. Which machine can see a defect is a
+  property of the reordering it depends on, not of how serious it is.
 - **`instructions_per_op` and `joules_per_op` still report `Unavailable`.** The
   harness carries the fields and marks them absent rather than omitting them, so
   a claim cannot quietly narrow to wall-clock only. The reasons now name owners

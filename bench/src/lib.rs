@@ -277,7 +277,7 @@ impl fmt::Display for Histogram {
 /// statement: the claim says which class of machine can defend it, and this
 /// says which class of machine is allowed to speak.
 const MEASUREMENT_ENVIRONMENTS: &[(&str, &str)] =
-    &[("runner-class-A", "pinned bare metal, thermally stable — claims/README.md")];
+    &[("runner-class-A", "pinned bare metal, thermally stable — claims/runner-class-A.md")];
 
 /// Whether this machine may record a timing measurement.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -63,7 +63,7 @@
 //! one.
 
 use f_abi::cap::{Handle, rights};
-use f_abi::door;
+use f_abi::{door, state};
 
 /// Which of the frame's grants is this component's address space.
 ///
@@ -78,12 +78,26 @@ const SPACE: u16 = 0;
 /// pointedly not write.
 const FRAME: u16 = 1;
 
+/// The fourth grant: the frame's published state tree, read-only.
+///
+/// The first capability this component is given so it can *observe* rather than
+/// so it can act. RFC 0013.
+const TREE: u16 = 3;
+
 /// Where a frame may be mapped.
 ///
 /// One unmapped page above the top of the stack, which is the frame's layout
 /// and not this component's choice. It is a constant here for the same reason
 /// the handles are: there is no way to be told it yet.
 const GRANT: u64 = 0x0040_4000;
+
+/// Where the state tree is mapped: two pages above that, and still inside the
+/// two mebibytes one page table covers, so reading the frame's counters costs
+/// no allocation.
+const TREE_AT: u64 = 0x0040_6000;
+
+/// How large the tree's mapping is. One frame, which is what was granted.
+const TREE_BYTES: u32 = 4096;
 
 /// A run that did what it meant to.
 pub const DONE: u64 = 0;
@@ -102,6 +116,20 @@ pub const REFUSED_MAP: u64 = 3;
 
 /// The frame gave up waiting for the ticks it wanted out of ring 3.
 pub const GAVE_UP: u64 = 4;
+
+/// The state tree's mapping was refused.
+pub const REFUSED_TREE: u64 = 5;
+
+/// The bytes at the tree's address are not a tree this component can read.
+pub const TREE_MALFORMED: u64 = 6;
+
+/// Two snapshots of the tree, with nothing done in between, disagreed.
+///
+/// The exit criterion of `E0-B14`, as a status. It is a real possibility rather
+/// than a formality: the tree is memory another privilege level is writing, and
+/// a reader that happened to catch a publisher mid-store would see it here.
+/// Nothing publishes during this window, so seeing it means something else.
+pub const SNAPSHOT_MOVED: u64 = 7;
 
 /// How long to wait between asking the frame whether to stop.
 ///
@@ -189,6 +217,52 @@ fn use_what_was_granted(entry: door::Entry) -> u64 {
     ) < 0
     {
         return REFUSED_MAP;
+    }
+
+    read_the_tree(entry, space)
+}
+
+/// Map the frame's state tree and read it twice.
+///
+/// # What this proves and what it does not
+///
+/// It proves the tree is a real mapping in *this* address space, reachable from
+/// ring 3 through a capability, and that its snapshot is stable across a
+/// re-read with nothing changed in between. That is `E0-B14`'s exit criterion,
+/// and this is the side of the boundary it has to be checked from: the frame
+/// reading its own memory would prove the arithmetic and nothing about the
+/// mapping.
+///
+/// It does not prove the mapping is read-only. That is a negative, and a
+/// component cannot demonstrate a negative about itself — a store here would
+/// end the process rather than return an answer. `cargo xtask cap state` is the
+/// boot that tries it, from the probe, where being killed is the pass.
+///
+/// The granted handle is mapped directly rather than a derived copy of it. The
+/// derive above exists to be exercised and doing it twice would exercise it
+/// twice, while making every live-handle count in `kernel/src/process.rs` one
+/// larger for no reason.
+fn read_the_tree(entry: door::Entry, space: Handle) -> u64 {
+    let tree = entry.granted(TREE);
+
+    if door::call(
+        door::CAP_MAP,
+        door::map_operands(space, tree),
+        door::map_address(TREE_AT, rights::READ),
+    ) < 0
+    {
+        return REFUSED_TREE;
+    }
+
+    let Ok(reader) = state::Reader::at(TREE_AT, TREE_BYTES) else {
+        return TREE_MALFORMED;
+    };
+
+    // Twice, with nothing in between. A hash that is not a function of the
+    // bytes would show up here, and so would a reader that recomputed something
+    // other than what it read the first time.
+    if reader.snapshot() != reader.snapshot() {
+        return SNAPSHOT_MOVED;
     }
 
     DONE

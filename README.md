@@ -32,7 +32,38 @@ cargo xtask claims   # what is measured, and what gates
 ```
 
 Requires the pinned toolchain in `rust-toolchain.toml` and
-`qemu-system-x86_64`.
+`qemu-system-x86_64`. Both are in the development container, which is the
+supported route: `.\docker\dev.ps1 build` then `.\docker\dev.ps1 verify`, on a
+machine whose only prerequisite is Docker.
+
+## Reproducing a published number
+
+Every number this project publishes can be re-derived by somebody who was not
+there. That is not a courtesy; it is what makes it a number rather than an
+anecdote, and `claims/README.md` is where the rule is written down.
+
+```
+cargo xtask reproduce                       # every claim, and what each needs
+cargo xtask reproduce ring-submit-latency   # re-run one, here, now
+```
+
+The command prints the claim, the commit it is being run at, the class of
+machine it requires, and what *this* machine is — then runs the claim's own
+published reproduction and ends by saying plainly whether the number was
+recorded.
+
+**Expect it not to be, and that is the interesting part.** A timing measurement
+is only recorded on a machine that can defend it, described in
+`claims/runner-class-A.md`: bare metal, all four of RFC 0007's reservation
+components obtained by partition, thermally stable. Anywhere else — a laptop, a
+shared cloud runner, the development container — the workload still runs, the
+distribution is still drawn and printed, and recording is refused with the
+reason. A number with no environment attached is how a benchmark becomes
+marketing, so the default is to refuse.
+
+`cargo xtask lint-reproduce` is the standing check that every claim's published
+command still resolves inside this tree, so a reproduction cannot rot into a
+step somebody has to already know.
 
 ## Layout
 

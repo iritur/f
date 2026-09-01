@@ -31,6 +31,12 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use f_abi::{Cqe, Sqe, chan, error, flags, op};
 
+mod doorbell;
+mod mapping;
+
+pub use doorbell::{Bell, Hardware, Path, Ringer, Silent};
+pub use mapping::Mapping;
+
 /// A cursor on its own cache line.
 ///
 /// The padding is load-bearing, not decorative. See the module docs.
@@ -215,7 +221,17 @@ impl<'m> Producer<'m> {
         // Publishes the writes above. Paired with the consumer Acquire load,
         // this is a complete happens-before edge. Never weaken it to Relaxed:
         // it will pass every test on x86 and corrupt data on AArch64.
+        #[cfg(not(feature = "mutate-relaxed-submission"))]
         self.chan.head.value.store(head.wrapping_add(1), Ordering::Release);
+
+        // The deliberate defect the sentence above warns about, made runnable.
+        // E0-P16's exit names exactly this weakening as what a model checker
+        // must catch; the checker does not exist, and until it does the
+        // AArch64 litmus job is what requires the suite to notice. That is
+        // evidence about the stress suite and not about what RC11 permits, and
+        // it should be described as exactly that.
+        #[cfg(feature = "mutate-relaxed-submission")]
+        self.chan.head.value.store(head.wrapping_add(1), Ordering::Relaxed);
 
         Ok(self.doorbell_wanted())
     }
@@ -272,7 +288,46 @@ impl<'m> Producer<'m> {
     /// `Acquire` because a `true` answer is about to be acted on by ringing a
     /// doorbell, and the consumer's decision to sleep must not be observed
     /// before whatever it did to prepare for sleeping.
+    ///
+    /// # The fence, and why this is the only place in the ring with one
+    ///
+    /// The two ends run Dekker's algorithm here and nowhere else. The producer
+    /// **stores** `head` and then **loads** `flags`; the consumer **stores**
+    /// `flags` and then **loads** `head`. Each is a store to one location
+    /// followed by a load of a *different* one, and that is the single
+    /// reordering total store order permits — the store sits in the store
+    /// buffer while the load is satisfied ahead of it. `Release` and `Acquire`
+    /// do not forbid it; they are one-way barriers and this needs a two-way
+    /// one.
+    ///
+    /// Without the fence, both sides can look and see nothing: the producer
+    /// reads `flags` before its own publish is visible and concludes the
+    /// consumer is awake, while the consumer reads `head` before that publish
+    /// and concludes the ring is empty. The consumer sleeps holding work
+    /// nobody will ring for. That is a **lost wakeup**, and it is not a data
+    /// race — every value read is a value that was legitimately written. It is
+    /// a hang.
+    ///
+    /// The consumer's half of the barrier already exists:
+    /// [`Consumer::arm_wakeup`] is a `SeqCst` read-modify-write, which is a
+    /// full barrier. This is the missing half. RFC 0020.
+    ///
+    /// Unlike every other ordering in this crate, the absence of this fence is
+    /// observable on **x86-64** and not on AArch64. Store-load is the one
+    /// reordering total store order performs, and `stlr`/`ldar` are RCsc, so a
+    /// Store-Release followed by a Load-Acquire is already ordered on the arm.
+    /// `a_sleeping_consumer_is_never_left_holding_work` therefore catches this
+    /// on the ordinary runner and passes on the weak-memory one.
+    ///
+    /// That does not make the fence an x86 workaround. What it buys is
+    /// correctness under the *language's* model, where the reordering is
+    /// permitted whatever a particular backend currently emits — and a fence
+    /// kept only because one architecture is observed to need it is a fence the
+    /// next architecture removes.
     fn doorbell_wanted(&self) -> bool {
+        #[cfg(not(feature = "mutate-no-doorbell-fence"))]
+        core::sync::atomic::fence(Ordering::SeqCst);
+
         self.chan.flags.load(Ordering::Acquire) & chan::NEED_WAKEUP != 0
     }
 }
@@ -349,7 +404,15 @@ impl Batch<'_, '_> {
 
         // The one store the whole batch pays for. Everything staged above is
         // ordered before it, on every architecture.
+        #[cfg(not(feature = "mutate-relaxed-submission"))]
         self.producer.chan.head.value.store(self.base.wrapping_add(self.staged), Ordering::Release);
+
+        // The batch path's half of the same defect. Both, because the batch is
+        // where the indirection's two relaxed writes per entry are covered by
+        // one store — the weakening that is hardest to reason about and the one
+        // `a_batch_publishes_its_indirection_with_its_entries` exists for.
+        #[cfg(feature = "mutate-relaxed-submission")]
+        self.producer.chan.head.value.store(self.base.wrapping_add(self.staged), Ordering::Relaxed);
 
         Ok(self.producer.doorbell_wanted())
     }
@@ -534,7 +597,19 @@ impl<'m> Poster<'m> {
 
         // The same Release that the submission ring depends on, for the same
         // reason and with the same prohibition on weakening it.
+        #[cfg(not(feature = "mutate-relaxed-completion"))]
         self.cq.head.value.store(head.wrapping_add(1), Ordering::Release);
+
+        // The deliberate defect, and the reason it exists: RFC 0018 inherited
+        // this ordering argument from the submission ring rather than proving
+        // it, and a litmus test that has only ever passed cannot be told apart
+        // from one that cannot fail. `posted_completion_is_fully_visible` is
+        // the test; this is what makes it fail. It is invisible on x86-64,
+        // where total store order hides it, which is why the CI job that
+        // requires the failure runs only on the AArch64 runner.
+        #[cfg(feature = "mutate-relaxed-completion")]
+        self.cq.head.value.store(head.wrapping_add(1), Ordering::Relaxed);
+
         Ok(())
     }
 }
@@ -885,7 +960,11 @@ mod tests {
 
     // Fixed-size backing so the tests need no allocator, and so this module
     // stays buildable in a `no_std` test configuration later.
-    struct Backing<const N: usize> {
+    //
+    // `pub(crate)` because `doorbell`'s tests drive a real ring through a real
+    // producer and consumer, and a second fixture there would be a second
+    // opinion about what a well-formed channel is.
+    pub(crate) struct Backing<const N: usize> {
         head: Cursor,
         tail: Cursor,
         flags: AtomicU32,
@@ -902,7 +981,7 @@ mod tests {
     const ARENA: usize = CHUNK * 2 + 16;
 
     impl<const N: usize> Backing<N> {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 head: Cursor::new(),
                 tail: Cursor::new(),
@@ -918,7 +997,7 @@ mod tests {
             }
         }
 
-        fn chan(&self) -> Channel<'_> {
+        pub(crate) fn chan(&self) -> Channel<'_> {
             Channel {
                 head: &self.head,
                 tail: &self.tail,
