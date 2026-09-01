@@ -130,14 +130,46 @@ cmd_check() {
         fail=$((fail + 1))
     fi
 
-    local mb=""
-    for d in /boot/grub/i386-pc /boot/grub/x86_64-efi; do
+    # Two places, and the difference is the whole diagnosis. /boot/grub/<target>/
+    # is what the installed GRUB loads at boot; /usr/lib/grub/<target>/ is what
+    # the distribution package ships, which grub-install copies from. Present in
+    # the second and absent from the first means GRUB was never deployed to this
+    # /boot — a fixable state, and a completely different problem from a GRUB
+    # build that has no multiboot support at all.
+    local mb="" pkg=""
+    for d in /boot/grub/i386-pc /boot/grub/x86_64-efi /boot/grub2/i386-pc /boot/grub2/x86_64-efi; do
         [ -f "$d/multiboot.mod" ] && mb="$d/multiboot.mod"
     done
+    for d in /usr/lib/grub/i386-pc /usr/lib/grub/x86_64-efi; do
+        [ -f "$d/multiboot.mod" ] && pkg="$d/multiboot.mod"
+    done
+
     if [ -n "$mb" ]; then
         echo "multiboot mod   $mb"
+    elif [ -n "$pkg" ]; then
+        red "multiboot mod   not deployed to /boot, though the package has it:"
+        red "                  $pkg"
+        red ""
+        red "                GRUB's modules were never installed to this /boot, so the"
+        red "                bootloader running on this machine cannot load a multiboot"
+        red "                kernel. Deploy them:"
+        if [ -d /sys/firmware/efi ]; then
+            red "                  grub-install --target=x86_64-efi --efi-directory=<your ESP>"
+            red "                  grub-mkconfig -o /boot/grub/grub.cfg"
+            red "                (the ESP is usually /boot or /efi — check 'findmnt /boot')"
+        else
+            red "                  grub-install --target=i386-pc /dev/sdX"
+            red "                  grub-mkconfig -o /boot/grub/grub.cfg"
+        fi
+        red ""
+        red "                If this machine actually boots by something else — systemd-boot"
+        red "                is the common one on Arch — then GRUB is installed as a package"
+        red "                and not in use, and that is the thing to settle first."
+        fail=$((fail + 1))
     else
-        red "multiboot mod   not found. GRUB cannot load a multiboot 1 kernel without it."
+        red "multiboot mod   not found in /boot/grub or /usr/lib/grub."
+        red "                This GRUB cannot load a multiboot 1 kernel. On Arch:"
+        red "                  pacman -S grub"
         fail=$((fail + 1))
     fi
 
