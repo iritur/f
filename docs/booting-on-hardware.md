@@ -60,6 +60,29 @@ out first:
 
 which leaves both under `.\target-export\`.
 
+## The short way, on Arch
+
+`tools/f-on-metal.sh` does Procedure A and the checks around it. Run `check`
+first — it changes nothing and reports what would go wrong, which is worth more
+than the install step, because the failure modes here are silent:
+
+```sh
+./tools/f-on-metal.sh check      # what this machine would do. No changes.
+sudo ./tools/f-on-metal.sh build      # toolchain, build, and boot it under QEMU here first
+sudo ./tools/f-on-metal.sh install    # add the entries beside Arch
+sudo ./tools/f-on-metal.sh uninstall  # and take them away again
+```
+
+It refuses an ELF64 image — the easiest mistake, since cargo leaves one beside
+the `.elf32` — backs up `grub.cfg` before regenerating, never touches
+`GRUB_DEFAULT`, and writes `/etc/grub.d/45_f` rather than appending to
+`40_custom`, so a second run cannot leave two entries behind. `build` boots the
+result under QEMU on the target machine before you ask the firmware to, which
+means a failure on metal has one fewer explanation.
+
+The manual procedure is below, and it is what the script does; read it if the
+script refuses something and you want to disagree with it.
+
 ## Procedure A — a GRUB entry on a machine that already runs Linux
 
 This is the recommended route, and on `runner-class-A` it is the only one that
