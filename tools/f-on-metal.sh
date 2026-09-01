@@ -7,13 +7,15 @@
 # serves is E0-P18: nothing in this repository has ever run on hardware, so the
 # first boot on a real machine is an experiment rather than a deployment.
 #
-# It is written for that: `check` changes nothing and reports what would go
-# wrong, `install` adds a menu entry beside Arch without touching the default,
-# and `uninstall` removes it. Arch stays bootable at every point — which matters
+# It is written for that: `check` reports what would go wrong and changes
+# nothing you did not agree to, `deploy-grub` fixes the one blocker it can,
+# `install` adds a menu entry beside Arch without touching the default, and
+# `uninstall` removes it. Arch stays bootable at every point — which matters
 # because the machine this runs on is one somebody has to be able to use
 # tomorrow.
 #
 #   ./tools/f-on-metal.sh check                 what this machine would do
+#   ./tools/f-on-metal.sh deploy-grub           make the multiboot module exist
 #   ./tools/f-on-metal.sh build                 toolchain, then build and smoke-test
 #   ./tools/f-on-metal.sh install [--serial]    add the GRUB entries
 #   ./tools/f-on-metal.sh uninstall             remove them
@@ -209,8 +211,15 @@ cmd_check() {
         red ""
         red "                If this machine actually boots by something else — systemd-boot"
         red "                is the common one on Arch — then GRUB is installed as a package"
-        red "                and not in use, and that is the thing to settle first."
+        red "                and not in use. That is fine and does not have to be undone:"
+        red "                GRUB can sit beside it on the same ESP, and you pick it from"
+        red "                the firmware boot menu when you want F. systemd-boot cannot"
+        red "                load a multiboot 1 kernel at all, so something has to."
+        red ""
+        red "                  $PROG deploy-grub     does the above, after showing you"
+        red "                                        exactly what it will run"
         fail=$((fail + 1))
+        OFFER_DEPLOY=1
     else
         red "multiboot mod   not found in /boot/grub or /usr/lib/grub."
         red "                This GRUB cannot load a multiboot 1 kernel. On Arch:"
@@ -288,6 +297,22 @@ cmd_check() {
     echo
     if [ "$fail" -gt 0 ]; then
         red "$fail blocking problem(s), $warn warning(s). Fix the blocking ones first."
+        # One of them this script can fix, so it offers rather than only naming
+        # the command — but only when it could actually carry it out, and never
+        # without asking. `check` changes nothing you did not say yes to.
+        if [ "${OFFER_DEPLOY:-0}" -eq 1 ] && [ "$(id -u)" -eq 0 ] && [ -t 0 ]; then
+            echo
+            printf 'Deploy GRUB now, so the multiboot module exists? [y/N] '
+            local reply=""
+            read -r reply || true
+            case "$reply" in
+                [yY]|[yY][eE][sS]) echo; cmd_deploy_grub; return $? ;;
+                *) ylw "not run — '$PROG deploy-grub' when you are ready." ;;
+            esac
+        elif [ "${OFFER_DEPLOY:-0}" -eq 1 ]; then
+            echo
+            echo "Run '$PROG deploy-grub' as root to have this script do the GRUB half."
+        fi
         return 1
     fi
     grn "no blocking problems, $warn warning(s)."
@@ -295,6 +320,155 @@ cmd_check() {
 }
 
 # ----------------------------------------------------------------------------
+
+# Deploy GRUB's modules to this machine's /boot, which is what makes the
+# multiboot command available at boot time.
+#
+# This writes a bootloader, so it does two things before it does anything: it
+# works out the target itself rather than accepting a guess, and it refuses when
+# it cannot. `grub-install --target=i386-pc /dev/sdX` on the wrong disk is the
+# single most destructive command this script could run, so there is no default
+# for it — either the disk is derived from what /boot is actually mounted from,
+# or the caller passes --disk and owns the choice.
+#
+# It does not remove or displace systemd-boot. Both live on one ESP quite
+# happily; this adds GRUB beside it and leaves the firmware's boot order alone.
+cmd_deploy_grub() {
+    need_root
+
+    local disk="" esp="" assume=0 keep_order=0
+    BOOT_ORDER_BEFORE=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --disk)            disk="$2"; shift 2 ;;
+            --yes)             assume=1;  shift ;;
+            --keep-boot-order) keep_order=1; shift ;;
+            *) die "unknown option for deploy-grub: $1" ;;
+        esac
+    done
+
+    command -v grub-install >/dev/null 2>&1 || die "grub-install not found — pacman -S grub"
+
+    local cmd
+    if [ -d /sys/firmware/efi ]; then
+        # bootctl knows the ESP on any systemd machine, which Arch is. The
+        # fallback looks for a mounted vfat in the three conventional places.
+        esp=$(bootctl --print-esp-path 2>/dev/null || true)
+        if [ -z "$esp" ]; then
+            local c
+            for c in /efi /boot/efi /boot; do
+                if [ "$(findmnt -no FSTYPE "$c" 2>/dev/null)" = "vfat" ]; then esp="$c"; break; fi
+            done
+        fi
+        [ -n "$esp" ] || die "cannot find the EFI system partition.
+       Look for it with 'findmnt -t vfat', then run grub-install by hand:
+         grub-install --target=x86_64-efi --efi-directory=<esp> --bootloader-id=GRUB"
+        cmd="grub-install --target=x86_64-efi --efi-directory=$esp --bootloader-id=GRUB"
+    else
+        if [ -z "$disk" ]; then
+            # The disk /boot lives on, via its parent block device. Empty when
+            # /boot is on LVM, RAID or the whole device — all cases where a
+            # guess would be wrong, so it stops instead.
+            local src
+            src=$(findmnt -no SOURCE /boot 2>/dev/null || findmnt -no SOURCE / 2>/dev/null || true)
+            [ -n "$src" ] || die "cannot tell what /boot is mounted from"
+            local parent
+            parent=$(lsblk -no PKNAME "$src" 2>/dev/null | head -1 || true)
+            [ -n "$parent" ] || die "cannot derive the disk for '$src' — LVM, RAID or a whole-device mount.
+       Name it yourself, and check it twice:  $PROG deploy-grub --disk /dev/sdX"
+            disk="/dev/$parent"
+        fi
+        [ -b "$disk" ] || die "$disk is not a block device"
+        cmd="grub-install --target=i386-pc $disk"
+    fi
+
+    bold "== deploy GRUB =="
+    echo
+    echo "  $cmd"
+    echo "  grub-mkconfig -o /boot/grub/grub.cfg"
+    echo
+    if [ -d /sys/firmware/efi ]; then
+        echo "  ESP:            $esp"
+        echo
+        echo "  This adds GRUB to the ESP beside whatever is already there and does not"
+        echo "  remove systemd-boot."
+        echo
+        ylw "  It DOES change the firmware boot order. grub-install calls efibootmgr,"
+        ylw "  which adds a GRUB entry and puts it first, so GRUB becomes what boots by"
+        ylw "  default. systemd-boot stays installed and selectable, and GRUB's own menu"
+        ylw "  will list Arch — so the machine still boots — but the front door changes."
+        if [ "$keep_order" -eq 1 ]; then
+            echo
+            grn "  --keep-boot-order given: the current BootOrder will be restored"
+            grn "  afterwards, leaving systemd-boot as the default and GRUB reachable"
+            grn "  from the firmware boot menu."
+        else
+            echo
+            echo "  Pass --keep-boot-order to put the order back afterwards. Either way"
+            echo "  the before and after are printed, with the command to restore it."
+        fi
+        BOOT_ORDER_BEFORE=$(efibootmgr 2>/dev/null | sed -n 's/^BootOrder: //p' || true)
+        [ -n "$BOOT_ORDER_BEFORE" ] && echo "  BootOrder now:  $BOOT_ORDER_BEFORE"
+    else
+        echo "  Disk:           $disk   <- this gets a bootloader written to it"
+        echo "  /boot is on:    $(findmnt -no SOURCE /boot 2>/dev/null || echo '(not a separate mount)')"
+    fi
+    echo
+
+    if [ "$assume" -eq 0 ]; then
+        if [ ! -t 0 ]; then
+            die "not a terminal, so not prompting. Re-run with --yes if this is what you want."
+        fi
+        printf 'Run it? [y/N] '
+        local reply=""
+        read -r reply || true
+        case "$reply" in
+            [yY]|[yY][eE][sS]) ;;
+            *) ylw "not run."; return 0 ;;
+        esac
+    fi
+
+    $cmd
+    grub-mkconfig -o /boot/grub/grub.cfg
+
+    # The firmware boot order, honestly. grub-install has just put GRUB first;
+    # say so with both values rather than leaving somebody to discover it at the
+    # next reboot, and hand over the command that undoes it.
+    if [ -d /sys/firmware/efi ] && [ -n "$BOOT_ORDER_BEFORE" ]; then
+        local after
+        after=$(efibootmgr 2>/dev/null | sed -n 's/^BootOrder: //p' || true)
+        echo
+        echo "BootOrder before  $BOOT_ORDER_BEFORE"
+        echo "BootOrder after   ${after:-unknown}"
+        if [ "$after" != "$BOOT_ORDER_BEFORE" ]; then
+            if [ "$keep_order" -eq 1 ]; then
+                efibootmgr -o "$BOOT_ORDER_BEFORE" >/dev/null
+                grn "restored — systemd-boot is still your default; pick GRUB from the"
+                grn "firmware boot menu when you want F."
+            else
+                ylw "GRUB is now the default boot manager. To put it back:"
+                ylw "  efibootmgr -o $BOOT_ORDER_BEFORE"
+            fi
+        fi
+    fi
+
+    # Verify rather than assume. The whole point was to make one file exist.
+    local now=""
+    local d
+    for d in /boot/grub/i386-pc /boot/grub/x86_64-efi /boot/grub2/i386-pc /boot/grub2/x86_64-efi; do
+        [ -f "$d/multiboot.mod" ] && now="$d/multiboot.mod"
+    done
+    echo
+    if [ -n "$now" ]; then
+        grn "deployed: $now"
+        echo "Re-run '$PROG check' — the multiboot finding should be gone."
+    else
+        red "grub-install reported success and multiboot.mod is still not in /boot."
+        red "Something is deploying somewhere this script does not look. Find it with:"
+        red "  find / -name multiboot.mod 2>/dev/null"
+        return 1
+    fi
+}
 
 cmd_build() {
     if [ "$IN_REPO" -eq 0 ]; then
@@ -380,6 +554,11 @@ cmd_install() {
 cat <<'MENU'
 menuentry "F — milestone M0 (serial ${BAUD} 8N1)" --class f {
     echo "F: loading. All output is on COM1 at ${BAUD} 8N1 — there is no video."
+    insmod part_gpt
+    insmod part_msdos
+    insmod fat
+    insmod ext2
+    insmod multiboot
     search --no-floppy --file --set=root ${gp}/f-kernel.elf32
     multiboot ${gp}/f-kernel.elf32
     module ${gp}/init.bin
@@ -387,6 +566,11 @@ menuentry "F — milestone M0 (serial ${BAUD} 8N1)" --class f {
 
 menuentry "F — milestone M0, 60s timer jitter run" --class f {
     echo "F: loading with timer=60. Output on COM1 at ${BAUD} 8N1."
+    insmod part_gpt
+    insmod part_msdos
+    insmod fat
+    insmod ext2
+    insmod multiboot
     search --no-floppy --file --set=root ${gp}/f-kernel.elf32
     multiboot ${gp}/f-kernel.elf32 timer=60
     module ${gp}/init.bin
@@ -469,10 +653,26 @@ usage() {
     cat <<EOF
 $PROG — install F as a second boot entry on a minimal Arch Linux machine.
 
-  $PROG check                 report what this machine would do. Changes nothing.
-  $PROG build                 install the toolchain, build, and boot it under QEMU first
-  $PROG install [options]     add the GRUB entries beside Arch
-  $PROG uninstall             remove them and regenerate grub.cfg
+  $PROG check
+      Report what this machine would do. Changes nothing unless you answer yes
+      to something it offers.
+  $PROG deploy-grub [opts]
+      Deploy GRUB's modules to /boot, so the multiboot command exists at boot.
+      Shows the exact command first and asks. Does not remove systemd-boot —
+      both live on one ESP, and you pick GRUB from the firmware boot menu.
+  $PROG build
+      Install the toolchain, build, and boot the result under QEMU here first.
+  $PROG install [options]
+      Add the GRUB entries beside Arch, without touching the default.
+  $PROG uninstall
+      Remove them and regenerate grub.cfg.
+
+deploy-grub options:
+  --disk <dev>      BIOS only: the disk to write to. Derived from /boot when it
+                    can be, and required when it cannot — LVM, RAID, whole-device.
+  --yes             do not prompt
+  --keep-boot-order UEFI only: restore the firmware BootOrder afterwards, so
+                    grub-install does not leave GRUB as the default boot manager
 
 install options:
   --kernel <path>   default $KERNEL_DEFAULT
@@ -486,7 +686,8 @@ EOF
 }
 
 case "${1:-}" in
-    check)     shift; cmd_check "$@" ;;
+    check)       shift; cmd_check "$@" ;;
+    deploy-grub) shift; cmd_deploy_grub "$@" ;;
     build)     shift; cmd_build "$@" ;;
     install)   shift; cmd_install "$@" ;;
     uninstall) shift; cmd_uninstall "$@" ;;
