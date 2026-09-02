@@ -380,6 +380,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: cargo xtask run
+      # The same image on a machine with a gibibyte in it. The boot above is
+      # pinned at 128 MiB because its log is the artefact the determinism job
+      # hashes, and 128 MiB cannot hold the largest block the allocator admits
+      # — so the top of the buddy structure is reachable by no other check
+      # here, and would regress with every one of them still green.
+      - run: cargo xtask orders
       # The negative half, and the reason it is in the gate rather than in
       # somebody's habits: seven boots, each one a process deliberately doing
       # something it is not permitted to do. A protection nothing tries to

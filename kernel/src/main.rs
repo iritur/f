@@ -264,13 +264,37 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         kprintln!("  reclaimed     {reclaimed} frame(s) above the old identity map");
     }
 
-    match mem::self_test(&mut frames, &mut seeded) {
-        Ok(()) => kprintln!("  frame alloc   ok"),
+    let allocator = match mem::self_test(&mut frames, &mut seeded) {
+        Ok(report) => report,
         Err(why) => {
             kprintln!("FAIL: frame allocator: {why}");
             arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
         }
-    }
+    };
+    // `orders 0..=N` is the largest order this machine could actually serve,
+    // asked for rather than assumed: order 18 is a gibibyte, and a boot
+    // fixture with 128 MiB has no gibibyte to hand out. A line that claimed 18
+    // on a machine that cannot reach it would be the kind of number this tree
+    // registers claims to prevent. `cargo xtask orders` is the command that
+    // reads this number on a machine that does have one, and requires 18.
+    kprintln!(
+        "  frame alloc   ok — orders 0..={}, {} split, {} merged",
+        allocator.largest,
+        allocator.splits,
+        allocator.merges
+    );
+    // The exit criterion of E1-B12, as a line rather than an assertion. The
+    // first number is what the allocation path cost in cross-core traffic
+    // while it was being driven the way a running system drives it; the last
+    // is what the self-test had to provoke to prove the counter can move at
+    // all.
+    kprintln!(
+        "  frame shards  {} shards, {} cross-core on the hot path, {} refill(s), {} forced",
+        percpu::MAX_CPUS,
+        allocator.hot_remote,
+        allocator.refills,
+        allocator.steals
+    );
 
     // Nothing a frame's last owner wrote may reach its next one. There is no
     // component boundary to cross yet, which is exactly why this is asserted
@@ -406,10 +430,17 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // that a table which *stopped* refusing would have been noticed. That is
     // what the flawed fixtures are for, and a suite whose checks cannot fail is
     // a suite nobody has tested.
-    match cap::properties::self_test() {
+    //
+    // Since E1-B13 it runs twice, at two sizes: once on tables holding only
+    // what the frame gave them and once on tables that have bought a page out
+    // of an `Untyped` — which is why it needs the allocator, and why the flawed
+    // count is ten rather than five.
+    match cap::properties::self_test(&mut frames) {
         Ok(caught) => kprintln!(
-            "  capabilities  {} slots, {} properties hold, {caught} flawed tables caught",
+            "  capabilities  {} free slots, {} more per page bought, {} properties hold, \
+             {caught} flawed tables caught",
             cap::TABLE_SLOTS,
+            cap::SLOTS_PER_PAGE,
             cap::properties::Property::all().len(),
         ),
         Err(why) => {
@@ -499,6 +530,20 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // kernel has not yet agreed with.
     tree.set(state::node::MEMORY_TOTAL, frames.total_count());
     tree.set(state::node::MEMORY_FREE, frames.free_count());
+    // The three allocation paths, published rather than printed once: a reader
+    // that maps this tree later can see whether allocation is still local
+    // without a boot log to compare against. RFC 0027.
+    //
+    // A fourth node beside them, because `remote` on its own is a number a
+    // reader would misread. The self-test provokes the remote path on purpose
+    // every boot — a counter nothing can move is not a counter — so `remote`
+    // is never zero and the part that answers the exit criterion is the
+    // difference. The boot log takes that difference already; the tree
+    // publishes both halves and lets a reader take it.
+    tree.set(state::node::MEMORY_SERVED, frames.served_count());
+    tree.set(state::node::MEMORY_REFILL, frames.refill_count());
+    tree.set(state::node::MEMORY_REMOTE, frames.remote_count());
+    tree.set(state::node::MEMORY_FORCED, allocator.steals);
     match tree.self_test() {
         Ok(hash) => kprintln!(
             "  state tree    {} nodes, snapshot {hash:#018x}, stable across a re-read",

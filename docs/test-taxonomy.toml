@@ -218,7 +218,7 @@ id      = "cap-panic-the-kernel"
 group   = "C"
 class   = "A process makes the kernel panic by trying"
 layers  = ["P"]
-check   = "all nine cap boots must end at 33; cargo xtask mutate is the build that breaks the property and must go red"
+check   = "all eleven cap boots must end at 33; cargo xtask mutate is the build that breaks the property and must go red"
 cadence = ["every-verify", "every-pr"]
 status  = "catches"
 notes   = "The cap half runs in the CI kernel job only; the mutate half is in cargo xtask verify as well. fn verify is lint, test, run, panic, trace, mutate — it invokes neither cap nor user."
@@ -236,12 +236,11 @@ scheduled_by = ["E1-B14", "E1-P02"]
 [[row]]
 id      = "cap-table-outgrown"
 group   = "C"
-class   = "The capability table outgrows its fixed size"
+class   = "The capability table outgrows the slots its holder has paid for"
 layers  = ["P"]
-check   = "cargo xtask cap flood proves the refusal at the bound"
+check   = "cargo xtask cap flood buys a page and stops where the untyped region runs out; cap quota spends the region first and stops at the free size; cap beyond names slots past what was bought"
 cadence = ["every-pr"]
-status  = "partially"
-scheduled_by = ["E1-B13"]
+status  = "catches"
 
 [[row]]
 id      = "cap-inheritance"
@@ -319,10 +318,10 @@ id      = "allocator-split-coalesce"
 group   = "D"
 class   = "Allocator split/coalesce corruption"
 layers  = ["L1", "P"]
-check   = "nothing — mem.rs is order-0 free lists, so there is no split or coalesce to corrupt"
-cadence = ["never"]
-status  = "gap"
-scheduled_by = ["E1-B12"]
+check   = "cargo xtask run — mem::self_test phases two to four: an Env-driven mix of orders 0 to 9, a probe upward from order 9, and a 2 MiB block handed back as 512 shuffled frames that must reappear as a 2 MiB block. cargo xtask orders boots a machine with a gibibyte in it and requires order 18, which the 128 MiB fixture has no memory for"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "Every phase requires the free count to be exactly what it was, which is what catches a leak of a fixed number of frames per iteration. What it does not catch is fragmentation between coalescing passes — nothing schedules the pass, so its cost is argued rather than measured until E1-B07's batch class arrives."
 
 [[row]]
 id      = "percpu-global-state"
@@ -692,10 +691,10 @@ id      = "component-outgrows-table"
 group   = "H"
 class   = "A component that legitimately outgrows the capability table"
 layers  = ["P"]
-check   = "cargo xtask cap flood refuses at the fixed bound, which is the behaviour a real supervisor has to change"
+check   = "cargo xtask cap flood holds 160 capabilities, five times the fixed count, with the growth debited from its untyped region; cap quota holds 32 because it spent that region first"
 cadence = ["every-pr"]
-status  = "partially"
-scheduled_by = ["E1-B13"]
+status  = "catches"
+notes   = "E1-B13 made the table storage the component pays for, so outgrowing the fixed count is an ordinary thing a component does rather than a bound it meets. What is still sampled rather than proved is the size: one page, because the untyped region the frame grants is one frame. A real supervisor holding several is E1-B05."
 
 [[row]]
 id      = "imported-driver-not-over-ring"

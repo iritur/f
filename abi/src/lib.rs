@@ -227,6 +227,19 @@ pub mod flags {
     /// The same rule io_uring reached, under the name `CQE_SKIP_SUCCESS`, and
     /// for the same reason.
     pub const NO_CQE: u8 = 1 << 3;
+
+    /// Every submission flag this build defines.
+    ///
+    /// R04 refuses an unknown flag rather than ignoring it, and that check
+    /// needs something to compare against. It lives *here*, beside the bits it
+    /// names, rather than in each reader of an entry: there are two such
+    /// readers already — `f_ring::execute`'s envelope check and
+    /// [`buf::Request::read`](crate::buf::Request::read) — and a build where
+    /// one of them had been taught about a new flag and the other had not is a
+    /// build in which the same entry is malformed on one path and legal on the
+    /// other. One list makes adding a flag without teaching both a diff the
+    /// compiler shows.
+    pub const KNOWN: u8 = LINK | DRAIN | FIXED_BUF | NO_CQE;
 }
 
 /// Completion flags.

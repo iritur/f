@@ -79,7 +79,7 @@ use f_abi::{door, error};
 
 use crate::arch::x86_64::multiboot::BootInfo;
 use crate::arch::x86_64::{apic, paging, probe, read_tsc, ring3};
-use crate::cap::{TABLE_SLOTS, Table};
+use crate::cap::{Direct, SLOTS_PER_PAGE, TABLE_SLOTS, Table};
 use crate::kprintln;
 use crate::mem::{FRAME_SIZE, Frame, FrameAllocator, Order};
 use crate::percpu::PerCpu;
@@ -431,6 +431,29 @@ pub enum Provoke {
     /// it, reads it — which the preamble already did, so the fault below cannot
     /// be the page merely being absent — and then writes.
     State,
+
+    // The two E1-B13 added, and both are about the same surface: a table that
+    // can be bought is a table with a second way to be asked for something it
+    // cannot give. `Flood` is now the run that *does* buy — it fills the free
+    // part, pays for a page and fills that — so it is these two that say what
+    // happens at the two edges of paying.
+    /// Spend the untyped region on something else, then derive until the table
+    /// is full and there is nothing left to buy a page with.
+    ///
+    /// The refusal has to be `RESOURCE/QUOTA_EXHAUSTED` and the table has to
+    /// stop at the size it was given: a frame that served this out of anything
+    /// it kept in reserve would pass every other check in this file and would
+    /// have made a component's failure depend on what every other component had
+    /// spent. RFC 0008 and RFC 0029.
+    Quota,
+    /// Buy a page, then name slots past the end of what was bought.
+    ///
+    /// Three handles: one past the bought table, one past the ceiling this
+    /// build will ever grow a table to, and the largest index the packing can
+    /// express. Before growth, "past the end" was a constant; it is now a
+    /// number a component chooses by spending, and a bound that moves is a
+    /// bound worth a boot of its own.
+    Beyond,
 }
 
 /// What a provocation is supposed to produce.
@@ -487,12 +510,32 @@ const SWEEP_LIVE: u32 = GRANTS as u32 + 1;
 /// How many the sweep is refused, which is all of the rest.
 const SWEEP_REFUSED: u32 = TABLE_SLOTS as u32 * SWEEP_GENERATIONS + SWEEP_WILD - SWEEP_LIVE;
 
-/// How many capabilities a flooding process mints before the table is full.
+/// How many capabilities a flooding process mints before it runs out of money.
 ///
-/// Every slot that is not already spoken for. That this is a number at all is
-/// the point: the table has a bound, the bound is reached with an error rather
-/// than a fault, and the error names a resource.
-const FLOOD_MINTS: u32 = TABLE_SLOTS as u32 - SWEEP_LIVE;
+/// Every free slot, then every slot on the one page its untyped region can buy.
+/// That this is a number at all is the point, and since E1-B13 it is a number
+/// about a *quota* rather than about an array: the bound is what the process was
+/// handed to spend, it is reached with an error rather than a fault, and the
+/// error names a resource.
+///
+/// The untyped region the frame grants is one frame, so it buys exactly one
+/// page. A process holding more would flood further, which is the whole claim.
+const FLOOD_MINTS: u32 = (TABLE_SLOTS + SLOTS_PER_PAGE) as u32 - SWEEP_LIVE;
+
+/// How many a process mints when it has already spent its untyped region.
+///
+/// Every free slot and not one more. `cap=quota` derives a frame out of its
+/// untyped region first — which consumes the whole of it, the region being one
+/// frame — so when the table fills there is nothing to buy a page with and the
+/// refusal arrives at the size the frame handed over. The difference between
+/// this and [`FLOOD_MINTS`] is the evidence that growth is paid for rather than
+/// free.
+const QUOTA_MINTS: u32 = TABLE_SLOTS as u32 - SWEEP_LIVE;
+
+/// Handles `cap=beyond` presents that name no slot in a table that has bought
+/// one page: one past the bought end, one past the ceiling any table can reach,
+/// and the largest index the packing expresses.
+const BEYOND_WILD: u32 = 3;
 
 /// The page fault, which is what four of the seven provocations produce.
 const PAGE_FAULT: u64 = 14;
@@ -526,6 +569,13 @@ impl Provoke {
             (&b"cap=type"[..], Self::Mistyped),
             (&b"cap=flood"[..], Self::Flood),
             (&b"cap=unmap"[..], Self::Unmap),
+            // Absent until E1-B13, which is why `cargo xtask cap` had a ninth
+            // boot that ran the default provocation and passed. A boot whose
+            // name selects nothing is worse than a missing boot: the suite
+            // reports it green.
+            (&b"cap=state"[..], Self::State),
+            (&b"cap=quota"[..], Self::Quota),
+            (&b"cap=beyond"[..], Self::Beyond),
         ] {
             if boot.has_parameter(parameter) {
                 return provoke;
@@ -557,6 +607,8 @@ impl Provoke {
             Self::Flood => probe::PROVOKE_CAP_FLOOD as u32,
             Self::Unmap => probe::PROVOKE_CAP_UNMAP as u32,
             Self::State => probe::PROVOKE_CAP_STATE as u32,
+            Self::Quota => probe::PROVOKE_CAP_QUOTA as u32,
+            Self::Beyond => probe::PROVOKE_CAP_BEYOND as u32,
         }
     }
 
@@ -580,6 +632,8 @@ impl Provoke {
             Self::Flood => "deriving until the table is full",
             Self::Unmap => "reading a page after the capability that mapped it was revoked",
             Self::State => "writing to the state tree it was granted read-only",
+            Self::Quota => "filling its table with nothing left to buy more with",
+            Self::Beyond => "naming slots past the end of the table it bought",
         }
     }
 
@@ -608,7 +662,9 @@ impl Provoke {
             | Self::Stale
             | Self::Rights
             | Self::Mistyped
-            | Self::Flood => Expect::Exit(0),
+            | Self::Flood
+            | Self::Quota
+            | Self::Beyond => Expect::Exit(0),
         }
     }
 
@@ -693,8 +749,18 @@ impl Provoke {
             // A space where a frame belongs, then a frame where a space does.
             Self::Mistyped => tally(base, 0, 0, 0, 2, 0),
 
-            // Every free slot, then the refusal.
+            // Every free slot, then the page its untyped region pays for, then
+            // the refusal. Exactly one refusal: a table that could keep buying
+            // would never reach it, and one that never bought would reach it
+            // [`SLOTS_PER_PAGE`] mints early.
             Self::Flood => tally(base + FLOOD_MINTS, 0, 0, 0, 0, 1),
+
+            // The retype that empties the untyped region, then every free slot,
+            // then the refusal that says the account is empty.
+            Self::Quota => tally(base + QUOTA_MINTS, 0, 0, 0, 0, 1),
+
+            // The flood, and then three handles past the end of what it bought.
+            Self::Beyond => tally(base + FLOOD_MINTS, BEYOND_WILD, 0, 0, 0, 1),
 
             // The preamble's three, and the revoke that withdraws what the
             // third of them mapped. Nothing is refused: the frame answers every
@@ -1388,7 +1454,7 @@ pub fn syscall(number: u64, first: u64, second: u64) -> Answer {
 fn capability(number: u64, first: u64, second: u64, state: &State) -> u64 {
     let result = match number {
         SYS_CAP_INSPECT => inspect(Handle::from_bits(first as u32)),
-        SYS_CAP_DERIVE => derive(Handle::from_bits(first as u32), second),
+        SYS_CAP_DERIVE => derive(Handle::from_bits(first as u32), second, state),
         SYS_CAP_REVOKE => revoke(Handle::from_bits(first as u32), state),
         SYS_CAP_MAP => map_frame(first, second, state),
         // Unreachable from `syscall`, which matches on exactly these four. Not
@@ -1441,12 +1507,41 @@ fn inspect(handle: Handle) -> Result<u64, i32> {
 }
 
 /// Mint a weaker capability, or a copy, and answer with its handle.
-fn derive(handle: Handle, asked: u64) -> Result<u64, i32> {
+///
+/// # Why this is the call that can spend money
+///
+/// Because it is the only one a component makes that needs a slot it has not
+/// already got. RFC 0008 makes the capability table an object retyped from the
+/// component's own `Untyped`, and E1-B13 puts the purchase exactly where the
+/// need appears: a derive with nowhere to put its child buys a page and tries
+/// again, and a component with nothing left to spend is refused
+/// `RESOURCE/QUOTA_EXHAUSTED` rather than served from anything the frame keeps
+/// back. `cap=flood` is the run that buys and `cap=quota` the run that cannot.
+fn derive(handle: Handle, asked: u64, state: &State) -> Result<u64, i32> {
     let asked = u8::try_from(asked)
         .map_err(|_| error::pack(error::ARGUMENT, error::argument::UNKNOWN_FLAG))?;
+    if state.frames == 0 {
+        // No process is running, so there is no borrow of the allocator to
+        // reach a bought page through. Unreachable from ring 3 — a call arrives
+        // only while a process is entered — and refused rather than asserted,
+        // for the reason `map_frame` gives at the same check.
+        return Err(error::pack(error::RESOURCE, error::resource::QUOTA_EXHAUSTED));
+    }
+    // SAFETY: `state.frames` is the address of the `&mut FrameAllocator` that
+    // `run` holds, dormant for the whole life of the process — the same
+    // argument `map_frame` makes and for the same duration. Shared, never
+    // mutable: growing a table allocates nothing, it only translates a frame
+    // the process has already paid for.
+    let frames = unsafe { &*(state.frames as *const FrameAllocator) };
+    // SAFETY: every `Untyped` in this table names a frame `prepare` allocated
+    // out of this allocator for this process and gave to nobody else, and the
+    // watermark means no frame inside one is ever handed out twice — so the
+    // frame a growth charges for is owned by this table alone. `frames` is
+    // rebound onto the direct map of the address space in `CR3`.
+    let mut ground = unsafe { Direct::new(frames) };
     // SAFETY: as `inspect`, and no other reference to the table is live: this
     // is the only one taken in this call.
-    let minted = unsafe { table_mut() }.derive(handle, asked)?;
+    let minted = unsafe { table_mut() }.derive(handle, asked, &mut ground)?;
     Ok(u64::from(minted.bits()))
 }
 
@@ -1468,13 +1563,23 @@ fn derive(handle: Handle, asked: u64) -> Result<u64, i32> {
 /// waited: not that one core made it hard, but that one core made it
 /// unfalsifiable — a kernel that skipped the interrupt would have passed every
 /// test it could have been given.
+/// # Why it is three steps here and one call before E1-B13
+///
+/// Because a table is as many slots as its holder has paid for, so the list of
+/// mappings a revocation withdraws is no longer bounded by anything that fits
+/// in a return value. The table condemns, this function drains the addresses
+/// one at a time and unmaps each, and the table sweeps last — which is also the
+/// order that fails safely: authority is withdrawn only after every translation
+/// behind it is gone, and a drain that could not finish leaves a table that
+/// still names what it still maps.
 fn revoke(handle: Handle, state: &State) -> Result<u64, i32> {
     // SAFETY: as `derive`.
-    let withdrawn = unsafe { table_mut() }.revoke(handle)?;
-    for page in withdrawn.pages() {
-        withdraw(state, *page)?;
+    let table = unsafe { table_mut() };
+    let mut condemned = table.condemn(handle)?;
+    while let Some(page) = table.next_mapping(&mut condemned) {
+        withdraw(state, page)?;
     }
-    Ok(u64::from(withdrawn.cleared))
+    Ok(u64::from(table.sweep(&condemned)))
 }
 
 /// Take one mapping out of the running process's address space and tell every

@@ -134,6 +134,7 @@ fn main() -> ExitCode {
     let result = match cmd {
         "build" => build(),
         "run" => run(),
+        "orders" => orders(),
         "fault" => fault(args.get(1).map(String::as_str)),
         "user" => user(args.get(1).map(String::as_str)),
         "cap" => cap(args.get(1).map(String::as_str)),
@@ -214,6 +215,9 @@ cargo xtask <command>
 
   build              Build the kernel for {KERNEL_TARGET}
   run                Boot the kernel in QEMU and report its exit status
+  orders             Boot on a machine with a gibibyte in it and require the
+                     allocator to serve order 18 — the largest order it admits,
+                     and one the 128 MiB fixture has no memory for
   fault [kind]       Boot it into a deliberate fault and check the report:
                      pf, ud, df, nx, wx or stack
   user [kind]        Boot into a process that violates one isolation property
@@ -771,6 +775,25 @@ impl fmt::Display for Ending {
 /// everything around it.
 const BOOT_TIMEOUT: u64 = 180;
 
+/// The machine every boot in this file is run on, unless it says otherwise.
+///
+/// Pinned rather than defaulted, for the reason `machine_with` states at the
+/// `-m` argument: the kernel prints the loader's memory map, so the machine's
+/// size is part of the boot log, and the boot log is the artefact
+/// `cargo xtask trace` hashes.
+const BOOT_MEMORY: &str = "128M";
+
+/// A machine with a gibibyte in it, for the one check that needs one.
+///
+/// Four rather than one, because the kernel's largest order is a gibibyte and
+/// a machine of exactly that size has none to spare: the loader's holes, the
+/// kernel image and the first megabyte all come out of the one region, so the
+/// gibibyte-aligned gibibyte never exists. Four leaves three whole ones.
+///
+/// Nothing hashes this boot's log — see `orders` — so the size may move when
+/// the reason to move it appears.
+const LARGE_MEMORY: &str = "4G";
+
 fn boot(append: Option<&str>) -> Result<Option<i32>, String> {
     match machine(append, &[], Capture::Off)?.0 {
         Ending::TimedOut(seconds) => Err(format!(
@@ -789,7 +812,7 @@ fn boot(append: Option<&str>) -> Result<Option<i32>, String> {
 /// [`boot`] deliberately turns into an error because for every other caller a
 /// hang is a failure and not a result.
 fn boot_ending(append: Option<&str>, seconds: u64) -> Result<(Ending, String), String> {
-    machine_with(append, &[], Capture::Printed, seconds)
+    machine_with(append, &[], Capture::Printed, seconds, BOOT_MEMORY)
 }
 
 /// [`boot`], with the serial log.
@@ -810,12 +833,12 @@ fn machine(
     features: &[&str],
     capture: Capture,
 ) -> Result<(Ending, String), String> {
-    machine_with(append, features, capture, BOOT_TIMEOUT)
+    machine_with(append, features, capture, BOOT_TIMEOUT, BOOT_MEMORY)
 }
 
 /// [`machine`], capturing the log and printing none of it.
 fn machine_quiet(append: Option<&str>) -> Result<(Ending, String), String> {
-    machine_with(append, &[], Capture::Quiet, BOOT_TIMEOUT)
+    machine_with(append, &[], Capture::Quiet, BOOT_TIMEOUT, BOOT_MEMORY)
 }
 
 /// [`machine`], with a budget of its own.
@@ -828,6 +851,7 @@ fn machine_with(
     features: &[&str],
     capture: Capture,
     timeout: u64,
+    memory: &str,
 ) -> Result<(Ending, String), String> {
     build_with(features)?;
     let kernel = kernel_elf32();
@@ -854,11 +878,14 @@ fn machine_with(
         qemu.args(["-append", append]);
     }
 
-    // Pinned, not defaulted. The kernel prints the loader's memory map, so the
-    // machine's size is part of its output — and an emulator default that moves
-    // between versions would move the boot log with it, quietly breaking the one
-    // M0 contract that matters: the same commit produces the same run, byte for
-    // byte.
+    // Named by the caller, not defaulted. The kernel prints the loader's memory
+    // map, so the machine's size is part of its output — and an emulator
+    // default that moves between versions would move the boot log with it,
+    // quietly breaking the one M0 contract that matters: the same commit
+    // produces the same run, byte for byte. Every caller but one passes
+    // `BOOT_MEMORY`, and the one that does not is `orders`, whose log nothing
+    // hashes and which exists because the fixture is too small to hold the
+    // largest thing the allocator can hand out.
     //
     // The processor model is deliberately *not* pinned, and that is worth a
     // sentence because the timer would like it to be. QEMU's TCG backend refuses
@@ -879,7 +906,7 @@ fn machine_with(
         "-smp",
         "2",
         "-m",
-        "128M",
+        memory,
         "-serial",
         "stdio",
         "-display",
@@ -970,6 +997,85 @@ fn run() -> Result<(), String> {
         Some(other) => Err(format!("qemu exited {other}; expected 33 or 35")),
         None => Err("qemu terminated by signal".into()),
     }
+}
+
+/// The largest block the allocator can hand out, on a machine that has one.
+///
+/// # Why this is a second boot rather than a bigger `run`
+///
+/// The fixture is 128 MiB and stays 128 MiB: the kernel prints the loader's
+/// memory map, `cargo xtask trace` hashes the boot log, and a machine size
+/// that moved would move that hash for a reason that is not the kernel. But
+/// the largest block a 128 MiB machine can give away is order 13 — order 14 is
+/// 64 MiB and the one usable region ends before a 64 MiB-aligned one fits —
+/// while the largest order the allocator's own type admits, and the one
+/// E1-B12's exit criterion names, is 18: a gibibyte.
+///
+/// So the fixture cannot reach the top of the structure it is testing, and the
+/// paths only a large machine takes — `Order::up`'s bound, the top of the
+/// coalescing sweep, `refill`'s branch above the default grain — could
+/// regress with every other check in this file still green. A number
+/// reproduced by hand in a report and by nothing in the tree is the shape
+/// `claims/README.md` calls an anecdote.
+///
+/// This boots the same image on a machine that has the memory, and reads back
+/// the number the kernel reports. Nothing hashes *this* log, which is exactly
+/// why it is a separate command: the boot that has to be reproducible is
+/// small, and the boot that has to be large is not asked to be reproducible.
+///
+/// It asserts the top where `mem::self_test` reports it. The kernel reports
+/// because it does not know what machine it is on; this asserts because it
+/// chose the machine.
+fn orders() -> Result<(), String> {
+    /// `kernel::mem::Order::MAX`. Written down here rather than read out of
+    /// the log, because a check that took the kernel's own answer for what the
+    /// kernel should answer would check nothing.
+    const LARGEST: u8 = 18;
+    /// The prefix `mem::self_test`'s line puts that number after.
+    const MARK: &str = "orders 0..=";
+
+    let (ending, log) = machine_with(None, &[], Capture::Printed, BOOT_TIMEOUT, LARGE_MEMORY)?;
+    match ending {
+        Ending::TimedOut(seconds) => {
+            return Err(format!(
+                "the boot was still running after {seconds}s and was killed\n\n\
+                 The log up to that point is above."
+            ));
+        }
+        Ending::Exited(33) => {}
+        Ending::Exited(other) => {
+            return Err(format!("qemu exited {other}; expected 33 — see the log above"));
+        }
+        Ending::Signalled => return Err("qemu terminated by signal".into()),
+    }
+
+    let after = log.split(MARK).nth(1).ok_or_else(|| {
+        format!(
+            "no line in the boot log said `{MARK}N`.\n\n\
+             That line is how `kernel::mem::self_test` reports the largest order it\n\
+             could serve. If it has been renamed, this check has been reading nothing\n\
+             — re-point it rather than delete it."
+        )
+    })?;
+    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    let reported: u8 = digits
+        .parse()
+        .map_err(|_| format!("`{MARK}{digits}` is not a number this check can read"))?;
+
+    if reported != LARGEST {
+        return Err(format!(
+            "the allocator served order {reported} on a {LARGE_MEMORY} machine; \
+             expected {LARGEST}\n\n\
+             Order {LARGEST} is `Order::MAX` and this machine has the memory for one, so\n\
+             a smaller answer is the allocator refusing an order it admits: the split\n\
+             path above the default grain, `Order::up`'s bound, or the top of the\n\
+             coalescing sweep. `cargo xtask run` cannot see any of it — 128 MiB stops\n\
+             at order 13."
+        ));
+    }
+
+    println!("\norders: order {LARGEST} served on a {LARGE_MEMORY} machine, and given back");
+    Ok(())
 }
 
 /// Boot into a deliberate fault and check that the kernel reports it.
@@ -1093,7 +1199,7 @@ fn trace_hash(log: &str) -> u64 {
 
 /// One trace, printed as the single line a comparison needs.
 fn trace(features: &[&str]) -> Result<u64, String> {
-    let (ending, log) = machine_with(None, features, Capture::Quiet, BOOT_TIMEOUT)?;
+    let (ending, log) = machine_with(None, features, Capture::Quiet, BOOT_TIMEOUT, BOOT_MEMORY)?;
     match ending {
         Ending::Exited(33) => Ok(trace_hash(&log)),
         other => {
@@ -1439,8 +1545,17 @@ fn user(kind: Option<&str>) -> Result<(), String> {
 /// bound; and `unmap` is the one the exit criterion did not name because at M4
 /// it could not be run.
 ///
+/// `quota` and `beyond` are E1-B13's, and both are about a bound that moved.
+/// The table is bought a page at a time out of the component's own `Untyped`
+/// since RFC 0008, so *the table is full* is no longer a constant: `flood` now
+/// buys the one page its untyped region can pay for and stops a page later than
+/// it used to, `quota` spends that region first and stops where `flood` used
+/// to, and `beyond` names slots past the end of what it bought. The difference
+/// between `flood`'s count and `quota`'s is the evidence that growth is paid
+/// for rather than served out of anything the frame keeps back.
+///
 /// `unmap` is the odd one and worth reading the kernel's side of. The other
-/// seven are refused by the capability table and the process carries on. This
+/// nine are refused by the capability table and the process carries on. This
 /// one is not refused at all: the process revokes a capability it is entitled
 /// to revoke, and then reads a page that revoke withdrew — so what stops it is
 /// a page fault rather than an error code. "Cannot use a revoked handle" and
@@ -1459,9 +1574,11 @@ const ESCAPES: &[(&str, &str)] = &[
     ("stale", "use a capability after the tree it hangs from was revoked"),
     ("rights", "ask for rights its capability does not carry"),
     ("type", "present a capability of the wrong kind for the operand"),
-    ("flood", "derive until the table is full"),
+    ("flood", "derive until it has bought every slot its untyped region can pay for"),
     ("unmap", "read a page after the capability that mapped it was revoked"),
     ("state", "write to the state tree it was granted read-only"),
+    ("quota", "fill its table with the untyped region already spent"),
+    ("beyond", "name slots past the end of the table it bought"),
 ];
 
 /// Boot into a process that tries to escape its capabilities, or all of them in
@@ -1710,6 +1827,9 @@ fn verify() -> Result<(), String> {
     lint_all()?;
     test()?;
     run()?;
+    // The half of the allocator the fixture is too small to reach. A second
+    // boot rather than a bigger one, and `orders` says why.
+    orders()?;
     // Before `mutate`, and for the same reason `mutate` is in the loop at all.
     // Everything above this line establishes that the tree is green; these two
     // establish that a tree which was not would be *noticed*. This one covers
@@ -4185,6 +4305,7 @@ const ROUTES: &[(&str, Route)] = &[
     ("ring-submit-latency", Route::Bench("ring_submit")),
     ("timer-jitter", Route::Timer),
     ("boot-to-m0", Route::Boots),
+    ("buffer-registration-cost", Route::Bench("buffer_register")),
 ];
 
 /// The registry file one claim name resolves to.

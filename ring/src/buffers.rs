@@ -13,22 +13,38 @@
 //! answers it. While it is [`InFlight`] there is no method that yields its
 //! bytes, so there is nothing to write through.
 //!
-//! Four misuses are compile errors, one per fixture below. Writing an in-flight
+//! Five misuses are compile errors, one per fixture below. Writing an in-flight
 //! buffer has no method to call. Naming memory the set was not bound over has
 //! no type to pass, because an [`Idle`] cannot be built and the only ones that
 //! exist are pieces of the set's own region. Carving a set twice is a second
 //! mutable borrow of a set the first carve borrowed for the life of its
 //! buffers, so one name is minted once. Submitting a buffer twice is a use
-//! after move. `docs/rfc/0024-a-buffer-is-owned-by-one-side.md` names these,
-//! and also the misuses that stay runtime refusals and which [`f_abi::error`]
-//! domain each earns — because a type can only bind the code that uses it, and
-//! the service at the far end of a ring is bound by nothing but its own checks.
+//! after move. And naming a set with an id written down on the spot has no
+//! value to pass, because [`Fixed`] has no constructor except
+//! [`Fixed::from_completion`] — the weakest of the five, and the paragraph
+//! after next says how weak. `docs/rfc/0024-a-buffer-is-owned-by-one-side.md`
+//! names these, and also the misuses that stay runtime refusals and which
+//! [`f_abi::error`] domain each earns — because a type can only bind the code
+//! that uses it, and the service at the far end of a ring is bound by nothing
+//! but its own checks.
 //!
-//! What the types here do **not** establish is that the service ever issued the
-//! [`SetId`] the set was bound with: at E1 nothing issues one, so
-//! [`BufferSet::bind`] takes it on trust and the service's registration table
-//! is what refuses an id it never gave out. `E1-B10` is where ids start coming
-//! from a registration, and it is the task that closes that gap.
+//! The fifth is where RFC 0024 recorded an honest gap, and `E1-B10` narrowed
+//! it rather than closing it. Until a registration issued set identifiers,
+//! [`BufferSet::bind`] took one on trust and a client could bind a set with an
+//! id it had invented out of the air. Now a [`Fixed`] comes only from
+//! [`Fixed::from_completion`], and a completion carrying an id comes only from
+//! [`registry::Table::issued`](crate::registry::Table::issued), which refuses
+//! an id its own table does not hold.
+//!
+//! **What that is worth, exactly.** It removes the one-expression forgery and
+//! it does not remove forgery. A client can stand up a
+//! [`Table`](crate::registry::Table) of its own, register into it, and read its
+//! own answer back — three lines rather than one, and still a naming no service
+//! issued. That is a program lying to itself, not a forged authority: the id
+//! names a slot in the client's own table and nothing in the service's, so the
+//! service refuses it exactly as RFC 0024 said it would. The compile error
+//! below is a fence against the accident; the service's check is the boundary,
+//! and it is still the boundary.
 //!
 //! # Two paths, one set of rules
 //!
@@ -68,9 +84,9 @@
 //! # The legal path
 //!
 //! ```
-//! use f_abi::buf::SetId;
 //! use f_abi::{Negotiated, Sqe, ABI_VERSION};
 //! use f_ring::buffers::{BufferSet, Fixed, Submitter};
+//! use f_ring::registry::{Domains, Refusal, Table};
 //! use f_ring::RingError;
 //!
 //! // Stands in for a `Producer` or a `Batch`, both of which implement
@@ -80,9 +96,22 @@
 //!     fn submit(&mut self, _: Sqe) -> Result<bool, RingError> { Ok(false) }
 //! }
 //!
+//! // Stands in for the frame's IOMMU, which is `E1-B01`'s.
+//! struct Frame;
+//! impl Domains for Frame {
+//!     fn map(&mut self, _cap: u32, _len: u32) -> Result<u64, Refusal> { Ok(0x1000) }
+//!     fn unmap(&mut self, _cap: u32, _address: u64, _len: u32) {}
+//! }
+//!
+//! // The service's side: a table, a registration, and the completion it
+//! // answers with. A `Fixed` comes from that completion and from nowhere else.
+//! let mut table = Table::<2>::new();
+//! let set = table.register(0, 128, 2, &mut Frame).unwrap();
+//! let naming = Fixed::from_completion(&table.issued(1, set, 0)).unwrap();
+//!
 //! let agreed = Negotiated { version: ABI_VERSION, features: 0 };
 //! let mut region = [0u8; 128];
-//! let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed, &mut region).unwrap();
+//! let mut set = BufferSet::bind(naming, agreed, &mut region).unwrap();
 //! let [mut a, _b] = set.carve::<2>().unwrap();
 //!
 //! a.bytes_mut()[0] = 0x5A;                 // idle: ours to write
@@ -97,14 +126,19 @@
 //! assert_eq!(a.bytes()[0], 0x5A);
 //! ```
 //!
-//! # The four fixtures
+//! # The five fixtures
 //!
 //! Writing an in-flight buffer. There is no `bytes_mut` on [`InFlight`], or
 //! `bytes`, or anything else that reaches the memory:
 //!
 //! ```compile_fail,E0599
-//! # use f_abi::buf::SetId;
 //! # use f_abi::{Negotiated, Sqe, ABI_VERSION};
+//! # use f_ring::registry::{Domains, Refusal, Table};
+//! # struct Frame;
+//! # impl Domains for Frame {
+//! #     fn map(&mut self, _cap: u32, _len: u32) -> Result<u64, Refusal> { Ok(0x1000) }
+//! #     fn unmap(&mut self, _cap: u32, _address: u64, _len: u32) {}
+//! # }
 //! # use f_ring::buffers::{BufferSet, Fixed, Submitter};
 //! # use f_ring::RingError;
 //! # struct Wire;
@@ -112,8 +146,11 @@
 //! #     fn submit(&mut self, _: Sqe) -> Result<bool, RingError> { Ok(false) }
 //! # }
 //! # let agreed = Negotiated { version: ABI_VERSION, features: 0 };
+//! # let mut table = Table::<2>::new();
+//! # let set = table.register(0, 128, 2, &mut Frame).unwrap();
+//! # let naming = Fixed::from_completion(&table.issued(1, set, 0)).unwrap();
 //! # let mut region = [0u8; 128];
-//! # let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed, &mut region).unwrap();
+//! # let mut set = BufferSet::bind(naming, agreed, &mut region).unwrap();
 //! let [a, _b] = set.carve::<2>().unwrap();
 //! let (mut lent, _) = a.submit(&mut Wire, Sqe::ZERO).unwrap();
 //! lent.bytes_mut()[0] = 1;                 // the device holds this buffer
@@ -124,12 +161,20 @@
 //! not part of the region the set covers — has no way into a submission:
 //!
 //! ```compile_fail,E0451
-//! # use f_abi::buf::SetId;
 //! # use f_abi::{Negotiated, ABI_VERSION};
+//! # use f_ring::registry::{Domains, Refusal, Table};
+//! # struct Frame;
+//! # impl Domains for Frame {
+//! #     fn map(&mut self, _cap: u32, _len: u32) -> Result<u64, Refusal> { Ok(0x1000) }
+//! #     fn unmap(&mut self, _cap: u32, _address: u64, _len: u32) {}
+//! # }
 //! # use f_ring::buffers::{BufferSet, Fixed, Idle};
 //! # let agreed = Negotiated { version: ABI_VERSION, features: 0 };
+//! # let mut table = Table::<2>::new();
+//! # let set = table.register(0, 128, 2, &mut Frame).unwrap();
+//! # let naming = Fixed::from_completion(&table.issued(1, set, 0)).unwrap();
 //! # let mut region = [0u8; 128];
-//! # let set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed, &mut region).unwrap();
+//! # let set = BufferSet::bind(naming, agreed, &mut region).unwrap();
 //! let mut somewhere = [0u8; 64];
 //! let forged = Idle { naming: set.naming(), bytes: &mut somewhere[..], index: 0 };
 //! ```
@@ -139,12 +184,20 @@
 //! as long as its buffers live, which is as long as the set:
 //!
 //! ```compile_fail,E0499
-//! # use f_abi::buf::SetId;
 //! # use f_abi::{Negotiated, ABI_VERSION};
+//! # use f_ring::registry::{Domains, Refusal, Table};
+//! # struct Frame;
+//! # impl Domains for Frame {
+//! #     fn map(&mut self, _cap: u32, _len: u32) -> Result<u64, Refusal> { Ok(0x1000) }
+//! #     fn unmap(&mut self, _cap: u32, _address: u64, _len: u32) {}
+//! # }
 //! # use f_ring::buffers::{BufferSet, Fixed};
 //! # let agreed = Negotiated { version: ABI_VERSION, features: 0 };
+//! # let mut table = Table::<2>::new();
+//! # let set = table.register(0, 128, 2, &mut Frame).unwrap();
+//! # let naming = Fixed::from_completion(&table.issued(1, set, 0)).unwrap();
 //! # let mut region = [0u8; 128];
-//! # let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed, &mut region).unwrap();
+//! # let mut set = BufferSet::bind(naming, agreed, &mut region).unwrap();
 //! let [a, _b] = set.carve::<2>().unwrap();
 //! let [c, _d] = set.carve::<2>().unwrap();   // `a` and `c` would both be buffer 0
 //! ```
@@ -152,8 +205,13 @@
 //! Submitting the same buffer twice. The first submission moved it:
 //!
 //! ```compile_fail,E0382
-//! # use f_abi::buf::SetId;
 //! # use f_abi::{Negotiated, Sqe, ABI_VERSION};
+//! # use f_ring::registry::{Domains, Refusal, Table};
+//! # struct Frame;
+//! # impl Domains for Frame {
+//! #     fn map(&mut self, _cap: u32, _len: u32) -> Result<u64, Refusal> { Ok(0x1000) }
+//! #     fn unmap(&mut self, _cap: u32, _address: u64, _len: u32) {}
+//! # }
 //! # use f_ring::buffers::{BufferSet, Fixed, Submitter};
 //! # use f_ring::RingError;
 //! # struct Wire;
@@ -161,11 +219,28 @@
 //! #     fn submit(&mut self, _: Sqe) -> Result<bool, RingError> { Ok(false) }
 //! # }
 //! # let agreed = Negotiated { version: ABI_VERSION, features: 0 };
+//! # let mut table = Table::<2>::new();
+//! # let set = table.register(0, 128, 2, &mut Frame).unwrap();
+//! # let naming = Fixed::from_completion(&table.issued(1, set, 0)).unwrap();
 //! # let mut region = [0u8; 128];
-//! # let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed, &mut region).unwrap();
+//! # let mut set = BufferSet::bind(naming, agreed, &mut region).unwrap();
 //! let [a, _b] = set.carve::<2>().unwrap();
 //! let (first, _) = a.submit(&mut Wire, Sqe::ZERO).unwrap();
 //! let (second, _) = a.submit(&mut Wire, Sqe::ZERO).unwrap();
+//! ```
+//!
+//! Naming a set the service never registered. A [`SetId`] is a number and this
+//! module cannot stop one being written down; what it can do is refuse to build
+//! the naming out of anything but a completion some table answered with. This
+//! fixture is narrower than the other four and the difference is worth stating:
+//! it excludes the tuple constructor, not a hand-written registration. The
+//! caveat above the legal path says what remains, and it remains on purpose —
+//! the boundary is the service's check and this is a fence in front of it:
+//!
+//! ```compile_fail,E0423
+//! # use f_abi::buf::SetId;
+//! # use f_ring::buffers::Fixed;
+//! let invented = Fixed(SetId::new(0, 1));
 //! ```
 
 use f_abi::buf::{Name, SetId};
@@ -193,8 +268,40 @@ pub trait Naming {
 
 /// The registered path: the set was registered with the service, and an entry
 /// names a buffer by set id and index. No address crosses the boundary.
+///
+/// The field is private and there is one constructor, which takes a completion.
+/// That is the whole of what `E1-B10` added to this type: an id a client made
+/// up would be refused by the service, which is a round trip and a puzzled
+/// reader, and writing one down should not be the shortest path to a naming.
+/// It is a fence and not a boundary — the module documentation says exactly how
+/// far it reaches, which is as far as making the mistake take three lines
+/// instead of one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Fixed(pub SetId);
+pub struct Fixed(SetId);
+
+impl Fixed {
+    /// The naming a registration's completion authorises.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`SetId::from_completion`] refuses with: the completion's own
+    /// refusal when the registration was refused, and
+    /// `AUTHORITY`/`NO_SUCH_CAP` for a success carrying no id — an
+    /// unregistration's completion, most likely, which succeeds and issues
+    /// nothing.
+    pub const fn from_completion(cqe: &Cqe) -> Result<Self, (u8, u16)> {
+        match SetId::from_completion(cqe) {
+            Ok(set) => Ok(Self(set)),
+            Err(refused) => Err(refused),
+        }
+    }
+
+    /// The set this names, for the unregistration that eventually retires it.
+    #[must_use]
+    pub const fn set(self) -> SetId {
+        self.0
+    }
+}
 
 impl Naming for Fixed {
     const REQUIRES: u64 = 0;
@@ -303,9 +410,12 @@ pub enum Misuse {
 /// buffers with one name, and on the registered path that is the double
 /// submission the service would have to catch on the wire.
 ///
-/// What the set does *not* establish is that the [`SetId`] it was bound with
-/// names a registration the service ever made. Nothing issues one until
-/// `E1-B10`; see [`BufferSet::bind`].
+/// The [`SetId`] a [`Fixed`] carries came out of a registration's completion,
+/// because [`Fixed::from_completion`] is the only way to hold one. Which
+/// registration is not something this type can know, and the module
+/// documentation says so where a reader will reach it before relying on it:
+/// what refuses an id no *service* issued is the service, exactly as RFC 0024
+/// said it would be.
 #[derive(Debug)]
 pub struct BufferSet<'m, N: Naming> {
     naming: N,
@@ -317,11 +427,16 @@ impl<'m, N: Naming> BufferSet<'m, N> {
     ///
     /// The region is the whole of what this set can ever name. On the
     /// registered path it is the memory whose registration answered with the
-    /// [`SetId`] in `naming` — which this call takes on trust, because at E1
-    /// nothing issues one: the registration entry and the table that would
-    /// refuse an invented id are `E1-B10`'s, and until they exist an id a
-    /// client made up reaches the service and is refused there
-    /// (`AUTHORITY`/`NO_SUCH_CAP`) rather than here.
+    /// [`SetId`] in `naming`, and that id is no longer taken on trust: a
+    /// [`Fixed`] cannot be built except out of a service's own completion.
+    ///
+    /// What is still not checked is that the region handed in here is the
+    /// region that was registered. A client that registers one buffer and binds
+    /// the set over another names memory the service will hand the device while
+    /// writing memory of its own — one component lying to itself with two of
+    /// its own capabilities, which no second component's refusal could catch.
+    /// The frame's IOMMU domain is what makes the device's half of that fault
+    /// rather than land, and that is `E1-B01`'s.
     ///
     /// # Errors
     ///
@@ -616,12 +731,55 @@ impl PeerGone {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::{
+        Domains, PageWalk, Refusal, Registered, SharedVirtual, Table, Transport, path,
+    };
     use crate::tests::Backing;
     use crate::{Collector, Consumer, Poster, completion, refusal};
     use f_abi::{ABI_VERSION, flags};
 
     fn agreed(features: u64) -> Negotiated {
         Negotiated { version: ABI_VERSION, features }
+    }
+
+    /// A naming for a set a service really registered.
+    ///
+    /// A real [`Table`], a real registration, and the completion that table
+    /// answered with — because that is the only way to hold a [`Fixed`] and a
+    /// helper that had a shortcut would be testing a shortcut. The table is
+    /// dropped and the naming outlives it, which is honest: a `Fixed` is four
+    /// bytes and the authority behind it lives at the far end of a ring, not
+    /// here.
+    fn fixed() -> Fixed {
+        let mut table = Table::<8>::new();
+        let set = table.register(0, 256, 4, &mut Pinned(0x1000)).expect("a region that divides");
+        Fixed::from_completion(&table.issued(0, set, 0)).expect("a table's own answer")
+    }
+
+    /// A frame that hands out one address: the region's own, so that a `Reach`
+    /// is comparable across the two paths.
+    struct Pinned(u64);
+
+    impl Domains for Pinned {
+        fn map(&mut self, _cap: u32, _len: u32) -> Result<u64, Refusal> {
+            Ok(self.0)
+        }
+
+        fn unmap(&mut self, _cap: u32, _address: u64, _len: u32) {}
+    }
+
+    /// An IOMMU that reaches one region and nothing outside it.
+    struct Reaches {
+        base: u64,
+        len: u32,
+    }
+
+    impl PageWalk for Reaches {
+        fn reaches(&self, address: u64, len: u32) -> bool {
+            let end = self.base + u64::from(self.len);
+            address >= self.base
+                && address.checked_add(u64::from(len)).is_some_and(|last| last <= end)
+        }
     }
 
     fn entry(token: u64, len: u32) -> Sqe {
@@ -632,17 +790,34 @@ mod tests {
     }
 
     /// One body, both paths. `E1-B10`'s exit is that *both paths pass the same
-    /// ownership tests*, and the only way to be sure of that is for there to
-    /// be one test that takes the naming as a parameter.
+    /// ownership tests*, and the only way to be sure of that is for there to be
+    /// one test that takes the naming as a parameter — and, since `E1-B10`, the
+    /// service's transport too, because half of RFC 0024's rules are the
+    /// service's and a suite that only drove the client would have asserted the
+    /// easy half twice.
     ///
     /// Drives a real ring: the entry goes through a [`Producer`], is popped by
-    /// a [`Consumer`] that reads its name the way a service would, and the
-    /// completion comes back through a [`Poster`] and a [`Collector`].
-    fn ownership_holds_on<'m, N: Naming>(
+    /// a [`Consumer`] that reads its name the way a service would, resolved
+    /// through a [`Transport`] the way a service would, and the completion comes
+    /// back through a [`Poster`] and a [`Collector`].
+    ///
+    /// `at` is where buffer zero should turn out to live, which both paths must
+    /// agree on: the registered path reaches it through a translation and the
+    /// virtual path through a page walk, and the memory is the same memory.
+    ///
+    /// `outside` is a name this transport must refuse — an index past the set on
+    /// one path and an address past the region on the other. Two spellings of
+    /// one property, which is why it is an argument rather than two tests.
+    ///
+    /// Answers which path it ran, so that the caller can count them.
+    fn ownership_holds_on<'m, N: Naming, T: Transport>(
         set: &'m mut BufferSet<'m, N>,
         features: u64,
+        service: &mut T,
+        at: u64,
+        outside: Name,
         expect: impl Fn(&Name),
-    ) {
+    ) -> &'static str {
         let backing = Backing::<8>::new();
         let mut producer = Producer::new(backing.chan()).expect("a power-of-two ring");
         let consumer = Consumer::new(backing.chan()).expect("a power-of-two ring");
@@ -671,6 +846,22 @@ mod tests {
         let name = Name::read(&on_wire, features).expect("a name this channel can read");
         expect(&name);
 
+        // The service resolves what the client named, and reaches the buffer the
+        // client actually handed over. On the registered path that is a table
+        // lookup and on the virtual one a page walk, and the answer is the same
+        // memory either way — which is the whole of what `E1-B10` compares.
+        let reach = service.resolve(name, on_wire.len).expect("a name the service can reach");
+        assert_eq!(reach.len, 128);
+        assert_eq!(reach.address, at, "the device is pointed at the buffer the client lent");
+
+        // A name outside what the client holds is refused, with one code on both
+        // paths. RFC 0024 puts the index past the set and the length past the
+        // buffer in the same refusal, and an address the device cannot walk to
+        // is the virtual path's spelling of the same sentence.
+        let bad = error::pack(error::ARGUMENT, error::argument::BAD_ADDRESS);
+        let (refused, _) = service.resolve(outside, 8).map(|_| ()).expect_err("outside the set");
+        assert_eq!(refused, bad);
+
         // `b` is untouched by any of this: still idle, still writable.
         b.bytes_mut()[0] = 0xFF;
 
@@ -680,6 +871,11 @@ mod tests {
         let mut more = completion(11, 64, 0);
         more.flags = cflags::MORE;
         let a = a.complete(&more).expect_err("more to come");
+
+        // The service is finished with it, and says so before it answers: a
+        // completion posted while the buffer is still marked out is a service
+        // that would refuse the client's next submission of it.
+        service.release(name).expect("the service had it out");
 
         // The real one, through the completion ring.
         poster.post(completion(11, 128, 5)).expect("room to answer");
@@ -691,34 +887,97 @@ mod tests {
         assert_eq!(a.bytes()[0], 0xA5);
         a.bytes_mut()[0] = 0;
 
-        // And the buffer can go round again, which is what "returns" means.
+        // And the buffer can go round again, which is what "returns" means —
+        // on the service's side as well, because the name it refused a moment
+        // ago as occupied resolves once more.
         let (a, _) = a.submit(&mut producer, entry(13, 8)).expect("room on the ring");
-        let _ = consumer.pop().expect("healthy").expect("the second entry");
+        let second = consumer.pop().expect("healthy").expect("the second entry");
+        let name = Name::read(&second, features).expect("the same name again");
+        assert!(service.resolve(name, second.len).is_ok(), "released, so lendable again");
+        service.release(name).expect("and out again");
         let a = a.complete(&completion(13, 8, 0)).expect("returned again");
         drop(a);
         drop(b);
+
+        T::PATH
+    }
+
+    /// The registered path, end to end: a real registration issues the id the
+    /// set is bound with, and the service resolves against the table that
+    /// issued it.
+    fn registered_path_holds() -> &'static str {
+        let mut region = [0u8; 256];
+        let base = region.as_ptr() as usize as u64;
+
+        let mut table = Table::<8>::new();
+        let mut frame = Pinned(base);
+        let id = table.register(0, 256, 2, &mut frame).expect("a region that divides in two");
+
+        let agreed = agreed(0);
+        let naming =
+            Fixed::from_completion(&table.issued(1, id, 0)).expect("a registration answered");
+        let mut set =
+            BufferSet::bind(naming, agreed, &mut region).expect("registration needs no feature");
+        let mut service = Registered::bind(agreed, &mut table).expect("nor does the transport");
+
+        ownership_holds_on(
+            &mut set,
+            0,
+            &mut service,
+            base,
+            // One past the set: two buffers, so index two names nothing.
+            Name::Registered { set: id, index: 2 },
+            |name| assert_eq!(*name, Name::Registered { set: id, index: 0 }),
+        )
+    }
+
+    /// The shared-virtual-memory path, end to end: nothing is registered, the
+    /// entry carries the buffer's own address, and the IOMMU is asked whether
+    /// the device reaches it.
+    fn virtual_path_holds() -> &'static str {
+        let mut region = [0u8; 256];
+        let base = region.as_ptr() as usize as u64;
+
+        let svm = feature::SHARED_VIRTUAL_MEMORY;
+        let agreed = agreed(svm);
+        let walk = Reaches { base, len: 256 };
+        let mut set =
+            BufferSet::bind(Virtual, agreed, &mut region).expect("the feature was negotiated");
+        let mut service =
+            SharedVirtual::bind(agreed, &walk).expect("and the transport needs exactly it");
+
+        ownership_holds_on(
+            &mut set,
+            svm,
+            &mut service,
+            base,
+            // One past the region, which is the address the walk stops at.
+            Name::Virtual { address: base + 256 },
+            |name| assert!(matches!(name, Name::Virtual { address } if *address == base)),
+        )
     }
 
     #[test]
     fn both_paths_pass_the_same_ownership_test() {
-        let id = SetId::new(4, 2);
-        let mut registered = [0u8; 256];
-        let mut fixed = BufferSet::bind(Fixed(id), agreed(0), &mut registered)
-            .expect("registration needs no feature");
-        ownership_holds_on(&mut fixed, 0, |name| {
-            assert_eq!(*name, Name::Registered { set: id, index: 0 });
-        });
+        let exercised = [registered_path_holds(), virtual_path_holds()];
 
-        let svm = feature::SHARED_VIRTUAL_MEMORY;
-        let mut shared = [0u8; 256];
-        let mut virt =
-            BufferSet::bind(Virtual, agreed(svm), &mut shared).expect("the feature was negotiated");
-        ownership_holds_on(&mut virt, svm, |name| {
-            // The address is the buffer's own. Its value is the allocator's
-            // business and is not asserted; that it is non-zero and that the
-            // reading is the virtual one is.
-            assert!(matches!(name, Name::Virtual { address } if *address != 0));
-        });
+        // The count, asserted, so that a path which quietly stopped being run
+        // is a failure rather than a silence. A third path is one constant in
+        // `registry::path`, one `impl Transport`, and one more line here — and
+        // if the line is forgotten, this is where it is noticed.
+        assert_eq!(
+            exercised.len(),
+            path::ALL.len(),
+            "this build offers {} path(s) and the suite ran {}",
+            path::ALL.len(),
+            exercised.len()
+        );
+        for declared in path::ALL {
+            assert!(
+                exercised.contains(declared),
+                "path `{declared}` is declared and never exercised"
+            );
+        }
     }
 
     #[test]
@@ -732,16 +991,17 @@ mod tests {
 
         // Registration needs nothing, so it binds on either kind of channel.
         let mut second = [0u8; 64];
-        assert!(BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut second).is_ok());
+        assert!(BufferSet::bind(fixed(), agreed(0), &mut second).is_ok());
         let mut third = [0u8; 64];
         let both = agreed(feature::SHARED_VIRTUAL_MEMORY);
-        assert!(BufferSet::bind(Fixed(SetId::new(0, 1)), both, &mut third).is_ok());
+        assert!(BufferSet::bind(fixed(), both, &mut third).is_ok());
     }
 
     #[test]
     fn the_fixed_naming_sets_the_flag_and_the_virtual_naming_clears_it() {
         let mut region = [0u8; 64];
-        let mut set = BufferSet::bind(Fixed(SetId::new(1, 1)), agreed(0), &mut region).unwrap();
+        let naming = fixed();
+        let mut set = BufferSet::bind(naming, agreed(0), &mut region).unwrap();
         let [a] = set.carve::<1>().unwrap();
         let mut wire = Recorder(None);
         let mut e = entry(1, 64);
@@ -749,7 +1009,7 @@ mod tests {
         let (a, _) = a.submit(&mut wire, e).unwrap();
         let sent = wire.0.expect("one entry recorded");
         assert_eq!(sent.flags, flags::LINK | flags::FIXED_BUF, "the caller's flags survive");
-        assert_eq!(sent.buf_set, SetId::new(1, 1).bits());
+        assert_eq!(sent.buf_set, naming.set().bits(), "the id the registration answered with");
         assert_eq!(sent.buf_index, 0);
         let _ = a.complete(&completion(1, 0, 0)).unwrap();
 
@@ -789,7 +1049,7 @@ mod tests {
     #[test]
     fn a_refused_submission_hands_the_buffer_back() {
         let mut region = [0u8; 64];
-        let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut region).unwrap();
+        let mut set = BufferSet::bind(fixed(), agreed(0), &mut region).unwrap();
         let [a] = set.carve::<1>().unwrap();
 
         // A full ring is a retry: the buffer comes back idle, unchanged.
@@ -808,7 +1068,7 @@ mod tests {
     /// cases each need their own; this is that set, and the buffers die inside.
     fn carve_a_hundred_bytes_into<const B: usize>() -> Result<(), Misuse> {
         let mut region = [0u8; 100];
-        let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut region).unwrap();
+        let mut set = BufferSet::bind(fixed(), agreed(0), &mut region).unwrap();
         set.carve::<B>().map(|_| ())
     }
 
@@ -826,7 +1086,7 @@ mod tests {
     #[test]
     fn a_refusal_and_a_cancellation_both_return_the_buffer() {
         let mut region = [0u8; 128];
-        let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut region).unwrap();
+        let mut set = BufferSet::bind(fixed(), agreed(0), &mut region).unwrap();
         let [a, b] = set.carve::<2>().unwrap();
         let mut wire = Recorder(None);
 
@@ -854,7 +1114,7 @@ mod tests {
         // 0024 says only the caller's own bookkeeping can see, and this test
         // exists so that a reader can see it too rather than discover it.
         let mut region = [0u8; 128];
-        let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut region).unwrap();
+        let mut set = BufferSet::bind(fixed(), agreed(0), &mut region).unwrap();
         let [a, b] = set.carve::<2>().unwrap();
         let mut wire = Recorder(None);
 
@@ -879,7 +1139,7 @@ mod tests {
     #[test]
     fn a_batch_is_a_submitter_and_the_buffers_go_out_together() {
         let mut region = [0u8; 128];
-        let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut region).unwrap();
+        let mut set = BufferSet::bind(fixed(), agreed(0), &mut region).unwrap();
         let backing = Backing::<8>::new();
         let mut producer = Producer::new(backing.chan()).unwrap();
         let consumer = Consumer::new(backing.chan()).unwrap();
@@ -903,7 +1163,7 @@ mod tests {
     #[test]
     fn a_lost_peer_is_the_only_way_back_without_a_completion() {
         let mut region = [0u8; 64];
-        let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut region).unwrap();
+        let mut set = BufferSet::bind(fixed(), agreed(0), &mut region).unwrap();
         let [a] = set.carve::<1>().unwrap();
         let (a, _) = a.submit(&mut Recorder(None), entry(1, 64)).unwrap();
 
@@ -918,7 +1178,7 @@ mod tests {
     #[should_panic(expected = "dropped while the device held it")]
     fn dropping_an_in_flight_buffer_is_refused_at_the_drop() {
         let mut region = [0u8; 64];
-        let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut region).unwrap();
+        let mut set = BufferSet::bind(fixed(), agreed(0), &mut region).unwrap();
         let [a] = set.carve::<1>().unwrap();
         let (a, _) = a.submit(&mut Recorder(None), entry(1, 64)).unwrap();
         drop(a);

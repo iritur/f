@@ -1,0 +1,76 @@
+# Registered before it can be measured, which is the point: the threshold below
+# was written while the code was being written and before any number existed to
+# be tempted by. Two of the three metrics cannot be honest on any machine this
+# project can currently reach — there is no IOMMU under either path, so the
+# registered path's cost is missing a domain programming step and the virtual
+# path's is missing the page walk that is the entire operation. `E1-B01` is the
+# task that ends that, and `E1-P10` is where this joins the datapath set.
+name       = "buffer-registration-cost"
+status     = "pending"          # pending | tracked | gating
+milestone  = "E1"
+
+statement  = """
+Registering a buffer set costs less than 5 µs at p99, measured as the whole
+round trip: the client's entry, the service's slot, the frame's IOMMU
+translation, and the set identifier read back out of the completion. Amortised
+over the buffers of a set it is a setup cost and not a per-operation one, which
+is the claim that matters — a registration per operation would be the cost
+io_uring's fixed buffers exist to remove.
+
+And naming one buffer costs no more on the shared-virtual-memory path than on
+the registered path by more than half again at p99. If it does, the feature bit
+is buying nothing on this hardware and RFC 0024's reversal condition has fired.
+"""
+
+[baseline]
+system  = "linux-6.x-tuned"
+path    = "claims/baselines/linux-6.x-tuned"
+notes   = "The comparison is io_uring's IORING_REGISTER_BUFFERS, which is the same operation under another name: a process hands the kernel a set of ranges, the kernel pins them, and later submissions name a buffer by index rather than by address. Configured by someone trying to win — the same directory claim 0001 compares against, because it is the same tuned kernel and re-tuning produces a new versioned directory beside it rather than an edit to it. What the comparison cannot cover is the second half of the statement: Linux's registration path has no shared-virtual-memory twin to put beside it, so the ratio between this system's two paths is a statement about this system alone."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/fast-path.html"
+section  = "13"
+notes    = "Section 13 is where the sentence being tested lives — IOMMU shared virtual memory means devices walk the process page tables, so registration and pinning disappear for capable devices, which removes both a per-operation cost and the most awkward part of the buffer-ownership API. The subsystem that owns the number is the ring, and specifically `f_ring::registry`, which is where both paths meet; the IOMMU half of it is `E1-B01`'s and this claim goes red rather than quiet if that half never arrives."
+
+[workload]
+path    = "bench/src/bin/buffer_register.rs"
+repeat  = 100_000
+batch   = 1
+notes   = "One registration per observation, and a batch of one on purpose: a registration is setup and nothing amortises it against another registration. The per-path resolution loop beside it runs a million names on each path and writes its own two distributions, because a summary of either would hide exactly the bimodality a page walk produces."
+
+[metrics]
+primary   = "ns_per_registration_p99"
+secondary = [
+  "ns_per_registration_p50",
+  "ns_per_resolve_registered_p99",
+  "ns_per_resolve_virtual_p99",
+  "instructions_per_op",
+  "joules_per_op",
+]
+
+[threshold]
+# Written before there is a number. Five microseconds is where a per-set cost
+# stops being amortisable: at eight buffers per set and a device queue cycling
+# a set a thousand times, 5 µs is under a nanosecond per operation and 50 µs is
+# not. The ratio is the falsifiable half of RFC 0024 — the two paths are meant
+# to differ in *naming* and in nothing else, so a virtual name costing half
+# again as much as a registered one means the page walk is the cost and the
+# feature bit is a liability rather than an optimisation.
+ns_per_registration_p99         = { max = 5_000 }
+ratio_resolve_virtual_vs_fixed  = { max = 1.5 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "Needs an IOMMU with address translation services to mean anything at all — PASID and ATS, per section 13 — and the development container has neither the hardware nor a defensible clock. Under emulation both paths measure this crate's own arithmetic against a host clock QEMU does not control, so F_ENVIRONMENT refuses to record and the workload says so on every run."
+
+[reproduce]
+command = "cargo xtask claim buffer-registration-cost"
+
+[diagnosis]
+# Recorded while the system is understood, rather than at 2 a.m. when it is not.
+registration_over_50us = "not the registration. A round trip through two rings is the submission claim's cost twice over; if this is ten times claim 0001's p99 then the ring is not the thing that got slower — look at what the frame is doing inside Domains::map, which on real hardware is an IOMMU page-table write and an invalidation"
+registration_flat_in_set_size = "the translation is being asked for per buffer rather than per set. One registration is one map call; the counter the workload prints beside the distribution says how many were actually asked for"
+virtual_far_slower = "expected once there is hardware, and the threshold is where it stops being acceptable. A page walk that misses the IOTLB is the cost; if the ratio is above 1.5 the answer is not to widen the threshold but to ask whether the device should be on the registered path, which every device can take"
+virtual_far_faster = "suspect the measurement before the result. On a machine with no ATS, PageWalk is a range comparison and the ratio is a comparison of two pieces of this crate's arithmetic — which is exactly the state this claim is pending in, and it is not a result"
+bimodal_registered = "a slot search that is no longer O(1) in the common case. The table scans for the lowest free slot, which is deterministic and cheap while sets are short-lived; a workload holding most slots open makes the scan the cost"

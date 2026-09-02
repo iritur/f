@@ -55,7 +55,7 @@
 
 use f_abi::cap::{Handle, rights};
 
-use crate::cap::TABLE_SLOTS;
+use crate::cap::{MAX_SLOTS, SLOTS_PER_PAGE, TABLE_SLOTS};
 
 /// Read the direct map. Present in this address space, and not ring 3's.
 pub const PROVOKE_KERNEL: u64 = 0;
@@ -104,6 +104,14 @@ pub const PROVOKE_CAP_UNMAP: u64 = 14;
 
 /// Store into the state tree, which was granted read-only. E0-B14.
 pub const PROVOKE_CAP_STATE: u64 = 15;
+
+/// Spend the untyped region, then fill the table with nothing left to buy more
+/// slots with. E1-B13.
+pub const PROVOKE_CAP_QUOTA: u64 = 16;
+
+/// Buy a page of slots, then name handles past the end of what was bought.
+/// E1-B13.
+pub const PROVOKE_CAP_BEYOND: u64 = 17;
 
 unsafe extern "C" {
     /// First byte of the program.
@@ -277,6 +285,10 @@ user_probe_start:
     je .Lcap_unmap
     cmpq $15, %rbx
     je .Lcap_state
+    cmpq $16, %rbx
+    je .Lcap_quota
+    cmpq $17, %rbx
+    je .Lcap_beyond
     jmp .Lprobe_exit
 
     // The state tree, which the preamble mapped read-only and read. Writing to
@@ -487,6 +499,13 @@ user_probe_start:
 
     // Derive until it stops working. The table has a bound and reaching it is
     // an error rather than an event.
+    //
+    // Since E1-B13 the bound is not where it used to be. This loop fills the
+    // free part, and the derive that finds it full buys a page of slots out of
+    // the untyped region the frame granted — one frame, so one page — and
+    // carries on. What stops it is the second page, which nothing left in this
+    // process's table can pay for. The count is in `process::FLOOD_MINTS`, and
+    // it is the count rather than the refusal that says growth happened.
 .Lcap_flood:
     movl ${sys_derive}, %eax
     movq %r12, %rdi
@@ -494,6 +513,60 @@ user_probe_start:
     syscall
     testq %rax, %rax
     jns .Lcap_flood
+    jmp .Lprobe_exit
+
+    // The same flood with the money already spent. One retype takes the whole
+    // untyped region — it is one frame — so when the table fills there is
+    // nothing to buy a page with, and the refusal arrives at the size the frame
+    // handed over rather than a page later. That difference is the evidence
+    // that a bought table is bought: the two runs make the same calls and get
+    // different numbers of answers.
+    //
+    // `rbp` holds the untyped handle because it survives `syscall`; the frame
+    // grants space, frame, untyped, tree in that order, so it is two slots
+    // along from the one the process was told.
+.Lcap_quota:
+    movl %r13d, %ebp
+    addl $2, %ebp
+    movl ${sys_derive}, %eax
+    movl %ebp, %edi
+    movl ${right_r}, %esi
+    syscall
+    testq %rax, %rax
+    js .Lprobe_survived
+.Lcap_quota_fill:
+    movl ${sys_derive}, %eax
+    movq %r12, %rdi
+    movl ${right_r}, %esi
+    syscall
+    testq %rax, %rax
+    jns .Lcap_quota_fill
+    jmp .Lprobe_exit
+
+    // Buy the page, then ask for what is past it. Before growth "past the end"
+    // was a constant this program could be assembled with; it is now a number
+    // the process itself moved by spending, so all three of these are handles a
+    // component could plausibly compute from its own bookkeeping and none of
+    // them names a slot.
+.Lcap_beyond:
+    movl ${sys_derive}, %eax
+    movq %r12, %rdi
+    movl ${right_r}, %esi
+    syscall
+    testq %rax, %rax
+    jns .Lcap_beyond
+    movl ${sys_inspect}, %eax
+    movl ${cap_past_bought}, %edi
+    xorl %esi, %esi
+    syscall
+    movl ${sys_inspect}, %eax
+    movl ${cap_past_ceiling}, %edi
+    xorl %esi, %esi
+    syscall
+    movl ${sys_inspect}, %eax
+    movl ${cap_last_index}, %edi
+    xorl %esi, %esi
+    syscall
     jmp .Lprobe_exit
 
     // The one escape the frame does not answer. Everything above is refused by
@@ -549,6 +622,15 @@ user_probe_end:
     cap_unowned = const Handle::new(UNOWNED_SLOT, Handle::FIRST_GENERATION).bits(),
     cap_past_end = const Handle::new(TABLE_SLOTS as u16, Handle::FIRST_GENERATION).bits(),
     cap_last_index = const Handle::new(u16::MAX, Handle::FIRST_GENERATION).bits(),
+
+    // One past the table `cap=beyond` has just bought, and one past the largest
+    // table this build will grow. Neither carries a meaningful generation: the
+    // index is checked against what the table has paid for before the
+    // generation is looked at, which is what makes both of these `NO_SUCH_CAP`
+    // and not `REVOKED`.
+    cap_past_bought =
+        const Handle::new((TABLE_SLOTS + SLOTS_PER_PAGE) as u16, Handle::FIRST_GENERATION).bits(),
+    cap_past_ceiling = const Handle::new(MAX_SLOTS as u16, Handle::FIRST_GENERATION).bits(),
 
     slots = const TABLE_SLOTS as u32,
     sweep_generations = const crate::process::SWEEP_GENERATIONS,

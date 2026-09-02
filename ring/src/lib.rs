@@ -34,6 +34,7 @@ use f_abi::{Cqe, Sqe, chan, error, flags, op};
 pub mod buffers;
 mod doorbell;
 mod mapping;
+pub mod registry;
 
 pub use buffers::{BufferSet, Fixed, Idle, InFlight, Naming, PeerGone, Submitter, Virtual};
 pub use doorbell::{Bell, Hardware, Path, Ringer, Silent};
@@ -750,14 +751,6 @@ pub trait Sink {
 /// constant that a bare-metal caller can reason about.
 const CHUNK: usize = 256;
 
-/// Every submission flag this build knows.
-///
-/// R04 refuses an unknown flag rather than ignoring it, and that check needs
-/// something to compare against. Kept beside the executor so that adding a flag
-/// without teaching the executor about it is a test failure rather than a bit
-/// that is silently accepted.
-const KNOWN_FLAGS: u8 = flags::LINK | flags::DRAIN | flags::FIXED_BUF | flags::NO_CQE;
-
 /// Execute one submission and produce the completion it earns.
 ///
 /// `now` is the timestamp to stamp the completion with, on the monotonic clock
@@ -788,7 +781,11 @@ pub fn execute<S: Sink>(entry: &Sqe, arena: &Arena<'_>, sink: &mut S, now: u64) 
         );
     }
 
-    let unknown = entry.flags & !KNOWN_FLAGS;
+    // `flags::KNOWN` and not a list of this executor's own: an entry is
+    // malformed or it is not, and two readers of the envelope with two lists
+    // would be two answers to that question. `f_abi::flags::KNOWN` says why it
+    // is where it is.
+    let unknown = entry.flags & !flags::KNOWN;
     if unknown != 0 {
         return refuse(error::ARGUMENT, error::argument::UNKNOWN_FLAG, u64::from(unknown));
     }

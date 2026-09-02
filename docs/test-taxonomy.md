@@ -103,7 +103,7 @@ these three are different in the direction nobody intended.
 
 The rows for `cargo xtask cap` and `cargo xtask user` say *every PR* and not
 *every verify* for the same reason, read the other way: `fn verify` is lint,
-test, run, panic, trace and mutate, and it invokes neither. The nine capability
+test, run, panic, trace and mutate, and it invokes neither. The eleven capability
 escapes and the seven ring-3 boots run in the CI `kernel` job. A local green
 `verify` is not evidence that a change to the capability table is safe.
 
@@ -168,9 +168,9 @@ from one tree, and stops costing nothing at `E1-B05`.
 | Forging a handle | P | `cargo xtask cap forge` — the handle space swept, in range and past it | every PR | **catches** (sampled) |
 | Use after revoke | P | `cargo xtask cap stale` | every PR | **catches** (sampled) |
 | Derivation escape — rights that were never granted | P | `cargo xtask cap rights`, `cap type` | every PR | **catches** (sampled) |
-| A process makes the kernel panic by trying | P | all nine `cap` boots must end at 33; `cargo xtask mutate` is the build that breaks the property and must go red | every PR (`cap`); every verify, every PR (`mutate`) | **catches** |
+| A process makes the kernel panic by trying | P | all eleven `cap` boots must end at 33; `cargo xtask mutate` is the build that breaks the property and must go red | every PR (`cap`); every verify, every PR (`mutate`) | **catches** |
 | Mapping left after revoke (TLB shootdown) | P | `cargo xtask cap unmap` — one page, one process, one boot | every PR | **partially** |
-| The capability table outgrows its fixed size | P | `cargo xtask cap flood` proves the refusal at the bound | every PR | **partially** |
+| The capability table outgrows the slots its holder has paid for | P | `cargo xtask cap flood` buys a page and stops where the untyped region runs out; `cap quota` spends the region first and stops at the free size; `cap beyond` names slots past what was bought | every PR | **catches** |
 | Authority arriving by inheritance (R06) | P, X | the negative suite covers the part that runs; no lint | every PR | **partially** |
 | A ring-3 process touching what it was not handed | P | `cargo xtask user` — seven boots, six must fault and one must not | every PR | **catches** |
 | Writing to a read-only grant | P | `cargo xtask cap state` | every PR | **catches** |
@@ -178,7 +178,7 @@ from one tree, and stops costing nothing at `E1-B05`.
 | A driver addressing memory outside its grant (IOMMU) | L1, P | nothing — there is no IOMMU and no driver | never | **GAP** |
 
 The five properties hold and each has something that breaks it, which is
-`E0-P08` met. What none of them is, is a proof: nine boots sample a space
+`E0-P08` met. What none of them is, is a proof: eleven boots sample a space
 `E1-P07` is meant to exhaust with Kani, and the honest reading of a green `cap`
 run is that the escapes somebody thought of were refused.
 
@@ -195,7 +195,7 @@ churn.
 |---|---|---|---|---|
 | Frame leak on process death | P | `process::reap` fails the boot if the count does not return; the boot line reports `user frames N given back, free count unchanged` | every verify, every PR | **catches** (one death) |
 | Frame leak under churn | L1, L5 | nothing | never | **GAP** |
-| Allocator split/coalesce corruption | L1, P | nothing — `mem.rs` is order-0 free lists, so there is no split or coalesce to corrupt | never | **GAP** |
+| Allocator split/coalesce corruption | L1, P | `cargo xtask run` — `mem::self_test` phases two to four: an `Env`-driven mix of orders, a probe upward from order 9, and a 2 MiB block handed back as 512 shuffled frames that must reappear as a 2 MiB block. `cargo xtask orders` boots a machine with a gibibyte in it and requires order 18 | every verify, every PR | **catches** |
 | Kernel-global mutable state outside `PerCpu` | X | `cargo xtask lint-percpu` | every verify, every PR | **catches** |
 | A fifth word crossing a core with no named ordering | X | `REVIEW.md` pass 2, RFC 0016; `lint-percpu` does not count atomics | every PR | **partially** |
 | W^X or NX broken on the kernel mapping | P | `cargo xtask fault nx`, `cargo xtask fault wx` | on demand | **GAP** |
@@ -276,7 +276,7 @@ row saying a person has to apply it, which is a plan.
 |---|---|---|---|---|
 | Driver death observed by a client (blast radius) | L1, P | nothing — there is no driver and no supervisor | never | **GAP** |
 | Supervisor restart storm | L1 | nothing — RFC 0008 declares a restart policy and nothing runs it | never | **GAP** |
-| A component that legitimately outgrows the capability table | P | `cargo xtask cap flood` refuses at the fixed bound, which is the behaviour a real supervisor has to change | every PR | **partially** |
+| A component that legitimately outgrows the capability table | P | `cargo xtask cap flood` holds 160 capabilities, five times the fixed count, with the growth debited from its untyped region; `cap quota` holds 32 because it spent that region first | every PR | **catches** |
 | An imported driver reachable other than over a ring | X | `cargo xtask lint-licensing`; `lint-manifests` refuses an imported image in `shared` | every verify, every PR (`lint-licensing`); every verify (`lint-manifests`) | **catches** |
 | A shim diverging from the API it imitates | L4 | nothing — differential fuzzing against Linux is not built | never | **GAP** |
 
@@ -337,9 +337,7 @@ reversal condition. Nothing is left as "we should probably".
 | A peer that dies mid-claim, or lies about its epoch | `E1-P04`, `E1-P02` |
 | A driver addressing memory outside its grant (IOMMU) | `E1-B01` |
 | Frame leak under churn | `E1-B14` (the unmap-under-churn workload), `E1-P06`, `E1-B10` |
-| Allocator split/coalesce corruption | `E1-B12` — order-9 and order-18 under an adversarial alloc/free workload |
 | Mapping left after revoke, under churn | `E1-B14`, `E1-P02` |
-| The capability table's fixed bound | `E1-B13` |
 | Authority arriving by inheritance | `E1-B05` — the first lifecycle that could grant it |
 | Speculation across a domain boundary | `E1-B05` — the supervisor refusal RFC 0005 names |
 | Deadline inversion in a device queue | `E1-B06` |
@@ -354,7 +352,6 @@ reversal condition. Nothing is left as "we should probably".
 | A fault-injection site never exercised | `E1-P02`, `E1-P03` |
 | Driver death observed by a client | `E1-P06` — where the blast-radius claim becomes gating |
 | Supervisor restart storm | `E1-B05`, `E1-P06` |
-| A component that legitimately outgrows the capability table | `E1-B13` |
 | `instructions_per_op` and `joules_per_op` absent | `E0-P05` for the PMU, `E5-P03` for the meter |
 | A hardware-only bug | `E0-P18` — open; the first boot outside QEMU was a virtual machine, not metal |
 | Coverage on the entry-validation path | `E1-P05` — above 95%, as a claim rather than as a threshold |
@@ -454,11 +451,19 @@ L2 is the layer E1 does **not** build, and that is worth saying out loud rather
 than leaving to be noticed: `E0-P16` remains the only owner of the gap the
 litmus suite was measured to have, and it is an E0 task carried into E1.
 
-**Which rows move.** Of the eighty-five rows, thirty-eight say *catches* today,
-twenty-eight *partially* and nineteen *GAP*. Twenty-six name an E1 task as an
-owner, and twenty-three of those name *only* E1 tasks — so if the epoch lands as
-written, ten GAPs close and thirteen rows move from *partially* to *catches*,
-which is between a quarter and a third of everything on this page.
+**Which rows move.** Of the eighty-five rows, forty-one say *catches* today,
+twenty-six *partially* and eighteen *GAP*. Twenty-three name an E1 task as an
+owner, and twenty of those name *only* E1 tasks — so if the rest of the epoch
+lands as written, nine more GAPs close and eleven more rows move from
+*partially* to *catches*, which is about a quarter of everything on this page.
+
+Three rows have already moved and the counts above include them: the
+allocator's split and coalesce row, which `E1-B12` took from *GAP*, and the two
+capability-table rows, which `E1-B13` took from *partially*. A table is bounded
+by what its holder paid for now rather than by a constant, so a component
+outgrowing the fixed count is an ordinary thing it does — `cap flood` holds a
+hundred and sixty — and `cap quota` and `cap beyond` are the boots that say
+what happens at the two edges of paying.
 
 Three rows name an E1 task and something else, and those are the ones to watch,
 because a task can land and leave its row where it was: `ring-latency-regression`

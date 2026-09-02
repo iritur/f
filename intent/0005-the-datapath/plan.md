@@ -73,11 +73,17 @@ kernel/src/arch/x86_64/paging.rs            device pages into a component's
 kernel/src/cap.rs                           E1-B13: the table becomes storage an
                                             Untyped pays for; QUOTA_EXHAUSTED;
                                             the device and interrupt kinds
-kernel/src/mem/buddy.rs                     NEW: E1-B12. Orders above zero,
-                                            split and coalesce
-kernel/src/mem.rs                           per-CPU free lists, Order::HUGE as
-                                            the default grain, the M1 pair
-                                            retired rather than kept beside it
+kernel/src/mem.rs                           E1-B12: orders above zero, split
+                                            and coalesce, per-CPU free lists,
+                                            Order::HUGE as the grain a shard is
+                                            refilled in, the M1 pair retired
+                                            rather than kept beside it. One
+                                            file rather than the mem/buddy.rs
+                                            this row first named, because the
+                                            exit says the M1 structure is
+                                            retired and two files holding free
+                                            memory is the second structure that
+                                            can disagree with the first
 kernel/src/sched/mod.rs                     NEW: E1-B07. Where the classes live
 kernel/src/sched/admission.rs               NEW: the schedulability test that
                                             can refuse, and ADMISSION as the

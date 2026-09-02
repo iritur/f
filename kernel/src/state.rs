@@ -65,6 +65,22 @@ pub mod node {
     pub const CAPS: u32 = 10;
     /// Slots in it.
     pub const CAPS_SLOTS: u32 = 11;
+    /// Allocations the calling core's own free lists answered.
+    pub const MEMORY_SERVED: u32 = 12;
+    /// Allocations that had to reach the machine-wide frontier.
+    pub const MEMORY_REFILL: u32 = 13;
+    /// Allocations that had to reach another core's free lists.
+    pub const MEMORY_REMOTE: u32 = 14;
+    /// How much of `MEMORY_REMOTE` the boot's own self-test provoked.
+    ///
+    /// Published beside the total rather than subtracted from it, because a
+    /// reader who maps this tree under load is asking a different question
+    /// from the boot log's, and the boot log's answer is a difference it has
+    /// already taken. `mem::provoke_remote` withholds the frontier and asks an
+    /// empty shard for a frame on every boot, so that a zero on the hot path
+    /// is a zero a working counter produced rather than one nothing could ever
+    /// move; this node is what lets a reader take that provocation back out.
+    pub const MEMORY_FORCED: u32 = 15;
     /// A node of a kind this build does not name, published on purpose.
     ///
     /// RFC 0013's one deliberate exception to R04 is that a reader skips and
@@ -76,7 +92,7 @@ pub mod node {
 }
 
 /// How many nodes this build publishes.
-pub const NODES: usize = 12;
+pub const NODES: usize = 16;
 
 /// The schema, written once and never again for a generation.
 ///
@@ -124,8 +140,46 @@ const SCHEMA: [SchemaEntry; NODES] = [
     ),
     SchemaEntry::new(node::CAPS, node::ROOT, 9 * WORD, kind::SUBTREE, unit::NONE, b"caps"),
     SchemaEntry::new(node::CAPS_SLOTS, node::CAPS, 10 * WORD, kind::GAUGE, unit::SLOTS, b"slots"),
+    // Memory's three allocation paths, and they sit here rather than beside
+    // `free` for a reason worth stating: `validate` requires ids to ascend in
+    // schema order, ids are permanent, and these were minted after `topology`
+    // and `caps` already held 5 through 11. The tree's *shape* is the parent
+    // field, which still puts them under `memory`; the array's order is a
+    // detail, exactly as `node` says.
+    SchemaEntry::new(
+        node::MEMORY_SERVED,
+        node::MEMORY,
+        11 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"served",
+    ),
+    SchemaEntry::new(
+        node::MEMORY_REFILL,
+        node::MEMORY,
+        12 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"refill",
+    ),
+    SchemaEntry::new(
+        node::MEMORY_REMOTE,
+        node::MEMORY,
+        13 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"remote",
+    ),
+    SchemaEntry::new(
+        node::MEMORY_FORCED,
+        node::MEMORY,
+        14 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"forced",
+    ),
     // Deliberately a kind nothing names. See `node::RESERVED_KIND`.
-    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 11 * WORD, 0xEE, unit::NONE, b"reserved"),
+    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 15 * WORD, 0xEE, unit::NONE, b"reserved"),
 ];
 
 /// Where the schema block starts: immediately after the header, on the
