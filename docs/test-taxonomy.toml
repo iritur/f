@@ -1,0 +1,896 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The machine-readable half of docs/test-taxonomy.md. One [[row]] per class of
+# bug, with the layers that catch it, the concrete check today, how often that
+# check runs, and — where nothing catches it — who is scheduled to, or why the
+# gap is accepted and what would reverse the acceptance.
+#
+# This file exists because the page beside it is the kind of document that is
+# true on the day it is written and quietly false a quarter later, and the
+# failure mode is invisible: nothing goes red when a row stops being true.
+# Nothing reads this yet. `cargo xtask lint-taxonomy` is the follow-up named at
+# the end of the page — every `check` naming a verb that exists, every
+# `scheduled_by` naming a TODO.md id that exists and is still open, every
+# `accepted_because` carrying a `reversal`, and every row in the page present
+# here.
+#
+# Fields, and the vocabulary each is drawn from:
+#
+#   id              stable slug, referenced by the lint rather than by prose
+#   group           A..I, the section of the page this row appears in
+#   class           the bug class, as the page states it
+#   layers          L0..L7 from docs/design/proving-ground.html, plus the two
+#                   this page names because the ladder has no row for them:
+#                   P "provoke the real kernel", X "policy made executable".
+#                   Letters rather than L8 and L9 on purpose — the numbering
+#                   belongs to proving-ground.html and this file does not extend it.
+#   check           the command, job, hook or test that would catch it today
+#   cadence         one or more of: every-edit, every-build, every-verify,
+#                   every-pr, daily, weekly, per-release, on-demand, never
+#   status          catches | partially | gap
+#   scheduled_by    TODO.md task ids, for a gap somebody owns
+#   accepted_because + reversal   for a gap nobody owns, and why that is fine
+#
+# A row with status = "gap" carries exactly one of `scheduled_by` or
+# `accepted_because`. A row with `accepted_because` and no `reversal` is a
+# preference wearing a decision's clothes.
+
+schema = 1
+source = "docs/test-taxonomy.md"
+
+# --- A — the ring and the memory model ---------------------------------------
+
+[[row]]
+id      = "ring-relaxed-submission"
+group   = "A"
+class   = "Submission publishing store weakened to Relaxed"
+layers  = ["L2"]
+check   = "cargo test -p f-ring --test litmus --release, both runners; mutate-relaxed-submission exists as a fixture and gates nothing"
+cadence = ["every-pr"]
+status  = "partially"
+notes   = "The fixture was a gate on the AArch64 runner for one run and the suite passed with it on. The stress tests were given the exact defect on the exact hardware and did not see it."
+scheduled_by = ["E0-P16"]
+
+[[row]]
+id      = "ring-relaxed-completion"
+group   = "A"
+class   = "Completion publishing store weakened to Relaxed"
+layers  = ["L2"]
+check   = "the same litmus job; mutate-relaxed-completion"
+cadence = ["every-pr"]
+status  = "partially"
+scheduled_by = ["E0-P16"]
+
+[[row]]
+id      = "ring-doorbell-fence"
+group   = "A"
+class   = "Suppression fence removed (Store-Load, doorbell)"
+layers  = ["L2"]
+check   = "the litmus job with --features f-ring/mutate-no-doorbell-fence, x86-64 only"
+cadence = ["every-pr"]
+status  = "catches"
+notes   = "The one defect the stress suite does see, and on the runner nobody would guess: 58 971 lost wakeups in 500 000 rounds on x86-64, a clean pass on arm, because stlr/ldar are RCsc."
+
+[[row]]
+id      = "ring-unexplored-interleaving"
+group   = "A"
+class   = "An interleaving the stress tests never produce"
+layers  = ["L2", "L3"]
+check   = "nothing"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E0-P16"]
+
+[[row]]
+id      = "ring-new-ordering-untested"
+group   = "A"
+class   = "A new Release/Acquire pair lands with no litmus test"
+layers  = ["X"]
+check   = "REVIEW.md pass 2, the CLAUDE.md convention"
+cadence = ["every-pr"]
+status  = "partially"
+accepted_because = "A check would have to tell a new ordering from a moved one, which is a question about a diff rather than about a file, and xtask reads files."
+reversal = "A second ordering regression reaches main."
+
+[[row]]
+id      = "ring-cursor-wrap"
+group   = "A"
+class   = "Cursor arithmetic wrong at the wrap"
+layers  = ["L2"]
+check   = "ring/src/lib.rs::cursors_may_wrap, plus the outstanding-across-the-wrap assertion in litmus.rs"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+# --- B — a hostile peer -------------------------------------------------------
+
+[[row]]
+id      = "peer-header-panic"
+group   = "B"
+class   = "A hostile header or cursor panics the consumer"
+layers  = ["L4", "P", "X"]
+check   = "ring/tests/headers.rs; litmus.rs::a_hostile_client_cursor_never_panics; the unwrap_used/panic/unreachable clippy wall over ring"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+notes   = "What exists samples; what is owed proves. The difference is 'no fuzzer found one' against 'there is none'."
+scheduled_by = ["E1-P04", "E1-P12"]
+
+[[row]]
+id      = "peer-header-accepted"
+group   = "B"
+class   = "A hostile header is accepted rather than refused"
+layers  = ["L4"]
+check   = "headers.rs — every invalid header refused with a structured error, and the region survives the refusal"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+scheduled_by = ["E1-P04"]
+
+[[row]]
+id      = "peer-entry-mutated"
+group   = "B"
+class   = "An entry mutated between validation and use"
+layers  = ["L1", "L4"]
+check   = "nothing"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E1-P02", "E1-P04"]
+
+[[row]]
+id      = "peer-unknown-bits"
+group   = "B"
+class   = "Unknown opcode, flag or reserved bit accepted (R04)"
+layers  = ["L4", "X"]
+check   = "abi unit tests over the reading of Sqe; REVIEW.md; no lint"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+scheduled_by = ["E1-P05", "E1-P12"]
+
+[[row]]
+id      = "peer-dies-mid-claim"
+group   = "B"
+class   = "A peer that dies mid-claim, or lies about its epoch"
+layers  = ["L1", "L4"]
+check   = "ring/tests/faults.rs injects at ring.publish, ring.consume and chan.bind"
+cadence = ["every-pr"]
+status  = "partially"
+scheduled_by = ["E1-P04", "E1-P02"]
+
+[[row]]
+id      = "abi-layout-drift"
+group   = "B"
+class   = "ABI layout drift — a field reordered inside a fixed-size struct"
+layers  = ["X"]
+check   = "const _: () = assert!(size_of::<Sqe>() == 64) and its four siblings catch a size change; no offset assertion, no golden bytes"
+cadence = ["every-build"]
+status  = "partially"
+notes   = "Costs nothing while both ends of every channel come from one tree, and stops costing nothing at E1-B05."
+scheduled_by = ["E1-P05"]
+
+[[row]]
+id      = "abi-version-mismatch"
+group   = "B"
+class   = "A peer at a different ABI version"
+layers  = ["X"]
+check   = "ChannelHeader::negotiate, RFC 0011, exercised against a real mapping by headers.rs"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+# --- C — capabilities and isolation ------------------------------------------
+
+[[row]]
+id      = "cap-unowned-slot"
+group   = "C"
+class   = "Naming a slot the frame never filled"
+layers  = ["P"]
+check   = "cargo xtask cap unowned"
+cadence = ["every-pr"]
+status  = "catches"
+notes   = "Sampled, not proved. E1-P07 is what exhausts it."
+
+[[row]]
+id      = "cap-forge-handle"
+group   = "C"
+class   = "Forging a handle"
+layers  = ["P"]
+check   = "cargo xtask cap forge — the handle space swept, in range and past it"
+cadence = ["every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "cap-use-after-revoke"
+group   = "C"
+class   = "Use after revoke"
+layers  = ["P"]
+check   = "cargo xtask cap stale"
+cadence = ["every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "cap-derivation-escape"
+group   = "C"
+class   = "Derivation escape — rights that were never granted"
+layers  = ["P"]
+check   = "cargo xtask cap rights, cargo xtask cap type"
+cadence = ["every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "cap-panic-the-kernel"
+group   = "C"
+class   = "A process makes the kernel panic by trying"
+layers  = ["P"]
+check   = "all nine cap boots must end at 33; cargo xtask mutate is the build that breaks the property and must go red"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "The cap half runs in the CI kernel job only; the mutate half is in cargo xtask verify as well. fn verify is lint, test, run, panic, trace, mutate — it invokes neither cap nor user."
+
+[[row]]
+id      = "cap-mapping-after-revoke"
+group   = "C"
+class   = "Mapping left after revoke (TLB shootdown)"
+layers  = ["P"]
+check   = "cargo xtask cap unmap — one page, one process, one boot"
+cadence = ["every-pr"]
+status  = "partially"
+scheduled_by = ["E1-B14", "E1-P02"]
+
+[[row]]
+id      = "cap-table-outgrown"
+group   = "C"
+class   = "The capability table outgrows its fixed size"
+layers  = ["P"]
+check   = "cargo xtask cap flood proves the refusal at the bound"
+cadence = ["every-pr"]
+status  = "partially"
+scheduled_by = ["E1-B13"]
+
+[[row]]
+id      = "cap-inheritance"
+group   = "C"
+class   = "Authority arriving by inheritance (R06)"
+layers  = ["P", "X"]
+check   = "the negative suite covers the part that runs; no lint"
+cadence = ["every-pr"]
+status  = "partially"
+scheduled_by = ["E1-B05"]
+
+[[row]]
+id      = "isolation-ring3"
+group   = "C"
+class   = "A ring-3 process touching what it was not handed"
+layers  = ["P"]
+check   = "cargo xtask user — seven boots, six must fault and one must not"
+cadence = ["every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "cap-readonly-grant"
+group   = "C"
+class   = "Writing to a read-only grant"
+layers  = ["P"]
+check   = "cargo xtask cap state"
+cadence = ["every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "domain-speculation"
+group   = "C"
+class   = "Speculation across a domain boundary (R02)"
+layers  = ["X"]
+check   = "cargo xtask lint-manifests requires the domain field RFC 0005 rule 4 names; the supervisor refusal is not built"
+cadence = ["every-verify"]
+status  = "partially"
+notes   = "lint-manifests appears in no workflow file; it runs inside lint_all and nowhere else."
+scheduled_by = ["E1-B05"]
+
+[[row]]
+id      = "iommu-escape"
+group   = "C"
+class   = "A driver addressing memory outside its grant (IOMMU)"
+layers  = ["L1", "P"]
+check   = "nothing — there is no IOMMU and no driver"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E1-B01"]
+
+# --- D — memory ---------------------------------------------------------------
+
+[[row]]
+id      = "frame-leak-on-death"
+group   = "D"
+class   = "Frame leak on process death"
+layers  = ["P"]
+check   = "process::reap fails the boot if the count does not return; the boot line reports 'user frames N given back, free count unchanged'"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "One process, one death. Churn is a different row."
+
+[[row]]
+id      = "frame-leak-under-churn"
+group   = "D"
+class   = "Frame leak under churn"
+layers  = ["L1", "L5"]
+check   = "nothing"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E1-B14", "E1-P06", "E1-B10"]
+
+[[row]]
+id      = "allocator-split-coalesce"
+group   = "D"
+class   = "Allocator split/coalesce corruption"
+layers  = ["L1", "P"]
+check   = "nothing — mem.rs is order-0 free lists, so there is no split or coalesce to corrupt"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E1-B12"]
+
+[[row]]
+id      = "percpu-global-state"
+group   = "D"
+class   = "Kernel-global mutable state outside PerCpu"
+layers  = ["X"]
+check   = "cargo xtask lint-percpu"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "fifth-cross-core-word"
+group   = "D"
+class   = "A fifth word crossing a core with no named ordering"
+layers  = ["X"]
+check   = "REVIEW.md pass 2, RFC 0016; lint-percpu does not count atomics"
+cadence = ["every-pr"]
+status  = "partially"
+accepted_because = "A lint would have to distinguish an atomic that crosses a core from one that does not, which is a claim about the design rather than about the text. RFC 0016 names four; a fifth needs an argument, and an argument is a review."
+reversal = "A fifth lands without one."
+
+[[row]]
+id      = "kernel-wx-nx"
+group   = "D"
+class   = "W^X or NX broken on the kernel mapping"
+layers  = ["P"]
+check   = "cargo xtask fault nx, cargo xtask fault wx"
+cadence = ["on-demand"]
+status  = "gap"
+accepted_because = "See kernel-fault-path-rot: the fault verb is in no automated loop, and the kernel-mode half changes only when the address space or the IDT changes."
+reversal = "A kernel-mode fault path breaks without `cargo xtask user` noticing, or the kernel job stops being the longest in the gate."
+
+[[row]]
+id      = "onramp-page-table-leak"
+group   = "D"
+class   = "Page tables leaked by the higher-half on-ramp"
+layers  = ["P"]
+check   = "the free count is asserted across the switch — arch/x86_64/paging.rs"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+# --- E — time and scheduling --------------------------------------------------
+
+[[row]]
+id      = "deadline-inversion"
+group   = "E"
+class   = "Deadline inversion in a device queue"
+layers  = ["L1", "L5"]
+check   = "nothing — RFC 0025 decides the rule and nothing orders a device queue yet"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E1-B06"]
+
+[[row]]
+id      = "deadline-inheritance-unbounded"
+group   = "E"
+class   = "A component claiming urgency forever"
+layers  = ["L1", "L3"]
+check   = "RFC 0025 decides the decay; nothing enforces it"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E1-B06", "E1-B07"]
+
+[[row]]
+id      = "admission-starvation"
+group   = "E"
+class   = "A granted reservation misses its deadline under load"
+layers  = ["L1", "L5", "L6"]
+check   = "nothing — there is no admission control"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E1-B07"]
+
+[[row]]
+id      = "admission-oversubscribed"
+group   = "E"
+class   = "An over-subscribed reservation is admitted"
+layers  = ["L3", "P"]
+check   = "nothing"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E1-B07"]
+
+[[row]]
+id      = "timer-jitter-regression"
+group   = "E"
+class   = "Timer jitter regression"
+layers  = ["L5", "L7"]
+check   = "cargo xtask timer 60; claim 0002 is pending and gates nothing"
+cadence = ["on-demand"]
+status  = "gap"
+scheduled_by = ["E0-P06", "E0-D10", "E0-P18"]
+
+[[row]]
+id      = "ring-latency-regression"
+group   = "E"
+class   = "Ring submit latency regression"
+layers  = ["L5", "L7"]
+check   = "cargo xtask claim ring-submit-latency; claim 0001 is pending; bench refuses to record under F_ENVIRONMENT=container"
+cadence = ["on-demand"]
+status  = "gap"
+scheduled_by = ["E0-P05", "E1-P10"]
+
+[[row]]
+id      = "boot-time-regression"
+group   = "E"
+class   = "Boot-time regression"
+layers  = ["L5", "L7"]
+check   = "claim 0003, tracked, cargo xtask claim boot-to-m0, threshold 50 ms"
+cadence = ["on-demand"]
+status  = "partially"
+accepted_because = "Tracked by design. Nothing in the thesis rests on boot time and a tight threshold would fire the first time a milestone added a page-table walk the design wanted; the loose bound catches a tenfold change nobody intended."
+reversal = "Boot time becomes an argument in any document, at which point it needs an owner and a gate."
+
+[[row]]
+id      = "small-regression"
+group   = "E"
+class   = "A regression too small for a threshold"
+layers  = ["L5"]
+check   = "nothing; claims/history.jsonl is accumulating for it"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E2-P09"]
+
+# --- F — determinism ----------------------------------------------------------
+
+[[row]]
+id      = "determinism-known-construct"
+group   = "F"
+class   = "A clock, HashMap or rdtsc outside Env"
+layers  = ["L0", "X"]
+check   = ".claude/hooks/determinism-guard.sh, then cargo xtask lint-determinism"
+cadence = ["every-edit", "every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "determinism-unnamed-source"
+group   = "F"
+class   = "A source of nondeterminism no pattern names"
+layers  = ["L0", "P"]
+check   = "cargo xtask trace locally; the two-runner trace and reproduction jobs in CI"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "mutate-unseeded-time boots green twice with two different answers. Every other check in this tree is green on it."
+
+[[row]]
+id      = "determinism-off-log"
+group   = "F"
+class   = "A determinism leak that never reaches the boot log"
+layers  = ["L0", "L1"]
+check   = "nothing — the trace hashes the boot log, and the state tree deliberately publishes nothing that varies with time"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E1-P01", "E2-P05"]
+
+[[row]]
+id      = "sim-correlated-streams"
+group   = "F"
+class   = "Correlated streams in a seed sweep"
+layers  = ["L1"]
+check   = "per-site streams in env/src/sim.rs, plus the independence test"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+scheduled_by = ["E1-B11"]
+
+[[row]]
+id      = "sim-site-never-exercised"
+group   = "F"
+class   = "A fault-injection site that is never exercised"
+layers  = ["L1"]
+check   = "the site table is fixed at sixteen and overflow is counted and reported rather than dropped"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+scheduled_by = ["E1-P02", "E1-P03"]
+
+[[row]]
+id      = "allowlist-in-same-diff"
+group   = "F"
+class   = "An allow-list entry added in the same diff as the code needing it"
+layers  = ["X"]
+check   = "REVIEW.md pass 1 names it as the commonest way the policy erodes"
+cadence = ["every-pr"]
+status  = "partially"
+accepted_because = "The entry is a reviewable diff by construction, which is the whole mechanism; whether its stated reason survives reading is a judgement no lint makes."
+reversal = "An allow-list entry reaches main whose reason does not survive being read aloud."
+
+# --- G — the policies ---------------------------------------------------------
+
+[[row]]
+id      = "unsafe-outside-frame"
+group   = "G"
+class   = "unsafe outside abi/, ring/, kernel/"
+layers  = ["X"]
+check   = "unsafe_code = \"forbid\" from the workspace at compile time, and cargo xtask lint-unsafe over the text"
+cadence = ["every-build", "every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "safety-comment-hollow"
+group   = "G"
+class   = "A // SAFETY: comment that does not discharge its obligation"
+layers  = ["L3", "X"]
+check   = "REVIEW.md passes 1 and 3; no lint reads the comment"
+cadence = ["every-pr"]
+status  = "partially"
+accepted_because = "A checker for this is a proof checker; there is no cheaper version, and listing it as mechanised would be worse than listing it as review."
+reversal = "E2-P04 puts Verus on the frame."
+
+[[row]]
+id      = "unsafe-share-trigger"
+group   = "G"
+class   = "The unsafe share crossing RFC 0001's trigger"
+layers  = ["X"]
+check   = "cargo xtask unsafe reports both shares; it does not gate"
+cadence = ["on-demand"]
+status  = "partially"
+accepted_because = "RFC 0001's trigger is 'exceeds 10% by phase 02' and the phase is half the condition. A verb that went red at phase 00 would be a gate with no path to green."
+reversal = "Phase 02: lint_all gains a line, as E0-B21 records."
+
+[[row]]
+id      = "licence-boundary-import"
+group   = "G"
+class   = "The permissive tree importing third_party/"
+layers  = ["X"]
+check   = "cargo xtask lint-licensing"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "spdx-missing"
+group   = "G"
+class   = "A missing SPDX header"
+layers  = ["X"]
+check   = "cargo xtask lint-licensing"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "number-without-claim"
+group   = "G"
+class   = "A number in prose with no claim"
+layers  = ["L7", "X"]
+check   = "REVIEW.md pass 4"
+cadence = ["every-pr"]
+status  = "partially"
+accepted_because = "The mechanised direction is the other one — lint-claims catches a cited value that moved, lint-reproduce one that cannot be re-derived, lint-claim-owners one nobody owns. A lint cannot tell a number that needs a claim from a number in an example."
+reversal = "A published number without a claim survives a release."
+
+[[row]]
+id      = "claim-citation-stale"
+group   = "G"
+class   = "A document citing a claim value the claim no longer has"
+layers  = ["L7", "X"]
+check   = "cargo xtask lint-claims; cargo xtask claims --render fixes it"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "claim-no-owner"
+group   = "G"
+class   = "A claim with no owning document (R09)"
+layers  = ["X"]
+check   = "cargo xtask lint-claim-owners"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "claim-reproduction-empty"
+group   = "G"
+class   = "A claim whose published reproduction runs nothing"
+layers  = ["L7", "X"]
+check   = "cargo xtask lint-reproduce"
+cadence = ["every-verify"]
+status  = "catches"
+notes   = "lint-reproduce appears in no workflow file; the CI claims job runs lint-snapshot, claims, lint-claim-owners and lint-claims."
+
+[[row]]
+id      = "claim-snapshot-stale"
+group   = "G"
+class   = "A committed snapshot asserting what the registry does not hold"
+layers  = ["L7", "X"]
+check   = "cargo xtask lint-snapshot, run before anything regenerates it"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "abi-unit-missing"
+group   = "G"
+class   = "A quantity crossing the ABI with no unit (R03)"
+layers  = ["X"]
+check   = "cargo xtask lint-units"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "callback-registered"
+group   = "G"
+class   = "A callback registered across an interface (R05)"
+layers  = ["X"]
+check   = "cargo xtask lint-callbacks"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "defect-on-by-default"
+group   = "G"
+class   = "A deliberate defect left on by default"
+layers  = ["X"]
+check   = "cargo xtask lint-mutations"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "manifest-off-schema"
+group   = "G"
+class   = "A component manifest that does not fit docs/manifest.md"
+layers  = ["X"]
+check   = "cargo xtask lint-manifests"
+cadence = ["every-verify"]
+status  = "catches"
+notes   = "lint-manifests appears in no workflow file; it runs inside lint_all and nowhere else."
+
+[[row]]
+id      = "reversal-without-rfc"
+group   = "G"
+class   = "A reversal with no RFC"
+layers  = ["X"]
+check   = "REVIEW.md pass 4"
+cadence = ["every-pr"]
+status  = "partially"
+accepted_because = "The same shape as number-without-claim: recognising that a change contradicts something already written is a judgement about two documents, not a pattern in one file."
+reversal = "A design document is contradicted by code for more than one release."
+
+[[row]]
+id      = "buffer-ownership"
+group   = "G"
+class   = "Buffer ownership violated — both sides hold it"
+layers  = ["X"]
+check   = "three compile_fail doctests in ring/src/buffers.rs (E0599, E0451, E0382)"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+# --- H — components and drivers ----------------------------------------------
+
+[[row]]
+id      = "driver-death-blast-radius"
+group   = "H"
+class   = "Driver death observed by a client (blast radius)"
+layers  = ["L1", "P"]
+check   = "nothing — there is no driver and no supervisor"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E1-P06", "E1-B05"]
+
+[[row]]
+id      = "supervisor-restart-storm"
+group   = "H"
+class   = "Supervisor restart storm"
+layers  = ["L1"]
+check   = "nothing — RFC 0008 declares a restart policy and nothing runs it"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E1-B05", "E1-P06"]
+
+[[row]]
+id      = "component-outgrows-table"
+group   = "H"
+class   = "A component that legitimately outgrows the capability table"
+layers  = ["P"]
+check   = "cargo xtask cap flood refuses at the fixed bound, which is the behaviour a real supervisor has to change"
+cadence = ["every-pr"]
+status  = "partially"
+scheduled_by = ["E1-B13"]
+
+[[row]]
+id      = "imported-driver-not-over-ring"
+group   = "H"
+class   = "An imported driver reachable other than over a ring"
+layers  = ["X"]
+check   = "cargo xtask lint-licensing; lint-manifests refuses an imported image in shared"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "lint-licensing runs in the CI policy job as well as in lint_all; lint-manifests runs only in lint_all, so that half is every-verify."
+
+[[row]]
+id      = "shim-divergence"
+group   = "H"
+class   = "A shim diverging from the API it imitates"
+layers  = ["L4"]
+check   = "nothing — differential fuzzing against Linux is not built"
+cadence = ["never"]
+status  = "gap"
+accepted_because = "Named in proving-ground.html section 08 and owned by no task, because there is no shim."
+reversal = "The first imported driver is reachable over a ring — the point at which 'what does Linux do here' stops being rhetorical."
+
+# --- I — the apparatus itself -------------------------------------------------
+
+[[row]]
+id      = "weakened-test"
+group   = "I"
+class   = "A weakened test — #[ignore], assert!(true), a shrunk repeat count"
+layers  = ["X"]
+check   = ".claude/hooks/tests-hold.sh, then REVIEW.md pass 2"
+cadence = ["every-edit", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "hook-stopped-firing"
+group   = "I"
+class   = "A hook that stopped firing"
+layers  = ["X"]
+check   = ".claude/hooks/selftest.sh, in the policy job and in agent-evals.yml"
+cadence = ["every-pr", "weekly"]
+status  = "catches"
+
+[[row]]
+id      = "agent-config-regression"
+group   = "I"
+class   = "Agent configuration regression"
+layers  = ["X"]
+check   = "cargo xtask eval, twenty-two tasks, floor 0.95"
+cadence = ["every-pr", "weekly"]
+status  = "partially"
+accepted_because = "The suite measures whether a policy is known, not whether it is followed in hour three of a long session. evals/README.md states it, and the hooks exist because of it."
+reversal = "A policy violation passes the eval suite and no hook catches it."
+
+[[row]]
+id      = "test-on-no-runner"
+group   = "I"
+class   = "A test that exists and runs on no runner"
+layers  = ["X"]
+check   = "cargo xtask test is --workspace --exclude f-kernel; the CI test jobs name four crates, so xtask and bench tests run locally and not in the gate"
+cadence = ["every-verify"]
+status  = "partially"
+notes   = "The same drift xtask test was changed to fix: a hand-written crate list stops matching the workspace the moment a crate is added, and silently."
+scheduled_by = ["E0-P01"]
+
+[[row]]
+id      = "kernel-fault-path-rot"
+group   = "I"
+class   = "A kernel fault path that no longer reports"
+layers  = ["P"]
+check   = "cargo xtask fault pf|ud|df|nx|wx|stack"
+cadence = ["on-demand"]
+status  = "gap"
+accepted_because = "Narrowly. The exception path does run in the gate — cargo xtask user boots six processes that fault and requires the kernel to report each and survive it. What is unscheduled is the kernel-mode half: the double-fault stack, the W^X and NX faults, the guard page under the fault stack, all of which change only when the address space or the IDT changes."
+reversal = "A kernel-mode fault path breaks without `user` noticing, or the kernel job stops being the longest in the gate and six more boots are free. The gate's measured wall clock is 2 m 56 s against a ten-minute budget, so this is the weakest acceptance in this file."
+
+[[row]]
+id      = "panic-vs-hang"
+group   = "I"
+class   = "A panic reaching CI as a hang, or a hang as a pass"
+layers  = ["P"]
+check   = "cargo xtask panic — three endings, three fixtures"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "aarch64-compile"
+group   = "I"
+class   = "AArch64-only compile failure"
+layers  = ["L2", "X"]
+check   = "cargo check --target aarch64-unknown-none over the four crates, inside xtask test; the arm job builds and runs them"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "aarch64-ordering"
+group   = "I"
+class   = "AArch64-only ordering failure"
+layers  = ["L2"]
+check   = "tests (AArch64, weak memory) and memory-ordering litmus (AArch64, weak memory)"
+cadence = ["every-pr"]
+status  = "partially"
+scheduled_by = ["E0-P16", "E1-P11"]
+
+[[row]]
+id      = "toolchain-drift"
+group   = "I"
+class   = "Toolchain drift"
+layers  = ["X"]
+check   = "rust-toolchain.toml is a protected path; the container image reads its pin from that file rather than restating it"
+cadence = ["every-edit", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "dependency-policy"
+group   = "I"
+class   = "A dependency with a bad licence or a known advisory"
+layers  = ["X"]
+check   = "cargo deny check in the deps job; security-scan.yml against the advisory database"
+cadence = ["every-pr", "weekly"]
+status  = "catches"
+
+[[row]]
+id      = "credential-in-diff"
+group   = "I"
+class   = "A credential in the diff"
+layers  = ["X"]
+check   = ".claude/hooks/no-credentials.sh, REVIEW.md pass 3, security-scan.yml"
+cadence = ["every-edit", "every-pr", "weekly"]
+status  = "catches"
+
+[[row]]
+id      = "release-not-reproducible"
+group   = "I"
+class   = "Release package non-reproducible across two machines"
+layers  = ["X"]
+check   = "the package matrix and the address job; release --twice is the same-machine half"
+cadence = ["every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "release-unnamed-tree"
+group   = "I"
+class   = "A release that cannot name its own tree"
+layers  = ["X"]
+check   = "cargo xtask release --dry-run — version and commit are fatal rather than unknown"
+cadence = ["every-pr", "per-release"]
+status  = "catches"
+
+[[row]]
+id      = "release-unauthorised"
+group   = "I"
+class   = "A release crossing the boundary without authorisation"
+layers  = ["X"]
+check   = ".claude/hooks/release-gate.sh on every Bash"
+cadence = ["every-edit"]
+status  = "catches"
+
+[[row]]
+id      = "coverage-validation-path"
+group   = "I"
+class   = "Coverage falling on the entry-validation path"
+layers  = ["L4"]
+check   = "cargo xtask coverage, published and watched; nothing gates"
+cadence = ["every-pr"]
+status  = "partially"
+notes   = "A coverage threshold rewards tests written to touch lines rather than to catch anything, which is why ci.yml publishes the number instead."
+scheduled_by = ["E1-P05"]
+
+[[row]]
+id      = "hardware-only-bug"
+group   = "I"
+class   = "A hardware-only bug — something QEMU emulates differently"
+layers  = ["L6", "P"]
+check   = "docs/first-boot-outside-qemu.md: one boot, by hand, on a virtual machine rather than metal"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E0-P18", "E0-D10"]
+
+[[row]]
+id      = "counters-unavailable"
+group   = "I"
+class   = "instructions_per_op and joules_per_op absent, narrowing a claim"
+layers  = ["L5", "L6"]
+check   = "the harness carries both fields and marks them Unavailable rather than omitting them, and the value is only as fresh as the last claim run"
+cadence = ["on-demand"]
+status  = "partially"
+scheduled_by = ["E0-P05", "E5-P03"]
+
+[[row]]
+id      = "verify-gate-drift"
+group   = "I"
+class   = "A drift between what verify runs and what the gate runs"
+layers  = ["X"]
+check   = "this table, and the note verify prints on its last line"
+cadence = ["every-verify"]
+status  = "partially"
+accepted_because = "The two are deliberately different — verify cannot run the AArch64 tests, the litmus job or a second runner — so a check that required them to be equal would be asserting something false."
+reversal = "A third check exists in one and not the other without a stated reason, which is what lint-taxonomy would notice."

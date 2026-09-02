@@ -113,8 +113,8 @@ record's rather than the table's.
 | `name` | string | yes | The slot's name, `[a-z0-9-]`, unique within the manifest. A ring's `to` refers to it. |
 | `type` | string | yes | `abi::cap::CapType`, one snake_case word per variant: `untyped`, `frame`, `address_space`, `channel`, `endpoint`, `irq`, `buffer_set`. The variant is spelled, not the short label `CapType::label` prints; `space` and `bufset` are refused. The lint's table is checked against `abi/src/cap.rs` by a test, so a variant added there fails here until this document and the table say so. |
 | `rights` | list | yes | The minimum rights the supplied handle must carry, from `abi::cap::rights`: `read`, `write`, `execute`, `derive`, `revoke`, `grant`. Each at most once; an unknown word is refused. An empty list is legal — `rights::NONE` names an object and authorises nothing. `execute` on an `endpoint` is refused: RFC 0008 says it is undefined there and a derivation asking for it is refused, and a manifest asking for it would be refused later at greater cost. |
-| `from` | string | yes | Where the handle is routed from. `supervisor`: supplied in the spawn entry from the supervisor's own table. `sibling:<name>`: supplied by the supervisor from an endpoint it holds to the named component under the same supervisor — a *need*, checked for shape here and for existence by the topology, which is not in this file. `powerbox`: not supplied at spawn; an *ask*, resolved while running through the broker of RFC 0008. A component is not its own sibling. |
-| `optional` | boolean | no | Absent means `false`. A need not supplied and not optional refuses the spawn; an optional one arrives as an empty slot. The default is the one that gives less. |
+| `from` | string | yes | Where the handle is routed from. `supervisor`: supplied in the spawn entry from the supervisor's own table. `sibling:<name>`: supplied by the supervisor from an endpoint it holds to the named component under the same supervisor — a *need*, checked for shape here and for existence by the topology, which is not in this file. Because it arrives *through* an endpoint, only an `endpoint` or a `channel` may say it: a page of memory, an interrupt or an address space does not travel on one and comes from the supervisor's own table, so `sibling:` on any other `type` is refused. `powerbox`: not supplied at spawn; an *ask*, resolved while running through the broker of RFC 0008. A component is not its own sibling. |
+| `optional` | boolean | no | Absent means `false`. A need not supplied and not optional refuses the spawn; an optional one arrives as an empty slot. The default is the one that gives less. Refused on an ask: `powerbox` supplies nothing at spawn, so there is nothing there for `optional` to make optional, and a field that means nothing under the declared route is refused like every other one. |
 | `frames` | integer | iff `type = "frame"` | How many pages, each 4096 bytes, at least one. Refused on any other type: a count belongs to the thing it counts. |
 | `bytes` | integer | iff `type = "untyped"` | How much, a positive multiple of 4096, because untyped memory is retyped a page at a time. Refused on any other type. |
 
@@ -164,17 +164,36 @@ E1-B05 applies it; the frame provides only the mechanism.
 | `policy` | string | yes | `never`: the place is left empty however the component ended. `on_fault`: respawn after a fault — an exception at ring 3, or a corrupted control ring — and not after an exit or a stop. `always`: respawn after a fault or an exit, and not after a stop, which is the supervisor's own decision. |
 | `backoff_first_ms` | integer | iff not `never` | The pause before the first respawn, at least 1. Unit: milliseconds. Zero is a restart loop with no pause in it. |
 | `backoff_max_ms` | integer | iff not `never` | The pause doubles from `backoff_first_ms` on each respawn and is capped here; not below the first. Unit: milliseconds. |
-| `max_restarts` | integer | iff not `never` | How many respawns the supervisor will perform over its own lifetime, at least 1. Unit: restarts. After the last, the place stays empty: connects to it pend until their deadlines pass, which is what its clients see. Zero is `never` under another name and is refused; say `never`. |
+| `max_restarts` | integer | iff not `never` | How many respawns the supervisor performs within `budget_window_ms` before it stops trying, at least 1. Unit: restarts. Zero is `never` under another name and is refused; say `never`. |
+| `budget_window_ms` | integer | iff not `never` | The window that count is taken over, at least 1 and never below `backoff_max_ms`. Unit: milliseconds. |
 
-Under `never` the three quantities are refused rather than ignored, because a
+Under `never` the four quantities are refused rather than ignored, because a
 reader who sees a backoff will believe there is one.
 
-The count does not reset. A budget that resets is a budget a slow fault loop
-defeats — one fault an hour, forever, restarted forever — and a component that
-has exhausted a lifetime budget is one somebody should look at. E1-P06 kills
-drivers at random under load and is the workload that says whether a lifetime
-budget is too tight; if it is, the reversal is a `reset_after_ms` field in schema
-2, with the reason written beside it.
+The count and the window are one field between them, and RFC 0008 is why there
+are two. That RFC fixes the budget as *how many restarts in what window*, and
+says the window is read from `Env` — so a restart storm is a seeded scenario
+under the simulator rather than a wall-clock accident, which is RFC 0004's
+substrate keeping a call site it would otherwise have lost. An earlier draft of
+this schema had `max_restarts` alone and counted over the supervisor's lifetime,
+on the argument that a budget which resets is a budget a slow fault loop defeats
+— one fault a day, forever, restarted forever. The window is what the tree says
+instead, because a lifetime count is a number no scenario can reach and
+therefore a rule nothing tests. The slow loop is real and the answer to it is a
+lifetime cap *beside* the window, in schema 2, when a workload shows one: E1-P06
+kills drivers at random under load and is that workload. Adding it amends RFC
+0008's restart section, which is where the argument would have to be had.
+
+A window below `backoff_max_ms` is refused. Once the backoff reaches its cap,
+consecutive restarts are further apart than the window, so the count never
+reaches its maximum and the budget can never be exhausted — a policy that says
+`on_fault` with a budget and means `always`.
+
+What exhaustion does is RFC 0008's, not this schema's: the place is **retired**
+— its endpoint is revoked in every holder's table, pending connects complete
+`PEER/GONE`, and the supervisor's own supervisor is told by the ordinary route.
+A manifest declares the numbers; what happens when they run out is written once,
+there.
 
 Milliseconds here and nanoseconds on the wire, deliberately: `Sqe::deadline` is
 nanoseconds because a deadline is compared against a clock, and a backoff is a
@@ -199,6 +218,22 @@ and answers `ADMISSION` naming the component that could not be satisfied.
 In the soft class the three CPU fields are refused: the soft class is scheduled
 around the hard class, holds no core, and is refused nothing at admission but
 memory. Declaring a budget for it would be a number nothing reads.
+
+`class` is also the ceiling RFC 0025 refuses against: an entry whose class is
+more urgent than its submitter's ceiling earns `ADMISSION`/`NOT_HELD`, and this
+field is where that ceiling is declared. `abi::class` has four ordinals and this
+table has two spellings, which is not a gap — the table says what admission may
+*refuse*, and only two of the four are refusable. `hard` is refused by RFC
+0007's arithmetic; `soft` is refused its memory and nothing else; `batch` and
+`idle` reserve nothing, so a manifest declaring one would state a demand no
+admission test can fail. A component that wants to submit at batch or idle
+already may: a ceiling is a maximum, and RFC 0025's first bound demotes and
+never promotes. What this schema does not offer is a ceiling *below* `soft` — a
+component that may not write `SOFT` at all — which is what RFC 0025 means by
+"batch for a component that declares nothing". Schema 1 does not produce that
+component, because `[reservation]` is required; the day one is wanted it is a
+third value here and a `schema` bump, and not a default read into a missing
+table, because a default is how a component acquires a ceiling nobody chose.
 
 RFC 0007's other two components — memory bandwidth and a cache partition — are
 not declared. They are the machine's to supply, by partition or by exclusion,
@@ -225,12 +260,13 @@ For a reviewer, in one place:
   a data ring; `features_required` beyond `features`; `shared_virtual` without
   its feature bit.
 - A count on the wrong type; zero frames; bytes not a multiple of a page.
+- `sibling:` on anything but an `endpoint` or a `channel`; `optional` on an ask.
 - A ring named `control`; entries not a power of two in range; a version range
   with a zero or an inverted floor; a client ring naming a missing, non-endpoint
   or non-connectable capability; a server ring naming one at all; `clients`
   outside 1..=64 or on a client ring.
 - Restart quantities under `never`; a zero first backoff; a max below the first;
-  zero restarts.
+  zero restarts; a zero window, or one below the longest backoff.
 - CPU fields in the soft class; memory not in the class's grain; a budget above
   the period; zero cores.
 - Two manifests with one `name`; an image path that names a file.

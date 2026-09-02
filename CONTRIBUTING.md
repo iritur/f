@@ -16,9 +16,10 @@ cargo xtask lint
 cargo xtask test
 ```
 
-Both must pass. `lint` runs four checks that encode architectural decisions
-rather than style preferences, and each failure message names where the
-decision comes from.
+Both must pass. `lint` runs the checks that encode architectural decisions
+rather than style preferences — `cargo xtask` lists them, and the list grows as
+rules stop being review and start being executable — and each failure message
+names where the decision comes from.
 
 ## The three policies that are not negotiable in review
 
@@ -35,8 +36,8 @@ RFC. See RFC 0001.
 **The licence boundary.** The permissive tree never imports `third_party/`.
 Imported code is reachable only over a ring. See `LICENSING.md` and RFC 0003.
 
-The fourth check, `lint-percpu`, is not one of the three: it enforces a design
-decision rather than a policy, which is why it is named here and not above.
+`lint-percpu` is not one of the three either: it enforces a design decision
+rather than a policy, which is why it is named here and not above.
 Kernel state is per-CPU from the first allocation, behind `PerCpu<T>`, while
 only one core is running — see `kernel/src/percpu.rs` and section 14 of
 `docs/design/ring-scene-boot.html`. The reason it is mechanised at all is that
@@ -58,7 +59,7 @@ because it is a check somebody believes is happening.
 | | | Enforced by |
 |---|---|---|
 | **R01** Name the mechanism, not the intention | A drawback is answered when something makes it unavailable. "We will be careful about X" is a plan, and plans are what the systems being criticised also had. | review |
-| **R02** A boundary the hardware speculates through is not a confidentiality boundary | The one place this architecture is currently weaker than the system it criticises, and it entered by nobody stating the rule. | review for the kind a native component declares; the supervisor refusal and manifest lint RFC 0005 names, landing with E1-B05 |
+| **R02** A boundary the hardware speculates through is not a confidentiality boundary | The one place this architecture is currently weaker than the system it criticises, and it entered by nobody stating the rule. | **`cargo xtask lint-manifests`** for RFC 0005's schema and its licence rule; the supervisor's `ADMISSION` and `ARGUMENT` refusals that RFC names, landing with E1-B05; review for whether a native component holds a secret |
 | **R03** Every quantity crossing the ABI states its unit, its epoch and its zero | `deadline: u64` shipped with none of the three, in the one crate whose entire purpose is to be correct against code written by somebody else. | **`cargo xtask lint-units`** |
 | **R04** Fail closed | Unknown opcode, unknown flag, non-zero reserved field: refuse. Ignoring an unknown bit is how a protocol acquires two incompatible interpretations and no error. | review, plus the hostile-peer fuzzer at E1 |
 | **R05** Nothing is delivered asynchronously | Every event is a ring entry drained at a polling point. This is what keeps the determinism contract whole, and it is why this system never needs the concept of async-signal-safety. | **`cargo xtask lint-callbacks`** |
@@ -70,11 +71,13 @@ because it is a check somebody believes is happening.
 | **R11** The apparatus ships with the thing it measures | Determinism and coverage instrumentation were built early for exactly this reason, and the reasoning was written down. The state tree is the same argument and was deferred anyway. | process: a milestone that produces a number also produces its instrument |
 | **R12** A concession is written as a cost, never hidden in a metric | "Full system rollback: one reboot" is a concession dressed as a target. Reservations leaving capacity idle belongs beside the latency claim, not in a rebuttal after somebody runs a throughput benchmark. | review; the claims registry carries the cost beside the number |
 
-Three are executable, and each has a fixture in `xtask` that breaks it — a lint
-that has never failed is indistinguishable from a lint that cannot. The other
-nine are review, and saying so is the point: **R01 applies to this table**. A
-rule with "review" beside it is a rule somebody has to apply, which is a plan,
-and this table is honest about which rows are plans.
+Three are executable in full, and each has a fixture in `xtask` that breaks it —
+a lint that has never failed is indistinguishable from a lint that cannot. R02
+is executable in the half a manifest can carry and review in the half that is a
+judgement about what a component holds, which is why its cell says both. The
+other eight are review, and saying so is the point: **R01 applies to this
+table**. A rule with "review" beside it is a rule somebody has to apply, which
+is a plan, and this table is honest about which rows are plans.
 
 ## Where a change starts
 

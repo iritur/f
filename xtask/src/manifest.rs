@@ -106,6 +106,13 @@ pub const DOMAINS: &[&str] = &["shared", "private", "hostile"];
 pub const CAP_TYPES: &[&str] =
     &["untyped", "frame", "address_space", "channel", "endpoint", "irq", "buffer_set"];
 
+/// The kinds a `from = "sibling:<name>"` route can deliver. A sibling route is
+/// the supervisor connecting this component to a peer through an endpoint it
+/// holds, so what arrives is what travels on one: the endpoint itself, or a
+/// channel already opened on it. Memory, an interrupt or an address space
+/// arrives from the supervisor's own table and says `from = "supervisor"`.
+pub const SIBLING_KINDS: &[&str] = &["endpoint", "channel"];
+
 /// `abi::cap::rights`, one word per bit. Checked against the source the same
 /// way as [`CAP_TYPES`].
 pub const RIGHTS: &[&str] = &["read", "write", "execute", "derive", "revoke", "grant"];
@@ -742,20 +749,37 @@ impl Checker<'_> {
             {
                 f.refuse(*line, "`execute` on an endpoint is undefined and a derivation asking for it is refused — RFC 0008");
             }
-            if let Some((line, from)) = f.string("from", true) {
-                match from.as_str() {
+            let route = f.string("from", true);
+            if let Some((line, from)) = route.as_ref().map(|(l, f)| (*l, f.as_str())) {
+                match from {
                     "supervisor" | "powerbox" => {}
                     other => match other.strip_prefix("sibling:") {
                         Some(sibling) if is_name(sibling) => {
                             if own.as_deref() == Some(sibling) {
                                 f.refuse(line, "`from = \"sibling:…\"` names this component; a component is not its own sibling");
                             }
+                            // A sibling route is the supervisor handing over
+                            // something it holds *to that component*, which is
+                            // an endpoint; a page of memory or an interrupt
+                            // does not travel on one and comes from the
+                            // supervisor's own table instead. Refused here
+                            // rather than left for the spawn to discover,
+                            // which is what this lint is for.
+                            if let Some(kind) = kind.as_deref()
+                                && !SIBLING_KINDS.contains(&kind)
+                            {
+                                f.refuse(line, &format!("`from = \"{from}\"` on a `{kind}`: a sibling route arrives through an endpoint the supervisor holds to that component, so it can only deliver {}", quoted(SIBLING_KINDS)));
+                            }
                         }
                         _ => f.refuse(line, &format!("`from = \"{from}\"` is not \"supervisor\", \"powerbox\" or \"sibling:<name>\"")),
                     },
                 }
             }
-            f.boolean("optional");
+            if route.as_ref().is_some_and(|(_, from)| from == "powerbox") {
+                f.forbid("optional", "an ask is not supplied at spawn at all — the powerbox resolves it while the component runs — so there is nothing here for `optional` to make optional");
+            } else {
+                f.boolean("optional");
+            }
             match kind.as_deref() {
                 Some("frame") => {
                     if let Some((line, frames)) = f.int("frames", true)
@@ -897,10 +921,11 @@ impl Checker<'_> {
                 let policy = f.one_of("policy", RESTART_POLICIES).map(|(_, p)| p);
                 match policy.as_deref() {
                     Some("never") => {
-                        let why = "`policy = \"never\"` restarts nothing, so a backoff or a count would be read and never applied";
+                        let why = "`policy = \"never\"` restarts nothing, so a backoff, a count or a window would be read and never applied";
                         f.forbid("backoff_first_ms", why);
                         f.forbid("backoff_max_ms", why);
                         f.forbid("max_restarts", why);
+                        f.forbid("budget_window_ms", why);
                     }
                     Some(_) => {
                         let first = f.int("backoff_first_ms", true);
@@ -927,6 +952,23 @@ impl Checker<'_> {
                             && n == 0
                         {
                             f.refuse(line, "`max_restarts = 0` is `policy = \"never\"` under another name; say that instead");
+                        }
+                        // RFC 0008 fixes the budget as how many restarts in
+                        // what window, and the window is what `Env` seeds — so
+                        // a restart storm is a scenario under the simulator
+                        // and not a wall-clock accident. A count with no
+                        // window is a different policy from the one the RFC
+                        // states, so the window is required, not optional.
+                        let window = f.int("budget_window_ms", true);
+                        if let Some((line, w)) = window
+                            && w == 0
+                        {
+                            f.refuse(line, "`budget_window_ms = 0` is a budget with no window to count restarts in — RFC 0008");
+                        }
+                        if let (Some((_, hi)), Some((line, w))) = (max, window)
+                            && w < hi
+                        {
+                            f.refuse(line, &format!("`budget_window_ms = {w}` is below `backoff_max_ms = {hi}`: once the backoff reaches its cap, consecutive restarts fall outside the window, the count never reaches the maximum, and the budget can never be exhausted"));
                         }
                     }
                     None => {}
@@ -1249,6 +1291,36 @@ memory_bytes = 65536
             &edit("from   = \"sibling:store\"", "from   = \"sibling:example\""),
             "not its own sibling",
         );
+        // A sibling route arrives through an endpoint, so it cannot deliver an
+        // interrupt or a page of memory: those come from the supervisor's own
+        // table and say so.
+        refused_for(
+            &edit("type   = \"endpoint\"", "type   = \"irq\""),
+            "a sibling route arrives through an endpoint",
+        );
+        // And the ask has a passing case, not only refusals. It is the one
+        // route this schema resolves while the component runs, and a
+        // vocabulary word with no worked instance is a word.
+        let ask = edit("from   = \"sibling:store\"", "from   = \"powerbox\"");
+        check("user/example/manifest.toml", &ask).unwrap_or_else(|f| panic!("{}", f.join("\n")));
+    }
+
+    #[test]
+    fn optional_belongs_to_a_route_that_supplies_something() {
+        // A need may be optional and arrive as an empty slot. An ask is not
+        // supplied at spawn at all, so `optional` on one is a field that means
+        // nothing under the declared route — refused rather than ignored,
+        // which is the rule this schema applies everywhere else.
+        let sound = edit("from   = \"supervisor\"", "from   = \"supervisor\"\noptional = true");
+        check("user/example/manifest.toml", &sound).unwrap_or_else(|f| panic!("{}", f.join("\n")));
+        refused_for(
+            &edit("from   = \"sibling:store\"", "from   = \"powerbox\"\noptional = true"),
+            "nothing here for `optional`",
+        );
+        refused_for(
+            &edit("from   = \"supervisor\"", "from   = \"supervisor\"\noptional = \"yes\""),
+            "`optional` is a boolean",
+        );
     }
 
     #[test]
@@ -1354,6 +1426,10 @@ memory_bytes = 65536
             "restarts nothing",
         );
         refused_for(
+            &edit("policy = \"never\"", "policy = \"never\"\nbudget_window_ms = 1000"),
+            "restarts nothing",
+        );
+        refused_for(
             &edit("policy = \"never\"", "policy = \"on_fault\""),
             "`backoff_first_ms` is required",
         );
@@ -1371,9 +1447,25 @@ memory_bytes = 65536
             ),
             "under another name",
         );
+        // RFC 0008 fixes the budget as how many restarts *in what window*, so
+        // a count with no window is a policy that RFC does not describe.
+        refused_for(
+            &edit(
+                "policy = \"never\"",
+                "policy = \"on_fault\"\nbackoff_first_ms = 10\nbackoff_max_ms = 100\nmax_restarts = 3",
+            ),
+            "`budget_window_ms` is required",
+        );
+        refused_for(
+            &edit(
+                "policy = \"never\"",
+                "policy = \"on_fault\"\nbackoff_first_ms = 10\nbackoff_max_ms = 100\nmax_restarts = 3\nbudget_window_ms = 50",
+            ),
+            "below `backoff_max_ms",
+        );
         let sound = edit(
             "policy = \"never\"",
-            "policy = \"always\"\nbackoff_first_ms = 10\nbackoff_max_ms = 100\nmax_restarts = 3",
+            "policy = \"always\"\nbackoff_first_ms = 10\nbackoff_max_ms = 100\nmax_restarts = 3\nbudget_window_ms = 60_000",
         );
         check("user/example/manifest.toml", &sound).unwrap_or_else(|f| panic!("{}", f.join("\n")));
     }
@@ -1498,6 +1590,30 @@ memory_bytes = 8192
             .map(|name| name.to_ascii_lowercase())
             .collect::<Vec<_>>();
         assert_eq!(features, FEATURES, "FEATURES has drifted from abi::feature");
+    }
+
+    /// The one cross-crate number the tables above do not cover: a constant
+    /// documented as half of another crate's, which nothing checked until this
+    /// was written. If `TABLE_SLOTS` moves, two documents go on asserting
+    /// arithmetic that stopped being true — the same drift the tables above
+    /// are guarded against, in the one place it was left as prose.
+    #[test]
+    fn the_capability_bound_is_half_the_table() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let cap =
+            std::fs::read_to_string(root.join("kernel/src/cap.rs")).expect("kernel/src/cap.rs");
+        let slots: usize = cap
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("pub const TABLE_SLOTS: usize = "))
+            .and_then(|rest| rest.trim_end_matches(';').trim().parse().ok())
+            .expect("kernel::cap::TABLE_SLOTS");
+        assert_eq!(
+            CAPABILITIES_MAX * 2,
+            slots,
+            "CAPABILITIES_MAX is documented here and in docs/manifest.md as half of \
+             kernel::cap::TABLE_SLOTS; move it with the table, or say at the constant \
+             why the relation ended"
+        );
     }
 
     /// The lines between `open` and the first `}` at its indentation.

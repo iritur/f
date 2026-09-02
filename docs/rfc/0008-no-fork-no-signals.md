@@ -4,7 +4,13 @@
 - Date: 2026-09-02
 - Affects: `kernel/` (`process.rs`, `cap.rs`, `ring.rs`), `abi/` (`cap.rs` —
   `Endpoint`, `Untyped` and `rights::GRANT` acquire their objects; `door.rs`,
-  which shrinks; `feature::CONTROL_EVENTS`, which acquires a meaning),
+  which shrinks; `feature::CONTROL_EVENTS`, which acquires a meaning;
+  `lib.rs` — `Cqe` acquires a `cflags` bit for a notice and, with it, a second
+  reading of `user_data`, and `ChannelHeader::epoch` acquires a second reading,
+  both of them doc comments that R03 makes normative and `cargo xtask
+  lint-units` reads, so both are reworded by whoever lands the bit; and one
+  new code in `error::peer` for a connect whose place is still empty at its
+  deadline, which RFC 0010 permits a service to add and a domain to gain),
   `user/init/`, `docs/design/deadline-all-the-way-down.html` sections 02 and
   07, `docs/design/fast-path.html` (the component model row),
   `docs/what-must-be-stated.html` sections 04 and 08 (the `fork()`, *Signals*
@@ -119,8 +125,14 @@ refuse, and spawn is the moment of refusal. The manifest's domain field is RFC
 domain is, and what may share one, that RFC decides.
 
 The spawn completes on the supervisor's control ring with one new handle in the
-supervisor's table: an **`Endpoint`** to the child, carrying every right. What
-each right means on an endpoint is stated below. The child's first instruction
+supervisor's table: an **`Endpoint`** to the child, carrying `rights::ALL &
+!rights::EXECUTE` — the five rights that are defined on an endpoint, and not
+the sixth, which is not. What each right means on an endpoint is stated below.
+Minting the undefined bit and leaving it to mean nothing is the reserved-bit
+hazard R04 exists to refuse: `rights::narrows` would route it down every path,
+and a later ABI that gave `EXECUTE` a meaning on an endpoint would widen
+authority already granted everywhere, with no derivation and no notice. The
+child's first instruction
 runs with one register set: the address at which its control ring is mapped.
 Everything else it will ever know it learns by draining that ring, and the
 first thing it finds there is one *granted* notice per need the manifest
@@ -157,7 +169,12 @@ meanings are this document's.
 **Notices**, from the frame to the component. A notice is a completion entry
 that answers no submission. It carries a completion flag saying so, its result
 is the notice kind, its `user_data` is the handle it concerns, and its `ext`
-carries the rest. Seven kinds, and a version of the ABI that adds an eighth
+carries the rest. That flag is the whole of the ABI change, and it costs
+`Cqe::user_data` its present doc comment — "the submitter's own value, returned
+unchanged" is true of every entry that answers a submission and of no notice,
+so under R03 the field's normative sentence becomes *the submitter's own value,
+except on an entry carrying the notice flag, where it is the handle the notice
+concerns*. Seven kinds, and a version of the ABI that adds an eighth
 raises `ABI_VERSION` so that RFC 0011 keeps it off a channel whose peer does
 not know it; a component that nonetheless meets a kind it cannot name has found
 a frame bug and exits saying so, because R04 does not permit it to skip the
@@ -181,16 +198,31 @@ promise nothing can refuse and the frame refuses to make it: a stop submission
 whose deadline is `NO_DEADLINE` is an `ARGUMENT` error. A stop whose deadline
 has already passed is a kill, and it is spelled the same way as a polite stop
 so that the simulator's "kill this driver at a seeded moment" is one opcode
-rather than two paths through the frame.
+rather than two paths through the frame. A stop that arrives while a stop is
+already pending **never moves the deadline later**: the frame keeps the earlier
+of the two and completes the second submission saying which it kept. A promise
+that can be silently relaxed by whoever made it is the thing R08 refuses to
+call a deadline, and a component that has already begun quiescing against one
+must not have it withdrawn under it.
 
-*Reclaim applies to allocations, not to reservations.* A hard-class reservation
-holds its cores for its life under RFC 0007 and is never reclaimed; a core in an
-ordinary allocation can be. The notice is what makes parking clean possible; it
-does not make interruption impossible, and the resource document's rule that
-the kernel preempts at allocation boundaries is the deadline in the notice.
+*Reclaim applies to allocations, not to reservations, and it names one core.*
+A hard-class reservation holds its cores for its life under RFC 0007 and is
+never reclaimed; a core in an ordinary allocation can be. The notice is what
+makes parking clean possible; it does not make interruption impossible, and the
+resource document's rule that the kernel preempts at allocation boundaries is
+the deadline in the notice. Because the notice names a core in `ext` and a
+deadline of its own, reclaiming core 3 and then core 7 before the component
+drains is **two facts, not one**, and neither may displace the other: a
+component told only about core 7 parks core 7 and is preempted mid-task on core
+3, which is the outcome the notice exists to prevent.
 
-*The last four are grades, and the first three are facts about handles.* That
-distinction is what the next subsection rests on.
+*Two of the seven are grades; the other five are facts.* Pressure and
+generation are grades: a value that is true of the component now, where a value
+that was true a moment ago is not worth a second entry. The three handle
+notices are facts about a slot, and stop and reclaim are facts about a promise
+— a deadline somebody must meet — which is why neither of them may be
+overwritten by a later one of its kind. That distinction is what the next
+subsection rests on.
 
 The door shrinks to what RFC 0014 rule 1 permits: `EXIT`, which a component
 genuinely cannot submit and then wait on, and the kernel-path doorbell of
@@ -209,33 +241,82 @@ control ring advisory, and killing a component for a full ring makes a busy
 component a dead one.
 
 The answer is that a notice is not a queued event; it is **pending state that
-the frame publishes when there is room**. The three handle notices — granted,
-revoked, peer gone — are at most one per slot of the component's table at any
-moment, so their pending state is two bits *in the slot*, beside the mapping
-address that already lives there for the same reason `kernel/src/cap.rs` gives:
-a structure beside the table can disagree with it, and a bit in the slot
-cannot. The four grades are at most one per kind per component, latest wins:
-a pressure grade that changes twice before the component drains once is one
-notice carrying the second grade, because the first was never true of anything
-the component could still act on. The frame posts pending state in a fixed
-order — slots ascending, then the grades in the order of the table above —
-whenever the completion ring has room, so the ring's depth bounds how much is
-*visible* and never how much is *true*.
+the frame publishes when there is room**. Every kind has somewhere to be
+pending that is bounded by something the component has already paid for, and
+the collapse rule for each is the rule for what is still true.
 
-Two consequences are stated so they are not discovered. A capability granted
-and revoked before its granted notice was ever drained posts nothing: a
-component that was never told it held something never held it, and the frame
-clears both bits. And ordering across kinds is not promised — a component that
-drains late sees a revoked notice for slot three before a peer-gone for slot
-nine whatever the order the events had — while ordering within a slot is: no
-slot posts revoked before granted. A component that needs to know *when* reads
-`Cqe.timestamp`, which every completion already carries.
+**The three handle notices live in the slot they concern** — beside the mapping
+address that already lives there, for the reason `kernel/src/cap.rs` gives: a
+structure beside the table can disagree with it, and a field in the slot
+cannot. The field has five states, so three bits, and the states are the whole
+protocol:
 
-This is also why the pending state belongs to E1-B13 rather than to the ring
-code. The table becomes an object paid from `Untyped` in that task, and the
-notice bits are part of what a slot costs. A component's whole notice surface
-is then bounded by what it has paid for, which is the same bound everything
-else in this design has.
+| state | what the frame owes the component |
+| --- | --- |
+| quiet | nothing |
+| granted | one *granted* notice |
+| revoked | one *revoked* notice |
+| peer gone | one *peer gone* notice |
+| granted, then peer gone | both, granted first |
+
+Three rules make every collision total, rather than one rule and two cases
+somebody else decides later:
+
+1. **An undelivered grant that is revoked posts nothing, and the slot goes
+   quiet.** A component that was never told it held something never held it.
+2. **Peer death does not swallow the grant.** A channel handle granted and
+   widowed before the drain posts *granted* and then *peer gone*, in that
+   order, because the granted notice is the only place the ask or need index
+   in `ext` is ever stated — collapse it and a component that asked the
+   powerbox for two things cannot tell which of them died.
+3. **Revoked is terminal and supersedes peer gone**, which is why the two
+   never coexist: both say stop using it, and only *revoked* names the refusal
+   (`AUTHORITY/REVOKED`) a later submission carrying the handle will earn. A
+   revoked slot holds nothing whose peer can die, so the reverse collision does
+   not arise.
+
+And a slot whose field is not quiet is **not refilled**. The frame places a new
+capability only in a quiet slot; a table with none refuses the operation
+`RESOURCE/QUOTA_EXHAUSTED`, and a component gets its slots back by draining.
+This is what keeps `Handle`'s generation honest under a pending notice: a
+*revoked* notice always names a handle whose slot has not been reissued, so the
+component can match it against what it holds rather than against whatever
+arrived in the meantime. Without the rule the field could not say which
+handle they meant, which is exactly the silent authority transfer the
+generation exists to make impossible (`abi/src/cap.rs`, *What the generation is,
+and what it is not*).
+
+**Stop and reclaim are promises, and they are pending per promise.** A stop is
+one word per component holding the earliest deadline stopped against; a second
+stop only ever moves it earlier. A reclaim is pending **per core**: a bit and a
+deadline for each core in the component's allocation, so reclaiming two cores
+before a drain is two notices and never one, and a second reclaim of the same
+core takes the earlier of the two deadlines. This lives beside the allocation
+rather than in the table, and it is bounded by the cores the component was
+given, which is the same shape of bound as everything else here: you can only
+be owed as many park notices as you hold cores.
+
+**Pressure and generation are grades**, at most one per kind per component,
+latest wins: a pressure grade that changes twice before the component drains
+once is one notice carrying the second grade, because the first was never true
+of anything the component could still act on. Two words, and the argument for
+latest-wins is exactly the argument that does *not* hold for a core or a
+deadline.
+
+The frame posts pending state in a fixed order — slots ascending, then stop,
+then reclaim by core ascending, then the two grades — whenever the completion
+ring has room, so the ring's depth bounds how much is *visible* and never how
+much is *true*. Ordering across kinds is not promised: a component that drains
+late sees a revoked notice for slot three before a peer-gone for slot nine
+whatever order the events had. Ordering within a slot is promised, and it is
+rule 2 above. A component that needs to know *when* reads `Cqe.timestamp`,
+which every completion already carries.
+
+This is also why the handle notices' pending state belongs to E1-B13 rather
+than to the ring code. The table becomes an object paid from `Untyped` in that
+task, and the notice field is part of what a slot costs. A component's whole
+notice surface is then bounded by what it has paid for — slots and cores —
+which is the same bound everything else in this design has.
 
 ### Authority: routed, or asked for through a broker the user sees
 
@@ -289,22 +370,34 @@ follows, and the bitmap is not widened to say so:
 | --- | --- |
 | `READ` | may map the occupant's published state tree, read-only — RFC 0013's mapping, reached through the map opcode with the endpoint as its operand |
 | `WRITE` | may connect: submit *connect* and receive a channel to the occupant |
-| `EXECUTE` | undefined; a derivation asking for it is refused |
+| `EXECUTE` | undefined, and therefore never present: the spawn does not mint it and a derivation asking for it is refused |
 | `DERIVE` | may mint a weaker endpoint — connect-only, say — to route to a peer |
 | `REVOKE` | may stop the occupant, and may refill the place by spawning into it |
 | `GRANT` | may hand the endpoint to another component |
 
-The supervisor holds all six. A client is routed `WRITE`, and usually `GRANT`
-so it can route onward; a monitor is routed `READ`. Nothing holds `REVOKE` on
+The supervisor holds the five that are defined. A client is routed `WRITE`,
+and usually `GRANT` so it can route onward; a monitor is routed `READ`. Nothing
+holds `REVOKE` on
 an endpoint except the component that spawned into it and whoever that
 component chose to derive it to — which is what *a supervisor* means here, and
 it is a role a capability confers rather than a kind of component.
 
-*Connect* on an endpoint whose place is empty does not fail; it pends, with
-the submitter's deadline, until a spawn refills the place or the place is
-retired. That is the mechanism behind gate G1's sentence — a driver is killed
-under load and the system does not notice — and it is stated here so E1-P06
-tests a design rather than a coincidence.
+*Connect* on an endpoint whose place is empty does not fail; it pends until a
+spawn refills the place, the place is retired, or its deadline passes. Three
+outcomes and three answers, because two of them and a silence is how E1-B05 and
+E1-P06 would each invent the third: a refill completes it with the channel; a
+retirement completes it `PEER/GONE`; and a deadline that passes with the place
+still empty completes it in the `PEER` domain with a code that says *empty*,
+which E1-B05 adds beside `peer::GONE` and which is not `GONE`, because the
+place may yet be refilled and a client that can wait longer may submit again.
+A connect submitted with `NO_DEADLINE` pends until one of the other two, which
+is the right default for a client whose only job is to talk to that service and
+the wrong one for a client with a deadline of its own — RFC 0025 is where a
+client's deadline comes from, and a client that must answer somebody else
+submits with it rather than waiting on a restart it cannot bound. This is the
+mechanism behind gate G1's sentence — a driver is killed under load and the
+system does not notice — and it is stated here so E1-P06 tests a design rather
+than a coincidence.
 
 ### Ending, and what everyone else sees
 
@@ -385,7 +478,15 @@ this RFC fixes is its semantics, whatever the spelling:
   a restarted peer increments the epoch and a mismatch means every outstanding
   token is stale; under this RFC the region does not survive the peer, so the
   field's job is to tell a reconnecting client, in the first cache line of its
-  new channel, that this is not the peer it had.
+  new channel, that this is not the peer it had. That is a second reading of
+  the field and it costs the first one: `ChannelHeader::epoch` reads today
+  "Unit: restarts of the writing peer. Zero is a peer that has not restarted,
+  which is the state every channel opens in", and under this RFC a channel to
+  the second occupant of a place opens at one, so the sentence R03 makes
+  normative becomes *the ordinal of the occupant this channel was opened to*,
+  with zero the first occupant of a place rather than a promise about how every
+  channel opens. Whoever lands the notice flag owes that rewording too;
+  `cargo xtask lint-units` reads the doc comment, not this document.
 
 ### What is foreclosed
 
@@ -423,13 +524,16 @@ Named so that each can be built without re-deciding.
 **E1-B05, the supervisor.** The first long-lived component that is not `init`,
 and the first that holds an `Untyped` it did not consume itself. It parses
 E1-D04's manifests and refuses what it does not know; evaluates a topology
-into spawn entries; holds an endpoint with all six rights per place; applies
-the restart policy on peer-gone notices with the budget window read from
-`Env`; and refills places by spawning into them. On the frame side, this task
-adds the spawn, connect, stop and grant opcodes to the frame's channel, maps
-one such channel per component, posts the seven notices from the pending state
-E1-B13 provides, and retires `ANNOUNCE`, `PROGRESS` and the four capability
-calls from the door, leaving `EXIT` and the doorbell. E1-P06 is its exit: a
+into spawn entries; holds an endpoint per place with the five rights defined
+on one; applies the restart policy on peer-gone notices with the budget window
+read from `Env`; and refills places by spawning into them. On the frame side,
+this task adds the spawn, connect, stop and grant opcodes to the frame's
+channel, maps one such channel per component, and posts the seven notices in
+the order this document fixes — the handle notices from the pending field
+E1-B13 provides, the stop word it refuses to relax, the reclaim bit and
+deadline per core in the allocation, and the two grades. It retires `ANNOUNCE`,
+`PROGRESS` and the four capability calls from the door, leaving `EXIT` and the
+doorbell. E1-P06 is its exit: a
 driver killed under load, a client that reconnects through the endpoint it
 holds, and a blast-radius number read from the frame's tree.
 
@@ -440,15 +544,21 @@ from the component's own `Untyped`; a component that cannot pay is refused
 table, so the derivation tree spans components and the revocation walk crosses
 them — still iterative, still bounded, now by the slots in existence rather
 than by one array, which is bounded by what `Untyped` has paid for. Each slot
-carries the two pending-notice bits, and each table carries the four grade
-words. The five properties and the negative suite hold at every size, and a
+carries the three-bit pending-notice field and its five states, no slot is
+refilled while its field is not quiet, and each table carries one stop word
+that only moves earlier and two latest-wins grade words; the per-core reclaim
+state is the scheduler's, beside the allocation, and is E1-B05's to keep. The
+five properties and the negative suite hold at every size, and a
 process that could not previously hold more than the fixed count now can. This
 is the task the fixed table said it would break on, and it does.
 
 **E1-B08, the user-level runtime.** Drains its control ring at every polling
 point it already has, and never installs anything that looks like a handler.
-On *reclaim* it parks the work on the named core before the deadline and
-reports, through its state tree, how often it did not. On *stop* it stops
+On *reclaim* it parks the work on the named core before that notice's own
+deadline — one notice per core, so a runtime holding four cores may be
+parking three of them against three different deadlines and must not treat the
+newest as the only one — and reports, through its state tree, how often it did
+not. On *stop* it stops
 submitting, drains its own rings to a quiescent point, and calls `EXIT` before
 the deadline; the frame's count of stops that became kills is the number that
 says whether the deadline the supervisor chose was honest. On *pressure* it
@@ -544,10 +654,14 @@ the account that overspent — there is no global victim selection, which RFC
 fuzzer of E1-P04 already covers the control ring's wire without a second
 harness. And the door finally shrinks to the two calls RFC 0014 could defend.
 
-**Hard.** The pending-notice bits make the capability table carry protocol
-state, and E1-B13 has to keep them honest across grow, revoke and death in the
-same walk. Cross-table parent links make the revocation walk's bound a system
-property rather than a constant, and the argument that it is still bounded
+**Hard.** The pending-notice field makes the capability table carry protocol
+state, and E1-B13 has to keep it honest across grow, revoke and death in the
+same walk; a slot that is not quiet cannot be refilled, so a component that
+never drains its control ring runs out of table before it runs out of memory —
+which is the failure we want (local, refused, `RESOURCE/QUOTA_EXHAUSTED`) and
+is still a failure somebody will meet. Cross-table parent links make the
+revocation walk's bound a system property rather than a constant, and the
+argument that it is still bounded
 rests on `Untyped` accounting being airtight. A supervisor's `Untyped` revoked
 ends every component under it at once, which is correct and which somebody
 will do by accident. Endpoints as places mean a client can be connected to an

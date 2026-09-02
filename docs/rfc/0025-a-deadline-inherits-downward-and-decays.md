@@ -25,12 +25,26 @@ applies:
    promote whatever it touched.
 
 2. **By the caller's admission.** An entry whose class is more urgent than its
-   submitter holds on that channel is *refused* — `ADMISSION`/`NOT_HELD` — not
-   demoted. The ceiling a component holds is declared in its manifest and
-   granted at spawn: a hard-class reservation after RFC 0007's test, a soft
-   standing as a right the supervisor routes, batch for a component that
-   declares nothing. It reaches the service as a fact about the channel and
-   never as a field of the entry, so the entry cannot raise it.
+   submitter's ceiling is *refused* — `ADMISSION`/`NOT_HELD` — not demoted. The
+   ceiling is a property of the component, not of a channel: it is declared in
+   its manifest and granted once at spawn — a hard-class reservation after RFC
+   0007's test, a soft standing as a right the supervisor routes, batch for a
+   component that declares nothing — and every channel that component opens
+   reports the same ordinal, upstream or down. It reaches a service as a fact
+   about the channel and never as a field of the entry, so the entry cannot
+   raise it.
+
+   One ceiling per component is what makes bounds 1 and 2 compose rather than
+   collide. Bound 1 hands a service a class no more urgent than its own
+   ceiling, so the entry it writes downstream clears bound 2 at the next hop:
+   an honest forwarder copies what `inherit` gave it and is never refused for
+   it. Were the ceiling per-channel, a service admitted more urgently upstream
+   than down would have its own forward refused — the outcome this RFC reserves
+   for a caller that lied — and forwarding would need a clamp against the
+   downstream ceiling instead of a copy. `abi::deadline`'s
+   `an_honest_forwarder_is_never_refused` walks two hops so that the day the
+   ceiling stops being one value, a test fails rather than a request quietly
+   disappearing.
 
 3. **By time.** An inherited deadline is never earlier than the request's
    arrival plus the callee's floor — its worst-case service time — and,
@@ -43,9 +57,21 @@ applies:
 4. **By depth.** The caller's urgency reaches `MAX_DEPTH` rings — four — from
    the component that originated the request, counted in the high byte of
    `Sqe::class`, and ends there: the request continues as batch work, whoever
-   sent it, with no deadline, and the counter saturates so nothing downstream
-   can restart the chain. A depth past the bound is a value no conforming
-   service writes and is refused as malformed.
+   sent it, with no deadline, and the counter saturates rather than resetting,
+   so a service that forwards what `inherit` gave it cannot restart the chain.
+   A depth past the bound is a value no conforming service writes and is
+   refused as malformed.
+
+   Be clear about what this bound is: the depth byte is peer-written, and a
+   receiver cannot distinguish a genuine depth-zero origination from a counter
+   somebody reset. A service that does not call `inherit`, or that writes
+   `pack(class, 0)` downstream, keeps a deadline alive past four rings and
+   nothing detects it. So bound 4 bounds an *honest* chain — it is why a
+   conforming topology has a predictable reach — and what binds a service that
+   resets it is bound 2: whatever it originates, it originates at its own
+   admitted class, which is exactly the reach it already has for its own work.
+   That is the reason bound 4 is not load-bearing on its own and is never the
+   only bound between an urgent client and a starved queue.
 
 And urgency has a scope. What `inherit` returns is a property of *one request*,
 held by the service while the request is in flight and dropped at its
@@ -173,8 +199,13 @@ lower the bound. And a chain deeper than four rings loses its deadline at the
 fifth, which the topology of this epoch never reaches but a later one might.
 
 **Forecloses.** Priority inheritance across unrelated requests: nothing here can
-raise a component, only a request. Unbounded chains: four rings and the counter
-saturates. A component setting its own class: the ceiling comes from the grant
+raise a component, only a request. Unbounded chains *of conforming services*:
+four rings and the counter saturates. A chain is not foreclosed against a
+service that resets the counter — nothing on the wire can tell that apart from
+an origination — and what is foreclosed there is the only thing that mattered:
+such a service cannot exceed its own admitted class, so it buys itself no
+urgency it did not already hold. A component setting its own class: the ceiling
+comes from the grant
 and an entry above it is refused. A priority ordinal inside the class field. A
 deadline in the past as a way to the front of a queue. And silent demotion,
 anywhere: a service that serves a request below its class without the flag is

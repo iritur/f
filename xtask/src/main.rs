@@ -247,7 +247,7 @@ cargo xtask <command>
   lint-callbacks     R05: no interface registers a callback
   lint-claim-owners  R09: every claim names the document that owns it
   lint-manifests     Every component manifest fits docs/manifest.md; RFC 0005
-                     rule 4 and RFC 0008's shape, checked before a boot is
+                     rule 4 and RFC 0008's shape, checked before a spawn does
   lint-snapshot      claims/snapshot.json holds what the registry holds
 
   unsafe             The number A-05 reports: lines inside `unsafe` as a share
@@ -3122,11 +3122,20 @@ struct Content {
 
 /// Whether a release may go out without one of its contents.
 ///
-/// The contract lists eight things a release contains, and two of them —
-/// the tuned-Linux baseline and the seed corpus — are owed to `E1` tasks that
-/// argue, correctly, that they cannot be written yet. That left `E0-R01` with
-/// one of two bad options: ship a package the contract says is incomplete, or
-/// quietly shorten the list. `A-07` exists because of the second.
+/// The contract lists eight things a release contains, and two of them — the
+/// tuned-Linux baseline and the seed corpus — were owed to `E1` tasks that
+/// argued, correctly, that they could not be written yet. That left `E0-R01`
+/// with one of two bad options: ship a package the contract says is
+/// incomplete, or quietly shorten the list. `A-07` exists because of the
+/// second.
+///
+/// One of the two has since landed: `E1-D06` wrote `claims/baselines/`, so the
+/// baseline row is `Always` again and this variant now carries exactly one
+/// content, the seed corpus. RFC 0021's *what would reverse this* says the
+/// variant should be deleted rather than left as a shape for the next deferral
+/// to grow into — that is half due now and becomes wholly due at `E1-P01` and
+/// `E1-P03`, which is the deletion's owner. It is named here so that whoever
+/// lands the simulator finds the instruction rather than the shape.
 ///
 /// So the requirement is a predicate over the registry rather than a fixed
 /// list. A **pending** claim publishes no number, so nothing it would compare
@@ -3151,8 +3160,22 @@ enum Requirement {
 enum ContentSource {
     /// A file in the tree.
     File(&'static str),
-    /// Every file under a directory with this extension.
+    /// Every file directly under a directory with this extension.
     Tree(&'static str, &'static str),
+    /// Every file under a directory and everything below it, whatever the
+    /// extension.
+    ///
+    /// [`Tree`](ContentSource::Tree) filters by extension and looks one level
+    /// deep, which is right for `docs/rfc` — one flat directory of `.md`.
+    ///
+    /// It is wrong for `claims/baselines`, which is a directory *per baseline
+    /// version*, each holding a README, three scripts and three data files
+    /// with four extensions between them and none in common. A filter
+    /// naming one of those would package a baseline without the script that
+    /// applies it — a content that is present by the manifest's count and
+    /// useless to the stranger the contract is written for, which is a worse
+    /// failure than the absent row it replaced.
+    Dir(&'static str),
     /// Produced by the build rather than read from the tree.
     Built(&'static str),
     /// Nothing produces it yet.
@@ -3178,21 +3201,26 @@ const CONTENTS: &[Content] = &[
         owed_to: None,
         required: Requirement::Always,
     },
+    // This row was `Absent`, owed to `E1-D06`, and exempt while
+    // `ring-submit-latency` stayed `pending` — because `claims/0001` named
+    // `linux-6.x-tuned` in one sentence of prose, and prose ages into a stock
+    // comparison without anybody deciding it should, since prose cannot be
+    // re-run. `E1-D06` delivered the directory it names: `cmdline.txt`,
+    // `sysctl.conf` and `baseline.conf` as data, `apply.sh` to put a machine
+    // into that configuration and `verify.sh` to say when it has drifted out
+    // of one, and a README carrying the concessions and the rule that
+    // re-tuning produces a new versioned directory rather than an edit.
+    //
+    // So the exemption is gone rather than satisfied, and the row is `Always`:
+    // the deferral was never about this content being optional, it was about
+    // the content not existing. A directory rather than a file because there
+    // will be more than one baseline — that is the append-only rule the README
+    // states — and a new version of it appears in the package by existing.
     Content {
         name: "the baseline configuration",
-        source: ContentSource::Absent,
-        owed_to: Some(
-            "E1-D06. claims/0001 names `linux-6.x-tuned` in prose, which is exactly \
-             the decay the contract warns about: prose ages into a stock \
-             comparison without anybody deciding it should, because prose \
-             cannot be re-run",
-        ),
-        // Not owed while 0001 is `pending`, because a claim that publishes no
-        // number cannot be missing the baseline its number would be compared
-        // against. `ratio_vs_baseline = { min = 5.0 }` is in that claim's
-        // thresholds, so the day it stops being pending this row goes red and
-        // names E1-D06 — which is the conversation E0-P05 has to have anyway.
-        required: Requirement::WhilePending("ring-submit-latency"),
+        source: ContentSource::Dir("claims/baselines"),
+        owed_to: None,
+        required: Requirement::Always,
     },
     Content {
         name: "the seed corpus and scenario set",
@@ -3271,6 +3299,29 @@ fn content_files(content: &Content) -> Result<Vec<(String, Vec<u8>)>, String> {
                 let rel = relative(&path);
                 let bytes = std::fs::read(&path).map_err(|e| format!("reading {rel}: {e}"))?;
                 out.push((rel, bytes));
+            }
+            out
+        }
+        ContentSource::Dir(dir) => {
+            // A stack rather than recursion, and no ordering assumed while
+            // walking: the sort below is what makes the result the same on two
+            // machines, so the walk is free to visit in whatever order the
+            // filesystem hands back.
+            let mut out = Vec::new();
+            let mut pending = vec![root().join(dir)];
+            while let Some(directory) = pending.pop() {
+                let entries = std::fs::read_dir(&directory)
+                    .map_err(|e| format!("reading {}/: {e}", relative(&directory)))?;
+                for entry in entries.filter_map(Result::ok) {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        pending.push(path);
+                        continue;
+                    }
+                    let rel = relative(&path);
+                    let bytes = std::fs::read(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+                    out.push((rel, bytes));
+                }
             }
             out
         }
@@ -3396,7 +3447,7 @@ fn release(mode: Option<&str>) -> Result<(), String> {
                     println!("  [--]  {:<36} {path} does not exist", content.name);
                 }
             }
-            ContentSource::Tree(dir, _) => {
+            ContentSource::Tree(dir, _) | ContentSource::Dir(dir) => {
                 let count = content_files(content)?.len();
                 if count == 0 {
                     missing += 1;
@@ -4925,6 +4976,65 @@ section  = \"06\"
     }
 
     #[test]
+    fn a_baseline_named_in_prose_is_caught() {
+        // The state every named baseline was in before `E1-D06`: a claim that
+        // says which machine it was compared against and gives nobody a way to
+        // be that machine.
+        let findings = baseline_findings("claims/0001-x.toml", "linux-6.x-tuned", "");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("prose"), "{findings:?}");
+    }
+
+    #[test]
+    fn a_baseline_directory_with_no_verifier_is_caught() {
+        // `claims/baselines/linux-6.x-tuned` exists and has all three, so the
+        // fixture points one level down at a name that does not: the finding
+        // has to be about the missing files rather than about the missing
+        // directory, because a directory of notes with no `verify.sh` is the
+        // failure that reads as a success.
+        let findings =
+            baseline_findings("claims/0001-x.toml", "l", "claims/baselines/no-such-baseline");
+        assert_eq!(findings.len(), 3, "{findings:?}");
+        assert!(findings.iter().any(|f| f.contains("verify.sh")), "{findings:?}");
+    }
+
+    #[test]
+    fn a_baseline_outside_what_the_release_packages_is_caught() {
+        // Green lint, empty package. `ContentSource::Dir("claims/baselines")`
+        // is the whole of what a release carries, so a baseline elsewhere is
+        // one no stranger receives — and `..` is the same sentence with the
+        // tree's edge in it.
+        for path in ["docs/baselines/linux", "claims/baselines/../../etc"] {
+            let findings = baseline_findings("claims/0001-x.toml", "linux-6.x-tuned", path);
+            assert_eq!(findings.len(), 1, "{path}: {findings:?}");
+            assert!(findings[0].contains("no release contains"), "{path}: {findings:?}");
+        }
+    }
+
+    #[test]
+    fn a_directory_content_reaches_below_its_top_level_and_is_sorted() {
+        // The two properties `ContentSource::Dir` exists for. The first is why
+        // it is not `Tree`: `claims/baselines` holds a directory per baseline
+        // version, so a walk that stopped at the top would package nothing. The
+        // second is invisible on one machine and is the whole of what makes a
+        // package byte-identical on two, since `read_dir` order is the
+        // filesystem's business.
+        let content = CONTENTS
+            .iter()
+            .find(|content| matches!(content.source, ContentSource::Dir(_)))
+            .expect("the baseline configuration is the one Dir content");
+        let files = content_files(content).expect("claims/baselines is readable");
+        let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(
+            names.iter().any(|name| name.ends_with("/apply.sh")),
+            "the walk must descend into the per-version directory: {names:?}"
+        );
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted, "unsorted: two machines would pack two archives");
+    }
+
+    #[test]
     fn the_registry_as_it_stands_satisfies_all_three() {
         // Not a tautology, and the reason it is here: the three fixtures above
         // prove each lint *can* fail, and this proves the tree is on the other
@@ -4944,6 +5054,11 @@ struct Reproduction {
     command: String,
     runner: String,
     status: String,
+    /// `[baseline] system`. `none` is a real answer and two claims give it.
+    baseline: String,
+    /// `[baseline] path`, when the baseline is a directory somebody can apply
+    /// rather than a sentence somebody has to interpret.
+    baseline_path: String,
 }
 
 fn reproductions() -> Result<Vec<Reproduction>, String> {
@@ -4957,6 +5072,8 @@ fn reproductions() -> Result<Vec<Reproduction>, String> {
             command: toml_table_field(&text, "reproduce", "command").unwrap_or_default(),
             runner: toml_table_field(&text, "hardware", "runner").unwrap_or_default(),
             status: toml_field(&text, "status").unwrap_or_else(|| "unknown".into()),
+            baseline: toml_table_field(&text, "baseline", "system").unwrap_or_default(),
+            baseline_path: toml_table_field(&text, "baseline", "path").unwrap_or_default(),
         });
     }
     Ok(out)
@@ -5073,6 +5190,56 @@ fn reproduce_list() -> Result<(), String> {
     Ok(())
 }
 
+/// What one claim's `[baseline]` block owes, given its `system` and its `path`.
+///
+/// A named baseline is either `none` — which `claims/0002` and `0003` both are,
+/// and argue for in their own notes — or a directory a stranger can apply to a
+/// machine. There is no third option, and before `E1-D06` every named baseline
+/// was one: a sentence describing a configuration, which is
+/// `claims/README.md` rule 1's decay with nothing to stop it, because a
+/// sentence cannot be re-run and so cannot be found to have stopped being true.
+///
+/// The path is checked for where it points as well as for what is in it. The
+/// release packages `claims/baselines` and nothing else, so a baseline
+/// directory outside it is complete on disk, green in this lint, and absent
+/// from every package — which is the same failure as the `Absent` row this
+/// check replaced, arriving through the door the fix opened. `..` is refused
+/// for the same sentence: a path that leaves the tree names a baseline no
+/// clone contains.
+///
+/// A free function rather than a branch inside the lint because a lint that has
+/// never failed is indistinguishable from a lint that cannot, and this is the
+/// shape `mechanised_rules` can hand a fixture to.
+fn baseline_findings(file: &str, baseline: &str, path: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    if baseline.is_empty() || baseline == "none" {
+        return findings;
+    }
+    if path.is_empty() {
+        findings.push(format!(
+            "  {file}: names the baseline `{baseline}` and gives no `[baseline] path`, so the \
+             baseline is prose"
+        ));
+        return findings;
+    }
+    if !path.starts_with("claims/baselines/") || path.split('/').any(|part| part == "..") {
+        findings.push(format!(
+            "  {file}: baseline `{path}` is not under `claims/baselines/`, which is the whole \
+             of what a release packages — so it is a baseline no release contains"
+        ));
+        return findings;
+    }
+    // The three files that make a baseline directory a baseline rather than a
+    // folder of notes: what it is, how it is applied, and how a machine says it
+    // has drifted out of it.
+    for needed in ["README.md", "apply.sh", "verify.sh"] {
+        if !root().join(path).join(needed).exists() {
+            findings.push(format!("  {file}: baseline `{path}` has no {needed}"));
+        }
+    }
+    findings
+}
+
 /// Every claim's published reproduction command resolves inside this tree.
 ///
 /// `RELEASING.md`'s second gate says a claim in the snapshot with no
@@ -5118,6 +5285,7 @@ fn lint_reproduce() -> Result<(), String> {
                 entry.file, entry.name
             ));
         }
+        findings.extend(baseline_findings(&entry.file, &entry.baseline, &entry.baseline_path));
         if entry.runner.is_empty() {
             findings.push(format!("  {}: no `[hardware] runner`", entry.file));
         } else {

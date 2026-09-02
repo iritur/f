@@ -19,11 +19,15 @@
 //! it carries and the class the callee was admitted for**, with **the later of
 //! the deadline it carries and its arrival plus the callee's floor**, and only
 //! for **[`MAX_DEPTH`] rings** from the component that originated it. A caller
-//! may not carry a class it was not itself admitted for: that entry is refused,
-//! not demoted, because an entry that lies about its submitter is a malformed
-//! entry and R04 says those are refused. Every other way the request falls
-//! short of what it asked is reported in the result and, by the service, on the
-//! completion as [`cflags::SHORTFALL`](crate::cflags::SHORTFALL) — served
+//! may not carry a class it was not itself admitted for: that entry parses, so
+//! it is not malformed — it is refused under `ADMISSION` because it asks for a
+//! promise nobody made to its author (R08), and refused rather than demoted
+//! because a caller that loses nothing by writing `HARD` writes it on every
+//! entry. R04 refuses the two things that are genuinely malformed: a low byte
+//! naming no class, and a depth no conforming service could have written.
+//! Every other way the request falls short of what it asked is reported in the
+//! result and, by the service, on the completion as
+//! [`cflags::SHORTFALL`](crate::cflags::SHORTFALL) — served
 //! differently is fine, served differently *silently* is the failure the whole
 //! discipline exists to exclude.
 //!
@@ -55,6 +59,21 @@
 //! built from a valid ordinal and is a parameter rather than something read
 //! off the wire. `E1-B07` builds the test that grants it; `E1-B06` orders the
 //! device queues by what this returns.
+//!
+//! # One ceiling per component
+//!
+//! A component's admitted class is a property of the *component* and not of a
+//! channel: the grant is made once at spawn, and every channel that component
+//! opens reports the same ordinal, upstream or down. That is not tidiness, it
+//! is what makes forwarding safe. Bound 1 hands a service a class no more
+//! urgent than its own ceiling, so the entry it writes downstream —
+//! [`Inherited::class_field`] and [`Inherited::deadline`], verbatim — always
+//! passes bound 2 at the next hop: an honest forwarder never loses a request to
+//! the rule that exists for a lying caller. If a later change makes the ceiling
+//! a per-channel value, that stops being true and a forwarder needs a clamp
+//! against its downstream ceiling rather than a verbatim copy;
+//! `an_honest_forwarder_is_never_refused` is the test that fails on the day it
+//! does, which is why it walks two hops rather than one.
 
 use crate::{NO_DEADLINE, Sqe, class, error};
 
@@ -98,9 +117,16 @@ pub const fn depth_of(field: u16) -> u8 {
 /// Build a `class` field. What a component writes when it originates a request
 /// (depth zero) and what a service writes downstream (the depth
 /// [`inherit`] handed it).
+///
+/// The first argument is a bare class ordinal and **not** a `class` field: a
+/// field already carries a depth, and passing one here would silently discard
+/// it. Rebuild a field as `pack(class_of(field), depth)`. Debug builds refuse
+/// the mistake rather than reinterpreting it, which is this module's discipline
+/// on the building side of what R04 asks of the parsing side.
 #[inline]
 #[must_use]
 pub const fn pack(class: u16, depth: u8) -> u16 {
+    debug_assert!(is_class(class), "pack takes a class ordinal, not a class field");
     ((depth as u16) << DEPTH_SHIFT) | (class & CLASS_MASK)
 }
 
@@ -153,9 +179,12 @@ pub struct Caller {
     /// [`Sqe::deadline`] as written. Unit: nanoseconds, monotonic, in the
     /// channel's epoch — RFC 0009. Zero is [`NO_DEADLINE`].
     pub deadline: u64,
-    /// The class the caller was admitted for on this channel. Known to the
-    /// service from the grant, never from the entry.
-    /// Unit: none — a class ordinal.
+    /// The submitting component's own class ceiling — the one thing admission
+    /// granted it, which this channel reports. One value per component, not
+    /// per channel: see the module's *one ceiling per component*, which is the
+    /// invariant that lets a service forward what [`inherit`] hands it without
+    /// the next hop refusing it. Known to the service from the grant, never
+    /// from the entry. Unit: none — a class ordinal.
     pub admitted: Admitted,
 }
 
@@ -172,8 +201,10 @@ impl Caller {
 /// arrived, and the least it needs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Callee {
-    /// The class this component was admitted for. A request is never served
-    /// above it. Unit: none — a class ordinal.
+    /// The callee component's own class ceiling — the same value its own
+    /// entries carry as [`Caller::admitted`] when it submits downstream, for
+    /// the reason the module's *one ceiling per component* gives. A request is
+    /// never served above it. Unit: none — a class ordinal.
     pub admitted: Admitted,
     /// When the entry was observed, on the same clock as the deadline.
     /// Unit: nanoseconds, monotonic, in the channel's epoch — RFC 0009. Zero
@@ -212,7 +243,13 @@ pub struct Inherited {
 
 impl Inherited {
     /// The `class` field for an entry submitted downstream on this request's
-    /// behalf.
+    /// behalf, written verbatim.
+    ///
+    /// Safe to write verbatim because [`class`](Self::class) is never more
+    /// urgent than this component's own ceiling and that ceiling is the one the
+    /// downstream channel reports for it — the module's *one ceiling per
+    /// component*. Nothing here clamps against a downstream ceiling, because
+    /// under that invariant there is nothing to clamp.
     #[inline]
     #[must_use]
     pub const fn class_field(&self) -> u16 {
@@ -249,10 +286,15 @@ pub mod shortfall {
     pub const CLASS: u8 = 1 << 0;
     /// Served against a deadline later than the entry carried, because the
     /// entry's was inside the callee's floor — already late, or asking for
-    /// less time than any request here takes.
+    /// less time than any request here takes. Never set together with
+    /// [`DEPTH`]: a request that ends up with no deadline at all was not served
+    /// against a later one, and a service counts these, so reporting both would
+    /// over-count the deadlines this callee moved.
     pub const LATE: u8 = 1 << 1;
     /// The request's urgency had crossed [`super::MAX_DEPTH`] rings and ended
-    /// here: no deadline, and no class above [`super::BEYOND_DEPTH`].
+    /// here: no deadline, and no class above [`super::BEYOND_DEPTH`]. Strictly
+    /// more than [`LATE`] — the deadline is gone, not moved — and set instead
+    /// of it.
     pub const DEPTH: u8 = 1 << 2;
 }
 
@@ -323,6 +365,10 @@ pub const fn inherit(caller: &Caller, callee: Callee) -> Result<Inherited, (i32,
         }
         class = bounded;
         deadline = NO_DEADLINE;
+        // Whatever the floor did to a deadline that is now gone is not a fact
+        // the caller can act on, and a service counts these: LATE would say a
+        // deadline was moved when it was dropped, and DEPTH already says that.
+        shortfall &= !shortfall::LATE;
         MAX_DEPTH
     };
 
@@ -542,6 +588,62 @@ mod tests {
         let entry =
             Caller { class: pack(class::BATCH, MAX_DEPTH), deadline: NO_DEADLINE, admitted: BATCH };
         assert!(!inherit(&entry, callee(SOFT)).unwrap().fell_short());
+    }
+
+    #[test]
+    fn an_honest_forwarder_is_never_refused() {
+        // Two hops, every combination of ceilings. A component's ceiling is one
+        // value whichever channel reports it, and bound 1 hands the middle
+        // service a class no more urgent than its own ceiling — so the entry it
+        // forwards verbatim always clears bound 2 downstream. Refusal is for a
+        // caller that lied, and a forwarder that copies `class_field()` has not
+        // lied. The day the ceiling becomes a per-channel value this test fails
+        // rather than a request quietly disappearing at the second hop.
+        for originator in [HARD, SOFT, BATCH, IDLE] {
+            for middle in [HARD, SOFT, BATCH, IDLE] {
+                for downstream in [HARD, SOFT, BATCH, IDLE] {
+                    let entry = caller(originator.class(), ARRIVAL + 4 * FLOOR, originator);
+                    let first = inherit(&entry, callee(middle)).unwrap();
+                    assert!(first.class >= middle.class(), "bound 1 is what makes this work");
+
+                    let forwarded = Caller {
+                        class: first.class_field(),
+                        deadline: first.deadline,
+                        admitted: middle,
+                    };
+                    let next =
+                        Callee { admitted: downstream, arrival: ARRIVAL + FLOOR, floor: FLOOR };
+                    let second = inherit(&forwarded, next)
+                        .expect("a forwarder's own entry is never refused for a class it holds");
+                    assert!(second.class >= downstream.class());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_dropped_deadline_is_not_also_reported_as_a_late_one() {
+        // At the bound, a deadline inside the floor is floored and then thrown
+        // away. Reporting both would count it twice in a service's state tree
+        // and would tell the caller its deadline moved, when it stopped
+        // existing. DEPTH is the strictly stronger statement and stands alone.
+        let entry =
+            Caller { class: pack(class::HARD, MAX_DEPTH), deadline: ARRIVAL - 1, admitted: HARD };
+        let got = inherit(&entry, callee(HARD)).unwrap();
+        assert_eq!(got.deadline, NO_DEADLINE);
+        assert_eq!(got.shortfall, shortfall::DEPTH);
+        assert_eq!(got.shortfall & shortfall::LATE, 0);
+    }
+
+    #[test]
+    fn a_demoted_request_can_also_be_a_late_one() {
+        // The combination that *is* legal, and the one a service counts as two
+        // separate facts: a hard-class read at a soft-class service, asking for
+        // a deadline inside that service's floor. Both bits, one request.
+        let got = inherit(&caller(class::HARD, ARRIVAL, HARD), callee(SOFT)).unwrap();
+        assert_eq!(got.class, class::SOFT);
+        assert_eq!(got.deadline, ARRIVAL + FLOOR);
+        assert_eq!(got.shortfall, shortfall::CLASS | shortfall::LATE);
     }
 
     #[test]

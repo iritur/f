@@ -303,8 +303,9 @@ pub mod error {
         pub const NO_CORE: u16 = 2;
         /// Memory bandwidth or a cache partition could not be reserved.
         pub const NO_BANDWIDTH: u16 = 3;
-        /// The entry claims a class more urgent than its submitter was
-        /// admitted for on this channel. Refused rather than served at the
+        /// The entry claims a class more urgent than its submitter's own
+        /// ceiling — what admission granted that component, which this channel
+        /// reports to the service. Refused rather than served at the
         /// ceiling with a flag, because a caller that lost nothing by writing
         /// `HARD` would write it on every entry. In [`super::ADMISSION`]
         /// rather than [`super::ARGUMENT`] because the entry is well-formed;

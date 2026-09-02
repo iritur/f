@@ -13,14 +13,22 @@
 //! answers it. While it is [`InFlight`] there is no method that yields its
 //! bytes, so there is nothing to write through.
 //!
-//! Three misuses are compile errors, one per fixture below. Writing an
-//! in-flight buffer has no method to call. Submitting a buffer that was never
-//! carved from a [`BufferSet`] has no type to pass. Submitting a buffer twice
-//! is a use after move. `docs/rfc/0024-a-buffer-is-owned-by-one-side.md` names
-//! these three, and also the misuses that stay runtime refusals and which
-//! [`f_abi::error`] domain each earns — because a type can only bind the code
-//! that uses it, and the service at the far end of a ring is bound by nothing
-//! but its own checks.
+//! Four misuses are compile errors, one per fixture below. Writing an in-flight
+//! buffer has no method to call. Naming memory the set was not bound over has
+//! no type to pass, because an [`Idle`] cannot be built and the only ones that
+//! exist are pieces of the set's own region. Carving a set twice is a second
+//! mutable borrow of a set the first carve borrowed for the life of its
+//! buffers, so one name is minted once. Submitting a buffer twice is a use
+//! after move. `docs/rfc/0024-a-buffer-is-owned-by-one-side.md` names these,
+//! and also the misuses that stay runtime refusals and which [`f_abi::error`]
+//! domain each earns — because a type can only bind the code that uses it, and
+//! the service at the far end of a ring is bound by nothing but its own checks.
+//!
+//! What the types here do **not** establish is that the service ever issued the
+//! [`SetId`] the set was bound with: at E1 nothing issues one, so
+//! [`BufferSet::bind`] takes it on trust and the service's registration table
+//! is what refuses an id it never gave out. `E1-B10` is where ids start coming
+//! from a registration, and it is the task that closes that gap.
 //!
 //! # Two paths, one set of rules
 //!
@@ -43,17 +51,19 @@
 //!
 //! # What a lifetime buys, and what it does not
 //!
-//! A buffer borrows its region for `'m`, and its set for the same `'m`. So the
-//! region cannot be reused while any buffer carved from it is alive, and a
-//! buffer cannot outlive the registration that named it. What the borrow
-//! cannot do is stop an [`InFlight`] being *dropped*, because this language has
-//! no linear types. A dropped `InFlight` is the one misuse left, and it is
-//! answered by a drop bomb: the component that dropped a buffer the device
-//! still holds panics, and under this workspace's `panic = "abort"` that is
-//! the component ending — at which point RFC 0008 revokes its buffer sets and
-//! tears down its IOMMU domain, so the transfer faults rather than lands. The
-//! frame is the graveyard section 04 asks for. The RFC says what would turn
-//! this into a cancellation instead.
+//! A set owns the region it was bound over, for `'m`, and [`BufferSet::carve`]
+//! borrows the set for the same `'m` — which is why it can only be called once
+//! and why the region cannot be reused while any buffer carved from it is
+//! alive. So the only memory a set can name is the memory it was bound over,
+//! and a buffer cannot outlive the set that names it. What the borrow cannot do
+//! is stop an [`InFlight`] being *dropped*, because this language has no linear
+//! types. A dropped `InFlight` is the one misuse left, and it is answered by a
+//! drop bomb: the component that dropped a buffer the device still holds
+//! panics, and under this workspace's `panic = "abort"` that is the component
+//! ending — at which point RFC 0008 revokes its buffer sets and tears down its
+//! IOMMU domain, so the transfer faults rather than lands. The frame is the
+//! graveyard section 04 asks for. The RFC says what would turn this into a
+//! cancellation instead.
 //!
 //! # The legal path
 //!
@@ -71,9 +81,9 @@
 //! }
 //!
 //! let agreed = Negotiated { version: ABI_VERSION, features: 0 };
-//! let set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed).unwrap();
 //! let mut region = [0u8; 128];
-//! let [mut a, _b] = set.carve::<2>(&mut region).unwrap();
+//! let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed, &mut region).unwrap();
+//! let [mut a, _b] = set.carve::<2>().unwrap();
 //!
 //! a.bytes_mut()[0] = 0x5A;                 // idle: ours to write
 //! let mut entry = Sqe::ZERO;
@@ -87,7 +97,7 @@
 //! assert_eq!(a.bytes()[0], 0x5A);
 //! ```
 //!
-//! # The three fixtures
+//! # The four fixtures
 //!
 //! Writing an in-flight buffer. There is no `bytes_mut` on [`InFlight`], or
 //! `bytes`, or anything else that reaches the memory:
@@ -102,25 +112,41 @@
 //! #     fn submit(&mut self, _: Sqe) -> Result<bool, RingError> { Ok(false) }
 //! # }
 //! # let agreed = Negotiated { version: ABI_VERSION, features: 0 };
-//! # let set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed).unwrap();
 //! # let mut region = [0u8; 128];
-//! let [a, _b] = set.carve::<2>(&mut region).unwrap();
+//! # let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed, &mut region).unwrap();
+//! let [a, _b] = set.carve::<2>().unwrap();
 //! let (mut lent, _) = a.submit(&mut Wire, Sqe::ZERO).unwrap();
 //! lent.bytes_mut()[0] = 1;                 // the device holds this buffer
 //! ```
 //!
-//! Submitting a buffer that was never registered. An [`Idle`] cannot be built
-//! by hand, so a slice that did not come out of [`BufferSet::carve`] has no
-//! way into a submission:
+//! Naming memory the set was not bound over. An [`Idle`] cannot be built by
+//! hand, so a slice that did not come out of [`BufferSet::carve`] — and so was
+//! not part of the region the set covers — has no way into a submission:
 //!
 //! ```compile_fail,E0451
 //! # use f_abi::buf::SetId;
 //! # use f_abi::{Negotiated, ABI_VERSION};
 //! # use f_ring::buffers::{BufferSet, Fixed, Idle};
 //! # let agreed = Negotiated { version: ABI_VERSION, features: 0 };
-//! # let set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed).unwrap();
+//! # let mut region = [0u8; 128];
+//! # let set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed, &mut region).unwrap();
 //! let mut somewhere = [0u8; 64];
-//! let forged = Idle { set: &set, bytes: &mut somewhere[..], index: 0 };
+//! let forged = Idle { naming: set.naming(), bytes: &mut somewhere[..], index: 0 };
+//! ```
+//!
+//! Carving a set twice, which would mint two buffers with one name and put the
+//! same registered buffer in flight twice. The first carve borrows the set for
+//! as long as its buffers live, which is as long as the set:
+//!
+//! ```compile_fail,E0499
+//! # use f_abi::buf::SetId;
+//! # use f_abi::{Negotiated, ABI_VERSION};
+//! # use f_ring::buffers::{BufferSet, Fixed};
+//! # let agreed = Negotiated { version: ABI_VERSION, features: 0 };
+//! # let mut region = [0u8; 128];
+//! # let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed, &mut region).unwrap();
+//! let [a, _b] = set.carve::<2>().unwrap();
+//! let [c, _d] = set.carve::<2>().unwrap();   // `a` and `c` would both be buffer 0
 //! ```
 //!
 //! Submitting the same buffer twice. The first submission moved it:
@@ -135,9 +161,9 @@
 //! #     fn submit(&mut self, _: Sqe) -> Result<bool, RingError> { Ok(false) }
 //! # }
 //! # let agreed = Negotiated { version: ABI_VERSION, features: 0 };
-//! # let set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed).unwrap();
 //! # let mut region = [0u8; 128];
-//! let [a, _b] = set.carve::<2>(&mut region).unwrap();
+//! # let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed, &mut region).unwrap();
+//! let [a, _b] = set.carve::<2>().unwrap();
 //! let (first, _) = a.submit(&mut Wire, Sqe::ZERO).unwrap();
 //! let (second, _) = a.submit(&mut Wire, Sqe::ZERO).unwrap();
 //! ```
@@ -267,20 +293,35 @@ pub enum Misuse {
     },
 }
 
-/// One buffer set on one channel: the ledger every buffer is carved from.
+/// One buffer set on one channel: the region, the naming, and nothing else.
 ///
-/// Holds the naming and nothing else. It is borrowed by every buffer carved
-/// from it for as long as that buffer lives, which is what makes "a buffer
-/// not registered cannot be named in an entry" a statement about lifetimes
-/// rather than about discipline: the registration outlives every name that
-/// depends on it.
+/// The set holds the memory it names. That is what makes "a buffer this set
+/// names is memory this set covers" a statement about types rather than about
+/// discipline: [`BufferSet::carve`] is the only source of an [`Idle`], and it
+/// divides the region the set was bound over. It borrows the set for as long as
+/// those buffers live, so it can be called once — two carves would be two
+/// buffers with one name, and on the registered path that is the double
+/// submission the service would have to catch on the wire.
+///
+/// What the set does *not* establish is that the [`SetId`] it was bound with
+/// names a registration the service ever made. Nothing issues one until
+/// `E1-B10`; see [`BufferSet::bind`].
 #[derive(Debug)]
-pub struct BufferSet<N: Naming> {
+pub struct BufferSet<'m, N: Naming> {
     naming: N,
+    region: &'m mut [u8],
 }
 
-impl<N: Naming> BufferSet<N> {
-    /// Bind a naming to a channel that negotiated `agreed`.
+impl<'m, N: Naming> BufferSet<'m, N> {
+    /// Bind a naming to `region` on a channel that negotiated `agreed`.
+    ///
+    /// The region is the whole of what this set can ever name. On the
+    /// registered path it is the memory whose registration answered with the
+    /// [`SetId`] in `naming` — which this call takes on trust, because at E1
+    /// nothing issues one: the registration entry and the table that would
+    /// refuse an invented id are `E1-B10`'s, and until they exist an id a
+    /// client made up reaches the service and is refused there
+    /// (`AUTHORITY`/`NO_SUCH_CAP`) rather than here.
     ///
     /// # Errors
     ///
@@ -291,11 +332,11 @@ impl<N: Naming> BufferSet<N> {
     /// it is the same situation one layer up. Refused rather than downgraded:
     /// a set that asked for shared virtual memory and quietly got registration
     /// would be two peers with different beliefs about what an entry names.
-    pub fn bind(naming: N, agreed: Negotiated) -> Result<Self, i32> {
+    pub fn bind(naming: N, agreed: Negotiated, region: &'m mut [u8]) -> Result<Self, i32> {
         if agreed.features & N::REQUIRES != N::REQUIRES {
             return Err(error::pack(error::PEER, error::peer::FEATURE_REQUIRED));
         }
-        Ok(Self { naming })
+        Ok(Self { naming, region })
     }
 
     /// The naming this set puts on the wire.
@@ -303,29 +344,43 @@ impl<N: Naming> BufferSet<N> {
         &self.naming
     }
 
-    /// Carve a region into `B` equal buffers, all idle.
+    /// Bytes the set covers. Unit: bytes.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.region.len()
+    }
+
+    /// Never — [`BufferSet::bind`] would have to have been given an empty
+    /// region, and [`BufferSet::carve`] refuses to divide one — but the pair is
+    /// conventional and the lint asks for it.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.region.is_empty()
+    }
+
+    /// Divide the set's region into `B` equal buffers, all idle.
     ///
-    /// The one way an [`Idle`] comes into existence. The region is borrowed
-    /// for as long as any of them lives, and so is this set.
+    /// The one way an [`Idle`] comes into existence, and the reason a buffer
+    /// cannot name memory outside its set. Borrows the set for as long as any
+    /// of the buffers lives, which is what makes a second carve a compile
+    /// error rather than a second name for buffer zero.
     ///
     /// # Errors
     ///
     /// [`Misuse::Geometry`] when the region does not divide into `B` equal
     /// buffers of at least one byte, or `B` does not fit the index field.
-    pub fn carve<'m, const B: usize>(
-        &'m self,
-        region: &'m mut [u8],
-    ) -> Result<[Idle<'m, N>; B], Misuse> {
-        let geometry = Misuse::Geometry { region: region.len(), buffers: B };
+    pub fn carve<const B: usize>(&'m mut self) -> Result<[Idle<'m, N>; B], Misuse> {
+        let geometry = Misuse::Geometry { region: self.region.len(), buffers: B };
         if B == 0 || u32::try_from(B).is_err() {
             return Err(geometry);
         }
-        let size = region.len() / B;
-        if size == 0 || !region.len().is_multiple_of(B) {
+        let size = self.region.len() / B;
+        if size == 0 || !self.region.len().is_multiple_of(B) {
             return Err(geometry);
         }
 
-        let mut chunks = region.chunks_exact_mut(size);
+        let naming = &self.naming;
+        let mut chunks = self.region.chunks_exact_mut(size);
         Ok(core::array::from_fn(|index| {
             // Exactly `B` chunks: the length is a multiple of `size` and
             // `size * B` is the length, both established above. Not a check on
@@ -333,19 +388,19 @@ impl<N: Naming> BufferSet<N> {
             // caller's own — so an expectation rather than a refusal.
             let bytes = chunks.next().expect("a region divides into the buffers it was checked to");
             // Fits: `B` fits a `u32` and `index < B`.
-            Idle { set: self, bytes, index: index as u32 }
+            Idle { naming, bytes, index: index as u32 }
         }))
     }
 }
 
 /// A buffer this side holds. The only state in which its bytes can be reached.
 ///
-/// Created by [`BufferSet::carve`] and by nothing else. Moved into
-/// [`Idle::submit`], and returned by [`InFlight::complete`] when the service
-/// has answered.
+/// Created by [`BufferSet::carve`] and by nothing else, out of the region its
+/// set was bound over. Moved into [`Idle::submit`], and returned by
+/// [`InFlight::complete`] when the service has answered.
 #[must_use = "an idle buffer that is dropped is a slot in the set nobody can name again"]
 pub struct Idle<'m, N: Naming> {
-    set: &'m BufferSet<N>,
+    naming: &'m N,
     bytes: &'m mut [u8],
     index: u32,
 }
@@ -393,9 +448,17 @@ impl<'m, N: Naming> Idle<'m, N> {
     ///
     /// The buffer's name is written over `entry`'s `buf_set`, `buf_index` and
     /// `FIXED_BUF` flag by this call — a caller cannot name a buffer by hand,
-    /// which is what "a buffer not registered cannot be named" means on this
-    /// side. Everything else in the entry is the caller's, and `user_data` is
-    /// the token the completion has to carry to get the buffer back.
+    /// which is what "a buffer names memory its set covers" means on this side.
+    /// Everything else in the entry is the caller's.
+    ///
+    /// `entry.user_data` is the token the completion has to carry to get this
+    /// buffer back, and it **must be unique among this channel's in-flight
+    /// buffers**. That obligation is the caller's and neither the compiler nor
+    /// the service can see it: two buffers lent on one token means the first
+    /// completion returns whichever of them is asked first, which may be the
+    /// one the device is still writing. RFC 0024 states it beside the drop
+    /// bomb, as the second misuse that is neither a compile error nor a wire
+    /// refusal; `two_buffers_on_one_token_return_the_wrong_one` is the fixture.
     ///
     /// On success the buffer is [`InFlight`] and its bytes are unreachable
     /// until [`InFlight::complete`]. The `bool` is the doorbell answer
@@ -416,10 +479,13 @@ impl<'m, N: Naming> Idle<'m, N> {
             return Err((Refused::Misuse(misuse), self));
         }
 
-        self.set.naming.name(self.index, self.bytes).write(&mut entry);
+        self.naming.name(self.index, self.bytes).write(&mut entry);
 
+        let index = self.index;
         match lane.submit(entry) {
-            Ok(wanted) => Ok((InFlight { token: entry.user_data, idle: Some(self) }, wanted)),
+            Ok(wanted) => {
+                Ok((InFlight { token: entry.user_data, index, idle: Some(self) }, wanted))
+            }
             Err(err) => Err((Refused::Ring(err), self)),
         }
     }
@@ -438,14 +504,15 @@ pub struct InFlight<'m, N: Naming> {
     /// lets the drop bomb tell a consumed buffer from an abandoned one.
     idle: Option<Idle<'m, N>>,
     token: u64,
+    /// Kept here rather than read out of `idle`, so that [`InFlight::index`]
+    /// is total: it answers the same during the moment `idle` is empty, and
+    /// `Debug` has no sentinel to print.
+    index: u32,
 }
 
 impl<N: Naming> core::fmt::Debug for InFlight<'_, N> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("InFlight")
-            .field("index", &self.index())
-            .field("token", &self.token)
-            .finish()
+        f.debug_struct("InFlight").field("index", &self.index).field("token", &self.token).finish()
     }
 }
 
@@ -459,8 +526,8 @@ impl<'m, N: Naming> InFlight<'m, N> {
 
     /// Which buffer of the set. Unit: buffers, zero-based.
     #[must_use]
-    pub fn index(&self) -> u32 {
-        self.idle.as_ref().map_or(u32::MAX, Idle::index)
+    pub const fn index(&self) -> u32 {
+        self.index
     }
 
     /// Take the buffer back, if this completion is the one that returns it.
@@ -472,6 +539,10 @@ impl<'m, N: Naming> InFlight<'m, N> {
     /// nothing here treats it as either. What does *not* return it is a
     /// completion with [`cflags::MORE`], which promises another for the same
     /// token, or a completion for somebody else's token.
+    ///
+    /// The token is the whole of the test, so a token lent to two buffers at
+    /// once returns the wrong one — see [`Idle::submit`] for whose obligation
+    /// that is.
     ///
     /// # Errors
     ///
@@ -505,11 +576,11 @@ impl<'m, N: Naming> InFlight<'m, N> {
 
 impl<N: Naming> Drop for InFlight<'_, N> {
     fn drop(&mut self) {
-        // The fourth misuse, and the one the borrow checker cannot see. A
-        // component that reaches here has a bug that would otherwise become a
-        // device writing into memory it no longer owns; ending the component
-        // is what makes that write fault instead. Not a peer's fault, so not a
-        // refusal — nothing a peer wrote can bring a program here.
+        // The misuse the borrow checker cannot see. A component that reaches
+        // here has a bug that would otherwise become a device writing into
+        // memory it no longer owns; ending the component is what makes that
+        // write fault instead. Not a peer's fault, so not a refusal — nothing
+        // a peer wrote can bring a program here.
         assert!(
             self.idle.is_none(),
             "a buffer was dropped while the device held it; complete it or reclaim it"
@@ -567,15 +638,18 @@ mod tests {
     /// Drives a real ring: the entry goes through a [`Producer`], is popped by
     /// a [`Consumer`] that reads its name the way a service would, and the
     /// completion comes back through a [`Poster`] and a [`Collector`].
-    fn ownership_holds_on<N: Naming>(set: &BufferSet<N>, features: u64, expect: impl Fn(&Name)) {
+    fn ownership_holds_on<'m, N: Naming>(
+        set: &'m mut BufferSet<'m, N>,
+        features: u64,
+        expect: impl Fn(&Name),
+    ) {
         let backing = Backing::<8>::new();
         let mut producer = Producer::new(backing.chan()).expect("a power-of-two ring");
         let consumer = Consumer::new(backing.chan()).expect("a power-of-two ring");
         let poster = Poster::new(backing.cq()).expect("a power-of-two ring");
         let collector = Collector::new(backing.cq()).expect("a power-of-two ring");
 
-        let mut region = [0u8; 256];
-        let [mut a, mut b] = set.carve::<2>(&mut region).expect("256 bytes is two buffers");
+        let [mut a, mut b] = set.carve::<2>().expect("256 bytes is two buffers");
         assert_eq!((a.index(), b.index()), (0, 1));
         assert_eq!((a.len(), b.len()), (128, 128));
 
@@ -628,14 +702,18 @@ mod tests {
     #[test]
     fn both_paths_pass_the_same_ownership_test() {
         let id = SetId::new(4, 2);
-        let fixed = BufferSet::bind(Fixed(id), agreed(0)).expect("registration needs no feature");
-        ownership_holds_on(&fixed, 0, |name| {
+        let mut registered = [0u8; 256];
+        let mut fixed = BufferSet::bind(Fixed(id), agreed(0), &mut registered)
+            .expect("registration needs no feature");
+        ownership_holds_on(&mut fixed, 0, |name| {
             assert_eq!(*name, Name::Registered { set: id, index: 0 });
         });
 
         let svm = feature::SHARED_VIRTUAL_MEMORY;
-        let virt = BufferSet::bind(Virtual, agreed(svm)).expect("the feature was negotiated");
-        ownership_holds_on(&virt, svm, |name| {
+        let mut shared = [0u8; 256];
+        let mut virt =
+            BufferSet::bind(Virtual, agreed(svm), &mut shared).expect("the feature was negotiated");
+        ownership_holds_on(&mut virt, svm, |name| {
             // The address is the buffer's own. Its value is the allocator's
             // business and is not asserted; that it is non-zero and that the
             // reading is the virtual one is.
@@ -647,21 +725,24 @@ mod tests {
     fn the_virtual_path_is_refused_where_it_was_not_negotiated() {
         // RFC 0011 style: the feature bit gates the path, and a set that asked
         // for it on a channel without it is refused rather than downgraded.
-        let refused = BufferSet::bind(Virtual, agreed(0)).map(|_| ()).expect_err("no feature");
+        let mut first = [0u8; 64];
+        let refused =
+            BufferSet::bind(Virtual, agreed(0), &mut first).map(|_| ()).expect_err("no feature");
         assert_eq!(error::unpack(refused), Some((error::PEER, error::peer::FEATURE_REQUIRED)));
+
         // Registration needs nothing, so it binds on either kind of channel.
-        assert!(BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0)).is_ok());
-        assert!(
-            BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(feature::SHARED_VIRTUAL_MEMORY))
-                .is_ok()
-        );
+        let mut second = [0u8; 64];
+        assert!(BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut second).is_ok());
+        let mut third = [0u8; 64];
+        let both = agreed(feature::SHARED_VIRTUAL_MEMORY);
+        assert!(BufferSet::bind(Fixed(SetId::new(0, 1)), both, &mut third).is_ok());
     }
 
     #[test]
     fn the_fixed_naming_sets_the_flag_and_the_virtual_naming_clears_it() {
-        let set = BufferSet::bind(Fixed(SetId::new(1, 1)), agreed(0)).unwrap();
         let mut region = [0u8; 64];
-        let [a] = set.carve::<1>(&mut region).unwrap();
+        let mut set = BufferSet::bind(Fixed(SetId::new(1, 1)), agreed(0), &mut region).unwrap();
+        let [a] = set.carve::<1>().unwrap();
         let mut wire = Recorder(None);
         let mut e = entry(1, 64);
         e.flags = flags::LINK;
@@ -672,10 +753,11 @@ mod tests {
         assert_eq!(sent.buf_index, 0);
         let _ = a.complete(&completion(1, 0, 0)).unwrap();
 
-        let set = BufferSet::bind(Virtual, agreed(feature::SHARED_VIRTUAL_MEMORY)).unwrap();
         let mut region = [0u8; 64];
         let where_it_is = region.as_ptr() as usize as u64;
-        let [a] = set.carve::<1>(&mut region).unwrap();
+        let both = agreed(feature::SHARED_VIRTUAL_MEMORY);
+        let mut set = BufferSet::bind(Virtual, both, &mut region).unwrap();
+        let [a] = set.carve::<1>().unwrap();
         let mut e = entry(2, 64);
         e.flags = flags::FIXED_BUF; // a caller cannot name a buffer by hand
         let (a, _) = a.submit(&mut wire, e).unwrap();
@@ -706,9 +788,9 @@ mod tests {
 
     #[test]
     fn a_refused_submission_hands_the_buffer_back() {
-        let set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0)).unwrap();
         let mut region = [0u8; 64];
-        let [a] = set.carve::<1>(&mut region).unwrap();
+        let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut region).unwrap();
+        let [a] = set.carve::<1>().unwrap();
 
         // A full ring is a retry: the buffer comes back idle, unchanged.
         let (why, mut a) = a.submit(&mut FullRing, entry(1, 64)).expect_err("the ring is full");
@@ -722,32 +804,30 @@ mod tests {
         assert_eq!(a.bytes()[0], 1);
     }
 
+    /// A hundred bytes, carved into `B`. A set is carved once, so the geometry
+    /// cases each need their own; this is that set, and the buffers die inside.
+    fn carve_a_hundred_bytes_into<const B: usize>() -> Result<(), Misuse> {
+        let mut region = [0u8; 100];
+        let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut region).unwrap();
+        set.carve::<B>().map(|_| ())
+    }
+
     #[test]
     fn a_region_that_does_not_divide_is_refused() {
-        let set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0)).unwrap();
-        let mut region = [0u8; 100];
-        assert_eq!(
-            set.carve::<3>(&mut region).map(|_| ()),
-            Err(Misuse::Geometry { region: 100, buffers: 3 })
-        );
-        assert_eq!(
-            set.carve::<0>(&mut region).map(|_| ()),
-            Err(Misuse::Geometry { region: 100, buffers: 0 })
-        );
+        let geometry = |buffers| Err(Misuse::Geometry { region: 100, buffers });
+        assert_eq!(carve_a_hundred_bytes_into::<3>(), geometry(3));
+        assert_eq!(carve_a_hundred_bytes_into::<0>(), geometry(0));
         // More buffers than bytes would be zero-length buffers, which nothing
         // could name.
-        assert_eq!(
-            set.carve::<200>(&mut region).map(|_| ()),
-            Err(Misuse::Geometry { region: 100, buffers: 200 })
-        );
-        assert!(set.carve::<4>(&mut region).is_ok());
+        assert_eq!(carve_a_hundred_bytes_into::<200>(), geometry(200));
+        assert!(carve_a_hundred_bytes_into::<4>().is_ok());
     }
 
     #[test]
     fn a_refusal_and_a_cancellation_both_return_the_buffer() {
-        let set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0)).unwrap();
         let mut region = [0u8; 128];
-        let [a, b] = set.carve::<2>(&mut region).unwrap();
+        let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut region).unwrap();
+        let [a, b] = set.carve::<2>().unwrap();
         let mut wire = Recorder(None);
 
         // The service refused: it is done with the buffer.
@@ -766,13 +846,44 @@ mod tests {
     }
 
     #[test]
+    fn two_buffers_on_one_token_return_the_wrong_one() {
+        // The obligation `Idle::submit` states, as a fixture: a token is the
+        // whole of what a completion is matched on, so two buffers lent under
+        // one token are indistinguishable, and the first one asked takes the
+        // answer. Nothing here is a bug in this module — it is the misuse RFC
+        // 0024 says only the caller's own bookkeeping can see, and this test
+        // exists so that a reader can see it too rather than discover it.
+        let mut region = [0u8; 128];
+        let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut region).unwrap();
+        let [a, b] = set.carve::<2>().unwrap();
+        let mut wire = Recorder(None);
+
+        let (a, _) = a.submit(&mut wire, entry(9, 64)).unwrap();
+        let (b, _) = b.submit(&mut wire, entry(9, 64)).unwrap();
+        assert_eq!((a.token(), b.token()), (9, 9), "one token, two buffers in flight");
+
+        // The service answers for buffer 1, and buffer 0 takes it: the client
+        // now writes memory the device may still be writing.
+        let answer = completion(9, 64, 0);
+        let mut a = a.complete(&answer).expect("the token matches, and that is all it checks");
+        assert_eq!(a.index(), 0, "the completion was buffer 1's and buffer 0 answered to it");
+        a.bytes_mut()[0] = 1;
+
+        // And `b` has no completion left to take, so the only way to put it
+        // down is the reclaim path — which is what makes this a bug and not a
+        // deadlock: the ledger is wrong, not stuck.
+        let gone = PeerGone::of(RingError::EpochChanged).expect("the peer restarted");
+        drop(b.reclaim(gone));
+    }
+
+    #[test]
     fn a_batch_is_a_submitter_and_the_buffers_go_out_together() {
-        let set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0)).unwrap();
+        let mut region = [0u8; 128];
+        let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut region).unwrap();
         let backing = Backing::<8>::new();
         let mut producer = Producer::new(backing.chan()).unwrap();
         let consumer = Consumer::new(backing.chan()).unwrap();
-        let mut region = [0u8; 128];
-        let [a, b] = set.carve::<2>(&mut region).unwrap();
+        let [a, b] = set.carve::<2>().unwrap();
 
         let mut batch = producer.batch();
         let (a, wanted_a) = a.submit(&mut batch, entry(1, 64)).unwrap();
@@ -791,9 +902,9 @@ mod tests {
 
     #[test]
     fn a_lost_peer_is_the_only_way_back_without_a_completion() {
-        let set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0)).unwrap();
         let mut region = [0u8; 64];
-        let [a] = set.carve::<1>(&mut region).unwrap();
+        let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut region).unwrap();
+        let [a] = set.carve::<1>().unwrap();
         let (a, _) = a.submit(&mut Recorder(None), entry(1, 64)).unwrap();
 
         assert!(PeerGone::of(RingError::Full).is_none(), "full is a retry");
@@ -806,9 +917,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "dropped while the device held it")]
     fn dropping_an_in_flight_buffer_is_refused_at_the_drop() {
-        let set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0)).unwrap();
         let mut region = [0u8; 64];
-        let [a] = set.carve::<1>(&mut region).unwrap();
+        let mut set = BufferSet::bind(Fixed(SetId::new(0, 1)), agreed(0), &mut region).unwrap();
+        let [a] = set.carve::<1>().unwrap();
         let (a, _) = a.submit(&mut Recorder(None), entry(1, 64)).unwrap();
         drop(a);
     }

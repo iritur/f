@@ -4,8 +4,10 @@
 - Date: 2026-09-02
 - Affects: `abi/src/buf.rs`, `abi/src/cap.rs`, `abi/src/lib.rs` (the
   `buf_set`/`buf_index` reading and one `ARGUMENT` code), `ring/src/buffers.rs`;
-  `docs/design/ring-scene-boot.html` sections 04 and 05; step 1 of RFC 0008's
-  teardown order; `E1-B01`, `E1-B02`, `E1-B03` and `E1-B10`, which build on it
+  `docs/design/ring-scene-boot.html` sections 04 and 05, section 04 gaining a
+  sentence that says its cancelling `Drop` is not what was built; step 1 of RFC
+  0008's teardown order; `E1-B01`, `E1-B02`, `E1-B03` and `E1-B10`, which build
+  on it
 
 ## Decision
 
@@ -33,10 +35,13 @@ memory. `Idle::submit` takes the buffer by value and writes its name into the
 entry itself; `InFlight::complete` gives the buffer back only for a completion
 carrying its token and not flagged `MORE`. A refusal returns the buffer, and so
 does a cancellation, because in both the service is finished with it. An `Idle`
-comes into existence only through `BufferSet::carve`, which borrows the region
-and the set for as long as any buffer lives, so a buffer cannot outlive the
-registration that names it and the region cannot be reused while a buffer is
-carved from it.
+comes into existence only through `BufferSet::carve`, which divides the region
+the set was *bound over* — a set holds its memory, so the only bytes a set can
+name are bytes it covers — and which borrows the set for as long as any of
+those buffers lives. So a buffer cannot outlive the set that names it, the
+region cannot be reused while a buffer is carved from it, and a set is carved
+exactly once: a second carve would be two buffers with one name, and the
+compiler refuses it.
 
 **Two paths, one naming type parameter.** On the registered path
 (`buffers::Fixed`, `flags::FIXED_BUF` set) the entry carries the set id and an
@@ -55,14 +60,27 @@ registration; that ledger is the part section 04 says must survive when
 registration does not.
 
 **What the types make unrepresentable**, each with a `compile_fail` fixture on
-the module: writing an in-flight buffer (no method: `E0599`); submitting a
-buffer never carved from a set (no constructor: `E0451`); submitting the same
-buffer twice, or submitting one that is in flight (use after move: `E0382`).
+the module, pinned to the error code so that rustdoc checks the reason and not
+only the failure: writing an in-flight buffer (no method: `E0599`); naming
+memory the set was not bound over, since an `Idle` has no public constructor and
+the only ones that exist are pieces of the set's own region (`E0451`); carving
+one set twice, which is how two buffers would come to carry one name (`E0499`);
+and submitting the same buffer twice, or submitting one that is in flight (use
+after move: `E0382`).
+
+What the types do **not** make unrepresentable, and the honest boundary of the
+paragraph above: that the `SetId` a set was bound with names a registration the
+service ever made. Nothing issues one until `E1-B10`, so `BufferSet::bind` takes
+it on trust and the refusal below is the whole of the defence. The rule the
+types do carry — a buffer names memory its own set covers — is the half that
+does not depend on a registration existing, and it is the half that stops a
+client writing one region while the device transfers another.
 
 **What stays a runtime refusal**, and the `abi::error` domain each earns under
 RFC 0010. A set id nobody could have issued, or one the service never issued on
-this channel: `AUTHORITY`/`NO_SUCH_CAP`, detail the id. A set id whose
-generation has been retired by de-registration: `AUTHORITY`/`REVOKED`. An index
+this channel — including one a client simply made up, which at E1 is every one
+of them: `AUTHORITY`/`NO_SUCH_CAP`, detail the id. A set id whose generation
+has been retired by de-registration: `AUTHORITY`/`REVOKED`. An index
 past the set, a length past the buffer, or a buffer the service already holds
 in flight: `ARGUMENT`/`BAD_ADDRESS`, whose text already says *already occupied*,
 detail the offending field. An address on a channel that did not negotiate
@@ -72,9 +90,25 @@ are the service's, because a type binds only the code compiled against it and
 the far end of a ring is bound by nothing but its own checks — a peer that
 writes raw entries is the hostile peer section 06 already assumes.
 
-One misuse is neither. **Dropping an `InFlight`** cannot be a compile error in a
-language without linear types, and it cannot be a wire refusal because nothing
-crosses the wire. It is a drop bomb: the drop panics, and under this workspace's
+Two misuses are neither, and both are the caller's own bookkeeping.
+
+**Lending one token to two buffers.** A completion is matched on `user_data`
+and on nothing else, so two buffers in flight under one token are
+indistinguishable and the first one asked takes the answer — which may be the
+buffer the device is still writing. It cannot be a compile error, because a
+token is a number the caller chooses and the type system does not count the
+numbers a program has outstanding; it cannot be a wire refusal, because both
+entries are well formed and the service has no view of which buffer the client
+believes each token belongs to. So it is stated where the caller meets it, on
+`Idle::submit`, and shown as a fixture —
+`two_buffers_on_one_token_return_the_wrong_one` — so that a reader sees the
+hazard rather than discovers it. A runtime that hands out tokens rather than
+taking them, `E1-B08`'s, removes it; until one exists the obligation is written
+down.
+
+**Dropping an `InFlight`** cannot be a compile error in a language without
+linear types, and it cannot be a wire refusal because nothing crosses the wire.
+It is a drop bomb: the drop panics, and under this workspace's
 `panic = "abort"` the component ends, at which point RFC 0008 revokes its buffer
 sets and tears down its IOMMU domain so the transfer the device was still doing
 faults rather than lands. The frame is the graveyard section 04 asks for. The
@@ -156,21 +190,28 @@ The alternatives that were live:
 
 Makes easy: a driver resolves a buffer name in one call, `abi::buf::Name::read`,
 with the negotiated feature set in hand, and gets either a reading or the packed
-refusal to post. A client cannot tear its own buffer, cannot name one it did not
-register, and cannot lend one twice, and learns each of these from the compiler.
-`Batch` is a `Submitter`, so buffers go out in a batch with no second API.
-`E1-B10`'s comparison is a comparison of one thing, because the test that says
-both paths hold is one function.
+refusal to post. A client cannot tear its own buffer, cannot name memory
+outside the set it bound, and cannot lend one buffer twice, and learns each of
+these from the compiler rather than from a service's refusal. `Batch` is a
+`Submitter`, so buffers go out in a batch with no second API. `E1-B10`'s
+comparison is a comparison of one thing, because the test that says both paths
+hold is one function.
 
 Makes hard: an operation over part of a buffer, which is a smaller buffer or a
-later RFC. A buffer set's region is borrowed for the life of any buffer carved
-from it, so a set is not resized in place — it is a new set. The virtual path
-puts an address on the wire, and an address is deterministic only if the
-allocation behind it is; a seeded run that traces entries will show the
-difference, and `f_env::Env` is where that determinism has to come from. On the
-registered path the service keeps one in-flight bit per registered buffer to
-refuse the double submission it cannot otherwise see; that is a cost per buffer
-and is written here beside the rule it pays for. On the virtual path the service
+later RFC. A buffer set holds its region for the life of any buffer carved from
+it and is carved once, so a set is neither resized nor re-divided in place — it
+is a new set, and a client that wants two geometries over one registration wants
+two sets. Until `E1-B10` issues set ids, a client can bind a set with an id it
+invented; the types still confine it to the memory it bound, so the failure is a
+refusal from the service rather than a transfer into the wrong region, but the
+sentence *a buffer not registered cannot be named* is not true of the client
+alone and this RFC does not claim it is. The virtual path puts an address on
+the wire, and an address is deterministic only if the allocation behind it is;
+a seeded run that traces entries will show the difference, and `f_env::Env` is
+where that determinism has to come from. On the registered path the service
+keeps one in-flight bit per registered buffer to refuse the double submission
+it cannot otherwise see; that is a cost per buffer and is written here beside
+the rule it pays for. On the virtual path the service
 has no registration to keep that bit against, so a client that bypasses the types
 and submits the same address twice is refused by nothing — it tears its own
 memory, which is its own bug and not the service's breach, and this RFC states

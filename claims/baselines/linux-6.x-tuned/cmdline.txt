@@ -1,0 +1,119 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The kernel command line this baseline requires, as data.
+#
+# One token per line, `#` starts a comment, and `@MEASURED@` and
+# `@HOUSEKEEPING@` are substituted with the two CPU lists — see the README, and
+# `F_MEASURED_CPUS` / `F_HOUSEKEEPING_CPUS` in `apply.sh`. There is no default
+# for either: the numbering below cannot be guessed from anywhere, because CPU
+# enumeration is the firmware's business and differs between two machines with
+# the same part number.
+#
+# Nothing applies this file. `apply.sh` expands it, compares it against
+# `/proc/cmdline`, and prints what is missing; editing a bootloader is the one
+# thing on this machine that can leave it unbootable, and a script that does it
+# silently is a script nobody should run as root. The README says where to put
+# the result.
+#
+# `claims/runner-class-A.md` states the same list in prose, for a reader. This
+# is the copy that gets executed, and `verify.sh` checks the two against each
+# other when the checkout is reachable — a baseline whose two copies drift is
+# how the machine ends up being neither.
+
+# --- The partition. ---------------------------------------------------------
+# Cores are split into a housekeeping set and a measured set. Every kernel
+# thread, every RCU callback and every interrupt that can be moved lives in the
+# first; the second is what a reservation is granted out of, on both halves of
+# the comparison.
+#
+# `domain,managed_irq` rather than bare `isolcpus`: the first takes the cores
+# out of the scheduler's load-balancing domains, the second keeps a driver's
+# managed interrupt vectors off them. Without `managed_irq` a NVMe or NIC queue
+# vector is placed on a measured core by the driver at probe time, where
+# `irqaffinity` cannot move it and `/proc/irq/*/smp_affinity` refuses to.
+isolcpus=domain,managed_irq,@MEASURED@
+nohz_full=@MEASURED@
+rcu_nocbs=@MEASURED@
+rcu_nocb_poll
+irqaffinity=@HOUSEKEEPING@
+
+# --- Frequency, and the reason it is not left to a governor. ----------------
+# A frequency that varies with temperature and with how many cores are busy
+# makes a latency distribution a distribution over machine states rather than
+# over the code. `intel_pstate=disable` hands frequency to acpi-cpufreq, whose
+# `performance` governor pins the maximum non-turbo point; turbo itself is off
+# in firmware, per `claims/runner-class-A.md`, because no kernel parameter can
+# turn it off honestly.
+intel_pstate=disable
+cpufreq.default_governor=performance
+
+# --- Idle. ------------------------------------------------------------------
+# Deeper C-states are exit latency inside a deadline, on both halves. C1 is the
+# floor rather than C0: forbidding C1 as well buys single-digit nanoseconds and
+# costs a machine that runs hot enough to throttle, which costs far more.
+processor.max_cstate=1
+intel_idle.max_cstate=0
+
+# --- The clock the measurement is taken on. ---------------------------------
+# `tsc=reliable` suppresses the watchdog that switches the clocksource out from
+# under a running measurement when it decides the TSC has drifted. The firmware
+# requirement that makes this true rather than merely asserted — invariant TSC,
+# turbo off, no deep package states — is in `claims/runner-class-A.md`.
+tsc=reliable
+clocksource=tsc
+
+# --- Interference with a name. ----------------------------------------------
+# The NMI watchdog fires a per-core perf event periodically forever; the soft
+# lockup detector wakes a kernel thread on every core; the audit subsystem adds
+# a syscall-path branch and a queue. All three are diagnostics for a machine in
+# production, and this machine is not one.
+nmi_watchdog=0
+nosoftlockup
+audit=0
+
+# The per-CPU tick offsets, so that the housekeeping cores do not all take
+# their timer interrupt in the same microsecond and contend for the same locks
+# in it. This one helps the baseline and does nothing for F, which does not use
+# the Linux tick at all.
+skew_tick=1
+
+# --- Memory. ----------------------------------------------------------------
+# 16 pages of 1 GiB each = 16 GiB, reserved at boot, before anything has
+# fragmented physical memory enough that a 1 GiB contiguous allocation is a
+# matter of luck. RFC 0007 requires pre-faulted huge pages for a hard-class
+# reservation and this is where they come from, on both halves.
+default_hugepagesz=1G
+hugepagesz=1G
+hugepages=16
+
+# THP off *at boot*, and turned on again at run time for the baseline half
+# only — see `thp_enabled` in `baseline.conf`, which states why the two
+# disagree and which way the asymmetry points. The boot value is the one that
+# holds while the hugetlb pool above is being carved and while nothing has
+# asked for anything yet.
+transparent_hugepage=never
+
+# --- The IOMMU. -------------------------------------------------------------
+# `E1-B01` needs it, and a baseline machine that has to be re-specified one
+# epoch later is this work done twice. `iommu=pt` leaves the host's own devices
+# on identity-mapped domains, so the baseline pays no translation cost F does
+# not also pay.
+intel_iommu=on
+iommu=pt
+
+# --- The concession, written as a setting rather than as a footnote. --------
+# Speculative-execution mitigations are ON, and this line is here to say so out
+# loud rather than to change anything: `auto` is the default, and a default is
+# invisible in `/proc/cmdline` on a machine somebody else configured.
+#
+# The cost is real and it is the baseline's as much as F's: on a Sapphire
+# Rapids part the retpoline and IBPB paths are on the system-call and context-
+# switch edges this claim measures. Turning them off would improve both numbers
+# and describe a machine nobody deploys. The requirement that makes the ratio
+# mean anything is that the setting is identical on both sides, and a token in
+# a file is how that stops being a thing somebody remembers (R12).
+#
+# *Reversal:* a claim whose statement is explicitly about mitigation cost. That
+# claim states the setting in its own `[baseline]` block and runs against a new
+# versioned directory here, rather than editing this line.
+mitigations=auto

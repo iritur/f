@@ -106,15 +106,19 @@ features    = []
 # restart, which is the sentence `fast-path.html` section 08 makes of it; an
 # exit is a decision the driver made and a supervisor that overrode it would
 # be arguing with its own component. The backoff doubles from ten
-# milliseconds to a second, and the eighth restart is the last: a driver that
-# has faulted eight times under this policy is a driver whose place should be
-# left empty and looked at, not refilled a ninth time. E1-P06 kills this
-# component at random under load, and is what says whether eight is right.
+# milliseconds to a second, and the budget is RFC 0008's — eight restarts in
+# a minute, after which the place is retired. Eight faults in a minute is a
+# driver failing at something it will keep failing at; eight faults spread
+# over a day is a driver whose clients are better served by a ninth restart
+# than by an empty place, and the window is what tells those two apart.
+# E1-P06 kills this component at random under load, and is what says whether
+# eight in a minute is right.
 [restart]
 policy           = "on_fault"
 backoff_first_ms = 10
 backoff_max_ms   = 1_000
 max_restarts     = 8
+budget_window_ms = 60_000
 
 # --- Reservation: what admission may refuse ----------------------------------
 

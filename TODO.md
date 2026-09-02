@@ -696,20 +696,36 @@ everything after this cheap to debug.*
 
 ### Decide
 
-- [ ] **E1-D01** `M` Write RFC 0008 — no fork, no signals: spawn from a manifest, one control ring, the powerbox grant.
-  *exit:* RFC merged before a second long-lived component exists, because retrofitting a lifecycle is worse than designing one.
-- [ ] **E1-D02** `M` Write RFC 0005 — speculation is a boundary the language does not draw. Three domain kinds, assigned in the topology.
-  *exit:* RFC merged before any untrusted or imported code is hosted; the topology format carries a domain field.
-- [ ] **E1-D03** `M` Settle buffer registration and ownership transfer, including the shared-virtual-memory path.
-  *exit:* the ownership rules are expressed in types, and a misuse fails to compile in a fixture.
-- [ ] **E1-D04** `M` Record the driver-container shape: declaratively routed capabilities, typed protocol, declared restart policy.
-  *exit:* one manifest schema, with a worked example for virtio-blk.
-- [ ] **E1-D05** `S` Deadline inheritance bounds — how far a caller's deadline propagates, and what stops a component claiming urgency forever.
-  *exit:* the rule is written before the first starvation bug, as the resource document asks.
-- [ ] **E1-D06** `M` The tuned-Linux baseline, as configuration rather than as prose.
+- [x] **E1-D01** `M` Write RFC 0008 — no fork, no signals: spawn from a manifest, one control ring, the powerbox grant.
+  The ordering held: written while `user/init` is still the only thing above the frame, so nothing had to be retrofitted onto a lifecycle that already had a user.
+  **`Untyped` acquires its object, and the object is an account.** Everything a component is made of — address space, page tables, image frames, stack, control ring, state-tree region, and the capability table itself — is retyped from one supplied `Untyped`, so revoking a supervisor's `Untyped` ends every component it paid for. That is the same mechanism as a quota, and it is why `E1-B13` is a table that can be paid for rather than a bigger array.
+  **The door shrinks instead of growing.** Four opcodes join the ring — spawn, connect, stop, grant — and the RFC 0015 capability calls move onto it, which leaves `EXIT` and the doorbell as the whole of the door. Seven notice kinds arrive as flagged completion entries drained at polling points, so R05 survives contact with a lifecycle: there are no signals, and nothing is delivered asynchronously.
+  **A notice cannot be lost and cannot pile up**, because it is pending *state* — two bits per slot, four latest-wins words per table — published when the completion ring has room rather than queued. A queue of notices is a queue somebody has to bound.
+  `Endpoint` acquires its object too, and it is a *place* in the topology rather than an instance: a connect to an empty place pends until a respawn refills it, which is the mechanism gate G1's sentence rests on.
+  *exit:* met. `docs/rfc/0008-no-fork-no-signals.md` is accepted, and it names what `E1-B05`, `E1-B13` and `E1-B08` each build from it, precisely enough that none of the three has to re-decide.
+- [x] **E1-D02** `M` Write RFC 0005 — speculation is a boundary the language does not draw. Three domain kinds, assigned in the topology.
+  R02 was the one rule in `CONTRIBUTING.md` whose enforcement column said *review, until RFC 0005 and the topology check*. Both halves exist now: the kinds are `shared`, `private` and `hostile`, and `cargo xtask lint-manifests` refuses a manifest that does not name one.
+  **The licence boundary and the speculation boundary are the same line**, and that is the rule with the most reach: an image built from `third_party/` may declare `private` or `hostile` and may not declare `shared`. RFC 0003 put imported code behind a ring, which was the integrity half; this is the confidentiality half, and it lands where somebody can grep for it.
+  **A kind is delivered in full or the spawn is refused** with `ADMISSION`. A machine that cannot supply an idle sibling does not host a `private` component "with a note" — the same argument RFC 0007 makes about latency, applied to leaks: exclusion costs capacity, which is visible, and waiving it costs a leak, which is not.
+  Nothing inherits a kind, and a spawner may only go more isolated, never less — otherwise the supervisor is the route by which downloaded code joins the domain every native component lives in.
+  It also states what it does **not** promise, because the design corpus predicted somebody would read it as one: there is no speculation proof here, and there will not be.
+  *exit:* met. `docs/rfc/0005-speculation-is-a-boundary.md` is accepted, `domain` is a required closed field in `docs/manifest.md`, and `user/virtio-blk/manifest.toml` argues its own choice of `private` rather than defaulting into it.
+- [x] **E1-D03** `M` Settle buffer registration and ownership transfer, including the shared-virtual-memory path.
+  **The typestate is the mechanism and not the intention.** A registered set is `Idle` or `InFlight`; only `Idle` reaches the bytes, and a submission moves the token rather than borrowing it, so writing to an in-flight buffer, submitting an unregistered one and submitting the same one twice are each rejected by the compiler rather than by a runtime check somebody could forget to write.
+  *exit:* met. `docs/rfc/0024-a-buffer-is-owned-by-one-side.md` is accepted, the types are in `abi/src/buf.rs` and `ring/src/buffers.rs`, and four `compile_fail` doctests run under `cargo xtask test` — one per misuse class, so a fixture that stopped failing would be a test failure rather than a silence.
+- [x] **E1-D04** `M` Record the driver-container shape: declaratively routed capabilities, typed protocol, declared restart policy.
+  **The schema is in two places on purpose and they are bound together**: `docs/manifest.md` is the field-by-field reasoning, `xtask/src/manifest.rs` is the parser, and `cargo xtask lint-manifests` reads every manifest in the tree on every lint. It refuses unknown fields, unknown enum values and missing required ones (R04), and it has a fixture that breaks it — a lint that has never failed is indistinguishable from a lint that cannot.
+  *exit:* met. `user/virtio-blk/manifest.toml` is the worked example, written before the driver the way a claim is registered before its number, and it argues its own domain, its own restart budget and its own reservation rather than filling them in.
+- [x] **E1-D05** `S` Deadline inheritance bounds — how far a caller's deadline propagates, and what stops a component claiming urgency forever.
+  **A deadline inherits downward and decays, and a callee is never promoted above the class it was admitted for.** Inherited urgency is scoped to the request that carried it and ends at its completion, so a component's own work is never promoted by a request it once served — which is the shape the starvation bug would have had.
+  The rule is code as well as prose: `abi/src/deadline.rs` is the inheritance function with its bounds as constants that state their units, and its tests hold the five properties, including that a deadline never gets earlier by inheritance and never later than its caller's.
+  *exit:* met. `docs/rfc/0025-a-deadline-inherits-downward-and-decays.md` is accepted, before `E1-B06` orders a device queue by the field and before there is a starvation bug to explain it.
+- [x] **E1-D06** `M` The tuned-Linux baseline, as configuration rather than as prose.
   Found by `cargo xtask release --dry-run` at E0-D08: the release contract requires the baseline configuration in the package, and nothing in this file produced it. `claims/0001` says `linux-6.x-tuned` with a sentence of notes, which is the decay the contract exists to prevent — a tuned comparison becomes a stock comparison as the baseline ages and nobody re-checks it, and prose cannot be re-checked because it cannot be run.
   Belongs in E1 rather than E0: the first claim it has to configure a baseline *for* is the datapath set at `E1-P10`, and a baseline written before there is a workload to tune it against is a guess with a filename. `A-04` is the standing item that keeps it honest afterwards.
-  *exit:* the tuned baseline is a file in the tree that a stranger can apply to a machine and get the configuration a claim was compared against; `cargo xtask release --dry-run` reports it present.
+  **Prose became seven files that run.** `claims/baselines/linux-6.x-tuned/` holds the configuration as data — `cmdline.txt`, `sysctl.conf`, `baseline.conf` — with `apply.sh` to put a machine into it and `verify.sh` to say whether a machine is still in it and exit non-zero naming the drift. A setting is written once and read by both, because two copies of a baseline are how a baseline decays.
+  The re-tune rule is the RFC rule: a re-tuned baseline is a new versioned directory, never an edit, so a claim keeps pointing at the configuration it was actually compared against. `A-04` is the cadence that re-checks it.
+  *exit:* met. `cargo xtask release --dry-run` reports `[ok] the baseline configuration  claims/baselines/  7 file(s)`, and the row in `xtask`'s `CONTENTS` stopped being `Absent`. Seven of the eight release contents are present; the eighth is the seed corpus, owed to `E1-P01` and `E1-P03` and not owed while `ring-submit-latency` is pending (RFC 0021).
 
 ### Build
 
@@ -785,8 +801,11 @@ everything after this cheap to debug.*
 - [ ] **E1-P08** `M` Simulator snapshot and restore, so a long scenario bisects in seconds rather than hours.
   *exit:* a failure at simulated minute 40 is re-entered at minute 39 without re-running the first 39.
   *needs:* E1-P01
-- [ ] **E1-P09** `M` Write the test taxonomy: for each class of bug, which layer catches it and how often that layer runs.
-  *exit:* the table exists, and every gap in it is either scheduled or explicitly accepted.
+- [x] **E1-P09** `M` Write the test taxonomy: for each class of bug, which layer catches it and how often that layer runs.
+  **Eighty-five rows**, each naming the bug class, the layer that catches it, the command that catches it today, how often that command runs, and a status. Nineteen are gaps, and every one of them ends in a task id that schedules it or a sentence that accepts it with a reversal condition.
+  It has a machine-readable twin, `docs/test-taxonomy.toml`, with the same rows — so the table can be checked against the tree later rather than rotting quietly, which is what a taxonomy written once in prose does.
+  The row the seven layers have no home for is written down rather than omitted: *provoke the real kernel and require it to fail*, which is where most of this project's evidence currently comes from.
+  *exit:* met. `docs/test-taxonomy.md` and `docs/test-taxonomy.toml` agree row for row.
 - [ ] **E1-P10** `M` Claims for the datapath: ring submit under load, doorbells per operation, copies per operation, kernel entries per operation.
   *exit:* four claims, gating, each with a tuned-Linux baseline where one exists.
   *needs:* E1-B09

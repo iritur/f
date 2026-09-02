@@ -29,7 +29,7 @@ Eight things. The first is obvious and the other seven are the point.
 |---|---|
 | **The source, at a tag** | Obvious, and insufficient on its own — which is the argument for everything below it. |
 | **The claims snapshot** | Every number the release asserts, with its baseline, its workload, its distribution and its reproduction command. Machine-readable, so documents render from it rather than restating it. `claims/snapshot.json`, written by `cargo xtask claims`, and `cargo xtask lint` fails when a document disagrees with it. |
-| **The baseline configuration** | The tuned Linux a comparison was made against, as configuration rather than as prose. This is the one that decays silently: without it, a tuned comparison becomes a stock comparison as the baseline ages and nobody re-checks. |
+| **The baseline configuration** | The tuned Linux a comparison was made against, as configuration rather than as prose. This is the one that decays silently: without it, a tuned comparison becomes a stock comparison as the baseline ages and nobody re-checks. `claims/baselines/`, one directory per version — `apply.sh` puts a machine into it, `verify.sh` says when it has drifted out of it, and re-tuning adds a directory rather than editing one. |
 | **The seed corpus and scenario set** | So a third party can run the same sweeps — and so that a reported bug arrives as a seed rather than as a description of a bug. |
 | **A content-addressed system image** | One hash naming an entire bootable generation. Reproducing it from source and getting the same hash is a *test*, and it runs in the release job. |
 | **The dependency manifest and provenance** | What went in, at what version, under what licence, with the imported subtree's terms kept distinct — because the licence boundary and the isolation boundary are deliberately the same boundary. `LICENSING.md`, RFC 0003. |
@@ -53,12 +53,17 @@ this holds without anything having to arrange it — and the comparison checks i
 anyway, so that a difference in paths is never reported as a difference in the
 package. `CARGO_TARGET_DIR` is not one of the paths that matters.
 
-Two of the eight are not owed yet, and that is a decision rather than an
+One of the eight is not owed yet, and that is a decision rather than an
 omission: **a content is required when the claim that needs it publishes a
-number.** The baseline configuration and the seed corpus both serve
-`ring-submit-latency`, which is `pending`; the day it is not, the packager
-refuses and names the task that owes them. RFC 0021, which also states the
-consequence for release 0.1 rather than leaving it to be discovered.
+number.** The seed corpus serves `ring-submit-latency`, which is `pending`; the
+day it is not, the packager refuses and names the task that owes it. RFC 0021,
+which also states the consequence for release 0.1 rather than leaving it to be
+discovered.
+
+It was two. `E1-D06` landed the baseline configuration, so that row is
+unconditional again and the deferral it used is down to one content — which is
+the state RFC 0021's *what would reverse this* is about, and the reason the
+variant is now annotated with who deletes it.
 
 ## What a release is not
 

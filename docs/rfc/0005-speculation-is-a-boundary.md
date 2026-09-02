@@ -2,7 +2,9 @@
 
 - Status: accepted
 - Date: 2026-09-02
-- Affects: `docs/design/fast-path.html` bet 01 and section 14, `CONTRIBUTING.md`
+- Affects: `docs/design/fast-path.html` bet 01 and section 14,
+  `docs/what-must-be-stated.html` sections 14, 16, 18 and 19,
+  `docs/the-long-plan.html`'s uncovered speculation row, `CONTRIBUTING.md`
   R02, the component manifest of E1-D04, the supervisor of E1-B05, `ring/`,
   `kernel/`, `LICENSING.md`, RFC 0003, RFC 0007, RFC 0008 and RFC 0016
 
@@ -36,9 +38,15 @@ Five rules travel with the table.
    cannot supply an idle sibling for a `private` component, or a whole core and
    a cache partition for a `hostile` one, does not host it, and does not host it
    "with a note". The refusal is `ADMISSION`, naming the component that could
-   not be satisfied. This is RFC 0007's argument applied to confidentiality
-   instead of latency: exclusion costs capacity, which is visible, and waiving
-   costs a leak, which is not.
+   not be satisfied. A part that reports no thread-level sibling in the
+   extended topology leaf satisfies the sibling clause by construction — there
+   is no sibling to exclude and nothing to refuse — and the supervisor records
+   the mechanism as *unexercised* rather than as satisfied, because those are
+   the same admission and very different evidence. That is the QEMU case, and
+   the Consequences section says what it costs the tests rather than letting a
+   green boot mean more than it does. This is RFC 0007's argument applied to
+   confidentiality instead of latency: exclusion costs capacity, which is
+   visible, and waiving costs a leak, which is not.
 3. **Nothing inherits a kind.** The kind is a property of the image, carried by
    the manifest whose hash a spawn names under RFC 0008, and a child's kind
    comes from the child's manifest and nowhere else. R06. A spawner may create
@@ -46,7 +54,24 @@ Five rules travel with the table.
    one: `hostile` spawns only `hostile`, `private` spawns `private` or
    `hostile`, and only `shared` may spawn into `shared`. Otherwise the
    supervisor is the route by which attacker-authored code joins the domain
-   every native component lives in.
+   every native component lives in. That ordering makes a spawner's kind a
+   ceiling on every descendant's, so the root decides what the whole tree can
+   contain and is named here rather than discovered: **the supervisor declares
+   `shared`**, which is the table's first row read literally — native, built
+   from the permissive tree, no `unsafe`, reviewed here. It is not an exception
+   made for convenience. What a supervisor holds is capabilities, and a handle
+   is an index into the holder's own table, so an index observed from another
+   domain names nothing there; revocation, not confidentiality, is what guards
+   what a supervisor has. A supervisor judged to hold a secret and moved to
+   `private` would make the `shared` row unreachable for every component in the
+   system and buy nothing for it, and if anyone ever makes that judgement it
+   amends this rule rather than editing a manifest. The one component with no
+   spawner is outside rule 1 by construction: the frame *starts* the first
+   component (`user/init` today) rather than spawning it from a manifest, so
+   there is no field to read and nothing to refuse. E1-B05 gives it a manifest like every
+   other component and it declares `shared`; until then it is not an
+   undeclared kind, it is the `shared` domain, and an image the frame starts
+   that no manifest describes is a state that ends when the supervisor lands.
 4. **The licence boundary is the speculation boundary.** An image built from
    `third_party/` may declare `private` or `hostile` and may not declare
    `shared`. RFC 0003 put imported code in its own address space, reachable
@@ -60,16 +85,23 @@ Five rules travel with the table.
    index, a cursor, a slot — is bounds-checked *and masked*, so that the
    mispredicted path loads in range too. The gadget the frame presents to every
    kind is a bounds check followed by a dependent load, and a bounds check on
-   its own is what that gadget is made of.
+   its own is what that gadget is made of. The mask is derived from the check's
+   outcome and applied after it; it never replaces it, and the Context below
+   says why that distinction is worth a sentence. It also goes under the same
+   `cfg` as the check it depends on: RFC 0017's `mutate-unchecked-index`
+   removes that check to prove property five is load-bearing, and a mask left
+   standing would hand the mutated build an in-range index, turn the boot green
+   and retire a falsifiable property without anyone deciding to.
 
 **What is mechanised and what stays review.** Rules 1 and 2 are the supervisor's
 refusals and land with E1-B05; they fail closed, so an absent check is a
 component that does not start rather than one that starts unprotected. Rule 4,
-and rule 1's schema again, are a lint over every manifest in the tree — the
-*topology check* the R02 row of `CONTRIBUTING.md` has been promising — so that a
-boot is not the first place a missing field or a `third_party` image in `shared`
-is found. Rule 3's ordering is the supervisor's. Rule 5 stays review, and so
-does the question of which native component *holds a secret* and therefore
+and rule 1's schema again, are `cargo xtask lint-manifests` over every manifest
+in the tree — the *topology check* the R02 row of `CONTRIBUTING.md` had been
+promising, and the half of that row that is true in the present tense — so that
+a boot is not the first place a missing field or a `third_party` image in
+`shared` is found. Rule 3's ordering is the supervisor's. Rule 5 stays review,
+and so does the question of which native component *holds a secret* and therefore
 belongs in `private` rather than `shared`: that is a judgement no grep makes.
 The table says what each kind means; it cannot say what a component contains.
 Saying which rows are review is R01 applied to this RFC.
@@ -115,8 +147,9 @@ document in the corpus distinguished integrity from confidentiality. The
 absence of a mitigation cost had been read as the absence of a threat. The gap
 register asked for this RFC before any untrusted component is hosted; E1 is
 where the first imported code arrives, so it is being written at the last
-moment it can be written before the thing it gates, and later than section 14
-asked. That is recorded rather than smoothed over.
+moment it can be written before the thing it gates, and later than
+`what-must-be-stated.html` section 14 asked. That is recorded rather than
+smoothed over.
 
 What is true in the tree as this is decided. Every process has had its own
 address space since M3 (`kernel/src/process.rs`), with the frame mapped into
@@ -126,10 +159,19 @@ then loads through it; `cap::Table::resolve` checks a handle's index against
 `TABLE_SLOTS` and then indexes. Both are correct integrity checks and neither is
 a defect — they are the two constructs `cap.rs` reduces panic-freedom to, and
 RFC 0017's `mutate-unchecked-index` exists to prove one of them is load-bearing.
-The point of rule 5 is that a correct integrity check is exactly what the
-speculative gadget is built from. Each of those two sites owes one more
-instruction, the check's outcome folded into a mask on the index, and that
-instruction is the whole of this RFC's cost inside the frame. The second core
+`cap.rs` says of its check, in the tree today, "Checked, never masked. A mask is
+the bug this returns an error for", and that sentence is right about the thing
+it is about: an index masked *instead of* being checked names the wrong slot
+silently, which is one of the two constructs property five exists to exclude,
+and the comment stays. Rule 5 asks for the other thing — a mask *after* the
+check, derived from its outcome, on the path the check already allowed — and
+one word carrying both readings is why this is written out here rather than
+left to whoever reads that comment next. Whoever lands the masking writes both
+halves into that comment in the same diff. The point of rule 5 is that a
+correct integrity check is exactly what the speculative gadget is built from.
+Each of those two sites owes one more instruction, the check's outcome folded
+into a mask on the index, and that instruction is the whole of this RFC's cost
+inside the frame. The second core
 came up at E0-B10, and `kernel/src/smp.rs` already reads the extended topology
 leaf, at the core level, to count logical processors; the thread level of the
 same leaf is one subleaf away, so whether two APIC ids are siblings is a
