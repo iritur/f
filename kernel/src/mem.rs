@@ -18,6 +18,23 @@
 //! The cost is stated rather than hidden: a free frame must be *addressable*,
 //! because the list is written into it. See [`IDENTITY_LIMIT`].
 //!
+//! # The frontier: frames nobody asked for are not written
+//!
+//! Threading the list at boot means writing one word into every frame, and on
+//! the first machine with real memory that write was most of the boot: under a
+//! hypervisor, touching a page is what makes the host commit it, and touching
+//! every page of a 16 GiB guest serially cost two to three minutes before the
+//! kernel had done anything (RFC 0023, `docs/first-boot-outside-qemu.md`).
+//!
+//! So [`FrameAllocator::add_region`] no longer threads frames. It walks and
+//! *decides* exactly as it always has — the per-frame filter is untouched —
+//! and coalesces its acceptances into runs, held in a small array inside the
+//! allocator. A frame's link word is first written when the frame is first
+//! *freed*; a frame allocated straight off a run reaches its owner without
+//! this allocator ever having written to it. Until then it is counted among
+//! the dirty frames, because that is what it is: storage holding whatever the
+//! firmware left in it.
+//!
 //! # The link is not a plain pointer
 //!
 //! Storing the list inside the frames means the link word lives in memory that
@@ -206,6 +223,30 @@ impl Reserved {
     }
 }
 
+/// A run of accepted frames the allocator has never written to.
+///
+/// Produced by [`FrameAllocator::add_region`] coalescing the per-frame
+/// filter's consecutive acceptances, consumed one frame at a time when both
+/// free lists have nothing better. See the module documentation and RFC 0023.
+#[derive(Clone, Copy, Debug)]
+struct Run {
+    /// The next frame to hand out.
+    next: u64,
+    /// One past the last byte of the run.
+    end: u64,
+}
+
+/// How many runs the allocator can hold before falling back to eager
+/// threading.
+///
+/// A run ends where a reserved range, the addressable limit, or the region
+/// does, so a real memory map produces a few dozen at most — sixteen regions
+/// and twelve reservations on the machine that motivated this. The array is a
+/// kibibyte inside the allocator, which lives on the boot stack; a map
+/// fragmented past the bound is served the old way, one write per frame,
+/// which is slower and never wrong.
+const UNTOUCHED_RUNS: usize = 64;
+
 /// Free lists of physical frames: one holding zeroed frames, one holding frames
 /// as their last owner left them.
 ///
@@ -233,6 +274,13 @@ pub struct FrameAllocator {
     limit: u64,
     /// Mixed into every stored link. See the module documentation.
     cookie: u64,
+    /// Accepted frames never yet touched, newest run last. Consumed from the
+    /// last run, ascending within it — deterministic, like everything else.
+    runs: [Run; UNTOUCHED_RUNS],
+    /// How many entries of `runs` are live. Live runs are never empty.
+    run_count: usize,
+    /// Frames inside `runs`, so the counts stay one field read.
+    untouched: u64,
 }
 
 impl FrameAllocator {
@@ -254,6 +302,9 @@ impl FrameAllocator {
             phys_offset: 0,
             limit: IDENTITY_LIMIT,
             cookie,
+            runs: [Run { next: 0, end: 0 }; UNTOUCHED_RUNS],
+            run_count: 0,
+            untouched: 0,
         }
     }
 
@@ -290,7 +341,7 @@ impl FrameAllocator {
     /// Frames available now, zeroed or not.
     #[must_use]
     pub const fn free_count(&self) -> u64 {
-        self.clean_free + self.dirty_free
+        self.clean_free + self.dirty_free + self.untouched
     }
 
     /// Frames available and known to be zero.
@@ -300,9 +351,14 @@ impl FrameAllocator {
     }
 
     /// Frames available that still hold what their last owner wrote.
+    ///
+    /// The frames on the runs count here too: their last owner is the
+    /// firmware, and "probably zero" is not a property this allocator hands
+    /// anybody. The split between listed and untouched is an implementation
+    /// fact, not a guarantee, so it is not published.
     #[must_use]
     pub const fn dirty_count(&self) -> u64 {
-        self.dirty_free
+        self.dirty_free + self.untouched
     }
 
     /// Frames this allocator has ever been given.
@@ -327,18 +383,25 @@ impl FrameAllocator {
     /// It used to say the loop "costs nothing at boot" because "a machine has
     /// tens of thousands of frames and a handful of reserved ranges". The first
     /// machine this ever ran on outside an emulator had **four million** frames,
-    /// and the scan below ran once per frame per range. That sentence was an
+    /// and the scan ran once per frame per range. That sentence was an
     /// assumption about hardware written on a 128 MiB emulator, and
-    /// `docs/first-boot-on-hardware.md` is where it was measured.
+    /// `docs/first-boot-outside-qemu.md` is where it was measured.
     ///
-    /// So there is a ceiling now, and it is deliberately *not* a rewrite into
-    /// interval arithmetic: the per-frame filter still decides, unchanged. It is
-    /// simply not asked where its answer cannot be in doubt. Overlapping
-    /// requires `frame < r.end`, so a frame at or above every reserved end
-    /// overlaps nothing, and one comparison replaces the whole scan for the
-    /// overwhelming majority of frames — reserved ranges are few and clustered
-    /// low, and on the second pass the largest of them is everything the first
-    /// pass already took.
+    /// So the filter is only asked where its answer can be in doubt, and its
+    /// acceptances are recorded as runs rather than written into the frames —
+    /// two economies, each earned by its own measurement, neither a rewrite
+    /// into interval arithmetic:
+    ///
+    /// - Overlapping requires `frame < r.end`, so at or above every reserved
+    ///   end — and above [`LOW_MEMORY_LIMIT`] — a frame is usable with no
+    ///   question to put, and the rest of the region is accepted as one run by
+    ///   construction. Reserved ranges are few and clustered low, so this is
+    ///   nearly everything.
+    /// - Threading each accepted frame onto the free list wrote one word into
+    ///   every frame of RAM, which under a hypervisor made the host commit the
+    ///   whole guest at boot — minutes, measured, on the first 16 GiB machine.
+    ///   RFC 0023. The write now happens when a frame is first *freed*, and a
+    ///   frame allocated off a run is handed over untouched.
     ///
     /// Frames arrive dirty. Most of memory is in fact zero at boot, but "the
     /// firmware probably left it that way" is not a property to hand a
@@ -354,44 +417,125 @@ impl FrameAllocator {
     /// from any of those is memory corruption with a delay fuse.
     pub unsafe fn add_region(&mut self, base: u64, len: u64, reserved: &[Reserved]) {
         let region_end = base.saturating_add(len);
+        // One past the last whole frame in the region; the tail past it is
+        // ignored, as it always was.
+        let frames_end = region_end / FRAME_SIZE * FRAME_SIZE;
         let mut frame = base.next_multiple_of(FRAME_SIZE);
 
-        // The highest byte any reserved range reaches. Computed once here rather
-        // than tested per frame; `0` for an empty list, which makes every frame
-        // take the fast path, which is correct because there is nothing to
-        // overlap.
+        // Below this line the filter must be asked; at or above it the answer
+        // is known. `0` for an empty reserved list is correct: there is
+        // nothing to overlap, and the low-memory bound still applies.
         let ceiling = reserved.iter().map(|r| r.end).max().unwrap_or(0);
+        let threshold = ceiling.max(LOW_MEMORY_LIMIT);
+        // One past the last byte an accepted frame may reach. The limit is
+        // frame-aligned on every machine, and rounding down costs nothing
+        // where it is not.
+        let reach = self.limit / FRAME_SIZE * FRAME_SIZE;
 
-        while frame.saturating_add(FRAME_SIZE) <= region_end {
+        // The start of the run being coalesced, or zero for none. Zero cannot
+        // be a run start, because nothing below `LOW_MEMORY_LIMIT` is ever
+        // accepted.
+        let mut run = 0u64;
+
+        while frame < threshold && frame < frames_end {
             let end = frame + FRAME_SIZE;
-            let usable = frame >= LOW_MEMORY_LIMIT
-                && (frame >= ceiling || !reserved.iter().any(|r| r.overlaps(frame, end)));
+            let usable =
+                frame >= LOW_MEMORY_LIMIT && !reserved.iter().any(|r| r.overlaps(frame, end));
 
-            if usable {
-                if end > self.limit {
-                    self.unreachable += 1;
-                } else {
-                    // SAFETY: the frame is inside a region the caller vouched
-                    // for, overlaps nothing reserved, and lies below the
-                    // addressable limit, so writing its first word is writing
-                    // to memory nothing else owns.
-                    unsafe { self.push_dirty(frame) };
-                    self.total += 1;
-                }
+            if usable && end > reach {
+                self.unreachable += 1;
             }
-
+            if usable && end <= reach {
+                if run == 0 {
+                    run = frame;
+                }
+            } else if run != 0 {
+                // SAFETY: every frame in `run..frame` passed the filter above,
+                // inside a region the caller vouched for, below the limit.
+                unsafe { self.accept(run, frame) };
+                run = 0;
+            }
             frame = end;
         }
+
+        // From the threshold up every frame is usable by construction, so the
+        // remainder is one extension of the open run — no frame is visited.
+        let rest = frames_end.min(reach);
+        if frame < rest {
+            if run == 0 {
+                run = frame;
+            }
+            frame = rest;
+        }
+        if run != 0 {
+            // SAFETY: as above — per frame below the threshold, and by the
+            // threshold's construction from there to `frame`.
+            unsafe { self.accept(run, frame) };
+        }
+        if frame < frames_end {
+            self.unreachable += (frames_end - frame) / FRAME_SIZE;
+        }
+    }
+
+    /// Take ownership of a run of frames without touching any of them.
+    ///
+    /// # Safety
+    ///
+    /// Every frame in `start..end` must satisfy what [`Self::add_region`]
+    /// demands of an accepted frame: inside a vouched-for region, overlapping
+    /// nothing reserved, at or above [`LOW_MEMORY_LIMIT`], below the limit.
+    unsafe fn accept(&mut self, start: u64, end: u64) {
+        let frames = (end - start) / FRAME_SIZE;
+        self.total += frames;
+
+        if self.run_count < UNTOUCHED_RUNS {
+            self.runs[self.run_count] = Run { next: start, end };
+            self.run_count += 1;
+            self.untouched += frames;
+            return;
+        }
+
+        // A memory map fragmented past the runs array is served the old way,
+        // one write per frame — slower, never wrong. RFC 0023 states the
+        // bound so this branch is a documented cost, not a surprise.
+        let mut frame = start;
+        while frame < end {
+            // SAFETY: the caller's guarantee, frame by frame.
+            unsafe { self.push_dirty(frame) };
+            frame += FRAME_SIZE;
+        }
+    }
+
+    /// The next never-touched frame, or `None` when every run is spent.
+    ///
+    /// Runs are consumed newest-first, ascending within each, and a live run
+    /// is never empty — `accept` refuses nothing smaller than a frame and the
+    /// emptied entry is retired here.
+    fn take_untouched(&mut self) -> Option<u64> {
+        let last = self.run_count.checked_sub(1)?;
+        let run = &mut self.runs[last];
+        let frame = run.next;
+        run.next += FRAME_SIZE;
+        self.untouched -= 1;
+        if run.next >= run.end {
+            self.run_count = last;
+        }
+        Some(frame)
     }
 
     /// Take a run of frames, or `None` when there is none to be had.
     ///
-    /// The caller owns it until it is handed back. Its contents are whatever the
-    /// last owner left, plus a link word this allocator wrote — a caller that
-    /// needs to know what is in it wants [`Self::alloc_zeroed`]. This path
-    /// exists for the caller that is about to overwrite the whole frame anyway,
-    /// and it prefers a dirty frame precisely so that the clean list is left for
-    /// the callers that cannot.
+    /// The caller owns it until it is handed back. Its contents are whatever
+    /// the last owner left — possibly plus a link word this allocator wrote,
+    /// possibly untouched since the firmware — so a caller that needs to know
+    /// what is in it wants [`Self::alloc_zeroed`]. This path exists for the
+    /// caller that is about to overwrite the whole frame anyway, and it
+    /// prefers a dirty frame precisely so that the clean list is left for the
+    /// callers that cannot.
+    ///
+    /// The dirty list is preferred over an untouched run for a second reason
+    /// stated in RFC 0023: recycling keeps allocation on memory the machine —
+    /// or the hypervisor underneath it — has already committed.
     ///
     /// Any order but [`Order::FRAME`] is refused. That is the M1 floor rather
     /// than a policy: splitting and coalescing is the buddy allocator, and a
@@ -404,8 +548,10 @@ impl FrameAllocator {
             // SAFETY: the list is non-empty and holds frames this allocator put
             // there, within the window `phys_offset` names.
             unsafe { self.pop_dirty() }?
+        } else if let Some(frame) = self.take_untouched() {
+            frame
         } else {
-            // SAFETY: as above, for the other list.
+            // SAFETY: as above, for the clean list.
             unsafe { self.pop_clean() }?
         };
         Some(Frame { base: frame, order })
@@ -442,8 +588,14 @@ impl FrameAllocator {
             return Some(Frame { base: frame, order });
         }
 
-        // SAFETY: as above, for the dirty list.
-        let frame = unsafe { self.pop_dirty() }?;
+        // SAFETY: everything on the dirty list is a frame this allocator put
+        // there, addressable through `virt` — the invariant `rebind` carries.
+        // An untouched frame serves the same way: accepted below the limit,
+        // dirty in every sense that matters here.
+        let frame = match unsafe { self.pop_dirty() } {
+            Some(frame) => frame,
+            None => self.take_untouched()?,
+        };
         // SAFETY: the frame is off the list and unowned, so its whole extent is
         // ours to write.
         unsafe { self.zero(frame) };
@@ -483,10 +635,20 @@ impl FrameAllocator {
     /// scheduled against a deadline at all.
     pub fn scrub(&mut self, budget: u64) -> u64 {
         let mut done = 0;
-        while done < budget && self.dirty != 0 {
-            // SAFETY: the dirty list is non-empty and holds frames this
-            // allocator put there.
-            let Some(frame) = (unsafe { self.pop_dirty() }) else { break };
+        while done < budget {
+            // SAFETY: everything on the dirty list is a frame this allocator
+            // put there, addressable through `virt` — the invariant `rebind`
+            // carries. The untouched fallback is a safe call, and scrub is
+            // the right place for it: touching memory nobody asked for is
+            // this path's job, bandwidth-accounted, so faulting a page in
+            // here is a scheduled cost rather than a boot-time one.
+            let frame = match unsafe { self.pop_dirty() } {
+                Some(frame) => frame,
+                None => match self.take_untouched() {
+                    Some(frame) => frame,
+                    None => break,
+                },
+            };
             // SAFETY: the frame is off the list, so nothing else holds it.
             unsafe { self.zero(frame) };
             // SAFETY: as above — the frame is unowned and addressable, and its
