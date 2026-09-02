@@ -31,9 +31,11 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use f_abi::{Cqe, Sqe, chan, error, flags, op};
 
+pub mod buffers;
 mod doorbell;
 mod mapping;
 
+pub use buffers::{BufferSet, Fixed, Idle, InFlight, Naming, PeerGone, Submitter, Virtual};
 pub use doorbell::{Bell, Hardware, Path, Ringer, Silent};
 pub use mapping::Mapping;
 
@@ -1007,7 +1009,7 @@ mod tests {
             }
         }
 
-        fn cq(&self) -> Completions<'_> {
+        pub(crate) fn cq(&self) -> Completions<'_> {
             Completions { head: &self.cq_head, tail: &self.cq_tail, slots: &self.slots }
         }
 

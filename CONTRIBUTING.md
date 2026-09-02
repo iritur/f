@@ -58,7 +58,7 @@ because it is a check somebody believes is happening.
 | | | Enforced by |
 |---|---|---|
 | **R01** Name the mechanism, not the intention | A drawback is answered when something makes it unavailable. "We will be careful about X" is a plan, and plans are what the systems being criticised also had. | review |
-| **R02** A boundary the hardware speculates through is not a confidentiality boundary | The one place this architecture is currently weaker than the system it criticises, and it entered by nobody stating the rule. | review, until RFC 0005 and the topology check |
+| **R02** A boundary the hardware speculates through is not a confidentiality boundary | The one place this architecture is currently weaker than the system it criticises, and it entered by nobody stating the rule. | review for the kind a native component declares; the supervisor refusal and manifest lint RFC 0005 names, landing with E1-B05 |
 | **R03** Every quantity crossing the ABI states its unit, its epoch and its zero | `deadline: u64` shipped with none of the three, in the one crate whose entire purpose is to be correct against code written by somebody else. | **`cargo xtask lint-units`** |
 | **R04** Fail closed | Unknown opcode, unknown flag, non-zero reserved field: refuse. Ignoring an unknown bit is how a protocol acquires two incompatible interpretations and no error. | review, plus the hostile-peer fuzzer at E1 |
 | **R05** Nothing is delivered asynchronously | Every event is a ring entry drained at a polling point. This is what keeps the determinism contract whole, and it is why this system never needs the concept of async-signal-safety. | **`cargo xtask lint-callbacks`** |

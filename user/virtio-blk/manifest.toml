@@ -1,0 +1,129 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# virtio-blk: the first driver that lives outside the frame. E1-B02 builds the
+# crate this names; this file is written first, the way a claim is registered
+# before its number, so that the shape the driver has to fit predates the
+# driver. `docs/manifest.md` is the schema, field by field, and
+# `cargo xtask lint-manifests` is what refuses this file when it stops fitting.
+#
+# What it declares, in one paragraph: a block device server in the `private`
+# speculation domain, holding the device's register page set, memory for its
+# virtqueues and the device's interrupt, connected to the broker for anything
+# it may ever have to ask for; serving one typed protocol on one data ring
+# whose payload never passes through the ring; restarted on a fault and not on
+# an exit; in the soft class, with two mebibytes for everything it is made of.
+
+schema = 1
+name   = "virtio-blk"
+image  = "user/virtio-blk"
+
+# `private`, not `shared`, and the choice is argued because RFC 0005 leaves it
+# to review. This driver is native and carries no `unsafe`, which is what
+# `shared` is for — but every byte of every file on the disk crosses its
+# buffers, and RFC 0005 puts a native component that holds a secret in
+# `private`. The cost is the flush on every crossing into and out of the
+# driver, and it is paid deliberately: a `shared` block driver is a declaration
+# that no two clients of the disk hold anything from each other, and nothing in
+# this tree can say that on their behalf. The number that would reverse this is
+# RFC 0005's cross-domain call cost, measured at E1-P10 with this component as
+# the peer; if it dominates the datapath claims, the remedy is in that RFC and
+# not a quiet edit here.
+domain = "private"
+
+# --- Needs: routed at spawn, in this order, one handle each -------------------
+
+# The transport's register pages: common configuration, notification, ISR and
+# device configuration, as the modern PCI transport lays them out in one BAR
+# and as QEMU places them. Four pages is that layout; a device whose BAR is
+# larger is a different device and a different manifest, not a bigger number.
+[[capability]]
+name   = "mmio"
+type   = "frame"
+rights = ["read", "write"]
+from   = "supervisor"
+frames = 4
+
+# Memory the driver retypes into its virtqueues — descriptor tables, available
+# and used rings, one request queue. Untyped rather than frames because the
+# driver decides the split, and `derive` is what lets it retype. Sixteen pages
+# is a 256-entry queue with room to spare; the client's data never lands here.
+[[capability]]
+name   = "queues"
+type   = "untyped"
+rights = ["read", "write", "derive", "revoke"]
+from   = "supervisor"
+bytes  = 65_536
+
+# The device's interrupt, delivered to this component rather than to the frame.
+# No vector is named: which vector the device raises is the topology's to bind
+# and the machine's to know, and a manifest that named one would be a manifest
+# bound to one machine. What `read` means on an interrupt — the right to wait
+# on it — is E1-B01's to state; the lint checks only that the word is known.
+[[capability]]
+name   = "notify"
+type   = "irq"
+rights = ["read"]
+from   = "supervisor"
+
+# The broker. RFC 0008 says an ask is resolved by connecting to the powerbox,
+# whose endpoint reaches a component through its needs like any other need, and
+# in E1 the supervisor occupies that place. This manifest declares no ask
+# today — a driver bound to its device at spawn has nothing a user picks — so
+# the honest statement is that this handle is held for the asks E1-B02 may add,
+# and that adding one changes this file and therefore the hash a spawn names.
+# Connect-only: `write` on an endpoint is the right to connect and nothing else.
+[[capability]]
+name   = "powerbox"
+type   = "endpoint"
+rights = ["write"]
+from   = "supervisor"
+
+# --- Rings: the control ring is implicit; this is the data ring ---------------
+
+# One server ring per client, up to eight clients, each speaking `blk` version
+# 1. `registered` is the zero-copy path: a request names a registered buffer
+# set the client owns and the device transfers into it directly, so the bytes
+# of a read or a write never pass through this ring or through this
+# component. That is the sentence E1-B02's exit counts — "zero copies on the
+# data path, verified by counter" — stated here as the mechanism rather than
+# the intention. `features` is empty until something is built: E1-B06 adds
+# `admission_control` when this queue orders by deadline, and QEMU's virtio
+# has no address translation service, so `shared_virtual` is not offered.
+[[ring]]
+name        = "blk"
+role        = "server"
+protocol    = "blk"
+version_min = 1
+version     = 1
+entries     = 256
+payload     = "registered"
+clients     = 8
+features    = []
+
+# --- Restart: the supervisor's policy, the frame's mechanism ------------------
+
+# On a fault, and not on an exit. A driver bug is a fault and becomes a
+# restart, which is the sentence `fast-path.html` section 08 makes of it; an
+# exit is a decision the driver made and a supervisor that overrode it would
+# be arguing with its own component. The backoff doubles from ten
+# milliseconds to a second, and the eighth restart is the last: a driver that
+# has faulted eight times under this policy is a driver whose place should be
+# left empty and looked at, not refilled a ninth time. E1-P06 kills this
+# component at random under load, and is what says whether eight is right.
+[restart]
+policy           = "on_fault"
+backoff_first_ms = 10
+backoff_max_ms   = 1_000
+max_restarts     = 8
+
+# --- Reservation: what admission may refuse ----------------------------------
+
+# Soft class. A block driver serves deadlines carried in its clients' entries
+# (E1-B06) and holds no deadline of its own, so it reserves no core. The
+# memory is the account its whole footprint is retyped from — address space,
+# page tables, text, stack, control ring, state tree, capability table — and
+# not the queues above, which are a routed need. Two mebibytes is the figure
+# a soft-class component is refused at if the supplied `Untyped` holds less.
+[reservation]
+class        = "soft"
+memory_bytes = 2_097_152

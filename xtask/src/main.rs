@@ -18,6 +18,11 @@ use std::time::Duration;
 /// of this file is a list of decisions while that one is a list of constants.
 mod pack;
 
+/// The component manifest schema, as a check. Split out because it is a parser
+/// with a schema behind it rather than a grep with a policy behind it, and
+/// because `docs/manifest.md` names it as the place the schema is code.
+mod manifest;
+
 /// The target the kernel is built for.
 ///
 /// A built-in target and not a JSON file in `targets/`, which is a decision
@@ -165,6 +170,7 @@ fn main() -> ExitCode {
         "lint-units" => lint_units(),
         "lint-callbacks" => lint_callbacks(),
         "lint-claim-owners" => lint_claim_owners(),
+        "lint-manifests" => lint_manifests(),
         "lint-snapshot" => lint_snapshot(),
         "lint-reproduce" => lint_reproduce(),
         "unsafe" => unsafe_report(args.get(1).map(String::as_str) == Some("--by-file")),
@@ -240,6 +246,8 @@ cargo xtask <command>
   lint-units         R03: every public abi field states its unit
   lint-callbacks     R05: no interface registers a callback
   lint-claim-owners  R09: every claim names the document that owns it
+  lint-manifests     Every component manifest fits docs/manifest.md; RFC 0005
+                     rule 4 and RFC 0008's shape, checked before a boot is
   lint-snapshot      claims/snapshot.json holds what the registry holds
 
   unsafe             The number A-05 reports: lines inside `unsafe` as a share
@@ -1741,6 +1749,11 @@ fn lint_all() -> Result<(), String> {
     lint_units()?;
     lint_callbacks()?;
     lint_claim_owners()?;
+    // The topology check RFC 0005 promised in the R02 row: every component
+    // manifest fits the schema, declares a domain, and does not put an
+    // imported image in `shared`. It runs here so a boot is not the first
+    // place a missing field is found.
+    lint_manifests()?;
     // A generated file that is committed is a claim about the generator, and
     // the only moment it can be checked cheaply is before anything regenerates
     // it. `xtask claims` rewrites the snapshot by design, so this has to come
@@ -2040,6 +2053,73 @@ fn lint_claim_owners() -> Result<(), String> {
          Add an [owner] table naming a document that exists and a section in it.",
         findings.len(),
         findings.join("\n")
+    ))
+}
+
+/// Every component manifest in the permissive tree fits `docs/manifest.md`.
+///
+/// The schema itself is `manifest::check`; this is the walk, the cross-file
+/// rule, and the report. The cross-file rule is that two manifests do not share
+/// a `name`: the topology and every `sibling:` reference name a component by
+/// it, and two files with one name are two answers to "which component".
+///
+/// An image that is not in the tree yet is reported on the ok line rather than
+/// refused. The manifest is written before the driver on purpose — E1-D04
+/// precedes E1-B02 as a claim precedes its number — and the moment existence
+/// matters is assembly, which refuses there. Reporting it every run is what
+/// keeps "not yet" from quietly becoming "never".
+fn lint_manifests() -> Result<(), String> {
+    let files = manifest::files(&root(), &target_dir())?;
+    let mut findings = Vec::new();
+    let mut pending = Vec::new();
+    let mut names: BTreeMap<String, String> = BTreeMap::new();
+
+    for path in &files {
+        let rel = relative(path);
+        let text = std::fs::read_to_string(path).map_err(|e| format!("reading {rel}: {e}"))?;
+        let checked = match manifest::check(&rel, &text) {
+            Ok(checked) => checked,
+            Err(mut refusals) => {
+                findings.append(&mut refusals);
+                continue;
+            }
+        };
+        if let Some(other) = names.insert(checked.name.clone(), rel.clone()) {
+            findings.push(format!(
+                "  {rel}  `name = \"{}\"` is also the name in {other}; a component has one manifest",
+                checked.name
+            ));
+        }
+        match manifest::image_state(&root(), &checked) {
+            manifest::Image::Present | manifest::Image::ByHash => {}
+            manifest::Image::NotYet => pending.push(format!("{} ({rel})", checked.image)),
+            manifest::Image::Wrong(why) => findings.push(format!("  {rel}  {why}")),
+        }
+    }
+
+    if findings.is_empty() {
+        let not_yet = if pending.is_empty() {
+            String::new()
+        } else {
+            format!("; not yet built: {}", pending.join(", "))
+        };
+        println!("lint-manifests: ok  ({} manifest(s) fit the schema{not_yet})", files.len());
+        return Ok(());
+    }
+    Err(format!(
+        "{} manifest problem(s):
+{}
+
+         A manifest is a parser's input and a parser here refuses what it does not
+         know — R04. The schema is docs/manifest.md, field by field, with the reason
+         for each field and what is refused; the domain field is RFC 0005's, the
+         shape is RFC 0008's. A component the lint refuses is one the supervisor
+         would refuse to spawn, found here instead of at boot.",
+        findings.len(),
+        findings.join(
+            "
+"
+        )
     ))
 }
 
@@ -4853,6 +4933,7 @@ section  = \"06\"
         assert!(lint_units().is_ok(), "abi/ no longer satisfies R03");
         assert!(lint_callbacks().is_ok(), "an interface has acquired a callback");
         assert!(lint_claim_owners().is_ok(), "a claim has lost its owner");
+        assert!(lint_manifests().is_ok(), "a component manifest no longer fits the schema");
     }
 }
 

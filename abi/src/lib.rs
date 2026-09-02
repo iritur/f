@@ -12,7 +12,9 @@
 
 #![no_std]
 
+pub mod buf;
 pub mod cap;
+pub mod deadline;
 pub mod door;
 pub mod layout;
 pub mod state;
@@ -100,9 +102,18 @@ pub struct Sqe {
     /// See the `flags` module. Unit: none — a bitmask of the `flags`
     /// constants. Zero is no flags, which is always a valid submission.
     pub flags: u8,
-    /// Scheduling class and priority. See `docs/design/deadline-all-the-way-down.html`.
-    /// Unit: none — a class identifier in the high bits and a priority
-    /// ordinal in the low bits. Zero is the default class.
+    /// Scheduling class, and how many rings this request's urgency has already
+    /// crossed. Low byte: one of the [`class`] constants, read whole and
+    /// refused when it is none of them. High byte: inheritance depth, at most
+    /// [`deadline::MAX_DEPTH`]. [`deadline`] is the reading and
+    /// `docs/rfc/0025-a-deadline-inherits-downward-and-decays.md` the argument;
+    /// the resource document is where the class comes from. There is no
+    /// priority ordinal in this field, on purpose — within a class, the
+    /// deadline is the order.
+    /// Unit: none — a class ordinal in the low byte, smaller is more urgent,
+    /// and a count of rings in the high byte. Zero is `class::HARD` at depth
+    /// zero, which is why [`Sqe::ZERO`] writes `class::BATCH` explicitly: a
+    /// zeroed entry must not claim the one class that is admission-controlled.
     pub class: u16,
     /// Index into the caller's capability table. A forged value fails the
     /// bounds check and kills the channel.
@@ -129,12 +140,19 @@ pub struct Sqe {
     /// Unit: per-opcode, and the opcode owns saying which — bytes for a
     /// transfer, entries for an enumeration. Zero is the beginning.
     pub offset: u64,
-    /// Registered buffer set. On hardware with shared virtual memory this and
-    /// `buf_index` collapse to a plain address in the submitter's own space.
-    /// Unit: registered-set identifiers. Zero is a valid set.
+    /// Registered buffer set, packed as [`buf::SetId`], when
+    /// [`flags::FIXED_BUF`] is set. On a channel that negotiated
+    /// [`feature::SHARED_VIRTUAL_MEMORY`] and an entry with the flag clear,
+    /// this and `buf_index` are instead the low and high halves of a virtual
+    /// address in the submitter's own space — [`buf::Name`] is the reading, and
+    /// `docs/rfc/0024-a-buffer-is-owned-by-one-side.md` the argument.
+    /// Unit: registered-set identifiers on the registered path, the low 32
+    /// bits of a byte address on the other. Zero is slot zero at generation
+    /// zero, which was never issued, so a zeroed entry names no set.
     pub buf_set: u32,
-    /// Index within the buffer set.
-    /// Unit: buffers within `buf_set`, zero-based.
+    /// Index within the buffer set, or the high half of the address.
+    /// Unit: buffers within `buf_set`, zero-based, on the registered path; the
+    /// high 32 bits of a byte address on the other. Zero is the first buffer.
     pub buf_index: u32,
     /// Length in bytes. Unit: bytes. Zero is a zero-length operation, which
     /// is valid and distinct from an absent one.
@@ -217,6 +235,16 @@ pub mod cflags {
     pub const MORE: u32 = 1 << 0;
     /// The operation was cancelled rather than executed.
     pub const CANCELLED: u32 = 1 << 1;
+    /// The operation ran, and ran below what the entry asked: at a less urgent
+    /// class than it carried, against a later deadline than it carried, or
+    /// past the depth its urgency was allowed to reach. Which of the three is
+    /// [`deadline::Inherited::shortfall`](crate::deadline::Inherited::shortfall),
+    /// kept by the service and counted in its state tree; the flag is what
+    /// makes the demotion visible to the caller at all. Not an error, because
+    /// the request completed — but never silent, because a request served
+    /// below its class without a word is how a deadline becomes decorative.
+    /// RFC 0025.
+    pub const SHORTFALL: u32 = 1 << 2;
 }
 
 /// The error space.
@@ -275,6 +303,14 @@ pub mod error {
         pub const NO_CORE: u16 = 2;
         /// Memory bandwidth or a cache partition could not be reserved.
         pub const NO_BANDWIDTH: u16 = 3;
+        /// The entry claims a class more urgent than its submitter was
+        /// admitted for on this channel. Refused rather than served at the
+        /// ceiling with a flag, because a caller that lost nothing by writing
+        /// `HARD` would write it on every entry. In [`super::ADMISSION`]
+        /// rather than [`super::ARGUMENT`] because the entry is well-formed;
+        /// what it asks for is a promise nobody made to its author (R08).
+        /// Detail: the `class` field as written. RFC 0025.
+        pub const NOT_HELD: u16 = 4;
     }
 
     /// Codes within [`RESOURCE`].
@@ -323,6 +359,19 @@ pub mod error {
         /// object it names can be used for either, and no single mapping of it
         /// may have both.
         pub const RIGHTS_CONFLICT: u16 = 6;
+        /// The entry uses a feature this channel did not negotiate — an
+        /// address where [`crate::feature::SHARED_VIRTUAL_MEMORY`] was not
+        /// agreed is the case that exists. In [`super::ARGUMENT`] rather than
+        /// [`super::PEER`] because the channel is healthy and the peer is
+        /// present; what is wrong is one entry, and RFC 0011 says a feature
+        /// outside the agreed set must not be used, not that using it ends the
+        /// channel. Detail: the feature bit.
+        pub const FEATURE_NOT_NEGOTIATED: u16 = 7;
+        /// The `class` field's low byte names no class, or its high byte is a
+        /// depth past [`crate::deadline::MAX_DEPTH`], which no conforming
+        /// service writes. Refused, not clamped: a depth that is clamped is a
+        /// depth a peer can reset. Detail: the field as written. RFC 0025.
+        pub const BAD_CLASS: u16 = 8;
     }
 
     /// Pack a domain and a code into a [`Cqe::result`].

@@ -45,14 +45,15 @@
 
 /// What kind of object a capability names.
 ///
-/// Six, from the milestone. The discriminants are wire values: a component is
-/// told them by [`Handle`] lookups, and a later ABI version may add to the list
-/// but may not renumber it.
+/// Six from the milestone and a seventh from E1-D03. The discriminants are wire
+/// values: a component is told them by [`Handle`] lookups, and a later ABI
+/// version may add to the list but may not renumber it.
 ///
 /// Three of the six have no object behind them at M4 and the variant says which
 /// milestone gives them one. That is deliberate: a type added when its object
 /// arrives is a type the table's shape was not designed for, and the shape is
-/// the part that is expensive to change once two peers exist.
+/// the part that is expensive to change once two peers exist. The seventh is
+/// added on the same argument, ahead of the task that gives it an object.
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CapType {
@@ -78,6 +79,12 @@ pub enum CapType {
     /// One interrupt vector, delivered to a component rather than to the frame.
     /// No object until a driver lives outside the kernel, which is E1.
     Irq = 6,
+    /// A registered buffer set: memory a component handed to a service so a
+    /// device may reach it. A child of the memory capability it was registered
+    /// from, so revoking the parent — or the component dying, RFC 0008 — tears
+    /// the registration down with it. No object until `E1-B10`; the decision
+    /// is `docs/rfc/0024-a-buffer-is-owned-by-one-side.md`.
+    BufferSet = 7,
 }
 
 impl CapType {
@@ -96,6 +103,7 @@ impl CapType {
             4 => Some(Self::Channel),
             5 => Some(Self::Endpoint),
             6 => Some(Self::Irq),
+            7 => Some(Self::BufferSet),
             _ => None,
         }
     }
@@ -116,6 +124,7 @@ impl CapType {
             Self::Channel => "channel",
             Self::Endpoint => "endpoint",
             Self::Irq => "irq",
+            Self::BufferSet => "bufset",
         }
     }
 }
@@ -318,6 +327,7 @@ mod tests {
             CapType::Channel,
             CapType::Endpoint,
             CapType::Irq,
+            CapType::BufferSet,
         ];
         for kind in all {
             assert_eq!(CapType::from_wire(kind.to_wire()), Some(kind));
@@ -325,7 +335,7 @@ mod tests {
         }
         // Zero is not a type, which is what lets a zeroed slot mean empty.
         assert_eq!(CapType::from_wire(0), None);
-        assert_eq!(CapType::from_wire(7), None);
+        assert_eq!(CapType::from_wire(8), None);
         assert_eq!(CapType::from_wire(u8::MAX), None);
     }
 
