@@ -32,11 +32,13 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use f_abi::{Cqe, Sqe, chan, error, flags, op};
 
 pub mod buffers;
+pub mod device;
 mod doorbell;
 mod mapping;
 pub mod registry;
 
 pub use buffers::{BufferSet, Fixed, Idle, InFlight, Naming, PeerGone, Submitter, Virtual};
+pub use device::{Region, Window};
 pub use doorbell::{Bell, Hardware, Path, Ringer, Silent};
 pub use mapping::Mapping;
 

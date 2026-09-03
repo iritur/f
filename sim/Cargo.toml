@@ -1,0 +1,33 @@
+[package]
+name = "f-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The deterministic simulator: virtual time, seeded ordering, and a trace one seed reproduces."
+
+# A host crate. It is deliberately absent from the AArch64 cross-check in
+# `xtask`'s `fn test`, and the reason is not a portability gap: the target that
+# check uses is `aarch64-unknown-none`, which has no `std`, and this crate is a
+# tool that reads a command line and writes a trace. Nothing in it is compiled
+# into the system, so nothing in it can be wrong on a machine the system runs on.
+[dependencies]
+f-env.workspace = true
+# The device models are peers on a ring, so they obey RFC 0024 and RFC 0028 by
+# *driving the real types* rather than a parallel set: `f_ring::registry::Table`
+# is the registration, `f_ring::buffers` is who holds the bytes, and
+# `f_abi::Sqe`/`Cqe` are what crosses. A simulator with its own buffer ownership
+# would be checking that its own copy agrees with itself, which is the failure
+# RFC 0032 rejected shape (b) to avoid, arrived at from the other side.
+f-abi.workspace = true
+f-ring.workspace = true
+
+# No override. This crate inherits `unsafe_code = "forbid"` from the workspace,
+# and it has no business needing it: it models protocols, it does not touch
+# hardware. `cargo xtask lint-unsafe` is what says that stayed true.
+[lints]
+workspace = true
+
+[[bin]]
+name = "f-sim"
+path = "src/main.rs"

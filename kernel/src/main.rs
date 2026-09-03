@@ -22,6 +22,7 @@
 #![no_main]
 
 pub mod arch;
+pub mod blk;
 pub mod cap;
 pub mod component;
 pub mod doorbell;
@@ -579,6 +580,20 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // this boot had not finished being.
     let provoked = dma_provocation(&boot, &mut frames, &space, features, remapping.as_mut());
 
+    // E1-B02. The datapath, with the driver outside the frame: a component
+    // whose crate forbids `unsafe` brings a real device up through granted
+    // register windows, a client registers a buffer set and writes a sector
+    // through a ring, reads it back, and compares the bytes — and the driver's
+    // copy counter is required to be zero while the counter beside it, moved by
+    // the same function on purpose, is required not to be.
+    //
+    // Beside `dma_provocation` and behind its own parameter for the same
+    // reason: an ordinary boot has no device to drive and no business turning
+    // one on. Before the tree is rendered, because everything it does — a
+    // domain taken, frames spent and given back, a fault recorded — is
+    // something the tree publishes.
+    let datapath = blk_datapath(&boot, &mut frames, &space, features, remapping.as_mut());
+
     // Last of the frame's own numbers, because the allocator is still handing
     // out frames until the line above. The self-test is what says the hash
     // works: two readings with nothing in between must agree, and a reading
@@ -618,7 +633,24 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     if let Some(found) = remapping.as_ref() {
         tree.set(state::node::IOMMU_DOMAINS, u64::from(found.unit.domains()));
         tree.set(state::node::IOMMU_USED, u64::from(found.unit.domains_used()));
-        tree.set(state::node::IOMMU_FAULTS, u64::from(provoked));
+        // Both provocations' faults, summed rather than kept apart, because
+        // this node is the unit's own record of transactions it refused and the
+        // unit does not care which stage produced one. Only one of the two runs
+        // on any boot — they are different parameters — so the sum is a sum of
+        // one number and a zero.
+        let refused =
+            u64::from(provoked) + datapath.as_ref().map_or(0, |report| u64::from(report.faults));
+        tree.set(state::node::IOMMU_FAULTS, refused);
+    }
+    // The datapath's four numbers, published at the one place they are
+    // established. RFC 0013: a node names a live word rather than a value
+    // copied in later, and two homes for a count is the second copy that can
+    // disagree with the first.
+    if let Some(report) = datapath.as_ref() {
+        tree.set(state::node::BLK_SERVED, u64::from(report.counters.served));
+        tree.set(state::node::BLK_BYTES, report.counters.bytes);
+        tree.set(state::node::BLK_COPIES, report.counters.copies);
+        tree.set(state::node::BLK_PROVOKED, report.counters.provoked);
     }
     match tree.self_test() {
         Ok(hash) => kprintln!(
@@ -1656,6 +1688,171 @@ fn dma_provocation(
         }
     }
     outcome.faults
+}
+
+/// Drive the block datapath through a driver that lives outside the frame, and
+/// require the right thing to happen to it.
+///
+/// This is E1-B02's exit and the clause E1-B01's could not observe, and the two
+/// halves are the whole of it: `blk=inside` leaves the client's page in the
+/// driver's device domain and requires a sector written through a ring to come
+/// back byte for byte; `blk=outside` takes the page back between the write and
+/// the read and requires the read to be a fault the unit records rather than a
+/// transfer into memory the driver no longer holds.
+///
+/// The verdict is the kernel's rather than the harness's, exactly as `user`,
+/// `cap` and `iommu` already are: it knows which half it was asked for and what
+/// is in the client's buffer afterwards, and a harness reading an exit code
+/// could not tell a refused transfer from a device that never answered.
+///
+/// Answers the report so the caller can publish it, rather than this reaching
+/// into the state tree from underneath. A boot with no datapath answers `None`,
+/// which is the same absence and a different claim from a datapath that
+/// counted zero.
+fn blk_datapath(
+    boot: &BootInfo,
+    frames: &mut mem::FrameAllocator,
+    space: &paging::AddressSpace,
+    features: paging::Features,
+    remapping: Option<&mut Remapping>,
+) -> Option<blk::Report> {
+    let half = if boot.has_parameter(b"blk=inside") {
+        blk::Half::Inside
+    } else if boot.has_parameter(b"blk=outside") {
+        blk::Half::Outside
+    } else if boot.has_parameter(b"blk=escape") {
+        blk::Half::Escape
+    } else {
+        return None;
+    };
+
+    let Some(found) = remapping else {
+        kprintln!("FAIL: the block datapath asked for on a machine with no remapping unit");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+
+    kprintln!(
+        "  datapath      a driver outside the frame, and the {} half: {}",
+        half.name(),
+        match half {
+            blk::Half::Inside => "the client's buffer stays in the driver's grant",
+            blk::Half::Outside => "the client takes its page back between the two transfers",
+            blk::Half::Escape => "the driver points the device past what it was answered",
+        }
+    );
+
+    // SAFETY: the boot processor, with the kernel's address space in `CR3`,
+    // `frames` rebound onto its direct map, translation enabled, and nothing
+    // else in this kernel driving the device this finds — the `dma` stage runs
+    // on a different parameter and this one has already returned if it was not
+    // asked for.
+    let outcome = unsafe {
+        blk::demonstrate(
+            frames,
+            space,
+            features,
+            &mut found.unit,
+            &found.window,
+            &found.survey,
+            boot,
+            half,
+        )
+    };
+
+    let report = match outcome {
+        Ok(report) => report,
+        Err(why) => {
+            // A datapath that could not be set up is not a datapath that was
+            // exercised, and reporting it as a pass is how this whole check
+            // would come to mean nothing.
+            kprintln!("FAIL: the block datapath: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+
+    // What the component's own manifest declares, read out of the record the
+    // build compiled rather than repeated as constants in the frame. The
+    // content hash is what a spawn names, so a driver whose *code* changed is
+    // as visible here as one whose declaration did.
+    kprintln!(
+        "  blk manifest  virtio-blk declares {} register page(s) and {} B of untyped for its \
+         queues, content {:#018x}",
+        report.declared.frames,
+        report.declared.bytes,
+        report.declared.id.bits(),
+    );
+    kprintln!(
+        "  blk device    requester {:#06x}, {} page(s) of register window, {} sector(s) of \
+         capacity",
+        report.bdf.source_id(),
+        report.windows,
+        report.capacity,
+    );
+    kprintln!(
+        "  blk grant     the client registered one page at {:#018x}; a capability with no \
+         right to grant was {}",
+        report.registered_at,
+        if report.refused_without_grant { "refused" } else { "ACCEPTED" },
+    );
+    kprintln!(
+        "  blk transfer  write {}, read {}, {} byte(s) of the sink still unwritten, bytes {}",
+        if report.wrote { "completed" } else { "refused" },
+        if report.read { "completed" } else { "refused" },
+        report.untouched,
+        if report.matched { "match" } else { "DO NOT match" },
+    );
+    // The exit criterion, as two numbers rather than as a sentence. `copies` is
+    // the driver's own tally of bytes it moved on the data path and must be
+    // zero; `provoked` is the same function's tally when the boot calls it on
+    // purpose and must not be, because a counter nothing can move is not a
+    // counter.
+    kprintln!(
+        "  blk copies    {} byte(s) copied on the data path of {} transferred; {} byte(s) \
+         moved through the same function on purpose",
+        report.counters.copies,
+        report.counters.bytes,
+        report.counters.provoked,
+    );
+    // What the driver aimed at, beside where the unit says the transaction
+    // went. On `escape` these are a page apart and the second is the address the
+    // component's own arithmetic produced; on the other two halves nothing is
+    // provoked and the count is zero, which `Report::verdict` requires.
+    kprintln!(
+        "  blk escape    {} descriptor(s) pointed past a registration's answer; this \
+         half expects a fault at {:#018x}",
+        report.counters.escaped,
+        report.expected_fault(),
+    );
+    match report.fault {
+        Some(fault) => kprintln!(
+            "  blk fault     requester {:#06x} {} {:#018x}, reason {:#04x} — {} record(s)",
+            fault.source,
+            if fault.read { "read" } else { "wrote" },
+            fault.address,
+            fault.reason,
+            report.faults,
+        ),
+        None => kprintln!("  blk fault     none recorded"),
+    }
+
+    match report.verdict() {
+        Ok(()) => kprintln!(
+            "  blk verdict   {}",
+            match half {
+                blk::Half::Inside =>
+                    "a sector went out and came back through a ring, and nothing was copied",
+                blk::Half::Outside =>
+                    "the grant was withdrawn under a live registration and the transfer faulted",
+                blk::Half::Escape =>
+                    "the driver pointed the device outside its own grant and the unit faulted it",
+            }
+        ),
+        Err(why) => {
+            kprintln!("FAIL: {why}");
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+    Some(report)
 }
 
 /// Validate the boot handoff and print what the loader reported.

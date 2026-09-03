@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["abi", "env", "ring", "kernel", "user/init", "user/store", "bench", "xtask"]
+members = ["abi", "env", "ring", "kernel", "user/init", "user/store", "user/virtio-blk", "bench", "sim", "xtask"]
 
 [workspace.package]
 version = "0.0.1"
@@ -17,6 +17,14 @@ repository = "https://example.invalid/f"
 f-abi = { path = "abi" }
 f-env = { path = "env" }
 f-ring = { path = "ring" }
+# `default-features = false` here rather than at the one consumer, because a
+# workspace dependency fixes it for everybody who inherits it and cargo refuses
+# to let a member override it. The feature turned off is `image`, which carries
+# the component's `#[panic_handler]`; `user/virtio-blk/Cargo.toml` says why and
+# names the day it goes. Building the crate itself — which is what
+# `cargo xtask component` does to produce the image — uses its own defaults and
+# is unaffected.
+f-virtio-blk = { path = "user/virtio-blk", default-features = false }
 f-bench = { path = "bench" }
 
 # ---------------------------------------------------------------------------

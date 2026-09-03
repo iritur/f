@@ -35,6 +35,7 @@ dependencies = [
  "f-abi",
  "f-env",
  "f-ring",
+ "f-virtio-blk",
 ]
 
 [[package]]
@@ -46,10 +47,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "f-sim"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-env",
+ "f-ring",
+]
+
+[[package]]
 name = "f-store"
 version = "0.0.1"
 dependencies = [
  "f-abi",
+]
+
+[[package]]
+name = "f-virtio-blk"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-ring",
 ]
 
 [[package]]

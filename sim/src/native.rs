@@ -1,0 +1,273 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+//! The other thing a client can be pointed at: a component with no device
+//! behind it.
+//!
+//! # What this is for
+//!
+//! Component substitution is a claim with two halves, and a crate containing
+//! only device models can state one of them. This is the other: the same client,
+//! the same submissions, the same buffer-ownership rules, and **no model at
+//! all** — a peer built out of `f_ring::registry` and nothing else, which
+//! resolves the buffer a submission names, does the work, releases it, and
+//! answers.
+//!
+//! It is what a service inside this system looks like when the thing it serves
+//! is not hardware. `user/store` is one, the supervisor's control ring is
+//! another, and every future component that answers a ring without touching a
+//! device is a third. So this is not a stub standing in for a device: it is the
+//! shape of most of the system's peers, and the one the device models have to be
+//! substitutable *for* if the property is worth anything.
+//!
+//! # The comparison this makes possible
+//!
+//! [`crate::scenario`]'s substitution test runs one client against a modelled
+//! block device with no reordering, no coalescing and no loss, and against this,
+//! and requires the client's own records to be identical. What that says is that
+//! **every difference between the two is something the scenario asked for** — a
+//! latency, an interleaving, a lost completion — rather than an accident of
+//! which peer was installed. A client whose control flow depended on that would
+//! be a client the user-space-driver argument does not hold for.
+//!
+//! What the comparison deliberately does not cover is `gpu`, and that is not a
+//! gap: a display controller answers a different question from a disk, so the
+//! same client asks it and gets a different number back. Substitution is a claim
+//! about a client and its service's protocol, not a claim that every service
+//! answers alike.
+//!
+//! # Why it still refuses, and still takes time
+//!
+//! Both are deliberate. A service with no limit never refuses, and a client
+//! whose back-pressure path runs against one peer and not the other is a client
+//! the substitution claim is quietly weaker for. A service that answered inside
+//! its own submission would collapse the interleaving the timeline exists to
+//! choose, and the comparison would then be against something that is not a peer
+//! at all.
+
+use f_abi::buf::SetId;
+use f_abi::{buf, error};
+use f_ring::{completion, refusal};
+
+use crate::proto::{kind, wrote};
+use crate::service::Service;
+use crate::{Actor, ActorId, Message, World};
+
+/// One submission this peer has accepted and not yet answered.
+#[derive(Clone, Copy, Debug)]
+struct Job {
+    token: u64,
+    set: SetId,
+    index: u32,
+    /// What the client's entry asked for. Unit: bytes.
+    len: u32,
+}
+
+/// A component that serves submissions with no device under it.
+pub struct Native {
+    service: Service,
+    /// How many submissions it will hold at once. Unit: submissions.
+    depth: u32,
+    /// The shortest it takes over one submission. Unit: nanoseconds.
+    service_ns: u64,
+    /// How much longer than that it may take. Unit: nanoseconds.
+    spread_ns: u64,
+    /// Who it answers. One client, for the reason a virtqueue has one driver:
+    /// a channel has two ends.
+    client: Option<ActorId>,
+    jobs: Vec<Job>,
+}
+
+impl Native {
+    /// What this actor is called in the trace.
+    pub const NAME: &'static str = "native";
+
+    /// Where it records which of several accepted submissions is answered next.
+    ///
+    /// Its own site, not shared with any device: a site is what a failing seed
+    /// reports, and a peer that borrowed another's would move that other's
+    /// occurrence counts the moment it was installed — invalidating every seed
+    /// recorded against it. `decide.rs` is where that property is argued.
+    pub const COMPLETE: &'static str = "native.complete";
+
+    /// A component holding at most `depth` submissions, taking between
+    /// `service_ns` and `service_ns + spread_ns` over each, over a domain
+    /// holding `domain` translations.
+    #[must_use]
+    pub fn new(depth: u32, service_ns: u64, spread_ns: u64, domain: u32) -> Self {
+        Self {
+            service: Service::new(domain),
+            depth: depth.max(1),
+            service_ns,
+            spread_ns,
+            client: None,
+            jobs: Vec::new(),
+        }
+    }
+
+    /// Answer one entry and tell the client.
+    fn answer(&self, world: &mut World, me: ActorId, to: ActorId, cqe: f_abi::Cqe) {
+        let token = cqe.user_data;
+        world.wire().answer(me, to, cqe);
+        world.send(0, to, Message { from: me, kind: kind::CQE, token, detail: 0 });
+    }
+
+    /// Take one submission off the wire.
+    fn submit(&mut self, world: &mut World, me: ActorId, from: ActorId) {
+        let Some(entry) = world.wire().take(from, me) else {
+            world.record(me, Self::NAME, kind::SUBMIT, 0, u64::MAX);
+            return;
+        };
+        self.client = Some(from);
+        let token = entry.user_data;
+        let now = world.clock();
+
+        if buf::opcode::is_registration(entry.opcode) {
+            let cqe = self.service.register(&entry, now);
+            world.record(me, Self::NAME, wrote::REGISTER, token, u64::from(entry.len));
+            self.answer(world, me, from, cqe);
+            return;
+        }
+
+        if u32::try_from(self.jobs.len()).unwrap_or(u32::MAX) >= self.depth {
+            world.record(me, Self::NAME, wrote::DENIED, token, u64::from(self.depth));
+            let cqe = refusal(
+                token,
+                error::pack(error::RESOURCE, error::resource::DEVICE_FULL),
+                u64::from(self.depth),
+                now,
+            );
+            self.answer(world, me, from, cqe);
+            return;
+        }
+
+        let (set, index, reach) = match self.service.resolve(&entry) {
+            Ok(resolved) => resolved,
+            Err((packed, detail)) => {
+                world.record(me, Self::NAME, wrote::DENIED, token, detail);
+                let cqe = refusal(token, packed, detail, now);
+                self.answer(world, me, from, cqe);
+                return;
+            }
+        };
+
+        self.jobs.push(Job { token, set, index, len: reach.len });
+        world.record(me, Self::NAME, wrote::QUEUED, token, u64::from(reach.len));
+
+        // The work takes time, and the answer is scheduled rather than given —
+        // which is what makes this a peer rather than a function call.
+        // `spread_ns + 1` for the reason the device models give: the draw must
+        // happen either way, or a scenario's spread would change how far along
+        // the randomness stream a run is.
+        let elapsed =
+            self.service_ns.saturating_add(world.draw() % self.spread_ns.saturating_add(1));
+        world.send(elapsed, me, Message { from: me, kind: kind::SERVICE, token, detail: 0 });
+    }
+
+    /// A service time has elapsed: answer one of the submissions being held.
+    ///
+    /// *One of*, and the seed chooses which — the same freedom the device models
+    /// take, for the same reason. A service that answered in arrival order would
+    /// be a service a client could assume things about, and the assumption would
+    /// hold here and fail against a disk.
+    fn finish(&mut self, world: &mut World, me: ActorId) {
+        let arity = u32::try_from(self.jobs.len()).unwrap_or(u32::MAX);
+        if arity == 0 {
+            return;
+        }
+        let taken = world.decide(Self::COMPLETE, arity) as usize;
+        if taken >= self.jobs.len() {
+            return;
+        }
+        let job = self.jobs.remove(taken);
+
+        let now = world.clock();
+        let cqe = if self.service.release(job.set, job.index).is_err() {
+            // This peer's own bookkeeping gone wrong rather than a client
+            // misbehaving — a buffer released twice. Refused to the client
+            // rather than answered, because a service that answered anyway
+            // would be making a live buffer look free.
+            world.record(me, Self::NAME, wrote::IOERR, job.token, u64::from(job.index));
+            refusal(
+                job.token,
+                error::pack(error::ARGUMENT, error::argument::BAD_ADDRESS),
+                u64::from(job.index),
+                now,
+            )
+        } else {
+            world.record(me, Self::NAME, wrote::SERVED, job.token, u64::from(job.len));
+            completion(job.token, i32::try_from(job.len).unwrap_or(i32::MAX), now)
+        };
+
+        let Some(client) = self.client else {
+            return;
+        };
+        self.answer(world, me, client, cqe);
+    }
+}
+
+impl Actor for Native {
+    fn name(&self) -> &'static str {
+        Self::NAME
+    }
+
+    fn deliver(&mut self, world: &mut World, me: ActorId, message: Message) {
+        match message.kind {
+            kind::SUBMIT => self.submit(world, me, message.from),
+            kind::SERVICE => self.finish(world, me),
+            // R04: an unknown kind is recorded rather than ignored. It changes
+            // the digest, which is what makes the record an answer rather than
+            // a note.
+            other => world.record(me, Self::NAME, other, message.token, u64::MAX),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::App;
+    use crate::{Simulation, Trouble};
+
+    /// One client against one native peer, with a window of one.
+    fn run(seed: u64, operations: u32) -> Result<crate::Outcome, Trouble> {
+        let mut sim = Simulation::new(seed, 100_000);
+        let peer = sim.install(Box::new(Native::new(4, 1_000, 0, 4)));
+        let app = sim.install(Box::new(App::new(0, peer, 1, operations, 256, 2_000, 4)));
+        sim.world().send(0, app, Message { from: app, kind: kind::START, token: 0, detail: 0 });
+        sim.run()
+    }
+
+    #[test]
+    fn a_client_registers_binds_and_completes_every_operation() {
+        // The whole exchange through the real types: a registration answered by
+        // a real `Table`, a naming built from that completion and from nothing
+        // else, a set carved into `BUFFERS` buffers, and every one of them lent
+        // and returned.
+        let outcome = run(0x1234, 6).expect("the exchange terminates");
+        let records = outcome.trace.records();
+        let done = records.iter().filter(|r| r.kind == wrote::DONE).count();
+        assert_eq!(done, 6, "an operation was lost between the client and the peer");
+        assert_eq!(records.iter().filter(|r| r.kind == wrote::BOUND).count(), 1);
+        assert_eq!(records.iter().filter(|r| r.kind == wrote::FINISHED).count(), 1);
+    }
+
+    #[test]
+    fn no_buffer_comes_back_altered() {
+        // The ownership property, read out of the trace rather than asserted
+        // about the types: the client stamps a byte derived from the token
+        // before it lends a buffer and checks it on the way back, and a `done`
+        // carrying `u64::MAX` is what a mismatch looks like. It cannot happen —
+        // there is no method on `InFlight` that reaches the bytes — which is
+        // exactly why it is worth checking that the model did not find a way.
+        for seed in [1u64, 2, 3, 0xF00D] {
+            let outcome = run(seed, 8).expect("the exchange terminates");
+            assert!(
+                outcome
+                    .trace
+                    .records()
+                    .iter()
+                    .all(|r| r.kind != wrote::DONE || r.detail != u64::MAX),
+                "seed {seed}: a buffer came back with bytes nobody in this model can write"
+            );
+        }
+    }
+}

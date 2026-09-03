@@ -38,6 +38,7 @@ pub mod probe;
 pub mod ring3;
 pub mod rtc;
 pub mod serial;
+pub mod virtio;
 pub mod vtd;
 
 /// Which core is executing this.

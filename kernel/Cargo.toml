@@ -11,6 +11,15 @@ f-abi.workspace = true
 f-env.workspace = true
 f-ring.workspace = true
 
+# The block driver, which is a component and not part of the frame — it inherits
+# `unsafe_code = "forbid"` like every other `user/` crate and `cargo xtask
+# lint-unsafe` holds it to that. The frame depends on it because nothing
+# schedules a component yet: `kernel/src/blk.rs` calls the driver where a
+# scheduled component would call it from its own polling loop, which is the
+# same deferral E1-B05 recorded for the restart policy and RFC 0033 records
+# with a date. *Reversal:* E1-B08, at which point this line goes.
+f-virtio-blk.workspace = true
+
 [lints.rust]
 # The frame. This is the crate the < 5% unsafe-of-TCB metric measures.
 # Adding another crate to this list is a visible, reviewable diff.

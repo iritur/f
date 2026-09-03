@@ -94,6 +94,44 @@ pub mod node {
     /// nobody gave it. Zero on a healthy machine, and a number nothing else in
     /// the tree can produce.
     pub const IOMMU_FAULTS: u32 = 19;
+    /// The block datapath.
+    pub const BLK: u32 = 20;
+    /// Entries the driver answered without a refusal.
+    pub const BLK_SERVED: u32 = 21;
+    /// Bytes the device transferred on behalf of clients.
+    ///
+    /// Published beside the two below and never alone: *no bytes were copied*
+    /// is a claim about a datapath, and a datapath that moved nothing is one
+    /// nobody has tested. A reader checking `BLK_COPIES` should read this
+    /// first.
+    pub const BLK_BYTES: u32 = 22;
+    /// Bytes the driver copied on the data path.
+    ///
+    /// **Required to be zero**, and read it as what it is: a *structural*
+    /// property published as a number, not a tally of copies some code path
+    /// made and this boot found at zero. Nothing on the data path can move it,
+    /// which is exactly the claim — a request resolves to a `Reach`, which is
+    /// an address and a length and not a slice, so the address goes into a
+    /// descriptor and the bytes never reach the component.
+    ///
+    /// Two things make that worth publishing rather than asserting. The node
+    /// below says the counting mechanism works. `cargo xtask lint-datapath`
+    /// says the structure holds: the driver crate defines exactly one function
+    /// that moves bytes, calls it exactly once, calls it from its own
+    /// self-check and not from the data path, and mints no accessor out of an
+    /// address it invented. Without that lint this number would be a comment
+    /// with a `u64` around it, and it was for one review.
+    pub const BLK_COPIES: u32 = 23;
+    /// Bytes the boot moved through the driver's own copy function on purpose.
+    ///
+    /// The same argument [`MEMORY_FORCED`] makes beside [`MEMORY_REMOTE`], one
+    /// subsystem over: a counter nothing in a boot can move is
+    /// indistinguishable from a counter that does not work. The driver's
+    /// copying function takes the tally it moves as an argument, the data path
+    /// never passes it the one above, and this boot passes it this one — so a
+    /// build in which the function had been deleted or had stopped counting
+    /// would publish a zero here and fail the boot.
+    pub const BLK_PROVOKED: u32 = 24;
     /// A node of a kind this build does not name, published on purpose.
     ///
     /// RFC 0013's one deliberate exception to R04 is that a reader skips and
@@ -105,7 +143,7 @@ pub mod node {
 }
 
 /// How many nodes this build publishes.
-pub const NODES: usize = 20;
+pub const NODES: usize = 25;
 
 /// The schema, written once and never again for a generation.
 ///
@@ -209,8 +247,27 @@ const SCHEMA: [SchemaEntry; NODES] = [
         unit::EVENTS,
         b"faults",
     ),
+    SchemaEntry::new(node::BLK, node::ROOT, 19 * WORD, kind::SUBTREE, unit::NONE, b"blk"),
+    SchemaEntry::new(
+        node::BLK_SERVED,
+        node::BLK,
+        20 * WORD,
+        kind::COUNTER,
+        unit::ENTRIES,
+        b"served",
+    ),
+    SchemaEntry::new(node::BLK_BYTES, node::BLK, 21 * WORD, kind::COUNTER, unit::BYTES, b"bytes"),
+    SchemaEntry::new(node::BLK_COPIES, node::BLK, 22 * WORD, kind::COUNTER, unit::BYTES, b"copies"),
+    SchemaEntry::new(
+        node::BLK_PROVOKED,
+        node::BLK,
+        23 * WORD,
+        kind::COUNTER,
+        unit::BYTES,
+        b"provoked",
+    ),
     // Deliberately a kind nothing names. See `node::RESERVED_KIND`.
-    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 19 * WORD, 0xEE, unit::NONE, b"reserved"),
+    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 24 * WORD, 0xEE, unit::NONE, b"reserved"),
 ];
 
 /// Where the schema block starts: immediately after the header, on the

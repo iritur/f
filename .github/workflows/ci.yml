@@ -411,6 +411,22 @@ jobs:
       # remapping unit's fault registers. E1-B01. Neither half means anything
       # alone: the first is the control that says the device was started at all.
       - run: cargo xtask iommu
+      # The same outcomes one layer up, with the descriptor written by a driver
+      # *component* rather than by the frame's own adversary: `user/virtio-blk`
+      # builds it out of a `Reach` the frame answered its client's registration
+      # with. Three more boots. One carries a sector out and back through a ring
+      # byte for byte with nothing copied. One withdraws the client's page from
+      # the driver's domain between the write and the read, which is RFC 0024's
+      # reclaim and is the *frame's* property. One takes nothing away and has
+      # the driver add to the address it was answered before writing it into a
+      # descriptor, which is the component's own arithmetic and is the only one
+      # of the three that is `a driver reaching outside its grant`; the unit must
+      # fault it at the address the driver invented. E1-B02, and it is here
+      # rather than in somebody's habits for the reason `docs/test-taxonomy.md`
+      # gives: the `iommu-escape` row claims the `every PR` cadence for all four
+      # halves, and a cadence claimed by a row and kept by nobody is worse than
+      # a row that admits it runs on no cadence at all.
+      - run: cargo xtask blk
       # The other half of E0-P08, and the half that says the suite can fail. A
       # kernel built with one deliberate defect, booted into the forging sweep,
       # required to go red with a panic in the log — and then the same boot
@@ -495,6 +511,80 @@ jobs:
       # that never varies would agree with itself forever and this gate would
       # be green for the wrong reason.
       - run: cargo xtask trace
+
+  # The workload's half of the same question the `trace` job asks about a boot,
+  # and the same shape of answer: one command, one hash, two runners, a third
+  # job comparing the lines. RFC 0032 argues why there are two checks rather
+  # than one — the frame's instructions run in QEMU and the components run in
+  # the simulator — and RFC 0035 is what makes the pair a claim about one
+  # component set rather than two commands in one paragraph.
+  #
+  # `deployment` and not `contention`, because `deployment` is the scenario
+  # whose component set is read from the compiled manifest records this commit
+  # builds. It is therefore the one scenario whose hash moves when a manifest or
+  # a driver image moves, which is what makes the `commit` half of
+  # `(seed, commit)` mechanical rather than a promise.
+  simulation:
+    name: simulated workload (runner ${{ matrix.runner_id }})
+    needs: [environment, manifest]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_id: [a, b]
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo xtask sim --hash deployment | tee sim-${{ matrix.runner_id }}.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sim-${{ matrix.runner_id }}
+          path: sim-${{ matrix.runner_id }}.txt
+          if-no-files-found: error
+
+  workload:
+    name: the workload reproduction check
+    needs: [manifest, environment, simulation]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sim-*
+          merge-multiple: true
+      - name: the two runners must agree
+        run: |
+          a=$(cat sim-a.txt)
+          b=$(cat sim-b.txt)
+          echo "runner a  $a"
+          echo "runner b  $b"
+          if [ "$a" != "$b" ]; then
+            echo
+            echo "Two runners produced different simulated runs for one commit."
+            echo
+            echo "This is the determinism contract failing above the frame, and"
+            echo "every layer that reads a simulated run rests on it: a seed stops"
+            echo "being a bug report, a sweep stops shrinking, and a snapshot stops"
+            echo "re-entering. Something in the model is reading a clock, an address"
+            echo "or an iteration order the seed does not own — or the two runners"
+            echo "built different component files, which is the same failure one"
+            echo "layer down. RFC 0004, RFC 0032."
+            exit 1
+          fi
+          echo "agreed: $a"
+      # The half that says this job can fail. A digest taken over something that
+      # does not vary agrees with itself forever, so every scenario is also run
+      # at a second seed and required to disagree. The boot's equivalent needs a
+      # deliberately broken build because a boot takes no seed on its command
+      # line; a simulated run does, which is the one place this half of the
+      # apparatus has the better of the other.
+      - run: cargo xtask sim
+      # And the seam. The boot spawns components from compiled manifest records
+      # and prints each one's content hash; this requires the set the simulator
+      # ran to be that set. Without it `boot-to-workload` is two commands that
+      # share a directory name, and a shared directory name is not evidence.
+      - run: cargo xtask sim --join
 
   # The fourth thing the gate was always supposed to run, and the one that was
   # missing: lint, test, run — and claims.

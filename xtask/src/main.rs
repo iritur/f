@@ -127,6 +127,44 @@ const PERCPU_ALLOW: &[(&str, &str)] = &[(
 const SHARED_STATE: &[&str] =
     &["UnsafeCell", "RefCell", "OnceCell", "OnceLock", "Mutex", "RwLock", "Atomic", "Cell<"];
 
+/// The component crates that publish a *zero copies on the data path* counter,
+/// and the one function in each that is permitted to move bytes.
+///
+/// # Why this is a lint and not a comment
+///
+/// `E1-B02`'s exit is *zero copies on the data path, verified by counter*, and
+/// the counter it names is structurally zero: a request resolves to a `Reach`,
+/// which is an address and a length and deliberately not a slice, so the
+/// address goes into a descriptor and the bytes never reach the component. That
+/// is a statement about what the crate's *source* contains, not about what a
+/// boot observed — a zero counter published by a crate that had grown a second
+/// way to move bytes would say exactly the same thing as this one, which is the
+/// defect `state::node::MEMORY_FORCED` exists to keep out of the allocator's
+/// number one subsystem over.
+///
+/// So the structure is checked rather than asserted. For each row: the mover
+/// must be defined exactly once, called exactly once, and called from the named
+/// function and from nowhere else — and no shipped line of the crate may mint a
+/// granted window out of a bare address, which is the other way a safe
+/// component could reach memory it was not handed.
+///
+/// Each row is `(crate prefix, the function that moves bytes, the one function
+/// allowed to call it)`. `E1-B03` and `E1-B04` join by adding a row; a driver
+/// that makes no zero-copy claim adds none, and says so in its manifest.
+const DATAPATH: &[(&str, &str, &str)] = &[("user/virtio-blk/", "stage", "provoke_copy")];
+
+/// The constructors that turn a bare address into a granted window.
+///
+/// RFC 0033 argues these are safe to call *because the frame is the caller* —
+/// the obligation is discharged against a contract the frame keeps, and a
+/// component receives a window rather than minting one. Nothing enforced that
+/// until this lint: `Region::at` is a safe `const fn`, so a driver crate that
+/// forbids `unsafe` could still name the direct map and read a client's buffer
+/// through it, publish a zero, and be telling the truth about `stage` while
+/// lying about the datapath. Test fixtures may build their own memory — a host
+/// test has no frame to be handed one by — so the scan stops at `#[cfg(test)]`.
+const MINTS: &[&str] = &["Region::at(", "Window::at("];
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("help");
@@ -139,6 +177,7 @@ fn main() -> ExitCode {
         "user" => user(args.get(1).map(String::as_str)),
         "cap" => cap(args.get(1).map(String::as_str)),
         "iommu" => iommu(args.get(1).map(String::as_str)),
+        "blk" => blk(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
         "component" => components().map(|_| ()),
         "mutate" => mutate(),
@@ -147,6 +186,21 @@ fn main() -> ExitCode {
             Some("--hash") => trace_hash_only(),
             Some(other) => Err(format!("unknown option for trace: {other}")),
             None => trace_check(),
+        },
+        // The simulator's half of the same question `trace` asks about a boot.
+        // RFC 0032 is where the seam between the two is argued; `sim.rs` in
+        // `f-sim` is where it is implemented.
+        "sim" => match args.get(1).map(String::as_str) {
+            Some("--list") => sim_list(),
+            // The seam, and the only command in the tree that runs both halves
+            // of `boot-to-workload` and requires them to be about one component
+            // set. RFC 0035.
+            Some("--join") => sim_join(),
+            Some("--hash") => {
+                sim_hash_only(args.get(2).map(String::as_str), args.get(3).map(String::as_str))
+            }
+            Some(other) => Err(format!("unknown option for sim: {other}")),
+            None => sim_check(),
         },
         // `reproduce` used to mean the determinism check above, and it now
         // means what `RELEASING.md`, the long plan and `proving-ground` all use
@@ -174,6 +228,7 @@ fn main() -> ExitCode {
         "lint-callbacks" => lint_callbacks(),
         "lint-claim-owners" => lint_claim_owners(),
         "lint-manifests" => lint_manifests(),
+        "lint-datapath" => lint_datapath(),
         "lint-snapshot" => lint_snapshot(),
         "lint-reproduce" => lint_reproduce(),
         "unsafe" => unsafe_report(args.get(1).map(String::as_str) == Some("--by-file")),
@@ -232,6 +287,12 @@ cargo xtask <command>
   iommu [half]       Boot into a real device transfer and check the remapping
                      unit: inside, which must land, or outside, which must
                      fault and land nothing. Both with no argument
+  blk [half]         Boot the block datapath: a driver component moves a sector
+                     through a ring with nothing copied — inside; the same run
+                     with the client's grant withdrawn must fault — outside; and
+                     the driver pointing the device past what it was answered
+                     must be faulted at the address it invented — escape. All
+                     three with no argument
   init               Build user/init into the flat image the loader hands over,
                      and check it is one
   component          Build every component file: a manifest compiled to its
@@ -259,6 +320,9 @@ cargo xtask <command>
   lint-claim-owners  R09: every claim names the document that owns it
   lint-manifests     Every component manifest fits docs/manifest.md; RFC 0005
                      rule 4 and RFC 0008's shape, checked before a spawn does
+  lint-datapath      The mechanism behind `blk/copies`: each crate that claims
+                     zero copies moves bytes in exactly one function, calls it
+                     from exactly one place, and that place is not the data path
   lint-snapshot      claims/snapshot.json holds what the registry holds
 
   unsafe             The number A-05 reports: lines inside `unsafe` as a share
@@ -268,6 +332,18 @@ cargo xtask <command>
   trace              Two runs of this commit must produce one trace hash,
                      and one unseeded read of time must break that
   trace --hash       Print this run's trace hash and nothing else
+
+  sim                Run every simulator scenario twice at one seed and once at
+                     another: the pair must agree and the odd one must not
+  sim --hash [name] [seed]
+                     Print one scenario's trace hash and nothing else. The pair
+                     is (seed, commit): the seed is this argument or the default
+                     below, and the commit is the checkout you are standing in
+  sim --join         Boot the real kernel, read the component hashes out of its
+                     log, and require the set the simulator runs to be the set
+                     the boot spawned. The two halves of boot-to-workload,
+                     joined at an artefact rather than at a sentence
+  sim --list         The scenario set
 
   reproduce          Every claim, its published reproduction command, the
                      machine class it needs, and whether this one may record
@@ -517,7 +593,7 @@ fn image_dir(name: &str) -> PathBuf {
 /// manifest, every existing boot depends on it being first, and RFC 0030 says
 /// why that position is the contract. Everything here follows it, each as one
 /// module holding a record and an image.
-const COMPONENTS: &[&str] = &["store"];
+const COMPONENTS: &[&str] = &["store", "virtio-blk"];
 
 /// Where a component file is written: a manifest record and an image, in one
 /// blob the loader hands over as one module. RFC 0030.
@@ -920,6 +996,53 @@ const DMA_DEVICE: &[&str] = &[
     "-device",
     "virtio-blk-pci,drive=blk0,disable-legacy=on,iommu_platform=on",
 ];
+
+/// How large the disk `cargo xtask blk` gives the device is.
+///
+/// One mebibyte, which is two thousand and forty-eight sectors — far more than
+/// the one the datapath writes, and small enough that creating it is not a
+/// noticeable part of the command. It exists at all because the null block
+/// driver `cargo xtask iommu` uses cannot hold anything: `read-zeroes=on` makes
+/// it *write* to a destination buffer, which is what that check needs, and it
+/// discards what is written to it, which is exactly what a write-then-read-back
+/// check cannot use.
+/// Unit: bytes.
+const BLK_DISK_BYTES: usize = 1024 * 1024;
+
+/// Make the disk the block datapath works on, fresh.
+///
+/// Rewritten on every run rather than created once, and that is what keeps the
+/// boot a fixture: the kernel writes a sector and reads it back in the same
+/// boot, so a file left over from a previous run would make the read succeed
+/// for a reason this run did not establish — which is precisely the shape of
+/// pass this whole family of commands exists to refuse.
+fn blk_disk() -> Result<PathBuf, String> {
+    let dir = target_dir().join("blk");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", relative(&dir)))?;
+    let path = dir.join("disk.img");
+    std::fs::write(&path, vec![0u8; BLK_DISK_BYTES])
+        .map_err(|e| format!("writing {}: {e}", relative(&path)))?;
+    Ok(path)
+}
+
+/// The device and the disk behind it, for `cargo xtask blk`.
+///
+/// The two load-bearing options are `DMA_DEVICE`'s and the reasoning is not
+/// repeated: `disable-legacy=on` and `iommu_platform=on` together are what put
+/// the device's transfers through the remapping unit at all, and without them
+/// every isolation result here would be a pass for the wrong reason. What
+/// differs is the drive — a real file rather than a null device, because this
+/// check writes a sector and reads it back, and a device that discards writes
+/// would answer zeroes to both halves.
+fn blk_device(disk: &Path) -> Result<Vec<String>, String> {
+    let path = disk.to_str().ok_or("the disk image path is not valid UTF-8")?;
+    Ok(vec![
+        "-drive".to_string(),
+        format!("if=none,id=blk0,file={path},format=raw,cache=unsafe"),
+        "-device".to_string(),
+        "virtio-blk-pci,drive=blk0,disable-legacy=on,iommu_platform=on".to_string(),
+    ])
+}
 
 fn boot(append: Option<&str>) -> Result<Option<i32>, String> {
     match machine(append, &[], Capture::Off)?.0 {
@@ -1447,6 +1570,335 @@ fn trace_hash_only() -> Result<(), String> {
     Ok(())
 }
 
+/// The scenario `sim --hash` runs when none is named.
+///
+/// `contention` rather than whichever is first in the table, because it is the
+/// one whose refusal path runs. A default that exercised the quiet scenario
+/// would give CI a hash that could stop moving without anything saying so.
+const SIM_SCENARIO: &str = "contention";
+
+/// The second seed the simulator check compares against.
+///
+/// It is the negative control, and the simulator's version of the argument
+/// `trace_check` makes with a deliberate defect: two runs at one seed agreeing
+/// proves nothing on its own, because a digest over something that does not vary
+/// agrees with itself forever. A boot needs a broken build to demonstrate that,
+/// because a boot has no seed on its command line yet. A simulated run does have
+/// one, so its negative control is a second seed rather than a second build —
+/// cheaper, and it tests the same property.
+const SIM_OTHER_SEED: &str = "0xa5a5a5a5a5a5a5a5";
+
+/// One simulated run, as a subprocess, answering its trace hash.
+///
+/// A subprocess and not a library call, for the reason `sim/src/main.rs` states:
+/// the claim is that two runs sharing nothing but the commit produce one
+/// artefact, and two calls inside one process share an address space, an
+/// allocator and whatever a library left behind. `f-sim`'s own tests make the
+/// in-process claim, which is cheaper and weaker; this is the one that matches
+/// what `trace` does with two boots.
+fn sim(scenario: &str, seed: &str) -> Result<u64, String> {
+    // The component directory is passed on every run rather than only for the
+    // scenario that reads it, because this file is what knows about
+    // `CARGO_TARGET_DIR` and the simulator should not have to guess where a
+    // build put anything.
+    let dir = component_dir()?;
+    let out = capture(
+        "cargo",
+        &[
+            "run",
+            "-q",
+            "-p",
+            "f-sim",
+            "--",
+            "--hash",
+            "--seed",
+            seed,
+            "--components",
+            &dir,
+            scenario,
+        ],
+    )?;
+    let line = out.trim();
+    let unhash = || format!("f-sim printed `{line}`, which is not a hash");
+    let digits = line.strip_prefix("0x").ok_or_else(unhash)?;
+    u64::from_str_radix(digits, 16).map_err(|_| unhash())
+}
+
+/// Where `cargo xtask component` leaves the component files.
+///
+/// One directory, named here rather than in the simulator, because this file is
+/// what knows about `CARGO_TARGET_DIR` and a second answer to *where is the
+/// build output* is a second answer that stops matching.
+fn component_dir() -> Result<String, String> {
+    let dir = target_dir().join("component");
+    dir.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("the component directory {} is not valid UTF-8", dir.display()))
+}
+
+/// Build every component file, saying nothing about it.
+///
+/// [`components`] prints a line per component, which is right for
+/// `cargo xtask component` and wrong immediately before a hash a CI job pipes
+/// into a file. Same builder, same refusals, no report.
+fn components_quietly() -> Result<(), String> {
+    for name in COMPONENTS {
+        component_image(name)?;
+    }
+    Ok(())
+}
+
+/// The scenario set, read from the simulator rather than restated here.
+///
+/// A second copy of the list in this file is a second copy that stops matching
+/// the day somebody adds a scenario, and it would stop matching silently —
+/// which is exactly how `f-bench` and `f-init` came to have tests nothing ran.
+fn sim_scenarios() -> Result<Vec<String>, String> {
+    let out = capture("cargo", &["run", "-q", "-p", "f-sim", "--", "--list"])?;
+    let names: Vec<String> =
+        out.lines().filter_map(|line| line.split_whitespace().next()).map(str::to_string).collect();
+    if names.is_empty() {
+        return Err("f-sim listed no scenarios, so there is nothing to reproduce".into());
+    }
+    Ok(names)
+}
+
+/// The scenario set, as the simulator prints it.
+fn sim_list() -> Result<(), String> {
+    sh("cargo", &["run", "-q", "-p", "f-sim", "--", "--list"])
+}
+
+/// Print one scenario's trace hash and nothing else.
+///
+/// The same shape as `trace --hash` and for the same consumer: a CI job where
+/// two runners each produce a line and a third compares them. It takes a seed as
+/// well as a scenario, which `trace --hash` cannot yet do because the kernel does
+/// not take one on its command line — that is the only asymmetry between the two
+/// halves, and it is the simulator having the better of it. `E1-P03` sweeps by
+/// calling this with a seed per run.
+fn sim_hash_only(scenario: Option<&str>, seed: Option<&str>) -> Result<(), String> {
+    // Built first and quietly: the `deployment` scenario's component set *is*
+    // the compiled manifest records, so a hash of it taken against a stale or
+    // missing build would be a hash of the wrong commit — which is the one thing
+    // a `(seed, commit)` pair may not be wrong about.
+    components_quietly()?;
+    let name = scenario.unwrap_or(SIM_SCENARIO);
+    println!("{:#018x}", sim(name, seed.unwrap_or(TRACE_SEED))?);
+    Ok(())
+}
+
+/// The simulator's reproduction check.
+///
+/// # What is being claimed
+///
+/// That a `(seed, commit)` pair names one simulated run, byte for byte. Each
+/// scenario is run twice at [`TRACE_SEED`] in two separate processes and once at
+/// [`SIM_OTHER_SEED`]; the pair must agree and the odd one must not.
+///
+/// # Why the second seed is not optional
+///
+/// `trace_check` says it at length about a deliberate defect and it is the same
+/// argument here: a reproduction check that has only ever passed is
+/// indistinguishable from one that cannot fail. A scenario whose digest ignored
+/// its seed would agree with itself forever, and a nightly sweep across
+/// thousands of seeds would report having explored a space it never entered.
+/// That is the one failure a test apparatus must not have, so the command
+/// requires a different seed to give a different answer before it reports green.
+fn sim_check() -> Result<(), String> {
+    components_quietly()?;
+    println!(
+        "simulation reproduction check — seed {TRACE_SEED}
+"
+    );
+    println!("  {:<12} {:>18}  {:>18}  {:>18}", "scenario", "run 1", "run 2", SIM_OTHER_SEED);
+
+    for name in sim_scenarios()? {
+        let first = sim(&name, TRACE_SEED)?;
+        let second = sim(&name, TRACE_SEED)?;
+        let other = sim(&name, SIM_OTHER_SEED)?;
+        println!("  {name:<12} {first:#018x}  {second:#018x}  {other:#018x}");
+
+        if first != second {
+            return Err(format!(
+                "two runs of `{name}` at one seed produced different traces.
+
+                 This is the determinism contract failing above the frame, and every
+                 layer that reads a simulated run rests on it: a seed stops being a bug
+                 report, a sweep stops shrinking, and a snapshot stops re-entering.
+                 Something in the model is reading a clock, an address or an iteration
+                 order the seed does not own. RFC 0004, RFC 0032."
+            ));
+        }
+        if first == other {
+            return Err(format!(
+                "`{name}` produced the same trace at two different seeds.
+
+                 That means the check above cannot fail, which makes it worth nothing:
+                 a digest over something that does not vary agrees with itself forever.
+                 Either the scenario has stopped taking any interleaving decision, or
+                 the digest is being taken over something the run does not reach."
+            ));
+        }
+    }
+
+    println!(
+        "
+sim: ok — every scenario reproduced from its seed and moved when the seed did.
+         Two processes on one machine. The pair that matters is two runners, and that
+         is the CI job: same commit, same seed, hashes compared — exactly as `trace` does
+         for the boot. RFC 0032 says where the seam between the two lies."
+    );
+    Ok(())
+}
+
+/// The scenario whose component set is read from the compiled manifest records.
+///
+/// Named here as well as in the simulator because [`sim_join`] reports about it
+/// and a message that said *some scenario* would be a message nobody could act
+/// on. `f-sim --list` is still the one source of the scenario *set*.
+const SIM_DEPLOYMENT: &str = "deployment";
+
+/// The two halves of `boot-to-workload`, over one component set.
+///
+/// # What is being claimed, and what is not
+///
+/// E1-P01's exit says *a whole boot-to-workload run executes under simulation
+/// and reproduces byte-identically from `(seed, commit)`*. RFC 0032 decided that
+/// the simulator models the system above the frame, which makes that sentence a
+/// claim about a **pair** of runs rather than about one process, and RFC 0035
+/// makes the pair checkable rather than asserted:
+///
+/// - `cargo xtask trace --hash` boots the real kernel, which spawns components
+///   from the compiled manifest records the loader hands it, and hashes the log
+///   — a log in which each spawned component's content hash is printed.
+/// - `cargo xtask sim --hash deployment` reads *those same component files*,
+///   builds one actor per record with the model its declared protocol names,
+///   drives a workload through them, and hashes its own artefact.
+///
+/// This command is what makes those two the same component set rather than two
+/// commands in one paragraph: it boots, reads the hashes out of the log, asks
+/// the simulator which components it would run, and requires the first to be
+/// among the second. Without it the seam is a shared filename, and a shared
+/// filename is not evidence.
+///
+/// What it does not claim: that the frame's instructions ran under the
+/// simulator. They did not, they never do, and every artefact this simulator
+/// writes says so in its own header.
+fn sim_join() -> Result<(), String> {
+    components_quietly()?;
+    println!("the boot-to-workload seam — one component set, two runs\n");
+
+    println!("[1/2] the boot: the real kernel in QEMU, spawning from compiled records");
+    let (ending, log) = machine_with(None, &[], Capture::Quiet, BOOT_TIMEOUT, BOOT_MEMORY)?;
+    if ending != Ending::Exited(33) {
+        print!("{log}");
+        return Err(format!("the boot {ending}; expected 33"));
+    }
+    let (files, spawned) = spawned_from(&log)?;
+    println!("  component file(s)  {files}");
+    for id in &spawned {
+        println!("  spawned            {id:#018x}");
+    }
+
+    println!("\n[2/2] the workload: the simulator, reading the same records");
+    let dir = component_dir()?;
+    let listed = capture(
+        "cargo",
+        &["run", "-q", "-p", "f-sim", "--", "--deployment", "--components", &dir],
+    )?;
+    let mut modelled: Vec<(String, u64)> = Vec::new();
+    for line in listed.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(name), Some(hash)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let id = hash
+            .strip_prefix("0x")
+            .and_then(|digits| u64::from_str_radix(digits, 16).ok())
+            .ok_or_else(|| format!("f-sim printed `{line}`, which is not a component"))?;
+        println!("  {name:<32} {id:#018x}");
+        modelled.push((name.to_string(), id));
+    }
+
+    if modelled.is_empty() {
+        return Err("the simulator read no component files, so there is nothing to join".into());
+    }
+    if modelled.len() != files {
+        return Err(format!(
+            "the boot spawned from {files} component file(s) and the simulator read \
+             {}.\n\n\
+             The two halves of `boot-to-workload` are supposed to be one component set. \
+             They are built by one command — `cargo xtask component` — so a difference \
+             here means one of the two is reading somewhere else, or the loader is being \
+             handed a set this file no longer builds.",
+            modelled.len()
+        ));
+    }
+    for id in &spawned {
+        if !modelled.iter().any(|(_, modelled)| modelled == id) {
+            return Err(format!(
+                "the boot spawned the component whose manifest is {id:#018x}, and the \
+                 simulator ran no such component.\n\n\
+                 A content hash covers a component's record and its image together, so this \
+                 is the two halves disagreeing about what a component *is* rather than about \
+                 which one to run. RFC 0030, RFC 0035."
+            ));
+        }
+    }
+
+    println!(
+        "\njoin: ok — the component(s) the boot spawned are among the {} the simulator ran.\n\
+         \x20     `cargo xtask trace --hash` hashes the boot and `cargo xtask sim --hash \
+         {SIM_DEPLOYMENT}`\n\
+         \x20     hashes the workload. RFC 0035 states what the pair claims — and what it does\n\
+         \x20     not: the frame's instructions run in QEMU and nowhere else.",
+        modelled.len()
+    );
+    Ok(())
+}
+
+/// What a boot log says it spawned: how many component files, and which
+/// manifests.
+///
+/// Reads the log rather than the files, deliberately. The claim being checked is
+/// about what the *kernel* did, and a check that read the same directory twice
+/// would agree with itself whatever the kernel had done with it.
+fn spawned_from(log: &str) -> Result<(usize, Vec<u64>), String> {
+    const FILES: &str = " component file(s)";
+    const MANIFEST: &str = "manifest 0x";
+
+    let mut files = None;
+    let mut spawned = Vec::new();
+    for line in log.lines() {
+        if let Some(at) = line.find(FILES)
+            && let Some(head) = line.get(..at)
+            && let Some(count) =
+                head.split_whitespace().last().and_then(|w| w.parse::<usize>().ok())
+        {
+            files = Some(count);
+        }
+        if let Some(at) = line.find(MANIFEST)
+            && let Some(rest) = line.get(at + MANIFEST.len()..)
+        {
+            let digits: String = rest.chars().take_while(char::is_ascii_hexdigit).collect();
+            if let Ok(id) = u64::from_str_radix(&digits, 16) {
+                spawned.push(id);
+            }
+        }
+    }
+
+    let files = files.ok_or(
+        "the boot log did not say how many component files it was handed.\n\n\
+         `kernel/src/component.rs` prints that line, and this check reads it. If the \
+         wording moved, this check has to move with it — a join that silently stopped \
+         finding its evidence would report green forever.",
+    )?;
+    if spawned.is_empty() {
+        return Err("the boot spawned no component at all, so there is nothing to join".into());
+    }
+    Ok((files, spawned))
+}
+
 const MUTATIONS: &[(&str, &str, &str, &str)] = &[(
     "mutate-unchecked-index",
     "cap=forge",
@@ -1906,6 +2358,132 @@ fn iommu(kind: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// The two halves of E1-B02's exit, as boots.
+///
+/// A driver that lives outside the frame — `user/virtio-blk`, a crate that
+/// forbids `unsafe` — brings a real virtio-blk device up through four granted
+/// register windows; a client registers a buffer set and writes a sector to it
+/// through a ring, then reads that sector back into a *different* buffer and
+/// compares the bytes. The driver's own copy counter must be zero, and the
+/// counter beside it — moved by the same function, on purpose, in the same boot
+/// — must not be.
+///
+/// `outside` is the same run with the client's page taken out of the driver's
+/// device domain between the write and the read, which is RFC 0024's stated
+/// case: *the memory is the client's and it is entitled to take it back*. The
+/// driver still holds a live registration naming it, so it hands the device a
+/// descriptor pointing outside its grant, and the transaction must be a fault
+/// the remapping unit records rather than a transfer into memory the driver no
+/// longer has.
+///
+/// **That second half is the clause E1-B01's exit could not observe.** E1-B01
+/// proved the property at the device with the frame's own adversary and wrote
+/// down that *the word component in it belongs to E1-B02*; this is that word,
+/// and `TODO.md` already records why one criterion belonging to two tasks is a
+/// defect rather than a convenience.
+///
+/// Neither half means anything alone, which is `mutate`'s argument about
+/// defects and `iommu`'s about its own two halves: a refusal proves nothing if
+/// the identical setup also refuses when it should not.
+///
+/// Both must end at 33. A device addressing memory it was not given is an event
+/// the frame handles, and a kernel that died handling one would have failed the
+/// property rather than enforced it.
+/// The three block-datapath halves, and what each one is asking.
+///
+/// `outside` and `escape` are two different questions and the list keeps them
+/// apart on purpose. `outside` withdraws a translation under a descriptor the
+/// driver built correctly — RFC 0024's reclaim, which is the *frame's* property.
+/// `escape` takes nothing away and has the driver point past what it was
+/// answered — which is the one E1-B01's exit could not observe, because it is
+/// the component's own arithmetic that produces the address. A suite with only
+/// the first would be claiming the second.
+const BLK_PROVOCATIONS: &[(&str, &str)] = &[
+    ("inside", "the client's buffer stays in the driver's grant: the sector must come back"),
+    ("outside", "it is taken back before the read: the transfer must fault, and nothing may land"),
+    ("escape", "the driver points the device past what it was answered: the unit must fault it"),
+];
+
+fn blk(kind: Option<&str>) -> Result<(), String> {
+    let chosen: Vec<&(&str, &str)> = match kind {
+        None => BLK_PROVOCATIONS.iter().collect(),
+        Some(name) => {
+            let found = BLK_PROVOCATIONS.iter().find(|(known, _)| *known == name);
+            let Some(found) = found else {
+                let list: Vec<String> = BLK_PROVOCATIONS
+                    .iter()
+                    .map(|(name, what)| format!("  {name:<8} {what}"))
+                    .collect();
+                return Err(format!("unknown block provocation: {name}\n\n{}", list.join("\n")));
+            };
+            vec![found]
+        }
+    };
+
+    let all = chosen.len() > 1;
+    for (name, what) in chosen {
+        if all {
+            println!("\n--- blk={name}: {what}");
+        }
+        let disk = blk_disk()?;
+        let device = blk_device(&disk)?;
+        let borrowed: Vec<&str> = device.iter().map(String::as_str).collect();
+        let (ending, log) = machine_devices(
+            Some(&format!("blk={name}")),
+            &[],
+            Capture::Printed,
+            BOOT_TIMEOUT,
+            BOOT_MEMORY,
+            &borrowed,
+        )?;
+        match ending {
+            Ending::Exited(33) => {}
+            Ending::Exited(35) => {
+                return Err(format!(
+                    "the kernel refused to finish after `blk={name}`. Either a sector did \
+                     not survive the round trip, or the driver copied something on the data \
+                     path, or a descriptor pointing outside the driver's grant was not \
+                     stopped — which is the failure this exists to find. The serial log \
+                     above says which."
+                ));
+            }
+            Ending::Exited(0) => {
+                return Err(format!(
+                    "the machine reset with no output during `blk={name}`. A fault taken \
+                     while the remapping unit is enabled and this kernel's own tables are \
+                     under it is the frame having programmed a device wrong."
+                ));
+            }
+            other => return Err(format!("the boot {other}; expected exit 33")),
+        }
+
+        // The exit code says the kernel agreed with itself. This says the
+        // datapath ran at all: the device is a command-line option, and a typo
+        // in `blk_device` is the one way this check could quietly stop testing
+        // anything. `blk_datapath` turns an absent device into a failed boot,
+        // so this is belt and braces rather than the assertion.
+        if !log.contains("blk verdict") {
+            return Err(format!(
+                "`blk={name}` finished without reaching a verdict.\n\n\
+                 The kernel prints one for every run it makes, so this means the stage did \
+                 not run: no remapping unit was found, or the device this boot adds was not \
+                 there to drive."
+            ));
+        }
+        println!("\nblk={name}: the kernel reached its own verdict and finished");
+    }
+
+    if all {
+        println!(
+            "\nall three halves held: a sector went out and came back through a ring with \
+             nothing copied; the same path with the client's grant withdrawn was a fault \
+             rather than a corruption; and the driver reaching past what its client's \
+             registration answered was faulted at the address it invented"
+        );
+    }
+    Ok(())
+}
+
 /// The three endings CI has to tell apart, each produced by a fixture.
 ///
 /// # Why all three and not just the panic
@@ -2055,6 +2633,12 @@ fn test() -> Result<(), String> {
     // architecture-specific half is behind a `cfg`, and a `cfg` that stopped
     // covering everything is a compile error on the other target and nothing at
     // all on this one.
+    //
+    // `f-sim` is deliberately absent, and its absence is not a portability gap:
+    // the target here is `aarch64-unknown-none`, which has no `std`, and the
+    // simulator is a host tool that reads a command line and writes a trace.
+    // Nothing in it is compiled into the system, so nothing in it can be wrong
+    // on a machine the system runs on.
     sh(
         "cargo",
         &[
@@ -2069,6 +2653,8 @@ fn test() -> Result<(), String> {
             "f-init",
             "-p",
             "f-store",
+            "-p",
+            "f-virtio-blk",
             "--target",
             "aarch64-unknown-none",
         ],
@@ -2119,6 +2705,17 @@ fn verify() -> Result<(), String> {
     // nothing else in this loop can see: a boot that goes green twice with two
     // different answers passes `run`, `user`, `cap` and `mutate` alike.
     trace_check()?;
+    // The same claim, one layer up, and a separate command because it is a
+    // separate claim: `trace` says the frame's boot reproduces and this says a
+    // simulated workload does. RFC 0032 argues why the seam between them is
+    // where it is, and why a tree that answered only one of the two questions
+    // would not be able to say which half a failure belonged to.
+    sim_check()?;
+    // And the seam between the two, which is the only check that says the boot
+    // and the workload are about one component set. It boots once more, which is
+    // the cost of the claim being about the kernel's own behaviour rather than
+    // about a directory listing.
+    sim_join()?;
     // Last, and part of the loop rather than beside it. It is the half of
     // E0-P08 that says the suite can fail: everything above proves the
     // properties hold on this tree, and this proves that a tree where one of
@@ -2151,6 +2748,12 @@ fn lint_all() -> Result<(), String> {
     // imported image in `shared`. It runs here so a boot is not the first
     // place a missing field is found.
     lint_manifests()?;
+    // The mechanism behind `blk/copies`. The counter is published at zero on
+    // every datapath boot and would be published at zero by a crate that had
+    // grown a second way to move a client's bytes, so the property is checked
+    // where it actually lives — in the source — rather than inferred from a
+    // number that cannot move. E1-B02.
+    lint_datapath()?;
     // A generated file that is committed is a claim about the generator, and
     // the only moment it can be checked cheaply is before anything regenerates
     // it. `xtask claims` rewrites the snapshot by design, so this has to come
@@ -2517,6 +3120,173 @@ fn lint_manifests() -> Result<(), String> {
             "
 "
         )
+    ))
+}
+
+/// The name a line declares, if the line declares a function.
+///
+/// Prefixes rather than a parser, and the list is what this workspace actually
+/// writes: `pub`, `pub(crate)`, `const`, `unsafe`, in the order rustfmt puts
+/// them. A form nobody here writes reports no name, which fails *closed* — the
+/// enclosing function stays whatever it was, and a call in an unrecognised
+/// function is attributed to the previous one and therefore refused.
+fn declared_fn(code: &str) -> Option<&str> {
+    let mut rest = code.trim_start();
+    for prefix in ["pub(crate) ", "pub(super) ", "pub ", "default ", "const ", "async ", "unsafe "]
+    {
+        if let Some(stripped) = rest.strip_prefix(prefix) {
+            rest = stripped;
+        }
+    }
+    let rest = rest.strip_prefix("fn ")?;
+    let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))?;
+    rest.get(..end)
+}
+
+/// One crate's shipped source, against one row of [`DATAPATH`].
+///
+/// `text` is a whole file. The scan stops at the first `#[cfg(test)]`, which is
+/// the seam between what ships and what the host tests build for themselves;
+/// [`MINTS`] says why that seam has to exist.
+fn datapath_findings(rel: &str, text: &str, mover: &str, allowed: &str) -> (Vec<String>, usize) {
+    let mut findings = Vec::new();
+    let mut calls = 0;
+    let mut carry = Carry::default();
+    let mut current = "";
+    let call = format!("{mover}(");
+
+    for (n, raw) in text.lines().enumerate() {
+        let code = strip_to_code(raw, &mut carry);
+        let trimmed = code.trim();
+        if trimmed.starts_with("#[cfg(test)]") {
+            break;
+        }
+        if declared_fn(&code).is_some() {
+            // Taken from the raw line rather than from the stripped copy, whose
+            // lifetime ends here. A declaration line has nothing stripped out of
+            // it; if the two ever disagreed, `current` keeps its previous value
+            // and the next call is attributed to the wrong function and refused,
+            // which is the direction to be wrong in. The definition of the mover
+            // is not a call to it, so the line ends here either way.
+            if let Some(name) = declared_fn(raw) {
+                current = name;
+            }
+            continue;
+        }
+        for mint in MINTS {
+            if code.contains(mint) {
+                findings.push(format!(
+                    "  {rel}:{}  {mint}) — a component receives a granted window and does \
+                     not mint one",
+                    n + 1
+                ));
+            }
+        }
+        if code.contains(&call) {
+            calls += 1;
+            if current != allowed {
+                findings.push(format!(
+                    "  {rel}:{}  `{mover}` called from `{current}`, not from `{allowed}`",
+                    n + 1
+                ));
+            }
+        }
+    }
+    (findings, calls)
+}
+
+/// The zero on the data path, checked as a property of the source.
+///
+/// # What this makes true that a counter alone does not
+///
+/// `blk/copies` is published at zero on every boot, and it would be published
+/// at zero by a crate that had grown a second way to move a client's bytes — so
+/// on its own it is an assertion with a `u64` around it. This is the mechanism
+/// behind it: for each row of [`DATAPATH`], the crate defines exactly one
+/// function that moves bytes, calls it from exactly one place, and that place is
+/// the boot's own self-check rather than the data path. A build where the mover
+/// had been deleted fails here, and so does one where the data path had started
+/// calling it — which are the two ways the published zero could stop meaning
+/// what it says.
+///
+/// It is a source check and it is limited the way every source check is: it
+/// reads names, so a mover spelled differently is a mover it does not know
+/// about. That limit is why [`MINTS`] is in it — the one *general* way a safe
+/// component could reach memory it was not handed is to build an accessor over
+/// an address it invented, and that is a shape rather than a name.
+fn lint_datapath() -> Result<(), String> {
+    let sources = rust_sources()?;
+    let mut findings = Vec::new();
+
+    for (prefix, mover, allowed) in DATAPATH {
+        let mut defined = 0;
+        let mut calls = 0;
+        let mut seen = false;
+
+        for path in &sources {
+            let rel = relative(path);
+            if !rel.starts_with(prefix) {
+                continue;
+            }
+            seen = true;
+            let text = std::fs::read_to_string(path).map_err(|e| format!("reading {rel}: {e}"))?;
+            let mut carry = Carry::default();
+            for line in text.lines() {
+                let code = strip_to_code(line, &mut carry);
+                if code.trim().starts_with("#[cfg(test)]") {
+                    break;
+                }
+                if declared_fn(&code) == Some(*mover) {
+                    defined += 1;
+                }
+            }
+            let (found, called) = datapath_findings(&rel, &text, mover, allowed);
+            findings.extend(found);
+            calls += called;
+        }
+
+        if !seen {
+            findings.push(format!("  {prefix}  no source under this prefix — the row is stale"));
+            continue;
+        }
+        // Both directions, and the second is the one that matters: a crate with
+        // no mover in it publishes the same zero as a crate whose mover the data
+        // path never calls, and only one of those is the property holding.
+        if defined != 1 {
+            findings.push(format!(
+                "  {prefix}  `{mover}` is defined {defined} time(s); the claim is that it is \
+                 defined once and is the only thing that moves bytes"
+            ));
+        }
+        if calls != 1 {
+            findings.push(format!(
+                "  {prefix}  `{mover}` is called {calls} time(s); it must be called exactly \
+                 once, from `{allowed}`, so that the counter it moves has been moved"
+            ));
+        }
+    }
+
+    if findings.is_empty() {
+        println!(
+            "lint-datapath: ok  ({} crate(s) move bytes in one place, and not on the data path)",
+            DATAPATH.len()
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{} datapath finding(s):\n{}\n\n\
+         E1-B02's exit is `zero copies on the data path, verified by counter`, and the\n\
+         counter is structurally zero: a request resolves to a `Reach`, which is an\n\
+         address and a length and not a slice, so the address goes into a descriptor and\n\
+         the bytes never reach the component. This is what keeps that true. A zero\n\
+         published by a crate with a second way to move bytes reads exactly like a zero\n\
+         published by one without — which is the reason `state::node::MEMORY_FORCED`\n\
+         exists beside `MEMORY_REMOTE`, one subsystem over.\n\n\
+         If a driver now legitimately needs to move bytes on a client's behalf, that is a\n\
+         change to what E1-B02 claims and belongs in an RFC and in `DATAPATH`, not in a\n\
+         second call site.",
+        findings.len(),
+        findings.join("\n")
     ))
 }
 
@@ -5189,7 +5959,116 @@ fn eval_run(filter: Option<&str>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{toml_field, toml_multiline};
+    use super::{datapath_findings, declared_fn, toml_field, toml_multiline, trace_hash};
+
+    /// A driver crate shaped like `user/virtio-blk`: one function that moves
+    /// bytes, called once, from the boot's own self-check.
+    const DATAPATH_HELD: &str = concat!(
+        "impl Driver {\n",
+        "    /// Resolve a name and hand the address to the device.\n",
+        "    fn transfer(&mut self, entry: &Sqe) -> Result<Cqe, Refusal> {\n",
+        "        let reach = path.resolve(name, entry.len)?;\n",
+        "        self.round_trip(reach.address, entry.len)\n",
+        "    }\n",
+        "\n",
+        "    pub fn provoke_copy(&mut self) -> Result<(), Trouble> {\n",
+        "        stage(&self.control, FROM, TO, BYTES, &mut self.counters.provoked)\n",
+        "    }\n",
+        "}\n",
+        "\n",
+        "fn stage(region: &Region, from: u32, to: u32, len: u32, tally: &mut u64) {\n",
+        "    // The only function in this crate that moves bytes.\n",
+        "}\n",
+        "\n",
+        "#[cfg(test)]\n",
+        "mod tests {\n",
+        "    fn region() -> Region { Region::at(base, device, LEN).expect(\"aligned\") }\n",
+        "}\n",
+    );
+
+    #[test]
+    fn a_datapath_that_moves_no_bytes_is_the_shape_the_lint_passes() {
+        let (findings, calls) = datapath_findings("x.rs", DATAPATH_HELD, "stage", "provoke_copy");
+        assert_eq!(findings, Vec::<String>::new(), "the held shape reports nothing");
+        assert_eq!(calls, 1, "and the one call is counted");
+    }
+
+    #[test]
+    fn a_copy_on_the_data_path_is_a_finding_the_counter_would_not_show() {
+        // The fixture that breaks the lint, and the reason the lint exists: this
+        // crate publishes `copies = 0` — `transfer` passes `provoked`, not
+        // `copies` — while copying a client's bytes on every request. The
+        // counter is deaf to it and the source is not.
+        let broken = DATAPATH_HELD.replace(
+            "        self.round_trip(reach.address, entry.len)\n",
+            "        stage(&self.scratch, 0, 512, entry.len, &mut self.counters.provoked)?;\n\
+             \x20       self.round_trip(reach.address, entry.len)\n",
+        );
+        let (findings, calls) = datapath_findings("x.rs", &broken, "stage", "provoke_copy");
+        assert_eq!(calls, 2, "two call sites now");
+        assert_eq!(findings.len(), 1, "and one of them is not `provoke_copy`");
+        assert!(findings[0].contains("`stage` called from `transfer`"), "{}", findings[0]);
+    }
+
+    #[test]
+    fn a_window_minted_out_of_an_invented_address_is_a_finding() {
+        // The other way a crate that forbids `unsafe` could reach a client's
+        // bytes while `stage` stayed honest: name the direct map, build a
+        // `Region` over it, and read through the accessor RFC 0033 made safe.
+        // `Region::at` is a safe `const fn`, so nothing but this refuses it.
+        let broken = DATAPATH_HELD.replace(
+            "        let reach = path.resolve(name, entry.len)?;\n",
+            "        let reach = path.resolve(name, entry.len)?;\n\
+             \x20       let peek = Region::at(DIRECT_MAP + reach.address, 0, entry.len)?;\n",
+        );
+        let (findings, _) = datapath_findings("x.rs", &broken, "stage", "provoke_copy");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("Region::at"), "{}", findings[0]);
+    }
+
+    #[test]
+    fn a_mover_the_fixtures_alone_call_is_not_a_mover_the_boot_moved() {
+        // The `MEMORY_FORCED` half, at the level of the lint rather than of the
+        // boot: delete the one call and both counters publish zero, which is a
+        // green board and a counter nobody has ever seen move.
+        let deaf = DATAPATH_HELD.replace(
+            "        stage(&self.control, FROM, TO, BYTES, &mut self.counters.provoked)\n",
+            "        Ok(())\n",
+        );
+        let (findings, calls) = datapath_findings("x.rs", &deaf, "stage", "provoke_copy");
+        assert_eq!(calls, 0);
+        assert!(findings.is_empty(), "the per-line scan sees nothing wrong — the count does");
+    }
+
+    #[test]
+    fn a_declaration_names_its_function_through_every_prefix_this_tree_writes() {
+        assert_eq!(declared_fn("fn stage(region: &Region)"), Some("stage"));
+        assert_eq!(declared_fn("    pub fn provoke_copy(&mut self)"), Some("provoke_copy"));
+        assert_eq!(declared_fn("    pub const fn counters(&self) -> Counters"), Some("counters"));
+        assert_eq!(declared_fn("    pub(crate) unsafe fn read8(base: u64)"), Some("read8"));
+        assert_eq!(declared_fn("        let x = stage(&r, 0, 1, 2, &mut t);"), None);
+        // A form nobody here writes reports nothing, which leaves the enclosing
+        // function as it was and attributes the next call to it — refused.
+        assert_eq!(declared_fn("extern \"C\" fn trampoline()"), None);
+    }
+
+    /// The string `f_sim::trace::digest` is pinned against, and the value both
+    /// functions must produce.
+    const DIGEST_FIXTURE: &str = "F reproduction fixture
+0123456789";
+
+    /// FNV-1a of [`DIGEST_FIXTURE`], with the carriage return skipped.
+    const DIGEST_FIXTURE_VALUE: u64 = 0xea6c_1d51_99fa_61cd;
+
+    #[test]
+    fn the_sim_digest_is_the_one_this_file_hashes_boot_logs_with() {
+        // Two reproduction checks, two copies of one hash function, and this is
+        // what keeps them one function. `sim/src/trace.rs` carries the twin of
+        // this test over the same string against the same constant; if either
+        // has to change, both change, or the boot's check and the simulator's
+        // have quietly stopped speaking one language. RFC 0032.
+        assert_eq!(trace_hash(DIGEST_FIXTURE), DIGEST_FIXTURE_VALUE);
+    }
 
     /// The shapes the claim registry actually contains, carriage returns
     /// included, because the file on disk has them.
