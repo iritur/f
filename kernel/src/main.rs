@@ -593,7 +593,15 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // one on. Before the tree is rendered, because everything it does — a
     // domain taken, frames spent and given back, a fault recorded — is
     // something the tree publishes.
-    let datapath = blk_datapath(&boot, &mut frames, &space, features, remapping.as_mut());
+    let datapath = blk_datapath(
+        &boot,
+        &mut frames,
+        &space,
+        features,
+        remapping.as_mut(),
+        clocks,
+        tree.physical(),
+    );
 
     // E1-B08. A component that holds a core and schedules its own work inside
     // it, with the frame counting what crossed. Behind its own parameter, like
@@ -730,8 +738,9 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // reserved list before the allocator was populated.
     match unsafe { component::demonstrate(&mut frames, &space, features, &boot, now) } {
         Ok(report) => kprintln!(
-            "  supervisor    ok — {} place, {} spawn(s), {} fault(s), {} restart(s), \
-             {} resumed, {} client(s) lost, {} probe(s) refused, {} retired",
+            "  supervisor    ok — {} place(s), {} spawn(s), {} fault(s), {} restart(s), \
+             {} resumed, {} client(s) lost, {} probe(s) refused, {} retired, \
+             {} need(s) bound to nothing",
             report.places,
             report.spawns,
             report.faults,
@@ -740,6 +749,7 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             report.lost,
             report.probed,
             report.retired,
+            report.unbound,
         ),
         // A machine that carried no component file is not a broken machine.
         // `docs/booting-on-hardware.md` installs one module and E0-P18 landed a
@@ -1974,6 +1984,8 @@ fn blk_datapath(
     space: &paging::AddressSpace,
     features: paging::Features,
     remapping: Option<&mut Remapping>,
+    clocks: arch::x86_64::apic::Clocks,
+    tree: u64,
 ) -> Option<blk::Report> {
     let half = if boot.has_parameter(b"blk=inside") {
         blk::Half::Inside
@@ -1987,6 +1999,21 @@ fn blk_datapath(
 
     let Some(found) = remapping else {
         kprintln!("FAIL: the block datapath asked for on a machine with no remapping unit");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+
+    // The core the driver is given. Another one, always: a driver and its
+    // client are two ends of a ring and this frame is the client, so a machine
+    // with one core has nowhere to put the server. `runtime_demonstration` can
+    // fall back to running on this core because a runtime talks to nobody
+    // while it runs; this cannot, and says so rather than pretending.
+    let me = arch::x86_64::current_cpu();
+    let Some(worker) = (smp::started() > 1).then(smp::first_worker).filter(|core| *core != me)
+    else {
+        kprintln!(
+            "FAIL: the block datapath needs a second core — the driver serves from ring 3 and \
+             the frame is its client"
+        );
         arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
     };
 
@@ -2015,6 +2042,13 @@ fn blk_datapath(
             &found.survey,
             boot,
             half,
+            blk::Scheduling {
+                cpu: worker,
+                hz: TIMER_HZ,
+                target: RUNTIME_TICKS,
+                tsc_khz: clocks.tsc_khz,
+                tree,
+            },
         )
     };
 
@@ -2024,7 +2058,30 @@ fn blk_datapath(
             // A datapath that could not be set up is not a datapath that was
             // exercised, and reporting it as a pass is how this whole check
             // would come to mean nothing.
-            kprintln!("FAIL: the block datapath: {}", why.message());
+            //
+            // A wall-clock bound running out is said apart from everything
+            // else here. Every other arm is something the frame *observed*
+            // going wrong, so a red line on one of those means a protection
+            // fired; the two `bound` arms are spins bounded by a number scaled
+            // off `tsc_khz`, and that fires for a wedged component and for a
+            // runner slower than the number alike. One sentence for both is how
+            // a slow machine comes to be read as a datapath defect, and how a
+            // real wedge comes to be dismissed as one. `blk::Trouble::bound`.
+            match why.bound() {
+                Some(micros) => {
+                    kprintln!(
+                        "FAIL: the block datapath ran out of time: {} of {} us",
+                        why.message(),
+                        micros,
+                    );
+                    kprintln!(
+                        "      That is an anti-wedge bound and not a check of the datapath: \
+                         nothing above this line reported a failure, and a red here is a \
+                         component that is stuck or a machine slower than the bound."
+                    );
+                }
+                None => kprintln!("FAIL: the block datapath: {}", why.message()),
+            }
             arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
         }
     };
@@ -2046,6 +2103,19 @@ fn blk_datapath(
         report.bdf.source_id(),
         report.windows,
         report.capacity,
+    );
+    // Where the code that answered all of this ran. The line RFC 0047 added and
+    // the one a reader should check first: everything below it is a claim about
+    // a component, and this says the component was one.
+    kprintln!(
+        "  blk component core {} at ring 3, {} entr(ies) drained from its own loop, {} served, \
+         {} refused, {} translation(s) asked of the frame, ended {}",
+        report.cpu,
+        report.drained,
+        report.counters.served,
+        report.counters.refused,
+        report.asked,
+        if report.exited { "by EXIT" } else { "in a FAULT" },
     );
     kprintln!(
         "  blk grant     the client registered one page at {:#018x}; a capability with no \

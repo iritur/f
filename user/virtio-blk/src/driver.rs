@@ -362,9 +362,13 @@ impl Driver {
     /// which is exactly why the answer has to be the remapping unit and not a
     /// type. This is the call that asks it.
     ///
-    /// What it does not establish, and the module comment in `kernel/src/blk.rs`
-    /// says so: the code doing the arithmetic executes in the frame today,
-    /// because nothing schedules a component. E1-B08.
+    /// The sentence that used to close this paragraph — *the code doing the
+    /// arithmetic executes in the frame today, because nothing schedules a
+    /// component* — is the one RFC 0047 removed. It runs at ring 3, in an
+    /// address space where the only memory it can reach is what its manifest
+    /// declared, which is what makes the descriptor below an address the
+    /// component was never granted rather than one the frame happened to have
+    /// mapped anyway.
     ///
     /// [`Counters::escaped`] counts the descriptors this produced, so a boot
     /// can require that the provocation ran rather than inferring it from a

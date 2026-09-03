@@ -95,11 +95,18 @@
 //! there is no ring 3 here, because RFC 0032 put the frame's own instructions in
 //! QEMU and this crate above them. So this is the workload half of E1-P06 and
 //! `cargo xtask component` is the frame half, and RFC 0041 declares the gap
-//! between them as a quantity rather than leaving it as a silence: today
-//! `kernel/src/blk.rs` still calls `Driver::execute`, so the component that the
-//! boot kills is not the component that serves the datapath. `cargo xtask
-//! chaos` checks that declaration on every run, so it goes red the day it stops
-//! being true.
+//! between them as a quantity rather than leaving it as a silence.
+//!
+//! That quantity has been narrowed once and this paragraph is what it narrowed.
+//! It used to read *`kernel/src/blk.rs` still calls `Driver::execute`, so the
+//! component that the boot kills is not the component that serves the
+//! datapath.* RFC 0047 ended the first half: the driver serves its client from
+//! ring 3, in its own polling loop, and the frame calls no part of it. What is
+//! left is the second half and it is one word narrower — the driver is
+//! *scheduled* and not *spawned into a place*, so the occupant a boot can kill
+//! is still not the occupant serving a client's load. `CHAOS_GAP` in xtask is
+//! that residue, `cargo xtask chaos` checks it on every run, and it goes red
+//! the day it stops being true.
 
 use std::collections::{BTreeMap, VecDeque};
 

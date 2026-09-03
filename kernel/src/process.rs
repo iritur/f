@@ -154,6 +154,85 @@ pub const RING: u64 = TREE + FRAME_SIZE;
 /// Must equal `f_store::runtime`'s `WORK_AT`. See [`RING`].
 pub const WORK: u64 = RING + FRAME_SIZE;
 
+/// How many pages of text the frame reserves for a component it builds from a
+/// component file.
+///
+/// Sixteen — sixty-four kibibytes — and it is a bound on the layout rather than
+/// on the loader. Every process this kernel ran before RFC 0047 was one page of
+/// text and the build refused an image that was not, which was a bound nobody
+/// had to defend while the only components were an announcement and an
+/// executor. A driver is not: `user/virtio-blk` compiles to about thirteen
+/// kibibytes the moment its own polling loop reaches the transport, the queue
+/// and the registration table.
+///
+/// Sixteen rather than four, because what this constant really buys is that
+/// **the addresses below do not move when a component's code grows.** A layout
+/// derived from an image's own length would make [`BLK_BOARD`] a different
+/// number on every commit, and it is the one address a component holds as a
+/// constant.
+///
+/// It is a *reservation* and not a charge. `component::spawn` charges the
+/// account for the pages an image actually occupies, so a component that fits
+/// in one page pays for one; what the reservation costs is address space, of
+/// which a component has forty-seven bits.
+///
+/// *Reversal:* a loader that reads a component's headers and a component that
+/// is told where its own world is rather than holding one address — E5, and at
+/// that point every constant in this section goes, not just this one.
+/// Unit: pages.
+pub const TEXT_PAGES: usize = 16;
+
+/// One unmapped page between a component's text reservation and its stack.
+///
+/// [`GUARD`]'s argument, for every shape whose text is a reservation rather
+/// than a page — which since RFC 0047 is every component built from a component
+/// file, spawned into a place or scheduled on a core. One layout and not two,
+/// because a place holds *any* component and a layout that depended on which
+/// one would be a place that was not interchangeable.
+pub const SPAWN_GUARD: u64 = TEXT + TEXT_PAGES as u64 * FRAME_SIZE;
+
+/// Where such a component's stack is mapped.
+pub const SPAWN_STACK: u64 = SPAWN_GUARD + FRAME_SIZE;
+
+/// The stack pointer it starts with: one past its stack.
+pub const SPAWN_STACK_TOP: u64 = SPAWN_STACK + FRAME_SIZE;
+
+/// Where the frame maps such a component's control ring.
+///
+/// The ring the frame publishes its notices onto, and — for a driver — the ring
+/// it asks the frame for a device translation on. RFC 0047. A driver reads this
+/// address out of [`BLK_BOARD`] rather than holding it as a constant, which is
+/// why it may move without anything outside this file being edited.
+pub const SPAWN_CONTROL: u64 = SPAWN_STACK_TOP + FRAME_SIZE;
+
+/// Where the frame maps the ring a driver serves its client on.
+pub const BLK_DATA: u64 = SPAWN_CONTROL + FRAME_SIZE;
+
+/// Where the frame maps the page that says where everything else is.
+///
+/// **The one address a driver component holds as a constant**, and it must
+/// equal `f_virtio_blk::routing::AT`. `kernel/src/blk.rs` asserts that at
+/// compile time; a comment would be a claim and the assertion is a check, and
+/// the kernel is the one artefact that links both definitions.
+pub const BLK_BOARD: u64 = BLK_DATA + FRAME_SIZE;
+
+/// Where the frame maps the device's register pages for the driver.
+///
+/// Four of them, which is what `user/virtio-blk/manifest.toml` declares and
+/// what the modern virtio transport lays out in one base-address register.
+/// Mapped [`paging::UserPage::Device`] and not `Data`: see that variant.
+pub const BLK_REGISTERS: u64 = BLK_BOARD + FRAME_SIZE;
+
+/// How many register pages the driver shape maps. Unit: pages.
+pub const BLK_REGISTER_PAGES: usize = 4;
+
+/// Where the frame maps the driver's queue memory.
+///
+/// The untyped need its manifest declares, sixty-four kibibytes of it, whole
+/// and contiguous because a virtqueue is one descriptor table and two rings at
+/// fixed offsets from each other.
+pub const BLK_QUEUES: u64 = BLK_REGISTERS + BLK_REGISTER_PAGES as u64 * FRAME_SIZE;
+
 /// A second address in the same region, used only by provocations whose mapping
 /// is supposed to be refused.
 ///
@@ -1688,6 +1767,304 @@ pub unsafe fn prepare_runtime(
             cpu,
         },
         rings,
+    ))
+}
+
+/// What the frame is asking of one run of a *driver*.
+///
+/// A third plan beside [`Plan`] and [`RuntimePlan`], for [`RuntimePlan`]'s own
+/// reason: the three shapes share almost nothing. A process is judged by a
+/// tally of refusals, a runtime by an absence of crossings, and a driver by
+/// what happened in its client's memory and in a remapping unit's fault
+/// registers. The fields below are the ones a driver has and the other two do
+/// not — a device's registers, a device's queue memory, and a ring whose far
+/// end somebody else holds.
+#[derive(Clone, Copy)]
+pub struct DriverPlan {
+    /// The component's image, out of the component file the loader carried.
+    /// May be longer than one page — up to [`TEXT_PAGES`].
+    pub image: &'static [u8],
+    /// Which of the component's lives the frame is asking for. It reaches the
+    /// component in the low half of `f_abi::door::Entry`.
+    /// Unit: none — a selector ordinal.
+    pub selector: u32,
+    /// The physical address of the frame the state tree is published in.
+    /// Unit: bytes, physical.
+    pub tree: u64,
+    /// The rate the core running it arms its own timer at. Unit: hertz.
+    pub hz: u32,
+    /// How many ticks that timer asks for. Unit: timer ticks.
+    pub target: u64,
+    /// Which core the driver is allocated. Unit: none — a core index.
+    pub cpu: usize,
+    /// The first of the device's register pages, physical.
+    ///
+    /// **Not a frame this allocator owns**, which is why it is an address and
+    /// not a [`Frame`]: it is a base-address register the firmware placed, and
+    /// [`reap`] must not hand it back to anybody. A `Frame` here would be a
+    /// type inviting exactly that.
+    /// Unit: bytes, physical.
+    pub registers: u64,
+    /// The driver's queue memory, physical.
+    ///
+    /// The caller's to free, for the reason above inverted: it *is* an
+    /// allocation, and it is the caller's rather than this function's because
+    /// the same region has to be in the device's IOMMU domain before the
+    /// component runs and out of it after — which is the supervisor's act and
+    /// not the loader's.
+    /// Unit: bytes, physical.
+    pub queues: u64,
+    /// How many bytes of it. Unit: bytes.
+    pub queue_bytes: u64,
+    /// The frame holding the ring this driver serves its client on, physical.
+    ///
+    /// The caller's, because the caller holds the other end of it.
+    /// Unit: bytes, physical.
+    pub data: u64,
+}
+
+/// The kernel-visible addresses of a driver's two frame-owned pages.
+///
+/// The data ring is not here: the caller allocated it, holds the client end of
+/// it, and already knows where it is.
+#[derive(Clone, Copy, Debug)]
+pub struct DriverPages {
+    /// The control ring, as the frame sees it. Unit: bytes, kernel-virtual.
+    pub control: u64,
+    /// The page that says where everything else is, as the frame sees it.
+    /// Unit: bytes, kernel-virtual.
+    pub board: u64,
+}
+
+/// Build a driver on `cpu`'s behalf: an address space, a text reservation, a
+/// stack, two rings, a board, its device's registers and its queue memory.
+///
+/// # What is different from [`prepare_runtime`], and why it is a third function
+///
+/// Two things, and both of them are the difference between a component that
+/// computes and a component that drives a device.
+///
+/// **Its text is more than a page.** Every other shape here is one page and the
+/// build refuses an image that is not; a driver with its own polling loop is
+/// three. [`TEXT_PAGES`] is the reservation and the argument for its size.
+///
+/// **It is mapped things the frame does not own.** A device's registers are a
+/// base-address register the firmware placed, and its queue memory is an
+/// allocation the *supervisor* made and put in a remapping domain before this
+/// call and takes out after it. So they arrive as addresses rather than as
+/// frames, and [`reap`] never sees them: [`Prepared`] holds only what this
+/// function allocated, which is the property that makes the free count come
+/// back.
+///
+/// # Errors
+///
+/// [`Error`], every variant of which fails the boot.
+///
+/// # Safety
+///
+/// As [`prepare`], and `plan.registers` must name [`BLK_REGISTER_PAGES`] pages
+/// of a device's register space that nothing else is driving, `plan.queues`
+/// `plan.queue_bytes` of memory the caller allocated and holds, and `plan.data`
+/// one frame the caller allocated and holds the far end of.
+pub unsafe fn prepare_driver(
+    frames: &mut FrameAllocator,
+    kernel: &paging::AddressSpace,
+    features: paging::Features,
+    plan: DriverPlan,
+) -> Result<(Prepared, DriverPages), Error> {
+    let DriverPlan { image, selector, tree, hz, target, cpu, .. } = plan;
+    if image.is_empty() {
+        return Err(Error::NoProgram);
+    }
+    let text_pages = (image.len() as u64).div_ceil(FRAME_SIZE) as usize;
+    if text_pages > TEXT_PAGES {
+        return Err(Error::TooLarge);
+    }
+    if plan.queue_bytes == 0 || !plan.queue_bytes.is_multiple_of(FRAME_SIZE) {
+        return Err(Error::TooLarge);
+    }
+
+    let before = frames.free_count();
+
+    // SAFETY: the caller's guarantee that the kernel's space is live and that
+    // frames are addressable through its direct map.
+    let mut space = unsafe { paging::user_space(frames, kernel) }.map_err(Error::Space)?;
+
+    // One block and not `text_pages` separate frames, because a flat image is
+    // contiguous by definition — the frame copies it in one `memcpy` and the
+    // component's own `call`s are relative. The order rounds up, which is the
+    // allocator's own arithmetic and is why the slack is visible in the free
+    // count rather than hidden in a loop.
+    let order = Order::new(
+        u8::try_from(text_pages.next_power_of_two().trailing_zeros()).unwrap_or(u8::MAX),
+    )
+    .ok_or(Error::NoFrames)?;
+    let text = frames.alloc_zeroed(order).ok_or(Error::NoFrames)?;
+    let stack = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
+    // Zeroed, and it is an obligation rather than tidiness: a channel's cursors
+    // and entry arrays are reinterpreted in place and all-zero is the one bit
+    // pattern every one of those types is valid at.
+    let control = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
+    let board = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
+
+    let into = frames.virt(text);
+    // SAFETY: `text` was just allocated at an order covering `text_pages`,
+    // nothing else holds it, it is addressable through the direct map, and the
+    // image is no longer than the block — `text_pages` is computed from its
+    // length and the order rounds up.
+    unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), into, image.len()) };
+
+    for page in 0..text_pages as u64 {
+        let at = text.addr().wrapping_add(page * FRAME_SIZE);
+        // SAFETY: as `user_space`, and `space` is not in `CR3` — it has never
+        // been.
+        unsafe {
+            paging::map_user(
+                frames,
+                &mut space,
+                TEXT + page * FRAME_SIZE,
+                at,
+                paging::UserPage::Text,
+                features,
+            )
+        }
+        .map_err(Error::Space)?;
+    }
+
+    for (virt, at, kind) in [
+        (SPAWN_STACK, stack.addr(), paging::UserPage::Data),
+        (SPAWN_CONTROL, control.addr(), paging::UserPage::Data),
+        (BLK_DATA, plan.data, paging::UserPage::Data),
+        (BLK_BOARD, board.addr(), paging::UserPage::Data),
+    ] {
+        // SAFETY: as above.
+        unsafe { paging::map_user(frames, &mut space, virt, at, kind, features) }
+            .map_err(Error::Space)?;
+    }
+
+    for page in 0..BLK_REGISTER_PAGES as u64 {
+        // SAFETY: as above, and the caller's guarantee that `registers` names
+        // this many pages of a device's register space.
+        unsafe {
+            paging::map_user(
+                frames,
+                &mut space,
+                BLK_REGISTERS + page * FRAME_SIZE,
+                plan.registers.wrapping_add(page * FRAME_SIZE),
+                paging::UserPage::Device,
+                features,
+            )
+        }
+        .map_err(Error::Space)?;
+    }
+
+    for page in 0..plan.queue_bytes / FRAME_SIZE {
+        // SAFETY: as above, and the caller's guarantee that `queues` names
+        // `queue_bytes` of memory it holds.
+        unsafe {
+            paging::map_user(
+                frames,
+                &mut space,
+                BLK_QUEUES + page * FRAME_SIZE,
+                plan.queues.wrapping_add(page * FRAME_SIZE),
+                paging::UserPage::Data,
+                features,
+            )
+        }
+        .map_err(Error::Space)?;
+    }
+
+    let pages =
+        DriverPages { control: frames.virt(control) as u64, board: frames.virt(board) as u64 };
+
+    let table = crate::cap::of(cpu);
+    // SAFETY: the table of a core that is idle, with no process running on it,
+    // which is the write `PerCpu::at` exists for.
+    let held = unsafe { &mut *table };
+    held.clear_all();
+    // A driver has a control ring, so it is owed notices — and a slot whose
+    // notice field is not quiet is not refilled, so a driver that never drains
+    // runs out of table rather than out of memory. RFC 0008.
+    held.owes_notices();
+    let first = held
+        .grant(CapType::AddressSpace, rights::READ | rights::WRITE, space.root(), 0)
+        .map_err(|_| Error::NoSlot)?;
+    // Four grants, in the same order and at the same count as every other shape
+    // this kernel builds. The count is load-bearing and `prepare_runtime` says
+    // why at length: `door::Entry::granted(nth)` is arithmetic over one
+    // generation, and it is sound only while every shape fills the same number
+    // of slots.
+    for object in [control.addr(), plan.data] {
+        held.grant(CapType::Frame, rights::READ | rights::WRITE, object, FRAME_SIZE)
+            .map_err(|_| Error::NoSlot)?;
+    }
+    held.grant(CapType::Frame, rights::READ, tree, FRAME_SIZE).map_err(|_| Error::NoSlot)?;
+    let granted_count = held.used();
+
+    let state = STATE.at(cpu);
+    // SAFETY: the slot of an idle core, so neither the fault path nor the
+    // system-call path over there can be holding it.
+    unsafe {
+        state.write(State {
+            announced: false,
+            refused: 0,
+            death: Death::Running,
+            // A driver never asks. Its loop ends when the frame tells it to
+            // stop, on the ring, which is the answer RFC 0008 replaces
+            // `PROGRESS` with.
+            wanted: 0,
+            giveup: 0,
+            caps: Tally::ZERO,
+            root: space.root(),
+            // Zero, as a runtime's is: a driver holds no capability it could
+            // map with, so a capability call arriving from one is refused
+            // before it reaches an address space.
+            frames: 0,
+            features,
+        });
+    }
+
+    let ticks = IN_RING3.at(cpu);
+    // SAFETY: volatile through the raw pointer, into the slot of a core whose
+    // timer handler — the only other writer — has nothing to count yet.
+    unsafe { ticks.write_volatile(0) };
+    arm_entries(cpu);
+
+    let outcome = OUTCOME.at(cpu);
+    // SAFETY: as above; the core is idle and has not been given the job.
+    unsafe {
+        outcome.write(Outcome { ended: 0, ticks: 0, held: 0, entries: Entries::ZERO, failed: None })
+    };
+
+    let job = JOB.at(cpu);
+    // SAFETY: as above. Written last, and published to the running core by the
+    // `Release` store `smp::run_on` makes after this returns.
+    unsafe {
+        job.write(Job {
+            root: space.root(),
+            entry: TEXT,
+            stack: SPAWN_STACK_TOP,
+            argument: door::Entry::new(selector, first).bits(),
+            hz,
+            target,
+        })
+    };
+
+    Ok((
+        Prepared {
+            space,
+            // Four, and every one of them allocated here. The register pages,
+            // the queue memory and the data ring are the caller's and are
+            // deliberately absent: a list that held them would free memory this
+            // function never took, which is a corruption rather than a leak.
+            pages: [text, stack, control, board],
+            parts: 4,
+            before,
+            granted: granted_count,
+            generation: first.generation(),
+            cpu,
+        },
+        pages,
     ))
 }
 

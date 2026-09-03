@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! `virtio-blk` as something that runs: the body a spawn puts at
-//! `kernel::process::TEXT` and jumps to.
+//! `kernel::process::TEXT` and jumps to, and — since RFC 0047 — the polling
+//! loop that serves its client from ring 3.
 //!
 //! # Why there is no attribute on [`start`]
 //!
@@ -14,33 +15,57 @@
 //! load-bearing across three crates now: one linker script, one placement rule,
 //! one check.
 //!
-//! # Why this is three lines and the driver is two thousand
+//! # What changed, and what the sentence here used to say
 //!
-//! Because the two halves of this component run in different places today, and
-//! saying so here is better than a reader discovering it.
+//! It used to say that this file is three lines and the driver is two thousand,
+//! because *serving means draining a ring, draining a ring means adopting a
+//! mapped channel, and `f_ring::Mapping::adopt` is `unsafe`*. That stopped
+//! being true twice. RFC 0037 made a channel adoptable in safe code, and RFC
+//! 0047 gave a scheduled driver the two things it still lacked: more than one
+//! page of text, and a route by which it asks the frame for a device
+//! translation. So the loop is here now, and `kernel/src/blk.rs` no longer
+//! calls `Driver::execute` — which is RFC 0033's own reversal, stated as a grep
+//! anybody can run.
 //!
-//! The image is what a *spawn* produces: a component file, named by a hash over
-//! its record and these bytes, put in a place, given the needs its manifest
-//! declares. What it cannot yet do is serve, because serving means draining a
-//! ring, draining a ring means adopting a mapped channel, and
-//! `f_ring::Mapping::adopt` is `unsafe`. That is E1-B08's wall and RFC 0033
-//! deliberately does not climb it — a channel is shared with a hostile peer, a
-//! device window is not, and one argument for both would be the wrong argument
-//! made twice.
+//! # The three things this component cannot do for itself, and what it does
 //!
-//! So the driver's own code — [`crate::driver`], [`crate::transport`],
-//! [`crate::queue`] — is called by the frame at boot, from `kernel/src/blk.rs`,
-//! against real registers and a real device. One body of code, called from the
-//! wrong side of the boundary for one milestone, rather than a driver here and
-//! a copy of it in the kernel. `--gc-sections` is why none of it is in this
-//! image: nothing [`start`] reaches pulls it in.
+//! **It cannot program a remapping unit.** The unit is the frame's, its page
+//! tables are the frame's, and a component that could program one could point
+//! any device at any memory. So [`Route`] asks, over the control ring —
+//! `f_abi::control::op::DEVICE_MAP` — and the answer is an address or the
+//! refusal the frame's own check produced. That check is unchanged from when
+//! the frame called this code directly: the client's handle, resolved against
+//! the client's table, refused without `GRANT`.
 //!
-//! *Reversal, and it is a date rather than a measurement:* E1-B08 lands a safe
-//! channel adoption for components, at which point this function grows a
-//! polling loop over its control ring and its data ring, and the call from
-//! `kernel/src/blk.rs` goes.
+//! **It cannot find out where anything is.** A device's register structures are
+//! at offsets the *device* publishes and its queue memory has a device address
+//! a *translation* answered, so both are read out of [`crate::routing`] rather
+//! than assumed. One address is a constant on both sides and everything else is
+//! data.
+//!
+//! **It cannot decide when to stop.** RFC 0008 says a component ends when its
+//! supervisor says so, and this one ends on a `STOP` notice drained at the same
+//! polling point as everything else — R05, there is no second path in.
+//!
+//! # What it does *not* do, said rather than implied
+//!
+//! It is not spawned into the place `kernel/src/component.rs` builds for it.
+//! The frame stands this instance up the way `kernel/src/runtime.rs` stands a
+//! runtime up — image, account-less, needs unchecked — because the supervisor
+//! that would hand a *place's* occupant a core is the ring-3 supervisor E1-B05
+//! still owes. So the sentence this component now supports is *the code that
+//! serves the datapath runs at ring 3 in its own loop*, and not yet *the
+//! occupant of a place serves the datapath*. `CHAOS_GAP` in xtask is what
+//! carries the difference, shrunk to exactly that.
 
-use f_abi::door;
+use f_abi::control::{is_notice, notice};
+use f_abi::{Cqe, Negotiated, Sqe, door, error, feature};
+use f_ring::adopt::{Adopted, Client};
+use f_ring::device::{Region, Window};
+use f_ring::registry::{Domains, Refusal};
+
+use crate::routing::{self, at, life, reported, stopped};
+use crate::transport::Windows;
 
 /// A run that did what it meant to.
 pub const DONE: u64 = 0;
@@ -54,19 +79,339 @@ pub const DONE: u64 = 0;
 /// It never returns: [`door::EXIT`] does not come back, and the loop after it is
 /// what happens if the frame ever lets it.
 pub fn start(argument: u64) -> ! {
+    let entry = door::Entry::from_bits(argument);
+    // Which of this component's lives the frame asked for. A selector this
+    // build does not name falls through to the announcement rather than
+    // inventing a fourth, which is what a *spawn* into a place still asks for.
+    let selector = entry.selector();
+    if selector == life::SERVE || selector == life::ESCAPE {
+        serve(selector)
+    }
+
     // The frame tells a component what it holds rather than letting it assume,
     // and `door::Entry` argues why: a second occupant of a place finds its
     // capabilities at the same indices and a later generation. For this
     // component the order is the manifest's — the four register frames, the
-    // untyped region for its queues, its interrupt, its powerbox endpoint — and
-    // reading the first handle here is where a serving loop would start.
-    let entry = door::Entry::from_bits(argument);
+    // untyped region for its queues, its interrupt, its powerbox endpoint.
     let _ = entry.granted(0);
 
     // "I am here." The one thing the frame cannot observe from outside.
     let _ = door::call0(door::ANNOUNCE);
 
     end(DONE)
+}
+
+/// Serve the data ring until the frame says stop.
+///
+/// Every failure here ends the run with a reason in [`reported::OUTCOME`]
+/// rather than a panic, and the reason matters: a component that stopped
+/// because its routing page was blank and one that stopped because it was told
+/// to look identical from outside, and only one of them is the run the boot
+/// asked for.
+fn serve(selector: u32) -> ! {
+    let Ok(board) = Window::at(routing::AT, routing::BYTES) else {
+        // Nothing to report *into*, so the status word is all there is.
+        end(stopped::BAD_ROUTING)
+    };
+    // R04 at the one place this component reads a structure it did not build.
+    // A page of zeroes is what a frame that was mapped and never filled in
+    // looks like, and a zero length taken for a length reads as a device
+    // problem rather than as a frame that did not speak.
+    if board.read64(at::MAGIC) != Ok(routing::MAGIC) {
+        report(&board, None, 0, stopped::NO_ROUTING);
+        end(stopped::NO_ROUTING)
+    }
+
+    let Some(parts) = laid_out(&board) else {
+        report(&board, None, 0, stopped::BAD_ROUTING);
+        end(stopped::BAD_ROUTING)
+    };
+
+    let Ok(mut driver) = crate::driver::Driver::start(parts.windows, parts.queues, parts.agreed)
+    else {
+        report(&board, None, 0, stopped::NO_DEVICE);
+        end(stopped::NO_DEVICE)
+    };
+
+    // The self-check that makes the published zero worth reading, run before
+    // the data path so that a build in which it silently did nothing fails
+    // rather than being hidden by a transfer that also did nothing. It is the
+    // one call in this crate that moves bytes, and `cargo xtask lint-datapath`
+    // is what keeps that true.
+    if driver.provoke_copy().is_err() {
+        report(&board, Some(&driver), 0, stopped::NO_SELF_CHECK);
+        end(stopped::NO_SELF_CHECK)
+    }
+
+    let mut route = Route { control: parts.control, token: 0, told: false };
+    let mut drained: u64 = 0;
+    let outcome = loop {
+        // The control ring first, because a stop is the one thing that ends
+        // this loop and an entry taken after it would be work done for a client
+        // the frame has already told this component it no longer has.
+        match route.drain(0) {
+            Ok(_) => {}
+            Err(()) => break stopped::NO_RING,
+        }
+        if route.told {
+            break stopped::TOLD;
+        }
+
+        let taken = match parts.data.pop() {
+            Ok(taken) => taken,
+            Err(_) => break stopped::NO_RING,
+        };
+        let Some(entry) = taken else {
+            core::hint::spin_loop();
+            continue;
+        };
+        drained += 1;
+
+        // Two entry points and not a flag, so the provocation is greppable: the
+        // data path calls `execute`, and only the escape life reaches
+        // `provoke_escape`.
+        //
+        // **And only on a read**, which is not fussiness. The write before it is
+        // the positive control: it is what puts the pattern on the disk, and a
+        // run in which it also escaped would compare a sink against a sector
+        // that was never written — *the bytes do not match* for a reason that
+        // has nothing to do with the provocation being refused. That is the
+        // green-for-the-wrong-reason this epoch has recorded four times, and it
+        // is why the frame applied the displacement to exactly one entry when
+        // this code ran in the frame.
+        let bend = selector == life::ESCAPE && entry.opcode == crate::driver::op::READ;
+        let answer = if bend {
+            driver.provoke_escape(&entry, &mut route, 0, parts.beyond)
+        } else {
+            driver.execute(&entry, &mut route, 0)
+        };
+        if parts.data.post(answer).is_err() {
+            break stopped::NO_RING;
+        }
+    };
+
+    // Told to stop, or stopping because something stopped making sense. Either
+    // way the device goes back into reset before this component's memory does,
+    // because a device left able to address memory the frame is about to hand
+    // to somebody else is the corruption this whole subsystem is about.
+    let _ = driver.stop();
+    report(&board, Some(&driver), drained, outcome);
+    end(outcome)
+}
+
+/// Everything the routing page said, in the types that use it.
+struct Parts {
+    windows: Windows,
+    queues: Region,
+    control: Client,
+    data: f_ring::adopt::Server,
+    agreed: Negotiated,
+    /// Unit: bytes.
+    beyond: u64,
+}
+
+/// Read the routing page and state everything it names.
+///
+/// `None` for any address that cannot be stated as a window, a region or a
+/// channel — which is a frame that filled this page in wrongly, and is refused
+/// here rather than dereferenced to find out.
+fn laid_out(board: &Window) -> Option<Parts> {
+    let registers_at = board.read64(at::REGISTERS_AT).ok()?;
+    let registers_len = u32::try_from(board.read64(at::REGISTERS_LEN).ok()?).ok()?;
+    let registers = Window::at(registers_at, registers_len).ok()?;
+
+    // Narrowing, never widening: `Window::slice` is always inside the window it
+    // came from, so a device that published an implausible offset produces a
+    // refusal here rather than a driver reading somebody else's page.
+    let structure = |offset: u32, len: u32| -> Option<Window> {
+        let at = u32::try_from(board.read64(offset).ok()?).ok()?;
+        let bytes = u32::try_from(board.read64(len).ok()?).ok()?;
+        registers.slice(at, bytes).ok()
+    };
+    let windows = Windows {
+        common: structure(at::COMMON_OFFSET, at::COMMON_LEN)?,
+        notify: structure(at::NOTIFY_OFFSET, at::NOTIFY_LEN)?,
+        isr: structure(at::ISR_OFFSET, at::ISR_LEN)?,
+        config: structure(at::CONFIG_OFFSET, at::CONFIG_LEN)?,
+        notify_multiplier: u32::try_from(board.read64(at::NOTIFY_MULTIPLIER).ok()?).ok()?,
+    };
+
+    let queues = Region::at(
+        board.read64(at::QUEUES_AT).ok()?,
+        board.read64(at::QUEUES_DEVICE_AT).ok()?,
+        u32::try_from(board.read64(at::QUEUES_LEN).ok()?).ok()?,
+    )
+    .ok()?;
+
+    // The control ring requires the feature that carries notices in both
+    // directions, which is the one refusal a control ring depends on: a control
+    // ring whose peer cannot speak notices is not a control ring.
+    let control = Adopted::at(
+        board.read64(at::CONTROL_AT).ok()?,
+        u32::try_from(board.read64(at::CONTROL_LEN).ok()?).ok()?,
+        feature::CONTROL_EVENTS,
+        feature::CONTROL_EVENTS,
+    )
+    .ok()?
+    .client();
+
+    let data = Adopted::at(
+        board.read64(at::DATA_AT).ok()?,
+        u32::try_from(board.read64(at::DATA_LEN).ok()?).ok()?,
+        0,
+        0,
+    )
+    .ok()?
+    .server();
+
+    Some(Parts {
+        windows,
+        queues,
+        control,
+        data,
+        agreed: Negotiated {
+            version: u32::try_from(board.read64(at::NEGOTIATED_VERSION).ok()?).ok()?,
+            features: board.read64(at::NEGOTIATED_FEATURES).ok()?,
+        },
+        beyond: board.read64(at::BEYOND).ok()?,
+    })
+}
+
+/// Write what this component did into the half of the routing page that is
+/// its own.
+///
+/// The magic goes last, which is the whole of the discipline: a frame that
+/// reads a page this function never finished finds a zero rather than a
+/// plausible tally. RFC 0013's *read, never delivered* — the frame takes these
+/// numbers out of memory it granted, and this component is never asked for
+/// them.
+fn report(board: &Window, driver: Option<&crate::driver::Driver>, drained: u64, outcome: u64) {
+    if let Some(driver) = driver {
+        let counters = driver.counters();
+        let _ = board.write64(reported::SERVED, u64::from(counters.served));
+        let _ = board.write64(reported::REFUSED, u64::from(counters.refused));
+        let _ = board.write64(reported::BYTES, counters.bytes);
+        let _ = board.write64(reported::COPIES, counters.copies);
+        let _ = board.write64(reported::ESCAPED, u64::from(counters.escaped));
+        let _ = board.write64(reported::PROVOKED, counters.provoked);
+        let _ = board.write64(reported::CAPACITY, driver.capacity());
+    }
+    let _ = board.write64(reported::DRAINED, drained);
+    let _ = board.write64(reported::OUTCOME, outcome);
+    let _ = board.write64(reported::MAGIC, routing::MAGIC);
+}
+
+/// This component's end of the control ring, and the one thing it asks the
+/// frame for.
+///
+/// # Why the same object drains notices and waits for an answer
+///
+/// Because there is one ring and R04 does not let an entry be skipped. A
+/// translation request is answered on the same completion ring the frame
+/// publishes notices onto, so waiting for the answer means draining whatever is
+/// in front of it — and a wait that discarded a stop notice on the way would be
+/// a component that had been told to stop and did not know.
+struct Route {
+    control: Client,
+    /// The submitter's value on the next request. Monotonic, so a completion
+    /// carrying an older one is an answer to a request this component is no
+    /// longer waiting for and is not mistaken for this one.
+    /// Unit: none — a token.
+    token: u64,
+    /// Whether a stop notice has arrived. Once true it stays true: a promise
+    /// may only move earlier, and a component that forgot it had been told
+    /// would be one that kept serving.
+    told: bool,
+}
+
+impl Route {
+    /// Take completions until the one carrying `awaiting`, or until the ring is
+    /// empty when `awaiting` is zero.
+    ///
+    /// **This is the polling point.** Notices are recorded on the way past;
+    /// nothing is discarded, and a kind this build cannot name ends the run
+    /// rather than being skipped — R04, and `f_abi::control::notice::known` is
+    /// the one list that says which kinds exist.
+    ///
+    /// # Errors
+    ///
+    /// The ring stopped validating, or it carried something this component
+    /// cannot name. Both mean the peer has stopped speaking, and RFC 0008 says
+    /// what happens to a component whose peer has.
+    fn drain(&mut self, awaiting: u64) -> Result<Option<Cqe>, ()> {
+        loop {
+            let taken = match self.control.take() {
+                Ok(taken) => taken,
+                Err(_) => return Err(()),
+            };
+            let Some(entry) = taken else {
+                if awaiting == 0 {
+                    return Ok(None);
+                }
+                // The frame answers from its own polling loop on another core,
+                // so an empty ring is *not yet* rather than *never*.
+                core::hint::spin_loop();
+                continue;
+            };
+            if is_notice(&entry) {
+                if !notice::known(entry.result) {
+                    return Err(());
+                }
+                if entry.result == notice::STOP {
+                    self.told = true;
+                }
+                continue;
+            }
+            if entry.user_data == awaiting && awaiting != 0 {
+                return Ok(Some(entry));
+            }
+            // A completion for a request this component is no longer waiting
+            // for. There is none in this build; if one arrives it is dropped
+            // rather than mistaken for the answer, because the token is what
+            // says which answer this is.
+        }
+    }
+
+    /// Ask the frame for something, and wait for the answer on the same ring.
+    fn ask(&mut self, entry: Sqe) -> Result<Cqe, Refusal> {
+        let gone = (error::pack(error::PEER, error::peer::GONE), 0);
+        self.token = self.token.wrapping_add(1);
+        let token = self.token;
+        if self.control.submit(Sqe { user_data: token, ..entry }).is_err() {
+            return Err(gone);
+        }
+        match self.drain(token) {
+            Ok(Some(answer)) => Ok(answer),
+            _ => Err(gone),
+        }
+    }
+}
+
+impl Domains for Route {
+    fn map(&mut self, cap: u32, len: u32) -> Result<u64, Refusal> {
+        let answer =
+            self.ask(Sqe { opcode: f_abi::control::op::DEVICE_MAP, cap, len, ..Sqe::ZERO })?;
+        match answer.error() {
+            // Passed through unchanged, because a refusal this component
+            // invented a code for is a refusal its client cannot act on.
+            Some((domain, code)) => Err((error::pack(domain, code), answer.ext)),
+            None => Ok(answer.ext),
+        }
+    }
+
+    fn unmap(&mut self, cap: u32, address: u64, len: u32) {
+        // Answered even though it cannot refuse, and waited for. A withdrawal
+        // that had not happened yet when the next transfer went out would be a
+        // translation still live at the moment `InFlight::reclaim` rests on it
+        // being gone.
+        let _ = self.ask(Sqe {
+            opcode: f_abi::control::op::DEVICE_UNMAP,
+            cap,
+            len,
+            offset: address,
+            ..Sqe::ZERO
+        });
+    }
 }
 
 /// End, and do not come back.

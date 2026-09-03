@@ -61,15 +61,23 @@ pub const EXTENSION: &str = "fc";
 
 /// The largest component file this reader will hold. Unit: bytes.
 ///
-/// A record is 2 216 bytes and `xtask`'s `INIT_MAX` bounds an image at one page,
-/// so a component file is at most 6 312 today and this is the next power of two
-/// above it. It is a bound on a *buffer whose alignment is part of its type*,
-/// which is the whole reason it is a constant rather than a `Vec`: see the
-/// module documentation. A file past it is refused naming both numbers, because
-/// the day a component's image grows past one page is the day the frame's loader
-/// changes too, and a refusal here is a better place to find that out than a
-/// silent truncation.
-pub const MODULE_MAX: usize = 8192;
+/// A record is 2 216 bytes and the frame reserves
+/// `kernel::process::TEXT_PAGES` — sixteen — for a component's text, so a
+/// component file is at most 67 752 and this is the next power of two above it.
+/// It is a bound on a *buffer whose alignment is part of its type*, which is the
+/// whole reason it is a constant rather than a `Vec`: see the module
+/// documentation.
+///
+/// **It was eight kibibytes, derived from an image bound of one page, and the
+/// day that stopped being true is exactly the day this refused a build** — which
+/// is what the sentence that used to be here said would happen: *the day a
+/// component's image grows past one page is the day the frame's loader changes
+/// too, and a refusal here is a better place to find that out than a silent
+/// truncation.* RFC 0047 is that day, `user/virtio-blk` is thirteen kibibytes of
+/// image, and this number is derived from the frame's reservation rather than
+/// from what today's build happens to produce — because a bound fitted to the
+/// current artefact is a bound that refuses the next commit.
+pub const MODULE_MAX: usize = 131_072;
 
 /// Which ring protocols this simulator has a model for.
 ///

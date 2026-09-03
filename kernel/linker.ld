@@ -34,7 +34,27 @@ KERNEL_VMA = 0xFFFFFFFF80000000;
 /* One page, unmapped, below each stack. A stack that grows past its end hits
  * nothing instead of hitting whatever was allocated underneath it. */
 GUARD_SIZE  = 4K;
-STACK_SIZE  = 64K;
+
+/* The boot processor's kernel stack.
+ *
+ * Sixty-four kibibytes since M0, and it stopped being enough at RFC 0047 — a
+ * measurement rather than a guess: a boot with two places, the second of which
+ * has a four-page image, drove the stack into its guard page and took a double
+ * fault with nothing in it that said where it came from. Seventy-two was the
+ * first size that booted. This is that, rounded up, and the rounding is the
+ * headroom rather than the fix.
+ *
+ * What is on it, and why it grows with the frame rather than staying still:
+ * `component::demonstrate` holds a `Supply` and an `Instance` per place, each a
+ * `CHARGED_MAX`-wide array of handles, because a supervisor is not a component
+ * yet and the frame is standing in for one — RFC 0044 says so, and says that
+ * constant is on a boot processor's stack. Every place added since has been
+ * added to this stack, and the guard page is what has been catching it.
+ *
+ * *Reversal:* a supervisor that is a component. Its `Supply` is then its own
+ * memory, charged to its own account, and what is left here is the frame's own
+ * call depth. */
+STACK_SIZE  = 128K;
 FAULT_STACK_SIZE = 16K;
 
 /* The stacks an application processor arrives on: one block per core this

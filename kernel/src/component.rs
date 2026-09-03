@@ -31,14 +31,36 @@
 //!
 //! RFC 0008 is explicit that restart is the **supervisor's** act and that the
 //! frame provides only the mechanism. The policy in this file is the frame
-//! holding that ground until a supervisor can stand on it: a component cannot
-//! drive a control ring until it can adopt one safely, and adopting a mapped
-//! channel is `unsafe`, which a `user/` crate may not write. That is E1-B08's,
-//! and RFC 0030 records the deferral as a date rather than as an intention.
+//! holding that ground until a supervisor can stand on it, and **the reason it
+//! is still holding is not the reason it used to be.**
+//!
+//! What used to be written here is that a component cannot drive a control ring,
+//! because adopting a mapped channel is `unsafe` and a `user/` crate may not
+//! write one. RFC 0037 ended that, and RFC 0047 showed it working in both
+//! directions on a real component: `user/virtio-blk` adopts its control ring in
+//! safe code, submits operations on it, and is answered by the frame from a
+//! polling loop.
+//!
+//! Three things are missing and they are all one thing — **there is no
+//! supervisor component**:
+//!
+//! - Nothing implements `f_abi::control::op::SPAWN` or `op::STOP`. The opcodes
+//!   are named and the ring that would carry them works; what would submit them
+//!   does not exist.
+//! - A supervisor would have to be *told* its occupant died. The frame already
+//!   posts `notice::PEER_GONE` with a cause — [`tear_down`] does it on every
+//!   teardown — so the notice is there and the reader is not.
+//! - A supervisor is a component, so it needs a place, an account and a
+//!   manifest, and the `Untyped` behind that account is what would replace
+//!   [`PLACES_MAX`] and [`SUPERVISOR_ORDER`]. RFC 0044 names all three as the
+//!   same deviation.
 //!
 //! So [`policy`] is written as one function over a record and a tally, taking no
 //! kernel state at all, and moving it above the frame is a move rather than a
-//! rewrite.
+//! rewrite. `cargo xtask lint-owed` is what keeps that honest: it holds
+//! `policy::decide(` in this file as a declared quantity and goes red the day
+//! the call goes, which is the day this paragraph and RFC 0008's status both
+//! have to change.
 //!
 //! # What a spawn checks, and what it does not
 //!
@@ -91,21 +113,90 @@ use crate::mem::{FRAME_SIZE, Frame, FrameAllocator, Order};
 /// notices at once than it holds slots, which RFC 0008 says cannot happen.
 const CONTROL_ENTRIES: u32 = 16;
 
-/// How much untyped memory the frame stakes a place's account with.
+/// How much untyped memory the frame stakes the *supervisor's own* account
+/// with.
 ///
-/// Order five: thirty-two frames, a hundred and twenty-eight kibibytes. Enough
-/// for two instances of a small component and their channels with room to spare,
-/// which is what the demonstration needs; a real topology's accounts are the
-/// supervisor's to size out of what it was routed, and the manifest's
-/// `memory_bytes` is what admission compares against.
-const ACCOUNT_ORDER: u8 = 5;
+/// Order two: four frames. It pays for one thing, and that thing is why it is a
+/// separate account rather than a corner of a place's — the pages the
+/// supervisor's own capability table grows by. [`Table::grow`] charges the
+/// lowest-indexed `Untyped` in the table that carries `DERIVE`, so this is
+/// granted before any place's account, and a supervisor whose table growth was
+/// charged to a place would be one whose quota moved when a *sibling* was
+/// spawned. Four frames is [`crate::cap::MAX_PAGES`], which is the most a table
+/// in this build can ever buy.
+const SUPERVISOR_ORDER: u8 = 2;
+
+/// The account a place is staked with, as an allocator order.
+///
+/// Sized from the manifest's own `memory_bytes`, and that is the change that let
+/// this frame hold more than one place. What it replaced was a constant hundred
+/// and twenty-eight kibibytes; `user/virtio-blk/manifest.toml` declares two
+/// mebibytes; the two met in [`admit`] as `ADMISSION/MEMORY`, which is a
+/// component refused for the size of a number in the frame rather than for
+/// anything about itself. E1-B02's own note records that refusal, and this
+/// function is where it stops happening.
+///
+/// The next power of two at or above [`account_bytes`], because the allocator is
+/// a buddy allocator and an account is one block. Rounding *up* is the only safe
+/// direction: an account holding less than what was declared is a spawn that
+/// fails partway through, which is the state [`admit`] exists to refuse before
+/// anything is spent. The slack that leaves is printed on the admission line
+/// beside what was declared rather than hidden in here — a figure only this
+/// function knew would be a quota nobody could audit.
+fn account_order(record: &Record) -> Option<Order> {
+    let pages = account_bytes(record).max(FRAME_SIZE).div_ceil(FRAME_SIZE).next_power_of_two();
+    Order::new(u8::try_from(pages.trailing_zeros()).ok()?)
+}
+
+/// What one place's account has to hold: the component's declared footprint,
+/// **plus** what its declared needs are carved out of.
+///
+/// The sum is here rather than assumed, and getting it wrong is what an
+/// exactly-sized account made visible. `memory_bytes` is the footprint and
+/// nothing else — `user/virtio-blk/manifest.toml` says so in as many words: *the
+/// memory is the account its whole footprint is retyped from — address space,
+/// page tables, text, stack, control ring, state tree, capability table — and
+/// not the queues above, which are a routed need.* In this build there is
+/// nowhere else for a routed need to come from, because the supervisor is the
+/// frame and the frame stakes one region per place, so the needs are carved out
+/// of the same account and the account has to be that much larger.
+///
+/// That is what makes the *second* [`admit`], the one inside [`spawn`], a check
+/// rather than a formality. It runs after the offer has carved the needs out,
+/// and what it asks is whether the account still holds the footprint the
+/// manifest declared. Under the constant this replaced the answer was yes for
+/// the same reason it is yes for a stopped clock: there was a hundred and
+/// twenty-eight kibibytes of slack and nobody was comparing anything.
+///
+/// *Reversal:* a topology in which a need is routed from somewhere other than
+/// the spawning supervisor's own account — a sibling's endpoint, a device
+/// region the frame owns — at which point that need stops being part of this
+/// sum and the manifest's `from` field is what says so.
+/// Unit: bytes.
+fn account_bytes(record: &Record) -> u64 {
+    let mut bytes = record.memory_bytes;
+    for need in record.needs() {
+        if need.route == route::POWERBOX {
+            continue;
+        }
+        bytes = bytes.saturating_add(least_extent(need));
+    }
+    bytes
+}
 
 /// How many places this build's supervisor can hold.
 ///
-/// One is what the demonstration needs and four is room to grow without the
-/// structure becoming something with a quota. When a supervisor is a component,
-/// this bound is its `Untyped` rather than a constant, which is the direction
-/// everything else in this tree has already gone.
+/// Four, which is what this tree's two component files fit in with room for two
+/// more. When a supervisor is a component, this bound is its `Untyped` rather
+/// than a constant, which is the direction everything else in this tree has
+/// already gone.
+///
+/// It is also the bound on [`modules`], and the two being one number is the
+/// point: the loader hands over component files, and every one of them gets a
+/// place. A build that carried more component files than places would be a
+/// build where the boot half of RFC 0035's pair silently covered less than the
+/// workload half, which is exactly the drift `JOIN_GAP` was built to make
+/// visible.
 const PLACES_MAX: usize = 4;
 
 /// Why the lifecycle could not do what it was asked.
@@ -336,23 +427,70 @@ struct Instance {
     table: Table,
 }
 
-/// How many frames an instance is made of before its manifest asks for
-/// anything.
+/// What every instance is made of besides its text: a stack and a control ring.
 ///
-/// Three: one page of text, one of stack, one for the control ring. A component
-/// whose image needs two pages needs a loader that reads headers, which is E5
-/// and is the same bound `xtask`'s `INIT_MAX` already states.
-const PARTS: usize = 3;
+/// It was three, with text as the third, and text stopped being one frame the
+/// day a component's image stopped fitting in one page — RFC 0047. So the fixed
+/// part is two and the variable part is [`text_pages`], and the two are added
+/// by [`parts`] rather than by each caller, because the number appears in three
+/// places: what [`charges_for`] predicts, what [`admit`] refuses on, and what
+/// [`spawn`] actually takes. Three copies of one sum is how a manifest gets
+/// admitted for a footprint it then overruns.
+const FIXED_PARTS: usize = 2;
+
+/// How many frames one instance of an image this long is made of.
+/// Unit: frames.
+const fn parts(text_pages: usize) -> usize {
+    text_pages + FIXED_PARTS
+}
+
+/// How many pages of text an image occupies.
+///
+/// Rounded up, and refused above the frame's own reservation rather than
+/// silently truncated — a component whose text was mapped short would jump into
+/// its own guard page partway through its first function, which is a fault with
+/// no explanation in it.
+///
+/// # Errors
+///
+/// [`Failure::ImageTooLarge`].
+fn text_pages(image: &[u8]) -> Result<usize, Failure> {
+    let pages = (image.len() as u64).div_ceil(FRAME_SIZE) as usize;
+    if pages == 0 || pages > crate::process::TEXT_PAGES {
+        return Err(Failure::ImageTooLarge);
+    }
+    Ok(pages)
+}
 
 /// The most frames one instance can charge to an account.
 ///
-/// As many frames as the account holds, because a charge past that is refused
-/// by the derive that cannot pay: an instance can never hold more names than
-/// this however much its manifest declares. Stated as the account's own size
-/// rather than as a count of declarations, so that a manifest whose needs grow
-/// meets `RESOURCE/QUOTA_EXHAUSTED` — a refusal with a domain — rather than an
-/// array bound with none.
-const CHARGED_MAX: usize = 1 << ACCOUNT_ORDER;
+/// Sixty-four. It was *as many frames as the account holds*, which said
+/// something true while every account was one size and stopped saying anything
+/// the moment accounts were sized from manifests: the largest account in this
+/// tree is five hundred and twelve frames and the largest *instance* charges
+/// twenty-six of them, so the old form would have made every [`Supply`] and
+/// every [`Instance`] twenty times the size of what they hold — on the stack of
+/// a boot processor, once per place.
+///
+/// Twenty-six and not twenty-three, and the three are worth naming because they
+/// are the only part of this that moves with a commit: RFC 0047 let a
+/// component's text be more than one page, and `user/virtio-blk`'s image is
+/// four. The worst case is [`crate::process::TEXT_PAGES`] plus [`FIXED_PARTS`]
+/// plus whatever the manifest's needs carve out, which for this tree is
+/// thirty-eight — still well inside sixty-four, and the refusal below is what
+/// happens if a manifest ever pushes past it.
+///
+/// A fixed bound owes a refusal with a domain rather than an array bound with
+/// none, which is what [`charges_for`] and [`admit`] are: a manifest whose
+/// declared parts and needs would not fit is refused `ADMISSION/MEMORY` before
+/// anything is spent, and the refusal names the same domain as an account too
+/// small — because it is the same statement, made about the frame's list rather
+/// than about the supervisor's memory.
+///
+/// *Reversal:* a manifest that legitimately declares more. At that point the
+/// list stops being an array on a stack and the account it gives back to stops
+/// being a watermark, because a refund can only take back the top of one.
+const CHARGED_MAX: usize = 64;
 
 /// What the supervisor adds to a need's declared rights when it makes the
 /// offer.
@@ -457,6 +595,18 @@ pub struct Report {
     pub places: usize,
     /// Instances spawned, across every place. Unit: instances.
     pub spawns: u32,
+    /// Needs satisfied with a capability of the declared type that names no
+    /// object this machine has. Unit: capabilities.
+    ///
+    /// **The gap this change leaves, as a number rather than a paragraph.**
+    /// Today it is the `irq` need in `user/virtio-blk/manifest.toml`: nothing in
+    /// this build routes a device interrupt to a component, so what the spawn
+    /// supplies is a capability of the right type, carrying the right rights,
+    /// naming no vector. It is enough for the lifecycle — the spawn is real,
+    /// the account is real, the table is real — and it is not enough for the
+    /// component to wait on the device. E1-B09 is what makes it zero.
+    /// [`unbound_needs`] is the arithmetic and [`offer`] is the reason.
+    pub unbound: u32,
     /// Deaths by fault. Unit: deaths.
     pub faults: u32,
     /// Restarts performed. Unit: restarts.
@@ -516,9 +666,28 @@ pub struct Report {
     pub epoch: u32,
 }
 
-/// Build a place from the first component file the loader carried, put a
-/// component in it, connect a client, kill it, and put a new one in — with the
-/// client's connect pending across the gap and resuming at the higher epoch.
+/// Build a place per component file the loader carried, put a component in each,
+/// and then script the whole lifecycle against the first: connect a client, kill
+/// it, and put a new one in — with the client's connect pending across the gap
+/// and resuming at the higher epoch.
+///
+/// # A place per file, which is what this used to get wrong
+///
+/// It built one place, from `*modules.first()`, and RFC 0036 made the difference
+/// between that and the component set the simulator drives a *declared* quantity
+/// — `JOIN_GAP` in `xtask` — rather than a silence. The frame's half of closing
+/// it is here, and it was two numbers rather than an argument: the account was a
+/// constant hundred and twenty-eight kibibytes, and `virtio-blk` declares two
+/// mebibytes, so a second place could not have been admitted even if one had
+/// been built. [`account_order`] is the first, [`CHARGED_MAX`] the second.
+///
+/// Every place is filled and every place is torn down. **Only the first is
+/// scripted**, and that is a claim about what a demonstration is worth rather
+/// than about the places: killing a second occupant and watching the same three
+/// branches would run the same code against the same mechanism and prove
+/// nothing the first did not. What the others establish is the thing `JOIN_GAP`
+/// is about — that this boot instantiated them at all, from their own records,
+/// against accounts their own manifests sized.
 ///
 /// # Why this is a demonstration and not a test harness
 ///
@@ -558,8 +727,13 @@ pub unsafe fn demonstrate(
     let record = Record::read(module).map_err(Failure::Manifest)?;
 
     let before = frames.free_count();
-    let mut report = Report { components: count, places: 1, ..Report::default() };
+    let mut report = Report { components: count, places: count, ..Report::default() };
     let mut now = now;
+    // Every place after the first: built, filled, held for the whole of this
+    // function, and given back at the end. They are here rather than in an array
+    // beside `place` because the first place is *scripted* and the others are
+    // not, and a single array would have made that difference invisible.
+    let mut extras: [Option<Extra>; PLACES_MAX] = [const { None }; PLACES_MAX];
 
     // The supervisor's own table, on this stack rather than in a per-CPU slot.
     // A supervisor is a component and its table is an object it paid for; the
@@ -567,6 +741,26 @@ pub unsafe fn demonstrate(
     // smallest thing that is not a lie, and it is what keeps this file free of
     // kernel-global state entirely.
     let mut supervisor = Table::EMPTY;
+    // The supervisor's own account, and it is granted before anything else in
+    // this table on purpose: [`Table::grow`] charges the lowest-indexed
+    // `Untyped` that carries `DERIVE`, so this is the slot that pays for every
+    // page of slots the supervisor buys. Granted rather than derived because
+    // there is nothing above a supervisor to derive it from — which is the
+    // shape of the whole file: the frame is standing in for a component that
+    // does not exist yet, and where it has to mint something out of nothing it
+    // says so. [`grant_into`] argues the choice this account exists to make
+    // affordable.
+    let own = frames
+        .alloc_zeroed(Order::new(SUPERVISOR_ORDER).ok_or(Failure::NoMemory)?)
+        .ok_or(Failure::NoMemory)?;
+    supervisor
+        .grant(
+            CapType::Untyped,
+            rights::READ | rights::WRITE | rights::DERIVE | rights::REVOKE,
+            own.addr(),
+            own.bytes(),
+        )
+        .map_err(Failure::Capability)?;
     // A supervisor is a component, so it is owed notices like any other: the
     // peer-gone that tells it its child died is the ordinary route and there is
     // no separate wait-for-child. `Table::posts_notices` says why this is a flag
@@ -594,18 +788,25 @@ pub unsafe fn demonstrate(
     }
     .map_err(Failure::Ring)?;
 
+    crate::kprintln!(
+        "  supervisor    {} place(s) from {} component file(s), one per file, each staked with \
+         an account its own manifest sized",
+        report.places,
+        count,
+    );
+
     let region = frames
-        .alloc_zeroed(Order::new(ACCOUNT_ORDER).ok_or(Failure::NoMemory)?)
+        .alloc_zeroed(account_order(record).ok_or(Failure::Manifest(Refusal::Value))?)
         .ok_or(Failure::NoMemory)?;
     let account = Account {
-        handle: supervisor
-            .grant(
-                CapType::Untyped,
-                rights::READ | rights::WRITE | rights::DERIVE | rights::REVOKE | rights::GRANT,
-                region.addr(),
-                region.bytes(),
-            )
-            .map_err(Failure::Capability)?,
+        handle: grant_into(
+            &mut supervisor,
+            frames,
+            CapType::Untyped,
+            rights::READ | rights::WRITE | rights::DERIVE | rights::REVOKE | rights::GRANT,
+            region.addr(),
+            region.bytes(),
+        )?,
         floor: region.addr(),
     };
 
@@ -614,9 +815,14 @@ pub unsafe fn demonstrate(
     // nothing: `rights::narrows` would route an undefined bit down every path,
     // and a later ABI that gave it a meaning would widen authority already
     // granted everywhere, with no derivation and no notice.
-    let endpoint = supervisor
-        .grant(CapType::Endpoint, rights::ALL & !rights::EXECUTE, 0, 0)
-        .map_err(Failure::Capability)?;
+    let endpoint = grant_into(
+        &mut supervisor,
+        frames,
+        CapType::Endpoint,
+        rights::ALL & !rights::EXECUTE,
+        0,
+        0,
+    )?;
 
     let mut place = Place {
         manifest: ContentId::of(module),
@@ -632,18 +838,7 @@ pub unsafe fn demonstrate(
         restarts: 0,
     };
 
-    crate::kprintln!(
-        "  supervisor    {} place from {} component file(s): {}, manifest {:#018x}, {}, {}, \
-         {} restart(s) in {} tick(s)",
-        report.places,
-        count,
-        Name(record.label()),
-        place.manifest.bits(),
-        f_abi::manifest::domain::label(record.domain),
-        restart::label(record.restart),
-        record.max_restarts,
-        record.budget_window_ticks,
-    );
+    declared_line(record, region.bytes());
     // The supervisor's own admission test, before it spends anything building
     // an offer. The frame runs the same one again inside `spawn`, and that is
     // not redundancy: the supervisor is checking whether it can afford to ask,
@@ -651,14 +846,13 @@ pub unsafe fn demonstrate(
     // trust. RFC 0030's *there is no path by which a supervisor's belief
     // becomes the frame's belief* is this line and the one in `spawn` being
     // two lines.
-    admit(record, &supervisor, &account)?;
-    crate::kprintln!(
-        "  admission     {} class, {} B declared against a {} B account — refused before \
-         anything is spent, never after",
-        f_abi::manifest::class::label(record.class),
-        record.memory_bytes,
-        region.bytes(),
-    );
+    admit(
+        record,
+        &supervisor,
+        &account,
+        text_pages(record.image(module).map_err(Failure::Manifest)?)?,
+    )?;
+    admitted_line(record, region.bytes());
 
     // ---------------------------------------------------------------- spawn
     let offered = offer(&mut supervisor, &account, &place, record, frames)?;
@@ -666,20 +860,35 @@ pub unsafe fn demonstrate(
     let spawned =
         unsafe { spawn(frames, kernel, features, &mut place, &account, &mut supervisor, offered) }?;
     report.spawns += 1;
-    crate::kprintln!(
-        "  spawn         place {} epoch {} — {} need(s) supplied, type, rights and quantity \
-         checked; {} frame(s) from the account; control ring {} B",
-        Name(record.label()),
-        spawned.0,
-        spawned.1,
-        spawned.2,
-        FRAME_SIZE,
-    );
+    report.unbound += unbound_needs(record);
+    spawned_line(record, &place, spawned);
 
     // The first polling point. Everything the two tables owe goes onto their
     // control rings and comes back off, which is the half of R05 a pending-state
     // machine does not by itself provide: state nobody publishes is a debt.
     publish(&mut place, &mut supervisor, &ledger_ring, &mut report)?;
+
+    // ------------------------------------------------------ the other places
+    //
+    // One per remaining component file, in the order the loader placed them.
+    // This is the loop `JOIN_GAP` was a declaration about: until it existed, the
+    // boot half of RFC 0035's pair covered `{store}` while the workload half
+    // covered every record the build produced, and RFC 0036 made the difference
+    // a set somebody had to write down rather than a sentence nobody re-read.
+    for index in 1..count {
+        let Some(module) = modules.get(index).copied() else { break };
+        // SAFETY: the caller's guarantee, passed down; `module` came out of
+        // `modules` above and is one of the boot modules the direct map covers.
+        let mut extra =
+            unsafe { fill(frames, kernel, features, &mut supervisor, module, &mut report) }?;
+        // This place's own polling point, not the first place's: what a spawn
+        // owes is owed to *its* occupant, and pumping the wrong ring would leave
+        // a component holding capabilities it was never told about while the
+        // counters said every notice had been delivered.
+        publish(&mut extra.place, &mut supervisor, &ledger_ring, &mut report)?;
+        let Some(slot) = extras.get_mut(index) else { return Err(Failure::WrongPlace) };
+        *slot = Some(extra);
+    }
 
     // -------------------------------------------------------------- connect
     // A client holds the endpoint with `WRITE`, which is what `write` means on
@@ -950,6 +1159,37 @@ pub unsafe fn demonstrate(
         record.max_restarts,
     );
 
+    // ------------------------------------------------- the other places, back
+    //
+    // Uniform teardown, and *uniform* is the word doing the work: this is the
+    // same [`tear_down`] the scripted place above reached three times by three
+    // different routes, called here on an occupant that did nothing wrong. RFC
+    // 0008 asks for one path out for a fault, an exit and a stop, and a
+    // demonstration in which the unscripted places were dismantled some other
+    // way would have two.
+    for index in (1..PLACES_MAX).rev() {
+        let Some(extra) = extras.get_mut(index).and_then(Option::as_mut) else { continue };
+        let record = Record::read(extra.place.module).map_err(Failure::Manifest)?;
+        let cause = cause::pack(cause::STOPPED, STOP_DEADLINE);
+        let torn = tear_down(
+            frames,
+            &mut extra.place,
+            &mut supervisor,
+            &extra.account,
+            cause,
+            &mut report,
+        )?;
+        crate::kprintln!(
+            "  teardown      place {} — {} capabilit(ies) revoked, {} frame(s) refunded to its \
+             own account, {} peer-gone notice(s)",
+            Name(record.label()),
+            torn.0,
+            torn.2,
+            torn.3,
+        );
+        publish(&mut extra.place, &mut supervisor, &ledger_ring, &mut report)?;
+    }
+
     // -------------------------------------------------------------- notices
     publish(&mut place, &mut supervisor, &ledger_ring, &mut report)?;
     report.owed = supervisor.owes();
@@ -971,6 +1211,17 @@ pub unsafe fn demonstrate(
     // been refunded, and no address space names any of it: the instances are
     // gone and their spaces were never in `CR3`.
     unsafe { frames.free(region) };
+    for index in 1..PLACES_MAX {
+        let Some(extra) = extras.get(index).and_then(Option::as_ref) else { continue };
+        // SAFETY: as `region`. Each was allocated by `fill`, its occupant has
+        // been torn down and every frame refunded to it, and the table naming
+        // it was cleared a line ago.
+        unsafe { frames.free(extra.region) };
+    }
+    // SAFETY: allocated here; the only thing that ever charged it is the
+    // supervisor's own table, which was cleared a line ago, and no address
+    // space names any of it.
+    unsafe { frames.free(own) };
     // SAFETY: allocated here, and the mapping over it is past its last use —
     // the publish above is the last thing that touched it.
     unsafe { frames.free(ledger) };
@@ -981,6 +1232,156 @@ pub unsafe fn demonstrate(
 
     report.faults = place.faults;
     Ok(report)
+}
+
+/// A place the frame fills and holds without scripting it.
+///
+/// The three things that have to travel together for a place to be given back
+/// exactly: what it is, the account its occupant was retyped out of, and the
+/// block that account was staked from. Holding two of the three is how a
+/// teardown comes to refund frames to an account and leak the region under it.
+struct Extra {
+    /// The place, with its occupant while it has one.
+    place: Place,
+    /// The account, in the supervisor's table.
+    account: Account,
+    /// The block the account was staked from, so it can be freed.
+    region: Frame,
+}
+
+/// Build a place from one component file, stake it with an account its own
+/// manifest sized, and put its first occupant in.
+///
+/// The unscripted half of [`demonstrate`], and it is a function rather than
+/// inline code for one reason: the first place and the others have to be built
+/// the same way. A second body here would be a second set of refusals, and the
+/// day they disagreed the boot log would say two places were filled and mean two
+/// different things by it.
+///
+/// # Errors
+///
+/// [`Failure`], naming which step did not hold. Every one of them fails the
+/// boot: a place half-built is worse than a place not built.
+///
+/// # Safety
+///
+/// As [`demonstrate`], and `module` must be one of the boot modules the direct
+/// map covers.
+unsafe fn fill(
+    frames: &mut FrameAllocator,
+    kernel: &paging::AddressSpace,
+    features: Features,
+    supervisor: &mut Table,
+    module: &'static [u8],
+    report: &mut Report,
+) -> Result<Extra, Failure> {
+    let record = Record::read(module).map_err(Failure::Manifest)?;
+    let region = frames
+        .alloc_zeroed(account_order(record).ok_or(Failure::Manifest(Refusal::Value))?)
+        .ok_or(Failure::NoMemory)?;
+    let account = Account {
+        handle: grant_into(
+            supervisor,
+            frames,
+            CapType::Untyped,
+            rights::READ | rights::WRITE | rights::DERIVE | rights::REVOKE | rights::GRANT,
+            region.addr(),
+            region.bytes(),
+        )?,
+        floor: region.addr(),
+    };
+    let endpoint =
+        grant_into(supervisor, frames, CapType::Endpoint, rights::ALL & !rights::EXECUTE, 0, 0)?;
+    let mut place = Place {
+        manifest: ContentId::of(module),
+        module,
+        endpoint,
+        epoch: 0,
+        occupant: None,
+        retired: false,
+        budget: policy::Budget::default(),
+        faults: 0,
+        exits: 0,
+        stops: 0,
+        restarts: 0,
+    };
+
+    declared_line(record, region.bytes());
+    admit(
+        record,
+        supervisor,
+        &account,
+        text_pages(record.image(module).map_err(Failure::Manifest)?)?,
+    )?;
+    admitted_line(record, region.bytes());
+
+    let offered = offer(supervisor, &account, &place, record, frames)?;
+    // SAFETY: the caller's guarantee, passed down. The place was built a few
+    // lines ago and is empty.
+    let spawned =
+        unsafe { spawn(frames, kernel, features, &mut place, &account, supervisor, offered) }?;
+    report.spawns += 1;
+    report.unbound += unbound_needs(record);
+    spawned_line(record, &place, spawned);
+
+    Ok(Extra { place, account, region })
+}
+
+/// What the manifest declares about a place, before anything has been spent on
+/// it.
+///
+/// Three lines per place rather than one, because they are printed at three
+/// moments and the order is the argument: what was declared, then the admission
+/// test that could have refused it, then what the spawn did. One line printed
+/// afterwards would say the same words about a decision nobody could watch being
+/// made.
+fn declared_line(record: &Record, account_bytes: u64) {
+    crate::kprintln!(
+        "  place         {}: {}, {}, {} restart(s) in {} tick(s), {} B account",
+        Name(record.label()),
+        f_abi::manifest::domain::label(record.domain),
+        restart::label(record.restart),
+        record.max_restarts,
+        record.budget_window_ticks,
+        account_bytes,
+    );
+}
+
+/// What admission compared, and what it left over.
+///
+/// The slack is printed rather than left inside [`account_order`], because an
+/// account is a buddy block and a manifest is a byte count: they meet at a power
+/// of two, and a supervisor that could not see the difference could not tell a
+/// quota it chose from one the allocator rounded it into.
+fn admitted_line(record: &Record, staked: u64) {
+    crate::kprintln!(
+        "  admission     {} class, {} B footprint + {} B of declared need(s) against a {} B \
+         account — refused before anything is spent, never after",
+        f_abi::manifest::class::label(record.class),
+        record.memory_bytes,
+        account_bytes(record).saturating_sub(record.memory_bytes),
+        staked,
+    );
+}
+
+/// What a spawn put in a place.
+///
+/// The manifest's content hash is on **this** line and on no other, and that is
+/// load-bearing rather than tidy: `xtask`'s `spawned_from` reads the boot log
+/// for it, and RFC 0036's join is a comparison of that set against the set the
+/// simulator runs. A hash printed twice per place would make the boot claim to
+/// have spawned twice as many components as it did.
+fn spawned_line(record: &Record, place: &Place, spawned: (u32, usize, usize)) {
+    crate::kprintln!(
+        "  spawn         place {} epoch {} — manifest {:#018x}, {} need(s) supplied, type, \
+         rights and quantity checked; {} frame(s) from the account; control ring {} B",
+        Name(record.label()),
+        spawned.0,
+        place.manifest.bits(),
+        spawned.1,
+        spawned.2,
+        FRAME_SIZE,
+    );
 }
 
 /// The pressure grade the demonstration publishes.
@@ -1059,10 +1460,8 @@ unsafe fn spawn(
         return Err(Failure::WrongPlace);
     }
     let image = record.image(place.module).map_err(Failure::Manifest)?;
-    if image.len() as u64 > FRAME_SIZE {
-        return Err(Failure::ImageTooLarge);
-    }
-    admit(record, supervisor, account)?;
+    let pages = text_pages(image)?;
+    admit(record, supervisor, account, pages)?;
     // Every refusal R04 asks of a spawn, decided here and before anything of
     // the instance's own is charged. The frame checks the supply against the
     // supervisor's table rather than against what the supervisor said about it,
@@ -1070,10 +1469,18 @@ unsafe fn spawn(
     // caller.
     check_needs(record, supervisor, &offered)?;
 
-    // Three frames out of the account: text, stack, control ring. Retyped
-    // through `derive`, which advances the account's watermark — so this is the
-    // supervisor spending, not the frame allocating, and a supervisor that has
-    // run out is refused rather than served from anything the frame keeps back.
+    // Frames out of the account: one per page of text, then a stack, then a
+    // control ring. Retyped through `derive`, which advances the account's
+    // watermark — so this is the supervisor spending, not the frame allocating,
+    // and a supervisor that has run out is refused rather than served from
+    // anything the frame keeps back.
+    //
+    // A page at a time and not one block, and the reason is the watermark: an
+    // account is spent in frames and refunded from the top of one, so a
+    // multi-page text that was one retype would be a refund that could only
+    // come back whole. What that costs is that the pages are not contiguous by
+    // construction, which is why the image is copied page by page below rather
+    // than in one call.
     //
     // The needs were charged before the offer was made, so their frames are
     // already in `offered.charged` and this appends to that list rather than
@@ -1081,30 +1488,71 @@ unsafe fn spawn(
     // teardown to give all of it back.
     let mut charged = offered.charged;
     let mut charges = offered.charges;
-    let mut parts = [0u64; PARTS];
-    for index in 0..PARTS {
-        let (handle, object) = charge(supervisor, account, frames)?;
-        let Some(slot) = charged.get_mut(charges) else { return Err(Failure::Account) };
-        *slot = handle;
-        charges += 1;
-        let Some(part) = parts.get_mut(index) else { return Err(Failure::Account) };
-        *part = object;
-    }
-    let (text, stack, control) = (parts[0], parts[1], parts[2]);
 
     // SAFETY: the caller's guarantee that the kernel's space is live and frames
     // are addressable through its direct map.
     let mut space = unsafe { paging::user_space(frames, kernel) }.map_err(Failure::Space)?;
-    let into = frames.virt(Frame::from_addr(text));
-    // SAFETY: `text` is a frame this function just retyped out of the account
-    // and handed to nobody else; it is one frame, addressable through the
-    // direct map, and the image is shorter than one — checked above.
-    unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), into, image.len()) };
+
+    // One page at a time, charged and copied and mapped before the next is
+    // asked for, and nothing about the text kept afterwards. **No array**, and
+    // that is a fix rather than a style: a list of every address this maps,
+    // sized by the bound the *handles* are sized by, put a kilobyte on the boot
+    // processor's kernel stack per place and overflowed it into its guard page
+    // — a double fault with nothing in it that says where it came from.
+    //
+    // A page at a time and not one block, for the account's sake: an account is
+    // spent in frames and refunded from the top of a watermark, so a multi-page
+    // text that was one retype would be a refund that could only come back
+    // whole. What that costs is that the pages are not contiguous, which is why
+    // the image is copied a page at a time here rather than in one call.
+    for page in 0..pages {
+        let (handle, text) = charge(supervisor, account, frames)?;
+        let Some(slot) = charged.get_mut(charges) else { return Err(Failure::Account) };
+        *slot = handle;
+        charges += 1;
+
+        let from = page * FRAME_SIZE as usize;
+        let Some(chunk) = image.get(from..) else { return Err(Failure::Account) };
+        let bytes = chunk.len().min(FRAME_SIZE as usize);
+        let into = frames.virt(Frame::from_addr(text));
+        // SAFETY: `text` is a frame this function just retyped out of the
+        // account and handed to nobody else; it is one frame, addressable
+        // through the direct map, and `bytes` is at most one frame — taken as a
+        // minimum rather than assumed, because the last page of an image is
+        // almost never full.
+        unsafe { core::ptr::copy_nonoverlapping(chunk.as_ptr(), into, bytes) };
+        // SAFETY: as `user_space`, and `space` is not in `CR3` — it has never
+        // been.
+        unsafe {
+            paging::map_user(
+                frames,
+                &mut space,
+                crate::process::TEXT + page as u64 * FRAME_SIZE,
+                text,
+                UserPage::Text,
+                features,
+            )
+        }
+        .map_err(Failure::Space)?;
+    }
+
+    // The two fixed parts, after the text and in that order, because the order
+    // is what a teardown gives them back in.
+    let mut fixed = [0u64; FIXED_PARTS];
+    for slot in &mut fixed {
+        let (handle, object) = charge(supervisor, account, frames)?;
+        let Some(at) = charged.get_mut(charges) else { return Err(Failure::Account) };
+        *at = handle;
+        charges += 1;
+        *slot = object;
+    }
+    let (Some(&stack), Some(&control)) = (fixed.first(), fixed.get(1)) else {
+        return Err(Failure::Account);
+    };
 
     for (virt, phys, kind) in [
-        (crate::process::TEXT, text, UserPage::Text),
-        (crate::process::STACK, stack, UserPage::Data),
-        (crate::process::GRANT, control, UserPage::Data),
+        (crate::process::SPAWN_STACK, stack, UserPage::Data),
+        (crate::process::SPAWN_CONTROL, control, UserPage::Data),
     ] {
         // SAFETY: as `user_space`, and `space` is not in `CR3` — it has never
         // been.
@@ -1306,8 +1754,23 @@ fn offer(
         let handle = match kind {
             CapType::Untyped | CapType::Frame => {
                 let (at, bytes) = carve(supervisor, account, frames, least_extent(need), &mut out)?;
-                supervisor.grant(kind, held, at, bytes).map_err(Failure::Capability)?
+                grant_into(supervisor, frames, kind, held, at, bytes)?
             }
+            // An interrupt names no memory, so there is nothing to carve and
+            // nothing to derive from. Which vector a device raises is the
+            // topology's to bind and the machine's to know — `virtio-blk`'s
+            // manifest says exactly that and refuses to name one — and this
+            // build has no route by which a device interrupt reaches a
+            // component at all. So what a driver is supplied here is a
+            // capability **of the declared type, carrying the declared rights,
+            // naming no vector**: enough to be spawned against, and not enough
+            // to wait on. [`Report::unbound`] counts them rather than leaving
+            // the sentence to be found, because a need satisfied by an object
+            // the machine does not have is precisely the shape of a check that
+            // is green while the property is false.
+            // *Reversal:* E1-B09, which is the first thing that gives this
+            // object something to be.
+            CapType::Irq => grant_into(supervisor, frames, kind, held, 0, 0)?,
             // An endpoint or a channel routed from a sibling is the topology's,
             // and the topology is not in a manifest — `docs/manifest.md` says
             // so. The demonstration has one place and no siblings, so what a
@@ -1417,9 +1880,8 @@ unsafe fn probe_refusals(
     //    error and never also a quantity error.
     let other = if kind == CapType::Frame { CapType::Untyped } else { CapType::Frame };
     let mut wrong = Supply::EMPTY;
-    let held = supervisor
-        .grant(other, first.rights | OFFERED, 0, least.max(FRAME_SIZE))
-        .map_err(Failure::Capability)?;
+    let held =
+        grant_into(supervisor, frames, other, first.rights | OFFERED, 0, least.max(FRAME_SIZE))?;
     wrong.handles[0] = held;
     wrong.count = 1;
     // SAFETY: as above.
@@ -1431,9 +1893,14 @@ unsafe fn probe_refusals(
     //    provokable when the need does not itself declare `GRANT`.
     if first.rights & rights::GRANT == 0 {
         let mut weak = Supply::EMPTY;
-        let held = supervisor
-            .grant(kind, first.rights | rights::REVOKE, 0, least.max(FRAME_SIZE))
-            .map_err(Failure::Capability)?;
+        let held = grant_into(
+            supervisor,
+            frames,
+            kind,
+            first.rights | rights::REVOKE,
+            0,
+            least.max(FRAME_SIZE),
+        )?;
         weak.handles[0] = held;
         weak.count = 1;
         // SAFETY: as above.
@@ -1446,9 +1913,7 @@ unsafe fn probe_refusals(
     //    Only provokable for a need that declares one.
     if least > 0 {
         let mut small = Supply::EMPTY;
-        let held = supervisor
-            .grant(kind, first.rights | OFFERED, 0, least - 1)
-            .map_err(Failure::Capability)?;
+        let held = grant_into(supervisor, frames, kind, first.rights | OFFERED, 0, least - 1)?;
         small.handles[0] = held;
         small.count = 1;
         // SAFETY: as above.
@@ -1502,25 +1967,45 @@ fn refused(outcome: Result<(u32, usize, usize), Failure>, want: i32) -> Result<u
 /// that believes it holds a deadline it was never promised, which is exactly
 /// the state R08 says the word must not be used for.
 ///
+/// **The list.** A fourth, added when accounts stopped being one size: every
+/// frame an instance is made of has a name in [`Instance::charged`], because a
+/// teardown gives them back last-charged-first and a watermark can only give
+/// back its top. That list is [`CHARGED_MAX`] long, so a manifest declaring more
+/// than fits is refused here — `ADMISSION/MEMORY`, the same domain as an account
+/// too small, because it is the same statement about a different ledger — rather
+/// than part-way through a spawn at an array bound with no domain at all.
+///
 /// **The domain.** RFC 0005: a kind is delivered in full or the spawn is
 /// refused with `ADMISSION`, and a machine that cannot supply an idle sibling
 /// does not host a `private` component "with a note". This build delivers every
 /// kind, and the reason is a fact about the build rather than a mechanism:
-/// **no two components are ever co-resident**, because nothing schedules one —
-/// an instance runs when the frame hands it a core, one at a time, and there is
-/// no scheduler until E1-B08. Exclusion is therefore total by construction, and
-/// a domain that is total by construction is delivered in full.
+/// **no two components are ever co-resident**, because a component runs when the
+/// frame hands it a core and the frame hands out one at a time. Exclusion is
+/// therefore total by construction, and a domain that is total by construction
+/// is delivered in full.
 ///
-/// *Reversal, and it is the day the scheduler lands:* the moment two components
-/// can occupy one core's siblings, this stops being a fact and becomes a check
-/// — `private` needs an idle sibling and `hostile` needs a core nobody else is
+/// The clause that used to carry that — *nothing schedules one, and there is no
+/// scheduler until E1-B08* — stopped being the reason twice over: `runtime.rs`
+/// schedules a component and RFC 0047 schedules a driver. What has not changed
+/// is the *one at a time*, and that is now the whole of the argument rather
+/// than a consequence of a larger one.
+///
+/// *Reversal, and it is nearer than it was:* the moment two components can
+/// occupy one core's siblings, this stops being a fact and becomes a check —
+/// `private` needs an idle sibling and `hostile` needs a core nobody else is
 /// on, and a spawn that cannot get one is refused here. The condition is a
-/// scheduler that runs two components at once, and it is E1-B08's.
+/// frame that gives out a second core while a component holds the first, which
+/// is one line in a boot path rather than a scheduler somebody has to write.
 ///
 /// # Errors
 ///
 /// [`Failure::Admission`], carrying the packed refusal.
-fn admit(record: &Record, supervisor: &Table, account: &Account) -> Result<(), Failure> {
+fn admit(
+    record: &Record,
+    supervisor: &Table,
+    account: &Account,
+    text_pages: usize,
+) -> Result<(), Failure> {
     if record.class != f_abi::manifest::class::SOFT {
         return Err(Failure::Admission(error::pack(
             error::ADMISSION,
@@ -1531,7 +2016,30 @@ fn admit(record: &Record, supervisor: &Table, account: &Account) -> Result<(), F
     if held < record.memory_bytes {
         return Err(Failure::Admission(error::pack(error::ADMISSION, error::admission::MEMORY)));
     }
+    if charges_for(record, text_pages) > CHARGED_MAX {
+        return Err(Failure::Admission(error::pack(error::ADMISSION, error::admission::MEMORY)));
+    }
     Ok(())
+}
+
+/// How many frames one instance of this manifest charges its account.
+///
+/// [`parts`] for what every instance is made of, and then whatever each need
+/// declares a quantity of — which is the same arithmetic [`carve`] performs, so
+/// a manifest that passes here is one [`offer`] can pay for. Powerbox needs are
+/// not counted because they are not supplied at spawn, which is the rule
+/// [`check_needs`] and [`offer`] already share.
+///
+/// Unit: frames.
+fn charges_for(record: &Record, text_pages: usize) -> usize {
+    let mut charges = parts(text_pages);
+    for need in record.needs() {
+        if need.route == route::POWERBOX {
+            continue;
+        }
+        charges = charges.saturating_add((least_extent(need) / FRAME_SIZE) as usize);
+    }
+    charges
 }
 
 /// Take one frame out of the account, zero it, and answer the handle it went
@@ -1566,6 +2074,80 @@ fn charge(
     // capability naming it was minted a line ago and given to no other table.
     unsafe { core::ptr::write_bytes(at, 0, FRAME_SIZE as usize) };
     Ok((minted, object))
+}
+
+/// Put a capability in the supervisor's own table, buying a page of slots when
+/// there is nowhere to put it.
+///
+/// # The decision `cap.rs` left to this task, taken
+///
+/// [`Table::grant`] does not grow, its own documentation says why, and then it
+/// names who has to choose: *RFC 0008 has the frame placing capabilities into a
+/// running component's table — a powerbox grant, a spawn's needs — and every one
+/// of those is a grant that may find the table full. The answer is either that
+/// the placing component pays out of the `Untyped` it is already spending on the
+/// spawn, or that a grant into a full table is refused and the supervisor grows
+/// the child first. This task does not choose, because there is no second
+/// component yet to choose for.*
+///
+/// There is a second component now. **The choice is the second one: a grant into
+/// a full table is refused, and the holder buys the page itself, out of its own
+/// account.** The first would have the frame spending somebody else's account on
+/// the frame's own say-so, at a moment the component being granted to may not
+/// exist yet — which is the kernel reserve RFC 0008 refuses to have, arrived at
+/// from the other side. Keeping the payer and the grower the same party is what
+/// makes a quota a number a supervisor can predict.
+///
+/// What it costs, stated rather than discovered: a holder with no account of its
+/// own cannot be granted anything once its table is full. That is the honest
+/// shape — authority arriving from outside does not pay for somewhere to land —
+/// and it is why [`SUPERVISOR_ORDER`] exists and is granted first.
+///
+/// Only the *supervisor's* table is grown here, never a child's. A spawn's needs
+/// are bounded by [`f_abi::manifest::CAPABILITIES_MAX`] and a fresh table is
+/// [`crate::cap::TABLE_SLOTS`] wide, so a child that needed a page would be a
+/// child whose manifest had outgrown the schema — which is `lint-manifests`'s
+/// refusal and not a page purchase.
+///
+/// # Errors
+///
+/// [`Failure::Capability`], carrying whatever the table refused: the grow when
+/// nothing could pay for a page, and the grant when it could and the slot was
+/// still refused.
+fn grant_into(
+    supervisor: &mut Table,
+    frames: &FrameAllocator,
+    kind: CapType,
+    rights: u8,
+    object: u64,
+    extent: u64,
+) -> Result<Handle, Failure> {
+    let full = error::pack(error::RESOURCE, error::resource::QUOTA_EXHAUSTED);
+    match supervisor.grant(kind, rights, object, extent) {
+        Err(refused) if refused == full => {
+            supervisor.grow(&mut backing(frames)).map_err(Failure::Capability)?;
+            supervisor.grant(kind, rights, object, extent).map_err(Failure::Capability)
+        }
+        other => other.map_err(Failure::Capability),
+    }
+}
+
+/// How many of a manifest's needs this build satisfies with a capability that
+/// names no object the machine has.
+///
+/// The `irq` needs, and nothing else — see the [`CapType::Irq`] arm of
+/// [`offer`]. Counted into [`Report::unbound`] and printed, because *the needs
+/// were checked* and *the needs were met* are two different claims and a spawn
+/// that reported only the first would be the third false pass of this epoch
+/// wearing a fourth hat.
+///
+/// Unit: capabilities.
+fn unbound_needs(record: &Record) -> u32 {
+    record
+        .needs()
+        .iter()
+        .filter(|need| need.route != route::POWERBOX && need.cap_type() == Some(CapType::Irq))
+        .count() as u32
 }
 
 /// What a connect answered.

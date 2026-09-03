@@ -471,6 +471,7 @@ impl<'m> Consumer<'m> {
         // that writes a slot number past the end of the array is asking this
         // side to read whatever follows it in the mapping. Refused, and the
         // channel is corrupt rather than repairable.
+        #[cfg(not(feature = "mutate-trusted-slot"))]
         if slot as usize >= self.chan.entries.len() {
             return Err(RingError::Corrupt);
         }
@@ -480,7 +481,31 @@ impl<'m> Consumer<'m> {
         // The producer Release store on `head`, observed by the Acquire load
         // above, guarantees the write to this slot happened before this read.
         // It is read exactly once and copied out before any field is examined.
+        #[cfg(not(feature = "mutate-trusted-slot"))]
         let entry = unsafe { self.chan.entries[slot].get().read() };
+
+        // The deliberate defect for the *memory unsafety* half of `E1-P04`.
+        //
+        // It is deliberately not "drop the check and keep indexing": a slice
+        // index that is out of range is a bounds-check *panic*, which is the
+        // other property's fixture and would make one defect stand for two
+        // signatures. This reads through raw arithmetic instead, so the
+        // ordinary build returns a plausible entry from whatever follows the
+        // array — the completion ring — with nothing going wrong that any
+        // in-process assertion can see. Miri is what notices, which is the
+        // whole reason that half of the exit needs a different tool and a
+        // different count. RFC 0042 on one defect per signature; RFC 0046.
+        #[cfg(feature = "mutate-trusted-slot")]
+        let entry = {
+            // SAFETY: there is none, and that is the point. `slot` is a value a
+            // peer wrote and this is pointer arithmetic past the end of the
+            // array whenever the peer wanted it to be.
+            let at = unsafe { self.chan.entries.as_ptr().add(slot) };
+            // SAFETY: none. See above.
+            let cell = unsafe { &*at };
+            // SAFETY: none. See above.
+            unsafe { cell.get().read() }
+        };
 
         self.chan.tail.value.store(tail.wrapping_add(1), Ordering::Release);
         Ok(Some(entry))
@@ -789,7 +814,19 @@ pub fn execute<S: Sink>(entry: &Sqe, arena: &Arena<'_>, sink: &mut S, now: u64) 
     // malformed or it is not, and two readers of the envelope with two lists
     // would be two answers to that question. `f_abi::flags::KNOWN` says why it
     // is where it is.
+    #[cfg(not(feature = "mutate-ignored-flag"))]
     let unknown = entry.flags & !flags::KNOWN;
+
+    // `E1-P05`'s defect for the *envelope* oracle: the unknown bits are masked
+    // off and the entry runs anyway. It is one line, it is the exact failure R04
+    // is written against, and every property `ring/tests/hostile.rs` asserts is
+    // still true with it on — nothing panics, nothing hangs, nothing reads out
+    // of bounds. What is wrong is that two peers now disagree about what
+    // happened, and only an oracle that knows what the answer *should* be can
+    // say so. RFC 0048.
+    #[cfg(feature = "mutate-ignored-flag")]
+    let unknown = 0u8;
+
     if unknown != 0 {
         return refuse(error::ARGUMENT, error::argument::UNKNOWN_FLAG, u64::from(unknown));
     }
@@ -932,7 +969,23 @@ impl<'m, S: Sink> Service<'m, S> {
     pub fn drain(&mut self, budget: u32, now: u64) -> Result<Drained, RingError> {
         let mut done = Drained::default();
 
-        for _ in 0..budget {
+        #[cfg(not(feature = "mutate-unbounded-drain"))]
+        let ceiling = budget;
+
+        // The deliberate defect for the *hang* half of `E1-P04`: the budget is
+        // read and ignored, so how long this call takes is once again the
+        // peer's choice. It is the defect that shows why that half is asserted
+        // as a **count** rather than as a duration — the loop still terminates
+        // here, because a single-threaded harness runs out of entries, and what
+        // has gone wrong is visible only as `executed` exceeding what the
+        // caller asked for. A watchdog would have found nothing. RFC 0046.
+        #[cfg(feature = "mutate-unbounded-drain")]
+        let ceiling = {
+            let _ = budget;
+            u32::MAX
+        };
+
+        for _ in 0..ceiling {
             // Room to answer, before taking the question. An entry popped and
             // then not completed is a caller waiting forever for a reply that
             // was dropped on the floor, which is the one failure a ring must

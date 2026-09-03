@@ -45,29 +45,47 @@
 //!
 //! # What runs where today, stated rather than implied
 //!
-//! This crate is the driver. It is **not yet scheduled**, and the frame drives
-//! it at boot — `kernel/src/blk.rs` — for the same two reasons E1-B05 left its
-//! restart policy in the frame:
+//! This crate is the driver **and it is scheduled**. [`component::start`] runs
+//! at ring 3 on a core the frame allocated it, adopts its control ring and the
+//! ring it serves its client on in safe code — `f_ring::adopt`, RFC 0037 —
+//! drives real registers through mappings the frame made in answer to what its
+//! manifest declares, and ends on a stop notice. `kernel/src/blk.rs` is the
+//! supervisor's half and nothing else; the grep RFC 0033 wrote as its own
+//! reversal condition — *see which crate calls `Driver::execute`* — now finds
+//! only this one.
 //!
-//! - Nothing schedules a component. There is no scheduler until E1-B08, so an
-//!   instance runs when the frame hands it a core, one at a time.
-//! - A component cannot drive a ring. Draining one means adopting a mapped
-//!   channel, `f_ring::Mapping::adopt` is `unsafe`, and a `user/` crate may not
-//!   write it. RFC 0033 deliberately does *not* solve that: a channel is shared
-//!   with a hostile peer and a device window is not, and conflating the two
-//!   would be the wrong argument made once for both.
+//! Two sentences that used to be here are worth keeping as scars, because both
+//! were true and neither is any more:
 //!
-//! So the image this crate links to — [`component::start`] — announces itself
-//! and ends, exactly as `user/store` does, and everything else here is reached
-//! by the frame calling it. That is a deviation with a date rather than an
-//! intention, and RFC 0033 records it as one. What it is *not* is a
-//! reimplementation: there is one body of driver code and the frame calls it,
-//! rather than a driver in `user/` and a copy of it in `kernel/`.
+//! - *Nothing schedules a component.* E1-B08 landed the mechanism and RFC 0047
+//!   pointed it at a driver: more than one page of text, a device's registers
+//!   mapped uncached into a component's address space, and its queue memory
+//!   mapped whole.
+//! - *A component cannot drive a ring, because adopting a mapped channel is
+//!   `unsafe`.* RFC 0037 answered that, and deliberately did not answer it the
+//!   way RFC 0033 answered the device half — a channel is shared with a peer
+//!   that may be hostile and a device window is not, so the two arguments are
+//!   different arguments.
+//!
+//! What has **not** changed is that there is one body of driver code. The
+//! frame links this crate for its manifest-facing constants and for
+//! [`routing`], and calls none of it.
+//!
+//! What is still owed, and it is one sentence: this instance is *scheduled* and
+//! not *spawned into a place*. `kernel/src/component.rs` builds a place for
+//! this manifest on every boot and never hands its occupant a core, because the
+//! supervisor that would is the ring-3 supervisor E1-B05 owes. `CHAOS_GAP` in
+//! xtask carries exactly that difference and nothing wider.
 
 #![no_std]
 
 pub mod driver;
 pub mod queue;
+// Outside the `image` gate, because it is the one module both sides read: the
+// frame writes the page this describes and the component reads it, and a set of
+// offsets that existed in only one of the two builds would be a layout with two
+// definitions. RFC 0047.
+pub mod routing;
 pub mod transport;
 
 // The component half is x86-64's, and only because the door is. Nothing in

@@ -632,6 +632,21 @@ pub enum UserPage {
     /// executable. A rights bitmap the mapping cannot express is a rights
     /// bitmap that is not enforced.
     ReadOnly,
+    /// Writable, never executable, and **uncached**.
+    ///
+    /// A device's register window, routed to the component that drives it.
+    /// [`UserPage::Data`] would be wrong here in a way that is invisible under
+    /// an emulator and fatal on a machine: a write-back mapping lets the
+    /// processor merge, reorder and delay stores to registers whose whole
+    /// meaning is when they were written, and lets it answer a read out of a
+    /// cache line the device has since changed underneath. `f_ring::device`
+    /// makes every access volatile, which stops the *compiler* doing those
+    /// things and cannot stop the machine.
+    ///
+    /// Same two bits the frame's own device mappings use — `map_device` above
+    /// — because there is only one right answer and two spellings of it would
+    /// be one spelling too many.
+    Device,
 }
 
 impl UserPage {
@@ -646,6 +661,7 @@ impl UserPage {
             Self::Text => PRESENT | USER,
             Self::Data => PRESENT | USER | WRITE | nx,
             Self::ReadOnly => PRESENT | USER | nx,
+            Self::Device => PRESENT | USER | WRITE | CACHE_DISABLE | WRITE_THROUGH | nx,
         }
     }
 }

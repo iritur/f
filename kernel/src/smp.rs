@@ -474,6 +474,149 @@ pub unsafe fn run_on(cpu: usize, kernel_root: u64, tsc_khz: u64, micros: u64) ->
     }
 }
 
+/// A moment `micros` from now, on this core's timestamp counter.
+///
+/// Exported beside [`join_serviced`] because the two halves of a driver's boot
+/// wait in different places — the frame waits for a *completion* while it is
+/// the client, and for a *core* once it is not — and both waits have to be
+/// bounded by the same thing. A spin bounded by an iteration count is bounded
+/// by how fast the host is, which under an emulator is a number that moves by a
+/// factor of ten between runs; the counter this reads is the one
+/// [`wait_for`] already reads, and it is read here rather than at the caller so
+/// that the one place this kernel reads a timestamp counter stays the place the
+/// determinism allow-list already names.
+///
+/// Unit: the timestamp counter's own ticks. Not a clock a component can see and
+/// not one anything is measured against — it is a bound on a wedge.
+#[must_use]
+pub fn deadline_after(tsc_khz: u64, micros: u64) -> u64 {
+    read_tsc().saturating_add(tsc_khz.saturating_mul(micros) / 1_000)
+}
+
+/// Has that moment gone by?
+#[must_use]
+pub fn past(deadline: u64) -> bool {
+    read_tsc() > deadline
+}
+
+/// Ask a core to run the process prepared for it and **do not wait**.
+///
+/// The other half of [`run_on`], for the one caller that has work of its own to
+/// do while another core is inside a component. Every other caller here is a
+/// frame that has nothing to do until the component is over; a driver's client
+/// is the frame, and a client that could not act while its server ran would be
+/// a client that never submitted anything for the server to answer.
+///
+/// [`join_serviced`] is the other end and must be called: a core left holding
+/// `RUN` is a core that never goes back to waiting.
+///
+/// # Errors
+///
+/// The core, when it is this one — a driver and its client cannot be the same
+/// core, because the client would be inside the driver.
+///
+/// # Safety
+///
+/// As [`run_on`].
+pub unsafe fn start_on(cpu: usize) -> Result<(), usize> {
+    if cpu == current_cpu() {
+        return Err(cpu);
+    }
+    post(cpu, RUN);
+    Ok(())
+}
+
+/// Wait for a core [`start_on`] was called for, **serving it** until it has
+/// finished.
+///
+/// # Why waiting is not the only thing this core can do
+///
+/// [`run_on`] spins. That was the whole of what the boot processor had to do
+/// while another core held a process, because every process this kernel had
+/// ever run was self-contained: it announced itself, made a few calls that the
+/// running core answered out of its own shards, and ended.
+///
+/// A **driver** is not self-contained and cannot be. It owns a device and it
+/// does not own the remapping unit that device is behind — the unit is the
+/// frame's, its page tables are the frame's, and a component that could program
+/// one could point any device at any memory. So the one thing a driver cannot
+/// do for itself is turn a client's capability into an address its device may
+/// use, and it asks, on its control ring. RFC 0047.
+///
+/// `serve` is what answers. It is called between mailbox polls, on the boot
+/// processor, which is where the allocator, the remapping unit and the client's
+/// capability table already are — so the authority stays where it was and
+/// nothing is handed across a core boundary to make this work. **It is a
+/// polling point and not a callback**: R05 says nothing is delivered
+/// asynchronously, and what is here is this core looking, in its own loop, at a
+/// ring.
+///
+/// # Errors
+///
+/// [`NotJoined`], if the core never reported finished — and which of the two
+/// ways that happened, because one of them is a wall-clock bound and must not
+/// be read as a finding. `serve` refusing is not an error here and cannot be: a
+/// request the frame could not answer is answered with a refusal on the ring,
+/// which is the driver's to act on.
+///
+/// # Safety
+///
+/// As [`run_on`], and `serve` must not touch anything the running core is
+/// writing — which for the one caller means the driver's control ring, whose
+/// two ends are single-producer and single-consumer by construction.
+pub unsafe fn join_serviced(
+    cpu: usize,
+    tsc_khz: u64,
+    micros: u64,
+    serve: &mut dyn FnMut(),
+) -> Result<(), NotJoined> {
+    let deadline = read_tsc().saturating_add(tsc_khz.saturating_mul(micros) / 1_000);
+    loop {
+        // Served before the mailbox is read, so that a request outstanding at
+        // the moment the process ends is still answered: the driver's last act
+        // is an `EXIT`, and an unanswered request before it would be a
+        // completion nobody posted rather than one nobody wanted.
+        serve();
+        let state = peek(cpu);
+        if state == DONE {
+            post(cpu, READY);
+            return Ok(());
+        }
+        if state == READY || state == FAILED {
+            return Err(NotJoined::Refused(cpu));
+        }
+        if read_tsc() > deadline {
+            return Err(NotJoined::Overdue(cpu));
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Why a core [`join_serviced`] waited for did not report finished.
+///
+/// # Why these are two variants and not one
+///
+/// Because they are different news and only one of them is a finding. A core
+/// that went back to waiting, or failed, answered the wrong thing: something
+/// about the process is wrong and the boot should be read as having caught it.
+/// A core that is still holding the job when the bound passes has told the
+/// frame nothing at all — the bound is a wall-clock number scaled off this
+/// machine's timestamp counter, so it fires for a component that is wedged and
+/// for a runner slower than the number, and those two cannot be told apart from
+/// here.
+///
+/// Collapsing them into one error is how a red line on a slow CI runner comes
+/// to be read as a protection that fired. The caller renders them apart;
+/// `kernel/src/blk.rs`'s `Trouble::Overdue` is the other end of this.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NotJoined {
+    /// The core went back to waiting, or failed, without reporting done.
+    /// Carries the core.
+    Refused(usize),
+    /// The bound passed with the core still holding the job. Carries the core.
+    Overdue(usize),
+}
+
 /// Tell every other running core to forget one page.
 ///
 /// Returns once each of them has acknowledged, which is what makes the caller

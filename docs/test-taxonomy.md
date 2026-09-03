@@ -22,7 +22,12 @@ holes are.
 
 - **catches** — a named check runs on a stated cadence and would fail on this
   bug. Not *proves*: sampling counts, and where a row is sampled rather than
-  proved it says so.
+  proved it says so — **(sampled)** in the cell. Two different things wear that
+  word and the difference is worth one sentence. A check that is total over its
+  input is *catches* outright: give it the bug and it fails, every time. A check
+  that is total over each input it *sees*, drawn from a generator, is
+  **catches (sampled)**: the oracle has no holes, the input set does, and the
+  row names the task that owns quantifying over it.
 - **partially** — something runs and would catch some instances. The cell says
   which half is covered, because "partially" with no boundary is a tick with
   extra syllables.
@@ -45,12 +50,12 @@ document calls L8 the day it grows one.
 | **L1** | Deterministic simulation | Built — `sim/`, `cargo xtask sim`: virtual time, seeded ordering, device models and component substitution (`E1-P01`), seven fault classes each with a scenario and an asserted response (`E1-P02`), and seed sweeps with automatic minimisation (`E1-P03`) — `cargo xtask sweep`, five scenario-independent properties in `sim/src/check.rs`, `sim/corpus.txt` as the regression corpus, and `cargo xtask sweep --mutate` as the evidence the sweep can fail. No snapshot and restore — `E1-P08` |
 | **L2** | Concurrency and memory model | Stress tests only — `ring/tests/litmus.rs` on two architectures. Not a model check |
 | **L3** | Proof | Absent |
-| **L4** | Fuzzing | Instrumentation only — `xtask coverage`. No generator, no corpus, no hostile-peer harness |
+| **L4** | Fuzzing | Two fuzzers and the instrumentation. `E1-P04`'s hostile *peer*: `ring/tests/hostile.rs` draws a peer's behaviour from a seed through `f_env`, `cargo xtask hostile` runs a hundred million operations in `verify` and the exit's billion in CI, `--miri` carries the one property no in-process assertion can make, and `ring/corpus.txt` is its regression corpus. `E1-P05`'s structure-aware *entry*: `ring/tests/entries.rs` generates from fifteen named families with an eighth of the budget on bytes, keeps an input that lights a region nothing had lit — per case, out of the profile runtime's own counters — and `cargo xtask entries --coverage` publishes the share of a named list of thirty-seven functions that `ring/entries-corpus.txt` covers, which `claims/0009` gates at 95%. `--mutate` is the evidence each can fail: three defects, one per oracle |
 | **L5** | Performance regression | Harness only — `bench/`, `claims/history.jsonl`. No change-point detection |
 | **L6** | Hardware in the loop | Absent — one boot outside QEMU, by hand, on a virtual machine |
-| **L7** | Claims registry | Built, three entries, none gating |
+| **L7** | Claims registry | Built, eight entries, two of them gating — `claims/0005` (a count of components a driver restart disturbs) and `claims/0008` (hostile operations, and its twenty-six reach minimums). The row said *three entries, none gating* until `E1-P04`, and both halves of that had stopped being true |
 | **P** | Provoke the real kernel | Built — `xtask fault`, `user`, `cap`, `mutate`, `panic`, `trace` |
-| **X** | Policy made executable | Built — twelve lints, six hooks, `REVIEW.md`, `evals/` |
+| **X** | Policy made executable | Built — sixteen lints, six hooks, `REVIEW.md`, `evals/`. `cargo xtask lint` prints one `lint-` line per check, so the number is `cargo xtask lint \| grep -c '^lint-'` rather than something to remember. It read *twelve* while four more lints landed, which is what a remembered count does |
 
 **P** is the row `TESTING-STATUS.md` already says the seven-layer taxonomy
 lacks: the real kernel, in QEMU, being asked to do something that must not work.
@@ -93,13 +98,22 @@ else: a person editing in an editor gets *every PR* and no earlier. And **every
 verify** is a local loop somebody has to run — `CONTRIBUTING.md` asks for it
 before review, and the gate is what makes it more than a request.
 
-Which matters most where a row says *every verify* and nothing after it. Three
-do: `lint-manifests`, `lint-reproduce`, and the part of `cargo xtask test` the
-gate's four-crate list does not name. Those three verbs appear in no workflow
-file, so for them the local loop is not a convenience that saves a round trip —
-it is the only place the check happens, and a contributor who skips it skips the
-check. `verify` and the gate are deliberately different and always will be, but
-these three are different in the direction nobody intended.
+Which matters most where a row says *every verify* and nothing after it. Five
+lints do: `lint-manifests`, `lint-components`, `lint-datapath`, `lint-owed` and
+`lint-reproduce`. Those verbs appear in no workflow file — the set is
+`cargo xtask lint | grep -o '^lint-[a-z-]*'` minus what `grep -o 'lint-[a-z-]*'
+.github/workflows/*.yml` finds — so for them the local loop is not a convenience
+that saves a round trip: it is the only place the check happens, and a
+contributor who skips it skips the check. `verify` and the gate are deliberately
+different and always will be, but these are different in the direction nobody
+intended.
+
+The list used to include a sixth entry that was not a lint: the part of
+`cargo xtask test` the gate's hand-written four-crate list did not name. That
+one is gone rather than fixed, because there is no four-crate list any more —
+both test jobs run `cargo xtask test-host` over the whole workspace, `cross` is
+a step in the `policy` job, and `lint-arch-tests` is a step beside it. `E1-P11`,
+RFC 0045.
 
 The rows for `cargo xtask cap` and `cargo xtask user` say *every PR* and not
 *every verify* for the same reason, read the other way: `fn verify` is lint,
@@ -140,25 +154,40 @@ on x86-64, a clean pass on arm.
 
 | Bug class | Layers | Check today | Cadence | Status |
 |---|---|---|---|---|
-| A hostile header or cursor panics the consumer | L4, P, X | `ring/tests/headers.rs`; `litmus.rs::a_hostile_client_cursor_never_panics`; the `unwrap_used`/`panic`/`unreachable` clippy wall over `ring` | every verify, every PR | **partially** |
-| A hostile header is accepted rather than refused | L4 | `headers.rs` — every invalid header refused with a structured error, and the region survives the refusal | every verify, every PR | **partially** |
-| An entry mutated between validation and use | L1, L4 | nothing | never | **GAP** |
-| Unknown opcode, flag or reserved bit accepted (R04) | L4, X | `abi` unit tests over the reading of `Sqe`; `REVIEW.md`; no lint | every verify, every PR | **partially** |
-| A peer that dies mid-claim, or lies about its epoch | L1, L4 | `ring/tests/faults.rs` injects at `ring.publish`, `ring.consume` and `chan.bind`. `cargo xtask sim` runs `peergone`, which kills a device model with work outstanding and requires every buffer to come home and no completion to arrive after the reset | every PR, both runners; every verify | **partially** — the dying half is asserted at both layers, and lying about an epoch is not: nothing yet writes a hostile cursor, which is `E1-P04`'s |
-| ABI layout drift — a field reordered inside a fixed-size struct | X | `const _: () = assert!(size_of::<Sqe>() == 64)` and its four siblings catch a size change; **no offset assertion, no golden bytes** | every build | **partially** |
+| A hostile header or cursor panics the consumer | L4, P, X | `ring/tests/headers.rs`; `litmus.rs::a_hostile_client_cursor_never_panics`; the `unwrap_used`/`panic`/`unreachable` clippy wall over `ring`; and `cargo xtask hostile` — `ring/tests/hostile.rs` draws headers and cursors from a seed, catches a panic per episode so a failure is a seed rather than a backtrace, and `--mutate` arms `mutate-believed-header` and requires it to be found | every verify (10⁸ operations), every PR (10⁹) | **partially** — a billion draws is still sampling |
+| A hostile header is accepted rather than refused | L4 | `headers.rs` — every invalid header refused with a structured error, and the region survives the refusal. `hostile.rs` counts each refusal domain and `claims/0008` puts a **minimum** on all four, so a build that stopped producing one of them goes red | every verify, every PR | **partially** — the fuzzer asserts *no panic*, not that a particular drawn header was refused: the cases that assert refusal are still `headers.rs`'s fifteen |
+| An entry mutated between validation and use | L1, L4 | `hostile.rs` overwrites whole entry slots and forges index-ring slot numbers against a live channel, and `Consumer::pop` copies an entry out before any field is read | every verify, every PR | **partially** — the write lands *between* operations. A peer writing during one call needs a second thread, which this harness does not have and no task owns |
+| Unknown opcode, flag or reserved bit accepted (R04) | L4, X | `abi` unit tests over the reading of `Sqe`; and `E1-P05`'s **envelope oracle** — `entries.rs` computes the refusal R04 owes from the entry's own bytes *before* the code under test sees them and requires the domain and the code to match, over 262 144 generated cases per verify, on `f_ring::execute` and on `f_abi::buf::Request::read` alike | every verify, every PR | **catches** (sampled) — the oracle is total on every entry it sees; the *set* of entries is drawn, and `E1-P12` owns the quantifier |
+| A peer that dies mid-claim, or lies about its epoch | L1, L4 | `ring/tests/faults.rs` injects at `ring.publish`, `ring.consume` and `chan.bind`. `cargo xtask sim` runs `peergone`, which kills a device model with work outstanding and requires every buffer to come home and no completion to arrive after the reset. `hostile.rs` restarts the peer between operations and again between a batch being staged and published, and re-adopts at the moved epoch; `claims/0008` puts a minimum on both counts | every PR, both runners; every verify | **partially** — both halves are now driven, and what is still not asserted is a *code*: an operation against a stale epoch is refused, and the fuzzer folds `PEER/EPOCH_CHANGED` in with `Corrupt` rather than requiring that one by name |
+| ABI layout drift — a field reordered inside a fixed-size struct | X | `const _: () = assert!(size_of::<Sqe>() == 64)` and its four siblings catch a size change; and `E1-P05`'s `LAYOUT`, twelve `offset_of!` assertions over every field of an `Sqe`, checked before any case is drawn. **`Cqe` and `ChannelHeader` still have only their size checks** | every build, every verify | **partially** |
 | A peer at a different ABI version | X | `ChannelHeader::negotiate`, RFC 0011, exercised against a real mapping by `headers.rs` | every verify, every PR | **catches** |
 
-Every row here is "partially" for one reason: what exists samples, and what is
-owed proves. `E1-P04` asks for a billion hostile operations with no panic, no
-memory unsafety and no hang; `E1-P12` asks for panic-freedom over arbitrary
-header bytes, cursors and entries as a bounded proof. The distance between those
-and what is in the tree today is the distance between *no fuzzer found one* and
-*there is none*.
+Most rows here are "partially" for one reason: what exists samples, and what is
+owed proves. `E1-P04` has landed — a billion generated hostile operations with no
+panic and no hang, and Miri's verdict on memory unsafety at four thousand — and
+not one of *its* rows reached **catches**. That is the honest outcome rather than
+a disappointing one: a billion draws is a large sample and a sample is what it
+stays.
+
+The R04 row is the one exception and it is a narrow one, so the cell says
+**catches (sampled)** rather than **catches**. What changed there is not the
+sample size but the *oracle*: `E1-P05` computes the refusal R04 owes from an
+entry's own bytes before the code sees them, so every entry it draws is checked
+rather than counted, and `mutate-ignored-flag` is the evidence it can fail. The
+input set is still drawn. `E1-P12` asks for panic-freedom over arbitrary header
+bytes, cursors and entries as a bounded proof, and that is what takes any row
+here to **catches** with nothing in brackets. The distance between them is the
+distance between *no fuzzer found one* and *there is none*.
 
 The layout row is the quiet one. A reorder inside `Sqe` keeps `size_of` at 64
-and changes what every byte means to a peer built at another commit, and nothing
-in the tree would notice. It costs nothing while both ends of every channel come
-from one tree, and stops costing nothing at `E1-B05`.
+and changes what every byte means to a peer built at another commit. `E1-P05`'s
+`LAYOUT` closed that for `Sqe` — twelve `offset_of!` assertions, checked before
+any case is drawn, and there because the fuzzer writes an entry's wire image at
+fixed offsets and would otherwise have gone on flipping bits in a mislabelled
+field while every run stayed green. `Cqe` and `ChannelHeader` still have only
+their size checks, and nothing in the tree would notice a reorder in either. It
+costs nothing while both ends of every channel come from one tree, and stops
+costing nothing at `E1-B05`.
 
 ## C — capabilities and isolation
 
@@ -296,10 +325,10 @@ row saying a person has to apply it, which is a plan.
 | A weakened test — `#[ignore]`, `assert!(true)`, a shrunk repeat count | X | `.claude/hooks/tests-hold.sh`, then `REVIEW.md` pass 2 | every edit, every PR | **catches** |
 | A hook that stopped firing | X | `.claude/hooks/selftest.sh`, in the `policy` job and in `agent-evals.yml` | every PR, weekly | **catches** |
 | Agent configuration regression | X | `cargo xtask eval`, twenty-two tasks, floor 0.95 | every PR touching `.claude/`, weekly | **partially** |
-| A test that exists and runs on no runner | X | `cargo xtask test` is `--workspace --exclude f-kernel`; the CI test jobs name four crates, so `xtask` and `bench` tests run locally and **not in the gate** | every verify | **partially** |
+| A test that exists and runs on no runner | X | `cargo xtask test-host` — the whole workspace minus the crates `PORTABILITY` excludes with a reason — on the x86-64 runner and on the arm runner, and locally inside `cargo xtask test`; and `cargo xtask lint-arch-tests` for the half that one cannot see, which is a test inside an included crate compiled on one architecture only | every verify, every PR | **catches** |
 | A kernel fault path that no longer reports | P | `cargo xtask fault pf\|ud\|df\|nx\|wx\|stack` | on demand | **GAP** |
 | A panic reaching CI as a hang, or a hang as a pass | P | `cargo xtask panic` — three endings, three fixtures | every verify, every PR | **catches** |
-| AArch64-only compile failure | L2, X | `cargo check --target aarch64-unknown-none` over the four crates, inside `xtask test`; the arm job builds and runs them | every verify, every PR | **catches** |
+| AArch64-only compile failure | L2, X | `cargo xtask cross` — every workspace member compiled for `aarch64-unknown-none`, the list derived from `Cargo.toml`'s members — in the `policy` job and inside `cargo xtask test`; the arm job builds and runs the same suite the x86-64 job runs | every verify, every PR | **catches** |
 | AArch64-only ordering failure | L2 | `tests (AArch64, weak memory)` and `memory-ordering litmus (AArch64, weak memory)` | every PR | **partially** |
 | Toolchain drift | X | `rust-toolchain.toml` is a protected path; the container image reads its pin from that file rather than restating it | every edit, every PR | **catches** |
 | A dependency with a bad licence or a known advisory | X | `cargo deny check` in the `deps` job; `security-scan.yml` against the advisory database | every PR, weekly | **catches** |
@@ -307,7 +336,7 @@ row saying a person has to apply it, which is a plan.
 | Release package non-reproducible across two machines | X | the `package` matrix and the `address` job; `release --twice` is the same-machine half | every PR | **catches** |
 | A release that cannot name its own tree | X | `cargo xtask release --dry-run` — version and commit are fatal rather than `unknown` | every PR, per release | **catches** |
 | A release crossing the boundary without authorisation | X | `.claude/hooks/release-gate.sh` on every `Bash` | every edit | **catches** |
-| Coverage falling on the entry-validation path | L4 | `cargo xtask coverage`, published and watched; nothing gates | every PR | **partially** |
+| Coverage falling on the entry-validation path | L4 | `cargo xtask entries --coverage`: the share of a named list of thirty-seven functions that `ring/entries-corpus.txt` covers, per function, out of `llvm-cov`. `claims/0009` is gating and states the floor; `cargo xtask coverage` still publishes the per-crate figure beside it and still gates nothing | every PR | **catches** |
 | A hardware-only bug — something QEMU emulates differently | L6, P | `docs/first-boot-outside-qemu.md`: one boot, by hand, on a virtual machine rather than metal | never | **GAP** |
 | `instructions_per_op` and `joules_per_op` absent, narrowing a claim | L5, L6 | the harness carries both fields and marks them `Unavailable` rather than omitting them, and the value is only as fresh as the last claim run | on demand | **partially** |
 | A drift between what `verify` runs and what the gate runs | X | this page, and the note `verify` prints on its last line | every verify | **partially** |
@@ -338,12 +367,12 @@ reversal condition. Nothing is left as "we should probably".
 |---|---|
 | A publishing store weakened to `Relaxed`, either ring | `E0-P16` — the stress suite was measured not to catch it |
 | An interleaving the stress tests never produce | `E0-P16` — RustMC, on small tests a checker can exhaust, under its own toolchain (RFC 0022) |
-| An entry mutated between validation and use | `E1-P04` — `E1-P02` was listed here and does not reach it: a fault class breaks a *protocol* event, and mutating an entry after it is validated needs a peer writing shared memory |
-| Unknown opcode, flag or reserved bit accepted (R04) | `E1-P05` for the corpus, `E1-P12` for the proof |
-| ABI layout drift — a field reordered | `E1-P05` — the committed corpus is the golden-bytes fixture |
-| A hostile header or cursor panics the consumer | `E1-P04` (a billion operations), `E1-P12` (panic-freedom, proved) |
-| A hostile header accepted rather than refused | `E1-P04` |
-| A peer that dies mid-claim, or lies about its epoch | `E1-P04` — `E1-P02`'s `peergone` scenario asserts the dying half; the lying half needs a hostile cursor |
+| An entry mutated between validation and use | Narrowed by `E1-P04` and then **not owned**: `hostile.rs` scribbles entry slots against a live channel between operations, and the residual is a peer writing *during* one call — a second thread this harness does not have. Accepted with a reversal condition: a finding that needs the write to land inside a call, or a `Consumer::pop` that stops copying the entry out before reading a field |
+| Unknown opcode, flag or reserved bit accepted (R04) | Closed by `E1-P05`'s envelope oracle for a single entry; `E1-P12` still owns the proof, because the oracle samples entries and does not quantify over them |
+| ABI layout drift — a field reordered | Closed for `Sqe` by `E1-P05`, and **not by the corpus** — a corpus line names fields rather than bytes, so it would move with a reorder instead of catching one. What closes it is `LAYOUT`, twelve `offset_of!` assertions the fuzzer needs for itself. `Cqe` and `ChannelHeader` are unowned |
+| A hostile header or cursor panics the consumer | `E1-P12` (panic-freedom, proved). `E1-P04` landed the billion operations and did not close the row, because sampling does not close it |
+| A hostile header accepted rather than refused | `E1-P12`. `E1-P04` landed and made every refusal domain a counter with a minimum in `claims/0008`; what it does not assert is that a particular drawn header was refused |
+| A peer that dies mid-claim, or lies about its epoch | Both halves are driven — `E1-P02`'s `peergone` for the dying half, `E1-P04`'s restarts and moved epochs for the lying half. What is left is a code: `PEER/EPOCH_CHANGED` required by name rather than folded in with `Corrupt`, which is a line in `headers.rs`. `E1-P05` was named here as the other candidate and is not: an entry fuzzer's cases are self-contained by construction, so nothing in it holds a channel across an epoch change |
 | Frame leak under churn | `E1-B14` (the unmap-under-churn workload), `E1-P06`, `E1-B10` |
 | Mapping left after revoke, under churn | `E1-B14` — `E1-P02`'s `peergone` asserts a *model's* translations go with its registrations; the frame under churn is `E1-B14`'s |
 | A ring-3 **component** addressing memory outside its grant | `E1-B02` — the first driver that is a component; `E1-B01` built the mechanism and stood in for the driver |
@@ -362,9 +391,8 @@ reversal condition. Nothing is left as "we should probably".
 | Supervisor restart storm | `E1-B05`, `E1-P06` |
 | `instructions_per_op` and `joules_per_op` absent | `E0-P05` for the PMU, `E5-P03` for the meter |
 | A hardware-only bug | `E0-P18` — open; the first boot outside QEMU was a virtual machine, not metal |
-| Coverage on the entry-validation path | `E1-P05` — above 95%, as a claim rather than as a threshold |
-| AArch64-only ordering failure | `E0-P16`, `E1-P11` |
-| A test that runs on no runner | `E0-P01` — the gate's `test` half is narrower than `cargo xtask test` |
+| Coverage on the entry-validation path | Closed: 96.95% of thirty-seven named functions, from the committed corpus alone, gating as `claims/0009`; the fifteen missed lines are listed by name and mechanism in RFC 0048 |
+| AArch64-only ordering failure | `E0-P16` — `E1-P11` landed and the row did not move: the arm runner now runs the whole host suite rather than four crates, so more code is exposed to weak memory, and the suite is still stress tests rather than a model check |
 
 **Accepted, each with the condition that reverses it.**
 
@@ -481,14 +509,19 @@ outgrowing the fixed count is an ordinary thing it does — `cap flood` holds a
 hundred and sixty — and `cap quota` and `cap beyond` are the boots that say
 what happens at the two edges of paying.
 
-Three rows name an E1 task and something else, and those are the ones to watch,
+Two rows name an E1 task and something else, and those are the ones to watch,
 because a task can land and leave its row where it was: `ring-latency-regression`
-needs `E1-P10` **and** `E0-P05`, `determinism-off-log` needs `E1-P01` **and**
-`E2-P05`, and `aarch64-ordering` needs `E1-P11` **and** `E0-P16`. Eight more
+needs `E1-P10` **and** `E0-P05`, and `determinism-off-log` needs `E1-P01` **and**
+`E2-P05`. A third did until this epoch and is the worked example of the risk:
+`aarch64-ordering` needed `E1-P11` **and** `E0-P16` — E1-P11 has
+landed and the row did not move, which is the case this paragraph was written
+about: the arm runner now runs the whole host suite rather than four crates, and
+the suite is still stress tests rather than a model check, so `E0-P16` is what
+changes the status. Eight more
 scheduled rows have no E1 owner at all. What stays open at the end of the epoch
 is that set: change-point detection (`E2-P09`), the frame's proof (`E2-P04`),
-hardware in the loop (`E0-P18`, then `E3-P01`), the gate's crate list
-(`E0-P01`), and the weak-memory model check.
+hardware in the loop (`E0-P18`, then `E3-P01`), and the weak-memory model
+check.
 
 There is a shape in that list worth naming. Every row this epoch closes is one
 where the check is *specific to F* — the simulator, the hostile-peer harness,

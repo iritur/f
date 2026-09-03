@@ -108,63 +108,63 @@ id      = "peer-header-panic"
 group   = "B"
 class   = "A hostile header or cursor panics the consumer"
 layers  = ["L4", "P", "X"]
-check   = "ring/tests/headers.rs; litmus.rs::a_hostile_client_cursor_never_panics; the unwrap_used/panic/unreachable clippy wall over ring"
+check   = "ring/tests/headers.rs; litmus.rs::a_hostile_client_cursor_never_panics; the unwrap_used/panic/unreachable clippy wall over ring; and cargo xtask hostile — ring/tests/hostile.rs draws headers and cursors from a seed through f_env, catches a panic per episode so a failure reproduces from a seed rather than from a backtrace, and cargo xtask hostile --mutate arms mutate-believed-header and requires the panic property to find it"
 cadence = ["every-verify", "every-pr"]
 status  = "partially"
-notes   = "What exists samples; what is owed proves. The difference is 'no fuzzer found one' against 'there is none'."
-scheduled_by = ["E1-P04", "E1-P12"]
+notes   = "What exists samples; what is owed proves. The difference is 'no fuzzer found one' against 'there is none', and E1-P04 landing a billion operations did not change which side of it this row is on. RFC 0046, claims/0008."
+scheduled_by = ["E1-P12"]
 
 [[row]]
 id      = "peer-header-accepted"
 group   = "B"
 class   = "A hostile header is accepted rather than refused"
 layers  = ["L4"]
-check   = "headers.rs — every invalid header refused with a structured error, and the region survives the refusal"
+check   = "headers.rs — every invalid header refused with a structured error, and the region survives the refusal. hostile.rs counts each refusal domain the header can earn and claims/0008 puts a minimum on all four, so a build that stopped producing one of them goes red"
 cadence = ["every-verify", "every-pr"]
 status  = "partially"
-scheduled_by = ["E1-P04"]
+notes   = "E1-P04 landed and this row stayed partial on purpose: the fuzzer asserts no panic and no hang, not that the particular header it drew was refused. The cases that assert a refusal are still headers.rs's fifteen."
+scheduled_by = ["E1-P12"]
 
 [[row]]
 id      = "peer-entry-mutated"
 group   = "B"
 class   = "An entry mutated between validation and use"
 layers  = ["L1", "L4"]
-check   = "nothing"
-cadence = ["never"]
-status  = "gap"
-scheduled_by = ["E1-P04"]
+check   = "hostile.rs overwrites whole entry slots and forges index-ring slot numbers against a live channel, and Consumer::pop copies an entry out before any field is read"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+notes   = "Was a gap with no check at all. E1-P04 narrowed it and did not close it: the peer's write lands between operations, because the harness is single-threaded. A peer writing during one call needs a second thread, no task owns that, and the row is accepted with a reversal condition — a finding that needs the write to land inside a call, or a Consumer::pop that stops copying the entry out before reading a field."
 
 [[row]]
 id      = "peer-unknown-bits"
 group   = "B"
 class   = "Unknown opcode, flag or reserved bit accepted (R04)"
 layers  = ["L4", "X"]
-check   = "abi unit tests over the reading of Sqe; REVIEW.md; no lint"
+check   = "abi unit tests over the reading of Sqe; and E1-P05's envelope oracle — entries.rs computes the refusal R04 owes from the entry's own bytes before the code under test sees them and requires the domain and the code to match, over 262 144 generated cases per verify, on f_ring::execute and on f_abi::buf::Request::read alike"
 cadence = ["every-verify", "every-pr"]
-status  = "partially"
-scheduled_by = ["E1-P05", "E1-P12"]
+status  = "catches"   # sampled: total oracle, drawn input set
+notes   = "**catches (sampled)** in the sense docs/test-taxonomy.md's legend now separates: the oracle is total over every entry it sees, and the set of entries is drawn. The one row a sampling fuzzer can move that far, because the property is about a single entry and the oracle is total: every generated case is checked, and the three refusals are required by name rather than counted. mutate-ignored-flag is the evidence it can fail — one character in execute masks an unknown flag off instead of refusing it, nothing panics, nothing hangs, nothing reads out of bounds, and this oracle reports it. What is still sampling rather than proof is the *set of entries*, which is E1-P12's."
+scheduled_by = ["E1-P12"]
 
 [[row]]
 id      = "peer-dies-mid-claim"
 group   = "B"
 class   = "A peer that dies mid-claim, or lies about its epoch"
 layers  = ["L1", "L4"]
-check   = "ring/tests/faults.rs injects at ring.publish, ring.consume and chan.bind; cargo xtask sim runs the peergone scenario, which kills a device model with work outstanding and asserts that every buffer comes home and that no completion arrives after the reset"
+check   = "ring/tests/faults.rs injects at ring.publish, ring.consume and chan.bind; cargo xtask sim runs the peergone scenario, which kills a device model with work outstanding and asserts that every buffer comes home and that no completion arrives after the reset; hostile.rs restarts the peer between operations and again between a batch being staged and published, re-adopts at the moved epoch, and claims/0008 puts a minimum on peer_restarts_mid_batch and channel_epoch_changes_seen"
 cadence = ["every-pr", "every-verify"]
 status  = "partially"
-notes   = "The dying half is asserted at both layers. Lying about an epoch is not: nothing yet writes a hostile cursor, which is E1-P04's."
-scheduled_by = ["E1-P04"]
+notes   = "The dying half is asserted at both layers, and after E1-P04 the lying half is driven at a billion operations with no panic and no hang. What is still not asserted is a code rather than an absence: an operation against a stale epoch is refused, and the fuzzer folds PEER/EPOCH_CHANGED in with Corrupt rather than requiring that one by name. A line in headers.rs would close it."
 
 [[row]]
 id      = "abi-layout-drift"
 group   = "B"
 class   = "ABI layout drift — a field reordered inside a fixed-size struct"
 layers  = ["X"]
-check   = "const _: () = assert!(size_of::<Sqe>() == 64) and its four siblings catch a size change; no offset assertion, no golden bytes"
-cadence = ["every-build"]
+check   = "const _: () = assert!(size_of::<Sqe>() == 64) and its four siblings catch a size change; and E1-P05's LAYOUT, twelve offset_of! assertions over every field of an Sqe, checked before any case is drawn"
+cadence = ["every-build", "every-verify"]
 status  = "partially"
-notes   = "Costs nothing while both ends of every channel come from one tree, and stops costing nothing at E1-B05."
-scheduled_by = ["E1-P05"]
+notes   = "Closed for Sqe and open for the rest. E1-P05 needed the offsets for itself — entries.rs writes an entry's wire image byte by byte for its byte-level family, so a field reordered inside a repr(C) struct would have left it flipping bits in a field it had mislabelled while every case it produced stayed legal and every run stayed green. offset_of! is the exact question and the compiler is the exact answer, which is why it is an offset assertion rather than a golden-bytes fixture a reorder would simply be regenerated against. Cqe and ChannelHeader still have only their size checks; that is a smaller gap, it is still a gap, and no task owns it. It costs nothing while both ends of every channel come from one tree, and stops costing nothing at E1-B05."
 
 [[row]]
 id      = "abi-version-mismatch"
@@ -765,11 +765,10 @@ id      = "test-on-no-runner"
 group   = "I"
 class   = "A test that exists and runs on no runner"
 layers  = ["X"]
-check   = "cargo xtask test is --workspace --exclude f-kernel; the CI test jobs name four crates, so xtask and bench tests run locally and not in the gate"
-cadence = ["every-verify"]
-status  = "partially"
-notes   = "The same drift xtask test was changed to fix: a hand-written crate list stops matching the workspace the moment a crate is added, and silently."
-scheduled_by = ["E0-P01"]
+check   = "cargo xtask test-host — the whole workspace minus the crates PORTABILITY excludes with a reason — run on the x86-64 runner and on the arm runner, and locally inside cargo xtask test; and cargo xtask lint-arch-tests, which is the half test-host cannot see: a crate on both runners with a #[cfg(target_arch)] test inside it leaves both jobs green while one collects fewer tests"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "Was partially, and the entry it carried was itself stale: it named xtask and bench from before f-sim, f-store and f-virtio-blk existed, which is exactly the drift it was describing. E1-P11 removed the drift rather than the symptom — the crate list is derived from Cargo.toml's members and a member with no row in the exception table fails the build. lint-arch-tests reads three gate shapes: an item cfg, a block cfg, and a file-scope #![cfg(target_arch)]. The third was missing and review found the check green over it — which mattered most, because a file-scope attribute is the only gate an integration test under tests/ can carry, and ring/tests/litmus.rs is one of those. RFC 0045."
 
 [[row]]
 id      = "kernel-fault-path-rot"
@@ -796,9 +795,10 @@ id      = "aarch64-compile"
 group   = "I"
 class   = "AArch64-only compile failure"
 layers  = ["L2", "X"]
-check   = "cargo check --target aarch64-unknown-none over the four crates, inside xtask test; the arm job builds and runs them"
+check   = "cargo xtask cross — every workspace member compiled for aarch64-unknown-none, the list derived from Cargo.toml's members rather than written beside it — in the policy job and inside cargo xtask test; the arm job builds and runs the same suite the x86-64 job runs"
 cadence = ["every-verify", "every-pr"]
 status  = "catches"
+notes   = "The every-pr half of this cadence was not true until E1-P11: the cross-compile lived only in cargo xtask test, which no CI job runs, and the arm job built four crates — so f-store and f-virtio-blk were compiled for AArch64 by nothing on a pull request. RFC 0045."
 
 [[row]]
 id      = "aarch64-ordering"
@@ -808,7 +808,8 @@ layers  = ["L2"]
 check   = "tests (AArch64, weak memory) and memory-ordering litmus (AArch64, weak memory)"
 cadence = ["every-pr"]
 status  = "partially"
-scheduled_by = ["E0-P16", "E1-P11"]
+notes   = "E1-P11 landed and this row moved without changing status, which is the honest outcome: the arm runner now runs the whole host suite rather than four crates, so more code is exposed to weak memory — and the suite is still stress tests rather than a model check. E0-P16 is what changes the status."
+scheduled_by = ["E0-P16"]
 
 [[row]]
 id      = "toolchain-drift"
@@ -869,11 +870,10 @@ id      = "coverage-validation-path"
 group   = "I"
 class   = "Coverage falling on the entry-validation path"
 layers  = ["L4"]
-check   = "cargo xtask coverage, published and watched; nothing gates"
+check   = "cargo xtask entries --coverage: the share of a named list of thirty-seven functions that ring/entries-corpus.txt covers, per function, out of llvm-cov. claims/0009 is gating and states the floor; cargo xtask coverage still publishes the per-crate figure beside it and still gates nothing"
 cadence = ["every-pr"]
-status  = "partially"
-notes   = "A coverage threshold rewards tests written to touch lines rather than to catch anything, which is why ci.yml publishes the number instead."
-scheduled_by = ["E1-P05"]
+status  = "catches"
+notes   = "A coverage threshold rewards tests written to touch lines rather than to catch anything, which is why the per-crate number is still published rather than gated. What makes this one gate instead is that the number is not the only thing checked: the same corpus must replay clean, three oracles each have a deliberate defect behind them, and thirty-seven reach minimums say the generator still produces what it says it does. A corpus grown to touch lines would have to pass all of those. RFC 0048 states that as the standing risk and names it as the reversal condition."
 
 [[row]]
 id      = "hardware-only-bug"

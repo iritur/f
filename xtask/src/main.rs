@@ -144,9 +144,9 @@ const SHARED_STATE: &[&str] =
 ///
 /// So the structure is checked rather than asserted. For each row: the mover
 /// must be defined exactly once, called exactly once, and called from the named
-/// function and from nowhere else — and no shipped line of the crate may mint a
-/// granted window out of a bare address, which is the other way a safe
-/// component could reach memory it was not handed.
+/// function and from nowhere else. A fourth clause used to sit here — no
+/// shipped line may mint a granted window out of a bare address — and [`MINTS`]
+/// is where it went and why.
 ///
 /// Each row is `(crate prefix, the function that moves bytes, the one function
 /// allowed to call it)`. `E1-B03` and `E1-B04` join by adding a row; a driver
@@ -155,15 +155,267 @@ const DATAPATH: &[(&str, &str, &str)] = &[("user/virtio-blk/", "stage", "provoke
 
 /// The constructors that turn a bare address into a granted window.
 ///
-/// RFC 0033 argues these are safe to call *because the frame is the caller* —
-/// the obligation is discharged against a contract the frame keeps, and a
-/// component receives a window rather than minting one. Nothing enforced that
-/// until this lint: `Region::at` is a safe `const fn`, so a driver crate that
-/// forbids `unsafe` could still name the direct map and read a client's buffer
-/// through it, publish a zero, and be telling the truth about `stage` while
-/// lying about the datapath. Test fixtures may build their own memory — a host
-/// test has no frame to be handed one by — so the scan stops at `#[cfg(test)]`.
-const MINTS: &[&str] = &["Region::at(", "Window::at("];
+/// **Empty, and the emptiness is the point — read the paragraph before
+/// widening it back.**
+///
+/// It held `Region::at(` and `Window::at(` for as long as the driver's code ran
+/// *in the frame*. The reason was exact and is worth keeping: those are safe
+/// `const fn`s, the frame's direct map covers all of physical memory, and a
+/// driver crate forbidding `unsafe` could therefore have named a client's page
+/// through one, read the bytes, published a copy count of zero, and been
+/// telling the truth about `stage` while lying about the datapath. The lint was
+/// the only thing standing there.
+///
+/// It is not the only thing standing there now. RFC 0047 schedules the driver
+/// at ring 3, where the pages mapped for it are its text, its stack, its two
+/// rings, its board, its device's registers and its own queue memory — and
+/// nothing else in the machine. An address it invents is a page fault, taken by
+/// the component, reported by the frame as an ordinary ring-3 fault, and
+/// `cargo xtask blk` fails. That is an address space refusing what a source
+/// scan could only look for, and it is the enforcement `kernel/src/blk.rs`
+/// named as arriving *with the scheduler* rather than the one it had.
+///
+/// So the row stays, the mover check stays — one function that moves bytes,
+/// called once, from `provoke_copy` — and this list is empty. **What would put
+/// something back in it is a component whose code the frame runs.** If a driver
+/// is ever linked into the frame again for any reason, the direct map is under
+/// it again and this is the check that was holding.
+const MINTS: &[&str] = &[];
+
+/// Where a component's code may not be called from, what a call looks like,
+/// and where that name has to exist for the rule to mean anything.
+///
+/// One row, and it is RFC 0033's own reversal condition made executable:
+/// *grep for `Driver::execute` and see which crate calls it.* The answer was
+/// `kernel/` for the whole of E1-B02 and E1-B08, it is `user/virtio-blk` since
+/// RFC 0047, and this is what notices the day it goes back.
+///
+/// The needle is `Driver::` rather than `Driver::execute` on purpose. A frame
+/// that had gone back to calling the driver would not necessarily call
+/// *execute* first — it would call `Driver::start`, because that is the one
+/// that brings a device up — so a check spelled after the symptom would miss
+/// the cause. What it does not match is `DriverPlan` and `Trouble::Driver`,
+/// which are the frame's own types and name nothing of the component's.
+///
+/// # Why there is a third field
+///
+/// Because a needle is a *name*, and this check looks for its absence. Rename
+/// `Driver` in `user/virtio-blk`, or add a second driver crate whose type is
+/// called anything else, and the absence under `kernel/` is satisfied by a
+/// string that no longer refers to anything — green while the frame runs a
+/// component's code, with the direct map back under a crate whose `copies = 0`
+/// this tree publishes as a property. That is the same defect [`DATAPATH`]'s
+/// `defined != 1` clause exists to refuse one field over, and it is refused the
+/// same way: the needle must be *present* under the crate that owns it. A check
+/// whose needle nothing defines is indistinguishable from a rule that holds.
+///
+/// Each row is `(the prefix that must not name it, the needle, the prefix that
+/// must)`. A second driver therefore **does** add a row, because the needle is
+/// spelled after a type and each crate spells its own — `E1-B03` and `E1-B04`
+/// each add one. The rule stays about the frame; what the third field pins is
+/// that the rule still has a subject.
+const NOT_THE_FRAME: &[(&str, &str, &str)] = &[("kernel/", "Driver::", "user/virtio-blk/")];
+
+/// The reversal conditions that have fallen due and are **not paid**, declared
+/// as a set rather than left as a paragraph in three documents.
+///
+/// # Why this is data and not a sentence in an RFC
+///
+/// RFC 0036 is the precedent, `CHAOS_GAP` is the precedent's second use, and the
+/// argument does not change: a deviation that lives in prose is a deviation
+/// nobody re-checks, and the failure mode is not that it is never fixed — it is
+/// that it *is* fixed and three documents go on describing it. So each entry
+/// names a file and the exact text whose **presence** keeps the deviation open,
+/// and this check requires every one of them to still be there. The day one
+/// goes, the build goes red and tells whoever closed it which documents now
+/// describe a tree that does not exist.
+///
+/// Three entries, and each of them is an RFC's own words:
+///
+/// - **RFC 0008.** *Restart is the supervisor's act and the frame provides only
+///   the mechanism.* The policy runs in the frame. `component::policy::decide`
+///   was written to take a record and a tally and no kernel state precisely so
+///   that moving it would be a move rather than a rewrite, and what it is
+///   waiting for is not a place to move to but a supervisor to move into: a
+///   component that can be told its occupant died and can say *spawn it again*.
+///   RFC 0047 built the half of that a driver needed — a component asks the
+///   frame for something on its control ring and the frame answers — and did
+///   not build `op::SPAWN` or `op::STOP` behind it.
+/// - **RFC 0014.** `ANNOUNCE` and `PROGRESS` retire when a component is started
+///   with a channel and told on it. The channel exists now and carries
+///   operations in both directions; what a component still cannot do is *be
+///   started* by anything but the frame writing a job into a per-core slot, so
+///   `ANNOUNCE` has nothing to announce itself onto that the frame did not
+///   already know.
+/// - **RFC 0015.** The four capability calls retire onto
+///   `control::op::INSPECT`, `DERIVE`, `REVOKE` and `MAP`. All four opcodes are
+///   named in `abi/src/control.rs` and nothing implements them; the two that
+///   *are* implemented are RFC 0047's, and they are the two a driver could not
+///   do without.
+///
+/// **Read this before deleting a row.** Emptying one because the work *could*
+/// be done is the failure the constant exists to prevent. A row goes when the
+/// text it names goes, and what replaces it is a boot that shows the new thing
+/// happening.
+const OWED_REVERSALS: &[Gap] = &[
+    (
+        "kernel/src/component.rs",
+        "policy::decide(",
+        "RFC 0008: the restart policy runs in the frame, where that RFC says it does not belong",
+        "TODO.md E1-B05; docs/rfc/0008; kernel/src/component.rs's module comment; \
+         claims/0006-driver-restart-latency.toml's [workload] notes",
+    ),
+    (
+        "abi/src/door.rs",
+        "pub const ANNOUNCE",
+        "RFC 0014: `ANNOUNCE` and `PROGRESS` are still on the door, because nothing starts a \
+         component with a channel",
+        "TODO.md E1-B05; docs/rfc/0014; abi/src/door.rs's module comment",
+    ),
+    (
+        "abi/src/door.rs",
+        "pub const CAP_INSPECT",
+        "RFC 0015: the four capability calls are still on the door, because the four control-ring \
+         opcodes that retire them are named and unimplemented",
+        "TODO.md E1-B05; docs/rfc/0015; abi/src/door.rs's module comment; the four \
+         unimplemented opcodes in abi/src/control.rs",
+    ),
+];
+
+/// Every entry of a declared set is still true.
+///
+/// Shared by [`OWED_REVERSALS`] and by `chaos`'s own gap, because the two are
+/// one discipline used twice and a second copy of the reading would be a second
+/// place for it to rot.
+///
+/// # Errors
+///
+/// A needle that is gone, which is good news and a red build on purpose, or a
+/// file that is not there — which is a declaration nobody can check.
+fn gap_holds(what: &str, gap: &[Gap]) -> Result<(), String> {
+    gap_holds_under(&root(), what, gap)
+}
+
+/// One declared deviation: where it lives, what keeps it open, why it is still
+/// there, and **which documents say so**.
+///
+/// # Why there is a fourth field
+///
+/// Because the failure this whole discipline exists to prevent happened anyway,
+/// one row over. RFC 0047 closed half of `CHAOS_GAP` and paid RFC 0033's
+/// reversal; two constants and one module comment were updated, and five other
+/// live documents went on describing the tree that had gone. The refusal below
+/// said *every document that describes the same deviation ... update them* and
+/// named none of them, which is an instruction that assumes the reader already
+/// knows the answer. So the answer is data, and the day a gap closes the build
+/// prints the list.
+///
+/// It is a list of documents rather than a set of paths a lint reads, and that
+/// is deliberate: half of these entries are `TODO.md`, which this tree's agents
+/// may not edit, and a check that refused a stale sentence in a file nobody may
+/// touch would be a check that has to be switched off.
+type Gap = (&'static str, &'static str, &'static str, &'static str);
+
+/// [`gap_holds`], against a directory the caller names.
+///
+/// Split out so the mechanism has a fixture. Four declared quantities rest on
+/// this function — `OWED_REVERSALS`'s three rows and `CHAOS_GAP`'s one — and
+/// every one of them is worth exactly what this is: a check that has never
+/// failed is indistinguishable from a check that cannot.
+///
+/// # Errors
+///
+/// As [`gap_holds`].
+fn gap_holds_under(base: &Path, what: &str, gap: &[Gap]) -> Result<(), String> {
+    for (file, needle, _, describes) in gap {
+        let path = base.join(file);
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "reading {file}: {e}\n\nThe declared {what} gap names a file that is not there, \
+                 which is a declaration nobody can check."
+            )
+        })?;
+        if !text.contains(needle) {
+            return Err(format!(
+                "`{needle}` is gone from {file}.\n\n\
+                 That is a declared gap closing, which is good news and a red build on\n\
+                 purpose: `{what}` in xtask, and every document that describes the same\n\
+                 deviation, now describe a tree that no longer exists.\n\n\
+                 These are those documents. Update them in the diff that closes it, not\n\
+                 in the one after:\n\
+                 \x20  {describes}\n\n\
+                 Narrowing is what to do here rather than emptying: shrink the constant to\n\
+                 exactly what is still true, or delete the row and say in an RFC why nothing\n\
+                 is."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The reversal conditions this tree owes, still owed.
+///
+/// # Errors
+///
+/// One of them having been paid. See [`OWED_REVERSALS`].
+fn lint_owed() -> Result<(), String> {
+    gap_holds("OWED_REVERSALS", OWED_REVERSALS)?;
+    println!(
+        "lint-owed: ok  ({} reversal condition(s) fallen due and unpaid, each still unpaid)",
+        OWED_REVERSALS.len()
+    );
+    for (file, _, why, _) in OWED_REVERSALS {
+        println!("  {file:<28} {why}");
+    }
+    Ok(())
+}
+
+/// One file, against one row of [`NOT_THE_FRAME`].
+///
+/// Comments are stripped first, for the reason they are stripped everywhere
+/// else in this file: this tree explains its reversals in prose, so the line
+/// that says *`Driver::execute` used to be called here* must not be the line
+/// that fails the build.
+/// How many shipped lines under one file name `needle`.
+///
+/// The presence half of [`NOT_THE_FRAME`]. Comments are stripped for the reason
+/// they are stripped in [`frame_findings`] — the sentence recording that the
+/// frame used to call this must not be what keeps the rule alive — and the scan
+/// stops at `#[cfg(test)]`, so a fixture naming the type is not a definition of
+/// it either.
+fn code_mentions(text: &str, needle: &str) -> usize {
+    let mut seen = 0;
+    let mut carry = Carry::default();
+    for raw in text.lines() {
+        let code = strip_to_code(raw, &mut carry);
+        if code.trim().starts_with("#[cfg(test)]") {
+            break;
+        }
+        if code.contains(needle) {
+            seen += 1;
+        }
+    }
+    seen
+}
+
+fn frame_findings(rel: &str, text: &str, needle: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    let mut carry = Carry::default();
+    for (n, raw) in text.lines().enumerate() {
+        let code = strip_to_code(raw, &mut carry);
+        if code.trim().starts_with("#[cfg(test)]") {
+            break;
+        }
+        if code.contains(needle) {
+            findings.push(format!(
+                "  {rel}:{}  the frame names `{needle}` — a component's code, called from \
+                 inside the frame",
+                n + 1
+            ));
+        }
+    }
+    findings
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -192,6 +444,15 @@ fn main() -> ExitCode {
         // component directory and the wall clock. Everything that decides a
         // verdict is in `f-sim`, where no clock can reach it. RFC 0040.
         "sweep" => sweep_verb(args.get(1..).unwrap_or_default()),
+        // E1-P04. A peer that writes arbitrary values to the shared header and
+        // cursors, restarts mid-operation and lies about its epoch, generated
+        // from a seed. Three properties, three counts, three defects — one per
+        // property, because a harness with one defect in it exercises one
+        // property and decorates the others. RFC 0046.
+        "hostile" => hostile_verb(args.get(1..).unwrap_or_default()),
+        // E1-P05. A submission entry, generated by its structure and kept by
+        // its coverage. RFC 0048.
+        "entries" => entries_verb(args.get(1..).unwrap_or_default()),
         // E1-P08. A long run, marked as it goes and re-entered one minute
         // before it fails, with both wall-clock numbers printed. RFC 0043.
         "snapshot" => snapshot(),
@@ -230,6 +491,11 @@ fn main() -> ExitCode {
         },
         "timer" => timer(args.get(1).map(String::as_str)),
         "test" => test(),
+        // The two halves of `test`, separately, because CI runs them on
+        // different machines: `test-host` on both runners, `cross` wherever the
+        // policy job lands. E1-P11.
+        "test-host" => test_host(),
+        "cross" => cross_check(),
         "verify" => verify(),
         "lint" => lint_all(),
         "lint-determinism" => lint_determinism(),
@@ -244,6 +510,8 @@ fn main() -> ExitCode {
         "lint-manifests" => lint_manifests(),
         "lint-components" => lint_components(),
         "lint-datapath" => lint_datapath(),
+        "lint-owed" => lint_owed(),
+        "lint-arch-tests" => lint_arch_tests(),
         "lint-snapshot" => lint_snapshot(),
         "lint-reproduce" => lint_reproduce(),
         "unsafe" => unsafe_report(args.get(1).map(String::as_str) == Some("--by-file")),
@@ -327,7 +595,12 @@ cargo xtask <command>
                      go green without it
   timer [seconds]    Run the 1 kHz timer and print a jitter histogram. Sixty
                      seconds by default. A measurement, not an assertion
-  test               Workspace tests on both x86-64 and AArch64
+  test               test-host, then cross. Both halves, on this machine
+  test-host          The host suite on whatever architecture this is, derived
+                     from the workspace rather than from a list beside it. CI
+                     runs it on x86-64 and on the arm runner
+  cross              Compile every crate that reaches the machine for
+                     aarch64-unknown-none, and print what is excluded and why
   verify             lint, then test, then boot, then mutate. The one command a
                      session runs to check its own work before a human is asked
                      to
@@ -350,8 +623,14 @@ cargo xtask <command>
                      no downstream count ever looks for
   lint-datapath      The mechanism behind `blk/copies`: each crate that claims
                      zero copies moves bytes in exactly one function, calls it
-                     from exactly one place, and that place is not the data path
+                     from exactly one place, and that place is not the data path,
+                     and no part of it is called by the frame
+  lint-owed          The reversal conditions RFC 0008, RFC 0014 and RFC 0015
+                     name and this tree has not paid, declared as a set — red
+                     the day one of them is paid and the documents go stale
   lint-snapshot      claims/snapshot.json holds what the registry holds
+  lint-arch-tests    No test is compiled on one architecture and not the other
+                     without a reason and a reversal recorded beside it
 
   unsafe             The number A-05 reports: lines inside `unsafe` as a share
                      of the frame crates and of the whole tree, against
@@ -392,6 +671,52 @@ cargo xtask <command>
   sweep --record --mutate
                      The same, with the deliberate defect armed. This is how
                      the entries in sim/corpus.txt were produced
+
+  hostile [n]        A peer that writes arbitrary values to the shared header
+                     and cursors, restarts mid-operation and lies about its
+                     epoch, drawn from a seed. No panic and no hang, and the
+                     hang is a *count* rather than a timeout. A hundred million
+                     operations by default; the exit's billion takes 44-60 s here
+  hostile --exit     E1-P04's own number — one billion operations — by name
+                     rather than as a literal a workflow file would keep a
+                     second copy of
+  hostile --miri     The third property, memory unsafety, under the only tool
+                     that can see it — at four thousand operations rather than
+                     a billion, because Miri costs six orders of magnitude and
+                     saying so is the point
+  hostile --mutate   Arm the two defects this half can see, require each to be
+                     found by the property it breaks, and show that the third
+                     is invisible here
+  hostile --miri --mutate
+                     Arm the third and require Miri to report it
+  hostile --corpus   Replay every run in ring/corpus.txt and require each to be
+                     clean. Add --miri to replay them under Miri
+  hostile --record   Arm the defects and merge what they find into
+                     ring/corpus.txt. This is how its entries were produced
+  hostile --base <s> The seed the episodes derive from, for any of the forms
+                     above. The default is the tree's own; a nightly varies it
+                     so successive nights cover new seed space, and every
+                     report names the seed it used
+
+  entries [n]        Generate submission entries by their structure — a real
+                     opcode with a wrong flag, a live set id with an index one
+                     past the set, a length one byte past the arena — and
+                     require three oracles to hold: the envelope is refused
+                     with the code R04 names, an id is never reissued, and a
+                     resolved buffer is inside its own set
+  entries --coverage What share of the entry-validation path the committed
+                     corpus covers, function by function, out of the same
+                     instrumentation `coverage` reports from. The number
+                     claims/0009 publishes
+  entries --record   Draw with the per-case coverage signal on, keep what
+                     reaches something new, minimise, and write
+                     ring/entries-corpus.txt. The one build with feedback in it
+  entries --corpus   Replay every case in ring/entries-corpus.txt and require
+                     each to be clean
+  entries --mutate   Arm the three defects, one per oracle, and require each to
+                     be found by the oracle it breaks and by no other
+  entries --base <s> The seed the episodes derive from, for any of the forms
+                     above
 
   snapshot           A long run that goes wrong in simulated minute 40,
                      re-entered at minute 39 from a snapshot written while it
@@ -792,13 +1117,35 @@ fn components() -> Result<Vec<PathBuf>, String> {
 /// address the linker actually used.
 const INIT_TEXT: u64 = 0x0040_0000;
 
-/// How large a component's image may be.
+/// How large a component's image may be, by the shape the frame builds it in.
 ///
-/// One page, because the frame maps one page of text for it. A component that
-/// outgrows this needs a loader that maps as many pages as its headers ask for,
-/// which is E5 and a real ELF loader; until then the bound is real and the
-/// build says so rather than the boot.
+/// **Two numbers, and the pair is the honest statement.** One page is what
+/// `kernel::process::prepare` and `prepare_runtime` map, and every component
+/// they build is one page of text; a *driver* is built by `prepare_driver`,
+/// which reserves `kernel::process::TEXT_PAGES` — sixteen — and RFC 0047
+/// argues the size. A single constant would have to be the larger of the two,
+/// and would then stop refusing a `store` that had quietly grown past what the
+/// frame maps for it.
+///
+/// It is still not a loader. Neither shape reads a component's headers; both
+/// copy a flat image to a fixed address and jump to its first byte, and the
+/// difference is only how many pages the frame reserved. E5 is where the
+/// headers are read and where both of these stop existing.
+/// Unit: bytes.
+const IMAGE_MAX: &[(&str, u64)] = &[("virtio-blk", 16 * 4096)];
+
+/// What a component whose shape [`IMAGE_MAX`] does not name may be.
+/// Unit: bytes.
 const INIT_MAX: u64 = 4096;
+
+/// The bound for one component, by directory name.
+///
+/// The name and not the package, because the name is what the manifest, the
+/// directory and the frame's own `Record::label` all agree on.
+/// Unit: bytes.
+fn image_max(dir: &str) -> u64 {
+    IMAGE_MAX.iter().find_map(|(name, bytes)| (*name == dir).then_some(*bytes)).unwrap_or(INIT_MAX)
+}
 
 /// Build `user/init` into a flat image and check that it is one.
 ///
@@ -1075,12 +1422,15 @@ fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
     if bytes == 0 {
         return Err(format!("the {package} image is empty: the linker discarded everything"));
     }
-    if bytes > INIT_MAX {
+    let most = image_max(name);
+    if bytes > most {
         return Err(format!(
-            "the {package} image is {bytes} bytes and the frame maps one page ({INIT_MAX}) for \
-             it.\n\n\
-             A component that outgrows a page needs a loader that reads its headers, \n\
-             which is E5. Until then this is a real bound."
+            "the {package} image is {bytes} bytes and the frame maps {most} for it.\n\n\
+             A component that outgrows what its shape reserves needs a loader that reads\n\
+             its headers, which is E5. Until then this is a real bound, and widening it\n\
+             means widening `kernel::process`'s own reservation in the same diff: the two\n\
+             numbers are one number, and `IMAGE_MAX` in xtask says which shape it belongs\n\
+             to."
         ));
     }
 
@@ -1688,6 +2038,21 @@ const DEFECTS: &[&str] = &[
     // between them is one property under test and four decorations. This one
     // trips a different check — RFC 0042.
     "mutate-silent-reset",
+    // The ring's three, one per property `E1-P04`'s exit names, and they are
+    // three for RFC 0042's arithmetic rather than for thoroughness: a
+    // hostile-peer fuzzer with one defect behind it demonstrates that one of
+    // *no panic, no memory unsafety, no hang* can fail and says nothing about
+    // the other two. RFC 0046.
+    "mutate-believed-header",
+    "mutate-trusted-slot",
+    "mutate-unbounded-drain",
+    // And E1-P05's three, one per oracle the entry fuzzer has, by the same
+    // arithmetic one task later: the envelope, the ledger and the reach. RFC
+    // 0048, and `cargo xtask entries --mutate` requires each to be found by its
+    // own oracle and by no other.
+    "mutate-ignored-flag",
+    "mutate-reusable-slot",
+    "mutate-lenient-index",
 ];
 
 /// The seed every reproduction run uses.
@@ -1947,17 +2312,36 @@ fn sim_scenarios() -> Result<Vec<String>, String> {
 /// opposite of the usual failure, where a gap quietly stops being true and the
 /// document keeps describing it.
 ///
-/// One entry today, and it is RFC 0033's own reversal condition: *grep for
-/// `Driver::execute` and see which crate calls it*. While the frame calls it,
-/// the component the datapath runs on is not a scheduled component, so the thing
-/// `cargo xtask component` kills at boot is a place's occupant that serves
-/// nobody — and *under sustained load* is a sentence only the simulator can
-/// currently make true. RFC 0041 states it in full.
-const CHAOS_GAP: &[(&str, &str, &str)] = &[(
+/// One entry, and it is **narrower than it was**, which is the mechanism
+/// working rather than the gap closing on its own.
+///
+/// It used to be RFC 0033's reversal condition — *grep for `Driver::execute`
+/// and see which crate calls it* — and while the frame called it, the code the
+/// datapath ran on was not a scheduled component at all. RFC 0047 ended that:
+/// the driver serves its client from ring 3, on a core of its own, out of its
+/// own polling loop, and `cargo xtask lint-datapath` now refuses a frame that
+/// names the type. What that closed is *the datapath is served by a scheduled
+/// component*.
+///
+/// What it did not close is the sentence beside it, and the two are easy to
+/// read as one. `kernel/src/component.rs` builds a **place** for this manifest
+/// on every boot — an account, needs checked handle by handle, an endpoint
+/// clients hold, a restart policy — and never hands its occupant a core;
+/// `kernel/src/blk.rs` hands a core to an instance that is in no place. So the
+/// occupant a boot can kill is still not the occupant that serves a client's
+/// load, and *under sustained load* is still a sentence only the simulator
+/// makes true. The needle is the call that stands a driver up outside a place,
+/// and it goes when a supervisor spawns and schedules in one act — which is
+/// E1-B05's remaining half and RFC 0008's *restart is the supervisor's*.
+/// RFC 0041 states the shape of the gap; RFC 0047 states what is left of it.
+const CHAOS_GAP: &[Gap] = &[(
     "kernel/src/blk.rs",
-    "driver.execute(",
-    "the frame still calls the driver's service loop, so the component a boot \
-     kills is not the component that serves the datapath",
+    "prepare_driver(",
+    "the driver is scheduled outside the place its manifest is spawned into, so \
+     the occupant a boot can kill is not the occupant serving the datapath",
+    "TODO.md E1-B02, E1-B08 and E1-P06; docs/rfc/0041's gap section and its closing \
+     condition; docs/rfc/0047's *Foreclosed*; sim/src/chaos.rs's module comment; \
+     claims/0006-driver-restart-latency.toml's [workload] and [hardware] notes",
 )];
 
 /// Kill every component under load, twice over, and judge the pair.
@@ -2074,20 +2458,20 @@ fn chaos() -> Result<(), String> {
     );
 
     println!("\ndeclared gap  what this kills that a boot cannot, and why it is still true:");
-    for (file, needle, why) in CHAOS_GAP {
-        let path = root().join(file);
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("reading {file}: {e}\n\nThe declared gap names a file that is not there, which is a declaration nobody can check."))?;
-        if !text.contains(needle) {
-            return Err(format!(
-                "`{needle}` is gone from {file}.\n\n\
-                 That is the declared gap closing, which is good news and a red build on\n\
-                 purpose: the reason `cargo xtask chaos` is the only half of E1-P06 that can\n\
-                 kill a component under load has stopped being true, so RFC 0041's gap\n\
-                 section and `CHAOS_GAP` in xtask both describe a tree that no longer\n\
-                 exists. Update both, and move the kill into the boot."
-            ));
-        }
+    // The same reading `lint-owed` performs, from the same helper, with
+    // this verb's own guidance appended: the two gaps are one discipline used
+    // twice and a second copy of the loop would be a second place for it to rot,
+    // but what a reader should *do* about each of them is different.
+    gap_holds("CHAOS_GAP", CHAOS_GAP).map_err(|why| {
+        format!(
+            "{why}\n\n\
+             The reason `cargo xtask chaos` is the only half of E1-P06 that can kill a\n\
+             component under load has stopped being true, so RFC 0041's gap section and\n\
+             RFC 0047's now describe a tree that no longer exists. Move the kill into the\n\
+             boot."
+        )
+    })?;
+    for (file, _, why, _) in CHAOS_GAP {
         println!("  {file:<24} {why}");
     }
 
@@ -2283,14 +2667,25 @@ const SIM_DEPLOYMENT: &str = "deployment";
 ///
 /// # What is in it, and who removes it
 ///
-/// `virtio-blk`. The frame instantiates one place from the first module it is
-/// handed (`kernel/src/component.rs`, `*modules.first()`), and RFC 0008 puts
-/// spawning in a supervisor rather than in the frame. **E1-B08** lands the
-/// runtime that supervisor needs — safe channel adoption and a scheduler — and
-/// E1-B05's own note records that the wall is the same one. When a boot spawns
-/// the whole module set, this list is empty and the entry's removal is the
-/// evidence. RFC 0036.
-const JOIN_GAP: &[&str] = &["virtio-blk"];
+/// **Nothing, and the emptiness is the evidence.** It held `virtio-blk` for as
+/// long as the frame instantiated one place from the first module it was handed
+/// — `kernel/src/component.rs`, `*modules.first()` — and RFC 0036 said in its
+/// own reversal section that when a boot spawns the whole module set this list
+/// is empty and the entry's removal is what says so. RFC 0044 is that change:
+/// the frame fills a place per component file, each staked with an account its
+/// own manifest sized, and the boot log now carries a spawn line with a content
+/// hash for every record the build produced.
+///
+/// An empty list is not a weaker check than a full one. [`hold_the_gap`]
+/// requires **equality**, so a component the simulator runs that this boot does
+/// not spawn is red with nothing to compare it against — which is the direction
+/// that catches a new component file, and the one that was live in the tree when
+/// this constant was written. What an empty list can no longer exercise is the
+/// *other* direction, a stale entry, because there is no entry left to go stale;
+/// that half is held by a test at the foot of this file against a list it
+/// supplies itself, and that test says so rather than implying this constant
+/// still covers it.
+const JOIN_GAP: &[&str] = &[];
 
 /// The two halves of `boot-to-workload`, over one component set.
 ///
@@ -2401,11 +2796,12 @@ fn sim_join() -> Result<(), String> {
     // missing — and it is the direction that was live in the tree rather than
     // hypothetical. `spawned ⊆ modelled` above is satisfied by a boot that
     // instantiates one module while the simulator drives four, which is what
-    // this tree does today: `kernel/src/component.rs` builds one place from
-    // `*modules.first()`. So the difference is computed, printed, and required
-    // to be *exactly* the gap RFC 0036 declares — a set and not a bound, so
-    // that a new component widening it goes red, and so does a supervisor that
-    // closes it and leaves the entry behind. R04.
+    // this tree did until RFC 0044: `kernel/src/component.rs` built one place
+    // from `*modules.first()`. It builds one per component file now, so the
+    // difference is empty — and it is still computed, printed, and required to
+    // be *exactly* the gap `JOIN_GAP` declares, because a set and not a bound is
+    // what makes a new component file that nobody spawns go red rather than pass
+    // unmentioned. R04.
     let unspawned = unspawned(&modelled, &spawned);
     for name in &unspawned {
         println!("  not spawned        {name}");
@@ -2414,8 +2810,11 @@ fn sim_join() -> Result<(), String> {
 
     println!(
         "\njoin: ok — {} of the {} component(s) the simulator ran were spawned by this boot, and\n\
-         \x20     the {} that were not are the gap this tree declares: {}. RFC 0036 says what\n\
-         \x20     closes it, and until it is closed no artefact here claims the boot ran them.\n\
+         \x20     the {} that were not are the gap this tree declares: {}. RFC 0036 required\n\
+         \x20     that difference to be a declared set and RFC 0044 emptied it, so the emptiness\n\
+         \x20     is the evidence rather than a relaxed check: this is equality in both\n\
+         \x20     directions, and a component file nobody spawns is red with nothing to\n\
+         \x20     compare it against.\n\
          \x20     `cargo xtask trace --hash` hashes the boot and `cargo xtask sim --hash \
          {SIM_DEPLOYMENT}`\n\
          \x20     hashes the workload. RFC 0035 states what the pair claims — and what it does\n\
@@ -4467,64 +4866,1064 @@ fn timer(seconds: Option<&str>) -> Result<(), String> {
     }
 }
 
-fn test() -> Result<(), String> {
-    // Host tests exercise the ring and the substrate under the host memory
-    // model. That is necessary and not sufficient — see lint output.
-    // The whole workspace except the kernel, which cannot be built for the
-    // host at all. Naming crates individually is how `f-bench` and `f-init`
-    // came to have tests that nothing ran: the list stopped matching the
-    // workspace the moment a crate was added, and silently.
-    sh("cargo", &["test", "--workspace", "--exclude", "f-kernel"])?;
+/// The AArch64 target every crate that reaches the machine is compiled for.
+///
+/// A bare-metal target rather than a hosted one, and the choice is not a
+/// convenience: it is the AArch64 target `rust-toolchain.toml` pins, so it is
+/// the only one guaranteed to be installed, and it is also the honest one —
+/// nothing in this workspace that runs *on the machine* has a `std` under it.
+const AARCH64_TARGET: &str = "aarch64-unknown-none";
 
-    // The half of the AArch64 job that does not need an AArch64 machine.
-    //
-    // CI runs the tests on an arm runner, which is where the ordering means
-    // anything and which nothing local substitutes for. But most of what that
-    // job has ever caught is not an ordering bug at all: it is code that does
-    // not *compile* off x86-64, and a compile is a compile on any host. This
-    // check would have caught the one that got through — a component calling
-    // through a door whose one instruction is `#[cfg(target_arch = "x86_64")]`
-    // — and it costs two seconds.
-    //
-    // A bare-metal target rather than a hosted one, because it is the AArch64
-    // target `rust-toolchain.toml` pins and so the only one guaranteed to be
-    // installed. The crates checked are the ones the arm job tests, and a
-    // component crate belongs in that list for exactly the reason above: its
-    // architecture-specific half is behind a `cfg`, and a `cfg` that stopped
-    // covering everything is a compile error on the other target and nothing at
-    // all on this one.
-    //
-    // `f-sim` is deliberately absent, and its absence is not a portability gap:
-    // the target here is `aarch64-unknown-none`, which has no `std`, and the
-    // simulator is a host tool that reads a command line and writes a trace.
-    // Nothing in it is compiled into the system, so nothing in it can be wrong
-    // on a machine the system runs on.
-    sh(
-        "cargo",
-        &[
-            "check",
-            "-p",
-            "f-abi",
-            "-p",
-            "f-env",
-            "-p",
-            "f-ring",
-            "-p",
-            "f-init",
-            "-p",
-            "f-store",
-            "-p",
-            "f-virtio-blk",
-            "--target",
-            "aarch64-unknown-none",
-        ],
-    )?;
+/// One workspace member, and what each architecture is asked to do with it.
+///
+/// # Why this is an exception table rather than a list of crates
+///
+/// It was a list of crate names, twice, and both times it stopped matching the
+/// workspace without saying so. The host list named crates individually until
+/// `f-bench` and `f-init` turned out to have tests nothing ran; the AArch64
+/// cross-check named six crates beside a workspace of ten, and a crate added to
+/// that workspace joined neither side of it. A list written *beside* the thing
+/// it describes is a habit rather than a check — correct on the day it is
+/// written, silently wrong afterwards, and the silence is the whole defect.
+///
+/// So the workspace is the source of truth and this is the exception table. A
+/// member with no row here is a hard failure rather than a skip, which is what
+/// makes a new crate architecture-checked **by default** and makes leaving one
+/// out cost a sentence rather than nothing. RFC 0045.
+#[derive(Debug)]
+struct Portability {
+    /// The package name, spelled the way the crate's own `Cargo.toml` spells it.
+    krate: &'static str,
+    /// Why this crate's tests do not run on both architectures, or `None` when
+    /// they do. `cargo xtask test-host` is run on x86-64 *and* on the arm
+    /// runner, and this field is the only thing that may keep a crate off
+    /// either of them — which is what "no test is skipped on AArch64 without a
+    /// recorded reason" means mechanically.
+    host: Option<&'static str>,
+    /// Why this crate is not compiled for [`AARCH64_TARGET`], or `None` when it
+    /// is.
+    bare: Option<&'static str>,
+}
+
+/// Every workspace member, and its two answers.
+///
+/// A row per member, checked against `Cargo.toml`'s `members` in both
+/// directions by [`classify`]: a member with no row fails, and a row naming no
+/// member fails. The second direction matters as much as the first — a crate
+/// deleted from the workspace leaves an exclusion behind, and an exclusion
+/// nobody can trace to a crate is how the *next* crate inherits a reason that
+/// was written about something else.
+const PORTABILITY: &[Portability] = &[
+    Portability { krate: "f-abi", host: None, bare: None },
+    Portability { krate: "f-env", host: None, bare: None },
+    Portability { krate: "f-ring", host: None, bare: None },
+    Portability {
+        krate: "f-kernel",
+        host: Some(
+            "the frame has no host harness at all. It is `no_std` with its own entry point, \
+             its own panic handler and a linker script, so `cargo test` has nowhere to put a \
+             test binary — which is why the host run excludes it rather than failing on it. \
+             What the frame is checked by instead is the boot suite: `run`, `orders`, `user`, \
+             `cap`, `iommu`, `blk`, `runtime`, `mutate` and `panic`, every one of them in the \
+             gate. *Reversal:* none that is only about testing — a frame with a host harness \
+             would be a different frame.",
+        ),
+        bare: Some(
+            "the frame is x86-64 today. `kernel/src/arch/` is one architecture — the GDT, the \
+             IDT, the local APIC, `syscall`/`sysret` — and `KERNEL_TARGET` says so. \
+             *Reversal:* an AArch64 frame, which is the same reversal `user/init/src/lib.rs` \
+             states for `f_abi::door::call`: the day that function has a second \
+             implementation this row loses both its reasons at once, and the boot suite \
+             acquires a second runner rather than a second excuse.",
+        ),
+    },
+    Portability { krate: "f-init", host: None, bare: None },
+    Portability { krate: "f-store", host: None, bare: None },
+    Portability { krate: "f-virtio-blk", host: None, bare: None },
+    Portability {
+        krate: "f-bench",
+        host: None,
+        bare: Some(
+            "a host tool. It records distributions to a file and formats them for the claims \
+             registry, so it is `std` from its first line, and `aarch64-unknown-none` has no \
+             `std`. Nothing in it is compiled into the system, so nothing in it can be wrong \
+             on a machine the system runs on — and its tests do run on the arm runner, which \
+             is the half of the question that is about this crate. *Reversal:* a harness that \
+             runs on the machine under test rather than beside it, which is what E0-P18's \
+             hardware boot would need.",
+        ),
+    },
+    Portability {
+        krate: "f-sim",
+        host: None,
+        bare: Some(
+            "a host tool, and `sim/Cargo.toml` states this in the crate itself: the simulator \
+             reads a command line and writes a trace, under `std`. Its absence here is not a \
+             portability gap for the same reason `f-bench`'s is not — it is not compiled into \
+             the system. *Reversal:* a simulator that runs beside the frame on the machine, \
+             which RFC 0032 explicitly did not choose.",
+        ),
+    },
+    Portability {
+        krate: "xtask",
+        host: None,
+        bare: Some(
+            "the build orchestrator. It runs on the machine that *drives* a build and never \
+             on the machine the build is for, it spawns processes and reads the filesystem, \
+             and both of those are `std`. Its tests run on both runners like every other \
+             host crate's. *Reversal:* none foreseeable; a bare-metal build driver is not a \
+             thing this tree wants.",
+        ),
+    },
+];
+
+/// The member *paths* in a workspace manifest.
+///
+/// # Why the key is matched on a line and not on a substring
+///
+/// The first version of this read from the first occurrence of the substring
+/// `members`, and cargo has a key whose name ends in it: `default-members`. A
+/// manifest that grew one *above* `members` would have had its default set read
+/// as the whole set — which is a shorter list, silently, and a shorter list here
+/// is fewer crates checked on AArch64 with nothing going red. That is the exact
+/// failure this whole change exists to remove, reintroduced by the reader for
+/// it, so it is matched as a key at the start of a line and there is a test
+/// below feeding it both keys in the wrong order.
+///
+/// The same caveat every other reader in this file carries: this is not a TOML
+/// parser. It reads the shape `Cargo.toml`'s `members` is written in — a
+/// bracketed list of quoted paths — and the day the workspace needs more than
+/// that it needs a parser rather than a longer version of this.
+fn member_paths(text: &str) -> Result<Vec<String>, String> {
+    let mut rest = None;
+    let mut offset = 0usize;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if let Some(after) = trimmed.strip_prefix("members")
+            && after.trim_start().starts_with('=')
+        {
+            rest = Some(offset + (line.len() - trimmed.len()));
+            break;
+        }
+        offset += line.len() + 1;
+    }
+    let at = rest.ok_or("the workspace manifest has no `members = [...]` array in it")?;
+    let list = text[at..]
+        .split_once('[')
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(list, _)| list)
+        .ok_or("the workspace manifest's `members` is not a `[...]` list")?;
+
+    // The quoted halves of a `"a", "b"` list: odd indices once split on the
+    // quote character.
+    let paths: Vec<String> = list
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect();
+    if paths.is_empty() {
+        return Err("the workspace manifest's `members` list is empty".into());
+    }
+    Ok(paths)
+}
+
+/// Every `members` entry in the workspace manifest, as package names.
+///
+/// Read from the workspace rather than restated beside it, because restating it
+/// is the defect [`PORTABILITY`] exists to remove. The path in `members` is not
+/// the package name — `user/init` is `f-init` — so each member's own manifest
+/// is what supplies the name, which also means a crate renamed in one place and
+/// not the other fails here rather than becoming an unclassified member with a
+/// plausible-looking row.
+fn workspace_members() -> Result<Vec<String>, String> {
+    let manifest = root().join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .map_err(|e| format!("reading the workspace manifest: {e}"))?;
+
+    let mut names = Vec::new();
+    for path in member_paths(&text)? {
+        let member = root().join(&path).join("Cargo.toml");
+        let text = std::fs::read_to_string(&member)
+            .map_err(|e| format!("the workspace names `{path}` and reading its manifest: {e}"))?;
+        let name = toml_table_field(&text, "package", "name")
+            .ok_or_else(|| format!("{path}/Cargo.toml has no `name` under `[package]`"))?;
+        names.push(name);
+    }
+    Ok(names)
+}
+
+/// The workspace and [`PORTABILITY`] checked against each other, in both
+/// directions.
+///
+/// # Errors
+///
+/// A member with no row, or a row naming no member. Both are the same failure
+/// seen from two sides: the table and the workspace have stopped describing one
+/// set of crates, and every architecture check downstream is then reporting on
+/// a set nobody chose.
+fn classify<'a>(
+    members: &[String],
+    table: &'a [Portability],
+) -> Result<Vec<&'a Portability>, String> {
+    if members.is_empty() {
+        return Err("the workspace manifest yielded no members, so there is nothing to check. \
+                    An empty list here would make every architecture check trivially green, \
+                    which is why it is refused rather than tolerated."
+            .into());
+    }
+
+    let mut rows: Vec<&Portability> = Vec::new();
+    let mut unclassified: Vec<&str> = Vec::new();
+    for name in members {
+        match table.iter().find(|row| row.krate == name.as_str()) {
+            Some(row) => rows.push(row),
+            None => unclassified.push(name.as_str()),
+        }
+    }
+    let stale: Vec<&str> = table
+        .iter()
+        .map(|row| row.krate)
+        .filter(|krate| !members.iter().any(|name| name == krate))
+        .collect();
+
+    if unclassified.is_empty() && stale.is_empty() {
+        return Ok(rows);
+    }
+    Err(format!(
+        "the workspace and the portability table are not about the same set of crates.\n\n\
+         in the workspace and not in the table: {}\n\
+         in the table and not in the workspace: {}\n\n\
+         `PORTABILITY` in xtask/src/main.rs is what decides which crates are tested on both\n\
+         architectures and which are compiled for {AARCH64_TARGET}. A member with no row is\n\
+         refused rather than skipped, and that is the whole point of the table: a crate added\n\
+         to this workspace is checked on AArch64 by default, and leaving it out costs a\n\
+         sentence saying why and what would reverse it. A row naming no crate is the same\n\
+         failure from the other side — an exclusion the next crate could inherit a reason\n\
+         from. RFC 0045.",
+        if unclassified.is_empty() { "none".to_string() } else { unclassified.join(", ") },
+        if stale.is_empty() { "none".to_string() } else { stale.join(", ") },
+    ))
+}
+
+/// Print what the table says, so a reader of a CI log sees the exclusions
+/// rather than only the crates that ran.
+///
+/// An exclusion nobody reads is an exclusion nobody argues with, and the reason
+/// this prints on every run — green as well as red — is that the reasons are
+/// the deliverable. A list of what ran says nothing about what did not.
+fn portability_report(rows: &[&Portability], which: fn(&Portability) -> Option<&'static str>) {
+    let excluded: Vec<&&Portability> = rows.iter().filter(|row| which(row).is_some()).collect();
+    if excluded.is_empty() {
+        println!("  every workspace crate is included; nothing is excluded");
+        return;
+    }
+    for row in excluded {
+        let Some(reason) = which(row) else { continue };
+        println!("  excluded: {}\n    {reason}", row.krate);
+    }
+}
+
+/// The host suite, on whatever architecture this is running on.
+///
+/// # Why this is a command rather than a line of YAML
+///
+/// Because it is run on two machines and they have to run the same thing. The
+/// gate named four crates on both runners while `cargo xtask test` ran the
+/// whole workspace, so `f-store`, `f-virtio-blk`, `f-sim`, `f-bench` and
+/// `xtask` had tests that ran on a laptop and on no runner at all — and on the
+/// arm runner two of those crates were never *compiled*, which is the failure
+/// this file already records happening once with `f-bench` and `f-init`. One
+/// command, derived from the workspace, is what stops the two lists from
+/// drifting: there is only one list now.
+///
+/// It prints the architecture it ran on, because that is the fact a reader of
+/// the log wants and the one thing the command cannot assert about itself.
+fn test_host() -> Result<(), String> {
+    let rows = classify(&workspace_members()?, PORTABILITY)?;
+
+    println!("host tests on {} — the whole workspace except:", std::env::consts::ARCH);
+    portability_report(&rows, |row| row.host);
+    println!();
+
+    let mut args: Vec<&str> = vec!["test", "--workspace"];
+    let mut running = 0usize;
+    for row in &rows {
+        if row.host.is_some() {
+            args.push("--exclude");
+            args.push(row.krate);
+        } else {
+            running += 1;
+        }
+    }
+    // The one way this command could be green while nothing was checked: every
+    // crate excluded is a `cargo test --workspace` with nothing left in it,
+    // which runs no tests and exits zero. Fail closed rather than report a pass
+    // over an empty set. R04.
+    if running == 0 {
+        return Err("every crate in the workspace is excluded from the host suite, so this \
+                    would run no tests and exit zero. A pass over an empty set is the one \
+                    result this command must not be able to produce."
+            .into());
+    }
+    sh("cargo", &args)
+}
+
+/// Compile every crate that reaches the machine for AArch64.
+///
+/// # What this is and is not
+///
+/// It is the half of the AArch64 job that does not need an AArch64 machine. CI
+/// runs the tests on an arm runner, which is where the ordering means anything
+/// and which nothing local substitutes for. But most of what that job has ever
+/// caught is not an ordering bug at all: it is code that does not *compile* off
+/// x86-64, and a compile is a compile on any host. This is what would have
+/// caught the one that got through — a component calling through a door whose
+/// one instruction is `#[cfg(target_arch = "x86_64")]` — and it costs seconds.
+///
+/// A component crate belongs in it for exactly that reason: its
+/// architecture-specific half is behind a `cfg`, and a `cfg` that stopped
+/// covering everything is a compile error on the other target and nothing at
+/// all on this one.
+fn cross_check() -> Result<(), String> {
+    let rows = classify(&workspace_members()?, PORTABILITY)?;
+
+    println!("compiling for {AARCH64_TARGET} — the whole workspace except:");
+    portability_report(&rows, |row| row.bare);
+    println!();
+
+    let mut args: Vec<&str> = vec!["check"];
+    for row in &rows {
+        if row.bare.is_none() {
+            args.push("-p");
+            args.push(row.krate);
+        }
+    }
+    if args.len() == 1 {
+        return Err("every crate in the workspace is excluded from the AArch64 build, so this \
+                    check would pass by having nothing to do. `cargo check` with no `-p` would \
+                    then build the whole workspace for a bare-metal target and fail for an \
+                    unrelated reason, which is worse than refusing here."
+            .into());
+    }
+    args.push("--target");
+    args.push(AARCH64_TARGET);
+    sh("cargo", &args)
+}
+
+/// What would make the architecture checks green while the property was false.
+///
+/// Three inputs, and each is a way this could have been a habit rather than a
+/// check: a crate added to the workspace and to neither list, an exclusion left
+/// behind by a crate that is gone, and a manifest reader that quietly returns
+/// less than the workspace holds. All three are the same failure — the table
+/// and the workspace stop being about one set of crates — and all three are red
+/// here rather than green.
+#[cfg(test)]
+mod portability_tests {
+    use super::{PORTABILITY, Portability, classify, member_paths, workspace_members};
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    #[test]
+    fn default_members_is_not_read_as_members() {
+        // The reader's own version of the bug it exists to remove. `cargo` has
+        // a key ending in `members`, and a substring match takes the first one
+        // — a shorter list, quietly, and a shorter list here is fewer crates
+        // checked on AArch64 with nothing going red.
+        let manifest = "\
+[workspace]
+resolver = \"3\"
+default-members = [\"abi\"]
+members = [\"abi\", \"env\", \"user/init\"]
+";
+        assert_eq!(member_paths(manifest).unwrap(), names(&["abi", "env", "user/init"]));
+    }
+
+    #[test]
+    fn a_members_list_spanning_lines_is_read_whole() {
+        // The shape a workspace takes the moment it outgrows one line, which is
+        // the next edit anyone makes to this file.
+        let manifest = "\
+[workspace]
+members = [
+    \"abi\",
+    \"user/init\",
+]
+";
+        assert_eq!(member_paths(manifest).unwrap(), names(&["abi", "user/init"]));
+    }
+
+    #[test]
+    fn a_manifest_with_no_members_is_refused_rather_than_read_as_empty() {
+        // Fail closed, R04: an empty answer here makes every architecture check
+        // trivially green, which is the one outcome that must not be reachable
+        // by a parser going wrong.
+        assert!(member_paths("[workspace]\nresolver = \"3\"\n").is_err());
+        assert!(member_paths("[workspace]\nmembers = []\n").is_err());
+    }
+
+    #[test]
+    fn the_workspace_this_tree_has_is_the_one_the_table_describes() {
+        // The green case, and it is here so the red ones below are known to be
+        // red for their own reason rather than because the shape always fails.
+        let members = workspace_members().expect("the workspace manifest is readable");
+        classify(&members, PORTABILITY).expect("every member has a row and every row a member");
+    }
+
+    #[test]
+    fn a_member_is_named_by_its_package_and_not_by_its_path() {
+        // `user/init` is `f-init`. A reader that took the path would produce a
+        // member no row matches and a row no member matches — one edit, two
+        // failures, neither of them the real one.
+        let members = workspace_members().expect("the workspace manifest is readable");
+        assert!(members.iter().any(|name| name == "f-init"), "{members:?}");
+        assert!(members.iter().any(|name| name == "f-kernel"), "{members:?}");
+        assert!(members.iter().any(|name| name == "xtask"), "{members:?}");
+        assert!(!members.iter().any(|name| name.contains('/')), "a path reached the list");
+    }
+
+    #[test]
+    fn a_crate_added_to_the_workspace_is_refused_rather_than_skipped() {
+        // The whole point of the table. Before this, a crate added to the
+        // workspace joined neither the host list nor the AArch64 one and
+        // nothing said so.
+        let mut members = workspace_members().expect("the workspace manifest is readable");
+        members.push("f-newcomer".to_string());
+        let refusal = classify(&members, PORTABILITY).expect_err("an unclassified member passed");
+        assert!(refusal.contains("f-newcomer"), "the refusal must name the crate: {refusal}");
+    }
+
+    #[test]
+    fn an_exclusion_that_names_no_crate_is_refused() {
+        // The other direction, which is the one a deletion breaks: a reason
+        // written about a crate that is gone is a reason the next crate with
+        // that name inherits without anyone reading it.
+        let table = &[
+            Portability { krate: "f-abi", host: None, bare: None },
+            Portability { krate: "f-departed", host: None, bare: Some("gone") },
+        ];
+        let refusal = classify(&names(&["f-abi"]), table).expect_err("a stale exclusion passed");
+        assert!(refusal.contains("f-departed"), "the refusal must name the row: {refusal}");
+    }
+
+    #[test]
+    fn a_manifest_reader_that_returns_less_than_the_workspace_is_refused() {
+        // The failure mode that would otherwise be invisible: parse fewer
+        // members, check fewer crates, stay green. It arrives as a table full
+        // of rows naming nothing, which the direction above already refuses.
+        let refusal =
+            classify(&names(&["f-abi"]), PORTABILITY).expect_err("a truncated member list passed");
+        assert!(refusal.contains("f-kernel"), "{refusal}");
+        let empty = classify(&[], PORTABILITY).expect_err("an empty member list passed");
+        assert!(empty.contains("nothing to check"), "{empty}");
+    }
+
+    #[test]
+    fn every_exclusion_states_what_would_reverse_it() {
+        // A reason with no reversal is a preference wearing a decision's
+        // clothes — the same sentence RFC 0000's last section exists for. An
+        // exclusion is a small RFC, so it owes the same thing.
+        for row in PORTABILITY {
+            for reason in [row.host, row.bare].into_iter().flatten() {
+                assert!(
+                    reason.contains("Reversal:"),
+                    "{} is excluded without saying what would reverse it: {reason}",
+                    row.krate
+                );
+            }
+        }
+    }
+}
+
+/// A test that runs on one architecture and not the other, with the reason
+/// recorded.
+///
+/// Path prefix, then why. Empty today, and that is a statement rather than an
+/// oversight: no test in this workspace is architecture-gated. An entry here
+/// owes what an exclusion in [`PORTABILITY`] owes — a reason and a *Reversal*,
+/// checked below — because a test that runs on half the runners is a claim
+/// about half the machines, and E1-P11's exit is that nothing is skipped on
+/// AArch64 without a recorded reason.
+const ARCH_TEST_ALLOW: &[(&str, &str)] = &[];
+
+/// Every `mod NAME;` a file declares, and whether an architecture gate stands
+/// in front of it.
+///
+/// The declaration is what carries the gate — `#[cfg(target_arch = "x86_64")]
+/// pub mod component;` in `user/init/src/lib.rs` is the shape — so the file it
+/// names is compiled on one architecture and not on the other, and every
+/// `#[test]` inside it is skipped on the other one without the test itself
+/// saying anything at all. The declaration is the only place that gate can be
+/// read, because the file it names does not carry it.
+///
+/// A file-scope `#![cfg(target_arch = …)]` gates the declarations below it the
+/// same way, and it is tracked separately because it is not a property of the
+/// next item: it does not lift when that item is passed. Reading it as an item
+/// gate loses it at the first line of code after it, which is the shape review
+/// found green here once.
+fn file_modules(text: &str) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let mut gated = false;
+    let mut file_gated = false;
+    let mut carry = Carry::default();
+    for line in text.lines() {
+        let code = strip_to_code(line, &mut carry);
+        let trimmed = code.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("#![") {
+            // An inner attribute belongs to the enclosing scope, not to the
+            // item after it, so it is never cleared below. A `#![cfg]` written
+            // inside an inline `mod` therefore over-reaches to the rest of the
+            // file; that direction is deliberate. Over-reporting is argued with
+            // in review and under-reporting is not noticed at all, and this
+            // check's whole purpose is that a skipped test be said out loud.
+            file_gated |= trimmed.contains("target_arch");
+            continue;
+        }
+        if trimmed.starts_with("#[") {
+            // An attribute keeps whatever gate is already pending rather than
+            // replacing it: an item wearing both `#[cfg(target_arch)]` and
+            // `#[cfg(feature)]` is gated by both, and reading only the one
+            // nearest the item would drop the gate that matters here.
+            gated |= trimmed.contains("target_arch");
+            continue;
+        }
+        if let Some(rest) = trimmed
+            .strip_prefix("pub mod ")
+            .or_else(|| trimmed.strip_prefix("mod "))
+            .or_else(|| trimmed.strip_prefix("pub(crate) mod "))
+            && let Some(name) = rest.strip_suffix(';')
+        {
+            out.push((name.trim().to_string(), gated || file_gated));
+        }
+        gated = false;
+    }
+    out
+}
+
+/// A `#[test]` compiled on one architecture and not the other, found in the
+/// file it is written in.
+///
+/// # What this reads, and what it cannot
+///
+/// It reads the gate as a *lexical* property: an architecture `cfg` on a test
+/// function, on any block the test is written inside, or on the file itself as
+/// an inner `#![cfg(target_arch = …)]`. Three shapes, and the third is the one
+/// that matters most rather than least: an integration test file under `tests/`
+/// is named by no `mod` declaration anywhere, so the module half of
+/// [`lint_arch_tests`] can never reach it, and a file-scope attribute is the
+/// only way such a file can be gated at all. `ring/tests/litmus.rs` and its
+/// neighbours are exactly those files, and they are the ones CLAUDE.md's scar
+/// is about. Review found this check green over that input once; the fix is
+/// that a file gate is held apart from the item gate and is never cleared by
+/// the line of code that follows it.
+///
+/// It does not see a test a macro generates, a module reached through
+/// `#[path]`, or a test gated on a *feature* that is itself only ever enabled
+/// on one architecture. The last of those is worth naming rather than leaving
+/// implied: `user/store` and `user/virtio-blk` both write
+/// `all(target_arch = "x86_64", feature = "image")`, and a crate that wrote the
+/// feature alone would be gated by an architecture this reader cannot see. That
+/// is this check's declared limit rather than a defect in it, and it is the
+/// same kind of limit `JOIN_GAP` states: the honest move is to write the gap
+/// down, because a check that claims more than it reads is worse than one that
+/// says where it stops.
+fn arch_gated_tests(rel: &str, text: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    // The brace depths at which an architecture-gated block was opened. A stack
+    // rather than a flag, because a gated `mod` can contain an ungated one and
+    // the gate lifts when its own block closes rather than when the first inner
+    // block does. A flag here would clear the gate at the first `}` and every
+    // test after it in the same module would read as ungated.
+    let mut gates: Vec<usize> = Vec::new();
+    let mut depth = 0usize;
+    let mut gated = false;
+    // The file-scope gate, held apart from the item gate and never cleared. An
+    // inner attribute is a property of the scope, not of the next item, so the
+    // line of code after it must not consume it — and an integration test file
+    // has no other way to be gated, because nothing declares it with a `mod`.
+    let mut file_gated = false;
+    let mut is_test = false;
+    let mut carry = Carry::default();
+
+    for (n, line) in text.lines().enumerate() {
+        let code = strip_to_code(line, &mut carry);
+        let trimmed = code.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("#![") {
+            file_gated |= trimmed.contains("target_arch");
+            continue;
+        }
+        if trimmed.starts_with("#[") {
+            gated |= trimmed.contains("target_arch");
+            // `#[test]` and anything ending in `test]` alike. What matters is
+            // that the item below is a test, not which harness runs it —
+            // and `#[cfg(test)]`, which introduces a module rather than a test,
+            // is excluded by name.
+            is_test |= trimmed.ends_with("test]") && !trimmed.contains("cfg(test)");
+            continue;
+        }
+        if is_test && (gated || file_gated || !gates.is_empty()) {
+            findings.push(format!("  {rel}:{}  {trimmed}", n + 1));
+        }
+
+        let opens = trimmed.matches('{').count();
+        let closes = trimmed.matches('}').count();
+        if gated && opens > closes {
+            gates.push(depth);
+        }
+        depth = (depth + opens).saturating_sub(closes);
+        gates.retain(|at| *at < depth);
+        gated = false;
+        is_test = false;
+    }
+    findings
+}
+
+/// The file a `mod NAME;` in `parent` names, if there is one.
+///
+/// `dir/foo.rs` owns `dir/foo/NAME.rs`; a crate root or a `mod.rs` owns
+/// `dir/NAME.rs`. Both spellings of a directory module are tried, because both
+/// are in this tree. A declaration naming no file on disk is not an error here
+/// — it is an inline module, already handled by [`arch_gated_tests`], or a
+/// `#[path]` one, which this check declares it cannot see.
+fn module_file(parent: &Path, name: &str) -> Option<PathBuf> {
+    let dir = parent.parent()?;
+    let stem = parent.file_stem().and_then(|s| s.to_str())?;
+    let base =
+        if matches!(stem, "lib" | "main" | "mod") { dir.to_path_buf() } else { dir.join(stem) };
+    [base.join(format!("{name}.rs")), base.join(name).join("mod.rs")]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+}
+
+/// No test is skipped on AArch64 without a recorded reason.
+///
+/// # Why a source check rather than a count of what ran
+///
+/// The obvious check is to compare the tests the two runners collected. It
+/// cannot be written here. Nothing local can run an AArch64 test binary: the
+/// container carries `qemu-system-aarch64`, which would need a frame to boot
+/// and the frame is x86-64, and it carries no `qemu-user`, nothing in
+/// `binfmt_misc` and no `aarch64-unknown-linux-gnu` to build a hosted binary
+/// for. And a comparison of two CI logs is a check that lives in neither
+/// runner's job and fails in a third place. This reads the one thing that
+/// decides the answer — the gate in the source — and it runs everywhere,
+/// including on the laptop where the test is being written, which is the
+/// moment the gate is cheap to argue with.
+///
+/// It is the level below [`PORTABILITY`], and it exists because that table
+/// cannot see this. `cargo xtask test-host` runs the whole workspace on both
+/// runners and would keep saying so while a test inside an included crate
+/// quietly compiled on one of them: the job stays green, the test count on one
+/// runner is smaller, and nobody reads a test count.
+///
+/// # What would make this green while tests were being skipped
+///
+/// Four inputs, three of them refused and one declared. A test under an
+/// architecture-gated *item*, a test under an architecture-gated *block*, and a
+/// test in a file carrying `#![cfg(target_arch = …)]` are all refused rather
+/// than tolerated, and each has a case below. The third of those is here
+/// because review found this check green over it: an inner attribute is a
+/// property of the scope and not of the next item, and a reader that treats it
+/// as an item gate drops it at the first `use` below it. It is also the only
+/// gate an integration test file can carry, which made it the worst of the four
+/// to be blind to.
+///
+/// What is left is the limit [`arch_gated_tests`] declares and cannot close by
+/// reading text: a gate spelled as a *feature* that only one architecture ever
+/// enables is invisible to a reader of the source, and this is a reader of the
+/// source. Closing it means asking cargo to resolve features per target rather
+/// than scanning, and that is a different check.
+fn lint_arch_tests() -> Result<(), String> {
+    let sources = rust_sources()?;
+    let mut findings = Vec::new();
+
+    // The files a gated `mod NAME;` pulls in, and everything those pull in
+    // after that. A gate on a declaration reaches the whole subtree below it,
+    // so stopping at the first file would miss a test one module deeper — and
+    // one module deeper is where a test worth having usually is.
+    let mut gated_files: Vec<PathBuf> = Vec::new();
+    let mut queue: Vec<PathBuf> = Vec::new();
+    for path in &sources {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("reading {}: {e}", relative(path)))?;
+        for (name, gated) in file_modules(&text) {
+            if gated && let Some(child) = module_file(path, &name) {
+                queue.push(child);
+            }
+        }
+    }
+    while let Some(path) = queue.pop() {
+        if gated_files.contains(&path) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+        for (name, _) in file_modules(&text) {
+            if let Some(child) = module_file(&path, &name) {
+                queue.push(child);
+            }
+        }
+        gated_files.push(path);
+    }
+
+    for path in &gated_files {
+        let rel = relative(path);
+        if ARCH_TEST_ALLOW.iter().any(|(allowed, _)| rel.starts_with(allowed)) {
+            continue;
+        }
+        let text = std::fs::read_to_string(path).map_err(|e| format!("reading {rel}: {e}"))?;
+        let mut carry = Carry::default();
+        for (n, line) in text.lines().enumerate() {
+            let code = strip_to_code(line, &mut carry);
+            if code.trim().ends_with("test]") && !code.contains("cfg(test)") {
+                findings.push(format!(
+                    "  {rel}:{}  a test in a module an architecture `cfg` gates",
+                    n + 1
+                ));
+            }
+        }
+    }
+
+    for path in &sources {
+        let rel = relative(path);
+        if ARCH_TEST_ALLOW.iter().any(|(allowed, _)| rel.starts_with(allowed)) {
+            continue;
+        }
+        let text = std::fs::read_to_string(path).map_err(|e| format!("reading {rel}: {e}"))?;
+        findings.extend(arch_gated_tests(&rel, &text));
+    }
+
+    if findings.is_empty() {
+        println!(
+            "lint-arch-tests: ok  ({} file(s) behind an architecture gate, none with a test \
+             in it; {} recorded exception(s))",
+            gated_files.len(),
+            ARCH_TEST_ALLOW.len()
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{} test(s) compiled on one architecture and not on the other:\n{}\n\n\
+         E1-P11's exit is `green, and no test is skipped on AArch64 without a recorded\n\
+         reason`. A test behind an architecture `cfg` is skipped on the other runner and\n\
+         says nothing when it is: the job stays green, the count on one runner is smaller,\n\
+         and nobody reads a count. That is the same silence `PORTABILITY` removes one level\n\
+         up, arriving one level down — a crate can be on both runners while a test inside\n\
+         it is on one.\n\n\
+         Either move the test to the part of the crate that is not architecture-specific —\n\
+         `user/init` is the precedent, and states it: the door is gated, the protocol\n\
+         arithmetic is not, and the arithmetic is what its tests are about — or add a\n\
+         prefix to `ARCH_TEST_ALLOW` in xtask/src/main.rs with a reason and a *Reversal:*.\n\
+         RFC 0045.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// What would make [`lint_arch_tests`] green while a test was being skipped.
+#[cfg(test)]
+mod arch_test_lint_tests {
+    use super::{ARCH_TEST_ALLOW, arch_gated_tests, file_modules, lint_arch_tests};
+
+    #[test]
+    fn a_gated_module_declaration_is_seen_and_an_ungated_one_is_not() {
+        let src = "\
+#[cfg(target_arch = \"x86_64\")]
+pub mod component;
+
+pub mod protocol;
+";
+        assert_eq!(
+            file_modules(src),
+            vec![("component".to_string(), true), ("protocol".to_string(), false)]
+        );
+    }
+
+    #[test]
+    fn a_second_attribute_does_not_drop_the_gate() {
+        // `user/store` and `user/virtio-blk` both write the gate this way, and
+        // a reader that took only the attribute nearest the item would lose it
+        // — which would make the two crates with the most architecture-specific
+        // code in them the two this check could not see.
+        let src =
+            "#[cfg(all(target_arch = \"x86_64\", feature = \"image\"))]\npub mod component;\n";
+        assert_eq!(file_modules(src), vec![("component".to_string(), true)]);
+    }
+
+    #[test]
+    fn a_test_under_a_gated_item_is_found() {
+        let src = "\
+#[cfg(target_arch = \"x86_64\")]
+#[test]
+fn only_on_one_machine() {}
+";
+        assert_eq!(arch_gated_tests("x.rs", src).len(), 1);
+    }
+
+    #[test]
+    fn a_test_inside_a_gated_block_is_found_and_the_gate_lifts_at_its_brace() {
+        // The shape a person reaches for second: gate the module rather than
+        // the test. The second `mod` is outside the first and must not inherit
+        // its gate — if it did, every ungated test after one gated module would
+        // read as a finding, and a check that cries wolf is a check somebody
+        // deletes.
+        let src = "\
+#[cfg(target_arch = \"x86_64\")]
+mod only_here {
+    #[test]
+    fn t() {}
+}
+
+mod everywhere {
+    #[test]
+    fn u() {}
+}
+";
+        let findings = arch_gated_tests("x.rs", src);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("x.rs:4"), "{findings:?}");
+    }
+
+    #[test]
+    fn a_file_scope_gate_survives_the_line_of_code_after_it() {
+        // The input review found this check green over, written out exactly.
+        // `#![cfg(target_arch)]` opens no brace, so a reader that treats it as
+        // a gate on the *next item* discards it the moment any code follows —
+        // a `use`, a `const`, anything — and every test below reads as
+        // ungated. Two tests here, one of them inside a `#[cfg(test)] mod`,
+        // because both were green before.
+        let src = "\
+//! A file compiled on one machine.
+#![cfg(target_arch = \"x86_64\")]
+
+use core::mem::size_of;
+
+#[test]
+fn first() {}
+
+#[cfg(test)]
+mod inner {
+    #[test]
+    fn second() {}
+}
+";
+        let findings = arch_gated_tests("x.rs", src);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(findings[0].contains("x.rs:7"), "{findings:?}");
+        assert!(findings[1].contains("x.rs:12"), "{findings:?}");
+    }
+
+    #[test]
+    fn a_file_scope_gate_reaches_the_modules_the_file_declares() {
+        // The other half of the same hole: `lint_arch_tests` walks the subtree
+        // under a gated `mod`, and a file gate has to reach those declarations
+        // or the subtree is walked as if it were on both machines.
+        let src = "#![cfg(target_arch = \"x86_64\")]\n\nuse core::mem::size_of;\n\nmod sub;\n";
+        assert_eq!(file_modules(src), vec![("sub".to_string(), true)]);
+    }
+
+    #[test]
+    fn an_inner_attribute_that_is_not_a_gate_is_not_a_finding() {
+        // The control for the two above: `#![no_std]` is an inner attribute in
+        // almost every file in this workspace. If a bare inner attribute were
+        // read as a gate, the check would report the entire tree and be
+        // deleted within the week.
+        let src = "#![no_std]\n#![forbid(unsafe_code)]\n\n#[test]\nfn t() {}\n";
+        assert!(arch_gated_tests("x.rs", src).is_empty(), "{:?}", arch_gated_tests("x.rs", src));
+        let with_mod = "#![no_std]\n\nmod sub;\n";
+        assert_eq!(file_modules(with_mod), vec![("sub".to_string(), false)]);
+    }
+
+    #[test]
+    fn an_ordinary_test_module_is_not_a_finding() {
+        // The green case, so that the red ones above are known to be red for
+        // their own reason rather than because the scanner flags everything.
+        let src = "\
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t() {}
+}
+";
+        assert!(arch_gated_tests("x.rs", src).is_empty(), "{:?}", arch_gated_tests("x.rs", src));
+    }
+
+    #[test]
+    fn the_tree_as_it_stands_has_no_architecture_gated_test() {
+        // The property itself, over the real workspace, and a test rather than
+        // only a lint so that `cargo xtask test-host` asserts it on the arm
+        // runner too — on the machine whose tests are the ones at stake.
+        lint_arch_tests().expect("a test in this tree is compiled on one architecture only");
+    }
+
+    #[test]
+    fn the_gap_the_local_loop_cannot_close_is_declared_and_still_open() {
+        // Both directions, the way `JOIN_GAP` is checked. An empty
+        // `ARCH_RUN_GAP` would say nothing is unobserved here, which is false
+        // and is the shape of a gap quietly deleted rather than closed; and a
+        // run path on this machine would mean the gap has closed while the
+        // declaration went on describing it, which is the failure mode the
+        // declaration exists to be caught by.
+        assert!(
+            !super::ARCH_RUN_GAP.is_empty(),
+            "the local loop cannot observe AArch64 behaviour, so it owes a list of what it \
+             therefore does not know"
+        );
+        if std::env::consts::ARCH != "aarch64" {
+            assert_eq!(
+                super::aarch64_run_path(),
+                None,
+                "a hosted AArch64 binary can be run here after all, so ARCH_RUN_GAP is stale"
+            );
+        }
+    }
+
+    #[test]
+    fn every_recorded_exception_states_what_would_reverse_it() {
+        // An exclusion is a small RFC and owes the same last section, which is
+        // the rule `PORTABILITY` is already held to one level up.
+        for (path, reason) in ARCH_TEST_ALLOW {
+            assert!(
+                reason.contains("Reversal:"),
+                "{path} skips a test on one architecture without saying what would reverse it"
+            );
+        }
+    }
+}
+
+/// What the local loop cannot observe about AArch64, as a set rather than a
+/// sentence.
+///
+/// The exit E1-P11 is measured against has two halves. *No test is skipped
+/// without a recorded reason* is decided by reading source, so it is decided
+/// here, on this machine, by `lint-arch-tests`. *Green* is decided by running
+/// the suite on an AArch64 machine, and this machine is not one — so the second
+/// half is unobservable locally, and the honest thing is to name exactly what is
+/// unobserved rather than to say "CI covers it" and move on.
+///
+/// Each entry is one property the arm runner establishes and nothing here can.
+/// The list is short on purpose: a long one would mean the local loop had
+/// stopped being worth running.
+const ARCH_RUN_GAP: &[&str] = &[
+    "the ring's Release/Acquire pair holding under a weak memory model — total store \
+     order reorders store-then-load and nothing else, and AArch64 reorders freely, so a \
+     litmus test passing here is evidence about the ordering's *shape*, not the machine",
+    "every host test's behaviour on a target that is not total-store-order — the \
+     whole suite runs there, and `test-host` here says nothing about what it does",
+];
+
+/// Whether this machine can execute a hosted AArch64 binary after all.
+///
+/// # Why this is a check and not a comment
+///
+/// [`ARCH_RUN_GAP`] is a declaration that something cannot be observed here, and
+/// a declaration of that shape rots in one direction only: the day the container
+/// gains a way to run AArch64 code, the sentence saying it cannot is still in the
+/// file, still read as true, and the local loop goes on not running a suite it
+/// could now run. That is `JOIN_GAP`'s discipline exactly — the failure worth
+/// guarding is not that a gap is never closed but that it closes and the
+/// documents go on describing it — so the gap is required to still be a gap.
+///
+/// Two run paths are probed, because they are the two that exist: an interpreter
+/// registered in `binfmt_misc`, which makes an AArch64 binary directly
+/// executable, and a `qemu-aarch64` user-mode emulator on `PATH`, which makes it
+/// executable when named. A *system* emulator is not probed and is not a run
+/// path: `qemu-system-aarch64` is in this image and needs a frame to boot, and
+/// the frame is x86-64 — the row `f-kernel` already holds in [`PORTABILITY`].
+/// Nor is an installed `aarch64-unknown-linux-gnu` target, which would let a
+/// binary be built and still not run.
+fn aarch64_run_path() -> Option<String> {
+    for name in ["qemu-aarch64", "qemu-aarch64-static"] {
+        let registered = Path::new("/proc/sys/fs/binfmt_misc").join(name);
+        if registered.is_file() {
+            return Some(format!("{} is registered in binfmt_misc", registered.display()));
+        }
+        // `PATH` is split rather than walked: a directory listing would put a
+        // read_dir order into a decision, and RFC 0004 is about exactly that.
+        for dir in std::env::var("PATH").unwrap_or_default().split(':') {
+            if dir.is_empty() {
+                continue;
+            }
+            let candidate = Path::new(dir).join(name);
+            if candidate.is_file() {
+                return Some(format!("{} is on PATH", candidate.display()));
+            }
+        }
+    }
+    None
+}
+
+fn test() -> Result<(), String> {
+    // Before anything is compiled, because this one is about what the whole
+    // verb is allowed to claim afterwards and it costs two `stat` calls. The
+    // unit test in `arch_test_lint_tests` asserts the same thing and would
+    // catch it too — from inside `test_host`, several minutes later and worded
+    // as an assertion rather than as what to do about it.
+    if std::env::consts::ARCH != "aarch64"
+        && let Some(found) = aarch64_run_path()
+    {
+        return Err(format!(
+            "ARCH_RUN_GAP says this machine cannot run a hosted AArch64 binary, and it can:\n  \
+             {found}\n\n\
+             The declaration has outlived the thing it declared. The {} propert(ies) it lists \
+             as unobservable here are observable now, so the local loop should run the suite \
+             for that architecture rather than describe why it cannot: build the host tests \
+             for AArch64 and run them through that path, and shorten `ARCH_RUN_GAP` to \
+             whatever is left. E1-P11, RFC 0045.",
+            ARCH_RUN_GAP.len()
+        ));
+    }
+
+    // Host tests exercise the ring and the substrate under the host memory
+    // model. That is necessary and not sufficient — see the note below.
+    test_host()?;
+    cross_check()?;
+
+    // Read at run time rather than through a `cfg`, so that one binary says the
+    // true thing on both runners. On the arm job this whole section is about a
+    // gap that machine does not have, and printing the x86-64 note there would
+    // be the same species of stale sentence `ARCH_RUN_GAP` is checked against.
+    if std::env::consts::ARCH == "aarch64" {
+        println!(
+            "\nnote: this machine is AArch64, so the {} propert(ies) ARCH_RUN_GAP declares\n      \
+             unobservable on an x86-64 host were observed by the run above. That is what\n      \
+             this job is for. E1-P11, RFC 0045.",
+            ARCH_RUN_GAP.len()
+        );
+        return Ok(());
+    }
 
     println!(
         "\nnote: x86-64 total-store-order hides weak-memory ordering bugs.\n      \
          The AArch64 crates compile here; whether the ring's ordering holds on\n      \
-         one is the arm job's to say, and nothing local substitutes for it."
+         one is the arm job's to say, and nothing local substitutes for it.\n      \
+         This container is x86-64. It has `qemu-system-aarch64`, which needs a\n      \
+         frame to boot and the frame is x86-64; what it has no way to run is a\n      \
+         *hosted* AArch64 binary — no qemu-user, nothing in binfmt_misc, and no\n      \
+         aarch64-unknown-linux-gnu installed to build one for. So it compiles\n      \
+         for that architecture and cannot run for it, and `cargo xtask\n      \
+         test-host` on the arm runner is what runs. E1-P11, RFC 0045."
     );
+    println!(
+        "\n{} propert{} the arm runner establishes and this machine cannot \
+         (ARCH_RUN_GAP, checked above rather than asserted):",
+        ARCH_RUN_GAP.len(),
+        if ARCH_RUN_GAP.len() == 1 { "y" } else { "ies" }
+    );
+    for gap in ARCH_RUN_GAP {
+        println!("  - {gap}");
+    }
     Ok(())
 }
 
@@ -4599,6 +5998,32 @@ fn verify() -> Result<(), String> {
     // without, because the pair is also what shows a snapshot from another build
     // being refused. RFC 0043.
     snapshot()?;
+    // E1-P04, and in the loop for `chaos`'s reason: `claims/0008` is `gating`
+    // and a gating claim that nothing local runs is a claim that gates nothing.
+    // A hundred million operations, 4.4-7.3 s in release here over four runs —
+    // the exit's billion is 44-60 s and runs in CI, and the nightly runs it
+    // again at a moving base. Both counts are thresholds in the claim.
+    // Every number it produces is a count, so there is no machine to wait for.
+    // The Miri half is not here: it costs six orders of magnitude and has its
+    // own job. RFC 0046.
+    hostile_gate()?;
+    // And the half that says a clean fuzzer means something. Two defects, one
+    // per property this half can see, each required to be found by the property
+    // it breaks — and the third required to be *invisible* here, which is the
+    // argument for the Miri job existing at all.
+    hostile_mutate()?;
+    // E1-P05, and in the loop for `hostile_gate`'s reason: `claims/0009` is
+    // `gating` and a gating claim that nothing local runs is a claim that gates
+    // nothing. A quarter of a million cases, and the number it produces is a
+    // *percentage of lines*, which is the same figure on a fast host and a slow
+    // one. The coverage measurement itself is not here — it needs an
+    // instrumented build with link-time optimisation off, which is a second
+    // compile of the crate — and has its own step in CI. RFC 0048.
+    entries_gate()?;
+    // And the half that says a clean entry fuzzer means something: three
+    // deliberate defects, one per oracle, each required to be found by the
+    // oracle it breaks and by no other.
+    entries_mutate()?;
     // Last, and part of the loop rather than beside it. It is the half of
     // E0-P08 that says the suite can fail: everything above proves the
     // properties hold on this tree, and this proves that a tree where one of
@@ -4608,6 +6033,14 @@ fn verify() -> Result<(), String> {
     println!(
         "         Local only. The AArch64 tests and the litmus job run in CI and\n         \
          cover the class of bug an x86 host cannot see."
+    );
+    println!(
+        "         One gating claim's own metric is not in this: `claims/0009`'s\n         \
+         path_line_coverage needs a second, instrumented compile with link-time\n         \
+         optimisation off, so it is `cargo xtask entries --coverage` and the CI\n         \
+         `entries` job rather than part of the local loop. Green here means the\n         \
+         262 144-case gate and the three oracles passed, not that the percentage\n         \
+         was measured."
     );
     Ok(())
 }
@@ -4643,6 +6076,16 @@ fn lint_all() -> Result<(), String> {
     // where it actually lives — in the source — rather than inferred from a
     // number that cannot move. E1-B02.
     lint_datapath()?;
+    // And the reversal conditions that have fallen due and are not paid,
+    // declared as a set for `CHAOS_GAP`'s reason: a deviation in prose is one
+    // nobody re-checks, and the failure that matters is not that it is never
+    // closed but that it is closed and the documents go on describing it.
+    lint_owed()?;
+    // One level below `PORTABILITY`, and the level that table cannot see: a crate
+    // can be on both runners while a test inside it compiles on one. `test-host`
+    // would stay green through that, because a smaller test count is not a failure
+    // and nobody reads a count. E1-P11, RFC 0045.
+    lint_arch_tests()?;
     // A generated file that is committed is a claim about the generator, and
     // the only moment it can be checked cheaply is before anything regenerates
     // it. `xtask claims` rewrites the snapshot by design, so this has to come
@@ -5037,7 +6480,13 @@ fn declared_fn(code: &str) -> Option<&str> {
 /// `text` is a whole file. The scan stops at the first `#[cfg(test)]`, which is
 /// the seam between what ships and what the host tests build for themselves;
 /// [`MINTS`] says why that seam has to exist.
-fn datapath_findings(rel: &str, text: &str, mover: &str, allowed: &str) -> (Vec<String>, usize) {
+fn datapath_findings(
+    rel: &str,
+    text: &str,
+    mover: &str,
+    allowed: &str,
+    mints: &[&str],
+) -> (Vec<String>, usize) {
     let mut findings = Vec::new();
     let mut calls = 0;
     let mut carry = Carry::default();
@@ -5062,7 +6511,7 @@ fn datapath_findings(rel: &str, text: &str, mover: &str, allowed: &str) -> (Vec<
             }
             continue;
         }
-        for mint in MINTS {
+        for mint in mints {
             if code.contains(mint) {
                 findings.push(format!(
                     "  {rel}:{}  {mint}) — a component receives a granted window and does \
@@ -5100,9 +6549,17 @@ fn datapath_findings(rel: &str, text: &str, mover: &str, allowed: &str) -> (Vec<
 ///
 /// It is a source check and it is limited the way every source check is: it
 /// reads names, so a mover spelled differently is a mover it does not know
-/// about. That limit is why [`MINTS`] is in it — the one *general* way a safe
-/// component could reach memory it was not handed is to build an accessor over
-/// an address it invented, and that is a shape rather than a name.
+/// about. That limit is why [`MINTS`] used to be in it — the one *general* way
+/// a safe component could reach memory it was not handed is to build an
+/// accessor over an address it invented, which is a shape rather than a name —
+/// and why it no longer needs to be: the component runs at ring 3 and an
+/// address it invents is a page fault.
+///
+/// The second half is [`NOT_THE_FRAME`], and it points the other way. The claim
+/// above is worth nothing if the frame is the one running the crate's code, so
+/// this refuses a frame that names an associated item of a component's driver
+/// type — RFC 0033's own reversal condition, run as a check rather than left as
+/// an instruction to a reader.
 fn lint_datapath() -> Result<(), String> {
     let sources = rust_sources()?;
     let mut findings = Vec::new();
@@ -5129,7 +6586,7 @@ fn lint_datapath() -> Result<(), String> {
                     defined += 1;
                 }
             }
-            let (found, called) = datapath_findings(&rel, &text, mover, allowed);
+            let (found, called) = datapath_findings(&rel, &text, mover, allowed, MINTS);
             findings.extend(found);
             calls += called;
         }
@@ -5155,9 +6612,41 @@ fn lint_datapath() -> Result<(), String> {
         }
     }
 
+    // And the half that says who is running the code above. A crate that moves
+    // bytes in one place is a claim about a component; it is worth nothing if
+    // the frame is the component's caller, because then the direct map is under
+    // every address in it. RFC 0033, RFC 0047.
+    //
+    // Both directions, for `NOT_THE_FRAME`'s own reason: the absence half is a
+    // search for a name, and a name nothing defines is absent from everywhere.
+    for (prefix, needle, defines) in NOT_THE_FRAME {
+        let mut named = 0usize;
+        for path in &sources {
+            let rel = relative(path);
+            if rel.starts_with(prefix) {
+                let text =
+                    std::fs::read_to_string(path).map_err(|e| format!("reading {rel}: {e}"))?;
+                findings.extend(frame_findings(&rel, &text, needle));
+            }
+            if rel.starts_with(defines) {
+                let text =
+                    std::fs::read_to_string(path).map_err(|e| format!("reading {rel}: {e}"))?;
+                named += code_mentions(&text, needle);
+            }
+        }
+        if named == 0 {
+            findings.push(format!(
+                "  {defines}  nothing under this prefix names `{needle}` in shipped code, so \
+                 the rule that `{prefix}` must not name it cannot fail — rename the \
+                 type and the check goes green over a frame calling a component"
+            ));
+        }
+    }
+
     if findings.is_empty() {
         println!(
-            "lint-datapath: ok  ({} crate(s) move bytes in one place, and not on the data path)",
+            "lint-datapath: ok  ({} crate(s) move bytes in one place, not on the data \
+             path, and none of them called by the frame)",
             DATAPATH.len()
         );
         return Ok(());
@@ -6199,6 +7688,22 @@ struct Content {
 enum ContentSource {
     /// A file in the tree.
     File(&'static str),
+    /// Several named files, which are one content between them.
+    ///
+    /// Not a directory and not an extension filter, because the files a content
+    /// is made of do not have to live together: the seed corpora are one per
+    /// fuzzer and each sits beside the fuzzer it belongs to — `sim/corpus.txt`
+    /// beside the simulator, `ring/corpus.txt` and `ring/entries-corpus.txt`
+    /// beside the two that drive the ring. Moving them into one directory to
+    /// suit the packager would put each of them further from the thing that
+    /// writes it, which is the wrong trade: the contract cares that a release
+    /// carries every corpus, not where they are.
+    ///
+    /// Every named file must exist. A content that is present by the manifest's
+    /// count and short of a corpus is the same failure as an absent row, arriving
+    /// through a door the fix opened — which `ContentSource::Dir` already had to
+    /// say once, one content up.
+    Files(&'static [&'static str]),
     /// Every file directly under a directory with this extension.
     Tree(&'static str, &'static str),
     /// Every file under a directory and everything below it, whatever the
@@ -6298,9 +7803,32 @@ const CONTENTS: &[Content] = &[
     // deliberate defect, and each says so on its own `# under` line — because a
     // corpus whose entries are all green and do not say why they are green would
     // read as a corpus that never found anything. RFC 0040.
+    // And this row grew a second and a third file rather than a second row,
+    // which is the decision E1-P05 had to take and is worth stating. The
+    // contract names *the seed corpus* — one content — and there are three
+    // fuzzers in this tree that accumulate one: the simulator's sweeps, the
+    // hostile peer, and the structure-aware entry generator. A row each would
+    // have made `release --dry-run` report ten of ten and the contract's list of
+    // eight stop matching `docs/the-long-plan.html` section 08; a row that named
+    // only the first would have shipped a release missing two of the three
+    // corpora it has. So the row is one content made of three files, and the
+    // count stays eight.
+    //
+    // What each is, because they are not the same kind of thing.
+    // `sim/corpus.txt` and `ring/corpus.txt` are **regression suites**: every
+    // entry found something once and says what, at which commit, under which
+    // deliberate defect. `ring/entries-corpus.txt` is a **cover**: every entry
+    // reaches a region of the entry-validation path no earlier entry reaches,
+    // and it is the artefact `claims/0009`'s number is measured from — which is
+    // why that claim can say a stranger reproduces the figure without a seed and
+    // without a fuzzing run. RFC 0040, RFC 0046 and RFC 0048 respectively.
     Content {
         name: "the seed corpus and scenario set",
-        source: ContentSource::File("sim/corpus.txt"),
+        source: ContentSource::Files(&[
+            "sim/corpus.txt",
+            "ring/corpus.txt",
+            "ring/entries-corpus.txt",
+        ]),
         owed_to: None,
     },
     Content {
@@ -6339,6 +7867,13 @@ fn content_files(content: &Content) -> Result<Vec<(String, Vec<u8>)>, String> {
 
     let mut files = match &content.source {
         ContentSource::File(path) => vec![((*path).to_string(), read(path)?)],
+        ContentSource::Files(paths) => {
+            let mut out = Vec::new();
+            for path in *paths {
+                out.push(((*path).to_string(), read(path)?));
+            }
+            out
+        }
         ContentSource::Tree(dir, extension) => {
             let mut out = Vec::new();
             let entries =
@@ -6496,6 +8031,30 @@ fn release(mode: Option<&str>) -> Result<(), String> {
                 } else {
                     missing += 1;
                     println!("  [--]  {:<36} {path} does not exist", content.name);
+                }
+            }
+            ContentSource::Files(paths) => {
+                let absent: Vec<&&str> =
+                    paths.iter().filter(|path| !root().join(path).exists()).collect();
+                if absent.is_empty() {
+                    let mut bytes = 0usize;
+                    for path in *paths {
+                        bytes += std::fs::read(root().join(path)).map_err(|e| e.to_string())?.len();
+                    }
+                    println!("  [ok]  {:<36} {} file(s)", content.name, paths.len());
+                    for path in *paths {
+                        println!("        {path}");
+                    }
+                    println!("        {bytes} bytes in all");
+                } else {
+                    missing += 1;
+                    println!(
+                        "  [--]  {:<36} {} of {} file(s) do not exist: {}",
+                        content.name,
+                        absent.len(),
+                        paths.len(),
+                        absent.iter().map(|path| **path).collect::<Vec<_>>().join(", ")
+                    );
                 }
             }
             ContentSource::Tree(dir, _) | ContentSource::Dir(dir) => {
@@ -7227,6 +8786,19 @@ enum Route {
     /// same command on the same machine — which is why `claims/0007` is pending
     /// on the runner rather than gating on this one. E1-P08, RFC 0043.
     Snapshot,
+    /// A hundred million hostile operations against a real channel region. Not
+    /// a program and not a boot: the workload is `cargo xtask hostile`, and
+    /// every number it produces is a **count** — operations performed, paths
+    /// reached — which is why `claims/0008` may gate on this machine the way
+    /// `claims/0005` does and for exactly that reason. E1-P04, RFC 0046.
+    Hostile,
+    /// A quarter of a million generated submission entries, and the share of the
+    /// entry-validation path the committed corpus covers. Not a program and not
+    /// a boot: the workload is `cargo xtask entries`, and what it produces is a
+    /// **percentage of lines** — the same figure on a fast host and a slow one,
+    /// which is why `claims/0009` may gate on this machine for `claims/0005`'s
+    /// reason. E1-P05, RFC 0048.
+    Entries,
 }
 
 const ROUTES: &[(&str, Route)] = &[
@@ -7243,6 +8815,8 @@ const ROUTES: &[(&str, Route)] = &[
     // `buffer-registration-cost` has one claim over.
     ("driver-restart-latency", Route::Chaos),
     ("snapshot-re-entry-saving", Route::Snapshot),
+    ("hostile-peer-operations", Route::Hostile),
+    ("entry-validation-coverage", Route::Entries),
 ];
 
 /// The registry file one claim name resolves to.
@@ -7329,6 +8903,11 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         }
         Route::Chaos => chaos()?,
         Route::Snapshot => snapshot()?,
+        Route::Hostile => hostile_gate()?,
+        Route::Entries => {
+            entries_gate()?;
+            entries_coverage()?;
+        }
     }
 
     // The harness itself refuses in a non-measurement environment and says so
@@ -7852,8 +9431,8 @@ fn eval_run(filter: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        JOIN_GAP, datapath_findings, declared_fn, hold_the_gap, toml_field, toml_multiline,
-        trace_hash, unspawned,
+        JOIN_GAP, MINTS, code_mentions, datapath_findings, declared_fn, frame_findings,
+        gap_holds_under, hold_the_gap, toml_field, toml_multiline, trace_hash, unspawned,
     };
 
     /// A component set shaped like the one this tree builds: two records, the
@@ -7867,14 +9446,14 @@ mod tests {
 
     #[test]
     fn the_gap_this_tree_declares_is_the_gap_this_tree_has() {
-        // The state as of RFC 0036: the boot builds one place from the first
-        // module, so `store` is spawned and `virtio-blk` is not. This is the
-        // green case, and it is here so that the two red cases below are known
-        // to be red for their own reason rather than because the shape is
-        // always refused.
+        // The state as of RFC 0044: the boot builds a place per component file,
+        // so both are spawned and the difference is empty. This is the green
+        // case, and it is here so that the two red cases below are known to be
+        // red for their own reason rather than because the shape is always
+        // refused.
         let set = modelled(&[("store", STORE), ("virtio-blk", VIRTIO_BLK)]);
-        let gap = unspawned(&set, &[STORE]);
-        assert_eq!(gap, ["virtio-blk"]);
+        let gap = unspawned(&set, &[STORE, VIRTIO_BLK]);
+        assert!(gap.is_empty(), "the boot spawns every component file this tree builds");
         assert_eq!(hold_the_gap(&gap, JOIN_GAP), Ok(()));
     }
 
@@ -7882,12 +9461,16 @@ mod tests {
     fn a_component_the_boot_never_spawns_is_refused() {
         // **The input the review named, run.** Drop a third component file with
         // a modelled protocol into `target/component/`: the simulator runs
-        // three, the boot still spawns one, and before RFC 0036 this printed
-        // `join: ok` while the workload half covered two components the kernel
-        // never instantiated.
+        // three, the boot spawns the two it was handed, and before RFC 0036 this
+        // printed `join: ok` while the workload half covered a component the
+        // kernel never instantiated.
+        //
+        // This is the direction an empty `JOIN_GAP` still exercises against the
+        // real constant, and it is the one a growing tree meets: adding a
+        // component file is red until a boot spawns it.
         let set =
             modelled(&[("store", STORE), ("virtio-blk", VIRTIO_BLK), ("virtio-net", 0xABCD_1234)]);
-        let gap = unspawned(&set, &[STORE]);
+        let gap = unspawned(&set, &[STORE, VIRTIO_BLK]);
         let refused = hold_the_gap(&gap, JOIN_GAP).expect_err("a third component is not declared");
         assert!(refused.contains("virtio-net"), "the refusal does not name what appeared");
         assert!(refused.contains("JOIN_GAP"), "the refusal does not say where to declare it");
@@ -7895,15 +9478,20 @@ mod tests {
 
     #[test]
     fn a_declared_component_the_boot_has_started_spawning_is_refused() {
-        // The other direction, which is the one that fails the day the work
-        // lands: a supervisor spawns both, the gap is empty, and the entry in
-        // `JOIN_GAP` is now a hole this check would step over rather than a
-        // statement about the tree. Red until somebody deletes it, which is how
-        // the exception gets removed by the person whose change removed it.
+        // The other direction, and it is stated against a list this test
+        // supplies rather than against `JOIN_GAP`, because `JOIN_GAP` is empty
+        // now and an empty list has no entry that could go stale. Saying so is
+        // the point: the check still refuses a stale exception, and the *tree*
+        // no longer has one to refuse. A test that quietly stopped covering this
+        // direction would leave the next person who adds an entry with a
+        // half-checked mechanism.
         let set = modelled(&[("store", STORE), ("virtio-blk", VIRTIO_BLK)]);
         let gap = unspawned(&set, &[STORE, VIRTIO_BLK]);
         assert!(gap.is_empty());
-        assert!(hold_the_gap(&gap, JOIN_GAP).is_err(), "a stale exception was accepted");
+        assert!(
+            hold_the_gap(&gap, &["virtio-blk"]).is_err(),
+            "a stale exception was accepted: the boot spawns it and the list still names it"
+        );
         // And with the entry gone it is green again, which is what says the
         // refusal above is about the list and not about the boot.
         assert_eq!(hold_the_gap(&gap, &[]), Ok(()));
@@ -7947,7 +9535,8 @@ mod tests {
 
     #[test]
     fn a_datapath_that_moves_no_bytes_is_the_shape_the_lint_passes() {
-        let (findings, calls) = datapath_findings("x.rs", DATAPATH_HELD, "stage", "provoke_copy");
+        let (findings, calls) =
+            datapath_findings("x.rs", DATAPATH_HELD, "stage", "provoke_copy", MINTS);
         assert_eq!(findings, Vec::<String>::new(), "the held shape reports nothing");
         assert_eq!(calls, 1, "and the one call is counted");
     }
@@ -7963,7 +9552,7 @@ mod tests {
             "        stage(&self.scratch, 0, 512, entry.len, &mut self.counters.provoked)?;\n\
              \x20       self.round_trip(reach.address, entry.len)\n",
         );
-        let (findings, calls) = datapath_findings("x.rs", &broken, "stage", "provoke_copy");
+        let (findings, calls) = datapath_findings("x.rs", &broken, "stage", "provoke_copy", MINTS);
         assert_eq!(calls, 2, "two call sites now");
         assert_eq!(findings.len(), 1, "and one of them is not `provoke_copy`");
         assert!(findings[0].contains("`stage` called from `transfer`"), "{}", findings[0]);
@@ -7971,18 +9560,141 @@ mod tests {
 
     #[test]
     fn a_window_minted_out_of_an_invented_address_is_a_finding() {
-        // The other way a crate that forbids `unsafe` could reach a client's
-        // bytes while `stage` stayed honest: name the direct map, build a
-        // `Region` over it, and read through the accessor RFC 0033 made safe.
-        // `Region::at` is a safe `const fn`, so nothing but this refuses it.
+        // The scan, driven against a list this test supplies rather than
+        // against `MINTS` — which RFC 0047 emptied, because the driver runs at
+        // ring 3 now and an address it invents is a page fault rather than a
+        // client's bytes.
+        //
+        // Kept, and kept *working*, for the reason this file applies to every
+        // other check in it: a mechanism with nothing to find is
+        // indistinguishable from one that cannot find anything, and the day a
+        // component's code is linked into the frame again is the day the direct
+        // map is under it again and this is what was holding. The second half
+        // of this test is the retirement itself, stated as a check rather than
+        // as a comment.
         let broken = DATAPATH_HELD.replace(
             "        let reach = path.resolve(name, entry.len)?;\n",
             "        let reach = path.resolve(name, entry.len)?;\n\
              \x20       let peek = Region::at(DIRECT_MAP + reach.address, 0, entry.len)?;\n",
         );
-        let (findings, _) = datapath_findings("x.rs", &broken, "stage", "provoke_copy");
+        let held = ["Region::at(", "Window::at("];
+        let (findings, _) = datapath_findings("x.rs", &broken, "stage", "provoke_copy", &held);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(findings[0].contains("Region::at"), "{}", findings[0]);
+
+        let (retired, _) = datapath_findings("x.rs", &broken, "stage", "provoke_copy", MINTS);
+        assert!(
+            retired.is_empty(),
+            "`MINTS` is empty on purpose: the address space refuses what this used to look for"
+        );
+    }
+
+    #[test]
+    fn a_needle_no_crate_defines_is_a_finding_rather_than_a_green_rule() {
+        // `NOT_THE_FRAME`'s third field, and the fixture that breaks it.
+        //
+        // The absence half is a search for a *name*. Rename `Driver` in
+        // `user/virtio-blk` and `kernel/` stops naming it for a reason that has
+        // nothing to do with who runs the code, which is a green lint over a
+        // frame calling a component. So the needle has to still refer to
+        // something, and that is what this counts.
+        let owns = "pub struct Driver;\nimpl Driver { pub fn start() {} }\n";
+        assert_eq!(code_mentions(owns, "Driver::"), 0, "a declaration is not a use of the path");
+        let uses = "fn boot() { let d = Driver::start(); }\n";
+        assert_eq!(code_mentions(uses, "Driver::"), 1);
+
+        // The rename, modelled: the crate that owned the name no longer spells
+        // it, so nothing under the owning prefix names it and the count is zero
+        // — which is the input `lint_datapath` turns into a finding.
+        let renamed = uses.replace("Driver::", "Engine::");
+        assert_eq!(code_mentions(&renamed, "Driver::"), 0);
+
+        // And the two exclusions this shares with `frame_findings`, stated so
+        // that neither can be what keeps the rule alive: prose about the
+        // reversal, and a fixture below `#[cfg(test)]`.
+        let recorded = "// `Driver::execute` used to be called here. RFC 0047.\nfn turn() {}\n";
+        assert_eq!(code_mentions(recorded, "Driver::"), 0);
+        let fixture = "fn turn() {}\n#[cfg(test)]\nmod t { fn f() { Driver::start(); } }\n";
+        assert_eq!(code_mentions(fixture, "Driver::"), 0);
+    }
+
+    #[test]
+    fn a_declared_gap_that_has_closed_is_a_red_build() {
+        // The mechanism under `OWED_REVERSALS` and `CHAOS_GAP`, with its own
+        // fixture — four declared quantities rest on it, and until now the only
+        // evidence it could fail was that it had not.
+        let base = std::env::temp_dir().join("f-xtask-gap-fixture");
+        let dir = base.join("kernel").join("src");
+        std::fs::create_dir_all(&dir).expect("a temporary directory");
+        let file = dir.join("component.rs");
+        let gap: &[super::Gap] = &[(
+            "kernel/src/component.rs",
+            "policy::decide(",
+            "the reason it is still owed",
+            "TODO.md E1-B05; docs/rfc/0008",
+        )];
+
+        // Held: the text the row names is there, so the deviation is still open
+        // and the build is green.
+        std::fs::write(&file, "fn restart() { policy::decide(&record, &tally); }\n").unwrap();
+        assert_eq!(gap_holds_under(&base, "FIXTURE", gap), Ok(()));
+
+        // Paid: the text is gone, which is the good news this refuses on
+        // purpose, and the refusal has to name both the needle and the constant
+        // so that whoever closed it knows which documents now describe a tree
+        // that does not exist.
+        std::fs::write(&file, "fn restart() { supervisor.tell(notice::PEER_GONE); }\n").unwrap();
+        let refused = gap_holds_under(&base, "FIXTURE", gap)
+            .expect_err("a gap whose needle is gone must not stay green");
+        assert!(refused.contains("policy::decide("), "{refused}");
+        assert!(refused.contains("kernel/src/component.rs"), "{refused}");
+        assert!(refused.contains("FIXTURE"), "the refusal does not say which constant to edit");
+        // The fourth field, and the reason it is there: the last time a gap
+        // closed, the constants were updated and five other live documents were
+        // not. A refusal that says *update the documents* without naming them
+        // is an instruction that assumes the reader knows the answer.
+        assert!(refused.contains("TODO.md E1-B05"), "the refusal names no document to update");
+        assert!(refused.contains("docs/rfc/0008"), "{refused}");
+
+        // And a row naming a file that is not there is a declaration nobody can
+        // check, which is the other way this stops meaning anything.
+        std::fs::remove_file(&file).unwrap();
+        let refused = gap_holds_under(&base, "FIXTURE", gap).expect_err("a missing file is not ok");
+        assert!(refused.contains("nobody can check"), "{refused}");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_frame_that_calls_a_components_driver_is_a_finding() {
+        // RFC 0033's reversal condition, and the fixture that breaks it.
+        //
+        // The first assertion is the hole, stated rather than left to be found:
+        // a *method call on a value* does not name the type, so this needle
+        // does not see one. It does not have to. The value cannot exist without
+        // `Driver::start`, which is a constructor and does name the type, so a
+        // frame that had gone back to running the driver is caught at the line
+        // that brought the device up rather than at the line that used it.
+        //
+        // The last assertion is the direction that matters more day to day: the
+        // prose in this tree talks about `Driver::execute` at length, because
+        // that is how a reversal is recorded, and a check that failed on a
+        // comment would make recording it impossible.
+        let called = "    let answer = driver.execute(&entry, &mut asking, 0);\n";
+        let calling = format!("fn turn() {{\n{called}}}\n");
+        let findings = frame_findings("kernel/src/blk.rs", &calling, "Driver::");
+        assert!(findings.is_empty(), "a method call on a value is not what the needle names");
+
+        let naming = "use f_virtio_blk::driver::Driver;\nfn turn() { Driver::start(); }\n";
+        let findings = frame_findings("kernel/src/blk.rs", naming, "Driver::");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("Driver::"), "{}", findings[0]);
+
+        let recorded =
+            "// The frame used to call `Driver::execute` here. RFC 0047.\nfn turn() {}\n";
+        assert!(
+            frame_findings("kernel/src/blk.rs", recorded, "Driver::").is_empty(),
+            "a reversal this tree records in prose must not fail the build that records it"
+        );
     }
 
     #[test]
@@ -7994,7 +9706,7 @@ mod tests {
             "        stage(&self.control, FROM, TO, BYTES, &mut self.counters.provoked)\n",
             "        Ok(())\n",
         );
-        let (findings, calls) = datapath_findings("x.rs", &deaf, "stage", "provoke_copy");
+        let (findings, calls) = datapath_findings("x.rs", &deaf, "stage", "provoke_copy", MINTS);
         assert_eq!(calls, 0);
         assert!(findings.is_empty(), "the per-line scan sees nothing wrong — the count does");
     }
@@ -8550,4 +10262,2748 @@ fn lint_reproduce() -> Result<(), String> {
         findings.len(),
         findings.join("\n")
     ))
+}
+
+// ---------------------------------------------------------------------------
+// E1-P04 — the hostile-peer fuzzer, its Miri half, its harness and its corpus.
+//
+// The division of labour is `sweep`'s, restated because it is the reason a
+// number out of here is worth anything:
+//
+//   the fuzzer  draws the peer's behaviour from a seed, drives the honest end,
+//               counts every path it reached, and reports a finding as a seed
+//               and an episode. It reads no clock — `lint-determinism` scans
+//               `ring/` with no allow-list entry, so it could not.
+//   xtask       supplies the count, the wall clock, and the verdict about
+//               whether a run that printed nothing printed nothing for a good
+//               reason. RFC 0046.
+// ---------------------------------------------------------------------------
+
+/// Operations `cargo xtask hostile` runs when it is not told a count.
+/// Unit: operations.
+///
+/// A hundred million: **4.4 s to 7.3 s** in release on the four-core
+/// development container, over four runs, which is what makes it affordable in
+/// `verify`. A range and not the best of the four, for the reason the exit's
+/// own figure is a range: the host is shared, and a cost quoted at its minimum
+/// is one somebody later cannot reproduce and quietly stops running.
+///
+/// It is **not** the exit's number. `claims/0008-hostile-peer-operations.toml`
+/// carries both as thresholds — `operations` is this constant and
+/// `exit_operations` is [`HOSTILE_EXIT`] — and `hostile_thresholds_match`
+/// requires the registry and these constants to agree on every run, so neither
+/// number can move without the other noticing.
+const HOSTILE_GATE: u64 = 100_000_000;
+
+/// `E1-P04`'s own number. Unit: operations.
+///
+/// Measured at 44.3 s to 60.3 s in release here, over three runs on a shared
+/// host. It is a constant because a number in a workflow file and a number in a
+/// claim drift, and this is the one the exit is about — and it is a
+/// **threshold** in `claims/0008` (`exit_operations`) rather than only a line in
+/// its prose, checked against this constant by `hostile_thresholds_match` on
+/// every ordinary run. A registry that published a billion while gating a
+/// hundred million with nothing tying the two together is the shape this
+/// arrangement exists to refuse.
+const HOSTILE_EXIT: u64 = 1_000_000_000;
+
+/// Operations one Miri run performs when it is not told a count.
+/// Unit: operations.
+///
+/// Four thousand and ninety-six — four episodes, about 45 s of interpretation
+/// after a minute of sysroot. Miri costs roughly six orders of magnitude, so
+/// this is the count at which the unsafety property is checked per commit, and
+/// the nightly's is sixteen times larger. Reporting both is the whole of RFC
+/// 0046's first decision.
+///
+/// The distance between this and [`HOSTILE_EXIT`] is the exit's one unmet
+/// conjunct, and it is a **number in the registry** rather than a paragraph:
+/// `claims/0008`'s `unsafety_gap` is `exit_operations / miri_operations`, and
+/// `hostile_thresholds_match` recomputes it from these constants on every run.
+/// Raising the exit's count without raising Miri's widens the gap and goes red,
+/// which is the only mechanism available for a property no tool can check at the
+/// exit's own scale. `JOIN_GAP` and `CHAOS_GAP` are the same discipline.
+const HOSTILE_MIRI: u64 = 4096;
+
+/// Operations the mutation harness runs against one armed defect.
+/// Unit: operations.
+///
+/// A hundred thousand. Each of the three defects is reached inside the first
+/// handful of episodes — the harness fails loudly if that stops being true,
+/// which is the reversal condition rather than a comment.
+const HOSTILE_MUTATE_OPS: u64 = 100_000;
+
+/// The defect that breaks *no panic*: `Mapping::adopt` believes the layout the
+/// peer described.
+const HOSTILE_DEFECT_PANIC: &str = "mutate-believed-header";
+
+/// The defect that breaks *no memory unsafety*: `Consumer::pop` reads through
+/// the slot number a peer wrote.
+const HOSTILE_DEFECT_UNSAFE: &str = "mutate-trusted-slot";
+
+/// The defect that breaks *no hang*: `Service::drain` ignores its budget.
+const HOSTILE_DEFECT_STUCK: &str = "mutate-unbounded-drain";
+
+/// Where `claims/0008` lives, relative to the workspace root.
+///
+/// Read rather than restated: every count and every reach minimum this file
+/// enforces comes out of that file, so a threshold that lives here and a
+/// threshold that lives there cannot be two numbers.
+const HOSTILE_CLAIM: &str = "claims/0008-hostile-peer-operations.toml";
+
+/// Episodes replayed as a **control** when the corpus is recorded and again when
+/// `--mutate` checks the corpus can go red. Unit: episode indices.
+///
+/// They are episodes of [`TRACE_SEED`] that are deliberately *not* corpus
+/// entries, and what they measure is the one thing an entry's provenance does
+/// not say: whether the entry is **rare**. A corpus of runs that found something
+/// is a regression suite only if a run that did not find it exists — otherwise
+/// every line in the file carries exactly the information an arbitrary episode
+/// carries, which is none.
+const HOSTILE_CONTROL: &[u64] = &[1, 3, 7, 11, 101];
+
+/// How many of [`HOSTILE_CONTROL`] reproduce each defect. Unit: episodes.
+///
+/// # What this is for
+///
+/// A corpus entry says *this run found something once*. It cannot say whether a
+/// run that did **not** find it exists, and if none does then the entry carries
+/// exactly the information an arbitrary episode carries, which is none. This is
+/// that measurement, taken when an entry is recorded and checked on every
+/// `--mutate` run.
+///
+/// # The two answers differ, and that is the useful part
+///
+/// `mutate-believed-header` is reached by **every** control episode: a corpus
+/// entry recorded under it is provenance — a seed, a commit, a defect and an
+/// evidence line that outlive the run — and not rarity, and `ring/corpus.txt`
+/// says so rather than implying otherwise.
+///
+/// `mutate-unbounded-drain` is reached by **one of five**: an entry recorded
+/// under it does carry something an arbitrary episode does not, which is what a
+/// regression suite is supposed to be. The corpus earns its keep on one of the
+/// two defects and not on the other, and that is a more useful thing to have
+/// written down than an average.
+///
+/// Checked for equality the way `JOIN_GAP` is, because **both** directions are
+/// information: a defect that became easier to reach and one that became harder
+/// are each a fact about the generator, and neither should be discovered as a
+/// silence next to a green run.
+const HOSTILE_SELECTIVITY: &[(&str, usize)] =
+    &[(HOSTILE_DEFECT_PANIC, 5), (HOSTILE_DEFECT_STUCK, 1)];
+
+/// The declared control count for one defect, or `None` if it has none.
+fn hostile_selectivity(defect: &str) -> Option<usize> {
+    HOSTILE_SELECTIVITY.iter().find(|(name, _)| *name == defect).map(|(_, hits)| *hits)
+}
+
+/// Where the hostile corpus lives, relative to the workspace root.
+///
+/// In the tree rather than under `target/`, for `sim/corpus.txt`'s reason: a
+/// corpus is the one artefact of a fuzzing run that is supposed to outlive the
+/// run, and a build directory is where things go to be deleted.
+const HOSTILE_CORPUS: &str = "ring/corpus.txt";
+
+/// Miri's flags for this suite.
+///
+/// `-Zmiri-permissive-provenance` and nothing else. It silences the
+/// integer-to-pointer warning that `f_ring::adopt` earns by carrying a channel
+/// base as a `u64` — which is RFC 0037's design and not a defect — at the cost
+/// of weaker aliasing checking on that one path. RFC 0046 declares that as
+/// `MIRI_GAP` and `claims/0008` names it beside the number, rather than leaving
+/// a reader to find it out from a warning that scrolled past.
+const HOSTILE_MIRIFLAGS: &str = "-Zmiri-permissive-provenance";
+
+/// Run the fuzzer once, answering `(clean, output)`.
+///
+/// A non-zero exit is *a finding* rather than an error — the binary uses the
+/// status that way deliberately — so this cannot use [`capture`], which treats
+/// one as a failure. The output is printed as well as returned, because the
+/// report is the thing a person came for and a harness that swallowed it would
+/// make its own summary the only evidence.
+fn hostile_run(features: &[&str], args: &[&str], miri: bool) -> Result<(bool, String), String> {
+    hostile_run_reported(features, args, miri, true)
+}
+
+/// The same, with the fuzzer's report captured rather than printed.
+///
+/// For the one caller that runs the fuzzer several times to measure something
+/// about the *runs* rather than to show one: [`hostile_control_hits`] replays
+/// five episodes and what matters is how many of them found something, not five
+/// reports of twenty-six counters each. Everything a person came for is still
+/// printed by the step that calls it.
+fn hostile_run_quietly(
+    features: &[&str],
+    args: &[&str],
+    miri: bool,
+) -> Result<(bool, String), String> {
+    hostile_run_reported(features, args, miri, false)
+}
+
+fn hostile_run_reported(
+    features: &[&str],
+    args: &[&str],
+    miri: bool,
+    loud: bool,
+) -> Result<(bool, String), String> {
+    let mut argv: Vec<String> = if miri {
+        ["miri", "test", "-q", "-p", "f-ring", "--test", "hostile"]
+    } else {
+        ["test", "-q", "--release", "-p", "f-ring", "--test", "hostile"]
+    }
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    if !features.is_empty() {
+        argv.push("--features".into());
+        argv.push(features.join(","));
+    }
+    argv.push("--".into());
+    argv.extend(args.iter().map(|s| (*s).to_string()));
+
+    let mut command = Command::new("cargo");
+    command.args(&argv).current_dir(root());
+    if miri {
+        command.env("MIRIFLAGS", HOSTILE_MIRIFLAGS);
+    }
+    let out = command.output().map_err(|e| format!("could not run cargo: {e}"))?;
+
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    if loud {
+        print!("{text}");
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if loud && !stderr.trim().is_empty() {
+        eprint!("{stderr}");
+    }
+    // Miri reports undefined behaviour on standard error and aborts, so the
+    // verdict this function returns has to see both streams. The fuzzer's own
+    // findings are on standard output; a tool's are not.
+    text.push_str(&stderr);
+    // The one output a caller must never read as a result: a run that printed
+    // no report at all did not run. `f-sim` fails closed on the same signal.
+    if !text.contains("hostile ") {
+        // The one failure worth naming rather than passing through, because its
+        // own message names a component and not a cause: an image built before
+        // `docker/Dockerfile` grew `rustup component add miri` has a `cargo
+        // miri` proxy with nothing behind it, and rustup renders that as a
+        // stack backtrace.
+        if miri && (stderr.contains("is not installed") || stderr.contains("no such command")) {
+            return Err("Miri is not installed in this environment.\n\n\
+                 `docker/Dockerfile`'s `dev` stage installs it and builds its sysroot; an\n\
+                 image built before that does not have it. Rebuild:\n\n  \
+                 docker compose -f docker/compose.yaml build dev\n\n\
+                 It is deliberately not in `rust-toolchain.toml` — that file is the pin\n\
+                 every laptop reads and bumping it invalidates every claim. RFC 0046."
+                .to_string());
+        }
+        return Err(format!("the fuzzer printed no report, so it did not run:\n{}", stderr.trim()));
+    }
+    Ok((out.status.success(), text))
+}
+
+/// The `hostile` verb.
+///
+/// `--base <seed>` is pulled out here rather than taken positionally, for
+/// `sweep --base`'s reason: it is the argument a nightly varies and the
+/// positional one is the argument a person varies. Everything downstream takes
+/// the base explicitly, because a report whose base was implicit is a report
+/// nobody can reproduce from its own header.
+fn hostile_verb(args: &[String]) -> Result<(), String> {
+    let mut miri = false;
+    let mut base: Option<String> = None;
+    let mut rest: Vec<&str> = Vec::new();
+    let mut walk = args.iter();
+    while let Some(arg) = walk.next() {
+        match arg.as_str() {
+            "--miri" => miri = true,
+            "--base" => {
+                let value =
+                    walk.next().ok_or("--base needs a seed: 0x-prefixed hex, or decimal")?;
+                base = Some(value.clone());
+            }
+            other => rest.push(other),
+        }
+    }
+    let base = base.as_deref().unwrap_or(TRACE_SEED);
+
+    match rest.first().copied() {
+        Some("--mutate") if miri => hostile_miri_mutate(),
+        Some("--mutate") => hostile_mutate(),
+        Some("--corpus") => hostile_corpus(miri),
+        Some("--record") => hostile_record(base),
+        // `E1-P04`'s own number, by name rather than as a literal. A workflow
+        // file that spelled `1000000000` would be a second copy of the exit
+        // criterion, and the two would drift the first time one of them moved.
+        Some("--exit") => hostile(HOSTILE_EXIT, miri, base, true),
+        Some(other) if other.starts_with('-') => {
+            Err(format!("unknown option for hostile: {other}"))
+        }
+        count => {
+            let default = if miri { HOSTILE_MIRI } else { HOSTILE_GATE };
+            let ops = match count {
+                None => default,
+                Some(text) => text
+                    .parse()
+                    .map_err(|_| format!("hostile takes an operation count, not `{text}`"))?,
+            };
+            if ops == 0 {
+                return Err("hostile 0 asks for a run with no operations in it, which is a \
+                            result that is green because it asserted nothing. R04."
+                    .to_string());
+            }
+            hostile(ops, miri, base, false)
+        }
+    }
+}
+
+/// The gate: [`HOSTILE_GATE`] operations, in `verify` and in CI.
+///
+/// A named function rather than a call with a constant in it, because `verify`
+/// should read as a list of claims and not as a list of numbers — and because
+/// `claims/0008`'s route dispatches here too.
+fn hostile_gate() -> Result<(), String> {
+    hostile(HOSTILE_GATE, false, TRACE_SEED, false)
+}
+
+/// One run of the fuzzer, with the wall clock around it.
+///
+/// The clock is here and not in the binary, for `sweep`'s reason: a cost that
+/// could reach a verdict would make two machines disagree about what a commit
+/// does. What it buys is the number `claims/0008` reports — a run nobody can
+/// afford is a run nobody performs.
+fn hostile(ops: u64, miri: bool, base: &str, exit: bool) -> Result<(), String> {
+    let ops_text = ops.to_string();
+    let started = std::time::Instant::now();
+    let (clean, text) = hostile_run(&[], &["--seed", base, "--ops", &ops_text], miri)?;
+    let elapsed = started.elapsed();
+
+    let seconds = elapsed.as_secs_f64();
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rate = if seconds > 0.0 { (ops as f64 / seconds) as u64 } else { 0 };
+    println!(
+        "\nelapsed    {seconds:.1} s of wall clock under {}, about {rate} operation(s) a\n\
+         \x20          second, and it is in no verdict above. Two machines that disagree\n\
+         \x20          about this number still agree about every line of the report.",
+        if miri { "Miri" } else { "the ordinary build" }
+    );
+
+    if !clean {
+        return Err(hostile_failure(&text));
+    }
+
+    // The registry, before any verdict about the run. A run judged against a
+    // list that has drifted from the claim is the failure one level down from
+    // the one this whole file is about.
+    hostile_thresholds_match()?;
+
+    // The reach requirement is the ordinary run's and not Miri's, and the reason
+    // is structural rather than empirical. **Reach is a property of the
+    // generator**, and it is asserted where asserting it at scale is affordable:
+    // the ordinary run drives a hundred million operations or more and can be
+    // asked whether every path moved. The Miri run asserts one property, at a
+    // count six orders of magnitude smaller, and loading a coverage requirement
+    // onto it would make the *unsafety* check fail for a coverage reason — which
+    // is the one thing a per-property split exists to prevent.
+    //
+    // The earlier note here said 4 096 operations "cannot drive twenty-six
+    // paths". That was an empirical claim and it is false: a Miri run at this
+    // count reaches all twenty-six. A reason that is measurably wrong is worse
+    // than none, so it is the structural argument that stands.
+    if miri {
+        hostile_miri_count(ops)?;
+        println!(
+            "hostile: clean under Miri, over {ops} operation(s). Reach belongs to the\n\
+             \x20        ordinary run: it is a property of the generator, asserted where a\n\
+             \x20        large sample is affordable, and this run asserts one property at a\n\
+             \x20        count six orders of magnitude smaller. RFC 0046."
+        );
+        return Ok(());
+    }
+    hostile_counts(ops, exit)?;
+    hostile_reached(&text, ops)
+}
+
+/// The Miri run against the count `claims/0008` states for it.
+///
+/// A separate function from [`hostile_counts`] because it is a separate claim:
+/// this is the count at which the *unsafety* property is checked, and the whole
+/// of RFC 0046's first decision is that it is written down beside the other two
+/// rather than folded into them.
+fn hostile_miri_count(ops: u64) -> Result<(), String> {
+    let rows = hostile_thresholds()?;
+    let stated = rows.get("miri_operations").and_then(|b| b.min).unwrap_or(0);
+    if ops < stated {
+        return Err(format!(
+            "this Miri run performed {ops} operation(s) and {HOSTILE_CLAIM} states\n\
+             `miri_operations = {{ min = {stated} }}`.\n\n\
+             A shorter run is a smaller sample of a property that is already checked at\n\
+             a fraction of the exit's count, and lowering it silently is how the gap\n\
+             `unsafety_gap` measures grows without anybody deciding to grow it."
+        ));
+    }
+    Ok(())
+}
+
+/// The two counts `claims/0008` states, checked against the run that just
+/// happened, and both named whichever one this run was.
+///
+/// # Why this exists
+///
+/// Because the registry has to carry the number it publishes. `operations` is
+/// the gate and `exit_operations` is `E1-P04`'s own billion; before this, only
+/// the first was a threshold and the second lived in a CI job and in prose,
+/// which meant the claim's own reproduction command reproduced a tenth of the
+/// exit and said nothing about the rest.
+fn hostile_counts(ops: u64, exit: bool) -> Result<(), String> {
+    let rows = hostile_thresholds()?;
+    let min = |key: &str| rows.get(key).and_then(|b| b.min).unwrap_or(0);
+    let gate = min("operations");
+    let want = min("exit_operations");
+
+    if exit && ops < want {
+        return Err(format!(
+            "`--exit` performed {ops} operation(s) and {HOSTILE_CLAIM} states\n\
+             `exit_operations = {{ min = {want} }}`, which is E1-P04's own number.\n\n\
+             The exit sentence is a conjunction over one billion operations. A run that\n\
+             claims it and performs fewer is the shape this registry exists to refuse."
+        ));
+    }
+
+    let stood = if ops >= want {
+        "this run performed the exit's own count"
+    } else if ops >= gate {
+        "this run performed the gate's count"
+    } else {
+        "this run is below the gate and is neither"
+    };
+    println!(
+        "registry   {stood}: {ops} operation(s) against `operations >= {gate}` and\n\
+         \x20          `exit_operations >= {want}` in {HOSTILE_CLAIM}. The published\n\
+         \x20          reproduction — `cargo xtask claim hostile-peer-operations` — runs the\n\
+         \x20          gate; `cargo xtask hostile --exit` runs the exit's own number, and\n\
+         \x20          the claim's [reproduce] names both."
+    );
+    Ok(())
+}
+
+/// What a finding looks like when it is reported to a person.
+fn hostile_failure(text: &str) -> String {
+    let finding = text
+        .lines()
+        .find(|line| line.starts_with("finding 1  "))
+        .unwrap_or("finding 1  (the report's shape moved)");
+    format!(
+        "the fuzzer found something.\n\n  {finding}\n\n\
+         The `repro` line above stands alone: an episode is derived from (seed, index)\n\
+         by identity, so it reproduces in a millisecond rather than in the whole run.\n\
+         RFC 0046.\n\n\
+         If there is no finding line at all, the process died without reporting — which\n\
+         is what memory unsafety looks like without a tool, and is `--miri`'s job."
+    )
+}
+
+/// Every counter the report is required to have moved.
+///
+/// # Why a clean run is not enough
+///
+/// Because a fuzzer that reached nothing prints the same two words as one that
+/// reached everything. These are the paths a hostile peer has to have driven
+/// for *no panic, no hang* to be a statement about the ring rather than about a
+/// region that spent the whole run refused — and four of them were zero at some
+/// point while this was being written, which is the argument for having the
+/// list at all. `claims/0008` carries the same rows as thresholds.
+const HOSTILE_REACHED: &[(&str, &str)] = &[
+    ("header bytes", "peer_header_bytes"),
+    ("header fields", "peer_header_fields"),
+    ("cursors", "peer_cursors"),
+    ("index slots", "peer_index_slots"),
+    ("entry slots", "peer_entry_slots"),
+    ("arena bytes", "peer_arena_bytes"),
+    ("flag words", "peer_flag_words"),
+    ("restarts", "peer_restarts"),
+    ("restarts mid-batch", "peer_restarts_mid_batch"),
+    ("adopted", "channel_adopted"),
+    ("refused malformed", "channel_refused_malformed"),
+    ("refused address", "channel_refused_address"),
+    ("refused version", "channel_refused_version"),
+    ("refused feature", "channel_refused_feature"),
+    ("epoch changes seen", "channel_epoch_changes_seen"),
+    ("submitted", "ring_submitted"),
+    ("ring full", "ring_full"),
+    ("corrupt, reported", "ring_corrupt_reported"),
+    ("popped", "ring_popped"),
+    ("reaped", "ring_reaped"),
+    ("executed", "entries_executed"),
+    ("refused reserved", "entries_refused_reserved"),
+    ("refused flag", "entries_refused_flag"),
+    ("refused opcode", "entries_refused_opcode"),
+    ("refused bad address", "entries_refused_bad_address"),
+    ("arena bytes copied", "entries_arena_bytes_copied"),
+];
+
+/// The rows of `claims/0008`'s `[threshold]` table that are *not* reach counts.
+///
+/// Named as an exclusion rather than deriving the reach rows by a prefix,
+/// because a prefix is a convention and this is a short list. They are the three
+/// counts, the gap between two of them, and the three properties; everything
+/// else in that table is a minimum on a path, and a new one added there without
+/// a line in [`HOSTILE_REACHED`] is a threshold nothing reads.
+const HOSTILE_NOT_REACH: &[&str] = &[
+    "operations",
+    "exit_operations",
+    "miri_operations",
+    "unsafety_gap",
+    "panics",
+    "stuck",
+    "miri_undefined_behaviour",
+];
+
+/// One row of `claims/0008`'s `[threshold]` table.
+#[derive(Clone, Copy, Default)]
+struct Bound {
+    /// The `min`, where the row states one.
+    min: Option<u64>,
+    /// The `max`, where the row states one.
+    max: Option<u64>,
+}
+
+/// `claims/0008`'s `[threshold]` table, read.
+///
+/// # Why it is read rather than restated
+///
+/// Because a minimum that lives in `xtask` and a minimum that lives in the claim
+/// are two copies of one number, and the copy nobody reads is the one that rots.
+/// `hostile_thresholds_match` makes that argument about the *key set*; this makes
+/// it about the values, so `cargo xtask hostile` enforces exactly what the
+/// registry publishes and a reader can change a threshold by editing the claim.
+fn hostile_thresholds() -> Result<std::collections::BTreeMap<String, Bound>, String> {
+    let path = root().join(HOSTILE_CLAIM);
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+
+    let value = |rest: &str, which: &str| -> Option<u64> {
+        let (_, after) = rest.split_once(which)?;
+        after
+            .trim_start()
+            .strip_prefix('=')?
+            .split_whitespace()
+            .next()?
+            .trim_end_matches([',', '}'])
+            .parse()
+            .ok()
+    };
+
+    let mut rows = std::collections::BTreeMap::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            inside = trimmed.trim_end().trim_end_matches('\r') == "[threshold]";
+            continue;
+        }
+        if !inside || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, rest)) = trimmed.split_once('=') else { continue };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        rows.insert(key.to_string(), Bound { min: value(rest, "min"), max: value(rest, "max") });
+    }
+    Ok(rows)
+}
+
+/// Require the twenty-six reach rows in `claims/0008` and the twenty-six pairs
+/// in [`HOSTILE_REACHED`] to be the same set.
+///
+/// # Why this exists
+///
+/// Because they are one list written twice — the report prints prose names and
+/// the claim carries keys — and two copies of a list drift silently. Deleting a
+/// row from `HOSTILE_REACHED` costs nothing and turns a published minimum into a
+/// threshold nobody checks; deleting one from the claim leaves `xtask` enforcing
+/// a number the registry no longer states. Either is exactly the shape this
+/// epoch has already shipped three times: a check that is green while the thing
+/// it stands for is not there.
+///
+/// It runs on every ordinary `hostile` run rather than as a lint, because the
+/// verdict it protects is that run's, and a check that lives somewhere else is a
+/// check somebody can pass without.
+fn hostile_thresholds_match() -> Result<(), String> {
+    let rows = hostile_thresholds()?;
+
+    // The counts first, because they are the ones a reader would otherwise have
+    // to take on trust: three constants in this file and three thresholds in the
+    // registry, required to be the same three numbers.
+    for (key, want, what) in [
+        ("operations", HOSTILE_GATE, "the gate"),
+        ("exit_operations", HOSTILE_EXIT, "E1-P04's own number"),
+        ("miri_operations", HOSTILE_MIRI, "the count the unsafety property is checked at"),
+    ] {
+        match rows.get(key).and_then(|b| b.min) {
+            Some(stated) if stated == want => {}
+            Some(stated) => {
+                return Err(format!(
+                    "{HOSTILE_CLAIM} states `{key} = {{ min = {stated} }}` and this build \
+                     runs {want}.\n\n\
+                     {key} is {what}, and a registry number that is not the number the \
+                     command performs is a published claim nobody is checking. Move both."
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "{HOSTILE_CLAIM} has no `{key}` in [threshold], and {key} is {what}.\n\n\
+                     A count that lives only in prose is a count that quietly stops being \
+                     the one that runs. RFC 0046."
+                ));
+            }
+        }
+    }
+
+    // And the distance between the two — the exit's one conjunct no tool can
+    // check at the exit's own scale, as a number the registry carries rather
+    // than as a paragraph somebody has to find.
+    let gap = HOSTILE_EXIT / HOSTILE_MIRI;
+    match rows.get("unsafety_gap").and_then(|b| b.max) {
+        Some(stated) if stated == gap => {}
+        Some(stated) => {
+            return Err(format!(
+                "{HOSTILE_CLAIM} states `unsafety_gap = {{ max = {stated} }}` and this build's \
+                 constants give {gap}.\n\n\
+                 It is `exit_operations / miri_operations`: how many times larger the sample \
+                 the panic and hang properties are checked over is than the sample the memory \
+                 unsafety property is checked over. Raising the exit's count without raising \
+                 Miri's widens it, which is a decision and belongs in a diff. RFC 0046."
+            ));
+        }
+        None => {
+            return Err(format!(
+                "{HOSTILE_CLAIM} has no `unsafety_gap` in [threshold].\n\n\
+                 The exit is a conjunction over a billion operations and one of its three \
+                 conjuncts is checked over {HOSTILE_MIRI}. That shortfall is declared as a \
+                 quantity, the way JOIN_GAP and CHAOS_GAP are, rather than as a sentence \
+                 beside a green result. RFC 0046."
+            ));
+        }
+    }
+
+    let claimed: std::collections::BTreeSet<String> =
+        rows.keys().filter(|key| !HOSTILE_NOT_REACH.contains(&key.as_str())).cloned().collect();
+
+    let listed: std::collections::BTreeSet<String> =
+        HOSTILE_REACHED.iter().map(|(_, key)| (*key).to_string()).collect();
+
+    let only_claim: Vec<&String> = claimed.difference(&listed).collect();
+    let only_xtask: Vec<&String> = listed.difference(&claimed).collect();
+    if only_claim.is_empty() && only_xtask.is_empty() {
+        return Ok(());
+    }
+
+    let say = |what: &str, rows: &[&String]| {
+        if rows.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n  {what}:\n    {}",
+                rows.iter().map(|r| r.as_str()).collect::<Vec<_>>().join("\n    ")
+            )
+        }
+    };
+    Err(format!(
+        "claims/0008's reach thresholds and HOSTILE_REACHED have drifted.{}{}\n\n\
+         They are one list written twice, and the copy nobody reads is the one that\n\
+         rots: a row only the claim has is a published minimum this run does not check,\n\
+         and a row only xtask has is a requirement the registry does not state. Fix\n\
+         whichever side is wrong — and if a path really has gone, say so in the claim\n\
+         rather than deleting the row from here. RFC 0046.",
+        say("in claims/0008 and not in HOSTILE_REACHED", &only_claim),
+        say("in HOSTILE_REACHED and not in claims/0008", &only_xtask),
+    ))
+}
+
+/// One counter out of a report, by the name the report prints it under.
+fn hostile_counter(text: &str, name: &str) -> Option<u64> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(name))
+        .and_then(|line| line.split_whitespace().next_back())
+        .and_then(|value| value.parse().ok())
+}
+
+/// Require every path in [`HOSTILE_REACHED`] to have been reached as often as
+/// `claims/0008` says it must be.
+///
+/// # Why the minimums are not all one
+///
+/// Because a minimum of one catches a path that has *stopped*, and nothing else.
+/// The observed values at the gate's count span 60 068 to 298 507 655, so a
+/// regression that collapsed a path by five orders of magnitude — a generator
+/// drawing an unknown opcode once a run instead of sixty-seven thousand times —
+/// would pass a `min = 1` unchanged while the claim's prose says those rows exist
+/// so that exactly that fails. Reach is the only thing standing between a clean
+/// billion and a vacuous one, so the bound has to be able to bind.
+///
+/// # Why they scale
+///
+/// Each row in the claim is stated **per [`HOSTILE_GATE`] operations**, and is
+/// scaled here to the run that actually happened, floored at one. So the gate
+/// enforces the stated number, the exit's billion enforces ten times it, and a
+/// short diagnostic run still enforces *reached at all* rather than being held to
+/// a number it cannot make. The numbers themselves are about two orders of
+/// magnitude below what a healthy run produces: a floor that fires on drift, not
+/// one that fires on noise.
+fn hostile_reached(text: &str, ops: u64) -> Result<(), String> {
+    let rows = hostile_thresholds()?;
+
+    // Integer arithmetic, in `u128` so that a large claim and a large run cannot
+    // multiply past `u64` — the numbers today are nowhere near it, and a bound
+    // that overflowed would be a bound that silently became small.
+    let scaled = |stated: u64| -> u64 {
+        let want = u128::from(stated) * u128::from(ops) / u128::from(HOSTILE_GATE);
+        u64::try_from(want).unwrap_or(u64::MAX).max(1)
+    };
+
+    let mut missing = Vec::new();
+    for (name, key) in HOSTILE_REACHED {
+        let need = scaled(rows.get(*key).and_then(|b| b.min).unwrap_or(1));
+        match hostile_counter(text, name) {
+            Some(count) if count >= need => {}
+            Some(count) => missing
+                .push(format!("{name} reached {count}, and {key} scaled to this run is {need}")),
+            None => missing.push(format!("{name} (no such line in the report)")),
+        }
+    }
+    if missing.is_empty() {
+        println!(
+            "hostile: clean, and every one of the {} paths the claim names was reached at\n\
+             \x20        or above the minimum {HOSTILE_CLAIM} states for it.",
+            HOSTILE_REACHED.len()
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "the run was clean and {} path(s) fell below the claim's minimum:\n  {}\n\n\
+         A fuzzer that reached nothing reports exactly what one that reached everything\n\
+         reports, and this epoch has already shipped three tests that were green while\n\
+         the property they stood for did not hold. Either the generator stopped\n\
+         producing that input, or the code stopped having that path. Both are findings.\n\
+         RFC 0046; every minimum above is read from {HOSTILE_CLAIM} and stated there per\n\
+         {HOSTILE_GATE} operations.",
+        missing.len(),
+        missing.join("\n  ")
+    ))
+}
+
+/// The mutation harness: arm each defect, require the property it breaks to be
+/// reported, disarm, require quiet.
+///
+/// Two of the three are here. The third is `--miri --mutate`, and the split is
+/// the whole of what this harness demonstrates: a memory-unsafety defect is
+/// **invisible to this half**. It does not produce a finding, it produces a
+/// dead process with no seed attached — which is exactly why the third property
+/// is checked by a tool and at a different count.
+fn hostile_mutate() -> Result<(), String> {
+    // The panic defect first, and everything that needs it armed before the
+    // features change: switching a feature set rebuilds the crate, so the order
+    // of the steps below is also the order that builds `f-ring` three times
+    // rather than five.
+    // Each visible defect gets three steps under one feature set, in this order
+    // because switching a feature set rebuilds the crate: the defect is found by
+    // the property it breaks, the control says how much a corpus entry recorded
+    // under it is worth, and the corpus itself is required to go red.
+    for (defect, signature, property) in
+        [(HOSTILE_DEFECT_PANIC, "panic ", "no panic"), (HOSTILE_DEFECT_STUCK, "stuck ", "no hang")]
+    {
+        hostile_defect_found(defect, signature, property)?;
+        hostile_selective(defect)?;
+        hostile_corpus_red(defect)?;
+    }
+
+    let ops = HOSTILE_MUTATE_OPS.to_string();
+    println!("\n--- {HOSTILE_DEFECT_UNSAFE}: this half must NOT be able to see it\n");
+    match hostile_run(&[HOSTILE_DEFECT_UNSAFE], &["--ops", &ops], false) {
+        // The ordinary build dies on the wild read, and it dies as a signal
+        // rather than as a finding: no seed, no episode, nothing to paste. That
+        // is the observation this step exists to make, and it is why the third
+        // property has its own tool.
+        Err(_) => println!("  the process died without reporting, as it must"),
+        Ok((false, text)) if !text.contains("finding 1  ") => {
+            println!("  the run went red without reporting a finding, as it must");
+        }
+        Ok((false, _)) => {
+            return Err(format!(
+                "`{HOSTILE_DEFECT_UNSAFE}` was reported as a finding by the ordinary build.\n\n\
+                 That is not a failure of the ring — it means the defect has become\n\
+                 visible to a check that is supposed to be blind to it, so the Miri half\n\
+                 is no longer proving anything the cheap half does not. Re-read RFC\n\
+                 0046's argument for three defects before changing this."
+            ));
+        }
+        Ok((true, _)) => {
+            return Err(format!(
+                "`{HOSTILE_DEFECT_UNSAFE}` left the ordinary build clean and alive.\n\n\
+                 Reading past the end of the entry array is undefined behaviour whether\n\
+                 or not this machine noticed, so a green run here says only that the\n\
+                 bytes happened to be mapped — which is the entire argument for\n\
+                 `cargo xtask hostile --miri --mutate`, and that command is what has to\n\
+                 pass. This step is a note about what the cheap half cannot do."
+            ));
+        }
+    }
+
+    println!("\n--- disarmed: the fuzzer must go quiet\n");
+    let (clean, text) = hostile_run(&[], &["--ops", &ops], false)?;
+    if !clean {
+        return Err(format!(
+            "the fuzzer found something with no defect armed:\n{}",
+            hostile_failure(&text)
+        ));
+    }
+
+    // And the other half of the corpus pair. A file that goes red armed and red
+    // disarmed says nothing about the defect, which is the control every
+    // mutation harness in this tree carries beside its red half.
+    println!("\n--- disarmed: the corpus must go green\n");
+    hostile_corpus(false)?;
+
+    println!(
+        "\nhostile --mutate: the two properties this half can check both fail on demand,\n\
+         the corpus goes red on each of the two defects and green with neither, its\n\
+         entries are worth what HOSTILE_SELECTIVITY says they are worth, and the third\n\
+         defect is shown to be invisible here. `cargo xtask hostile --miri --mutate` is\n\
+         the half that can see it."
+    );
+    Ok(())
+}
+
+/// Measure how much a corpus entry recorded under `defect` is worth, and require
+/// the answer to be the one [`HOSTILE_SELECTIVITY`] declares.
+///
+/// Five episodes of the tree's own seed that are *not* corpus entries, replayed
+/// with the defect armed: what comes back is how many arbitrary runs find what a
+/// recorded run found. It is the one figure a corpus cannot carry by
+/// construction, and without it a reader has no way to tell a rare seed from the
+/// first one the recorder tried.
+fn hostile_selective(defect: &str) -> Result<(), String> {
+    let control = HOSTILE_CONTROL.len();
+    let Some(declared) = hostile_selectivity(defect) else {
+        return Err(format!(
+            "`{defect}` has no row in HOSTILE_SELECTIVITY in xtask/src/main.rs.\n\n\
+             A defect the corpus records entries under and nothing measures the\n\
+             selectivity of is a defect whose entries could be worth nothing without\n\
+             anybody finding out. RFC 0046, *The corpus*."
+        ));
+    };
+
+    println!("\n--- {defect}: how much a corpus entry recorded under it is worth\n");
+    let hits = hostile_control_hits(defect)?;
+    if hits != declared {
+        return Err(format!(
+            "{hits} of {control} control episode(s) reproduce `{defect}`, and\n\
+             HOSTILE_SELECTIVITY in xtask/src/main.rs says {declared}.\n\n\
+             Both directions are information and neither is a failure of the ring. Fewer\n\
+             means the defect has become harder to reach and the entries in\n\
+             {HOSTILE_CORPUS} recorded under it have started carrying more than an\n\
+             arbitrary episode does; more means the opposite. Either way the number moves\n\
+             in a diff, `--record` rewrites the `# also` lines, and the corpus header\n\
+             stops saying what it says today. RFC 0046, *The corpus*."
+        ));
+    }
+    if hits == control {
+        println!(
+            "\n  selectivity  {hits} of {control}: every control episode reproduces it, so an\n\
+            \x20              entry recorded under `{defect}` is provenance — a seed, a\n\
+            \x20              commit and an evidence line that outlive the run — and not\n\
+            \x20              rarity. {HOSTILE_CORPUS} says so rather than implying otherwise."
+        );
+    } else {
+        println!(
+            "\n  selectivity  {hits} of {control}: most control episodes do not reproduce it,\n\
+            \x20              so an entry recorded under `{defect}` carries something an\n\
+            \x20              arbitrary episode does not. This is the half of\n\
+            \x20              {HOSTILE_CORPUS} that is a regression suite in the full sense."
+        );
+    }
+    Ok(())
+}
+
+/// Arm one defect and require every corpus entry recorded under it to go red.
+///
+/// # Why this step exists
+///
+/// Because without it `cargo xtask hostile --corpus` is green for the reason an
+/// empty file is green: nothing has ever shown it can be anything else.
+/// `sweep_mutate` spends its `[3/5]` on exactly this and its comment is the
+/// argument — *a regression suite whose entries have never been seen to fail is
+/// a file of command lines nobody has tested*. The step was missing here, which
+/// is the fourth instance in this epoch of a check that is green while the thing
+/// it stands for is not there.
+///
+/// The requirement is **exact rather than statistical**: an entry's `# under`
+/// line names the defect it was recorded against, and only those entries are
+/// required to fail. Entries recorded under another defect are counted and no
+/// more, because a panic entry going red under the drain defect says nothing
+/// either way.
+fn hostile_corpus_red(defect: &str) -> Result<(), String> {
+    println!("\n--- the corpus must go red with `{defect}` armed\n");
+    let played = hostile_corpus_replay(false, &[defect])?;
+    let owned: Vec<&(CorpusEntry, bool)> =
+        played.iter().filter(|(e, _)| e.under() == Some(defect)).collect();
+    if owned.is_empty() {
+        return Err(format!(
+            "no entry in {HOSTILE_CORPUS} names `{defect}` in an `# under` line, so arming\n\
+             it proves nothing about the file.\n\n\
+             An entry's provenance is what makes this step exact rather than statistical.\n\
+             `cargo xtask hostile --record` writes it; an entry that lost it was written by\n\
+             a recorder that read only the argv, which is how the first version of this\n\
+             file came to hold seven bare lines under a header claiming each said what it\n\
+             was found under."
+        ));
+    }
+    let survived: Vec<String> =
+        owned.iter().filter(|(_, clean)| *clean).map(|(e, _)| e.argv.join(" ")).collect();
+    if !survived.is_empty() {
+        return Err(format!(
+            "{} of {} corpus entr(y/ies) recorded under `{defect}` stayed clean with it\n\
+             armed:\n  {}\n\n\
+             The corpus is the runs that found this, kept so that they keep finding it. An\n\
+             entry that no longer does is either a stale line or a generator that has\n\
+             stopped producing the input — both are findings, and neither is a reason to\n\
+             delete the entry.",
+            survived.len(),
+            owned.len(),
+            survived.join("\n  ")
+        ));
+    }
+    println!(
+        "\n  the corpus catches it: all {} entr(y/ies) recorded under `{defect}` went red,\n\
+        \x20                        and {} of {} entries did in total.",
+        owned.len(),
+        played.iter().filter(|(_, clean)| !clean).count(),
+        played.len()
+    );
+    Ok(())
+}
+
+/// Arm one defect, require it to be found, and require the property that found
+/// it to be the one it breaks.
+///
+/// Split out of [`hostile_mutate`] when the corpus steps went in beside it: each
+/// defect now gets three steps under one feature set, and a step that needs the
+/// defect armed has to sit inside that stretch rather than after it.
+fn hostile_defect_found(defect: &str, signature: &str, property: &str) -> Result<(), String> {
+    let ops = HOSTILE_MUTATE_OPS.to_string();
+    println!("\n--- {defect}: `{property}` must be reported\n");
+    let (clean, text) = hostile_run(&[defect], &["--ops", &ops], false)?;
+    if clean {
+        return Err(format!(
+            "the fuzzer was clean with `{defect}` armed.\n\n\
+             The defect is in the shipped source behind a feature that is off by\n\
+             default — RFC 0017's argument, extended to this layer by RFC 0046 — and\n\
+             a fuzzer that cannot find it is a fuzzer whose clean runs mean nothing.\n\
+             Either {HOSTILE_MUTATE_OPS} operations no longer reach it, or the\n\
+             generator stopped producing the input that does."
+        ));
+    }
+    let Some(finding) = text.lines().find(|line| line.starts_with("finding 1  ")) else {
+        return Err(format!("`{defect}` went red and printed no finding line"));
+    };
+    if !finding.contains(signature) {
+        return Err(format!(
+            "`{defect}` was found by the wrong property:\n  {finding}\n\n\
+             It is supposed to break `{property}`, and one defect per property is the\n\
+             whole reason there are three. A defect found by another property's check\n\
+             leaves that property's check unproven. RFC 0042, RFC 0046."
+        ));
+    }
+    if !text.contains("--episode ") {
+        return Err(format!("`{defect}` was found and printed no reproduction"));
+    }
+    println!("\n  found by   {}", finding.trim());
+    Ok(())
+}
+
+/// The Miri half of the mutation harness.
+fn hostile_miri_mutate() -> Result<(), String> {
+    let ops = HOSTILE_MIRI.to_string();
+
+    println!("\n--- {HOSTILE_DEFECT_UNSAFE} under Miri: `no memory unsafety` must be reported\n");
+    let (clean, text) = hostile_run(&[HOSTILE_DEFECT_UNSAFE], &["--ops", &ops], true)?;
+    if clean {
+        return Err(format!(
+            "Miri was clean with `{HOSTILE_DEFECT_UNSAFE}` armed.\n\n\
+             The defect reads past the end of the entry array through the slot number a\n\
+             peer wrote, which is undefined behaviour Miri detects by construction. A\n\
+             clean run here means the generator no longer produces an out-of-range slot\n\
+             number, or {HOSTILE_MIRI} operations no longer reach `Consumer::pop`."
+        ));
+    }
+    if !text.contains("Undefined Behavior") {
+        return Err(format!(
+            "Miri went red with `{HOSTILE_DEFECT_UNSAFE}` armed and did not report\n\
+             undefined behaviour. Something else failed, and this harness asserts the\n\
+             tool's own verdict rather than an exit status: read the output above."
+        ));
+    }
+    println!("\n  Miri reported undefined behaviour, as it must");
+
+    println!("\n--- disarmed: Miri must go quiet\n");
+    let (clean, _) = hostile_run(&[], &["--ops", &ops], true)?;
+    if !clean {
+        return Err("Miri found something with no defect armed. That is a real finding about \
+                    this tree, and its output above names the location."
+            .to_string());
+    }
+    println!("\nhostile --miri --mutate: the unsafety check fails on demand and is quiet without.");
+    Ok(())
+}
+
+/// One corpus entry: where it came from, and the run it is.
+///
+/// A corpus line **is** an argv, which is the whole of the format;
+/// `sim/corpus.txt` states the same rule and this follows it rather than
+/// inventing a second. What sits *above* a line is the entry's provenance —
+/// what was found, at which commit, under which defect, with what evidence —
+/// and it is carried here rather than discarded, because a recorder that reads
+/// only the argv rewrites the file without it and the second `--record` run
+/// silently deletes what the first one wrote. That is what happened, and it is
+/// why this is a struct and not a `Vec<String>`.
+struct CorpusEntry {
+    /// The comment lines immediately above the argv, verbatim.
+    block: Vec<String>,
+    /// The entry: an argument list for the fuzzer.
+    argv: Vec<String>,
+}
+
+impl CorpusEntry {
+    /// The defect this entry's block names, where it names one.
+    ///
+    /// It is what makes `--mutate` able to say something exact rather than
+    /// something statistical: an entry recorded under a defect must go red when
+    /// that defect is armed, and an entry recorded under another one is not
+    /// evidence either way.
+    fn under(&self) -> Option<&str> {
+        self.block.iter().find_map(|line| {
+            let rest = line.trim_start_matches('#').trim();
+            rest.strip_prefix("under").map(str::trim).filter(|d| !d.is_empty())
+        })
+    }
+}
+
+/// Every corpus entry, with the provenance block that belongs to it.
+///
+/// The only structure in the file beyond *a line is an argv*: a **blank line
+/// ends a block**, so the file's own header does not become the first entry's
+/// provenance and each entry owns the comments immediately above it.
+fn hostile_corpus_entries() -> Result<Vec<CorpusEntry>, String> {
+    let path = root().join(HOSTILE_CORPUS);
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+
+    let mut entries = Vec::new();
+    let mut block: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            block.clear();
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix('#') {
+            block.push(format!("#{rest}"));
+            continue;
+        }
+        entries.push(CorpusEntry {
+            block: std::mem::take(&mut block),
+            argv: trimmed.split_whitespace().map(str::to_string).collect(),
+        });
+    }
+    Ok(entries)
+}
+
+/// Replay every corpus entry, answering what each one did.
+///
+/// `features` is what makes this more than a green-path replay: armed with a
+/// defect, the entries recorded under that defect have to go red, and that is
+/// the step that says the file can fail at all. `sweep_mutate`'s `[3/5]` is the
+/// precedent and its comment is the argument — *a regression suite whose entries
+/// have never been seen to fail is a file of command lines nobody has tested*.
+fn hostile_corpus_replay(
+    miri: bool,
+    features: &[&str],
+) -> Result<Vec<(CorpusEntry, bool)>, String> {
+    let entries = hostile_corpus_entries()?;
+    if entries.is_empty() {
+        return Err(format!(
+            "{HOSTILE_CORPUS} holds no entries.\n\n\
+             An empty corpus is not a corpus: it is a file that passes because it asks\n\
+             nothing. `cargo xtask hostile --record` is how the entries in it were\n\
+             produced."
+        ));
+    }
+
+    println!(
+        "corpus — {} entr(y/ies) from {HOSTILE_CORPUS}{}",
+        entries.len(),
+        if features.is_empty() {
+            String::new()
+        } else {
+            format!(", with `{}` armed", features.join(","))
+        }
+    );
+    let mut played = Vec::new();
+    for (i, entry) in entries.into_iter().enumerate() {
+        println!("\n[{}] {}\n", i + 1, entry.argv.join(" "));
+        let argv: Vec<&str> = entry.argv.iter().map(String::as_str).collect();
+        let clean = matches!(hostile_run(features, &argv, miri), Ok((true, _)));
+        played.push((entry, clean));
+    }
+    Ok(played)
+}
+
+/// The corpus, replayed. Every run that has ever found something, required to
+/// be clean now.
+fn hostile_corpus(miri: bool) -> Result<(), String> {
+    let played = hostile_corpus_replay(miri, &[])?;
+    let failed = played.iter().filter(|(_, clean)| !clean).count();
+
+    if failed == 0 {
+        println!(
+            "\ncorpus: {} entr(y/ies), all clean under {}.",
+            played.len(),
+            if miri { "Miri" } else { "the ordinary build" }
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{failed} of {} corpus entr(y/ies) that used to be clean are not.\n\n\
+         Each line above is an argument list: paste it after\n\
+         `cargo test -q --release -p f-ring --test hostile --` and read the report.",
+        played.len()
+    ))
+}
+
+/// How many of [`HOSTILE_CONTROL`] reproduce `defect`. Unit: episodes.
+///
+/// # What this measures, and why a corpus needs it
+///
+/// A corpus entry says *this run found something once*. What it does not say is
+/// whether a run that did **not** find it exists — and if every episode of every
+/// seed reproduces the defect, then the entry carries exactly the information an
+/// arbitrary episode carries, which is none. Measuring it is the difference
+/// between a regression suite and seven lines somebody happened to record first.
+///
+/// The answer is [`HOSTILE_SELECTIVITY`], which is a row per defect because the
+/// two answer differently — five of five for the panic defect, one of five for
+/// the drain — and it is written into each entry as it is recorded and checked
+/// by `--mutate` on every run.
+fn hostile_control_hits(defect: &str) -> Result<usize, String> {
+    let mut hits = 0;
+    for episode in HOSTILE_CONTROL {
+        let episode = episode.to_string();
+        let (clean, _) =
+            hostile_run_quietly(&[defect], &["--seed", TRACE_SEED, "--episode", &episode], false)?;
+        if !clean {
+            hits += 1;
+        }
+    }
+    Ok(hits)
+}
+
+/// Arm each defect that reports through the fuzzer, and merge what it finds
+/// into the corpus.
+///
+/// This is how the entries already in `ring/corpus.txt` were produced, and it
+/// is spelled rather than left as folklore: on a tree with nothing wrong with
+/// it the only thing to find is a deliberate defect, so a corpus of a clean
+/// tree's findings would be an empty file.
+///
+/// **It still fails when it finds something**, on `sweep --record`'s argument:
+/// growing the corpus and going red are two things one pass has to do.
+fn hostile_record(base: &str) -> Result<(), String> {
+    let commit = sweep_commit()?;
+    let ops = HOSTILE_MUTATE_OPS.to_string();
+    let mut found = Vec::new();
+
+    for (defect, property) in
+        [(HOSTILE_DEFECT_PANIC, "no panic"), (HOSTILE_DEFECT_STUCK, "no hang")]
+    {
+        println!("\n--- {defect}\n");
+        let (clean, text) = hostile_run(&[defect], &["--seed", base, "--ops", &ops], false)?;
+        if clean {
+            continue;
+        }
+        let Some(finding) = text.lines().find(|line| line.starts_with("finding 1  ")) else {
+            continue;
+        };
+        let Some(repro) = text.lines().find(|line| line.trim_start().starts_with("repro ")) else {
+            continue;
+        };
+        let Some((_, argv)) = repro.split_once(" -- ") else { continue };
+        // Measured while the defect is still armed, and written into the entry:
+        // how many arbitrary episodes find the same thing. It is the one figure
+        // a corpus entry cannot carry by construction, and without it a reader
+        // has no way to tell a rare seed from the first one the recorder tried.
+        let hits = hostile_control_hits(defect)?;
+        found.push((
+            defect.to_string(),
+            property.to_string(),
+            finding.trim_start_matches("finding 1  ").trim().to_string(),
+            argv.trim().to_string(),
+            hits,
+        ));
+    }
+
+    let path = root().join(HOSTILE_CORPUS);
+    let existing = hostile_corpus_entries().unwrap_or_default();
+    let mut text = hostile_corpus_header();
+    let mut known: Vec<String> = existing.iter().map(|e| e.argv.join(" ")).collect();
+
+    // Every existing entry, **with its block**. Reading only the argv here is
+    // what deleted the provenance of every earlier entry on the second
+    // `--record` run: the file that shipped was seven bare lines under a header
+    // claiming each one said what it was found under.
+    for entry in &existing {
+        text.push('\n');
+        for line in &entry.block {
+            text.push_str(line);
+            text.push('\n');
+        }
+        text.push_str(&entry.argv.join(" "));
+        text.push('\n');
+    }
+    let mut added = 0;
+    for (defect, property, evidence, argv, hits) in found {
+        if known.contains(&argv) {
+            continue;
+        }
+        known.push(argv.clone());
+        added += 1;
+        let control = HOSTILE_CONTROL.len();
+        let also = if hits == control {
+            format!(
+                "{hits} of {control} control episodes reproduce it too, so this entry is \
+                 provenance and not rarity"
+            )
+        } else {
+            format!(
+                "only {hits} of {control} control episodes reproduce it, so this entry \
+                 reaches something an arbitrary episode does not"
+            )
+        };
+        text.push_str(&format!(
+            "\n# ----------------------------------------------------------------------\n\
+             # broke     {property}\n\
+             # commit    {commit}\n\
+             # under     {defect}\n\
+             # evidence  {evidence}\n\
+             # also      {also}\n\
+             {argv}\n"
+        ));
+    }
+    std::fs::write(&path, text).map_err(|e| format!("writing {HOSTILE_CORPUS}: {e}"))?;
+    println!("\ncorpus     {added} entr(y/ies) added to {HOSTILE_CORPUS}");
+
+    if added == 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "{added} entr(y/ies) were recorded, which means the run found something.\n\n\
+         That is the ordinary outcome of `--record` and it is still a failure: a pass\n\
+         that both grew the corpus and reported clean would be a pass nobody could\n\
+         read. Disarm the defects, and the corpus replay is what keeps them."
+    ))
+}
+
+/// The header `ring/corpus.txt` is regenerated with.
+///
+/// Kept beside the writer rather than in the file, so a corpus regenerated by a
+/// later commit carries that commit's explanation rather than the first one's.
+/// `sim/src/main.rs` does the same for the seed corpus and this follows it.
+fn hostile_corpus_header() -> String {
+    let control = HOSTILE_CONTROL.len();
+    let panic_defect = HOSTILE_DEFECT_PANIC;
+    let stuck_defect = HOSTILE_DEFECT_STUCK;
+    let panic_hits = hostile_selectivity(HOSTILE_DEFECT_PANIC).unwrap_or(0);
+    let stuck_hits = hostile_selectivity(HOSTILE_DEFECT_STUCK).unwrap_or(0);
+    format!(
+        "# The hostile-peer corpus.\n\
+         #\n\
+         # Every line below that is not a comment is an argument list for the fuzzer,\n\
+         # and every one of them is a run that found something once. `cargo xtask\n\
+         # hostile --corpus` replays all of them and requires each to be clean now.\n\
+         # `cargo xtask hostile --miri --corpus` replays the same entries under Miri.\n\
+         #\n\
+         # There is no format here beyond *a line is an argv*, and one rule about the\n\
+         # comments: **a blank line ends a block**, so the comments immediately above a\n\
+         # line belong to that entry and this header belongs to none. The fuzzer's own\n\
+         # command-line parser reads an entry, so an entry this binary cannot run is an\n\
+         # entry that fails to load. `sim/corpus.txt` is the file this shape comes from,\n\
+         # and following it rather than inventing a second one was the point.\n\
+         #\n\
+         # Append-only. An entry removed because somebody believed the bug was gone is\n\
+         # the entry that would have caught it coming back. `--record` carries every\n\
+         # existing block through verbatim; a recorder that read only the argv would\n\
+         # delete the provenance of everything an earlier run wrote, and did.\n\
+         #\n\
+         # ---- what an entry is worth, stated rather than implied ----\n\
+         #\n\
+         # Each block says what was found, at which commit and under which of the\n\
+         # deliberate defects in `ring/Cargo.toml`. The `# also` line says the thing a\n\
+         # corpus cannot say by construction: how many of {control} *control* episodes —\n\
+         # episodes deliberately not in this file — reproduce the same finding with the\n\
+         # same defect armed. Without it there is no way to tell a rare seed from the\n\
+         # first one the recorder happened to try.\n\
+         #\n\
+         # **The two answers differ, and that is the useful part.**\n\
+         #\n\
+         #   {panic_defect}\n\
+         #     {panic_hits} of {control}. Every episode reaches it, so an entry recorded\n\
+         #     under it is *provenance and not rarity*: a seed, a commit and an evidence\n\
+         #     line that outlive the run, and nothing an arbitrary episode does not have.\n\
+         #\n\
+         #   {stuck_defect}\n\
+         #     {stuck_hits} of {control}. Most episodes do **not** reach it, so an entry\n\
+         #     recorded under it carries something an arbitrary episode does not. This is\n\
+         #     the half of the file that is a regression suite in the full sense.\n\
+         #\n\
+         # `HOSTILE_SELECTIVITY` in `xtask/src/main.rs` holds those two numbers and\n\
+         # `cargo xtask hostile --mutate` checks each for equality on every run — in both\n\
+         # directions, because a defect that became easier to reach and one that became\n\
+         # harder are each a fact about the generator.\n\
+         #\n\
+         # And the file is shown to be able to go red rather than assumed to be: for each\n\
+         # defect `--mutate` arms it and requires every entry whose `# under` names it to\n\
+         # fail, then disarms and requires every entry to pass. `sweep_mutate`'s [3/5]\n\
+         # makes the same argument about `sim/corpus.txt`, and this file shipped once\n\
+         # without the step.\n\
+         #\n\
+         # The third defect, {HOSTILE_DEFECT_UNSAFE}, has no entry and cannot have one.\n\
+         # It is memory unsafety, so the ordinary build dies on a signal with no seed\n\
+         # attached and Miri aborts before a reproduction can be printed. What checks it\n\
+         # is `cargo xtask hostile --miri --mutate`, and RFC 0046 is why that is a\n\
+         # separate command with a separate count.\n\
+         #\n\
+         # Reproduce one by hand:\n\
+         #   cargo test -q --release -p f-ring --test hostile -- <the line>\n"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// E1-P05 — the structure-aware entry fuzzer, its coverage measurement, its
+// corpus and the harness that says a clean run means something.
+//
+// The division of labour is `hostile`'s, restated because it is what makes a
+// number out of here worth anything:
+//
+//   the fuzzer  draws a case from a seed, answers it, checks three oracles,
+//               counts every family and every refusal it reached, and reports a
+//               finding as a *corpus line* rather than as a backtrace. It reads
+//               no clock and it knows nothing about llvm-cov.
+//   xtask       supplies the count, the instrumentation, and the verdict about
+//               which lines of which functions the run reached. RFC 0048.
+// ---------------------------------------------------------------------------
+
+/// Cases `cargo xtask entries` runs when it is not told a count. Unit: cases.
+///
+/// A quarter of a million. It is the gate, and
+/// `claims/0009-entry-validation-coverage.toml` carries it as `cases` so the
+/// number in this file and the number in the registry cannot be two numbers.
+const ENTRIES_GATE: u64 = 262_144;
+
+/// Cases `--record` draws before it minimises. Unit: cases.
+///
+/// Four times the gate, because the recording run is the only one whose *point*
+/// is to find inputs rather than to check them: a corpus is a cover, and a cover
+/// found by a shorter search is a cover with holes in it. It costs about an
+/// order of magnitude more per case than the gate — resetting and reading the
+/// profile runtime's counter array once per case is what per-input coverage
+/// costs — which is why this is a command somebody runs and not a step in
+/// `verify`.
+const ENTRIES_RECORD_CASES: u64 = 1_048_576;
+
+/// Cases the mutation harness runs against one armed defect. Unit: cases.
+///
+/// Sixty-five thousand five hundred and thirty-six, and it is larger than it
+/// looks it needs to be because one of the three defects lives behind
+/// `World::Spent`, which is drawn once in two hundred and fifty-six cases. The
+/// harness fails loudly if a defect stops being reached inside this count,
+/// which is the reversal condition rather than a comment.
+const ENTRIES_MUTATE_CASES: u64 = 65_536;
+
+/// The defect that breaks the *envelope* oracle: `execute` masks an unknown
+/// flag off instead of refusing the entry.
+const ENTRIES_DEFECT_ENVELOPE: &str = "mutate-ignored-flag";
+
+/// The defect that breaks the *ledger* oracle: `Table::register` fills a slot
+/// whose generations have run out, so it reissues a live name.
+const ENTRIES_DEFECT_LEDGER: &str = "mutate-reusable-slot";
+
+/// The defect that breaks the *reach* oracle: `Table::resolve` masks a buffer
+/// index instead of checking it.
+const ENTRIES_DEFECT_REACH: &str = "mutate-lenient-index";
+
+/// Each defect, the words of the oracle that must be the one to find it, and
+/// what that oracle is called.
+///
+/// Required to be found by **its own** oracle and by no other, for RFC 0042's
+/// arithmetic: three oracles with one defect between them is one oracle under
+/// test and two decorations, and a defect found by the wrong oracle is a
+/// harness whose three properties are one property wearing three names.
+const ENTRIES_DEFECTS: &[(&str, &str, &str)] = &[
+    (ENTRIES_DEFECT_ENVELOPE, "the code R04 names", "the envelope"),
+    (ENTRIES_DEFECT_LEDGER, "never reissued", "the ledger"),
+    (ENTRIES_DEFECT_REACH, "inside its own set", "the reach"),
+];
+
+/// The feature that compiles the per-case coverage signal in.
+///
+/// Not a defect: it is the FFI into the profile runtime's counters, and those
+/// symbols exist only in a build carrying `-Cinstrument-coverage`. A feature
+/// rather than a `cfg` so that referring to them without the flag is a link
+/// error rather than a silently absent signal.
+const ENTRIES_FEEDBACK: &str = "coverage-feedback";
+
+/// Where the entry corpus lives, relative to the workspace root.
+const ENTRIES_CORPUS: &str = "ring/entries-corpus.txt";
+
+/// Where `claims/0009` lives.
+const ENTRIES_CLAIM: &str = "claims/0009-entry-validation-coverage.toml";
+
+/// The case the recorder runs *before* the corpus when it minimises it.
+///
+/// A process's first case lights every region the harness itself needs to start
+/// — the argument parser, the allocator's first call — and an entry credited
+/// with those is an entry whose `adds` figure says nothing about the validation
+/// path. One warm-up case absorbs them, and it is not in the file.
+const ENTRIES_WARMUP: [&str; 4] = ["--world", "frame", "--sqe", "op=0x0"];
+
+/// Cases the corpus always carries, whatever the feedback keeps.
+///
+/// # Why a coverage-fed corpus needs hand-written seeds at all
+///
+/// Because the feedback signal is **blind to some of the path**, and finding
+/// that out is worth more than the number it cost. LLVM gives a region a
+/// physical counter only when it needs one: a region whose execution count can
+/// be *derived* — an else-arm whose count is the parent's minus its sibling's —
+/// carries an expression rather than a counter, and there is nothing in
+/// `__llvm_prf_cnts` for the harness to read. So an input that is the first to
+/// reach such a region adds no bit, is not kept, and never reaches the corpus.
+///
+/// It is not a hypothetical, and it is not two regions either. `Name::read`'s
+/// `AUTHORITY/NO_SUCH_CAP` arm, `Request::read`'s, and **both** arms of the
+/// short-write test in `f_ring::write_serial` are derived regions. The generator
+/// reaches all of them thousands of times in a quarter of a million cases —
+/// `arena bytes copied` runs to five figures in four thousand — and the corpus
+/// the signal built covered none of them. The third was found by review rather
+/// than by this file, which is the honest way to record that the first two were
+/// found by a measurement and nothing then asked whether there were more.
+///
+/// The fourth was found by *fixing* the third, and is the sharpest statement of
+/// the gap this list has. Seeding the short write covered `write_serial`'s
+/// `break` and **uncovered the line below it**: the loop's go-round is the same
+/// test's other arm, derived from the same parent, and the corpus entry that had
+/// been reaching it was dropped by minimisation as adding nothing — because what
+/// it added was invisible. Two seeds, one per arm, and the total is what moved.
+/// A signal that cannot see a region cannot see it being lost either, which is
+/// why the measurement is a separate step from the feedback rather than the same
+/// tool trusted twice. `llvm-cov` — which computes the expressions — is what
+/// says so.
+///
+/// # The seed this list used to carry, and why it is gone
+///
+/// A third seed named `Table::slot_of`'s *index past the table* refusal, and its
+/// reason was that the signal could not see the region. Two measurements say
+/// otherwise. Four other entries in the corpus reach it — entries the signal
+/// itself kept — and removing the seed left the figure exactly where it was. A
+/// seed whose reason a measurement contradicts is worse than no seed: it is a
+/// comment a reader would believe, in the one file whose whole purpose is to be
+/// believed about coverage.
+///
+/// The line in `slot_of` that really is uncovered is its *generation zero*
+/// refusal, and that one is a second bound rather than a blind spot:
+/// `Name::read` and `Request::read` both refuse a generation-zero id before
+/// `slot_of` is asked, so no entry this harness can write reaches it. RFC 0048
+/// lists it with the other second bounds instead of pretending a seed could
+/// reach it.
+///
+/// The test that distinguishes a blind spot from a hole, since it cost a run to
+/// find: replay a near-miss case and then the reaching case into one process
+/// with the signal on. If the reaching case is **not kept**, what it reached is
+/// invisible. The short write is not kept and so is a seed; the two `slot_of`
+/// cases are kept and so are not.
+///
+/// Each seed names the region it exists for. They are replayed **first** when
+/// `--record` minimises, and written first, so an entry that only duplicates a
+/// seed is dropped rather than surviving because minimisation never saw the
+/// seed. `COUNTER_GAP`, RFC 0048.
+const ENTRIES_SEEDS: &[(&str, &[&str])] = &[
+    (
+        "Name::read refuses an id at generation zero, which no table ever issued",
+        &["--world", "live", "--sqe", "op=0x0,flags=0x4,set=0x3,index=0x2"],
+    ),
+    (
+        "Request::read refuses an unregistration naming an id nobody could have issued",
+        &["--world", "live", "--sqe", "op=0xff,flags=0x4,set=0x5"],
+    ),
+    (
+        "write_serial stops on a short write: 200 bytes asked of a 96-byte sink",
+        &["--world", "frame", "--sqe", "op=0x1,len=0xc8"],
+    ),
+    (
+        "write_serial's loop goes round instead: 34 bytes the same sink takes whole",
+        &["--world", "frame", "--sqe", "op=0x1,offset=0xa5,len=0x22"],
+    ),
+];
+
+/// The files the entry-validation path lives in.
+///
+/// Passed to `llvm-cov` as the sources to report on, absolute, because that is
+/// what the coverage mapping records and what the tool matches against.
+const ENTRIES_SOURCES: [&str; 5] = [
+    "abi/src/buf.rs",
+    "abi/src/lib.rs",
+    "ring/src/lib.rs",
+    "ring/src/registry.rs",
+    "ring/src/buffers.rs",
+];
+
+/// One member of the entry-validation path: what it is called, and how its
+/// symbol is recognised.
+///
+/// # Why a list of name fragments and not a demangler
+///
+/// Because `llvm-cov --show-functions` prints the *mangled* symbol, and v0
+/// mangling writes every identifier as a length followed by the identifier —
+/// `6f_ring`, `8registry`, `5Table`, `7resolve`. Matching all of a member's
+/// fragments as substrings is therefore exact enough to be unambiguous and
+/// short enough to read, and it needs no dependency. A member matched by no row
+/// fails the run rather than being quietly counted wrong.
+///
+/// Where two members' fragment lists both match a row, the **longer** list wins
+/// — which is what separates `f_ring::execute` from `Table::execute`.
+struct PathMember {
+    /// What a reader calls it.
+    name: &'static str,
+    /// The fragments its mangled symbol must contain, all of them.
+    fragments: &'static [&'static str],
+}
+
+/// The entry-validation path, function by function.
+///
+/// # Why this list exists at all
+///
+/// Because *95% of the validation path* means nothing until somebody says which
+/// lines are in it. This is that list, and `claims/0009` carries the same names
+/// so the two cannot drift — `entries_path_matches_claim` checks it on every
+/// run, the way `hostile_thresholds_match` does for `claims/0008`.
+///
+/// # What is deliberately not in it
+///
+/// **`kernel/src/ring.rs`.** The kernel has no host harness — `kernel/Cargo.toml`
+/// says why — so no instrument in this repository can produce a coverage figure
+/// for it at all. RFC 0048 declares that as `FRAME_GAP` and names what stands in
+/// its place: `cargo xtask run`'s boot drives the same `f_ring::execute` and
+/// both of its refusal paths on the target.
+///
+/// **`SetId::new`, `bits`, `index`, `generation` and `from_bits`.** They are on
+/// the path — `slot_of` reads all of them — and each is a single expression, and
+/// all five are fully covered. Including them would raise the figure by about
+/// two and a half points and add no evidence, which is the definition of
+/// padding a metric.
+///
+/// **`Request::write`, `Name::write` and `registration`/`unregistration`.** They
+/// are how a *client* composes an entry, not how a service validates one.
+const ENTRIES_PATH: &[PathMember] = &[
+    // The envelope, and the two readings of an entry's buffer fields.
+    PathMember { name: "SetId::is_issuable", fragments: &["5f_abi", "5SetId", "11is_issuable"] },
+    PathMember {
+        name: "SetId::from_completion",
+        fragments: &["5f_abi", "5SetId", "15from_completion"],
+    },
+    PathMember { name: "Name::read", fragments: &["5f_abi", "3buf", "4Name", "4read"] },
+    PathMember { name: "Request::read", fragments: &["5f_abi", "3buf", "7Request", "4read"] },
+    PathMember {
+        name: "opcode::is_registration",
+        fragments: &["5f_abi", "6opcode", "15is_registration"],
+    },
+    PathMember { name: "op::known", fragments: &["5f_abi", "2op", "5known"] },
+    PathMember { name: "Cqe::error", fragments: &["5f_abi", "3Cqe", "5error"] },
+    PathMember { name: "error::unpack", fragments: &["5f_abi", "5error", "6unpack"] },
+    // The frame's executor.
+    PathMember { name: "execute", fragments: &["6f_ring", "7execute"] },
+    PathMember { name: "write_serial", fragments: &["6f_ring", "12write_serial"] },
+    PathMember { name: "Arena::copy_out", fragments: &["6f_ring", "5Arena", "8copy_out"] },
+    // The service's registration table.
+    PathMember {
+        name: "Table::execute",
+        fragments: &["6f_ring", "8registry", "5Table", "7execute"],
+    },
+    PathMember {
+        name: "Table::register",
+        fragments: &["6f_ring", "8registry", "5Table", "8register"],
+    },
+    PathMember {
+        name: "Table::unregister",
+        fragments: &["6f_ring", "8registry", "5Table", "10unregister"],
+    },
+    PathMember {
+        name: "Table::retire_all",
+        fragments: &["6f_ring", "8registry", "5Table", "10retire_all"],
+    },
+    PathMember {
+        name: "Table::resolve",
+        fragments: &["6f_ring", "8registry", "5Table", "7resolve"],
+    },
+    PathMember {
+        name: "Table::release",
+        fragments: &["6f_ring", "8registry", "5Table", "7release"],
+    },
+    PathMember {
+        name: "Table::slot_of",
+        fragments: &["6f_ring", "8registry", "5Table", "7slot_of"],
+    },
+    PathMember { name: "Table::issued", fragments: &["6f_ring", "8registry", "5Table", "6issued"] },
+    PathMember { name: "retire", fragments: &["6f_ring", "8registry", "6retire"] },
+    PathMember { name: "negotiated_for", fragments: &["6f_ring", "8registry", "14negotiated_for"] },
+    PathMember {
+        name: "Registered::bind",
+        fragments: &["6f_ring", "8registry", "10Registered", "4bind"],
+    },
+    PathMember {
+        name: "SharedVirtual::bind",
+        fragments: &["6f_ring", "8registry", "13SharedVirtual", "4bind"],
+    },
+    PathMember {
+        name: "Registered::resolve",
+        fragments: &["6f_ring", "8registry", "10Registered", "9Transport", "7resolve"],
+    },
+    PathMember {
+        name: "Registered::release",
+        fragments: &["6f_ring", "8registry", "10Registered", "9Transport", "7release"],
+    },
+    PathMember {
+        name: "SharedVirtual::resolve",
+        fragments: &["6f_ring", "8registry", "13SharedVirtual", "9Transport", "7resolve"],
+    },
+    PathMember {
+        name: "SharedVirtual::release",
+        fragments: &["6f_ring", "8registry", "13SharedVirtual", "9Transport", "7release"],
+    },
+    // The client's side of what a service wrote.
+    PathMember {
+        name: "Fixed::from_completion",
+        fragments: &["6f_ring", "7buffers", "5Fixed", "15from_completion"],
+    },
+    PathMember {
+        name: "Fixed::name",
+        fragments: &["6f_ring", "7buffers", "5Fixed", "6Naming", "4name"],
+    },
+    PathMember {
+        name: "Virtual::name",
+        fragments: &["6f_ring", "7buffers", "7Virtual", "6Naming", "4name"],
+    },
+    PathMember {
+        name: "BufferSet::bind",
+        fragments: &["6f_ring", "7buffers", "9BufferSet", "4bind"],
+    },
+    PathMember {
+        name: "BufferSet::carve",
+        fragments: &["6f_ring", "7buffers", "9BufferSet", "5carve"],
+    },
+    PathMember { name: "Idle::submit", fragments: &["6f_ring", "7buffers", "4Idle", "6submit"] },
+    PathMember {
+        name: "InFlight::complete",
+        fragments: &["6f_ring", "7buffers", "8InFlight", "8complete"],
+    },
+    PathMember {
+        name: "InFlight::reclaim",
+        fragments: &["6f_ring", "7buffers", "8InFlight", "7reclaim"],
+    },
+    PathMember {
+        name: "InFlight::drop",
+        fragments: &["6f_ring", "7buffers", "8InFlight", "4Drop", "4drop"],
+    },
+    PathMember { name: "PeerGone::of", fragments: &["6f_ring", "7buffers", "8PeerGone", "2of"] },
+];
+
+/// One member's measured coverage.
+struct MemberCoverage {
+    /// Lines in the member's coverage mapping. Unit: lines.
+    lines: u64,
+    /// Lines never executed. Unit: lines.
+    missed: u64,
+    /// Instantiations that contributed. Unit: symbols.
+    rows: usize,
+    /// Placeholder records dropped from the denominator. Unit: symbols.
+    ///
+    /// Printed rather than kept quiet: this number decides how large the
+    /// denominator is, and a change in it is the shape of a figure moving
+    /// because the *measurement* moved. Every one of them is required to have
+    /// executed nothing — `entries_measure` refuses the run otherwise.
+    skipped: usize,
+}
+
+/// Run the fuzzer once, answering `(clean, output)`.
+///
+/// A non-zero exit is *a finding* rather than an error — the binary uses the
+/// status that way deliberately — so this cannot use [`capture`], which treats
+/// one as a failure.
+fn entries_run(features: &[&str], args: &[&str], loud: bool) -> Result<(bool, String), String> {
+    let mut argv: Vec<String> = ["test", "-q", "--release", "-p", "f-ring", "--test", "entries"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    if !features.is_empty() {
+        argv.push("--features".into());
+        argv.push(features.join(","));
+    }
+    argv.push("--".into());
+    argv.extend(args.iter().map(|s| (*s).to_string()));
+
+    let out = Command::new("cargo")
+        .args(&argv)
+        .current_dir(root())
+        .output()
+        .map_err(|e| format!("could not run cargo: {e}"))?;
+
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    if loud {
+        print!("{text}");
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if loud && !stderr.trim().is_empty() {
+        eprint!("{stderr}");
+    }
+    text.push_str(&stderr);
+    // The one output a caller must never read as a result: a run that printed
+    // no report at all did not run.
+    if !text.contains("entries \u{2014} ") {
+        return Err(format!("the fuzzer printed no report, so it did not run:\n{}", stderr.trim()));
+    }
+    Ok((out.status.success(), text))
+}
+
+/// What a finding looks like when it is reported to a person.
+fn entries_failure(text: &str) -> String {
+    let finding = text
+        .lines()
+        .find(|line| line.starts_with("finding 1  "))
+        .unwrap_or("finding 1  (the report's shape moved)");
+    format!(
+        "the fuzzer found something.\n\n  {finding}\n\n\
+         The `repro` line above is a whole case — a world and an entry — and it stands\n\
+         alone: nothing carries over between cases, so it reproduces at the cost of one\n\
+         case rather than of the run. RFC 0048.\n\n\
+         `wrong` is an oracle refusing the answer, and the oracle names itself in the\n\
+         line. `panic` is the ring panicking on an entry, which is the property\n\
+         `ring/tests/hostile.rs` owns at a much larger count."
+    )
+}
+
+/// The `entries` verb.
+fn entries_verb(args: &[String]) -> Result<(), String> {
+    let mut base: Option<String> = None;
+    let mut rest: Vec<&str> = Vec::new();
+    let mut walk = args.iter();
+    while let Some(arg) = walk.next() {
+        match arg.as_str() {
+            "--base" => {
+                let value =
+                    walk.next().ok_or("--base needs a seed: 0x-prefixed hex, or decimal")?;
+                base = Some(value.clone());
+            }
+            other => rest.push(other),
+        }
+    }
+    let base = base.as_deref().unwrap_or(TRACE_SEED);
+
+    match rest.first().copied() {
+        Some("--corpus") => entries_corpus(),
+        Some("--record") => entries_record(base),
+        Some("--coverage") => entries_coverage(),
+        Some("--mutate") => entries_mutate(),
+        Some(other) if other.starts_with('-') => {
+            Err(format!("unknown option for entries: {other}"))
+        }
+        count => {
+            let cases = match count {
+                None => ENTRIES_GATE,
+                Some(text) => {
+                    text.parse().map_err(|_| format!("entries takes a case count, not `{text}`"))?
+                }
+            };
+            if cases == 0 {
+                return Err("entries 0 asks for a run with no cases in it, which is a result \
+                            that is green because it asserted nothing. R04."
+                    .to_string());
+            }
+            entries_draw(cases, base)
+        }
+    }
+}
+
+/// The gate: [`ENTRIES_GATE`] cases, in `verify` and in CI.
+fn entries_gate() -> Result<(), String> {
+    entries_draw(ENTRIES_GATE, TRACE_SEED)
+}
+
+/// One drawn run of the fuzzer.
+fn entries_draw(cases: u64, base: &str) -> Result<(), String> {
+    let cases_text = cases.to_string();
+    let (clean, text) = entries_run(&[], &["--seed", base, "--ops", &cases_text], true)?;
+    if !clean {
+        return Err(entries_failure(&text));
+    }
+    entries_path_matches_claim()?;
+    entries_reached(&text, cases)
+}
+
+/// Replay every case in the corpus, and require each to be clean.
+fn entries_corpus() -> Result<(), String> {
+    let lines = entries_corpus_lines()?;
+    if lines.is_empty() {
+        return Err(format!(
+            "{ENTRIES_CORPUS} holds no entries.\n\n\
+             An empty corpus replays clean and asserts nothing, which is the shape of\n\
+             false green this whole task is arranged against. `cargo xtask entries\n\
+             --record` is what fills it."
+        ));
+    }
+    let argv: Vec<&str> = lines.iter().flat_map(|line| line.iter().map(String::as_str)).collect();
+    let (clean, text) = entries_run(&[], &argv, true)?;
+    if !clean {
+        return Err(entries_failure(&text));
+    }
+    println!(
+        "\nentries: {} corpus entr{} replayed clean from {ENTRIES_CORPUS}.\n\
+         \x20        Each one lights a coverage region of this binary no earlier entry in\n\
+         \x20        the file lights — `--record` minimises against exactly that, and\n\
+         \x20        against nothing narrower: the counter array covers the harness too.\n\
+         \x20        What each is worth to the *path* is `--coverage`'s per-member table.",
+        lines.len(),
+        if lines.len() == 1 { "y" } else { "ies" }
+    );
+    Ok(())
+}
+
+/// Every corpus entry, as an argv.
+///
+/// `sim/corpus.txt`'s shape, which `ring/corpus.txt` already follows: a line is
+/// an argv and a comment is a comment. Following it rather than inventing a
+/// third is the whole of the format decision.
+fn entries_corpus_lines() -> Result<Vec<Vec<String>>, String> {
+    let path = root().join(ENTRIES_CORPUS);
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| line.split_whitespace().map(str::to_string).collect())
+        .collect())
+}
+
+/// Draw cases with the coverage signal on, keep the ones that reach something
+/// new, minimise the result against the corpus already in the tree, and write
+/// it back.
+fn entries_record(base: &str) -> Result<(), String> {
+    println!(
+        "[1/3] drawing with the per-case coverage signal on\n\
+         \x20     `-Cinstrument-coverage` and `--features {ENTRIES_FEEDBACK}`: the profile\n\
+         \x20     runtime's counters are reset before each case and read after it, which is\n\
+         \x20     per-input coverage and not a summary of the run."
+    );
+    let cases = ENTRIES_RECORD_CASES.to_string();
+    let (clean, text) =
+        entries_instrumented(&[ENTRIES_FEEDBACK], &["--seed", base, "--ops", &cases, "--emit"])?;
+    if !clean {
+        return Err(entries_failure(&text));
+    }
+    let mut candidates = entries_kept(&text);
+    if candidates.is_empty() {
+        return Err("the instrumented run kept nothing, so there was no coverage signal.\n\n\
+             That is the failure this command exists to notice rather than to survive: a\n\
+             recorder that writes an empty corpus and exits zero is a fuzzer claiming\n\
+             feedback it does not have. Check that the build carried both\n\
+             `-Cinstrument-coverage` and `--features coverage-feedback`, and that the\n\
+             report's `feedback` line said `per case`."
+            .to_string());
+    }
+    println!("      {} case(s) reached something no earlier case had", candidates.len());
+
+    // The seeds first, then the corpus already in the tree, then the new
+    // candidates by what they added.
+    //
+    // The seeds lead because they are written to the file first, and a
+    // minimisation whose order is not the file's order makes the file's own
+    // header false: review found three entries that lit nothing a seed above
+    // them had not, kept because minimisation had never seen the seeds. An
+    // entry that only duplicates a seed is now dropped, which is what makes the
+    // sentence *no earlier line lights this* checkable rather than asserted.
+    //
+    // Existing entries next, because the file is append-only in spirit: an
+    // entry that still reaches something nothing else reaches stays, and one
+    // that no longer does is the only kind this drops.
+    let seeds: Vec<Vec<String>> = ENTRIES_SEEDS
+        .iter()
+        .map(|(_, argv)| argv.iter().map(|word| (*word).to_string()).collect())
+        .collect();
+    let mut ordered: Vec<Vec<String>> = seeds.clone();
+    for case in entries_corpus_lines().unwrap_or_default() {
+        if !ordered.contains(&case) {
+            ordered.push(case);
+        }
+    }
+    candidates.sort_by_key(|(added, _)| std::cmp::Reverse(*added));
+    for (_, case) in candidates {
+        if !ordered.contains(&case) {
+            ordered.push(case);
+        }
+    }
+
+    println!(
+        "\n[2/3] minimising: {} candidate(s) replayed in order behind the {} seed(s), and an\n\
+         \x20     entry stays only if it lights a region the ones before it did not",
+        ordered.len(),
+        seeds.len()
+    );
+    let warmup: Vec<String> = ENTRIES_WARMUP.iter().map(|s| (*s).to_string()).collect();
+    let mut argv: Vec<String> = warmup.clone();
+    for case in &ordered {
+        argv.extend(case.iter().cloned());
+    }
+    argv.push("--emit".to_string());
+    let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let (clean, text) = entries_instrumented(&[ENTRIES_FEEDBACK], &borrowed)?;
+    if !clean {
+        return Err(entries_failure(&text));
+    }
+    // The warm-up is not an entry, and the seeds are written from
+    // `ENTRIES_SEEDS` with their own reasons rather than from what the signal
+    // said about them — they exist for regions the signal cannot see, so a
+    // `kept` line for one of them would be crediting them with the wrong thing.
+    let kept: Vec<(usize, Vec<String>)> = entries_kept(&text)
+        .into_iter()
+        .filter(|(_, case)| *case != warmup && !seeds.contains(case))
+        .collect();
+    println!(
+        "      {} entr{} survive behind the {} seed(s), which minimisation may not drop",
+        kept.len(),
+        if kept.len() == 1 { "y" } else { "ies" },
+        ENTRIES_SEEDS.len()
+    );
+
+    let commit = capture("git", &["rev-parse", "HEAD"]).unwrap_or_else(|_| "unknown".into());
+    let body = entries_corpus_text(&kept, commit.trim());
+    let path = root().join(ENTRIES_CORPUS);
+    std::fs::write(&path, body).map_err(|e| format!("writing {}: {e}", relative(&path)))?;
+    println!("\n[3/3] wrote {ENTRIES_CORPUS}");
+    Ok(())
+}
+
+/// The `kept <n> <argv>` lines a run with `--emit` prints.
+fn entries_kept(text: &str) -> Vec<(usize, Vec<String>)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("kept ") else { continue };
+        let mut words = rest.split_whitespace();
+        let Some(added) = words.next().and_then(|n| n.parse::<usize>().ok()) else { continue };
+        out.push((added, words.map(str::to_string).collect()));
+    }
+    out
+}
+
+/// The header every write of the corpus regenerates.
+///
+/// Regenerated rather than preserved, which is the opposite of what
+/// `ring/corpus.txt` does and is right for the opposite reason: an entry there
+/// carries provenance a later run cannot recompute — what it found, and under
+/// which defect — while an entry here carries a *measurement*, how many regions
+/// it adds, and that number is only true of the file it is in. A recorder that
+/// carried an old `adds` figure through would be publishing a number about a
+/// corpus that no longer exists.
+const ENTRIES_CORPUS_HEADER: &str = "\
+# The entry corpus: inputs a coverage signal kept.
+#
+# Every line below that is not a comment is an argument list for
+# `ring/tests/entries.rs`, and every one of them is a *case* — a named world and
+# an entry — that lit a coverage region **of this test binary** no earlier line
+# in this file lit. `cargo xtask entries --corpus` replays them all and requires
+# each to be clean; `cargo xtask entries --coverage` measures what they cover of
+# the entry-validation path, and that measurement is the number `claims/0009`
+# publishes.
+#
+# *Of this binary*, said in those words because the two are not the same and the
+# difference used to be papered over here. The profile runtime's counter array
+# covers every region in the binary, this harness's own included, so an entry
+# kept for lighting something new may have lit something new **in the harness**.
+# What the entry is worth to the *path* is what `--coverage` measures, one member
+# at a time, and that is the number that gates. Making the signal path-aware —
+# intersecting the counter set with the regions belonging to the thirty-seven
+# members — is the fix that would let this file say the stronger thing; nothing
+# in the tree needs it yet, and RFC 0048 carries it as the open end.
+#
+# There is no format here beyond *a line is an argv*. `sim/corpus.txt` is where
+# that shape comes from and `ring/corpus.txt` is the sibling that already
+# follows it; a third format would be a third parser and a third thing to keep
+# working. The fuzzer's own command-line parser reads an entry, so an entry this
+# binary cannot run is an entry that fails to load.
+#
+# ---- what an entry is worth, and how this file differs from its sibling ----
+#
+# `ring/corpus.txt` is a regression suite: each line found something once, and
+# the comment above it says what, at which commit, under which deliberate
+# defect. This file is a **cover**. A line is here because it lit a region the
+# lines above it did not, and the `adds` figure is how many it was the first to
+# light — regions of this binary, counted by the profile runtime, which is the
+# signal minimisation has and not the one the published number is about.
+#
+# That makes it minimisable in a way a regression suite is not, and
+# `--record` minimises it: candidates are replayed in order into one process
+# with the coverage signal on, behind the seeds and in this file's own order,
+# and a candidate that lights nothing new is dropped. So this file has the
+# property a corpus is supposed to have and usually cannot demonstrate — **no
+# entry in it lights only what an earlier entry already lit**, and the command
+# that says so is the command that wrote it.
+#
+# It is at a fixpoint, which is the checkable form of that sentence: running
+# `cargo xtask entries --record` against this file writes these bytes back. It
+# takes two runs to get there from an arbitrary file, because minimisation reads
+# the file's order and rewriting the file changes it, and a corpus that never
+# settles would be a cover whose membership depended on how many times somebody
+# had run the command.
+#
+# That is a weaker sentence than *no entry is redundant* and it is deliberately
+# weaker. Redundant *for the published number* would mean removing the entry
+# leaves the coverage figure where it was, and by that measure several entries
+# here are redundant: the signal is per binary region and the number is per path
+# member, so an entry can earn its place by the first and not move the second.
+# The measurement is what settles which, one entry at a time, and the header of a
+# corpus is not the place to assert what a measurement has not been run to check.
+#
+# What that costs, said rather than left to be discovered: minimisation is
+# greedy and in order, so a *smaller* cover may exist. And the order is the
+# file's order, so an entry near the top is credited with regions an entry near
+# the bottom would also have lit. Neither affects what the file is used for.
+#
+# One consequence is visible on the face of this file and would otherwise read as
+# a bug, so: an entry below may be the *same case* as a seed above it, written
+# without a field the seed writes explicitly. It survives because the two argvs
+# take different branches through this binary's own argument parser, and the
+# counter array does not know a parser region from a validation one. It is the
+# clearest thing in the tree to point at when arguing for a path-aware signal,
+# and it is left here rather than hand-deleted because this file is generated and
+# an entry somebody edited in is an entry no command stands behind.
+#
+# Not append-only, and that is the one rule it does not share with its sibling.
+# An entry whose regions are all covered by others is dropped on the next
+# `--record`, because a cover that has stopped being minimal is a cover with a
+# line nobody can justify. The exception is the seeds: they are hand-written,
+# they are never dropped, and each says which region it exists for — because the
+# coverage signal is blind to a region LLVM gives an expression rather than a
+# counter, and a cover built by a blind signal has holes a measurement finds.
+# `ENTRIES_SEEDS` in `xtask/src/main.rs` is the list and RFC 0048's `COUNTER_GAP`
+# is the argument.
+#
+# Reproduce one by hand:
+#   cargo test -q --release -p f-ring --test entries -- <the line>
+";
+
+/// The corpus file, header and all.
+fn entries_corpus_text(kept: &[(usize, Vec<String>)], commit: &str) -> String {
+    let mut out = String::from(ENTRIES_CORPUS_HEADER);
+    for (why, argv) in ENTRIES_SEEDS {
+        out.push_str(
+            "
+# ----------------------------------------------------------------------
+",
+        );
+        out.push_str(
+            "# seed      a region the coverage signal cannot see, so nothing keeps it
+",
+        );
+        out.push_str(&format!(
+            "# reaches   {why}
+"
+        ));
+        out.push_str(&format!(
+            "{}
+",
+            argv.join(" ")
+        ));
+    }
+    for (added, case) in kept {
+        out.push_str(
+            "\n# ----------------------------------------------------------------------\n",
+        );
+        out.push_str(&format!(
+            "# adds      {added} region(s) no earlier entry in this file reaches\n"
+        ));
+        out.push_str(&format!("# commit    {commit}\n"));
+        out.push_str(&format!("{}\n", case.join(" ")));
+    }
+    out
+}
+
+/// A cargo invocation with the coverage instrumentation on.
+///
+/// Link-time optimisation is **off** for these runs, and that is a measured
+/// decision rather than a preference: with `lto = true` — which is what
+/// `[profile.release]` carries — `llvm-cov` warns that functions have mismatched
+/// data and hands back near-zero coverage for functions that demonstrably ran.
+/// So the instrumented build is not the shipped build, and the figure is one
+/// about the source rather than about the optimiser's output. RFC 0048.
+fn entries_instrumented(features: &[&str], args: &[&str]) -> Result<(bool, String), String> {
+    let profiles = target_dir().join("entries-coverage");
+    if profiles.exists() {
+        std::fs::remove_dir_all(&profiles)
+            .map_err(|e| format!("clearing {}: {e}", relative(&profiles)))?;
+    }
+    std::fs::create_dir_all(&profiles)
+        .map_err(|e| format!("creating {}: {e}", relative(&profiles)))?;
+
+    let mut argv: Vec<String> = ["test", "-q", "--release", "-p", "f-ring", "--test", "entries"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    if !features.is_empty() {
+        argv.push("--features".into());
+        argv.push(features.join(","));
+    }
+    argv.push("--".into());
+    argv.extend(args.iter().map(|s| (*s).to_string()));
+
+    let out = Command::new("cargo")
+        .args(&argv)
+        .envs(entries_instrument_env())
+        .env("LLVM_PROFILE_FILE", profiles.join("e-%p-%m.profraw"))
+        .current_dir(root())
+        .output()
+        .map_err(|e| format!("could not run cargo: {e}"))?;
+
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    text.push_str(&stderr);
+    if !text.contains("entries \u{2014} ") {
+        return Err(format!(
+            "the instrumented fuzzer printed no report, so it did not run:\n{}",
+            stderr.trim()
+        ));
+    }
+    if features.contains(&ENTRIES_FEEDBACK) && !text.contains("feedback   per case") {
+        return Err("the build carried the feedback feature and the run reported no per-case\n\
+             signal, which means the profile runtime's counters were not there. A\n\
+             recorder that keeps nothing and exits zero is the failure this refuses."
+            .to_string());
+    }
+    Ok((out.status.success(), text))
+}
+
+/// The two environment variables an instrumented run needs.
+const fn entries_instrument_env() -> [(&'static str, &'static str); 2] {
+    [("RUSTFLAGS", "-Cinstrument-coverage"), ("CARGO_PROFILE_RELEASE_LTO", "false")]
+}
+
+/// Measure the entry-validation path's line coverage, from the corpus alone.
+///
+/// # Why the corpus alone
+///
+/// Because that is what makes the corpus an artefact rather than a souvenir. A
+/// number measured over a long drawn run says the *generator* reaches the path;
+/// a number measured over the committed file says a stranger with this
+/// repository reaches it, in seconds, with no seed and no fuzzing run.
+fn entries_coverage() -> Result<(), String> {
+    entries_path_matches_claim()?;
+    let profdata = llvm_tool("llvm-profdata")?;
+    let llvm_cov = llvm_tool("llvm-cov")?;
+
+    let lines = entries_corpus_lines()?;
+    if lines.is_empty() {
+        return Err(format!("{ENTRIES_CORPUS} holds no entries, so there is nothing to measure"));
+    }
+    let argv: Vec<&str> = lines.iter().flat_map(|line| line.iter().map(String::as_str)).collect();
+
+    println!(
+        "measuring the entry-validation path over {} corpus entr{}, with the feedback\n\
+         feature off: the per-case signal resets the counters, so a build that has it\n\
+         writes a profile for the last case rather than for the run. RFC 0048.",
+        lines.len(),
+        if lines.len() == 1 { "y" } else { "ies" }
+    );
+    let (clean, text) = entries_instrumented(&[], &argv)?;
+    if !clean {
+        return Err(entries_failure(&text));
+    }
+
+    let profiles = target_dir().join("entries-coverage");
+    let mut raw: Vec<PathBuf> = std::fs::read_dir(&profiles)
+        .map_err(|e| format!("reading {}: {e}", relative(&profiles)))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "profraw"))
+        .collect();
+    raw.sort();
+    if raw.is_empty() {
+        return Err(format!(
+            "no .profraw files in {}\n\n\
+             The run happened and wrote no profile, so the instrumented build did not take\n\
+             effect. Check that RUSTFLAGS is not already set in the environment or in a\n\
+             cargo config, which replaces rather than adds.",
+            relative(&profiles)
+        ));
+    }
+
+    let merged = profiles.join("entries.profdata");
+    let mut merge = Command::new(&profdata);
+    merge.arg("merge").arg("-sparse");
+    for path in &raw {
+        merge.arg(path);
+    }
+    merge.arg("-o").arg(&merged);
+    let status = merge
+        .current_dir(root())
+        .status()
+        .map_err(|e| format!("could not run llvm-profdata: {e}"))?;
+    if !status.success() {
+        return Err("llvm-profdata could not merge the raw profiles".into());
+    }
+
+    let probe = [
+        "test",
+        "--release",
+        "-p",
+        "f-ring",
+        "--test",
+        "entries",
+        "--no-run",
+        "--message-format=json",
+    ];
+    let manifest = capture_with("cargo", &probe, &entries_instrument_env())?;
+    let binary = executables(&manifest)
+        .into_iter()
+        .next_back()
+        .ok_or("cargo reported no test executable for `entries`")?;
+
+    let mut report = Command::new(&llvm_cov);
+    report.arg("report").arg(format!("--instr-profile={}", merged.display()));
+    report.arg(&binary);
+    report.arg("--show-functions");
+    for source in ENTRIES_SOURCES {
+        report.arg(root().join(source));
+    }
+    let out =
+        report.current_dir(root()).output().map_err(|e| format!("could not run llvm-cov: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "llvm-cov could not produce a report: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let text =
+        String::from_utf8(out.stdout).map_err(|e| format!("llvm-cov printed non-UTF-8: {e}"))?;
+
+    let measured = entries_measure(&text)?;
+    let total: u64 = measured.iter().map(|(_, c)| c.lines).sum();
+    let missed: u64 = measured.iter().map(|(_, c)| c.missed).sum();
+    #[allow(clippy::cast_precision_loss)]
+    let percent = if total == 0 { 0.0 } else { (total - missed) as f64 * 100.0 / total as f64 };
+
+    println!("\ncoverage — the entry-validation path, line by line\n");
+    for (member, cover) in &measured {
+        #[allow(clippy::cast_precision_loss)]
+        let share = if cover.lines == 0 {
+            100.0
+        } else {
+            (cover.lines - cover.missed) as f64 * 100.0 / cover.lines as f64
+        };
+        let note = match (cover.rows > 1, cover.skipped) {
+            (true, 0) => format!("   ({} instantiations, summed)", cover.rows),
+            (true, n) => format!("   ({} instantiations, summed; {n} placeholder(s))", cover.rows),
+            (false, 0) => String::new(),
+            (false, n) => format!("   ({n} placeholder(s))"),
+        };
+        println!(
+            "  {:<24} {:>6.1}%   {:>4} of {:>4}{note}",
+            member,
+            share,
+            cover.lines - cover.missed,
+            cover.lines
+        );
+    }
+    println!("  ------------------------");
+    println!("  {:<24} {:>6.2}%   {:>4} of {:>4}", "the path", percent, total - missed, total);
+
+    let floor = entries_claim_floor()?;
+    #[allow(clippy::cast_precision_loss)]
+    let wanted = floor as f64 / 100.0;
+    if percent < wanted {
+        return Err(format!(
+            "the corpus covers {percent:.2}% of the entry-validation path and\n\
+             {ENTRIES_CLAIM} states `path_line_coverage = {{ min = {floor} }}`, which is\n\
+             {wanted:.2}%.\n\n\
+             Two causes needing opposite fixes. The corpus stopped covering a member —\n\
+             `cargo xtask entries --record` draws again and re-minimises. Or the path\n\
+             *grew*: a new branch in one of the functions `ENTRIES_PATH` names, which is a\n\
+             line nothing reaches and is a finding about the code rather than about the\n\
+             corpus. The per-member table above says which."
+        ));
+    }
+    println!(
+        "\nentries: {percent:.2}% of the entry-validation path, against\n\
+         \x20        `path_line_coverage >= {wanted:.2}%` in {ENTRIES_CLAIM}.\n\
+         \x20        {} member(s), measured from the committed corpus alone: no seeded run, no\n\
+         \x20        generator, and reproducible by a stranger with this checkout.",
+        measured.len()
+    );
+    Ok(())
+}
+
+/// Fold `llvm-cov report --show-functions` into one row per path member.
+///
+/// # The one thing this refuses rather than tolerates
+///
+/// A member matched by no row. That is a member the fuzzer never reached at all,
+/// or a symbol whose mangling moved — and both would otherwise appear as a
+/// *smaller denominator*, which is a coverage figure going up because something
+/// stopped being measured.
+///
+/// A member with several instantiations is summed across all of them, which
+/// under-reports rather than over-reports when they cover different lines: the
+/// union is not computable from this report, and the conservative direction is
+/// the one to take with a number that gates.
+///
+/// Rows whose mangled name carries a placeholder type argument are skipped:
+/// rustc emits a zero-coverage record for every generic it did **not**
+/// instantiate in this binary, and counting those would report a function that
+/// ran as half never having run.
+fn entries_measure(report: &str) -> Result<Vec<(&'static str, MemberCoverage)>, String> {
+    let mut out: Vec<(&'static str, MemberCoverage)> = ENTRIES_PATH
+        .iter()
+        .map(|member| (member.name, MemberCoverage { lines: 0, missed: 0, rows: 0, skipped: 0 }))
+        .collect();
+
+    for line in report.lines() {
+        let row: Vec<&str> = line.split_whitespace().collect();
+        if row.len() < 10 {
+            continue;
+        }
+        let Some(symbol) = row.first() else { continue };
+        if !symbol.starts_with("_R") {
+            continue;
+        }
+        // The longest matching fragment list wins, which is what separates
+        // `f_ring::execute` from `Table::execute`.
+        let mut best: Option<(usize, usize)> = None;
+        for (index, member) in ENTRIES_PATH.iter().enumerate() {
+            if member.fragments.iter().all(|fragment| symbol.contains(fragment))
+                && best.is_none_or(|(_, len)| member.fragments.len() > len)
+            {
+                best = Some((index, member.fragments.len()));
+            }
+        }
+        let Some((index, _)) = best else { continue };
+
+        let cell = |at: usize| -> Result<u64, String> {
+            row.get(at)
+                .ok_or_else(|| format!("llvm-cov row too short: {line}"))?
+                .parse::<u64>()
+                .map_err(|_| format!("llvm-cov row not understood: {line}"))
+        };
+        let lines = cell(4)?;
+        let missed = cell(5)?;
+
+        // A row this drops is a row that leaves the denominator, so the pattern
+        // that decides it is checked against the thing it is supposed to be
+        // true of rather than trusted. A record rustc emitted for a generic it
+        // never instantiated here executed nothing, so every one of its lines is
+        // missed; a row matching the pattern that has an executed line is a real
+        // instantiation the pattern caught by accident, and dropping it would
+        // raise the figure by removing uncovered lines — which is exactly the
+        // failure this function's contract refuses.
+        if entries_is_placeholder(symbol) {
+            if missed != lines {
+                return Err(format!(
+                    "a row of the report reads as a placeholder and is not one:\n  {symbol}\n\n\
+                     {} of its {lines} line(s) executed. `entries_is_placeholder` recognises an\n\
+                     un-instantiated generic by the `p` and `Kp` v0 mangling writes for a type\n\
+                     argument it never filled in, and such a record executes nothing at all. A\n\
+                     row with an executed line that matches the pattern is a real instantiation,\n\
+                     and dropping it would take *uncovered* lines out of the denominator — a\n\
+                     coverage figure going up because something stopped being measured.\n\n\
+                     The fix is in the recogniser, not in the threshold: parse the generic\n\
+                     argument position rather than matching a substring of the whole symbol.",
+                    lines - missed
+                ));
+            }
+            out[index].1.skipped += 1;
+            continue;
+        }
+
+        out[index].1.lines += lines;
+        out[index].1.missed += missed;
+        out[index].1.rows += 1;
+    }
+
+    let absent: Vec<&str> =
+        out.iter().filter(|(_, c)| c.rows == 0).map(|(name, _)| *name).collect();
+    if !absent.is_empty() {
+        return Err(format!(
+            "{} member(s) of the entry-validation path matched no symbol in the report:\n  {}\n\n\
+             That is not a coverage failure, it is a *measurement* failure, and it is\n\
+             refused rather than counted as a smaller denominator — which is a coverage\n\
+             figure going up because something stopped being measured.\n\n\
+             Two causes. The fuzzer no longer reaches the function at all, so rustc emitted\n\
+             only the placeholder record for it: fix the generator. Or the symbol mangling\n\
+             moved, in which case `ENTRIES_PATH`'s fragments need the new one — `llvm-cov\n\
+             report --show-functions` prints what it actually saw.",
+            absent.len(),
+            absent.join("\n  ")
+        ));
+    }
+    Ok(out)
+}
+
+/// Is this a record rustc emitted for a generic it never instantiated here?
+///
+/// v0 mangling writes an un-instantiated type argument as a bare `p` and a const
+/// one as `Kp`. Those records exist so a never-called generic shows as uncovered
+/// rather than as absent, which is right for a whole-crate report and wrong
+/// here: the same function's *real* instantiation is in the same report, and
+/// counting both would report every generic on the path as half covered.
+///
+/// # Why this is a substring match and what stops it failing open
+///
+/// It is load-bearing — it removes better than a third of the raw lines
+/// `llvm-cov` attributes to the path — and a substring of a whole mangled symbol
+/// is not the same thing as a generic argument in the argument position. A real,
+/// entirely uncovered instantiation whose symbol happened to end an identifier in
+/// `p` before an `E` would be dropped, and dropping an uncovered row *raises* the
+/// figure.
+///
+/// So the pattern is not trusted on its own. [`entries_measure`] requires every
+/// row this drops to have executed nothing — which a placeholder record does by
+/// construction and a real instantiation caught by accident does not — and fails
+/// the run naming the symbol when one has an executed line. The recogniser can
+/// still be wrong; it can no longer be wrong in the direction that makes the
+/// number look better.
+fn entries_is_placeholder(symbol: &str) -> bool {
+    symbol.contains("Kp") || symbol.contains("pE") || symbol.ends_with('p')
+}
+
+/// The floor `claims/0009` states, in hundredths of a per cent.
+fn entries_claim_floor() -> Result<u64, String> {
+    let path = root().join(ENTRIES_CLAIM);
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("path_line_coverage") else { continue };
+        let Some((_, after)) = rest.split_once("min") else { continue };
+        let value = after
+            .trim_start()
+            .strip_prefix('=')
+            .and_then(|v| v.split_whitespace().next())
+            .map(|v| v.trim_end_matches([',', '}']))
+            .and_then(|v| v.parse::<u64>().ok());
+        if let Some(value) = value {
+            return Ok(value);
+        }
+    }
+    Err(format!(
+        "{ENTRIES_CLAIM} states no `path_line_coverage` threshold.\n\n\
+         The number this command produces is published, so it gates; a run that invented\n\
+         its own floor would be a number checking itself."
+    ))
+}
+
+/// The path this file walks and the path the claim publishes are one list.
+///
+/// The guard `hostile_thresholds_match` is for `claims/0008`, here for the same
+/// reason: a member named in one and not the other is either a published figure
+/// nothing measures or a measured figure nothing publishes, and both read as
+/// agreement.
+fn entries_path_matches_claim() -> Result<(), String> {
+    let path = root().join(ENTRIES_CLAIM);
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+    let mut published: Vec<String> = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("path = [") {
+            inside = true;
+            continue;
+        }
+        if inside {
+            if trimmed.starts_with(']') {
+                inside = false;
+                continue;
+            }
+            // A comment inside the list is a comment, not a member. The list is
+            // grouped by which file each member lives in and those headings are
+            // the whole reason it is readable.
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            let name = trimmed.trim_start_matches('"').split('"').next().unwrap_or("");
+            if !name.is_empty() {
+                published.push(name.to_string());
+            }
+        }
+    }
+
+    let declared: Vec<&str> = ENTRIES_PATH.iter().map(|member| member.name).collect();
+    let here: Vec<String> =
+        published.iter().filter(|name| !declared.contains(&name.as_str())).cloned().collect();
+    let there: Vec<String> = declared
+        .iter()
+        .filter(|name| !published.iter().any(|p| p == *name))
+        .map(|name| (*name).to_string())
+        .collect();
+
+    if here.is_empty() && there.is_empty() {
+        return Ok(());
+    }
+    let say = |what: &str, list: &[String]| {
+        if list.is_empty() { String::new() } else { format!("\n  {what}: {}", list.join(", ")) }
+    };
+    Err(format!(
+        "{ENTRIES_CLAIM}'s `path` and `ENTRIES_PATH` in xtask have drifted.{}{}\n\n\
+         The list is the whole of what *95% of the validation path* means, and two copies\n\
+         of it is one copy nobody reads. RFC 0048.",
+        say("in the claim and not in ENTRIES_PATH", &here),
+        say("in ENTRIES_PATH and not in the claim", &there)
+    ))
+}
+
+/// Every counter the report is required to have moved.
+///
+/// A fuzzer that reached nothing prints the same two words as one that reached
+/// everything. These are the families it must have drawn and the refusals it
+/// must have earned for *no finding* to be a statement about the validation path
+/// rather than about a run that refused everything at the first check — which is
+/// exactly what the first version of `ring/tests/hostile.rs` did.
+const ENTRIES_REACHED: &[(&str, &str)] = &[
+    ("well-formed", "family_well_formed"),
+    ("unknown flag", "family_unknown_flag"),
+    ("unknown opcode", "family_unknown_opcode"),
+    ("reserved bit", "family_reserved_bit"),
+    ("index past set", "family_index_past_set"),
+    ("forged generation", "family_forged_generation"),
+    ("past arena", "family_past_arena"),
+    ("unstatable length", "family_unstatable_length"),
+    ("past deadline", "family_past_deadline"),
+    ("indivisible region", "family_indivisible_region"),
+    ("refused capability", "family_refused_capability"),
+    ("malformed name", "family_malformed_name"),
+    ("malformed registration", "family_malformed_registration"),
+    ("nudged field", "family_nudged_field"),
+    ("flipped bytes", "family_flipped_bytes"),
+    ("spent", "world_spent"),
+    ("accepted", "answers_accepted"),
+    ("silent, NO_CQE", "answers_silent"),
+    ("ids issued", "answers_ids_issued"),
+    ("buffers resolved", "answers_buffers_resolved"),
+    ("buffers released", "answers_buffers_released"),
+    ("sets torn down", "answers_sets_torn_down"),
+    ("arena bytes copied", "answers_arena_bytes_copied"),
+    ("argument/bad-address", "refused_bad_address"),
+    ("argument/feature-not-negotiated", "refused_feature_not_negotiated"),
+    ("argument/reserved-not-zero", "refused_reserved_not_zero"),
+    ("argument/unknown-flag", "refused_unknown_flag"),
+    ("argument/unknown-opcode", "refused_unknown_opcode"),
+    ("authority/no-such-cap", "refused_no_such_cap"),
+    ("authority/revoked", "refused_revoked"),
+    ("peer/feature-required", "refused_feature_required"),
+    ("resource/quota-exhausted", "refused_quota_exhausted"),
+    ("namings taken", "client_namings_taken"),
+    ("buffers returned", "client_buffers_returned"),
+    ("buffers reclaimed", "client_buffers_reclaimed"),
+    ("submissions refused", "client_submissions_refused"),
+    ("regions refused", "client_regions_refused"),
+];
+
+/// The rows of `claims/0009`'s `[threshold]` table that are not reach counts.
+///
+/// Named as an exclusion rather than deriving the reach rows by a prefix, which
+/// is `HOSTILE_NOT_REACH`'s arrangement and its reason: a prefix is a convention
+/// and this is a short list. A new row added to that table without a counter in
+/// [`ENTRIES_REACHED`] is a published minimum nothing reads, and
+/// [`entries_thresholds_match`] is what says so.
+const ENTRIES_NOT_REACH: &[&str] = &["path_line_coverage", "cases", "panics", "wrong"];
+
+/// The reach rows the claim publishes and the counters this file reads are one
+/// list.
+///
+/// The same guard `hostile_thresholds_match` is for `claims/0008`, and it exists
+/// because that task found the two had been one list written twice with nothing
+/// checking it. A row deleted from either side is otherwise a minimum nobody
+/// enforces on a counter nobody publishes, and both read as agreement.
+fn entries_thresholds_match() -> Result<(), String> {
+    let rows = entries_thresholds()?;
+    let published: Vec<&String> =
+        rows.keys().filter(|key| !ENTRIES_NOT_REACH.contains(&key.as_str())).collect();
+    let read: Vec<&str> = ENTRIES_REACHED.iter().map(|(_, key)| *key).collect();
+
+    let here: Vec<String> = published
+        .iter()
+        .filter(|key| !read.contains(&key.as_str()))
+        .map(|key| (*key).clone())
+        .collect();
+    let there: Vec<String> = read
+        .iter()
+        .filter(|key| !published.iter().any(|p| p.as_str() == **key))
+        .map(|key| (*key).to_string())
+        .collect();
+
+    if here.is_empty() && there.is_empty() {
+        return Ok(());
+    }
+    let say = |what: &str, list: &[String]| {
+        if list.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "
+  {what}: {}",
+                list.join(", ")
+            )
+        }
+    };
+    Err(format!(
+        "{ENTRIES_CLAIM}'s reach thresholds and ENTRIES_REACHED have drifted.{}{}
+
+         A minimum with no counter behind it is a published number nothing checks, and a
+         counter with no minimum behind it is a path that can fall to zero without a
+         word. RFC 0048.",
+        say("in the claim and not in ENTRIES_REACHED", &here),
+        say("in ENTRIES_REACHED and not in the claim", &there)
+    ))
+}
+
+/// Every counter the run reported, against the minimum `claims/0009` states.
+fn entries_reached(text: &str, cases: u64) -> Result<(), String> {
+    entries_thresholds_match()?;
+    let rows = entries_thresholds()?;
+    let mut short: Vec<String> = Vec::new();
+    let mut met = 0usize;
+
+    for (label, key) in ENTRIES_REACHED {
+        let seen = text
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim_start().strip_prefix(label)?;
+                rest.split_whitespace().next()?.parse::<u64>().ok()
+            })
+            .next()
+            .unwrap_or(0);
+        let stated = rows.get(*key).copied().unwrap_or(0);
+        // Stated per the gate's own count and scaled to the run, `claims/0008`'s
+        // arrangement: a short diagnostic run still enforces *reached at all*
+        // rather than being held to a count it cannot make.
+        let scaled = stated.saturating_mul(cases) / ENTRIES_GATE.max(1);
+        let floor = if stated > 0 { scaled.max(1) } else { 0 };
+        if seen < floor {
+            short.push(format!("  {label:<34}{seen:>10}  against a minimum of {floor}"));
+        } else {
+            met += 1;
+        }
+    }
+
+    if !short.is_empty() {
+        return Err(format!(
+            "{} of {} path(s) {ENTRIES_CLAIM} names were not reached:\n{}\n\n\
+             The run was clean and something stopped being exercised, which is the failure\n\
+             this list exists to make visible. Two causes needing opposite fixes: the\n\
+             generator stopped producing that input — `Draw::family`'s weights, or\n\
+             `Draw::case` — or the code stopped having that path, which is a finding about\n\
+             the ring.",
+            short.len(),
+            ENTRIES_REACHED.len(),
+            short.join("\n")
+        ));
+    }
+    println!("entries: clean, and every one of the {met} paths the claim names was reached.");
+    Ok(())
+}
+
+/// `claims/0009`'s reach minimums, read rather than restated.
+fn entries_thresholds() -> Result<std::collections::BTreeMap<String, u64>, String> {
+    let path = root().join(ENTRIES_CLAIM);
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+    let mut rows = std::collections::BTreeMap::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            inside = trimmed == "[threshold]";
+            continue;
+        }
+        if !inside || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, rest)) = trimmed.split_once('=') else { continue };
+        let Some((_, after)) = rest.split_once("min") else { continue };
+        let value = after
+            .trim_start()
+            .strip_prefix('=')
+            .and_then(|v| v.split_whitespace().next())
+            .map(|v| v.trim_end_matches([',', '}']))
+            .and_then(|v| v.parse::<u64>().ok());
+        if let Some(value) = value {
+            rows.insert(key.trim().to_string(), value);
+        }
+    }
+    Ok(rows)
+}
+
+/// Arm each deliberate defect in turn, and require the oracle it breaks — and no
+/// other — to find it.
+fn entries_mutate() -> Result<(), String> {
+    let cases = ENTRIES_MUTATE_CASES.to_string();
+    for (feature, words, oracle) in ENTRIES_DEFECTS {
+        println!("\n--- {feature}: {oracle} must be the oracle that finds it");
+        let (clean, text) =
+            entries_run(&[feature], &["--seed", TRACE_SEED, "--ops", &cases], false)?;
+        if clean {
+            return Err(format!(
+                "the fuzzer ran {cases} case(s) against `{feature}` and found nothing.\n\n\
+                 That is {oracle} failing rather than holding: the defect is armed and the\n\
+                 run is green, so either the generator no longer reaches it or the check\n\
+                 that would have caught it has stopped being made."
+            ));
+        }
+        let finding = text
+            .lines()
+            .find(|line| line.starts_with("finding 1  "))
+            .unwrap_or("finding 1  (the report's shape moved)");
+        if !finding.contains(words) {
+            return Err(format!(
+                "`{feature}` was found, and not by {oracle}:\n\n  {finding}\n\n\
+                 A defect found by the wrong oracle is a harness whose oracles are one\n\
+                 oracle wearing three names, which is RFC 0042's finding applied here. The\n\
+                 line above should contain `{words}`."
+            ));
+        }
+        println!("{feature}: caught —\n  {}", finding.trim());
+    }
+
+    println!("\n--- and without any of them, the same run must be clean");
+    let (clean, text) = entries_run(&[], &["--seed", TRACE_SEED, "--ops", &cases], false)?;
+    if !clean {
+        return Err(format!(
+            "the fuzzer found something with no defect armed, so the three runs above say\n\
+             nothing about the defects.\n\n{}",
+            entries_failure(&text)
+        ));
+    }
+    println!(
+        "\nentries: all {} defect(s) caught, each by the oracle it breaks and by no other,\n\
+         \x20        and the same run is clean without them.",
+        ENTRIES_DEFECTS.len()
+    );
+    Ok(())
 }

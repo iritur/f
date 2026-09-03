@@ -6,6 +6,8 @@
     { "name": "buffer-registration-cost", "status": "pending", "milestone": "E1", "file": "claims/0004-buffer-registration-cost.toml" },
     { "name": "driver-restart-blast-radius", "status": "gating", "milestone": "E1", "file": "claims/0005-driver-restart-blast-radius.toml" },
     { "name": "driver-restart-latency", "status": "pending", "milestone": "E1", "file": "claims/0006-driver-restart-latency.toml" },
-    { "name": "snapshot-re-entry-saving", "status": "pending", "milestone": "E1", "file": "claims/0007-snapshot-re-entry-saving.toml" }
+    { "name": "snapshot-re-entry-saving", "status": "pending", "milestone": "E1", "file": "claims/0007-snapshot-re-entry-saving.toml" },
+    { "name": "hostile-peer-operations", "status": "gating", "milestone": "E1", "file": "claims/0008-hostile-peer-operations.toml" },
+    { "name": "entry-validation-coverage", "status": "gating", "milestone": "E1", "file": "claims/0009-entry-validation-coverage.toml" }
   ]
 }

@@ -137,6 +137,35 @@ RUN cd /tmp/pin \
 # ---------------------------------------------------------------------------
 FROM toolchain AS dev
 
+# Miri, and it is in `dev` rather than in `full` because one of `E1-P04`'s three
+# properties cannot be checked without it. *No memory unsafety* is not
+# observable from inside the program: the ordinary build dies on a signal with
+# no seed attached, or does not die at all and reads whatever was next in the
+# page. `cargo xtask hostile --miri` is the check, RFC 0046 is why it is a
+# separate command at a much smaller count, and a tool that lived only in the
+# opt-in image would be a tool the gate could not run.
+#
+# It is not in `rust-toolchain.toml`'s `components`, deliberately: that file is
+# the pin every contributor's laptop reads, and bumping it invalidates every
+# claim (`claims/README.md`). Miri is an *environment* dependency the way QEMU
+# is — needed to run one command, not to build the system — and the environment
+# is what this image is. It costs about 40 MB and one download at image build.
+#
+# The sysroot is **not** built here, and that is a decision rather than an
+# omission. Miri keys its sysroot on the flags it is run with, so a sysroot
+# built in this image would either bind the image to one particular `MIRIFLAGS`
+# — a second copy of a constant that lives in `xtask` — or be rebuilt on first
+# use anyway, and the failure when the two disagree is the unreadable
+# *detected a concurrent sysroot build with different settings*. It was built
+# here for one commit and produced exactly that. So the minute it costs is paid
+# per job, and `claims/0008`'s timings say so.
+#
+# The `chmod` restores what the toolchain stage established: a component added
+# after it would otherwise be readable only by root.
+RUN rustup component add miri \
+ && chmod -R a+rX /opt/rustup /opt/cargo \
+ && cargo miri --version
+
 # F_ENVIRONMENT is announced so that a build can tell it is in the container,
 # and so that a timing measurement taken here can be refused rather than
 # quietly published as a claim.

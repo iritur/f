@@ -17,32 +17,35 @@
 //! the one to check first if this file ever looks like it is growing one. There
 //! is one body of driver code, in `user/virtio-blk`, and this calls it.
 //!
-//! # Why the driver's code runs in the frame today
+//! # Where the driver's code runs, and what this file is left holding
 //!
-//! Two reasons, both of them somebody else's task, and both recorded here
-//! rather than left for a reader to infer:
+//! At ring 3, on a core of its own, in its own polling loop. That is RFC 0047
+//! and it is what two sentences that used to be here stopped being true of:
 //!
-//! - **Nothing schedules a component.** There is no scheduler until E1-B08, so
-//!   an instance runs when the frame hands it a core. E1-B05 hit this and said
-//!   so; `component::demonstrate` spawns, kills and refills a place without
-//!   ever running its occupant.
-//! - **A component cannot drive a ring.** Draining one means adopting a mapped
-//!   channel and `f_ring::Mapping::adopt` is `unsafe`, which a `user/` crate
-//!   may not write. RFC 0033 supplies the safe accessor a driver needs for its
-//!   *device* and deliberately does not supply one for a *channel*: a channel is
-//!   shared with a hostile peer and a device window is not, and one argument
-//!   made for both would be the wrong argument used twice.
+//! - *Nothing schedules a component.* E1-B08 landed the mechanism —
+//!   `kernel/src/runtime.rs` — and RFC 0047 pointed it at a driver, which needed
+//!   three things a runtime did not: more than one page of text, a device's
+//!   registers mapped uncached into a component's address space, and its queue
+//!   memory mapped whole.
+//! - *A component cannot drive a ring, because adopting a mapped channel is
+//!   `unsafe`.* RFC 0037 answered that, and answered it with a different
+//!   argument from the one RFC 0033 made for a device window — a channel is
+//!   shared with a peer that may be hostile and a window is not.
 //!
-//! So the frame calls `f_virtio_blk::driver::Driver::execute` where a scheduled
-//! component would call it from its own polling loop, and it passes
-//! [`iommu::Grant`] where a scheduled component would ask for a translation
-//! over its control ring. Everything else — the registers, the descriptors, the
-//! registration table, the counters — is the component's own code doing the
-//! component's own work.
+//! What is left here is the supervisor's half, and it is exactly the half a
+//! driver may not have: the remapping unit, the domain its device is attached
+//! to, the frame allocator, and the *client's* capability table. [`Supervising`]
+//! is that list as a type. The one thing a scheduled driver cannot do for
+//! itself is turn a client's capability into an address its device may use, so
+//! it asks — `f_abi::control::op::DEVICE_MAP`, on its control ring — and this
+//! file answers, from a polling loop on the boot processor, out of the same
+//! [`iommu::Grant`] it used to pass in as an argument. The check is unchanged:
+//! the client's handle, against the client's table, refused without `GRANT`.
 //!
-//! *Reversal, and it is a date rather than a measurement:* E1-B08 lands a
-//! scheduler and a safe channel adoption, at which point this file keeps the
-//! supervisor's half and loses the two calls that stand in for a component's.
+//! *Reversal:* a supervisor that is a component. When one exists, the answering
+//! below is its work rather than the frame's, and what this file keeps is the
+//! device discovery underneath it. E1-B05 owes that, and `CHAOS_GAP` in xtask
+//! carries what is still owed as a set rather than as a sentence.
 //!
 //! # Three halves, and none of them means anything alone
 //!
@@ -74,18 +77,18 @@
 //! [`Half`] says why `outside` and `escape` are different questions rather than
 //! one question run twice, and review is what found that they were being
 //! conflated: only `escape` is *a driver reaching outside its grant*, and
-//! `outside` is *a grant being taken away under a driver*. What neither shows
-//! is that the code doing the reaching runs at ring 3 — nothing schedules a
-//! component until E1-B08, so the frame calls it, and these boots establish the
-//! descriptor's provenance and the unit's refusal rather than the privilege
-//! level of the code that built it.
+//! `outside` is *a grant being taken away under a driver*. The sentence that
+//! used to close this paragraph — *what neither shows is that the code doing
+//! the reaching runs at ring 3* — is the one RFC 0047 removed. It does now, and
+//! the arithmetic that produces the bad descriptor happens in an address space
+//! where the only memory it can reach is what its manifest declared.
 //!
 //! # What the zero-copy counter is worth on *this* boot, exactly
 //!
 //! `f_virtio_blk::driver::Counters::copies` is zero because there is no type in
 //! the driver crate that turns a client's buffer into bytes: a
 //! [`Reach`](f_ring::registry::Reach) is an address and a length, a
-//! [`Region`] is the component's own memory, and the one function in that crate
+//! `Region` is the component's own memory, and the one function in that crate
 //! which moves bytes takes the tally it moves as an argument and is not called
 //! from the data path.
 //!
@@ -94,25 +97,25 @@
 //! zero — those two read identically and only one of them is what is being
 //! claimed. The mechanism behind it is `cargo xtask lint-datapath`, which
 //! requires that crate to define exactly one function that moves bytes, to call
-//! it exactly once, and to call it from `provoke_copy` and nowhere else — and
-//! which refuses any line of shipped component source that mints a
-//! [`Region`] or a `Window` out of a bare address, because a safe `const fn`
-//! constructor over the direct map is the one way a crate that forbids `unsafe`
-//! could still read a client's bytes with `stage` left honest. Node 24 is the
-//! other half: it says the counting works at all.
+//! it exactly once, and to call it from `provoke_copy` and nowhere else. Node
+//! 24 is the other half: it says the counting works at all.
 //!
-//! What is **not** true on this boot is that the driver's code is prevented from
-//! reaching those bytes by an address space. It executes in the frame, where the
-//! direct map covers all of physical memory, so what enforces the property here
-//! is the driver crate's own types and the absence of any accessor that could
-//! yield a slice — a property `cargo xtask lint-unsafe` and the workspace's
-//! `unsafe_code = "forbid"` make load-bearing rather than aspirational, and
-//! which `cargo xtask lint-datapath` checks rather than leaving to a reader's
-//! search.
-//! The second enforcement arrives with the scheduler: when the driver runs at
-//! ring 3 its page tables will refuse what its types already do. That is
-//! E1-B08's, and saying it here is cheaper than a reader inferring the stronger
-//! claim from a zero.
+//! **The second enforcement has arrived, and it is what closes this paragraph
+//! rather than lengthening it.** What used to be missing was an address space:
+//! the driver executed in the frame, where the direct map covers all of
+//! physical memory, so the property rested on the crate's own types and on a
+//! source check that refused any line minting an accessor over a bare address.
+//! It runs at ring 3 now. The pages it can reach are its text, its stack, its
+//! two rings, its board, its device's registers and its own queue memory, and
+//! nothing else in the machine is mapped for it — so an address it invents is a
+//! page fault rather than somebody's bytes. RFC 0047 retires the source check
+//! and says why the page tables are the stronger statement.
+//!
+//! The number itself no longer comes from a counter in this address space: the
+//! component writes its own tallies into the half of its board that is its own,
+//! and this file reads them. RFC 0013's *read, never delivered*. A component
+//! that never ran writes nothing, which is why [`Reported`] refuses a board
+//! with no magic in it rather than reading a page of zeroes as six zeroes.
 
 #![deny(
     clippy::indexing_slicing,
@@ -123,16 +126,18 @@
 )]
 
 use f_abi::cap::{CapType, rights};
+use f_abi::control;
 use f_abi::manifest::{ContentId, Record, route};
-use f_abi::{ABI_VERSION, Negotiated, error};
-use f_ring::device::{Region, Window};
+use f_abi::{ABI_VERSION, Negotiated, error, feature};
+use f_ring::device::Window;
 use f_ring::registry::{Domains, registration};
 use f_ring::{BufferSet, Collector, Consumer, Fixed, Mapping, Poster, Producer};
-use f_virtio_blk::driver::{self, Driver};
-use f_virtio_blk::transport::{SECTOR_BYTES, Windows};
+use f_virtio_blk::driver;
+use f_virtio_blk::routing;
+use f_virtio_blk::transport::SECTOR_BYTES;
 
 use crate::arch::x86_64::multiboot::BootInfo;
-use crate::arch::x86_64::paging::{AddressSpace, Features};
+use crate::arch::x86_64::paging::{self, AddressSpace, Features};
 use crate::arch::x86_64::pci::{self, Bdf, Survey};
 use crate::arch::x86_64::virtio;
 use crate::arch::x86_64::vtd::{Fault, Unit};
@@ -140,6 +145,22 @@ use crate::cap::Table;
 use crate::component;
 use crate::iommu;
 use crate::mem::{FRAME_SIZE, Frame, FrameAllocator, Order};
+
+/// The one address a driver component holds as a constant, agreed.
+///
+/// `f_virtio_blk::routing::AT` is written down in the component and
+/// `kernel::process::BLK_BOARD` in the frame, and they are linked separately —
+/// the component is a flat image built by a different invocation of the
+/// compiler. There is nothing to share a constant through, which is the same
+/// position `user/init/link.ld` and `INIT_TEXT` are in. What is different is
+/// that the kernel links *both* definitions, so the agreement can be a check
+/// rather than a comment, and this is that check: a build where the two
+/// disagree does not link, instead of booting into a page fault at the
+/// component's first read.
+const _: () = assert!(
+    crate::process::BLK_BOARD == routing::AT,
+    "the frame and the driver disagree about where the routing page is"
+);
 
 /// Entries on the client's data ring.
 ///
@@ -226,8 +247,6 @@ pub enum Trouble {
     /// of the test: a client that could put memory in a driver's domain without
     /// `rights::GRANT` has an authority the capability system never issued.
     NotRefused,
-    /// The driver refused to start. Its own reason.
-    Driver(f_virtio_blk::Trouble),
     /// A channel could not be laid out, or one of its four ends could not bind.
     Channel(i32),
     /// The client's region does not divide into the buffers the registration
@@ -252,6 +271,28 @@ pub enum Trouble {
     /// manifest* — `user/virtio-blk/manifest.toml` says so in as many words —
     /// and not a number to quietly enlarge here.
     Manifest,
+    /// The driver could not be built as a process, carrying which step.
+    Process(crate::process::Error),
+    /// The core the driver was given never took it, or never gave it back.
+    ///
+    /// Carries the core. A machine with one core reaches this too, and
+    /// deliberately: a driver and its client cannot be the same core, because
+    /// the client would be inside the driver.
+    Scheduled(usize),
+    /// The driver did not answer a completion inside the frame's own bound.
+    /// Carries that bound. Unit: microseconds.
+    NoAnswer(u64),
+    /// The driver's core was still holding its job when the frame's bound
+    /// passed. Carries that bound. Unit: microseconds.
+    ///
+    /// Apart from [`Trouble::Scheduled`] on purpose, and the difference is the
+    /// only thing standing between a slow runner and a datapath defect: a core
+    /// that went back to waiting answered the wrong thing and is a finding,
+    /// while a bound that passed is a wall-clock number scaled off this
+    /// machine's timestamp counter and fires for a wedge and for a slow machine
+    /// alike. `smp::NotJoined` is where the two are told apart, and
+    /// [`Trouble::bound`] is what the boot log renders them by.
+    Overdue(u64),
 }
 
 impl Trouble {
@@ -267,7 +308,6 @@ impl Trouble {
             Self::NotRefused => {
                 "the frame gave a device translation for a capability carrying no right to grant"
             }
-            Self::Driver(why) => why.message(),
             Self::Channel(_) => "the client's data ring could not be laid out or bound",
             Self::Geometry => "the client's region does not divide into the buffers declared",
             Self::Registration(_) => "the driver refused to register the client's buffer set",
@@ -277,6 +317,35 @@ impl Trouble {
             Self::Manifest => {
                 "the driver's manifest and this machine disagree about what has to be routed"
             }
+            Self::Process(_) => "the driver could not be built as a process",
+            Self::Scheduled(_) => {
+                "the core the driver was given never took it or never gave it \
+                                   back"
+            }
+            Self::NoAnswer(_) => "the driver did not answer a completion inside the bound",
+            Self::Overdue(_) => "the driver's core did not report finished inside the bound",
+        }
+    }
+
+    /// The wall-clock bound this refusal is, when it is one.
+    ///
+    /// # Why the boot log asks
+    ///
+    /// Because two of these variants are not findings. Every other arm is
+    /// something the frame *observed* going wrong — a refusal, a fault, a
+    /// mismatch — and a red line on it means a protection fired. These two are
+    /// spins that ran out of a number derived from `tsc_khz`, so they fire for
+    /// a component that is wedged and for a runner slower than the number, and
+    /// nothing here can tell those apart. Printing them under the same sentence
+    /// as the rest is how a slow CI machine comes to be read as a datapath
+    /// defect, and how a real wedge comes to be dismissed as one.
+    ///
+    /// Unit: microseconds.
+    #[must_use]
+    pub const fn bound(self) -> Option<u64> {
+        match self {
+            Self::NoAnswer(micros) | Self::Overdue(micros) => Some(micros),
+            _ => None,
         }
     }
 }
@@ -298,6 +367,12 @@ pub struct Declared {
     pub frames: u32,
     /// Untyped bytes it routes for the queues. Unit: bytes.
     pub bytes: u64,
+    /// The component's own image, out of the same component file.
+    ///
+    /// Read here rather than found again later, because it is the same
+    /// module: a datapath that read a *manifest* from one place and an *image*
+    /// from another would be a datapath whose content hash named neither.
+    pub image: &'static [u8],
 }
 
 /// Find the driver's component file and read what it declares.
@@ -337,7 +412,8 @@ pub unsafe fn declared(boot: &BootInfo) -> Result<Declared, Trouble> {
             }
         }
         let (Some(frames), Some(bytes)) = (frames, bytes) else { return Err(Trouble::Manifest) };
-        return Ok(Declared { id: ContentId::of(module), frames, bytes });
+        let Ok(image) = record.image(module) else { return Err(Trouble::Manifest) };
+        return Ok(Declared { id: ContentId::of(module), frames, bytes, image });
     }
     Err(Trouble::NoManifest)
 }
@@ -406,6 +482,23 @@ impl Half {
             _ => 0,
         }
     }
+
+    /// Which of the component's lives this half asks for.
+    ///
+    /// Two and not three: `inside` and `outside` differ in what the *frame*
+    /// does between the two transfers and not in what the driver does at all,
+    /// which is the point of that half — the driver's descriptor is correct
+    /// throughout. `escape` is a different life because it is a different code
+    /// path in the component, and a selector that could not tell them apart
+    /// would be a provocation the boot could not ask for.
+    /// Unit: none — a selector ordinal.
+    #[must_use]
+    pub const fn selector(self) -> u32 {
+        match self {
+            Self::Escape => routing::life::ESCAPE,
+            _ => routing::life::SERVE,
+        }
+    }
 }
 
 /// What one run of the datapath did.
@@ -446,8 +539,36 @@ pub struct Report {
     /// are different failures and only one of them is the expected result of
     /// the refused half.
     pub untouched: u32,
-    /// What the driver counted. Unit: see [`driver::Counters`].
+    /// What the driver counted, read out of the board rather than out of a
+    /// structure in this address space. Unit: see [`driver::Counters`].
     pub counters: driver::Counters,
+    /// Which core the driver held. Unit: none — a core index.
+    pub cpu: usize,
+    /// Whether it ended by `EXIT` rather than by a fault.
+    ///
+    /// The frame's own reading, taken from `process::reap` rather than from
+    /// anything the component wrote: a driver that faulted mid-run could write
+    /// nothing afterwards, and one that scribbled its own board could write
+    /// anything.
+    pub exited: bool,
+    /// How many entries it took off its data ring. Unit: entries.
+    ///
+    /// Beside [`driver::Counters::served`] rather than derived from it, because
+    /// they are two claims: one is what the component's executor counted and
+    /// the other is what its loop saw arrive.
+    pub drained: u64,
+    /// How many operations the driver submitted on its control ring and this
+    /// frame answered.
+    ///
+    /// Counted by the frame and not reported by the component, which is what
+    /// makes it evidence: it is the one number here a component could not
+    /// produce if the route it names had never been used.
+    /// Unit: operations.
+    pub asked: u32,
+    /// Why its loop ended, as one of `f_virtio_blk::routing::stopped`.
+    /// Zero for a component that never wrote a report at all.
+    /// Unit: none — an ordinal.
+    pub stopped: u64,
     /// The first fault the remapping unit recorded, if it recorded one.
     pub fault: Option<Fault>,
     /// How many it recorded. Unit: transactions.
@@ -469,7 +590,35 @@ impl Report {
     /// protection that did not fire is not a smaller result than a fault, it is
     /// the opposite result.
     pub const fn verdict(&self) -> Result<(), &'static str> {
-        // The half that is true on both runs, checked first, because it is
+        // The component ran and ended the way a component ends, checked before
+        // anything it said about itself. Both halves are the *frame's* reading:
+        // a driver that faulted before its loop started would write nothing
+        // into its board, and every counter below would read zero — including
+        // `copies`, which is the number this subsystem publishes as a property.
+        // A zero arrived at by never running and a zero arrived at by a
+        // structural impossibility are the same zero, and this is the line that
+        // tells them apart.
+        if !self.exited {
+            return Err("the driver did not end by EXIT, so nothing it reported is its own");
+        }
+        if self.stopped != routing::stopped::TOLD {
+            return Err("the driver's loop ended for a reason of its own rather than because its \
+                        supervisor told it to, so the run is shorter than the one asked for");
+        }
+        if self.drained == 0 {
+            return Err("the driver took nothing off its data ring, so its client's entries \
+                        crossed no boundary");
+        }
+        // Two, because two registrations were submitted — one refused for want
+        // of `GRANT` and one served — and each of them is a `DEVICE_MAP` the
+        // driver could not answer for itself. A run with fewer is a run in
+        // which the component got its translations from somewhere that is not
+        // the frame, which is the arrangement RFC 0047 refused by name.
+        if self.asked < 2 {
+            return Err("the driver did not ask the frame for the translations its \
+                        registrations needed, so the route this run is about was not used");
+        }
+        // The half that is true on both runs, checked next, because it is
         // about this component rather than about the hardware — and a datapath
         // that copied would be wrong whichever way the second half went.
         if self.counters.copies != 0 {
@@ -579,6 +728,7 @@ pub unsafe fn demonstrate(
     survey: &Survey,
     boot: &BootInfo,
     half: Half,
+    scheduling: Scheduling,
 ) -> Result<Report, Trouble> {
     // The manifest first, before a frame is spent, because everything below is
     // sized from it. A datapath that allocated first and read the declaration
@@ -642,8 +792,20 @@ pub unsafe fn demonstrate(
 
     // SAFETY: three frames just allocated, each held by nobody else, and the
     // caller's guarantees passed down.
-    let outcome =
-        unsafe { run(frames, unit, &mut domain, &found, declared, granted, owned, wire, half) };
+    let outcome = unsafe {
+        run(
+            frames,
+            unit,
+            &mut domain,
+            &found,
+            declared,
+            granted,
+            owned,
+            wire,
+            half,
+            Setup { space, features, scheduling },
+        )
+    };
 
     // Whatever happened, the device stops being able to address memory before
     // its domain is freed. This ordering is what makes the free safe rather
@@ -677,6 +839,309 @@ pub unsafe fn demonstrate(
     Ok(report)
 }
 
+/// What the frame stands a scheduled driver up with.
+///
+/// Separate from the frames [`run`] is handed because these are not
+/// allocations: they are what the boot path knows and this file cannot find out
+/// — which core the topology left free, what the clocks came out at, and where
+/// the state tree was published. The same bundle `runtime::demonstrate` takes as
+/// loose arguments, given a name here because a driver takes more of them.
+#[derive(Clone, Copy)]
+pub struct Scheduling {
+    /// The core the driver is given. Unit: none — a core index.
+    pub cpu: usize,
+    /// The rate that core arms its own timer at. Unit: hertz.
+    pub hz: u32,
+    /// How many ticks it asks for. A bound rather than a schedule: the client's
+    /// work is what ends the run. Unit: timer ticks.
+    pub target: u64,
+    /// This machine's timestamp-counter rate, for bounding a wait.
+    /// Unit: kilohertz.
+    pub tsc_khz: u64,
+    /// The physical address of the frame the state tree is published in.
+    /// Unit: bytes, physical.
+    pub tree: u64,
+}
+
+/// The address space a driver is built in, and what it is stood up with.
+struct Setup<'a> {
+    space: &'a AddressSpace,
+    features: Features,
+    scheduling: Scheduling,
+}
+
+/// How long the frame waits for one completion from a driver it is a client of.
+///
+/// Five seconds, the same bound `main::run_one` and `runtime::demonstrate` use
+/// and for the same reason: it is the answer to a component that is wedged
+/// rather than a schedule for one that is working. Generous under an emulator
+/// that compiles each block of guest code the first time it reaches it, which
+/// is what the first transfer of a run pays for.
+/// Unit: microseconds.
+const ANSWER_MICROS: u64 = 5_000_000;
+
+/// How long it waits for the core afterwards. Unit: microseconds.
+const EXIT_MICROS: u64 = 5_000_000;
+
+/// The register window as a *component* sees it: one base and four offsets.
+///
+/// # Why this is computed rather than routed structure by structure
+///
+/// Because a component may not be told four unrelated addresses. A modern
+/// virtio transport publishes its four structures inside one base-address
+/// register, and what the manifest declares is *four register frames* — one
+/// window, whole, which the driver narrows with `Window::slice`. Narrowing only
+/// ever goes inwards, so a driver that got an offset wrong reads its own
+/// registers wrongly and cannot read anybody else's; four separate mappings
+/// would have given it four chances to be handed something it did not declare.
+///
+/// The span is taken from the pages the structures actually fall in rather than
+/// assumed to start at the register's own base, because a device that put its
+/// common configuration at a non-zero offset is a device this has to route and
+/// not one it may refuse.
+#[derive(Clone, Copy)]
+struct Registers {
+    /// The first page of the span, physical. Unit: bytes, physical.
+    base: u64,
+    /// How many pages it covers. Unit: pages.
+    pages: u32,
+    /// Each structure's offset into the span and its length, in the order
+    /// common, notify, ISR, device configuration. Unit: bytes.
+    each: [(u32, u32); 4],
+}
+
+impl Registers {
+    /// Work out the span from what the device published.
+    ///
+    /// # Errors
+    ///
+    /// [`Trouble::Manifest`] for a span wider than the manifest declares or
+    /// than the driver's address space reserves — which is the direction
+    /// `user/virtio-blk/manifest.toml` insists on: *a device whose window is
+    /// larger is a different device and a different manifest, not a bigger
+    /// number.*
+    fn of(found: &virtio::Found, declared: &Declared) -> Result<Self, Trouble> {
+        let structures = [found.common, found.notify, found.isr, found.device];
+        let mut low = u64::MAX;
+        let mut high = 0;
+        for structure in structures {
+            let physical = Self::physical(&structure)?;
+            let end = physical.checked_add(u64::from(structure.len)).ok_or(Trouble::Manifest)?;
+            low = low.min(physical & !(FRAME_SIZE - 1));
+            high = high.max(end.div_ceil(FRAME_SIZE).saturating_mul(FRAME_SIZE));
+        }
+        let span = high.checked_sub(low).ok_or(Trouble::Manifest)?;
+        let pages = u32::try_from(span / FRAME_SIZE).map_err(|_| Trouble::Manifest)?;
+        if pages > declared.frames || pages as usize > crate::process::BLK_REGISTER_PAGES {
+            return Err(Trouble::Manifest);
+        }
+        let mut each = [(0, 0); 4];
+        for (slot, structure) in each.iter_mut().zip(structures) {
+            let offset = u32::try_from(Self::physical(&structure)?.wrapping_sub(low))
+                .map_err(|_| Trouble::Manifest)?;
+            *slot = (offset, structure.len);
+        }
+        Ok(Self { base: low, pages, each })
+    }
+
+    /// Where a structure is in physical memory.
+    ///
+    /// `Structure::at` is where the *frame* reads it, which is the physical
+    /// address plus the direct device window's offset. The component is mapped
+    /// the physical page, so the offset comes back off here — and a value it
+    /// cannot come off is a structure this build did not map through that
+    /// window, which is refused rather than wrapped.
+    fn physical(structure: &virtio::Structure) -> Result<u64, Trouble> {
+        structure.at.checked_sub(paging::DEVICE_OFFSET).ok_or(Trouble::Manifest)
+    }
+}
+
+/// The frame's half of a scheduled driver's run: the client's ring, the
+/// driver's control ring, and the authority behind both.
+///
+/// # Why one struct and not six arguments
+///
+/// Because the six belong together and are used together at every polling
+/// point. What is here is exactly what a *supervisor* holds and a driver does
+/// not: the remapping unit, the domain the device is attached to, the
+/// allocator, and the client's capability table. The driver holds none of them
+/// and that is the whole architecture — RFC 0047 — so a type that names them as
+/// one thing is the type that says so.
+struct Supervising<'a, 'm> {
+    /// What the driver asked for.
+    asks: &'a Consumer<'m>,
+    /// Where its answers go, and where the frame's notices go.
+    answers: &'a Poster<'m>,
+    /// The client's end of the data ring, on the frame's side.
+    reaper: &'a Collector<'m>,
+    unit: &'a mut Unit,
+    domain: &'a mut crate::arch::x86_64::vtd::Domain,
+    frames: &'a mut FrameAllocator,
+    /// The **client's** table. Every handle a driver names in a translation
+    /// request is resolved against this one, which is what makes a driver
+    /// unable to grant itself anything: it is asking about somebody else's
+    /// capability, and the answer is somebody else's rights.
+    table: &'a Table,
+    /// The device address the last translation answered.
+    ///
+    /// Kept here because it is the frame's knowledge and the client's need:
+    /// nothing in the completion a *client* reaps carries an address — RFC 0024
+    /// — so a client that needs to know where the device sees its buffer, in
+    /// order to say where a refused transaction should have faulted, asks the
+    /// frame that answered it. A client on the far side of a boundary could not
+    /// ask this and would not be entitled to; this one is the frame.
+    /// Unit: bytes, in the device's address space.
+    answered_at: u64,
+    /// How many operations this has answered on the driver's control ring.
+    ///
+    /// **The frame's own evidence that the driver asked**, and it is what makes
+    /// RFC 0047's third clause a measurement rather than a design note: a build
+    /// in which the translation route had quietly stopped being used — because
+    /// somebody put the answers somewhere the component could read them, which
+    /// is the alternative that RFC rejects by name — would publish zero here
+    /// and fail the verdict. Counted on this side of the boundary, because the
+    /// other side's tally is the other side's.
+    /// Unit: operations.
+    answered: u32,
+}
+
+impl Supervising<'_, '_> {
+    /// Where the last translation this served put the memory it was asked
+    /// about. Unit: bytes, in the device's address space.
+    const fn answered_at(&self) -> u64 {
+        self.answered_at
+    }
+
+    /// Answer everything the driver has asked for, and nothing else.
+    ///
+    /// **This is the frame's polling point.** R05: nothing is delivered
+    /// asynchronously, and what happens here is this core looking at a ring in
+    /// its own loop while another core is inside a component.
+    ///
+    /// # Errors
+    ///
+    /// [`Trouble::Channel`] for a ring that stopped validating — a driver that
+    /// scribbled its own control ring, which RFC 0008 treats as a component
+    /// that has stopped speaking.
+    fn serve(&mut self) -> Result<u32, Trouble> {
+        let mut answered = 0;
+        loop {
+            let Some(entry) = self.asks.pop().map_err(|_| Trouble::Channel(0))? else {
+                return Ok(answered);
+            };
+            // Room before the entry is acted on, because an operation performed
+            // and then not answered is a driver waiting forever for a reply
+            // that was dropped on the floor — and for a translation that would
+            // be a device left holding a mapping nobody knows about.
+            if self.answers.free().map_err(|_| Trouble::Channel(0))? == 0 {
+                return Err(Trouble::Channel(0));
+            }
+            let answer = self.execute(&entry);
+            self.answers.post(answer).map_err(|_| Trouble::Channel(0))?;
+            answered += 1;
+            self.answered = self.answered.saturating_add(1);
+        }
+    }
+
+    /// One control-ring operation.
+    ///
+    /// R04 at the bottom: an opcode this build does not implement is refused
+    /// and never ignored. The two it does implement are the ones a driver
+    /// cannot perform for itself, and both go through the same
+    /// [`iommu::Grant`] the frame used when it called the driver's code
+    /// directly — so the check that stands between a component's clients and
+    /// each other's memory is the same check, on the same table, with the same
+    /// refusal.
+    fn execute(&mut self, entry: &f_abi::Sqe) -> f_abi::Cqe {
+        let mut asking = iommu::Grant {
+            unit: &mut *self.unit,
+            domain: &mut *self.domain,
+            frames: &mut *self.frames,
+            table: self.table,
+        };
+        match entry.opcode {
+            control::op::DEVICE_MAP => match asking.map(entry.cap, entry.len) {
+                Ok(address) => {
+                    self.answered_at = address;
+                    f_abi::Cqe {
+                        user_data: entry.user_data,
+                        result: 0,
+                        flags: 0,
+                        timestamp: 0,
+                        ext: address,
+                    }
+                }
+                Err((packed, detail)) => f_ring::refusal(entry.user_data, packed, detail, 0),
+            },
+            control::op::DEVICE_UNMAP => {
+                asking.unmap(entry.cap, entry.offset, entry.len);
+                f_ring::completion(entry.user_data, 0, 0)
+            }
+            other => f_ring::refusal(
+                entry.user_data,
+                error::pack(error::ARGUMENT, error::argument::UNKNOWN_OPCODE),
+                u64::from(other),
+                0,
+            ),
+        }
+    }
+
+    /// Take the client's next completion, serving the driver until it arrives.
+    ///
+    /// # Errors
+    ///
+    /// [`Trouble::NoAnswer`] for a driver that did not answer inside
+    /// [`ANSWER_MICROS`] — a wedge, or a machine slower than that bound, and
+    /// this cannot tell those apart, which is what [`Trouble::bound`] exists to
+    /// say in the boot log; otherwise whatever [`Supervising::serve`]
+    /// refuses.
+    fn awaited(&mut self, tsc_khz: u64) -> Result<f_abi::Cqe, Trouble> {
+        let deadline = crate::smp::deadline_after(tsc_khz, ANSWER_MICROS);
+        loop {
+            self.serve()?;
+            if let Some(answer) = self.reaper.take().map_err(|_| Trouble::Channel(0))? {
+                return Ok(answer);
+            }
+            if crate::smp::past(deadline) {
+                return Err(Trouble::NoAnswer(ANSWER_MICROS));
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Take a translation away, on the frame's own initiative.
+    ///
+    /// The `outside` half, and it is deliberately not an operation the driver
+    /// asked for: RFC 0024 says *the memory is the client's and it is entitled
+    /// to take it back*, so what happens here happens under a driver that holds
+    /// a live registration and is doing nothing wrong.
+    fn withdraw(&mut self, cap: u32, address: u64, len: u32) {
+        let mut asking = iommu::Grant {
+            unit: &mut *self.unit,
+            domain: &mut *self.domain,
+            frames: &mut *self.frames,
+            table: self.table,
+        };
+        asking.unmap(cap, address, len);
+    }
+
+    /// Tell the driver to stop.
+    ///
+    /// RFC 0008's stop, as the one notice this run posts: a component ends
+    /// because its supervisor said so, on the ring, drained at the same polling
+    /// point as everything else.
+    ///
+    /// # Errors
+    ///
+    /// [`Trouble::Channel`] for a control ring with no room left, which is a
+    /// driver that stopped draining.
+    fn stop(&self) -> Result<(), Trouble> {
+        self.answers
+            .post(control::entry(control::notice::STOP, 0, 0, 0))
+            .map_err(|_| Trouble::Channel(0))
+    }
+}
+
 /// The datapath proper, with every allocation already made.
 ///
 /// Split out so the teardown in [`demonstrate`] runs on every path, including
@@ -703,6 +1168,7 @@ unsafe fn run(
     owned: Frame,
     wire: Frame,
     half: Half,
+    setup: Setup<'_>,
 ) -> Result<Report, Trouble> {
     // --- the two tables ------------------------------------------------------
     //
@@ -735,9 +1201,11 @@ unsafe fn run(
     // --- the driver's own grant ---------------------------------------------
     //
     // Put in the domain by the *spawn* and not by the driver, which is why this
-    // is here rather than inside `Driver::start`: a component's declared needs
+    // is here rather than inside the component: a component's declared needs
     // are the supervisor's to deliver, and a driver that mapped its own queue
-    // would be a driver deciding what it was granted.
+    // would be a driver deciding what it was granted. It is also why the
+    // component is *told* the device address of its queues rather than asking
+    // for it — `f_virtio_blk::routing`.
     let region_len = u32::try_from(granted.bytes()).map_err(|_| Trouble::Authority)?;
     let region_at = {
         let mut asking = iommu::Grant {
@@ -761,56 +1229,242 @@ unsafe fn run(
     unsafe { pci::command_set(found.config, pci::COMMAND_BUS_MASTER) };
 
     // --- the component ------------------------------------------------------
-    let region = Region::at(frames.virt(granted) as u64, region_at, region_len)
-        .map_err(|packed| Trouble::Driver(f_virtio_blk::Trouble::Register(packed)))?;
-    let windows = Windows {
-        common: window_of(&found.common)?,
-        notify: window_of(&found.notify)?,
-        isr: window_of(&found.isr)?,
-        config: window_of(&found.device)?,
-        notify_multiplier: found.notify_multiplier,
-    };
-    let agreed = Negotiated { version: ABI_VERSION, features: 0 };
-    let mut driver = Driver::start(windows, region, agreed).map_err(Trouble::Driver)?;
-
-    // The self-check that makes the zero worth reading. Run before the data
-    // path, so a build in which it silently did nothing fails the verdict
-    // rather than being hidden by a transfer that also did nothing.
-    driver.provoke_copy().map_err(Trouble::Driver)?;
-
-    // --- the client's ring --------------------------------------------------
     //
-    // A real channel over a real frame, laid out by `f_abi::layout`, with the
-    // driver on the server end and the client on the other. Not a recorder
-    // standing in for one: the exit criterion says *through a ring*, and a
-    // client that handed entries straight to a service would be a client whose
-    // entries never crossed anything.
-    let at = frames.virt(wire);
+    // Built the way `runtime::demonstrate` builds a runtime, and given three
+    // things a runtime is not: more than one page of text, its device's
+    // registers mapped uncached, and its queue memory mapped whole. RFC 0047.
+    let registers = Registers::of(found, &declared)?;
+    let plan = crate::process::DriverPlan {
+        image: declared.image,
+        selector: half.selector(),
+        tree: setup.scheduling.tree,
+        hz: setup.scheduling.hz,
+        target: setup.scheduling.target,
+        cpu: setup.scheduling.cpu,
+        registers: registers.base,
+        queues: granted.addr(),
+        queue_bytes: granted.bytes(),
+        data: wire.addr(),
+    };
+    // SAFETY: the caller's guarantee, passed down; `registers.base` is the
+    // first page of a device window this boot mapped and nothing else is
+    // driving, `granted` and `wire` are frames this call's caller allocated and
+    // holds, and `cpu` is a core that is up and idle.
+    let (prepared, pages) =
+        unsafe { crate::process::prepare_driver(frames, setup.space, setup.features, plan) }
+            .map_err(Trouble::Process)?;
+
+    // --- the two rings ------------------------------------------------------
+    //
+    // The frame is the grantor, so the frame writes both headers and the
+    // component adopts them and believes nothing — `f_ring::adopt`, RFC 0037 —
+    // which is exactly what it would do if the peer were hostile.
     let bytes = u32::try_from(FRAME_SIZE).map_err(|_| Trouble::Authority)?;
-    // SAFETY: `wire` was allocated zeroed, is frame-aligned — stronger than the
-    // cache-line alignment the layout asks for — and is `FRAME_SIZE` bytes with
-    // no pointer into it held anywhere else.
-    let server =
-        unsafe { Mapping::describe(at, bytes, ENTRIES, 0, 0, 0) }.map_err(Trouble::Channel)?;
+    let at = frames.virt(wire);
+    // SAFETY: `wire` was allocated zeroed by the caller, is frame-aligned —
+    // stronger than the cache-line alignment the layout asks for — and is
+    // `FRAME_SIZE` bytes with no pointer into it held anywhere else.
+    // Written and then let go of: the frame is the grantor and writes the
+    // header, and the *server* end over these bytes is the component's. Binding
+    // it here as well would be the frame holding an end of a channel it does
+    // not serve — which is what it did while the driver's code ran in the
+    // frame, and what stopped being true at RFC 0047.
+    let _ = unsafe { Mapping::describe(at, bytes, ENTRIES, 0, 0, 0) }.map_err(Trouble::Channel)?;
+    // The client's end. The server's end is the component's, at ring 3, and
+    // that is the whole change: two ends of one region on two sides of a
+    // privilege boundary rather than two ends in one address space.
     // SAFETY: as above; two ends over one region is what a channel is, and
     // every accessor hands out atomics and `UnsafeCell`s rather than references.
-    let client = unsafe { Mapping::adopt(at, bytes, 0, 0) }.map_err(Trouble::Channel)?;
+    let client_end = unsafe { Mapping::adopt(at, bytes, 0, 0) }.map_err(Trouble::Channel)?;
+    // SAFETY: `pages.control` is the kernel address of a frame `prepare_driver`
+    // allocated zeroed for this run and handed to nobody else.
+    let control = unsafe {
+        Mapping::describe(
+            pages.control as *mut u8,
+            bytes,
+            ENTRIES,
+            0,
+            feature::CONTROL_EVENTS,
+            feature::CONTROL_EVENTS,
+        )
+    }
+    .map_err(Trouble::Channel)?;
 
-    let mut producer = Producer::new(client.channel()).ok_or(Trouble::Channel(0))?;
-    let reaper = Collector::new(client.completions()).ok_or(Trouble::Channel(0))?;
-    let consumer = Consumer::new(server.channel()).ok_or(Trouble::Channel(0))?;
-    let poster = Poster::new(server.completions()).ok_or(Trouble::Channel(0))?;
-    let wiring = Wiring { consumer: &consumer, poster: &poster, reaper: &reaper };
+    // --- what the component is told ------------------------------------------
+    let board = Window::at(pages.board, routing::BYTES).map_err(Trouble::Channel)?;
+    let negotiated = Negotiated { version: ABI_VERSION, features: 0 };
+    for (offset, value) in [
+        (routing::at::REGISTERS_AT, crate::process::BLK_REGISTERS),
+        (routing::at::REGISTERS_LEN, u64::from(registers.pages) * FRAME_SIZE),
+        (routing::at::NOTIFY_MULTIPLIER, u64::from(found.notify_multiplier)),
+        (routing::at::QUEUES_AT, crate::process::BLK_QUEUES),
+        (routing::at::QUEUES_DEVICE_AT, region_at),
+        (routing::at::QUEUES_LEN, granted.bytes()),
+        (routing::at::CONTROL_AT, crate::process::SPAWN_CONTROL),
+        (routing::at::CONTROL_LEN, u64::from(bytes)),
+        (routing::at::DATA_AT, crate::process::BLK_DATA),
+        (routing::at::DATA_LEN, u64::from(bytes)),
+        (routing::at::NEGOTIATED_VERSION, u64::from(negotiated.version)),
+        (routing::at::NEGOTIATED_FEATURES, negotiated.features),
+        (routing::at::BEYOND, half.beyond()),
+    ] {
+        board.write64(offset, value).map_err(Trouble::Channel)?;
+    }
+    for (slots, structure) in [
+        (routing::at::COMMON_OFFSET, routing::at::COMMON_LEN),
+        (routing::at::NOTIFY_OFFSET, routing::at::NOTIFY_LEN),
+        (routing::at::ISR_OFFSET, routing::at::ISR_LEN),
+        (routing::at::CONFIG_OFFSET, routing::at::CONFIG_LEN),
+    ]
+    .into_iter()
+    .zip(registers.each)
+    {
+        board.write64(slots.0, u64::from(structure.0)).map_err(Trouble::Channel)?;
+        board.write64(slots.1, u64::from(structure.1)).map_err(Trouble::Channel)?;
+    }
+    // Last, so that a component reading a page this loop did not finish finds a
+    // zero rather than a plausible layout. Nothing here races — the core is
+    // idle until the line below — and the order is kept anyway, because the day
+    // something does race is the day nobody remembers this was safe.
+    board.write64(routing::at::MAGIC, routing::MAGIC).map_err(Trouble::Channel)?;
 
+    // --- the driver runs -----------------------------------------------------
+    // SAFETY: `cpu` reports ready, everything `process::execute` depends on was
+    // put in its shards by `prepare_driver`, and this core has interrupts
+    // enabled — which `run_on`'s contract requires so that a shootdown can be
+    // answered.
+    unsafe { crate::smp::start_on(setup.scheduling.cpu) }.map_err(Trouble::Scheduled)?;
+
+    let asks = Consumer::new(control.channel()).ok_or(Trouble::Channel(0))?;
+    let answers = Poster::new(control.completions()).ok_or(Trouble::Channel(0))?;
+    let reaper = Collector::new(client_end.completions()).ok_or(Trouble::Channel(0))?;
+    let mut producer = Producer::new(client_end.channel()).ok_or(Trouble::Channel(0))?;
+    // The client's page, taken before the allocator is borrowed for the length
+    // of the run.
+    // SAFETY: `owned` is a frame the caller allocated and handed to nobody
+    // else; the direct map makes it readable and writable for the whole of this
+    // call, and no other reference into it exists.
+    let page = unsafe { core::slice::from_raw_parts_mut(frames.virt(owned), FRAME_SIZE as usize) };
+    let tsc_khz = setup.scheduling.tsc_khz;
+    let asking = Asking { half, owned_cap, ungrantable_cap, bytes, tsc_khz, negotiated };
+
+    let mut supervising = Supervising {
+        asks: &asks,
+        answers: &answers,
+        reaper: &reaper,
+        unit: &mut *unit,
+        domain: &mut *domain,
+        frames: &mut *frames,
+        table: &client_table,
+        answered_at: 0,
+        answered: 0,
+    };
+    let observed = client(&mut supervising, &mut producer, page, asking);
+    // Told to stop whatever happened above, because a driver left serving a
+    // client that has gone is a core this boot never gets back.
+    let told = supervising.stop();
+    // SAFETY: `start_on` was called for this core and nothing else has joined
+    // it. `serve` touches only the driver's control ring, whose two ends are
+    // single-producer and single-consumer by construction.
+    let joined = unsafe {
+        crate::smp::join_serviced(setup.scheduling.cpu, tsc_khz, EXIT_MICROS, &mut || {
+            let _ = supervising.serve();
+        })
+    };
+
+    let asked = supervising.answered;
+
+    // What the component said about itself, read out of memory the frame
+    // granted it. RFC 0013's *read, never delivered*: it was never asked.
+    let reported = Reported::of(&board);
+
+    // SAFETY: on the core that prepared it, after the core that ran it reported
+    // finished — which is what `join_serviced` returning `Ok` means, and which
+    // the refusal below is checked against before anything reads its report.
+    let ended = unsafe { crate::process::reap(frames, prepared) }.map_err(Trouble::Process)?;
+    let exited = matches!(ended.death, crate::process::Death::Exited(_));
+
+    told?;
+    joined.map_err(|why| match why {
+        crate::smp::NotJoined::Refused(cpu) => Trouble::Scheduled(cpu),
+        // Not `Scheduled`: the core said nothing, the bound said everything.
+        crate::smp::NotJoined::Overdue(_) => Trouble::Overdue(EXIT_MICROS),
+    })?;
+    let observed = observed?;
+    let faults = unit.faults();
+
+    Ok(Report {
+        half,
+        declared,
+        bdf: found.bdf,
+        windows: registers.pages,
+        capacity: reported.capacity,
+        registered_at: observed.registered_at,
+        refused_without_grant: observed.refused_without_grant,
+        wrote: observed.wrote,
+        read: observed.read,
+        matched: observed.matched,
+        untouched: observed.untouched,
+        counters: reported.counters,
+        cpu: setup.scheduling.cpu,
+        exited,
+        drained: reported.drained,
+        stopped: reported.outcome,
+        asked,
+        fault: faults.first,
+        faults: faults.records,
+    })
+}
+
+/// What the client asks for and holds, in one bundle.
+#[derive(Clone, Copy)]
+struct Asking {
+    half: Half,
+    /// The client's page, as a handle it may hand on. Unit: none — a handle.
+    owned_cap: u32,
+    /// The same page, as a handle it may not. Unit: none — a handle.
+    ungrantable_cap: u32,
+    /// How many bytes of it. Unit: bytes.
+    bytes: u32,
+    /// Unit: kilohertz.
+    tsc_khz: u64,
+    negotiated: Negotiated,
+}
+
+/// What the client observed.
+#[derive(Clone, Copy)]
+struct Observed {
+    /// Unit: bytes, in the device's address space.
+    registered_at: u64,
+    refused_without_grant: bool,
+    wrote: bool,
+    read: bool,
+    matched: bool,
+    /// Unit: bytes.
+    untouched: u32,
+}
+
+/// The client's whole run: register, write, read, compare.
+///
+/// Every wait in here is [`Supervising::awaited`], which serves the driver's
+/// control ring while it waits — so the client and its server make progress
+/// against each other on two cores, through one ring, with the frame answering
+/// the one question the driver cannot answer for itself.
+fn client(
+    supervising: &mut Supervising<'_, '_>,
+    producer: &mut Producer<'_>,
+    page: &mut [u8],
+    asking: Asking,
+) -> Result<Observed, Trouble> {
     // --- the refusal, before anything is registered -------------------------
     //
     // A client that holds memory it may use and may not pass on cannot put it
     // in a driver's domain. Provoked on every run because a check nobody has
     // watched fail is indistinguishable from one that cannot fail — and this is
     // the check standing between a component's clients and each other's memory.
-    let probe = registration(1, ungrantable_cap, bytes, BUFFERS);
+    let probe = registration(1, asking.ungrantable_cap, asking.bytes, BUFFERS);
     producer.submit(probe).map_err(|_| Trouble::Channel(0))?;
-    let answer = wiring.turn(&mut driver, unit, domain, frames, &client_table, 0)?;
+    let answer = supervising.awaited(asking.tsc_khz)?;
     let refused_without_grant =
         matches!(answer.error(), Some((error::AUTHORITY, error::authority::RIGHT_NOT_HELD)));
     if !refused_without_grant {
@@ -818,18 +1472,16 @@ unsafe fn run(
     }
 
     // --- the registration ---------------------------------------------------
-    let asked = registration(2, owned_cap, bytes, BUFFERS);
+    let asked = registration(2, asking.owned_cap, asking.bytes, BUFFERS);
     producer.submit(asked).map_err(|_| Trouble::Channel(0))?;
-    let answer = wiring.turn(&mut driver, unit, domain, frames, &client_table, 0)?;
+    let answer = supervising.awaited(asking.tsc_khz)?;
     let naming = Fixed::from_completion(&answer)
         .map_err(|(refused, code)| Trouble::Registration(error::pack(refused, code)))?;
-    // Where the *device* addresses the set. Known here because `iommu::Grant`
-    // answers the physical address of the memory a capability names and this
-    // build makes a device address the identity of a physical one — which is a
-    // decision `kernel/src/iommu.rs` argues and writes a reversal for, not an
-    // assumption. It is the frame's knowledge and never the client's: nothing
-    // in the completion carries an address, and RFC 0024 is why.
-    let registered_at = owned.addr();
+    // Where the *device* addresses the set. The frame knows it because the
+    // frame answered the translation, and it is the frame's knowledge and never
+    // the client's: nothing in the completion the *client* reaped carries an
+    // address, and RFC 0024 is why.
+    let registered_at = supervising.answered_at();
 
     // --- the client's buffers -----------------------------------------------
     //
@@ -837,11 +1489,7 @@ unsafe fn run(
     // is the only thing here that reaches bytes, a submission *moves* it, and
     // the completion is what hands it back — RFC 0024, and the reason a client
     // in this system cannot write to a buffer the device holds.
-    // SAFETY: `owned` is a frame this function allocated and handed to nobody
-    // else; the direct map makes it readable and writable for the whole of this
-    // call, and no other reference into it exists.
-    let page = unsafe { core::slice::from_raw_parts_mut(frames.virt(owned), FRAME_SIZE as usize) };
-    let mut set = BufferSet::bind(naming, agreed, page).map_err(Trouble::Channel)?;
+    let mut set = BufferSet::bind(naming, asking.negotiated, page).map_err(Trouble::Channel)?;
     let [mut source, mut sink] = set.carve::<2>().map_err(|_| Trouble::Geometry)?;
     if source.len() < TRANSFER as usize {
         return Err(Trouble::Geometry);
@@ -859,8 +1507,8 @@ unsafe fn run(
 
     // --- the write ----------------------------------------------------------
     let entry = driver::write(3, AT, TRANSFER);
-    let (lent, _) = source.submit(&mut producer, entry).map_err(|_| Trouble::Channel(0))?;
-    let answer = wiring.turn(&mut driver, unit, domain, frames, &client_table, 0)?;
+    let (lent, _) = source.submit(producer, entry).map_err(|_| Trouble::Channel(0))?;
+    let answer = supervising.awaited(asking.tsc_khz)?;
     let wrote = !answer.is_error();
     let source = taken(lent, &answer)?;
 
@@ -871,26 +1519,15 @@ unsafe fn run(
     // client's and it is entitled to take it back*, and what makes that safe is
     // exactly this: the translation goes away with it, so a transfer the device
     // had already been pointed at faults instead of landing in memory somebody
-    // is about to reuse. Here the client takes it back between the two
-    // transfers, and the driver — which still holds a live registration naming
-    // it — hands the device a descriptor pointing outside its grant.
-    if half == Half::Outside {
-        let mut asking = iommu::Grant {
-            unit: &mut *unit,
-            domain: &mut *domain,
-            frames: &mut *frames,
-            table: &client_table,
-        };
-        asking.unmap(owned_cap, registered_at, bytes);
+    // is about to reuse.
+    if asking.half == Half::Outside {
+        supervising.withdraw(asking.owned_cap, registered_at, asking.bytes);
     }
 
     // --- the read -----------------------------------------------------------
     let entry = driver::read(4, AT, TRANSFER);
-    let (lent, _) = sink.submit(&mut producer, entry).map_err(|_| Trouble::Channel(0))?;
-    // The read is the one entry a half can bend. `Half::beyond` is zero for the
-    // other two, so the same line is the data path on `inside` and on `outside`
-    // and is the provocation on `escape`.
-    let answer = wiring.turn(&mut driver, unit, domain, frames, &client_table, half.beyond())?;
+    let (lent, _) = sink.submit(producer, entry).map_err(|_| Trouble::Channel(0))?;
+    let answer = supervising.awaited(asking.tsc_khz)?;
     let read = !answer.is_error();
     let sink = taken(lent, &answer)?;
 
@@ -916,26 +1553,83 @@ unsafe fn run(
         }
     }
 
-    driver.stop().map_err(Trouble::Driver)?;
-    let faults = unit.faults();
-
-    Ok(Report {
-        half,
-        declared,
-        bdf: found.bdf,
-        windows: found.pages,
-        capacity: driver.capacity(),
-        registered_at,
-        refused_without_grant,
-        wrote,
-        read,
-        matched,
-        untouched,
-        counters: driver.counters(),
-        fault: faults.first,
-        faults: faults.records,
-    })
+    Ok(Observed { registered_at, refused_without_grant, wrote, read, matched, untouched })
 }
+
+/// What the component wrote about itself into the half of its board that is
+/// its own.
+#[derive(Clone, Copy)]
+struct Reported {
+    counters: driver::Counters,
+    /// Unit: sectors.
+    capacity: u64,
+    /// Unit: entries.
+    drained: u64,
+    /// One of `f_virtio_blk::routing::stopped`. Unit: none — an ordinal.
+    outcome: u64,
+}
+
+impl Reported {
+    /// Read it, and answer zeroes for a component that never wrote one.
+    ///
+    /// The magic is what tells those two apart, and it matters: a component
+    /// that faulted before it reached its own report would otherwise publish a
+    /// copy counter of zero — which is the number this whole subsystem
+    /// publishes as a property, arrived at by the component never having run.
+    /// `Report::verdict` refuses a run whose outcome is not
+    /// `routing::stopped::TOLD` for exactly that reason.
+    ///
+    /// # Why three fields are converted rather than cast
+    ///
+    /// This is the frame reading a page a ring-3 component writes, so it is a
+    /// value crossing a trust boundary and R04 applies: the transport is `u64`
+    /// and `driver::Counters` holds `u32`, so a component that put `1 << 32`
+    /// into `SERVED` would have been reported to the boot log as having served
+    /// none, and a truncation that happens to land on a plausible tally is
+    /// worse than one that lands on an implausible one. A value that does not
+    /// fit is a component that scribbled on its own board rather than one with
+    /// a large tally — four billion entries do not fit in this boot's ring —
+    /// so it is answered the way a missing magic is, and the run fails
+    /// `verdict` on the line that says the component did not report.
+    fn of(board: &Window) -> Self {
+        let read = |offset: u32| board.read64(offset).unwrap_or(0);
+        if read(routing::reported::MAGIC) != routing::MAGIC {
+            return Self::NOTHING_AT_ALL;
+        }
+        let (Ok(served), Ok(refused), Ok(escaped)) = (
+            u32::try_from(read(routing::reported::SERVED)),
+            u32::try_from(read(routing::reported::REFUSED)),
+            u32::try_from(read(routing::reported::ESCAPED)),
+        ) else {
+            return Self::NOTHING_AT_ALL;
+        };
+        Self {
+            counters: driver::Counters {
+                served,
+                refused,
+                bytes: read(routing::reported::BYTES),
+                copies: read(routing::reported::COPIES),
+                escaped,
+                provoked: read(routing::reported::PROVOKED),
+            },
+            capacity: read(routing::reported::CAPACITY),
+            drained: read(routing::reported::DRAINED),
+            outcome: read(routing::reported::OUTCOME),
+        }
+    }
+
+    /// What the frame knows about a component that reported nothing it can
+    /// believe. See [`NOTHING`] for why every field of it is zero.
+    const NOTHING_AT_ALL: Self = Self { counters: NOTHING, capacity: 0, drained: 0, outcome: 0 };
+}
+
+/// What a component that never reported has done, as far as the frame knows.
+///
+/// Zero everywhere, and the zero on `provoked` is the one that matters:
+/// `Report::verdict` requires it to move, so a component that never ran fails
+/// on the same line a component whose self-check stopped working would.
+const NOTHING: driver::Counters =
+    driver::Counters { served: 0, refused: 0, bytes: 0, copies: 0, escaped: 0, provoked: 0 };
 
 /// Take a buffer back from the completion that answers it.
 ///
@@ -992,75 +1686,4 @@ fn order_for(bytes: u64) -> Option<Order> {
 const fn pattern(index: usize) -> u8 {
     let byte = (index as u8) ^ 0x5A;
     if byte == POISON { byte ^ 1 } else { byte }
-}
-
-/// One register structure, as a component may touch it.
-fn window_of(structure: &virtio::Structure) -> Result<Window, Trouble> {
-    Window::at(structure.at, structure.len)
-        .map_err(|packed| Trouble::Driver(f_virtio_blk::Trouble::Register(packed)))
-}
-
-/// The four ends of the client's data ring, and the one turn of the crank that
-/// uses all of them.
-///
-/// A struct because the alternative is five arguments repeated at six call
-/// sites, and because the four ends belong together: they are one channel, and
-/// a caller holding three of them is a caller that has forgotten which side it
-/// is on.
-struct Wiring<'a, 'm> {
-    consumer: &'a Consumer<'m>,
-    poster: &'a Poster<'m>,
-    reaper: &'a Collector<'m>,
-}
-
-impl Wiring<'_, '_> {
-    /// Drain what the client submitted, let the driver answer it, post the
-    /// answer, and reap it.
-    ///
-    /// This is the polling loop a scheduled driver runs on its own core, done
-    /// here on its behalf because nothing schedules one — the same substitution
-    /// `component::publish` makes for a component's control ring, and the same
-    /// reason. What it is not is a shortcut past the ring: the entry really is
-    /// written into the shared region by the client's [`Producer`] and really is
-    /// taken out of it by the driver's [`Consumer`], through the `Release`/
-    /// `Acquire` pair the whole design rests on.
-    ///
-    /// `now` is zero, and deliberately. A completion carries a timestamp the
-    /// client reads to know *when*; the boot log is a fixture and prints none of
-    /// them, and a clock read here would be a number that moved between hosts
-    /// for no reason a reader could name.
-    ///
-    /// `beyond` is what the driver adds to the address a registration answered
-    /// before it becomes a descriptor, and it is an argument here rather than a
-    /// mode on the driver so that every call site says which it is. Three of the
-    /// four in `run` are a literal zero.
-    fn turn(
-        &self,
-        driver: &mut Driver,
-        unit: &mut Unit,
-        domain: &mut crate::arch::x86_64::vtd::Domain,
-        frames: &mut FrameAllocator,
-        table: &Table,
-        beyond: u64,
-    ) -> Result<f_abi::Cqe, Trouble> {
-        let entry =
-            self.consumer.pop().map_err(|_| Trouble::Channel(0))?.ok_or(Trouble::Channel(0))?;
-        // The frame stands in for the driver's route to the IOMMU. A scheduled
-        // component asks for a translation over its control ring; there is no
-        // such opcode yet and no way for a component to submit on one, so the
-        // supervisor passes the authority in. The *check* is unchanged either
-        // way: the handle is resolved against the client's table and refused
-        // without `GRANT`.
-        let mut asking = iommu::Grant { unit, domain, frames, table };
-        // Two entry points and not a flag, so the provocation is greppable: the
-        // data path calls `execute`, which passes a literal zero of its own, and
-        // only the `escape` half reaches `provoke_escape`.
-        let answer = if beyond == 0 {
-            driver.execute(&entry, &mut asking, 0)
-        } else {
-            driver.provoke_escape(&entry, &mut asking, 0, beyond)
-        };
-        self.poster.post(answer).map_err(|_| Trouble::Channel(0))?;
-        self.reaper.take().map_err(|_| Trouble::Channel(0))?.ok_or(Trouble::Channel(0))
-    }
 }

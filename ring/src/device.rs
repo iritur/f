@@ -225,6 +225,36 @@ impl Window {
         Ok(unsafe { (self.base.wrapping_add(offset as u64) as *const u32).read_volatile() })
     }
 
+    /// Read eight bytes as two four-byte halves, low first.
+    ///
+    /// The pair of [`Window::write64`], and it arrived late for a reason worth
+    /// leaving here: until a component was scheduled, nothing *read* a
+    /// sixty-four-bit quantity out of a window — a driver in the frame was
+    /// handed its addresses as arguments, and the only wide values in a device
+    /// window are ones a driver writes. A component that the frame can no
+    /// longer pass arguments to has to read them, and the same argument
+    /// [`Window::write64`] makes about halves applies unchanged in this
+    /// direction: the low half first, because that is the order a
+    /// specification that permits two accesses fixes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Window::read32`], for either half.
+    pub fn read64(&self, offset: u32) -> Result<u64, i32> {
+        // Both halves bounded before either is read, so a value whose upper
+        // half falls outside the window is refused rather than half-read —
+        // which would answer a plausible number built from one real word and
+        // one refusal that never happened.
+        bounded(offset, 4, self.len)?;
+        let upper = offset
+            .checked_add(4)
+            .ok_or(error::pack(error::ARGUMENT, error::argument::BAD_ADDRESS))?;
+        bounded(upper, 4, self.len)?;
+        let low = self.read32(offset)?;
+        let high = self.read32(upper)?;
+        Ok((u64::from(high) << 32) | u64::from(low))
+    }
+
     /// Write one byte.
     ///
     /// Takes `&self` rather than `&mut self`, which is the honest signature: a

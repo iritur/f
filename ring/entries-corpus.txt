@@ -1,0 +1,289 @@
+# The entry corpus: inputs a coverage signal kept.
+#
+# Every line below that is not a comment is an argument list for
+# `ring/tests/entries.rs`, and every one of them is a *case* — a named world and
+# an entry — that lit a coverage region **of this test binary** no earlier line
+# in this file lit. `cargo xtask entries --corpus` replays them all and requires
+# each to be clean; `cargo xtask entries --coverage` measures what they cover of
+# the entry-validation path, and that measurement is the number `claims/0009`
+# publishes.
+#
+# *Of this binary*, said in those words because the two are not the same and the
+# difference used to be papered over here. The profile runtime's counter array
+# covers every region in the binary, this harness's own included, so an entry
+# kept for lighting something new may have lit something new **in the harness**.
+# What the entry is worth to the *path* is what `--coverage` measures, one member
+# at a time, and that is the number that gates. Making the signal path-aware —
+# intersecting the counter set with the regions belonging to the thirty-seven
+# members — is the fix that would let this file say the stronger thing; nothing
+# in the tree needs it yet, and RFC 0048 carries it as the open end.
+#
+# There is no format here beyond *a line is an argv*. `sim/corpus.txt` is where
+# that shape comes from and `ring/corpus.txt` is the sibling that already
+# follows it; a third format would be a third parser and a third thing to keep
+# working. The fuzzer's own command-line parser reads an entry, so an entry this
+# binary cannot run is an entry that fails to load.
+#
+# ---- what an entry is worth, and how this file differs from its sibling ----
+#
+# `ring/corpus.txt` is a regression suite: each line found something once, and
+# the comment above it says what, at which commit, under which deliberate
+# defect. This file is a **cover**. A line is here because it lit a region the
+# lines above it did not, and the `adds` figure is how many it was the first to
+# light — regions of this binary, counted by the profile runtime, which is the
+# signal minimisation has and not the one the published number is about.
+#
+# That makes it minimisable in a way a regression suite is not, and
+# `--record` minimises it: candidates are replayed in order into one process
+# with the coverage signal on, behind the seeds and in this file's own order,
+# and a candidate that lights nothing new is dropped. So this file has the
+# property a corpus is supposed to have and usually cannot demonstrate — **no
+# entry in it lights only what an earlier entry already lit**, and the command
+# that says so is the command that wrote it.
+#
+# It is at a fixpoint, which is the checkable form of that sentence: running
+# `cargo xtask entries --record` against this file writes these bytes back. It
+# takes two runs to get there from an arbitrary file, because minimisation reads
+# the file's order and rewriting the file changes it, and a corpus that never
+# settles would be a cover whose membership depended on how many times somebody
+# had run the command.
+#
+# That is a weaker sentence than *no entry is redundant* and it is deliberately
+# weaker. Redundant *for the published number* would mean removing the entry
+# leaves the coverage figure where it was, and by that measure several entries
+# here are redundant: the signal is per binary region and the number is per path
+# member, so an entry can earn its place by the first and not move the second.
+# The measurement is what settles which, one entry at a time, and the header of a
+# corpus is not the place to assert what a measurement has not been run to check.
+#
+# What that costs, said rather than left to be discovered: minimisation is
+# greedy and in order, so a *smaller* cover may exist. And the order is the
+# file's order, so an entry near the top is credited with regions an entry near
+# the bottom would also have lit. Neither affects what the file is used for.
+#
+# One consequence is visible on the face of this file and would otherwise read as
+# a bug, so: an entry below may be the *same case* as a seed above it, written
+# without a field the seed writes explicitly. It survives because the two argvs
+# take different branches through this binary's own argument parser, and the
+# counter array does not know a parser region from a validation one. It is the
+# clearest thing in the tree to point at when arguing for a path-aware signal,
+# and it is left here rather than hand-deleted because this file is generated and
+# an entry somebody edited in is an entry no command stands behind.
+#
+# Not append-only, and that is the one rule it does not share with its sibling.
+# An entry whose regions are all covered by others is dropped on the next
+# `--record`, because a cover that has stopped being minimal is a cover with a
+# line nobody can justify. The exception is the seeds: they are hand-written,
+# they are never dropped, and each says which region it exists for — because the
+# coverage signal is blind to a region LLVM gives an expression rather than a
+# counter, and a cover built by a blind signal has holes a measurement finds.
+# `ENTRIES_SEEDS` in `xtask/src/main.rs` is the list and RFC 0048's `COUNTER_GAP`
+# is the argument.
+#
+# Reproduce one by hand:
+#   cargo test -q --release -p f-ring --test entries -- <the line>
+
+# ----------------------------------------------------------------------
+# seed      a region the coverage signal cannot see, so nothing keeps it
+# reaches   Name::read refuses an id at generation zero, which no table ever issued
+--world live --sqe op=0x0,flags=0x4,set=0x3,index=0x2
+
+# ----------------------------------------------------------------------
+# seed      a region the coverage signal cannot see, so nothing keeps it
+# reaches   Request::read refuses an unregistration naming an id nobody could have issued
+--world live --sqe op=0xff,flags=0x4,set=0x5
+
+# ----------------------------------------------------------------------
+# seed      a region the coverage signal cannot see, so nothing keeps it
+# reaches   write_serial stops on a short write: 200 bytes asked of a 96-byte sink
+--world frame --sqe op=0x1,len=0xc8
+
+# ----------------------------------------------------------------------
+# seed      a region the coverage signal cannot see, so nothing keeps it
+# reaches   write_serial's loop goes round instead: 34 bytes the same sink takes whole
+--world frame --sqe op=0x1,offset=0xa5,len=0x22
+
+# ----------------------------------------------------------------------
+# adds      43 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world revoked --sqe flags=0x4,cap=0x100000,udata=0xe7226dd8a2a8e10c,deadline=0x20,set=0x10000,index=0x7,len=0xc,ext0=0x100000
+
+# ----------------------------------------------------------------------
+# adds      38 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world live --sqe flags=0x4,set=0x3,index=0x2
+
+# ----------------------------------------------------------------------
+# adds      13 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world live --sqe op=0xfe,cap=0x3,udata=0xff78aa0450bce948,len=0xb9,ext0=0x5
+
+# ----------------------------------------------------------------------
+# adds      13 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world spent --sqe op=0x1,udata=0xaa8878626c64868d,deadline=0x200000000000,offset=0x100020,len=0x11c,res=0x8,ext0=0x40000
+
+# ----------------------------------------------------------------------
+# adds      10 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world live --sqe flags=0x84,udata=0xf2f8cf1ff5d7f015,set=0x10000,index=0x3,len=0x12
+
+# ----------------------------------------------------------------------
+# adds      8 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world svm --sqe op=0xfd,udata=0x5e0d3e1bcc55d9a7,set=0x1000078f,len=0x7b8
+
+# ----------------------------------------------------------------------
+# adds      8 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world svm --sqe op=0x1,udata=0xafb1f408db53dbf5,set=0x10000f41,len=0xffffffff
+
+# ----------------------------------------------------------------------
+# adds      7 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world lent --sqe flags=0x4,udata=0x3258fdb09a35ba4d,set=0x10000,index=0x9
+
+# ----------------------------------------------------------------------
+# adds      6 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world full --sqe op=0xfe,cap=0xdeadbeef,udata=0xf9ebe5d05180686,len=0x40,ext0=0x4
+
+# ----------------------------------------------------------------------
+# adds      5 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world frame --sqe op=0xfe,cap=0xdeadbeef,udata=0xf9ebe5d05180286,offset=0x800000000000,len=0x40,ext0=0x4
+
+# ----------------------------------------------------------------------
+# adds      5 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world revoked --sqe op=0xfe,cap=0x3,udata=0xe571c45b0b6faf56,deadline=0x37427,len=0x40,ext0=0x1
+
+# ----------------------------------------------------------------------
+# adds      3 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world live --sqe op=0xff,flags=0x4,udata=0x3dc3d9baacfde203,set=0x10000
+
+# ----------------------------------------------------------------------
+# adds      3 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world lent --sqe op=0xfe,cap=0x3,udata=0xf772b41985524faf,len=0x134,ext0=0x7
+
+# ----------------------------------------------------------------------
+# adds      2 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world live --sqe op=0xfe,cap=0xdeadbeef,udata=0x265908fb40b4c214,len=0x40,ext0=0x4
+
+# ----------------------------------------------------------------------
+# adds      2 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world frame --sqe flags=0x8,udata=0xf97011ffb471b9a2,deadline=0x3987e,offset=0x2,set=0x100006c5,len=0x2ef
+
+# ----------------------------------------------------------------------
+# adds      2 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world revoked --sqe op=0xfe,cap=0x3,udata=0x9f1a39542ee19f9e,len=0x7,ext0=0x100000000
+
+# ----------------------------------------------------------------------
+# adds      2 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world svm --sqe udata=0x8a909a38d5c23d7e,set=0x100002ac,len=0xb9f
+
+# ----------------------------------------------------------------------
+# adds      2 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world svm --sqe flags=0x4,udata=0x5d5e72125553f7b3,set=0x10000,index=0x9,len=0xfe7
+
+# ----------------------------------------------------------------------
+# adds      2 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world revoked --sqe op=0xfe,cap=0x3,udata=0x51ec0c4360cd2a34,deadline=0x604b9,len=0x2a,ext0=0x3
+
+# ----------------------------------------------------------------------
+# adds      2 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world frame --sqe op=0xff,flags=0x4,udata=0x3dc399baacfde203,deadline=0x400000000000,offset=0x4000000,set=0x10000,ext0=0x800000
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world live --sqe flags=0x4,set=0x10009,index=0x1
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world full --sqe op=0x1,flags=0x4,udata=0x5233dbf91007c44f,offset=0x1,set=0x10000,index=0x3,len=0x7fffffff
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world revoked --sqe op=0xfe,flags=0x4,cap=0x3,udata=0x7c88668ff64258c9,len=0x7
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world fresh --sqe flags=0x4,cap=0x3,udata=0x594df90d5d05b986,set=0x10000,index=0x994aa4cf,len=0x9,ext0=0x3
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world frame --sqe op=0x1,udata=0xba8878626c64868d,offset=0x20,len=0x11c,res=0x8
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world fresh --sqe op=0xff,flags=0x4,udata=0xb2548e65b5b92dfc,set=0x10000
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world full --sqe op=0x1,flags=0x4,udata=0x6123eb3611b01449,offset=0x1e6,set=0x10000,index=0x7,len=0x1b
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world frame --sqe op=0xff,flags=0x14,udata=0x6045b5f11ca4f109,set=0x10000,len=0x1000,ext1=0x400000000000000
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world frame --sqe op=0x1,udata=0xa6d473279d232e67,offset=0xc1,len=0x140
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world svm --sqe op=0xfe,cap=0x3,udata=0x7654db73fb4fde9c,len=0x7
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world lent --sqe op=0xfe,cap=0x3,udata=0xbe9ee2b71043590d,ext0=0x3
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world revoked --sqe op=0xfe,cap=0x3,udata=0xbe9ee2b71043590d,ext0=0x80000003
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world frame --sqe op=0x1,udata=0x2704c3ab3ff999c0,offset=0x2,len=0x80000000
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world lent --sqe op=0x2,flags=0xc,udata=0xec341fee16f04b3e,set=0x10000
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world svm --sqe udata=0x8051b49af32e55b1,deadline=0x65c97,res=0x20000,ext1=0x20000000
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world live --sqe op=0xff,cap=0x3,udata=0xf772b41985524faf,len=0x134,ext0=0x7
+
+# ----------------------------------------------------------------------
+# adds      1 region(s) no earlier entry in this file reaches
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+--world frame --sqe flags=0x8,udata=0xf97011ffb471b9a2,deadline=0x3987e,offset=0x2,set=0x101106c5,len=0x2ef,ext0=0x40000,ext1=0x20000

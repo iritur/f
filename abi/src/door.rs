@@ -27,8 +27,36 @@
 //!
 //! RFC 0014 is the argument for the door being this narrow, and RFC 0015 for
 //! the four capability calls being behind it at all. Both name what retires
-//! each call, which is an opcode on a ring at M5. When that happens this module
+//! each call, which is an opcode on a ring. When that happens this module
 //! shrinks to nothing rather than growing.
+//!
+//! # What is now true about that, and what is not
+//!
+//! **The ring exists and carries operations.** RFC 0037 made a channel
+//! adoptable in safe code and RFC 0047 showed a component using one in both
+//! directions on a real device: `user/virtio-blk` submits
+//! `f_abi::control::op::DEVICE_MAP` on its control ring and the frame answers it
+//! from a polling loop. So the sentence that used to defer this — *a component
+//! cannot drive a ring* — is not the reason any more.
+//!
+//! **The four capability opcodes are still names.** `control::op::INSPECT`,
+//! `DERIVE`, `REVOKE` and `MAP` are defined, `op::known` admits them, and
+//! nothing executes them; the two that *are* executed are the two a driver
+//! could not do without. Until something executes them there is nowhere for
+//! [`CAP_INSPECT`] and its three neighbours to go, and moving them would be
+//! moving a call to a refusal.
+//!
+//! **[`ANNOUNCE`] and [`PROGRESS`] are waiting on something else again.**
+//! RFC 0014 retires them when a component is *started with a channel and told
+//! on it*. A component is still started by the frame writing a job into a
+//! per-core slot and jumping to a fixed address, so there is nothing for an
+//! announcement to tell anybody that the frame did not already know, and
+//! `PROGRESS` still asks a question the frame answers out of a per-core tick
+//! count rather than off a ring.
+//!
+//! None of that is a plan. `cargo xtask lint-owed` holds all three as a
+//! declared set and goes red the day one is paid, which is the day this
+//! paragraph is wrong and has to be rewritten rather than quietly left.
 //!
 //! # What a component may assume about registers
 //!

@@ -370,7 +370,24 @@ impl<const SLOTS: usize> Table<SLOTS> {
         // order that depended on anything else — most recently freed, a hash of
         // the capability — would be a place a seeded run stopped reproducing,
         // and RFC 0004 says the only source of that is `f_env::Env`.
+        #[cfg(not(feature = "mutate-reusable-slot"))]
         let free = |slot: &Slot| !slot.live && slot.generation != SetId::RETIRED_GENERATION;
+
+        // `E1-P05`'s defect for the *ledger* oracle: a slot that has run out of
+        // generations is filled again, so the sixty-five thousand five hundred
+        // and thirty-fifth registration of one slot answers to a name an earlier
+        // client may still hold — with no event anywhere. It is the exact
+        // failure RFC 0024 rejected a plain index to avoid, arriving sixty-five
+        // thousand registrations late instead of immediately.
+        //
+        // The defect is **here** and not in `retire`, and finding that out cost
+        // a run: `retire`'s `saturating_add` and a `wrapping_add` in its place
+        // are indistinguishable, because this predicate already refuses a slot
+        // at `RETIRED_GENERATION` and so `retire` is never asked to add to it.
+        // The two guards are defence in depth and exactly one of them is
+        // load-bearing. RFC 0048.
+        #[cfg(feature = "mutate-reusable-slot")]
+        let free = |slot: &Slot| !slot.live;
         let Some(index) = self.slots.iter().position(free) else {
             return Err((quota, SLOTS as u64));
         };
@@ -461,6 +478,16 @@ impl<const SLOTS: usize> Table<SLOTS> {
         let slot = self.slot_of(set)?;
         let slot = &mut self.slots[slot];
 
+        // `E1-P05`'s defect for the *reach* oracle, and it is the sentence below
+        // this block taken literally: *checked above and masked here*. With the
+        // check gone the mask is all that is left, so an index past the end of
+        // the set resolves — to a plausible address inside somebody else's
+        // buffer, with no refusal and no crash. A fuzzer watching for a panic
+        // sees nothing; an oracle that knows where the buffer should have been
+        // sees it at once. It is applied to `Table::release` as well, because
+        // half a lenient index is a service that hands out a buffer it will not
+        // take back, which is a different bug. RFC 0048.
+        #[cfg(not(feature = "mutate-lenient-index"))]
         if index >= slot.buffers {
             return Err((bad, u64::from(index)));
         }
@@ -493,6 +520,8 @@ impl<const SLOTS: usize> Table<SLOTS> {
         let slot = self.slot_of(set)?;
         let slot = &mut self.slots[slot];
 
+        // The other half of `mutate-lenient-index`; `Table::resolve` says why.
+        #[cfg(not(feature = "mutate-lenient-index"))]
         if index >= slot.buffers {
             return Err((bad, u64::from(index)));
         }

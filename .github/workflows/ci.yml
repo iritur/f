@@ -191,7 +191,45 @@ jobs:
       # indistinguishable from a hook with nothing to complain about, so it is
       # checked here rather than noticed later.
       - run: bash .claude/hooks/selftest.sh
+      # E1-P11. Every crate that reaches the machine, compiled for
+      # `aarch64-unknown-none`, with the crate list derived from the workspace
+      # rather than written beside it — and every exclusion printed with the
+      # reason and the reversal it carries. It is here rather than only in
+      # `cargo xtask verify` because `docs/test-taxonomy.md`'s
+      # `aarch64-compile` row claims the `every PR` cadence, and until this
+      # step existed nothing on a pull request ran it: the arm job built four
+      # crates and `f-store` and `f-virtio-blk` were compiled for AArch64 by
+      # nothing at all. A cadence claimed by a row and kept by nobody is worse
+      # than a row that admits it runs on no cadence. RFC 0045.
+      - run: cargo xtask cross
+      # E1-P11's second half, and the one `cross` above cannot answer. That step
+      # says every crate is compiled for AArch64; this says no *test* inside one
+      # of them is compiled on only one architecture. The two are different
+      # questions and the second is the quieter one: a crate on both runners
+      # with a `#[cfg(target_arch)]` test inside it leaves `test-host` green on
+      # both while the arm runner collects fewer tests, and a smaller test count
+      # is not a failure anybody reads. The allow-list is empty today, which is
+      # the finding rather than the default.
+      #
+      # Three gate shapes are refused: an item `cfg`, a block `cfg`, and a
+      # file-scope `#![cfg(target_arch = ...)]`. The third is the one this step
+      # was green over in review, and it is the one that matters most rather
+      # than least — an integration test under `tests/` is named by no `mod`
+      # declaration anywhere, so a file-scope attribute is the only gate it can
+      # carry, and `ring/tests/litmus.rs` is one of those files. RFC 0045.
+      - run: cargo xtask lint-arch-tests
 
+  # The same suite on both architectures, and *the same command* on both, which
+  # is the part that was missing.
+  #
+  # These two jobs named four crates each while `cargo xtask test` ran the whole
+  # workspace. So `f-store`, `f-virtio-blk`, `f-sim`, `f-bench` and `xtask` had
+  # tests that ran on a laptop and on no runner — and two of those crates were
+  # never *compiled* on the arm runner, which is the failure `xtask`'s own
+  # comment already records happening once with `f-bench` and `f-init`. One
+  # command, derived from `Cargo.toml`'s members, is what stops two lists from
+  # drifting: there is one list now, and a crate added to the workspace joins it
+  # or fails the build saying why. RFC 0045.
   test-x86:
     name: tests (x86-64, total store order)
     needs: [environment, manifest]
@@ -199,7 +237,9 @@ jobs:
     container: ${{ needs.environment.outputs.image }}
     steps:
       - uses: actions/checkout@v7
-      - run: cargo test -p f-abi -p f-env -p f-ring -p f-init
+      # The control, and not a redundancy: it is what says a red arm run below
+      # is about the architecture rather than about the test.
+      - run: cargo xtask test-host
 
   test-aarch64:
     name: tests (AArch64, weak memory)
@@ -215,13 +255,28 @@ jobs:
       # This job is not a portability nicety. x86-64 total-store-order hides
       # the entire class of ordering bug the ring is exposed to, so this is the
       # only configuration in which the ring tests mean anything.
-      - run: cargo test -p f-abi -p f-env -p f-ring -p f-init
-      # E0-P09. Seeded fault injection against the two subsystems that have a
-      # host harness — the ring at publish and drain, the channel header at
-      # negotiation. On the arm runner as well as x86-64: the assertions are
-      # about refusals rather than ordering, but the ring under fault is the
-      # last place to assume one architecture speaks for the other.
-      - run: cargo test -p f-ring --test faults
+      #
+      # `ubuntu-24.04-arm` is a native AArch64 runner rather than emulation, and
+      # that distinction is load-bearing rather than pedantic: a store buffer is
+      # what this job exists to observe, and QEMU's TCG serialises rather than
+      # reordering, so an emulated run would be green whatever the ordering
+      # said. E1-P11's title says "under emulation"; the honest answer is that
+      # emulation would be the weaker check and this runner is the stronger one.
+      # The development container could not stand in for it even if TCG did
+      # reorder. It carries `qemu-system-aarch64`, which is the thing a reader
+      # checking this comment will find and wonder about — but a full-system
+      # emulator needs a frame to boot and the frame is x86-64. What would be
+      # needed is a *hosted* AArch64 binary, and there is no `qemu-user` in the
+      # image, nothing registered in `binfmt_misc`, and no
+      # `aarch64-unknown-linux-gnu` in the installed target list to build one
+      # for. So the container compiles for this architecture and cannot run for
+      # it, and this job — not a local command — is what runs. RFC 0045.
+      #
+      # E0-P09's seeded fault injection — `cargo test -p f-ring --test faults`
+      # — used to be a second step here. It is not weakened by being gone: the
+      # workspace run above includes every one of `f-ring`'s test targets, that
+      # one included, on this runner as well as x86-64.
+      - run: cargo xtask test-host
 
   # Both architectures, both non-advisory, and that is the whole of E0-P07.
   #
@@ -635,6 +690,105 @@ jobs:
       # run something to fail at and one without, because the pair is also what
       # shows a snapshot from another build being refused. RFC 0043.
       - run: cargo xtask snapshot
+
+  # E1-P04. Its own job rather than a step in `workload`, because the two halves
+  # of it differ by six orders of magnitude and putting them in one job would
+  # make a forty-five-second Miri run wait behind a forty-five-second fuzzing
+  # run for no reason.
+  #
+  # Three commands, three properties, three counts — and the counts are in
+  # `claims/0008-hostile-peer-operations.toml` rather than here, because a
+  # number in a workflow file is a second copy of a number in a claim and the
+  # two drift. `--exit` is the exit criterion's own billion by name; the local
+  # `verify` runs a hundred million, which is stated there too. RFC 0046.
+  hostile:
+    name: the hostile peer
+    needs: [environment, manifest]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      # First, and the sweep's `harness` job is the precedent: a night where the
+      # fuzzer has broken should report *the fuzzer is broken* rather than
+      # report a clean billion nobody should believe. Two defects, one per
+      # property this half can see, each required to be found by the property it
+      # breaks — and the third required to be invisible here, which is the whole
+      # argument for the Miri step below.
+      - run: cargo xtask hostile --mutate
+      # E1-P04's own number: one billion hostile operations, no panic, no hang.
+      # It is `exit_operations` in the claim, and this run refuses to call itself
+      # the exit if it performed fewer — so the registry carries the number this
+      # step reaches rather than mentioning it.
+      # 44 to 60 s on the four-core development container and of the order of twice that on
+      # a two-core runner, which is why it is a job of its own and not a step in
+      # `verify`.
+      - run: cargo xtask hostile --exit
+      # And the corpus: every run that has ever found something, required to be
+      # clean now. Seconds, because a corpus entry is one episode.
+      - run: cargo xtask hostile --corpus
+
+  # E1-P05, and a job of its own for the reason the one above is: the fuzzing
+  # half is seconds and the coverage half rebuilds three crates with
+  # instrumentation and with link-time optimisation off, which is a second
+  # compile of the whole dependency chain. Putting them together would make a
+  # two-and-a-half-second gate wait behind a forty-second build.
+  #
+  # The counts and the floor are in `claims/0009-entry-validation-coverage.toml`
+  # rather than here, for the reason the hostile job gives: a number in a
+  # workflow file is a second copy of a number in a claim, and the two drift.
+  # RFC 0048.
+  entries:
+    name: the entry fuzzer and its coverage
+    needs: [environment, manifest]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      # First, and the hostile job's reason: a run where the *oracles* have
+      # broken should report that rather than report a clean quarter of a million
+      # cases nobody should believe. Three defects, one per oracle, each required
+      # to be found by the oracle it breaks and by no other.
+      - run: cargo xtask entries --mutate
+      # The gate: 262 144 generated cases, every family drawn, every refusal
+      # earned, and the thirty-seven reach minimums the claim names.
+      - run: cargo xtask entries
+      # The corpus, replayed: every entry required to be clean now.
+      - run: cargo xtask entries --corpus
+      # And the number E1-P05's exit is about, measured from that corpus alone.
+      # It is `path_line_coverage` in the claim and this step refuses a figure
+      # below it, naming the members that fell short.
+      - run: cargo xtask entries --coverage
+      # Kept with the run for the same reason the coverage job keeps its summary:
+      # *the number fell* is a question anyone can answer from two artifacts and
+      # nobody can answer from one.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: entry-corpus
+          path: ring/entries-corpus.txt
+
+  # The third property, and the only one no assertion inside the program can
+  # make. Its own job because Miri costs about six orders of magnitude: four
+  # thousand operations here against a billion above, and reporting both numbers
+  # rather than one is the first thing RFC 0046 decides.
+  #
+  # `MIRI_GAP` is declared there and not here: `f_ring::adopt` carries a channel
+  # base as a `u64` — RFC 0037's design — so Miri's aliasing discipline on that
+  # one path is weakened to permissive provenance while the `Mapping::adopt`
+  # path, which is where the reads a hostile peer aims at actually happen, is
+  # checked in full.
+  miri:
+    name: the ring under Miri
+    needs: [environment, manifest]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      # The harness first, for the job above's reason. It arms the one defect
+      # that is invisible to everything except this tool and requires Miri to
+      # report undefined behaviour by name, then disarms it and requires quiet.
+      - run: cargo xtask hostile --miri --mutate
+      - run: cargo xtask hostile --miri
 
   # The fourth thing the gate was always supposed to run, and the one that was
   # missing: lint, test, run — and claims.

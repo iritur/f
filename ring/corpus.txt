@@ -1,0 +1,115 @@
+# The hostile-peer corpus.
+#
+# Every line below that is not a comment is an argument list for the fuzzer,
+# and every one of them is a run that found something once. `cargo xtask
+# hostile --corpus` replays all of them and requires each to be clean now.
+# `cargo xtask hostile --miri --corpus` replays the same entries under Miri.
+#
+# There is no format here beyond *a line is an argv*, and one rule about the
+# comments: **a blank line ends a block**, so the comments immediately above a
+# line belong to that entry and this header belongs to none. The fuzzer's own
+# command-line parser reads an entry, so an entry this binary cannot run is an
+# entry that fails to load. `sim/corpus.txt` is the file this shape comes from,
+# and following it rather than inventing a second one was the point.
+#
+# Append-only. An entry removed because somebody believed the bug was gone is
+# the entry that would have caught it coming back. `--record` carries every
+# existing block through verbatim; a recorder that read only the argv would
+# delete the provenance of everything an earlier run wrote, and did.
+#
+# ---- what an entry is worth, stated rather than implied ----
+#
+# Each block says what was found, at which commit and under which of the
+# deliberate defects in `ring/Cargo.toml`. The `# also` line says the thing a
+# corpus cannot say by construction: how many of 5 *control* episodes —
+# episodes deliberately not in this file — reproduce the same finding with the
+# same defect armed. Without it there is no way to tell a rare seed from the
+# first one the recorder happened to try.
+#
+# **The two answers differ, and that is the useful part.**
+#
+#   mutate-believed-header
+#     5 of 5. Every episode reaches it, so an entry recorded
+#     under it is *provenance and not rarity*: a seed, a commit and an evidence
+#     line that outlive the run, and nothing an arbitrary episode does not have.
+#
+#   mutate-unbounded-drain
+#     1 of 5. Most episodes do **not** reach it, so an entry
+#     recorded under it carries something an arbitrary episode does not. This is
+#     the half of the file that is a regression suite in the full sense.
+#
+# `HOSTILE_SELECTIVITY` in `xtask/src/main.rs` holds those two numbers and
+# `cargo xtask hostile --mutate` checks each for equality on every run — in both
+# directions, because a defect that became easier to reach and one that became
+# harder are each a fact about the generator.
+#
+# And the file is shown to be able to go red rather than assumed to be: for each
+# defect `--mutate` arms it and requires every entry whose `# under` names it to
+# fail, then disarms and requires every entry to pass. `sweep_mutate`'s [3/5]
+# makes the same argument about `sim/corpus.txt`, and this file shipped once
+# without the step.
+#
+# The third defect, mutate-trusted-slot, has no entry and cannot have one.
+# It is memory unsafety, so the ordinary build dies on a signal with no seed
+# attached and Miri aborts before a reproduction can be printed. What checks it
+# is `cargo xtask hostile --miri --mutate`, and RFC 0046 is why that is a
+# separate command with a separate count.
+#
+# Reproduce one by hand:
+#   cargo test -q --release -p f-ring --test hostile -- <the line>
+
+# ----------------------------------------------------------------------
+# broke     no panic
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+# under     mutate-believed-header
+# evidence  panic — the peer described a layout we compute: -327681
+# also      5 of 5 control episodes reproduce it too, so this entry is provenance and not rarity
+--seed 0xf00dbeefcafe1234 --episode 0
+
+# ----------------------------------------------------------------------
+# broke     no hang
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+# under     mutate-unbounded-drain
+# evidence  stuck — a drain's executed entries did 5 against a bound of 4
+# also      only 1 of 5 control episodes reproduce it, so this entry reaches something an arbitrary episode does not
+--seed 0xf00dbeefcafe1234 --episode 2
+
+# ----------------------------------------------------------------------
+# broke     no panic
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+# under     mutate-believed-header
+# evidence  panic — the peer described a layout we compute: -327681
+# also      5 of 5 control episodes reproduce it too, so this entry is provenance and not rarity
+--seed 0x9e3779b97f4a7c15 --episode 0
+
+# ----------------------------------------------------------------------
+# broke     no hang
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+# under     mutate-unbounded-drain
+# evidence  stuck — a drain's executed entries did 6 against a bound of 4
+# also      only 1 of 5 control episodes reproduce it, so this entry reaches something an arbitrary episode does not
+--seed 0x9e3779b97f4a7c15 --episode 5
+
+# ----------------------------------------------------------------------
+# broke     no panic
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+# under     mutate-believed-header
+# evidence  panic — the peer described a layout we compute: -327681
+# also      5 of 5 control episodes reproduce it too, so this entry is provenance and not rarity
+--seed 0x6a09e667f3bcc909 --episode 0
+
+# ----------------------------------------------------------------------
+# broke     no hang
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+# under     mutate-unbounded-drain
+# evidence  stuck — a drain's executed entries did 7 against a bound of 4
+# also      only 1 of 5 control episodes reproduce it, so this entry reaches something an arbitrary episode does not
+--seed 0x6a09e667f3bcc909 --episode 2
+
+# ----------------------------------------------------------------------
+# broke     no panic
+# commit    aa4dd345053bcd1e3e6c1939d88c37fa73604f4a
+# under     mutate-believed-header
+# evidence  panic — the peer described a layout we compute: -327681
+# also      5 of 5 control episodes reproduce it too, so this entry is provenance and not rarity
+--seed 0xbb67ae8584caa73b --episode 0

@@ -162,7 +162,23 @@ impl Mapping {
         let header = unsafe { base.cast::<ChannelHeader>().read_volatile() };
 
         let agreed = header.negotiate(offers, requires)?;
+
+        #[cfg(not(feature = "mutate-believed-header"))]
         let layout = Layout::adopt(&header, len)?;
+
+        // The deliberate defect for the *panic* half of `E1-P04`, and it is one
+        // character of difference from the line above. This crate's whole
+        // contract is that nothing a peer wrote produces a panic; the fastest
+        // way to break it is to treat a refusal as impossible, which is what a
+        // first implementation writes before it has met a hostile peer.
+        //
+        // `cargo xtask hostile --mutate` arms it and requires the fuzzer to
+        // report a panic finding with a seed. A fuzzer that has only ever
+        // printed *findings none* cannot be told from one that cannot print
+        // anything else — RFC 0017's argument, extended here the way RFC 0040
+        // extended it to the simulator. RFC 0046.
+        #[cfg(feature = "mutate-believed-header")]
+        let layout = Layout::adopt(&header, len).expect("the peer described a layout we compute");
 
         Ok(Self { base, layout, agreed, epoch: header.epoch })
     }

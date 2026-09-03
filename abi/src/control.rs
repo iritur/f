@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! The control channel: the four opcodes a component submits, the seven notices
-//! the frame posts, and the pending state the notices are published *from*.
+//! The control channel: the opcodes a component submits, the seven notices the
+//! frame posts, and the pending state the notices are published *from*.
 //!
 //! # One ring, and the frame at the other end of it
 //!
 //! Every component has exactly one channel to the frame, created with it, with
 //! the component at the producer end. It submits — the capability operations,
-//! spawn, connect, stop, grant — and the frame completes. Every event a
+//! spawn, connect, stop, grant, and the two device translations a driver cannot
+//! perform for itself — and the frame completes. Every event a
 //! component ever receives is a completion entry on that ring carrying
 //! [`crate::cflags::NOTICE`], drained at a polling point. There is no handler,
 //! no interrupted instruction stream and no second path in. RFC 0008, and R05.
@@ -55,8 +56,11 @@ use crate::{Cqe, cflags};
 ///
 /// The four capability operations are first because RFC 0015 named the opcode
 /// that would retire each of them and this is that opcode. The four lifecycle
-/// operations follow. RFC 0028 reserves `0xFE` and `0xFF` at the top of every
-/// service's space for buffer registration, and nothing here approaches them.
+/// operations follow, and then the two a *driver* needs: a scheduled component
+/// that owns a device owns no remapping unit, so the one thing it cannot do for
+/// itself is turn a client's capability into an address its device may use.
+/// RFC 0047. RFC 0028 reserves `0xFE` and `0xFF` at the top of every service's
+/// space for buffer registration, and nothing here approaches them.
 pub mod op {
     /// "What is this handle?" Answers a kind, rights, object and extent.
     /// Retires `door::CAP_INSPECT`.
@@ -97,6 +101,34 @@ pub mod op {
     /// the occupant of an endpoint. The powerbox's one operation.
     pub const GRANT: u8 = 0x17;
 
+    /// "Put `len` bytes of the memory `cap` names into my device's domain, and
+    /// tell me the address the device will use for it."
+    ///
+    /// The route RFC 0044 named and did not build: a **scheduled** driver
+    /// cannot reach a remapping unit — the unit is the frame's, the page tables
+    /// under it are the frame's, and a component that could program one would
+    /// be a component that could point any device at any memory. So it asks,
+    /// on the one ring it has, and the frame answers with the address or with
+    /// the refusal the check produced.
+    ///
+    /// `cap` is a handle in the **client's** table and not in the submitter's,
+    /// which is what makes this different from every other opcode here and is
+    /// the whole of `Domains::map`'s meaning: a registration resolves the
+    /// client's handle, requires `GRANT` on it, and maps it into the driver's
+    /// domain. The driver never holds the client's memory and never could.
+    /// `len` is bytes; the completion's `ext` is the device address, and its
+    /// `result` is zero on success.
+    pub const DEVICE_MAP: u8 = 0x18;
+    /// "Take that translation away again."
+    ///
+    /// `cap` and `len` as [`DEVICE_MAP`], and `offset` carries the device
+    /// address that was answered. It cannot refuse — teardown that can fail is
+    /// teardown a peer can decline, which is
+    /// `f_ring::registry::Domains::unmap`'s own sentence — so the completion
+    /// exists only so that the submitter knows the frame has done it, which is
+    /// what makes a withdrawal ordered against the transfer that follows it.
+    pub const DEVICE_UNMAP: u8 = 0x19;
+
     /// Is this an opcode this build implements?
     ///
     /// R04: an unknown opcode is refused and never ignored, and that check
@@ -104,7 +136,19 @@ pub mod op {
     /// reader.
     #[must_use]
     pub const fn known(opcode: u8) -> bool {
-        matches!(opcode, INSPECT | DERIVE | REVOKE | MAP | SPAWN | CONNECT | STOP | GRANT)
+        matches!(
+            opcode,
+            INSPECT
+                | DERIVE
+                | REVOKE
+                | MAP
+                | SPAWN
+                | CONNECT
+                | STOP
+                | GRANT
+                | DEVICE_MAP
+                | DEVICE_UNMAP
+        )
     }
 
     /// A word for a log.
@@ -119,6 +163,8 @@ pub mod op {
             CONNECT => "connect",
             STOP => "stop",
             GRANT => "grant",
+            DEVICE_MAP => "device map",
+            DEVICE_UNMAP => "device unmap",
             _ => "unknown",
         }
     }
@@ -776,8 +822,13 @@ mod tests {
     /// R04, on the two closed sets this module owns.
     #[test]
     fn an_unknown_opcode_or_kind_is_refused_rather_than_ignored() {
-        for opcode in [0u8, 1, 0x0F, 0x18, 0xFE, 0xFF] {
-            assert!(!op::known(opcode), "{opcode:#04x} is not one of the eight");
+        // `0x1A` and not `0x18`: the two device operations RFC 0047 added sit
+        // above the lifecycle four, so the first unknown opcode moved. The
+        // reserved pair at the top is `0xFE` and `0xFF` — RFC 0028 — and this
+        // list reaching them is what says the space has not silently grown into
+        // them.
+        for opcode in [0u8, 1, 0x0F, 0x1A, 0xFE, 0xFF] {
+            assert!(!op::known(opcode), "{opcode:#04x} is not one this build implements");
             assert_eq!(op::label(opcode), "unknown");
         }
         for opcode in [op::INSPECT, op::DERIVE, op::REVOKE, op::MAP] {
@@ -785,6 +836,10 @@ mod tests {
         }
         for opcode in [op::SPAWN, op::CONNECT, op::STOP, op::GRANT] {
             assert!(op::known(opcode));
+        }
+        for opcode in [op::DEVICE_MAP, op::DEVICE_UNMAP] {
+            assert!(op::known(opcode));
+            assert_ne!(op::label(opcode), "unknown");
         }
         for kind in [0i32, 8, -1, i32::MAX] {
             assert!(!notice::known(kind));

@@ -13,11 +13,23 @@ f-ring.workspace = true
 
 # The block driver, which is a component and not part of the frame — it inherits
 # `unsafe_code = "forbid"` like every other `user/` crate and `cargo xtask
-# lint-unsafe` holds it to that. The frame depends on it because nothing
-# schedules a component yet: `kernel/src/blk.rs` calls the driver where a
-# scheduled component would call it from its own polling loop, which is the
-# same deferral E1-B05 recorded for the restart policy and RFC 0033 records
-# with a date. *Reversal:* E1-B08, at which point this line goes.
+# lint-unsafe` holds it to that.
+#
+# This line used to say the frame linked it because nothing scheduled a
+# component, and that stopped being true at RFC 0047: the driver runs at ring 3
+# on a core of its own and `kernel/src/blk.rs` calls no part of it, which
+# `cargo xtask lint-datapath` now holds rather than leaving to a reader. What
+# the frame links it for is three *shared vocabularies* and no code:
+# `routing`'s offsets, which are the layout of a page the frame writes and the
+# component reads; `driver::Counters`, which is the shape the frame reads that
+# page back into; and `transport::SECTOR_BYTES`. One definition the compiler
+# checks is worth more than two that agree today — the same argument the
+# `f-store` line below makes.
+#
+# *Reversal:* those three moving into `abi/`, which is where a wire layout two
+# crates agree on belongs and where this would have gone had the layout existed
+# before the driver did. Then this line goes, and `lint-unsafe`'s frame list
+# gets one crate shorter to justify.
 f-virtio-blk.workspace = true
 
 # The component a place holds, and — from E1-B08 — the runtime that holds a
