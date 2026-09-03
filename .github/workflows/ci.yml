@@ -427,6 +427,20 @@ jobs:
       # halves, and a cadence claimed by a row and kept by nobody is worse than
       # a row that admits it runs on no cadence at all.
       - run: cargo xtask blk
+      # The scheduler, and the one exit on this list that is an *absence*. Four
+      # boots. A component holds a core, adopts its control ring and its own
+      # work ring in safe code — `f_ring::adopt`, RFC 0037 — and puts sixteen
+      # thousand work items through its own executor; the frame counts every
+      # crossing into itself and requires the hot-path count to be zero. The
+      # second boot makes one crossing on purpose and requires the count to move
+      # by exactly as many, so a build that had stopped counting fails rather
+      # than looks clean. The third posts a reclaim from the timer handler once
+      # a quarter of the load is done and requires the runtime to park within
+      # one quantum with its own queue empty — an interrupt happened and a
+      # preemption did not. The fourth scribbles the control ring's header
+      # before entry and requires the adoption to refuse rather than believe it.
+      # E1-B08, RFC 0038.
+      - run: cargo xtask runtime
       # The other half of E0-P08, and the half that says the suite can fail. A
       # kernel built with one deliberate defect, booted into the forging sweep,
       # required to go red with a panic in the log — and then the same boot
@@ -524,6 +538,15 @@ jobs:
   # builds. It is therefore the one scenario whose hash moves when a manifest or
   # a driver image moves, which is what makes the `commit` half of
   # `(seed, commit)` mechanical rather than a promise.
+  #
+  # **What this job compares is the digest, not the bytes.** Two runners cannot
+  # hand each other an artefact as cheaply as they can hand each other a line,
+  # and `sim/src/trace.rs` is honest that its 64-bit FNV-1a is not a
+  # collision-resistant hash. So the exit criterion's word *byte-identically* is
+  # answered elsewhere and deliberately: `cargo xtask sim`, below, compares the
+  # whole `deployment` artefact between two processes, and `f-sim`'s own tests
+  # compare it in process. Nobody should quote this job as the byte-level
+  # evidence; it is the cross-machine one.
   simulation:
     name: simulated workload (runner ${{ matrix.runner_id }})
     needs: [environment, manifest]
@@ -582,8 +605,11 @@ jobs:
       - run: cargo xtask sim
       # And the seam. The boot spawns components from compiled manifest records
       # and prints each one's content hash; this requires the set the simulator
-      # ran to be that set. Without it `boot-to-workload` is two commands that
-      # share a directory name, and a shared directory name is not evidence.
+      # ran and the set the boot spawned to differ by exactly the gap `xtask`
+      # declares — in both directions, because a one-directional check passes
+      # while the simulator drives components the kernel never instantiated.
+      # Without it `boot-to-workload` is two commands that share a directory
+      # name, and a shared directory name is not evidence. RFC 0035, RFC 0036.
       - run: cargo xtask sim --join
 
   # The fourth thing the gate was always supposed to run, and the one that was

@@ -167,6 +167,34 @@ impl Mapping {
         Ok(Self { base, layout, agreed, epoch: header.epoch })
     }
 
+    /// Rebuild a mapping over bytes [`Self::adopt`] has already believed.
+    ///
+    /// # Why this exists, and why it is not a shortcut
+    ///
+    /// `f_ring::adopt` binds a channel *for one call*: it holds the layout it
+    /// was validated at and rebuilds the mapping on every access, so no
+    /// reference into memory a peer writes outlives the call that made it. That
+    /// is what lets a component adopt a channel in safe code — RFC 0037 — and
+    /// re-running [`Self::adopt`] there would be worse than slow: the header is
+    /// the peer's, so a peer that rewrote it between two calls could move the
+    /// entry array under a component midway through a drain. **Believing
+    /// happens once; binding happens per call.**
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::adopt`], and `layout`, `agreed` and `epoch` must be exactly
+    /// what [`Self::adopt`] answered for these bytes at this `base`. Passing a
+    /// layout computed for anything else is passing bounds that bound nothing,
+    /// which is the failure the whole of this module exists to refuse.
+    pub(crate) const unsafe fn bound(
+        base: *mut u8,
+        layout: Layout,
+        agreed: Negotiated,
+        epoch: u32,
+    ) -> Self {
+        Self { base, layout, agreed, epoch }
+    }
+
     /// Refuse an address the layout arithmetic cannot even be stated against.
     fn addressable(base: *mut u8, len: u32) -> Result<(), i32> {
         let bad = error::pack(error::ARGUMENT, error::argument::BAD_ADDRESS);

@@ -132,6 +132,66 @@ pub mod node {
     /// build in which the function had been deleted or had stopped counting
     /// would publish a zero here and fail the boot.
     pub const BLK_PROVOKED: u32 = 24;
+    /// The runtime a core was allocated to.
+    pub const RUNTIME: u32 = 25;
+    /// Kernel entries a runtime caused on the hot path.
+    ///
+    /// **Required to be zero**, and the whole of E1-B08's exit. It is a
+    /// *counted* zero rather than a structural one, which is the difference
+    /// from [`BLK_COPIES`] beside it and is worth stating: the driver's zero is
+    /// true because no type in that crate can express a copy, and this one is
+    /// true because nothing the runtime executed between the `iretq` that
+    /// entered it and the `EXIT` that left it crossed a privilege boundary. The
+    /// second is a fact about a run and the first is a fact about a source
+    /// tree, and only one of them needs a counter.
+    ///
+    /// The sum of door calls that were not the boundary and exceptions taken at
+    /// ring 3. What it excludes is [`RUNTIME_BOUNDARY`] and [`RUNTIME_TICKS`],
+    /// both published beside it so a reader who disagrees with the line can
+    /// move it. RFC 0038 argues where it is.
+    pub const RUNTIME_HOT: u32 = 26;
+    /// Crossings a runtime made on purpose, on the boot that asks for them.
+    ///
+    /// The same argument [`MEMORY_FORCED`] makes beside [`MEMORY_REMOTE`] and
+    /// [`BLK_PROVOKED`] makes beside [`BLK_COPIES`], a third time: a counter
+    /// nothing in a boot can move is indistinguishable from a counter that does
+    /// not work. `cargo xtask runtime provoke` requires this to be non-zero and
+    /// to equal what the frame counted, so a build that had stopped counting
+    /// publishes zero in both nodes and fails rather than looking clean.
+    pub const RUNTIME_PROVOKED: u32 = 27;
+    /// Crossings at the allocation boundary: the one door call that ends a
+    /// residency.
+    ///
+    /// Excluded from [`RUNTIME_HOT`] and published rather than dropped, because
+    /// an exclusion nobody can see is an exclusion nobody can check. Exactly one
+    /// on a run that ended by `EXIT`.
+    pub const RUNTIME_BOUNDARY: u32 = 28;
+    /// Timer interrupts delivered while a runtime held its core.
+    ///
+    /// The other exclusion, and the more arguable one. It is the frame's own
+    /// clock reaching a core it gave away — nothing the runtime does makes one
+    /// happen or not — and on the reclaim boot it is the mechanism that
+    /// *delivers* the notice. An interrupt happened and a preemption did not,
+    /// which is the distinction the whole allocation model rests on and the
+    /// reason this is a separate node rather than a term in the one above.
+    pub const RUNTIME_TICKS: u32 = 29;
+    /// Work items a runtime's own executor completed.
+    ///
+    /// Published beside [`RUNTIME_HOT`] and never alone, for [`BLK_BYTES`]'s
+    /// reason one subsystem over: *no boundary was crossed* is a claim about a
+    /// workload, and a workload that did nothing is one nobody has tested.
+    pub const RUNTIME_WORK: u32 = 30;
+    /// Interrupts other than the clock delivered while a runtime held its core.
+    ///
+    /// The third exclusion, and it is here because it was missing. A TLB
+    /// shootdown another core asked for, a doorbell, and the spurious vector
+    /// the local APIC withdrew: each of them is a kernel entry, each of them
+    /// used to land in no bucket at all, and [`RUNTIME_TICKS`]'s argument
+    /// covers all three without being weakened — the frame or another core
+    /// reaching a core this one gave away, which nothing the runtime does makes
+    /// happen. What was wrong was not where the line was drawn; it was that
+    /// three vectors were on neither side of it. RFC 0038.
+    pub const RUNTIME_INTERRUPTS: u32 = 31;
     /// A node of a kind this build does not name, published on purpose.
     ///
     /// RFC 0013's one deliberate exception to R04 is that a reader skips and
@@ -143,7 +203,7 @@ pub mod node {
 }
 
 /// How many nodes this build publishes.
-pub const NODES: usize = 25;
+pub const NODES: usize = 32;
 
 /// The schema, written once and never again for a generation.
 ///
@@ -266,8 +326,57 @@ const SCHEMA: [SchemaEntry; NODES] = [
         unit::BYTES,
         b"provoked",
     ),
+    SchemaEntry::new(node::RUNTIME, node::ROOT, 24 * WORD, kind::SUBTREE, unit::NONE, b"runtime"),
+    SchemaEntry::new(
+        node::RUNTIME_HOT,
+        node::RUNTIME,
+        25 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"hot",
+    ),
+    SchemaEntry::new(
+        node::RUNTIME_PROVOKED,
+        node::RUNTIME,
+        26 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"provoked",
+    ),
+    SchemaEntry::new(
+        node::RUNTIME_BOUNDARY,
+        node::RUNTIME,
+        27 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"boundary",
+    ),
+    SchemaEntry::new(
+        node::RUNTIME_TICKS,
+        node::RUNTIME,
+        28 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"ticks",
+    ),
+    SchemaEntry::new(
+        node::RUNTIME_WORK,
+        node::RUNTIME,
+        29 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"work",
+    ),
+    SchemaEntry::new(
+        node::RUNTIME_INTERRUPTS,
+        node::RUNTIME,
+        30 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"interrupts",
+    ),
     // Deliberately a kind nothing names. See `node::RESERVED_KIND`.
-    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 24 * WORD, 0xEE, unit::NONE, b"reserved"),
+    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 31 * WORD, 0xEE, unit::NONE, b"reserved"),
 ];
 
 /// Where the schema block starts: immediately after the header, on the

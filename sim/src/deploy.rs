@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! The seam: the component set the boot spawns, read here as the frame reads
-//! it.
+//! The seam: the component set the loader is handed, read here as the frame
+//! reads it.
+//!
+//! *The loader is handed*, and not *the boot spawns*, because the two are not
+//! the same set today and this module can only see the first. Which modules a
+//! boot instantiates is the boot's own answer — one, at present — and
+//! `cargo xtask sim --join` is what compares the two and declares the
+//! difference. RFC 0036.
 //!
 //! # What this module is for
 //!
@@ -217,8 +223,8 @@ impl Refusal {
         match self {
             Self::NoDirectory { at } => format!(
                 "no component files at {at}\n\n\
-                 The deployment scenario runs the component set the boot spawns, read from the \
-                 same compiled manifest records the loader hands the machine (RFC 0030). Build \
+                 The deployment scenario runs the component set the loader is handed, read from \
+                 the same compiled manifest records (RFC 0030). Build \
                  them with `cargo xtask component`, or run `cargo xtask sim`, which builds them \
                  first."
             ),

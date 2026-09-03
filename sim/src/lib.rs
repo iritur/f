@@ -73,6 +73,19 @@
 //! of orderings the system permits rather than the set its runtime happened to
 //! produce.
 //!
+//! # A fault class states its response before it is injected
+//!
+//! [`fault`] is `E1-P02`: seven classes, each a site a model consults, a
+//! scenario that arms it, and an assertion that says in advance what the system
+//! must do. A scenario that injected a fault and printed what happened would be
+//! an observation, and an observation needs a reader; the assertion is what
+//! makes it a check. The plan is a field of the scenario rather than a flag, so
+//! a reproduction command is still a name and a seed.
+//!
+//! Fault draws are keyed at [`decide::domain::FAULTS`], which `E1-P01` reserved
+//! for exactly this and which is why arming a class cannot move an interleaving
+//! a recorded seed had already selected.
+//!
 //! # The substitution seam, and where it is visible
 //!
 //! [`Actor`] is the seam. A device model and a component with no device behind
@@ -111,6 +124,7 @@ pub mod client;
 pub mod decide;
 pub mod deploy;
 pub mod dev;
+pub mod fault;
 pub mod gpu;
 pub mod native;
 pub mod net;
@@ -125,6 +139,7 @@ pub mod wire;
 use f_env::{Env, Instant, Scheduler, WallSource, WallTime, split};
 
 use decide::Decisions;
+use fault::{Class, Fault, Injection, Injector};
 use time::Timeline;
 use trace::{Record, Trace};
 use wire::Wire;
@@ -221,6 +236,14 @@ pub struct World {
     /// not: it is not `f_ring::Producer` over a real mapping, and `E1-P04` is
     /// the task that would make it one.
     wire: Wire,
+    /// What this run breaks, and how often.
+    ///
+    /// Beside the decisions rather than inside them, because the two answer
+    /// different questions from different domains: `decide` chooses between
+    /// things that could both happen, and this decides whether one of them
+    /// happens at all. [`fault`] argues the separation and `decide::domain` is
+    /// where the two streams are kept apart.
+    faults: Injector,
 }
 
 impl World {
@@ -234,7 +257,19 @@ impl World {
             random: split::Stream::from_seed(split::derive(seed, split::label(RANDOM))),
             seed,
             wire: Wire::new(),
+            faults: Injector::new(seed),
         }
+    }
+
+    /// Arm the fault classes this run injects.
+    ///
+    /// Called by the scenario before a single actor is installed, so that a
+    /// class is armed for the whole run or for none of it. There is deliberately
+    /// no way to arm one part-way through: a plan that changed under a run would
+    /// make the run a function of something other than `(seed, commit)`, which
+    /// is the one property everything above this rests on.
+    pub fn arm(&mut self, plan: &'static [Injection]) {
+        self.faults.arm(plan);
     }
 
     /// The virtual clock. Unit: nanoseconds since the start of the run.
@@ -286,6 +321,36 @@ impl World {
     /// move the other.
     pub fn draw(&mut self) -> u64 {
         self.random.next_u64()
+    }
+
+    /// Consult one fault class, and write down what it answered.
+    ///
+    /// The third thing a world hands out, and the third stream: a class draws at
+    /// [`decide::domain::FAULTS`], so consulting one cannot move an interleaving
+    /// decision or a service time, and adding a class cannot move another
+    /// class's answers. [`fault`] is where that is argued and tested.
+    ///
+    /// A strike is **recorded**, hashed with the rest of the artefact. A
+    /// simulator that broke something quietly would produce a trace that
+    /// reproduces perfectly and describes a run nobody can reason about — the
+    /// same argument `dev.rs` makes for writing a dropped completion down. It is
+    /// also what `E1-P03` reads to say what a failing seed injected: the class,
+    /// the operation it struck, and which consultation of that class it was.
+    ///
+    /// `who` and `actor` are the model that consulted, not the injector, because
+    /// a fault happens somewhere and a record that did not say where would send
+    /// a reader looking through the whole trace for it.
+    pub fn strike(&mut self, who: ActorId, class: Class, token: u64) -> Option<Fault> {
+        let occurrence = self.faults.consulted(class);
+        let fault = self.faults.strike(class)?;
+        self.record(who, fault::ACTOR, class.label(), token, occurrence);
+        Some(fault)
+    }
+
+    /// How many faults this run injected. Unit: faults.
+    #[must_use]
+    pub const fn injected(&self) -> u32 {
+        self.faults.struck()
     }
 
     /// State something this run covers, in the artefact itself.
@@ -435,6 +500,13 @@ pub struct Outcome {
     /// Every decision, in order, so `E1-P03` can shrink and `E1-P08` can
     /// re-enter.
     pub log: Vec<decide::Decision>,
+    /// Faults injected. Unit: faults.
+    ///
+    /// Reported beside a failure so a seed's severity is visible without reading
+    /// the artefact — the same number `f_env::sim::SimEnv::injected` answers on
+    /// the other side of the tree. Zero for every scenario that arms nothing,
+    /// which is most of them.
+    pub injected: u32,
 }
 
 impl Outcome {
@@ -512,6 +584,7 @@ impl Simulation {
             finished_ns: self.world.line.clock(),
             trace: self.world.trace,
             log: self.world.decisions.log().to_vec(),
+            injected: self.world.faults.struck(),
         })
     }
 }

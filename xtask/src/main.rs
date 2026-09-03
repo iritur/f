@@ -178,6 +178,7 @@ fn main() -> ExitCode {
         "cap" => cap(args.get(1).map(String::as_str)),
         "iommu" => iommu(args.get(1).map(String::as_str)),
         "blk" => blk(args.get(1).map(String::as_str)),
+        "runtime" => runtime(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
         "component" => components().map(|_| ()),
         "mutate" => mutate(),
@@ -293,6 +294,13 @@ cargo xtask <command>
                      the driver pointing the device past what it was answered
                      must be faulted at the address it invented — escape. All
                      three with no argument
+  runtime [half]     Boot a component that holds a core and schedules its own
+                     work inside it: load, which must cross the boundary only on
+                     its way out; provoke, which crosses once on purpose so the
+                     counter is shown to move; reclaim, where the timer posts a
+                     notice under load and the runtime must park cleanly; and
+                     hostile, where its control ring header is scribbled and
+                     adoption must refuse. All four with no argument
   init               Build user/init into the flat image the loader hands over,
                      and check it is one
   component          Build every component file: a manifest compiled to its
@@ -698,6 +706,36 @@ fn init_image() -> Result<PathBuf, String> {
 /// whose entry has that path is placed the same way and checked the same way.
 /// A component with a differently named entry would need its own script and
 /// would be a second answer to a question this tree has one answer to.
+/// Every archive cargo says it built, except the component's own.
+///
+/// Read out of `--message-format=json` rather than found by walking a
+/// directory, because cargo's layout for intermediate artefacts is not
+/// something this file is entitled to know: it has already moved once, and a
+/// glob that stopped matching would produce an image with a member missing
+/// rather than an error. The `filenames` field is cargo's stated interface for
+/// exactly this question.
+///
+/// The scan is textual and does not parse JSON, which is a real limitation and
+/// a deliberate one: `xtask` has no serialisation dependency, and the thing
+/// being looked for is a quoted absolute path ending in `.rlib`. A path
+/// containing a quote or a backslash escape would be missed, and the linker
+/// would then fail with an undefined symbol — loudly, naming the symbol, which
+/// is the failure mode this whole step already relies on.
+fn artefacts(emitted: &str, own: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    for piece in emitted.split('"') {
+        if !piece.ends_with(".rlib") {
+            continue;
+        }
+        let path = PathBuf::from(piece);
+        if !path.is_absolute() || !path.exists() || path == own || found.contains(&path) {
+            continue;
+        }
+        found.push(path);
+    }
+    found
+}
+
 fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
     let lld = llvm_tool("rust-lld")?;
     let objcopy = llvm_tool("llvm-objcopy")?;
@@ -717,7 +755,14 @@ fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
     // `relocation-model=static` for the same reason the kernel uses it: this is
     // a fixed-address image, and without it the crate compiles as position
     // independent and wants a relocation table nothing will process.
-    let status = Command::new("cargo")
+    //
+    // `--message-format=json` on stdout, with stderr left where it was, because
+    // the linker below needs to be told which archives cargo produced. Cargo's
+    // own layout for intermediate artefacts is not a path this file gets to
+    // know — it has already moved once — and asking cargo is the difference
+    // between a build step and a build step plus a guess. Progress lines are on
+    // stderr, so a caller still sees the same output it saw before.
+    let mut child = Command::new("cargo")
         .args([
             "build",
             "-p",
@@ -734,11 +779,38 @@ fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
             "-Zbuild-std=core,compiler_builtins",
             "--target-dir",
             &target,
+            "--message-format=json",
         ])
-        .env("RUSTFLAGS", "-C relocation-model=static")
+        // `relocation-model=static` for the reason above.
+        //
+        // `panic=immediate-abort` because a component has no way to report a
+        // panic and never will have one at this size: no serial port, no
+        // unwinder, and a `#[panic_handler]` whose whole body is a halt. The
+        // several kilobytes of formatting machinery a panic *message* needs are
+        // therefore bought for a string nobody can read, in an image the frame
+        // maps one page for — which is a real bound and not a preference, and
+        // which `f_ring::adopt` arriving in a component pushed past.
+        //
+        // What it buys is also the more honest failure: a panic becomes `ud2`,
+        // an invalid-opcode fault at ring 3 that the frame reports with a
+        // vector, an address and an instruction pointer, and which RFC 0008
+        // already names as one of the three ways a component ends. A component
+        // parking silently tells nobody anything.
+        //
+        // Here rather than in `[profile.init]`, which is where it belongs,
+        // because the profile key needs `cargo-features` at the top of the
+        // workspace manifest — an opt-in that would apply to every build in the
+        // tree to change one step. *Reversal:* the key stabilising.
+        .env("RUSTFLAGS", "-C relocation-model=static -Zunstable-options -Cpanic=immediate-abort")
         .current_dir(root())
-        .status()
+        .stdout(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("could not run cargo: {e}"))?;
+    let mut emitted = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        out.read_to_string(&mut emitted).map_err(|e| format!("reading cargo's output: {e}"))?;
+    }
+    let status = child.wait().map_err(|e| format!("waiting for cargo: {e}"))?;
     if !status.success() {
         return Err(format!("building {package} failed"));
     }
@@ -755,26 +827,38 @@ fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
     }
 
     let elf = dir.join(format!("{name}.elf"));
-    // One library and nothing else on the command line, which is a claim about
-    // the component rather than a shortcut: everything it calls across a crate
-    // boundary is `#[inline]` in `f_abi::door`, so a copy is compiled into this
-    // crate and there is nothing left to resolve. If that stopped being true the
-    // linker would say so — an undefined symbol is an error here, not a warning
-    // — which is why this is safe to state rather than to check.
+
+    // The component's own archive whole, and everything cargo built for it
+    // beside — as archives, so the linker takes only what is reached.
     //
-    // `--whole-archive` because nothing refers to anything: the entry is called
-    // by the kernel, so without it the linker would pull in no members at all
-    // and produce an empty image. `--gc-sections` then takes back everything the
+    // This used to be one library and nothing else, on the grounds that
+    // everything a component called across a crate boundary was `#[inline]` in
+    // `f_abi::door` and therefore already compiled in. That stopped being true
+    // at E1-B08: a component that drives a ring calls `f_ring::adopt`, whose
+    // bodies are in `f_ring`, and the linker said so — an undefined symbol is
+    // an error here rather than a warning, which is what made the old comment
+    // safe to state and what made this change a build failure rather than a
+    // silently smaller image.
+    //
+    // `--whole-archive` on the component's own rlib because nothing refers to
+    // anything: the entry is called by the kernel, so without it the linker
+    // would pull in no members at all and produce an empty image.
+    // `--no-whole-archive` before the rest, so a dependency contributes only
+    // what the component actually reaches — the difference between linking a
+    // ring and linking every ring. `--gc-sections` then takes back what the
     // entry does not reach, and the `KEEP()` in the script is what stops it
     // taking the entry too.
-    let status = Command::new(&lld)
-        .args(["-flavor", "gnu", "-T", "user/init/link.ld", "--gc-sections", "--whole-archive"])
+    let mut link = Command::new(&lld);
+    link.args(["-flavor", "gnu", "-T", "user/init/link.ld", "--gc-sections", "--whole-archive"])
         .arg("-o")
         .arg(&elf)
         .arg(&archive)
-        .current_dir(root())
-        .status()
-        .map_err(|e| format!("could not run rust-lld: {e}"))?;
+        .arg("--no-whole-archive");
+    for path in artefacts(&emitted, &archive) {
+        link.arg(path);
+    }
+    let status =
+        link.current_dir(root()).status().map_err(|e| format!("could not run rust-lld: {e}"))?;
     if !status.success() {
         return Err(format!("linking {package} against user/init/link.ld failed"));
     }
@@ -812,12 +896,29 @@ fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
     // mutable global is a fault on the first write to it — with no message, in a
     // component that has no way to print one. `llvm-nm` names the section class
     // of every symbol in one letter, and four of those letters are writable.
+    //
+    // The two exceptions are the linker's own boundary markers, and excluding
+    // them is a statement rather than a concession: `__image_start` and
+    // `__image_end` are *addresses*, not objects, and `llvm-nm` classifies an
+    // address by whichever output section it happens to land in. From E1-B08 a
+    // component links `f_ring`, which brings an eight-byte global offset table
+    // — addresses the linker resolved, written by nothing at run time — and
+    // `lld` gives its output section the writable flag whatever
+    // `user/init/link.ld` says. The end marker then lands in it and the check
+    // reported the image's own extent as writable data.
+    //
+    // Nothing about the property is weakened: a real mutable global still has a
+    // name of its own and is still caught, and `.data` and `.bss` being empty is
+    // still what makes this image safe to map read-only.
     let writable: Vec<&str> = symbols
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
             let class = fields.nth(1)?;
             let name = fields.next()?;
+            if name == "__image_start" || name == "__image_end" {
+                return None;
+            }
             matches!(class, "d" | "D" | "b" | "B" | "g" | "G" | "s" | "S").then_some(name)
         })
         .collect();
@@ -1624,6 +1725,35 @@ fn sim(scenario: &str, seed: &str) -> Result<u64, String> {
     u64::from_str_radix(digits, 16).map_err(|_| unhash())
 }
 
+/// One simulated run, as a subprocess, answering its whole artefact.
+///
+/// The same run [`sim`] takes a digest of, printed rather than hashed. It exists
+/// because the exit criterion's word is *byte-identically* and a digest is not
+/// bytes: `trace::digest` says of itself that it "does not have to be
+/// collision-resistant, because nothing adversarial produces these traces",
+/// which is the right argument for the boot's log hash and does not make a
+/// 64-bit digest into a byte comparison. The boot has no alternative; the
+/// simulator does, and this is it.
+fn sim_trace(scenario: &str, seed: &str) -> Result<String, String> {
+    let dir = component_dir()?;
+    capture(
+        "cargo",
+        &[
+            "run",
+            "-q",
+            "-p",
+            "f-sim",
+            "--",
+            "--trace",
+            "--seed",
+            seed,
+            "--components",
+            &dir,
+            scenario,
+        ],
+    )
+}
+
 /// Where `cargo xtask component` leaves the component files.
 ///
 /// One directory, named here rather than in the simulator, because this file is
@@ -1704,6 +1834,18 @@ fn sim_hash_only(scenario: Option<&str>, seed: Option<&str>) -> Result<(), Strin
 /// thousands of seeds would report having explored a space it never entered.
 /// That is the one failure a test apparatus must not have, so the command
 /// requires a different seed to give a different answer before it reports green.
+///
+/// # Digests, and the one comparison that is over bytes
+///
+/// Every scenario above is compared by its digest, which is what a CI job over
+/// two runners can carry in a file. The exit criterion says *byte-identically*,
+/// though, and a 64-bit FNV-1a digest is not a byte comparison — `sim/src/trace.rs`
+/// says as much about itself. So one scenario is additionally compared **as
+/// bytes**, in two processes, and it is [`SIM_DEPLOYMENT`] because that is the
+/// scenario the exit criterion is about. What remains digest-identity and not
+/// byte-identity is the *cross-runner* claim in `.github/workflows/ci.yml`, and
+/// it is written down there so nobody quotes that job as the byte-level
+/// evidence.
 fn sim_check() -> Result<(), String> {
     components_quietly()?;
     println!(
@@ -1741,12 +1883,43 @@ fn sim_check() -> Result<(), String> {
         }
     }
 
+    // And one of them compared as bytes rather than as a digest, because that is
+    // the word the exit criterion uses. Two processes, so the comparison is
+    // between two artefacts that share nothing but the commit — the in-process
+    // pair `sim/src/scenario.rs` asserts shares an address space and an
+    // allocator with itself, which is the weaker shape by this file's own
+    // argument for running the simulator as a subprocess at all.
+    let first = sim_trace(SIM_DEPLOYMENT, TRACE_SEED)?;
+    let second = sim_trace(SIM_DEPLOYMENT, TRACE_SEED)?;
+    if first != second {
+        let differs = first
+            .lines()
+            .zip(second.lines())
+            .position(|(a, b)| a != b)
+            .map_or_else(|| "in its length".to_string(), |line| format!("at line {}", line + 1));
+        return Err(format!(
+            "two runs of `{SIM_DEPLOYMENT}` at one seed produced artefacts differing {differs}.
+
+             The digests above agreed, so this is either a difference too small for a
+             64-bit hash to have caught or a digest taken over less than the artefact.
+             Either way the word in the exit criterion is *byte-identically*, and this is
+             the check that means it."
+        ));
+    }
+    println!(
+        "\n  {:<12} {} bytes of `{SIM_DEPLOYMENT}`, identical across two processes",
+        "byte-for-byte",
+        first.len()
+    );
+
     println!(
         "
-sim: ok — every scenario reproduced from its seed and moved when the seed did.
+sim: ok — every scenario reproduced from its seed and moved when the seed did, and one
+         of them was compared as bytes rather than as a digest.
          Two processes on one machine. The pair that matters is two runners, and that
          is the CI job: same commit, same seed, hashes compared — exactly as `trace` does
-         for the boot. RFC 0032 says where the seam between the two lies."
+         for the boot, and digest-identity rather than byte-identity for the same reason.
+         RFC 0032 says where the seam between the two lies."
     );
     Ok(())
 }
@@ -1757,6 +1930,34 @@ sim: ok — every scenario reproduced from its seed and moved when the seed did.
 /// and a message that said *some scenario* would be a message nobody could act
 /// on. `f-sim --list` is still the one source of the scenario *set*.
 const SIM_DEPLOYMENT: &str = "deployment";
+
+/// The components the simulator runs that this boot does not spawn, by the name
+/// their record declares.
+///
+/// # Why a list and not a tolerance
+///
+/// Because the two halves of `boot-to-workload` are supposed to be about one
+/// component set, and where they are not, the difference has to be a quantity
+/// somebody wrote down. A check that merely allowed the simulator to run *more*
+/// components than the boot would go on passing while the workload half drifted
+/// away from the boot half one component at a time — the failure RFC 0035 built
+/// this command to catch, arriving through the door the first version of it left
+/// open.
+///
+/// So [`sim_join`] requires the difference to equal this list exactly. Adding a
+/// component the boot does not spawn is red until somebody says so here;
+/// spawning one that is in the list is red until the entry goes.
+///
+/// # What is in it, and who removes it
+///
+/// `virtio-blk`. The frame instantiates one place from the first module it is
+/// handed (`kernel/src/component.rs`, `*modules.first()`), and RFC 0008 puts
+/// spawning in a supervisor rather than in the frame. **E1-B08** lands the
+/// runtime that supervisor needs — safe channel adoption and a scheduler — and
+/// E1-B05's own note records that the wall is the same one. When a boot spawns
+/// the whole module set, this list is empty and the entry's removal is the
+/// evidence. RFC 0036.
+const JOIN_GAP: &[&str] = &["virtio-blk"];
 
 /// The two halves of `boot-to-workload`, over one component set.
 ///
@@ -1777,9 +1978,17 @@ const SIM_DEPLOYMENT: &str = "deployment";
 ///
 /// This command is what makes those two the same component set rather than two
 /// commands in one paragraph: it boots, reads the hashes out of the log, asks
-/// the simulator which components it would run, and requires the first to be
-/// among the second. Without it the seam is a shared filename, and a shared
+/// the simulator which components it would run, and compares the two sets **in
+/// both directions**. Without it the seam is a shared filename, and a shared
 /// filename is not evidence.
+///
+/// Both directions, because one of them was the hole. `spawned ⊆ modelled` is
+/// satisfied while the simulator drives components the kernel never
+/// instantiated — which is the tree as it stands, where the frame builds one
+/// place from the first module. The set the simulator runs and the boot does
+/// not is therefore computed and required to equal [`JOIN_GAP`], so that the
+/// gap is a declared quantity somebody has to change rather than a silence.
+/// RFC 0036.
 ///
 /// What it does not claim: that the frame's instructions ran under the
 /// simulator. They did not, they never do, and every artefact this simulator
@@ -1823,14 +2032,23 @@ fn sim_join() -> Result<(), String> {
     if modelled.is_empty() {
         return Err("the simulator read no component files, so there is nothing to join".into());
     }
+    // Demoted, and the demotion is the finding. Both numbers are counts of
+    // `target/component/`: the loader is handed what `cargo xtask component`
+    // built, and the simulator reads the same directory. A disagreement says
+    // one of the two saw a stale or partial build; it says *nothing* about
+    // which modules the kernel instantiated. RFC 0035 rejected exactly this
+    // shape as evidence about the boot — "a check that read the component
+    // directory twice would agree with itself whatever the kernel had done" —
+    // and this file shipped it anyway as half the join. It is kept for the one
+    // failure it can see, and the two set checks below are what read the boot.
     if modelled.len() != files {
         return Err(format!(
-            "the boot spawned from {files} component file(s) and the simulator read \
+            "the loader was handed {files} component file(s) and the simulator read \
              {}.\n\n\
-             The two halves of `boot-to-workload` are supposed to be one component set. \
-             They are built by one command — `cargo xtask component` — so a difference \
-             here means one of the two is reading somewhere else, or the loader is being \
-             handed a set this file no longer builds.",
+             Both counts are of `target/component/`, so this is a stale or partial build \
+             rather than a disagreement about the deployment — one of the two ran before \
+             `cargo xtask component` finished. It says nothing about which components the \
+             boot instantiated; the checks that read that are below.",
             modelled.len()
         ));
     }
@@ -1846,15 +2064,82 @@ fn sim_join() -> Result<(), String> {
         }
     }
 
+    // The other direction, which the first review of this command found
+    // missing — and it is the direction that was live in the tree rather than
+    // hypothetical. `spawned ⊆ modelled` above is satisfied by a boot that
+    // instantiates one module while the simulator drives four, which is what
+    // this tree does today: `kernel/src/component.rs` builds one place from
+    // `*modules.first()`. So the difference is computed, printed, and required
+    // to be *exactly* the gap RFC 0036 declares — a set and not a bound, so
+    // that a new component widening it goes red, and so does a supervisor that
+    // closes it and leaves the entry behind. R04.
+    let unspawned = unspawned(&modelled, &spawned);
+    for name in &unspawned {
+        println!("  not spawned        {name}");
+    }
+    hold_the_gap(&unspawned, JOIN_GAP)?;
+
     println!(
-        "\njoin: ok — the component(s) the boot spawned are among the {} the simulator ran.\n\
+        "\njoin: ok — {} of the {} component(s) the simulator ran were spawned by this boot, and\n\
+         \x20     the {} that were not are the gap this tree declares: {}. RFC 0036 says what\n\
+         \x20     closes it, and until it is closed no artefact here claims the boot ran them.\n\
          \x20     `cargo xtask trace --hash` hashes the boot and `cargo xtask sim --hash \
          {SIM_DEPLOYMENT}`\n\
          \x20     hashes the workload. RFC 0035 states what the pair claims — and what it does\n\
          \x20     not: the frame's instructions run in QEMU and nowhere else.",
-        modelled.len()
+        spawned.len(),
+        modelled.len(),
+        unspawned.len(),
+        if unspawned.is_empty() { "none".to_string() } else { unspawned.join(", ") }
     );
     Ok(())
+}
+
+/// The components the simulator ran and the boot did not, by name, in order.
+///
+/// A function rather than four lines inside [`sim_join`] because the check it
+/// feeds is the one this command exists for, and a check that can only be
+/// exercised by booting QEMU is a check nothing tests. Its tests are at the foot
+/// of this file, and one of them is the input the review named: a third
+/// component file that nothing spawns.
+fn unspawned<'a>(modelled: &'a [(String, u64)], spawned: &[u64]) -> Vec<&'a str> {
+    let mut names: Vec<&str> = modelled
+        .iter()
+        .filter(|(_, id)| !spawned.contains(id))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// Refuse unless the two halves differ by exactly the gap this tree declares.
+///
+/// Equality and not containment, in both directions, which is the whole of
+/// RFC 0036: a component the workload half covers that nobody declared is a
+/// silent widening, and a declared component the boot has started spawning is a
+/// stale exception — a hole a later check steps over. Neither is a state this
+/// command may report as green.
+///
+/// # Errors
+///
+/// A sentence naming both sets and what to do about the difference.
+fn hold_the_gap(unspawned: &[&str], gap: &[&str]) -> Result<(), String> {
+    let mut declared: Vec<&str> = gap.to_vec();
+    declared.sort_unstable();
+    if unspawned == declared {
+        return Ok(());
+    }
+    Err(format!(
+        "the simulator ran {unspawned:?} that the boot did not spawn, against a declared \
+         gap of {declared:?}.\n\n\
+         The two halves of `boot-to-workload` are about one component set, and where they \
+         are not, the difference is written down rather than discovered. A component here \
+         that is not in `JOIN_GAP` is one the workload half covers and the boot half does \
+         not, with nobody having said so — either the boot spawns it, or it goes in the \
+         list with its reason and the task that removes it. A component in `JOIN_GAP` that \
+         is no longer here is a boot that has started spawning it, and a stale entry is a \
+         hole this check would step over. RFC 0035, RFC 0036."
+    ))
 }
 
 /// What a boot log says it spawned: how many component files, and which
@@ -2479,6 +2764,128 @@ fn blk(kind: Option<&str>) -> Result<(), String> {
              nothing copied; the same path with the client's grant withdrawn was a fault \
              rather than a corruption; and the driver reaching past what its client's \
              registration answered was faulted at the address it invented"
+        );
+    }
+    Ok(())
+}
+
+/// The four halves of E1-B08's exit, as boots.
+///
+/// A component holds a core and schedules its own work inside it. `load` is the
+/// exit criterion — *async work under load produces zero kernel entries on the
+/// hot path, counted* — and the other three are what stop that zero from being
+/// worthless.
+///
+/// `provoke` is the same run with one door call in the middle of the work loop
+/// on purpose. It requires the hot-path count to be non-zero **and** to equal
+/// what the component says it made: the two numbers are taken on opposite sides
+/// of the boundary, so a build in which the counting had stopped publishes zero
+/// on both halves and fails rather than looking clean. That is the shape
+/// `blk copies` and `blk provoked` already have, and `state::node::MEMORY_FORCED`
+/// before them. It is required to be *the same run* and not merely a run — the
+/// same load, finished, ending the same way — because the provocation fires
+/// after the first quantum and a run that stopped there would otherwise pass.
+///
+/// `reclaim` posts the notice from inside the timer handler after the runtime
+/// has been working for a tick, so it arrives *under load* rather than at a
+/// first polling point with nothing behind it. It requires the runtime to park
+/// at its next allocation boundary with its own queue empty — the frame reads
+/// the queue itself rather than believing the report — and requires that
+/// nothing crossed the boundary while it did. It also rings this core's own
+/// doorbell as the notice goes out, which is the fifth entry bucket's
+/// provocation: an interrupt that is not the clock, taken at ring 3, counted,
+/// and not on the hot path. That bucket did not exist when this landed and the
+/// three vectors in it were counted nowhere, which RFC 0038 records.
+///
+/// This half is the one whose greenness depends on the machine. The notice
+/// rides a timer tick, so it needs a ring-3 tick to land between a quarter of
+/// the load and the end of it; under QEMU that window is tens of ticks wide and
+/// on hardware it may be empty. `kernel::runtime::RECLAIM_AFTER_ITEMS` states
+/// the bound and RFC 0038 argues it, so a red run on a fast machine is read as
+/// the harness and not as the scheduler.
+///
+/// `hostile` scribbles the control ring's header before entry, which makes the
+/// frame the untrustworthy peer for one boot. Safe adoption must refuse with a
+/// structured error rather than fault, hang, or believe it. Without this half
+/// the other three would show that adoption is *available* and not that it is
+/// safe.
+const RUNTIME_PROVOCATIONS: &[(&str, &str)] = &[
+    ("load", "a component schedules its own work; nothing may cross the boundary until it exits"),
+    ("provoke", "one crossing on purpose: the count must move, and by exactly as many"),
+    ("reclaim", "the timer posts a reclaim under load; the runtime must park cleanly"),
+    ("hostile", "a scribbled control ring header: adoption must refuse rather than believe it"),
+];
+
+fn runtime(kind: Option<&str>) -> Result<(), String> {
+    let chosen: Vec<&(&str, &str)> = match kind {
+        None => RUNTIME_PROVOCATIONS.iter().collect(),
+        Some(name) => {
+            let found = RUNTIME_PROVOCATIONS.iter().find(|(known, _)| *known == name);
+            let Some(found) = found else {
+                let list: Vec<String> = RUNTIME_PROVOCATIONS
+                    .iter()
+                    .map(|(name, what)| format!("  {name:<8} {what}"))
+                    .collect();
+                return Err(format!("unknown runtime provocation: {name}\n\n{}", list.join("\n")));
+            };
+            vec![found]
+        }
+    };
+
+    let all = chosen.len() > 1;
+    for (name, what) in chosen {
+        if all {
+            println!("\n--- runtime={name}: {what}");
+        }
+        let (ending, log) = machine_with(
+            Some(&format!("runtime={name}")),
+            &[],
+            Capture::Printed,
+            BOOT_TIMEOUT,
+            BOOT_MEMORY,
+        )?;
+        match ending {
+            Ending::Exited(33) => {}
+            Ending::Exited(35) => {
+                return Err(format!(
+                    "the kernel refused to finish after `runtime={name}`. Either something \
+                     crossed the boundary on the hot path, or the counter that would have \
+                     said so stopped counting, or a runtime that was told to park abandoned \
+                     work instead — which is the failure this exists to find. The serial log \
+                     above says which."
+                ));
+            }
+            Ending::TimedOut(_) => {
+                return Err(format!(
+                    "`runtime={name}` never finished. A component that holds a core and does \
+                     not give it back is the one failure a scheduler has that a frame does \
+                     not: the boot core is waiting on a mailbox word that will never move."
+                ));
+            }
+            other => return Err(format!("the boot {other}; expected exit 33")),
+        }
+
+        // The exit code says the kernel agreed with itself. This says the stage
+        // ran at all — a boot that carried no component file prints a refusal
+        // and stops, and `runtime_demonstration` turns that into a failed boot,
+        // so this is belt and braces rather than the assertion.
+        if !log.contains("runtime verdict") {
+            return Err(format!(
+                "`runtime={name}` finished without reaching a verdict.\n\n\
+                 The kernel prints one for every run it makes, so this means the stage did \
+                 not run: no component file among the boot modules, or no core free to \
+                 allocate."
+            ));
+        }
+        println!("\nruntime={name}: the kernel reached its own verdict and finished");
+    }
+
+    if all {
+        println!(
+            "\nall four halves held: a component scheduled its own work with nothing crossing \
+             the boundary, the counter that says so was shown to move, a reclaim arriving \
+             under load was parked at an allocation boundary, and a scribbled header was \
+             refused"
         );
     }
     Ok(())
@@ -5959,7 +6366,74 @@ fn eval_run(filter: Option<&str>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{datapath_findings, declared_fn, toml_field, toml_multiline, trace_hash};
+    use super::{
+        JOIN_GAP, datapath_findings, declared_fn, hold_the_gap, toml_field, toml_multiline,
+        trace_hash, unspawned,
+    };
+
+    /// A component set shaped like the one this tree builds: two records, the
+    /// hashes standing in for content ids.
+    fn modelled(names: &[(&str, u64)]) -> Vec<(String, u64)> {
+        names.iter().map(|(name, id)| ((*name).to_string(), *id)).collect()
+    }
+
+    const STORE: u64 = 0x55ff_b07c_0dfc_5864;
+    const VIRTIO_BLK: u64 = 0xbf22_756d_7b8c_7b9c;
+
+    #[test]
+    fn the_gap_this_tree_declares_is_the_gap_this_tree_has() {
+        // The state as of RFC 0036: the boot builds one place from the first
+        // module, so `store` is spawned and `virtio-blk` is not. This is the
+        // green case, and it is here so that the two red cases below are known
+        // to be red for their own reason rather than because the shape is
+        // always refused.
+        let set = modelled(&[("store", STORE), ("virtio-blk", VIRTIO_BLK)]);
+        let gap = unspawned(&set, &[STORE]);
+        assert_eq!(gap, ["virtio-blk"]);
+        assert_eq!(hold_the_gap(&gap, JOIN_GAP), Ok(()));
+    }
+
+    #[test]
+    fn a_component_the_boot_never_spawns_is_refused() {
+        // **The input the review named, run.** Drop a third component file with
+        // a modelled protocol into `target/component/`: the simulator runs
+        // three, the boot still spawns one, and before RFC 0036 this printed
+        // `join: ok` while the workload half covered two components the kernel
+        // never instantiated.
+        let set =
+            modelled(&[("store", STORE), ("virtio-blk", VIRTIO_BLK), ("virtio-net", 0xABCD_1234)]);
+        let gap = unspawned(&set, &[STORE]);
+        let refused = hold_the_gap(&gap, JOIN_GAP).expect_err("a third component is not declared");
+        assert!(refused.contains("virtio-net"), "the refusal does not name what appeared");
+        assert!(refused.contains("JOIN_GAP"), "the refusal does not say where to declare it");
+    }
+
+    #[test]
+    fn a_declared_component_the_boot_has_started_spawning_is_refused() {
+        // The other direction, which is the one that fails the day the work
+        // lands: a supervisor spawns both, the gap is empty, and the entry in
+        // `JOIN_GAP` is now a hole this check would step over rather than a
+        // statement about the tree. Red until somebody deletes it, which is how
+        // the exception gets removed by the person whose change removed it.
+        let set = modelled(&[("store", STORE), ("virtio-blk", VIRTIO_BLK)]);
+        let gap = unspawned(&set, &[STORE, VIRTIO_BLK]);
+        assert!(gap.is_empty());
+        assert!(hold_the_gap(&gap, JOIN_GAP).is_err(), "a stale exception was accepted");
+        // And with the entry gone it is green again, which is what says the
+        // refusal above is about the list and not about the boot.
+        assert_eq!(hold_the_gap(&gap, &[]), Ok(()));
+    }
+
+    #[test]
+    fn the_difference_is_computed_by_identity_and_not_by_name() {
+        // A component whose image changed has a different content hash and is
+        // therefore a different component here, which is the whole reason the
+        // join reads hashes out of the log rather than names: two builds of one
+        // name are two components, and the half that ran the other one is not
+        // the half that ran this one.
+        let set = modelled(&[("store", STORE), ("virtio-blk", VIRTIO_BLK)]);
+        assert_eq!(unspawned(&set, &[STORE ^ 1]), ["store", "virtio-blk"]);
+    }
 
     /// A driver crate shaped like `user/virtio-blk`: one function that moves
     /// bytes, called once, from the boot's own self-check.

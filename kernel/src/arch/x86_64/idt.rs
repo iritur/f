@@ -347,6 +347,16 @@ pub unsafe extern "C" fn interrupt_dispatch(frame: *mut Frame) {
     // that is not about something having gone wrong, and the only one that is
     // sent by this kernel rather than by a device: `smp` says what it is for.
     if frame.vector == u64::from(apic::SHOOTDOWN_VECTOR) {
+        // Whose time it was, for the timer's reason and read in the same place:
+        // an interrupt taken out of ring 3 is a kernel entry, and one that
+        // landed in no bucket was this file's contribution to a total that was
+        // not a total. See `process::Entries`.
+        if frame.cs & PRIVILEGE == USER_PRIVILEGE {
+            // SAFETY: the shootdown vector's own gate, on the core it was
+            // delivered to, and the selector says the interrupted code was at
+            // ring 3.
+            unsafe { crate::process::frame_interrupt_from_ring3() };
+        }
         // SAFETY: the shootdown vector's own gate, on the core it was delivered
         // to, with interrupts disabled by that gate.
         unsafe { crate::smp::answer() };
@@ -358,6 +368,13 @@ pub unsafe extern "C" fn interrupt_dispatch(frame: *mut Frame) {
     // is that it arrived, and its effect — a halted core is no longer halted —
     // happened before this ran.
     if frame.vector == u64::from(apic::DOORBELL_VECTOR) {
+        // Counted before it is answered, as above.
+        if frame.cs & PRIVILEGE == USER_PRIVILEGE {
+            // SAFETY: the doorbell vector's own gate, on the core it was
+            // delivered to, and the selector says the interrupted code was at
+            // ring 3.
+            unsafe { crate::process::frame_interrupt_from_ring3() };
+        }
         // SAFETY: the doorbell vector's own gate, on the core it was delivered
         // to, with interrupts disabled by that gate.
         unsafe { crate::doorbell::answer() };
@@ -372,8 +389,16 @@ pub unsafe extern "C" fn interrupt_dispatch(frame: *mut Frame) {
     //
     // Silent on purpose rather than for lack of a counter: this path is
     // reachable from any interrupt, so anything it printed would appear in the
-    // boot log at a moment nothing chose, and the boot log is a fixture.
+    // boot log at a moment nothing chose, and the boot log is a fixture. Silent
+    // is not the same as uncounted, though, and that distinction is the reason
+    // the line below exists: a vector that prints nothing and counts nothing is
+    // a kernel entry no number in this tree contains.
     if frame.vector == u64::from(apic::SPURIOUS_VECTOR) {
+        if frame.cs & PRIVILEGE == USER_PRIVILEGE {
+            // SAFETY: an interrupt gate on this core, and the selector says the
+            // interrupted code was at ring 3.
+            unsafe { crate::process::frame_interrupt_from_ring3() };
+        }
         return;
     }
 

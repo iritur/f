@@ -70,6 +70,7 @@ use f_abi::{Cqe, Sqe, buf, error};
 use f_ring::registry::Reach;
 use f_ring::{completion, refusal};
 
+use crate::fault::{Class, Fault};
 use crate::proto::{kind, wrote};
 use crate::service::Service;
 use crate::virtq::{Chain, Part, Queue, Region, Trouble};
@@ -146,6 +147,23 @@ pub trait Protocol {
     /// Where the choice to hold a notification back is recorded.
     const COALESCE: &'static str;
 
+    /// The fault classes this protocol's [`Protocol::serve`] actually reads off
+    /// the [`Bus`], and therefore the only ones a scenario may arm against it.
+    ///
+    /// A declaration and not a description. `Device::poll` consults exactly the
+    /// classes named here, so a scenario that arms one a device ignores never
+    /// strikes — and
+    /// `fault::tests::every_armed_scenario_actually_strikes_and_writes_it_down`
+    /// fails, which is the point. Without it such a scenario would strike, write
+    /// the strike into the hashed artefact, and change nothing about the run:
+    /// a site that is consulted but not exercised, passing for coverage.
+    ///
+    /// Only the two bus classes belong here. The rest — an allocation refused at
+    /// the domain, a page fault added to the service time, a peer that stops,
+    /// a torn doorbell — are the machinery's rather than the protocol's, and
+    /// every device honours them by construction.
+    const HONOURS: &'static [Class];
+
     /// Bytes of control memory one outstanding request needs. Unit: bytes.
     fn control_bytes(&self) -> u32;
 
@@ -191,6 +209,27 @@ pub trait Protocol {
     fn harvest(&mut self, written: u32, control: &Region, at: u32, asked: u32) -> i32;
 }
 
+/// What is broken about the machine, for the length of one chain.
+///
+/// Two of `E1-P02`'s seven classes are things a device *cannot detect*: a
+/// translation the unit declines to answer, and a write of its own that does not
+/// land. Neither is expressible as a refusal the model could return, because
+/// from the device's side neither has happened — which is exactly why they are
+/// worth injecting, and why they arrive on the bus rather than as a parameter to
+/// a protocol.
+///
+/// Empty is the ordinary machine, and every scenario that arms nothing gets it.
+/// `fault.rs` is where each class states the response it demands.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Injured {
+    /// The domain will not answer this transfer's translation, though it holds
+    /// one. Unit: none. `fault::Class::MapFault`.
+    pub translation: bool,
+    /// The device's last write into control memory does not land. Unit: none.
+    /// `fault::Class::Partial`.
+    pub last_write: bool,
+}
+
 /// What a device model can address.
 ///
 /// Handed to [`Protocol::serve`] so that a device decodes every descriptor
@@ -205,6 +244,28 @@ pub struct Bus<'d> {
     pub control: &'d mut Region,
     /// Every translation the component's domain holds.
     pub grants: &'d crate::service::Grants,
+    /// What is broken about the machine for this chain.
+    ///
+    /// Private, and reached through [`Bus::granted`] and [`Bus::writes_land`],
+    /// so that a protocol asks *may I* rather than *is a fault armed* — a
+    /// protocol that branched on the second would be a device model that knew it
+    /// was being tested.
+    injured: Injured,
+}
+
+impl<'d> Bus<'d> {
+    /// A bus on a machine with nothing wrong with it.
+    #[must_use]
+    pub fn new(control: &'d mut Region, grants: &'d crate::service::Grants) -> Self {
+        Self { control, grants, injured: Injured::default() }
+    }
+
+    /// The same bus, on a machine with something wrong with it.
+    #[must_use]
+    pub const fn injured(mut self, injured: Injured) -> Self {
+        self.injured = injured;
+        self
+    }
 }
 
 impl Bus<'_> {
@@ -215,9 +276,27 @@ impl Bus<'_> {
     }
 
     /// Does the device's domain translate `len` bytes at `at`?
+    ///
+    /// `false` under an injected translation fault, whatever the domain holds.
+    /// The device cannot tell the two apart and must not be able to: on real
+    /// silicon a transfer the unit declines and a transfer to an address nobody
+    /// granted are the same fault, and a model where the device could
+    /// distinguish them would be a model of a machine that reported more than
+    /// the hardware does.
     #[must_use]
     pub fn granted(&self, at: u64, len: u32) -> bool {
-        self.grants.reaches(at, len)
+        !self.injured.translation && self.grants.reaches(at, len)
+    }
+
+    /// Will the device's last write into control memory land?
+    ///
+    /// `false` under an injected partial write: the payload moved and the answer
+    /// did not. A protocol whose answer is a byte in shared memory must then
+    /// leave that byte alone, so the driver reads back what *it* wrote — which
+    /// is the whole reason `blk.rs` writes `0xFF` there first.
+    #[must_use]
+    pub const fn writes_land(&self) -> bool {
+        !self.injured.last_write
     }
 }
 
@@ -394,8 +473,22 @@ impl<P: Protocol> Device<P> {
         }
 
         if buf::opcode::is_registration(entry.opcode) {
+            // `E1-P02`'s allocation failure. The domain is told to refuse and
+            // the registration then goes through the real table, so what comes
+            // back is the refusal `Table::register` builds when a domain
+            // declines — including the part worth asserting, that a refused
+            // registration leaves no slot and no generation spent.
+            if world.strike(me, Class::Alloc, entry.user_data).is_some() {
+                self.service.starve();
+            }
             let now = world.clock();
             let cqe = self.service.register(&entry, now);
+            // Armed and disarmed around this one call. `Table::register` refuses
+            // a malformed geometry or a full slot table without ever asking the
+            // domain, and a starve left armed after one of those would refuse
+            // the next operation's translation — a fault recorded against one
+            // token and suffered by another. `Grants::starve` argues it.
+            self.service.relent();
             world.record(me, P::NAME, wrote::REGISTER, entry.user_data, entry.len.into());
             self.answer(world, me, cqe);
             return;
@@ -524,7 +617,41 @@ impl<P: Protocol> Device<P> {
                 }
             };
 
-            let mut bus = Bus { control: &mut self.control, grants: self.service.grants() };
+            // The token before the chain is served, so that an injected fault
+            // is written into the trace against the operation it struck rather
+            // than against a descriptor index. It is a second lookup of the
+            // same job the harvest below finds, and it is worth it: `E1-P03`
+            // reports the token, and a report naming a queue head would be a
+            // report nobody could match to a request.
+            //
+            // `u64::MAX` when there is no job behind the chain, and not zero:
+            // zero is client zero's first operation, so a fault attributed to it
+            // would name a real request that had nothing to do with it. The same
+            // spelling `Device::submit` uses for a doorbell with nothing behind
+            // it, for the same reason — a missing value must not be a valid one
+            // (R04).
+            let token =
+                self.jobs.iter().find(|job| job.head == chain.head).map_or(u64::MAX, |j| j.token);
+
+            // Only the classes this protocol actually reads off the bus are
+            // consulted here, and that is the check rather than tidiness: a
+            // class armed against a device that ignores it would strike, be
+            // written into the hashed artefact, and change nothing about the run
+            // — an unexercised site reporting green, which is the row
+            // `docs/test-taxonomy.md` calls *a fault-injection site that is
+            // never exercised*. Gated, such a scenario never strikes at all, and
+            // `fault::tests::every_armed_scenario_actually_strikes_and_writes_it_down`
+            // turns it into a red suite. The classes the machinery injects — the
+            // three below and around this loop — belong to every device and are
+            // not listed.
+            let injured = Injured {
+                translation: P::HONOURS.contains(&Class::MapFault)
+                    && world.strike(me, Class::MapFault, token).is_some(),
+                last_write: P::HONOURS.contains(&Class::Partial)
+                    && world.strike(me, Class::Partial, token).is_some(),
+            };
+
+            let mut bus = Bus::new(&mut self.control, self.service.grants()).injured(injured);
             let served = self.proto.serve(&chain, &mut bus, self.cfg.extent);
             let Some(job) = self.jobs.iter_mut().find(|job| job.head == chain.head) else {
                 world.record(me, P::NAME, wrote::IOERR, 0, u64::from(chain.head));
@@ -543,6 +670,16 @@ impl<P: Protocol> Device<P> {
                 .cfg
                 .service_ns
                 .saturating_add(world.draw() % self.cfg.spread_ns.saturating_add(1));
+
+            // `E1-P02`'s device page-fault latency: the translation was there
+            // and fetching it cost more than the transfer. Added to the service
+            // time rather than replacing it, because the transfer still happens
+            // — the class is a cost and not a failure, and the assertion is that
+            // nothing but the clock moved.
+            let elapsed = match world.strike(me, Class::FaultIn, token) {
+                Some(Fault::Delay(nanos)) => elapsed.saturating_add(nanos),
+                _ => elapsed,
+            };
             world.send(elapsed, me, Message { from: me, kind: kind::SERVICE, token, detail: 0 });
         }
     }
@@ -568,6 +705,16 @@ impl<P: Protocol> Device<P> {
         let Some(served) = job.served else {
             return;
         };
+
+        // `E1-P02`'s peer death mid-operation: the device stops with this job
+        // and everything behind it still outstanding. The same path a lost
+        // completion takes — RFC 0024 leaves a client no other way to take a
+        // buffer back — reached by a different cause, which is what makes it a
+        // class rather than a second name for `lose_one_in`.
+        if world.strike(me, Class::PeerGone, job.token).is_some() {
+            self.fall_over(world, me);
+            return;
+        }
 
         if self.loses(world) {
             world.record(me, P::NAME, wrote::DROPPED, job.token, u64::from(job.head));
@@ -595,7 +742,15 @@ impl<P: Protocol> Device<P> {
             world.record(me, P::NAME, wrote::HELD, job.token, u64::from(job.head));
             return;
         }
-        world.send(0, me, Message { from: me, kind: kind::REAP, token: job.token, detail: 0 });
+        // `E1-P02`'s delayed completion: the used entry is published and the
+        // driver is told late. After the publish and not before the service, so
+        // that this class and `Class::FaultIn` are distinguishable in a trace by
+        // where they sit rather than only by their labels.
+        let held = match world.strike(me, Class::LateCqe, job.token) {
+            Some(Fault::Delay(nanos)) => nanos,
+            _ => 0,
+        };
+        world.send(held, me, Message { from: me, kind: kind::REAP, token: job.token, detail: 0 });
     }
 
     /// The driver harvests the used ring and answers its client.

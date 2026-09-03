@@ -33,6 +33,7 @@ pub mod mem;
 pub mod percpu;
 pub mod process;
 pub mod ring;
+pub mod runtime;
 pub mod smp;
 pub mod state;
 
@@ -594,6 +595,21 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // something the tree publishes.
     let datapath = blk_datapath(&boot, &mut frames, &space, features, remapping.as_mut());
 
+    // E1-B08. A component that holds a core and schedules its own work inside
+    // it, with the frame counting what crossed. Behind its own parameter, like
+    // the two stages above and for a sharper version of their reason: it enters
+    // ring 3 and takes timer ticks there, and a tick count differs between a
+    // fast host and a slow one — so a default boot that ran it would stop being
+    // the fixture `cargo xtask trace` hashes.
+    //
+    // Here rather than beside `timed_window`, which is where a reader would
+    // look for it, because everything it produces is something the tree
+    // publishes and a tree rendered first would publish the state of a machine
+    // this boot had not finished being. The same fix `dma_provocation` records
+    // above.
+    let scheduled =
+        runtime_demonstration(&boot, &mut frames, &space, features, clocks, tree.physical());
+
     // Last of the frame's own numbers, because the allocator is still handing
     // out frames until the line above. The self-test is what says the hash
     // works: two readings with nothing in between must agree, and a reading
@@ -651,6 +667,29 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         tree.set(state::node::BLK_BYTES, report.counters.bytes);
         tree.set(state::node::BLK_COPIES, report.counters.copies);
         tree.set(state::node::BLK_PROVOKED, report.counters.provoked);
+    }
+    // The runtime's five crossings, published where they were established. Zero
+    // on a boot that ran none, which is what makes the default boot's log the
+    // same bytes it was before this landed — and a `runtime=` boot is not the
+    // fixture, for the reason `runtime_demonstration` gives.
+    if let Some(report) = scheduled.as_ref() {
+        tree.set(state::node::RUNTIME_HOT, report.entries.on_the_hot_path());
+        tree.set(state::node::RUNTIME_PROVOKED, u64::from(report.tally.provoked));
+        tree.set(state::node::RUNTIME_BOUNDARY, report.entries.boundary);
+        tree.set(state::node::RUNTIME_TICKS, report.entries.ticks);
+        tree.set(state::node::RUNTIME_INTERRUPTS, report.entries.interrupts);
+        // Zero rather than what the field holds, on a run that never adopted a
+        // ring: there `completed` carries the refusal's domain, and a node that
+        // published it would be publishing an `f_abi::error` under a name that
+        // says work items. `f_store::report::refusal` is where that lives.
+        tree.set(
+            state::node::RUNTIME_WORK,
+            if f_store::report::refusal_of(&report.tally).is_some() {
+                0
+            } else {
+                u64::from(report.tally.completed)
+            },
+        );
     }
     match tree.self_test() {
         Ok(hash) => kprintln!(
@@ -1689,6 +1728,226 @@ fn dma_provocation(
     }
     outcome.faults
 }
+
+/// Give a component a core, let it schedule its own work inside it, and count
+/// what crossed.
+///
+/// This is E1-B08's exit — *async work under load produces zero kernel entries
+/// on the hot path, counted* — and the four halves are what make the zero worth
+/// anything. `runtime=load` is the exit itself. `runtime=provoke` is the same
+/// run with one crossing on purpose, and requires the count to move by exactly
+/// as many as the component says it made: the two numbers are taken on opposite
+/// sides of the boundary, so a build where counting had stopped publishes zero
+/// twice and fails rather than looking clean. `runtime=reclaim` posts the notice
+/// from the timer handler after the runtime has been working for a tick, and
+/// requires it to park at its next allocation boundary with its own queue empty.
+/// `runtime=hostile` scribbles its control ring's header before entry, and
+/// requires the adoption to refuse rather than to fault, hang or believe it.
+///
+/// The verdict is the kernel's rather than the harness's, exactly as `user`,
+/// `cap`, `iommu` and `blk` already are: it knows which half it was asked for,
+/// what the counters say and what the component reported, and a harness reading
+/// an exit code could not tell a runtime that parked from one that ran out of
+/// work.
+fn runtime_demonstration(
+    boot: &BootInfo,
+    frames: &mut mem::FrameAllocator,
+    space: &paging::AddressSpace,
+    features: paging::Features,
+    clocks: arch::x86_64::apic::Clocks,
+    tree: u64,
+) -> Option<runtime::Report> {
+    let half = if boot.has_parameter(b"runtime=load") {
+        runtime::Half::Load
+    } else if boot.has_parameter(b"runtime=provoke") {
+        runtime::Half::Provoke
+    } else if boot.has_parameter(b"runtime=reclaim") {
+        runtime::Half::Reclaim
+    } else if boot.has_parameter(b"runtime=hostile") {
+        runtime::Half::Hostile
+    } else {
+        return None;
+    };
+
+    // The core the runtime is allocated. Another one where there is another
+    // one, and this one where there is not — `timed_window`'s choice, and the
+    // single-core branch needs the same system-call entry for the same reason.
+    let me = arch::x86_64::current_cpu();
+    let worker = if smp::started() > 1 { smp::first_worker() } else { me };
+    if worker == me {
+        // SAFETY: boot processor, after `gdt::init` installed every descriptor
+        // the selectors written there name, and before anything enters ring 3 on
+        // it. Idempotent: it writes four model-specific registers with the same
+        // values `timed_window` would write later.
+        unsafe { arch::x86_64::ring3::init() };
+    }
+
+    kprintln!(
+        "  runtime       core {} allocated to a component, and the {} half: {}",
+        worker,
+        half.name(),
+        match half {
+            runtime::Half::Load => "it schedules its own work and nothing crosses the boundary",
+            runtime::Half::Provoke => "the same, and one crossing on purpose so the zero moves",
+            runtime::Half::Reclaim => "the timer posts a reclaim under load; it must park cleanly",
+            runtime::Half::Hostile => "its control ring header is scribbled; adoption must refuse",
+        }
+    );
+
+    // SAFETY: the boot processor, with the kernel's address space in `CR3`,
+    // `frames` rebound onto its direct map, the direct map covering every boot
+    // module — `reserved_ranges` put them all in the reserved list before the
+    // allocator was populated — and `worker` a core that is up and idle.
+    let outcome = unsafe {
+        runtime::demonstrate(
+            frames,
+            space,
+            features,
+            boot,
+            half,
+            worker,
+            TIMER_HZ,
+            RUNTIME_TICKS,
+            clocks.tsc_khz,
+            RECLAIM_DEADLINE_NS,
+            tree,
+        )
+    };
+
+    let report = match outcome {
+        Ok(report) => report,
+        Err(why) => {
+            kprintln!("FAIL: the runtime: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+
+    kprintln!(
+        "  allocation    {} core(s) held; a reclaim of a hard-class core was {}, and a second \
+         reclaim {} an earlier deadline",
+        report.cores,
+        if report.reserved_refused { "refused ADMISSION/RESERVED" } else { "SERVED" },
+        if report.deadline_kept { "kept" } else { "MOVED" },
+    );
+    kprintln!(
+        "  adoption      {} capabilit(ies) granted, {} notice(s) published before the first \
+         instruction, {} drained by the component itself",
+        report.granted,
+        report.posted,
+        report.tally.notices,
+    );
+    kprintln!(
+        "  entries       {} on the hot path ({} call(s), {} fault(s)); {} at the allocation \
+         boundary, {} timer tick(s), {} other interrupt(s) — {} in all",
+        report.entries.on_the_hot_path(),
+        report.entries.hot,
+        report.entries.faults,
+        report.entries.boundary,
+        report.entries.ticks,
+        report.entries.interrupts,
+        report.entries.total(),
+    );
+    // A run that never adopted a ring completed no work, and the two fields
+    // that would say how much carry the refusal instead — so the work line
+    // would be reporting an `f_abi::error` domain as a number of work items.
+    // `report::refusal` is where the two live and why; this is the log
+    // agreeing with it rather than printing the same bytes under the wrong
+    // heading.
+    if let Some((domain, reason)) = f_store::report::refusal_of(&report.tally) {
+        kprintln!(
+            "  work          none: it refused before it had a ring to put any on, f_abi::error \
+             domain {} reason {} ({} left on the ring)",
+            domain,
+            reason,
+            report.left_behind,
+        );
+    } else {
+        kprintln!(
+            "  work          {} of {} item(s) completed, {} parked, {} left on the ring; \
+             reclaimed {}, quiescent {}",
+            report.tally.completed,
+            f_store::report::LOAD,
+            report.tally.parked,
+            report.left_behind,
+            report.tally.reclaimed(),
+            report.tally.quiescent(),
+        );
+    }
+    if report.half == runtime::Half::Reclaim {
+        kprintln!(
+            "  parking       the notice went out after {} item(s); the runtime finished {} more \
+             and stopped, having crossed nothing in between",
+            report.progress,
+            report.tally.completed.saturating_sub(report.progress),
+        );
+        // Beside it and not instead of it, because it is the latency somebody
+        // will eventually want — and not a bound, because under an emulator the
+        // first execution of the exit path is translation rather than work.
+        kprintln!(
+            "  parking       in time: the notice went out at ring-3 tick {} and the runtime \
+             exited at tick {}",
+            report.posted_at,
+            report.entries.ticks,
+        );
+    }
+    if report.tally.code != f_store::report::OK {
+        kprintln!(
+            "  component     it stopped saying: {}",
+            f_store::report::label(report.tally.code)
+        );
+    }
+
+    match report.verdict() {
+        Ok(()) => kprintln!(
+            "  runtime verdict  the {} half held: {}",
+            half.name(),
+            match half {
+                runtime::Half::Load =>
+                    "a component scheduled its own work and crossed the boundary once, on the \
+                     way out",
+                runtime::Half::Provoke =>
+                    "the frame and the component agree about every crossing that happened",
+                runtime::Half::Reclaim =>
+                    "an interrupt happened and a preemption did not: it parked at its own \
+                     boundary with nothing outstanding",
+                runtime::Half::Hostile =>
+                    "a scribbled header was refused with a structured error rather than \
+                     believed",
+            }
+        ),
+        Err(why) => {
+            kprintln!("FAIL: the runtime, {} half: {why}", half.name());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+
+    Some(report)
+}
+
+/// How many timer ticks the core running a runtime arms its own timer for.
+///
+/// A bound rather than a schedule, exactly as [`PROBE_TICKS`] is: the runtime's
+/// own load is what ends the run, and this is what stops a wedged one holding
+/// the core forever. Three seconds at [`TIMER_HZ`].
+/// Unit: timer ticks.
+const RUNTIME_TICKS: u64 = 3_000;
+
+/// The deadline a reclaim notice carries.
+///
+/// A constant rather than a reading of the clock, and that is a decision rather
+/// than a shortcut. Nothing in this build can *read* a deadline — a component
+/// observes time only through a ring, and RFC 0004 gives it no clock — so a
+/// number derived from the machine would put a different value in the boot log
+/// on every run and buy nothing that could be checked. What is measured instead
+/// is the mechanism the deadline exists for: how many timer intervals the
+/// runtime took to reach an allocation boundary after it was told, which
+/// `runtime::Report::verdict` bounds.
+///
+/// *Reversal:* a component that can read `Cqe::timestamp` against a clock of its
+/// own, at which point this is `env.now()` plus a budget and the check is
+/// whether the deadline was met rather than whether the boundary was reached.
+/// Unit: nanoseconds, monotonic, in the control channel's epoch.
+const RECLAIM_DEADLINE_NS: u64 = 1_000_000;
 
 /// Drive the block datapath through a driver that lives outside the frame, and
 /// require the right thing to happen to it.

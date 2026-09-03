@@ -31,16 +31,20 @@
 //! and `env/src/sim.rs` is where the two-level form of it already lives; this
 //! adds the third level, and the third level is the point.
 //!
-//! [`domain::FAULTS`] is reserved and nothing draws there yet. That is
-//! deliberate rather than aspirational. `E1-P02` adds the fault classes, and
-//! without a domain of their own the first fault draw would have to key off a
-//! site label — colliding with the ordering draw at the same site, and moving
+//! [`domain::FAULTS`] is the second domain, and `sim/src/fault.rs` is the only
+//! thing that draws there — one draw per class consultation, keyed by the
+//! class's label and its own occurrence. The word was reserved a task before it
+//! was spent, and the argument for reserving it early is the reason it is now
+//! spendable at all: without a domain of their own the first fault draw would
+//! have had to key off a site label — colliding with the ordering draw at the same site, and moving
 //! every interleaving a seed had already selected. Every seed recorded before
-//! that commit would silently stop reproducing its run, which is the exact
+//! `E1-P02` would have silently stopped reproducing its run, which is the exact
 //! failure `env/src/sim.rs` spends four paragraphs removing. A domain word is
-//! the cheapest possible time to pay for it, and this is that time: `E1-B11` was
-//! placed before `E1-P01` on the same reasoning, because a seed corpus is priced
-//! in the derivation it was drawn from.
+//! the cheapest possible time to pay for it, and `E1-P01` was that time:
+//! `E1-B11` was placed before `E1-P01` on the same reasoning, because a seed
+//! corpus is priced in the derivation it was drawn from. The bill came due one
+//! task later and was zero, which is what a word costing nothing looks like when
+//! it is spent on time.
 
 use std::collections::BTreeMap;
 
@@ -55,9 +59,11 @@ pub mod domain {
     /// Which of several things that could happen in either order happens first.
     pub const ORDERING: &str = "sim.ordering";
 
-    /// Whether an operation fails, and how. Nothing draws here yet — `E1-P02`
-    /// is the task that does, and the module documentation says why the word is
-    /// spent now rather than then.
+    /// Whether an operation fails, and how. `sim/src/fault.rs` is the only
+    /// caller: each of its seven classes draws here at its own label and its own
+    /// occurrence, so a class's answer is independent of every ordering decision
+    /// and of every other class. The module documentation says why the word was
+    /// reserved a task before anything drew at it.
     pub const FAULTS: &str = "sim.faults";
 }
 

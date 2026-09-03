@@ -71,7 +71,9 @@ pub struct Native {
     /// How much longer than that it may take. Unit: nanoseconds.
     spread_ns: u64,
     /// Who it answers. One client, for the reason a virtqueue has one driver:
-    /// a channel has two ends.
+    /// a channel has two ends. A second one is refused `AUTHORITY/NO_SUCH_CAP`
+    /// in [`Native::submit`] rather than admitted — the rule is the code's and
+    /// not this sentence's, which is what R01 asks of a field like this.
     client: Option<ActorId>,
     jobs: Vec<Job>,
 }
@@ -116,9 +118,33 @@ impl Native {
             world.record(me, Self::NAME, kind::SUBMIT, 0, u64::MAX);
             return;
         };
-        self.client = Some(from);
         let token = entry.user_data;
         let now = world.clock();
+
+        // One client, and the refusal is what makes that a mechanism rather
+        // than a sentence in the field's documentation. This used to be an
+        // unconditional `self.client = Some(from)`, which is not *one client*
+        // but *the most recent one*: a second client's submission would have
+        // redirected every completion still owed to the first, and the first
+        // would have waited forever on tokens it could no longer be told about.
+        // `Device::submit` in `dev.rs` refuses the same way for the same reason
+        // — a channel has two ends — and the peer the substitution test compares
+        // the device models against is the one that should be weakest on it.
+        match self.client {
+            None => self.client = Some(from),
+            Some(known) if known == from => {}
+            Some(_) => {
+                world.record(me, Self::NAME, wrote::DENIED, token, u64::MAX);
+                let cqe = refusal(
+                    token,
+                    error::pack(error::AUTHORITY, error::authority::NO_SUCH_CAP),
+                    0,
+                    now,
+                );
+                self.answer(world, me, from, cqe);
+                return;
+            }
+        }
 
         if buf::opcode::is_registration(entry.opcode) {
             let cqe = self.service.register(&entry, now);
@@ -248,6 +274,55 @@ mod tests {
         assert_eq!(done, 6, "an operation was lost between the client and the peer");
         assert_eq!(records.iter().filter(|r| r.kind == wrote::BOUND).count(), 1);
         assert_eq!(records.iter().filter(|r| r.kind == wrote::FINISHED).count(), 1);
+    }
+
+    #[test]
+    fn a_second_client_is_refused_rather_than_answered() {
+        // The field said *one client* and the code took whoever spoke last,
+        // which is a different thing: the second client's submission would have
+        // pointed every completion still owed to the first at the wrong actor,
+        // and the first would have waited forever on tokens nobody would
+        // mention again. Nothing in the shipped scenarios builds that — one peer
+        // per client, always — so this is the arrangement made on purpose,
+        // because a rule nothing exercises is a rule that quietly stops holding.
+        let mut sim = Simulation::new(0x5EED, 100_000);
+        let peer = sim.install(Box::new(Native::new(4, 1_000, 0, 4)));
+        let first = sim.install(Box::new(App::new(0, peer, 1, 4, 256, 2_000, 4)));
+        let second = sim.install(Box::new(App::new(1, peer, 1, 4, 256, 2_000, 4)));
+        sim.world().send(0, first, Message { from: first, kind: kind::START, token: 0, detail: 0 });
+        // The second starts later rather than at the same instant, so which of
+        // the two the peer accepts is a fact about the arrangement and not about
+        // the seed. The seed's freedom to choose between two channels due at one
+        // instant is the machinery working, and a test that depended on which
+        // way it went would be a test of the seed.
+        sim.world().send(
+            5_000,
+            second,
+            Message { from: second, kind: kind::START, token: 0, detail: 0 },
+        );
+        let outcome = sim.run().expect("the exchange terminates");
+        let records = outcome.trace.records();
+
+        // The refusal happened, and it happened to the second client's tokens:
+        // `App::token` puts the client's own number in the high half, so a
+        // denial carrying a token above the boundary is the second client being
+        // told it holds no channel here.
+        let denied: Vec<u64> = records
+            .iter()
+            .filter(|r| r.actor == Native::NAME && r.kind == wrote::DENIED)
+            .map(|r| r.token)
+            .collect();
+        assert!(!denied.is_empty(), "a second client was admitted to a peer that has one");
+        assert!(
+            denied.iter().all(|token| token >> 32 == 1),
+            "the peer refused the client it had already accepted"
+        );
+        // And the first client was not disturbed by any of it: it finished its
+        // work, which is the property the refusal exists to protect.
+        assert!(
+            records.iter().any(|r| r.kind == wrote::FINISHED && r.token == 0),
+            "the client that held the channel did not finish"
+        );
     }
 
     #[test]

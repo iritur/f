@@ -42,7 +42,7 @@ document calls L8 the day it grows one.
 | | Layer | Status today |
 |---|---|---|
 | **L0** | Determinism substrate | Built — `env/`, `lint-determinism`, `xtask trace` |
-| **L1** | Deterministic simulation | Hook only — `env/src/sim.rs`, consumed by `ring/tests/faults.rs`. No device models, no seed sweeps |
+| **L1** | Deterministic simulation | Built — `sim/`, `cargo xtask sim`: virtual time, seeded ordering, device models and component substitution (`E1-P01`), and seven fault classes each with a scenario and an asserted response (`E1-P02`). No seed sweeps — `E1-P03` |
 | **L2** | Concurrency and memory model | Stress tests only — `ring/tests/litmus.rs` on two architectures. Not a model check |
 | **L3** | Proof | Absent |
 | **L4** | Fuzzing | Instrumentation only — `xtask coverage`. No generator, no corpus, no hostile-peer harness |
@@ -63,7 +63,7 @@ seven layers has a home for *a decision being broken* as distinct from a
 behaviour being wrong: `unsafe` outside the frame, an import across the licence
 boundary, a number in prose with no claim, a mutable `static` outside `PerCpu`.
 Those are caught by a lint wall, a set of hooks and four review passes, none of
-which is a test in the sense L1 to L6 mean. Forty of the eighty-five rows below
+which is a test in the sense L1 to L6 mean. Forty of the eighty-six rows below
 carry X, and before this page they had no layer at all.
 
 P and X sit beside the ladder rather than on top of it. `proving-ground.html`
@@ -144,7 +144,7 @@ on x86-64, a clean pass on arm.
 | A hostile header is accepted rather than refused | L4 | `headers.rs` — every invalid header refused with a structured error, and the region survives the refusal | every verify, every PR | **partially** |
 | An entry mutated between validation and use | L1, L4 | nothing | never | **GAP** |
 | Unknown opcode, flag or reserved bit accepted (R04) | L4, X | `abi` unit tests over the reading of `Sqe`; `REVIEW.md`; no lint | every verify, every PR | **partially** |
-| A peer that dies mid-claim, or lies about its epoch | L1, L4 | `ring/tests/faults.rs` injects at `ring.publish`, `ring.consume` and `chan.bind` | every PR, both runners | **partially** |
+| A peer that dies mid-claim, or lies about its epoch | L1, L4 | `ring/tests/faults.rs` injects at `ring.publish`, `ring.consume` and `chan.bind`. `cargo xtask sim` runs `peergone`, which kills a device model with work outstanding and requires every buffer to come home and no completion to arrive after the reset | every PR, both runners; every verify | **partially** — the dying half is asserted at both layers, and lying about an epoch is not: nothing yet writes a hostile cursor, which is `E1-P04`'s |
 | ABI layout drift — a field reordered inside a fixed-size struct | X | `const _: () = assert!(size_of::<Sqe>() == 64)` and its four siblings catch a size change; **no offset assertion, no golden bytes** | every build | **partially** |
 | A peer at a different ABI version | X | `ChannelHeader::negotiate`, RFC 0011, exercised against a real mapping by `headers.rs` | every verify, every PR | **catches** |
 
@@ -175,7 +175,7 @@ from one tree, and stops costing nothing at `E1-B05`.
 | A ring-3 process touching what it was not handed | P | `cargo xtask user` — seven boots, six must fault and one must not | every PR | **catches** |
 | Writing to a read-only grant | P | `cargo xtask cap state` | every PR | **catches** |
 | Speculation across a domain boundary (R02) | X | `cargo xtask lint-manifests` requires the domain field RFC 0005 rule 4 names; the supervisor refusal is not built | every verify | **partially** |
-| A driver addressing memory outside its grant (IOMMU) | L1, P | `cargo xtask iommu` — two boots on a machine with a VT-d unit and a real virtio-blk device, with the frame's own adversary as the requester: one descriptor inside the grant, which must land bytes, and one outside it, which must be refused and recorded in the unit's own fault registers. `cargo xtask blk` — three boots with the requester's descriptor written by a driver **component**, `user/virtio-blk`, out of a `Reach` the frame answered its client's registration with: one carries a sector out and back through a ring byte for byte, one withdraws the client's page from the driver's domain between the write and the read (RFC 0024's reclaim, the frame's property), and one has the driver add a frame to the address it was answered before writing it into a descriptor, requiring the unit to fault at the address the driver invented — the only one of the five that is a driver *reaching* outside its grant. All five halves also require the frame to refuse a device translation for a capability carrying no `GRANT` | every PR | **partially** — the descriptor and the arithmetic behind it are a driver component's own, and the component's *code* is still called by the frame because nothing schedules one; RFC 0033 dates that to E1-B08. Both commands are jobs in `ci.yml`, so all five halves keep the cadence claimed here |
+| A driver addressing memory outside its grant (IOMMU) | L1, P | `cargo xtask iommu` — two boots on a machine with a VT-d unit and a real virtio-blk device, with the frame's own adversary as the requester: one descriptor inside the grant, which must land bytes, and one outside it, which must be refused and recorded in the unit's own fault registers. `cargo xtask blk` — three boots with the requester's descriptor written by a driver **component**, `user/virtio-blk`, out of a `Reach` the frame answered its client's registration with: one carries a sector out and back through a ring byte for byte, one withdraws the client's page from the driver's domain between the write and the read (RFC 0024's reclaim, the frame's property), and one has the driver add a frame to the address it was answered before writing it into a descriptor, requiring the unit to fault at the address the driver invented — the only one of the five that is a driver *reaching* outside its grant. All five halves also require the frame to refuse a device translation for a capability carrying no `GRANT` | every PR | **partially** — the descriptor and the arithmetic behind it are a driver component's own, and the component's *code* is still called by the frame because nothing routes a device into a spawned component's address space — E1-B08 landed the scheduling half, so a component now runs at ring 3 with its own polling loop, and RFC 0038 names the routing half as what is left: four register windows and a DMA region mapped into a spawned component with its IOMMU domain programmed. Both commands are jobs in `ci.yml`, so all five halves keep the cadence claimed here |
 
 The five properties hold and each has something that breaks it, which is
 `E0-P08` met. What none of them is, is a proof: eleven boots sample a space
@@ -212,13 +212,22 @@ churn.
 | Timer jitter regression | L5, L7 | `cargo xtask timer 60`; claim 0002 is `pending` and gates nothing | on demand | **GAP** |
 | Ring submit latency regression | L5, L7 | `cargo xtask claim ring-submit-latency`; claim 0001 is `pending`; `bench` refuses to record under `F_ENVIRONMENT=container` | on demand | **GAP** |
 | Boot-time regression | L5, L7 | claim 0003, `tracked`, `cargo xtask claim boot-to-m0`, threshold 50 ms | on demand | **partially** |
+| A kernel entry on the hot path that nobody counted | L5, P | `cargo xtask runtime` — four boots. `load` requires zero door calls and zero ring-3 faults across sixteen thousand work items a component scheduled inside its own allocation; `provoke` runs the same load with one crossing on purpose and requires the frame's count and the component's own to be non-zero and equal, taken on opposite sides of the boundary; `reclaim` posts RFC 0008's notice from the timer handler under load and requires parking at an allocation boundary within one quantum, ringing a doorbell as it goes so the non-timer interrupt bucket is a number a boot can move; `hostile` scribbles the control ring header and requires a structured refusal. All five buckets are published as `state::node::RUNTIME_*` | every PR | **catches** |
 | A regression too small for a threshold | L5 | nothing; `claims/history.jsonl` is accumulating for it | never | **GAP** |
 
 R08 is the rule this group exists to keep honest: a hard class with no admission
-test is a hint with a better name. Four of these eight rows are empty because
+test is a hint with a better name. Four of these nine rows are empty because
 the thing they would test does not exist yet, and that is the correct state at
 the start of E1. What would not be correct is for them to be absent from the
 table, because that is how a promised layer acquires no owner.
+
+The ninth row is the newest, and it is in this group rather than in group I
+because what it catches is a property of the system and not of the apparatus:
+*nothing the code at ring 3 does reaches the frame*. It arrived with four
+buckets and three interrupt vectors counted in none of them — entries that were
+neither on the hot path nor excluded from it — which is the failure the row now
+exists to make visible, and RFC 0038 records it as a scar rather than a
+correction.
 
 ## F — determinism
 
@@ -228,7 +237,7 @@ table, because that is how a promised layer acquires no owner.
 | A source of nondeterminism no pattern names | L0, P | `cargo xtask trace` locally; the two-runner `trace` and `reproduction` jobs in CI | every verify, every PR | **catches** |
 | A determinism leak that never reaches the boot log | L0, L1 | nothing — the trace hashes the boot log, and the state tree deliberately publishes nothing that varies with time | never | **GAP** |
 | Correlated streams in a seed sweep | L1 | per-site streams in `env/src/sim.rs`, plus the independence test | every verify, every PR | **partially** |
-| A fault-injection site that is never exercised | L1 | the site table is fixed at sixteen and overflow is counted and reported rather than dropped | every verify, every PR | **partially** |
+| A fault-injection site that is never exercised | L1 | `f_sim::fault` requires every class to have a scenario, every armed scenario to strike at three seeds, and every class to be declared by a protocol that reads it — an arming a device would ignore never fires and fails the second check; `ring/tests/faults.rs` requires each of its three sites to be injected at; `env/src/sim.rs` counts and reports sites past its fixed table rather than dropping them | every verify, every PR | **catches** |
 | An allow-list entry added in the same diff as the code needing it | X | `REVIEW.md` pass 1 names it as the commonest way the policy erodes | every PR | **partially** |
 
 The second row justifies the whole of L0, and it is worth stating what it
@@ -329,14 +338,14 @@ reversal condition. Nothing is left as "we should probably".
 |---|---|
 | A publishing store weakened to `Relaxed`, either ring | `E0-P16` — the stress suite was measured not to catch it |
 | An interleaving the stress tests never produce | `E0-P16` — RustMC, on small tests a checker can exhaust, under its own toolchain (RFC 0022) |
-| An entry mutated between validation and use | `E1-P02`, `E1-P04` |
+| An entry mutated between validation and use | `E1-P04` — `E1-P02` was listed here and does not reach it: a fault class breaks a *protocol* event, and mutating an entry after it is validated needs a peer writing shared memory |
 | Unknown opcode, flag or reserved bit accepted (R04) | `E1-P05` for the corpus, `E1-P12` for the proof |
 | ABI layout drift — a field reordered | `E1-P05` — the committed corpus is the golden-bytes fixture |
 | A hostile header or cursor panics the consumer | `E1-P04` (a billion operations), `E1-P12` (panic-freedom, proved) |
 | A hostile header accepted rather than refused | `E1-P04` |
-| A peer that dies mid-claim, or lies about its epoch | `E1-P04`, `E1-P02` |
+| A peer that dies mid-claim, or lies about its epoch | `E1-P04` — `E1-P02`'s `peergone` scenario asserts the dying half; the lying half needs a hostile cursor |
 | Frame leak under churn | `E1-B14` (the unmap-under-churn workload), `E1-P06`, `E1-B10` |
-| Mapping left after revoke, under churn | `E1-B14`, `E1-P02` |
+| Mapping left after revoke, under churn | `E1-B14` — `E1-P02`'s `peergone` asserts a *model's* translations go with its registrations; the frame under churn is `E1-B14`'s |
 | A ring-3 **component** addressing memory outside its grant | `E1-B02` — the first driver that is a component; `E1-B01` built the mechanism and stood in for the driver |
 | Authority arriving by inheritance | `E1-B05` — the first lifecycle that could grant it |
 | Speculation across a domain boundary | `E1-B05` — the supervisor refusal RFC 0005 names |
@@ -349,7 +358,6 @@ reversal condition. Nothing is left as "we should probably".
 | A regression too small for a threshold | `E2-P09` — change-point detection over the stored history |
 | A determinism leak that never reaches the boot log | `E1-P01`, `E2-P05` |
 | Correlated streams in a seed sweep | `E1-B11` — a splittable generator, before the sweep multiplies streams |
-| A fault-injection site never exercised | `E1-P02`, `E1-P03` |
 | Driver death observed by a client | `E1-P06` — where the blast-radius claim becomes gating |
 | Supervisor restart storm | `E1-B05`, `E1-P06` |
 | `instructions_per_op` and `joules_per_op` absent | `E0-P05` for the PMU, `E5-P03` for the meter |
@@ -451,15 +459,19 @@ L2 is the layer E1 does **not** build, and that is worth saying out loud rather
 than leaving to be noticed: `E0-P16` remains the only owner of the gap the
 litmus suite was measured to have, and it is an E0 task carried into E1.
 
-**Which rows move.** Of the eighty-five rows, forty-one say *catches* today,
-twenty-seven *partially* and seventeen *GAP*. Twenty-three name an E1 task as an
-owner, and twenty of those name *only* E1 tasks — so if the rest of the epoch
-lands as written, eight more GAPs close and twelve more rows move from
+**Which rows move.** Of the eighty-six rows, forty-three say *catches* today,
+twenty-six *partially* and seventeen *GAP*. Twenty-two name an E1 task as an
+owner, and nineteen of those name *only* E1 tasks — so if the rest of the epoch
+lands as written, eight more GAPs close and eleven more rows move from
 *partially* to *catches*, which is about a quarter of everything on this page.
 
-Four rows have already moved and the counts above include them: the
+Five rows have already moved and the counts above include them: the
 allocator's split and coalesce row, which `E1-B12` took from *GAP*, the two
-capability-table rows, which `E1-B13` took from *partially*, and the IOMMU row,
+capability-table rows, which `E1-B13` took from *partially*, the fault-injection
+row, which `E1-P02` took from *partially* by closing all three ways a site goes
+unexercised — a class with no scenario, a scenario whose class never fires, and
+a class armed against a device whose protocol never reads it — and the IOMMU
+row,
 which `E1-B01` took from *GAP* to *partially* rather than to *catches* — the
 mechanism is booted twice on every PR and the requester is the frame's own
 adversary rather than a driver component, so the row moves one step and names

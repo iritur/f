@@ -181,12 +181,21 @@ pub struct Cqe {
     /// Echoed from the submission, except on a notice.
     ///
     /// Unit: none — the submitter's own value, returned unchanged, **except on
-    /// an entry carrying [`cflags::NOTICE`], where it is the handle the notice
-    /// concerns**. The second reading is RFC 0008's and it is stated here
+    /// an entry carrying [`cflags::NOTICE`], where it is the thing the notice
+    /// concerns: a capability handle for the five notices about a slot, a
+    /// deadline or a peer, and a core index for
+    /// [`control::notice::RECLAIM`], which is about neither**. The second
+    /// reading is RFC 0008's and the third is RFC 0038's; both are stated here
     /// rather than deduced, because R03 makes this sentence normative and
     /// `cargo xtask lint-units` reads it: a notice answers no submission, so
     /// there is no submitter's value for it to carry, and a reader that
     /// believed there was would match a notice against an outstanding token.
+    ///
+    /// A reclaim is the one notice whose subject is not in a capability table,
+    /// which is why it needs a reading of its own rather than a handle that
+    /// names a core: a core is not an object a component holds, it is capacity
+    /// a component was allocated, and RFC 0008 puts the pending state for it
+    /// beside the allocation for exactly that reason.
     pub user_data: u64,
     /// Non-negative values are success, and their meaning is per-opcode — for a
     /// transfer it is the count actually transferred, which is how partial
@@ -362,6 +371,21 @@ pub mod error {
         /// Added by E1-B05, which is the task `CONTRIBUTING.md`'s R02 row names
         /// as the one that lands the supervisor's `ADMISSION` refusals.
         pub const MEMORY: u16 = 5;
+        /// The core named is held by a hard-class reservation, and a hard-class
+        /// reservation holds its cores for its life.
+        ///
+        /// RFC 0007 grants a reservation a whole physical core, its sibling,
+        /// a bandwidth allocation and a cache partition, and forecloses
+        /// work-conserving scheduling of reserved capacity: *reserved and idle
+        /// stays idle, and no later optimisation may quietly lend it out.* So a
+        /// reclaim naming such a core is refused rather than served, and it is
+        /// refused in [`super::ADMISSION`] because what was asked for is the
+        /// withdrawal of a promise admission already made — R08. Detail: the
+        /// core index.
+        ///
+        /// Added by E1-B08 (RFC 0038), which is where a core first belongs to
+        /// anything that could be asked to give it back.
+        pub const RESERVED: u16 = 6;
     }
 
     /// Codes within [`RESOURCE`].

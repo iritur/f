@@ -20,6 +20,18 @@ f-ring.workspace = true
 # with a date. *Reversal:* E1-B08, at which point this line goes.
 f-virtio-blk.workspace = true
 
+# The component a place holds, and — from E1-B08 — the runtime that holds a
+# core. The frame links it for one thing: `f_store::report` is the encoding a
+# runtime's exit status carries, and one definition the compiler checks is worth
+# more than two that agree today. Its `image` feature is off for the reason
+# `f-virtio-blk`'s is: a `#[panic_handler]` is a lang item and there may be one
+# per linked artefact.
+#
+# *Reversal:* a runtime that publishes a state tree of its own under RFC 0013,
+# at which point the frame reads nodes rather than a packed word and this line
+# goes.
+f-store.workspace = true
+
 [lints.rust]
 # The frame. This is the crate the < 5% unsafe-of-TCB metric measures.
 # Adding another crate to this list is a visible, reviewable diff.

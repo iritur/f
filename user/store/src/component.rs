@@ -14,17 +14,28 @@
 //! load-bearing across both crates: one linker script, one placement rule, one
 //! check.
 //!
-//! # What it does
+//! # What it does, and which of its two lives it is in
 //!
-//! It announces itself and ends, and the shortness is the honest part rather
-//! than a placeholder. A component's whole vocabulary is its control ring, and
-//! draining one means adopting a mapped channel, which is `unsafe` and which
-//! this crate may not write — E1-B08 and RFC 0030. Until that lands, the
-//! interesting half of this component's life happens *to* it: it is spawned
-//! from a record, killed, and spawned again into the same place, and what a
-//! client sees across that is the thing gate G1 is about.
+//! Entered with a selector of zero it announces itself and ends, which is what
+//! `E1-B05` spawns, kills and respawns on every boot: the interesting half of
+//! that life happens *to* it, and what a client sees across a restart is the
+//! thing gate G1 is about.
+//!
+//! Entered with [`report::RUN`] it is a **runtime**. It adopts its control ring
+//! and its own work ring in safe code — `f_ring::adopt`, RFC 0037 — schedules
+//! [`report::LOAD`] work items inside the core it was allocated, drains its
+//! control ring at every allocation boundary, and parks cleanly when the frame
+//! posts a reclaim notice. Between the instruction that enters it and the
+//! `EXIT` that leaves it, it crosses no privilege boundary at all, and
+//! `kernel/src/runtime.rs` is what counts that rather than asserting it.
+//!
+//! The sentence this module used to carry — *draining one means adopting a
+//! mapped channel, which is `unsafe` and which this crate may not write* — was
+//! true until `E1-B08`. `crate::runtime` is where it stopped being true.
 
 use f_abi::door;
+
+use crate::report;
 
 /// A run that did what it meant to.
 pub const DONE: u64 = 0;
@@ -38,6 +49,22 @@ pub const DONE: u64 = 0;
 /// It never returns: [`door::EXIT`] does not come back, and the loop after it is
 /// what happens if the frame ever lets it.
 pub fn start(argument: u64) -> ! {
+    // Which of this component's two lives the frame asked for. A selector the
+    // frame does not set is zero, which is the life this component has always
+    // had; `report::RUN` and `report::PROVOKE` are the runtime, and a selector
+    // this build does not name falls through to the old life rather than
+    // inventing a third.
+    //
+    // Two lives in one image rather than two component files, because they are
+    // one component: the place, the manifest, the account and the restart
+    // policy are all the same, and what differs is whether the frame gave it a
+    // core to schedule inside. A second manifest would be a second place, and a
+    // second place is a claim about the topology rather than about scheduling.
+    let selector = door::Entry::from_bits(argument).selector();
+    if selector == report::RUN || selector == report::PROVOKE {
+        crate::runtime::run(selector);
+    }
+
     // The frame tells a component what it holds rather than letting it assume,
     // and `door::Entry` argues why: a second occupant of a place finds its
     // capabilities at the same indices and a later generation, so a component

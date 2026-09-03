@@ -57,6 +57,7 @@ use f_ring::RingError;
 use f_ring::buffers::{BufferSet, Fixed, Idle, InFlight, PeerGone, Refused};
 use f_ring::registry::registration;
 
+use crate::fault::Class;
 use crate::proto::{kind, wrote};
 use crate::wire::Post;
 use crate::{Actor, ActorId, Message, World};
@@ -161,6 +162,16 @@ impl App {
     /// across the run, and legible in a trace without a lookup.
     const fn token(&self, nth: u32) -> u64 {
         ((self.who as u64) << 32) | nth as u64
+    }
+
+    /// The sequence [`App::token`] minted a token from.
+    ///
+    /// The exact inverse of the low half, and it exists so that an operation's
+    /// position is a property of the *operation* rather than of when it happened
+    /// to be submitted. A retry re-submits the same position, which is what a
+    /// driver does; deriving the position from a counter meant a retry moved.
+    const fn nth(token: u64) -> u32 {
+        (token & 0xFFFF_FFFF) as u32
     }
 
     /// How many operations completed. Unit: operations.
@@ -271,7 +282,18 @@ impl App {
                 // link, a request for a display. Unit: per-peer, and the peer
                 // that reads it is what states what it means — the same rule
                 // `Sqe::offset` itself carries.
-                offset: u64::from(self.issued),
+                //
+                // Carried on the token rather than read off the issue counter,
+                // which is what this line used to do and which was neither
+                // quantity: `self.issued` has already been incremented for
+                // fresh work, so the first request landed at sector one and
+                // sector zero was never reachable, and a *retried* token was
+                // re-submitted at whatever the counter had reached by then —
+                // a request that moved between attempts, which no driver does
+                // and no device should have to tolerate. `Blk::describe` picks
+                // its direction from this number, so a retry could even flip
+                // from a read to a write.
+                offset: u64::from(Self::nth(token)),
                 ..Sqe::ZERO
             };
 
@@ -286,6 +308,24 @@ impl App {
                         token,
                         u64::try_from(self.flight.len()).unwrap_or(u64::MAX),
                     );
+                    // `E1-P02`'s torn doorbell. Publishing the entry and
+                    // ringing the bell are two stores, and a torn pair is a bell
+                    // with nothing behind it — so the bell rings twice for one
+                    // entry and the peer finds an empty wire on one of them.
+                    //
+                    // The other tear, an entry with no bell, is deliberately not
+                    // produced here: this model's peer takes one entry per
+                    // doorbell, so a missing bell would be a lost entry rather
+                    // than a late one, and what that would exercise is the
+                    // model's shape rather than the system's response. A peer
+                    // that lies about its cursors is `E1-P04`'s.
+                    if world.strike(me, Class::Doorbell, token).is_some() {
+                        world.send(
+                            0,
+                            self.peer,
+                            Message { from: me, kind: kind::SUBMIT, token, detail: 0 },
+                        );
+                    }
                     world.send(
                         0,
                         self.peer,

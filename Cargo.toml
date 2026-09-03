@@ -25,6 +25,10 @@ f-ring = { path = "ring" }
 # `cargo xtask component` does to produce the image — uses its own defaults and
 # is unaffected.
 f-virtio-blk = { path = "user/virtio-blk", default-features = false }
+# The same arrangement, one crate over and for a different reason:
+# `user/store/Cargo.toml` says which, and the frame links this so that
+# `f_store::report` has one definition rather than two.
+f-store = { path = "user/store", default-features = false }
 f-bench = { path = "bench" }
 
 # ---------------------------------------------------------------------------

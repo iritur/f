@@ -93,13 +93,51 @@ pub struct Grants {
     /// deliberately never reused: an address that named one set and then names
     /// another is the failure a generation exists to prevent, one layer down.
     made: u64,
+    /// The next translation this domain is asked for is refused.
+    ///
+    /// `E1-P02`'s *allocation failure*, injected here rather than answered
+    /// beside the table, so that the refusal a client reads is the one
+    /// `f_ring::registry::Table::register` builds when a domain declines. A
+    /// fabricated completion would be a model of a refusal rather than the
+    /// refusal, and the property worth asserting — that a refused registration
+    /// leaves no slot and no generation spent — is the real table's rather than
+    /// this file's. `fault.rs` is where the class is argued.
+    starved: bool,
 }
 
 impl Grants {
     /// A domain with room for `room` translations.
     #[must_use]
     pub fn new(room: u32) -> Self {
-        Self { live: Vec::new(), room: room.max(1), made: 0 }
+        Self { live: Vec::new(), room: room.max(1), made: 0, starved: false }
+    }
+
+    /// Refuse the next translation this domain is asked for.
+    ///
+    /// One-shot, and consumed by the next [`Domains::map`] rather than cleared
+    /// on a timer or at the end of an operation: the class is *this allocation
+    /// failed*, and a flag that outlived one call would be a domain that had
+    /// been turned off, which is a different and much blunter thing.
+    ///
+    /// Armed and disarmed around **one** registration by the caller, because the
+    /// call it is aimed at may never reach the domain at all:
+    /// `f_ring::registry::Table::register` refuses a malformed geometry, an
+    /// out-of-range buffer count and a full slot table before it asks `map` for
+    /// anything. A flag left armed after one of those would refuse the *next*
+    /// operation's translation instead — a strike written into the trace against
+    /// one token taking effect on another, which is exactly the attribution
+    /// `E1-P03` reads out of a failing run. [`Grants::relent`] is the other half
+    /// and `Device::submit` is the caller that owns the pair.
+    pub const fn starve(&mut self) {
+        self.starved = true;
+    }
+
+    /// Disarm a [`Grants::starve`] that was never consumed.
+    ///
+    /// Idempotent, and a no-op on the ordinary path where the registration did
+    /// reach the domain and spent the flag there.
+    pub const fn relent(&mut self) {
+        self.starved = false;
     }
 
     /// Does the device reach `len` bytes at `at`?
@@ -124,6 +162,17 @@ impl Grants {
 
 impl Domains for Grants {
     fn map(&mut self, cap: u32, len: u32) -> Result<u64, Refusal> {
+        if core::mem::replace(&mut self.starved, false) {
+            // The injected refusal, and it is the *same* refusal a full domain
+            // gives: same code, same detail, same path back through the table.
+            // A distinct code would let a client tell an injected failure from a
+            // real one, which would make every assertion about the response an
+            // assertion about the harness.
+            return Err((
+                error::pack(error::RESOURCE, error::resource::QUOTA_EXHAUSTED),
+                u64::from(self.room),
+            ));
+        }
         if u32::try_from(self.live.len()).unwrap_or(u32::MAX) >= self.room {
             return Err((
                 error::pack(error::RESOURCE, error::resource::QUOTA_EXHAUSTED),
@@ -185,6 +234,26 @@ impl Service {
     #[must_use]
     pub const fn grants(&self) -> &Grants {
         &self.grants
+    }
+
+    /// Refuse the next translation this peer's domain is asked for.
+    ///
+    /// The peer's door to [`Grants::starve`], so that a device model injects
+    /// `E1-P02`'s allocation failure without reaching into the domain itself —
+    /// the same reason [`Service::register`] exists rather than the peers
+    /// driving `Table` directly.
+    pub const fn starve(&mut self) {
+        self.grants.starve();
+    }
+
+    /// Disarm a [`Service::starve`] the registration never reached.
+    ///
+    /// The peer's door to [`Grants::relent`]. Called unconditionally after the
+    /// registration this starve was armed for, so that the one-shot is one-shot
+    /// for *that* registration rather than for the next `map` that happens
+    /// along — `Grants::starve` states the failure this closes.
+    pub const fn relent(&mut self) {
+        self.grants.relent();
     }
 
     /// Registrations this peer holds. Unit: buffer sets.
@@ -292,6 +361,33 @@ mod tests {
             "a full domain refused with something other than a quota"
         );
         assert_eq!(service.registered(), 2, "a refused registration filled a slot");
+    }
+
+    #[test]
+    fn a_starve_the_registration_never_reached_does_not_refuse_the_next_one() {
+        // `E1-P02`'s allocation failure is armed at the domain and the
+        // registration is what consumes it — but `Table::register` refuses a
+        // geometry that is not a set *before* it asks the domain for anything,
+        // and a full slot table the same way. A flag left armed after one of
+        // those would refuse the next operation's translation instead: a fault
+        // written into the trace against one token and suffered by another,
+        // which is precisely the attribution `E1-P03` reads out of a failing
+        // run. `Device::submit` arms and disarms around one call and this is
+        // what that pair is for.
+        let mut service = Service::new(4);
+        service.starve();
+        let never_asked = service.register(&registration(0, 0, 512, 0), 0);
+        assert!(never_asked.is_error(), "a registration with no buffers was accepted");
+        assert_eq!(service.grants().live(), 0, "a refused registration held a translation");
+        service.relent();
+
+        let next = service.register(&registration(1, 0, 512, 4), 0);
+        assert!(
+            !next.is_error(),
+            "a starve aimed at a registration the domain never saw refused the next one: {:?}",
+            next.error()
+        );
+        assert_eq!(service.grants().live(), 1);
     }
 
     #[test]

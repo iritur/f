@@ -33,6 +33,7 @@
 use f_abi::error;
 
 use crate::dev::{Bus, Protocol, Request, Served};
+use crate::fault::Class;
 use crate::proto::wrote;
 use crate::virtq::{Chain, Part, Region};
 
@@ -102,6 +103,13 @@ impl Protocol for Gpu {
     const COMPLETE: &'static str = "gpu.complete";
     const DROP: &'static str = "gpu.drop";
     const COALESCE: &'static str = "gpu.coalesce";
+    // A translation only, for now. This protocol does write an answer back —
+    // the response header — so `Class::Partial` is modellable here and simply
+    // is not modelled; it is listed when `serve` asks `writes_land` and a
+    // scenario asserts what a display controller's client is told, and not
+    // before, because a class named here that nothing reads is exactly the
+    // unexercised site this list exists to prevent.
+    const HONOURS: &'static [Class] = &[Class::MapFault];
 
     fn control_bytes(&self) -> u32 {
         CONTROL_BYTES
@@ -277,7 +285,7 @@ mod tests {
                 .describe(&Request { token: at, at, reach, seq: at }, &mut control, slot)
                 .expect("a legal request");
             let chain = Chain { head: 0, parts };
-            let mut bus = Bus { control: &mut control, grants: &grants };
+            let mut bus = Bus::new(&mut control, &grants);
             let served = gpu.serve(&chain, &mut bus, extent);
             let result = gpu.harvest(served.used_len, &control, slot, reach.len);
             out.push((served.label, result, served.fenced));
@@ -337,7 +345,7 @@ mod tests {
             .expect("a legal request");
         control.put32(0, 0x0999).expect("the header this test just wrote");
         let chain = Chain { head: 0, parts };
-        let mut bus = Bus { control: &mut control, grants: &grants };
+        let mut bus = Bus::new(&mut control, &grants);
         assert_eq!(gpu.serve(&chain, &mut bus, 8).label, wrote::IOERR);
         assert_eq!(
             error::unpack(gpu.harvest(HEADER_BYTES, &control, 0, reach.len)),

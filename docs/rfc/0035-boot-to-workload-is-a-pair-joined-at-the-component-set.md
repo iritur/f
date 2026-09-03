@@ -1,10 +1,20 @@
 # RFC 0035: A boot-to-workload run is a pair, joined at the component set
 
-- Status: accepted
+- Status: accepted; amended by RFC 0036
 - Date: 2026-09-03
 - Affects: `sim/`, `xtask`, `.github/workflows/ci.yml`,
   `docs/TESTING-STATUS.md` L1, `docs/test-taxonomy.md` and its TOML twin,
   RFC 0030, RFC 0032, E1-P01, E1-P02, E1-P03, E1-P08
+
+**Amendment, RFC 0036.** Step 3 below overstated what was built. The join it
+describes was one-directional — it required the boot's components to be among
+the simulator's and nothing the other way — and the tree it shipped into has a
+boot that instantiates one module while the simulator runs every compiled
+record. So the pair was *not* about one set, and the check could not see it.
+RFC 0036 makes the comparison symmetric and requires the difference to equal a
+declared list. Read step 3, and the sentence in the paragraph after it about the
+log printing "each spawned component's `ContentId`", with that correction: a boot
+prints one such hash per place it spawns, which today is one.
 
 ## Decision
 
@@ -29,7 +39,10 @@ left unbuilt.
    Its artefact is hashed. This is the **workload** half.
 3. `cargo xtask sim --join` requires the two to be about one set: it boots, reads
    the content hashes out of the log, asks the simulator which components it
-   would run, and refuses if the first are not among the second.
+   would run, and refuses if the first are not among the second. *(RFC 0036: it
+   also refuses if the second are not among the first, except for a declared
+   list of components the boot does not yet spawn — which is where the tree
+   actually stands.)*
 
 **Every artefact says what it covers.** A trace opens with a header — hashed
 with the records, not printed beside them — naming what the run modelled

@@ -38,6 +38,7 @@
 //! outstanding token. Recorded here rather than discovered there.
 
 use crate::dev::{Bus, Protocol, Request, Served};
+use crate::fault::Class;
 use crate::proto::wrote;
 use crate::virtq::{Chain, Part, Region};
 
@@ -78,6 +79,11 @@ impl Protocol for Net {
     const COMPLETE: &'static str = "net.complete";
     const DROP: &'static str = "net.drop";
     const COALESCE: &'static str = "net.coalesce";
+    // A translation only. This protocol writes nothing back into control
+    // memory — `harvest` says a network interface answers nothing at all —
+    // so there is no last write for a partial one to lose, and claiming the
+    // class would be claiming a site nothing exercises.
+    const HONOURS: &'static [Class] = &[Class::MapFault];
 
     fn control_bytes(&self) -> u32 {
         CONTROL_BYTES
@@ -186,7 +192,7 @@ mod tests {
             .describe(&Request { token: 1, at: 0, reach, seq: 0 }, &mut control, 0)
             .expect("a legal frame");
         let chain = Chain { head: 0, parts };
-        let mut bus = Bus { control: &mut control, grants: &grants };
+        let mut bus = Bus::new(&mut control, &grants);
         let out = net.serve(&chain, &mut bus, extent);
         let result = net.harvest(out.used_len, &control, 0, reach.len);
         (out, result)
@@ -232,7 +238,7 @@ mod tests {
                 .describe(&Request { token: 1, at: 0, reach, seq: 0 }, &mut control, 0)
                 .expect("a legal frame");
             let chain = Chain { head: 0, parts };
-            let mut bus = Bus { control: &mut control, grants: &grants };
+            let mut bus = Bus::new(&mut control, &grants);
             assert_eq!(
                 net.serve(&chain, &mut bus, extent).label,
                 label,
@@ -254,7 +260,7 @@ mod tests {
             .expect("a legal frame");
         control.put8(GSO_AT, 4).expect("the header this test just wrote");
         let chain = Chain { head: 0, parts };
-        let mut bus = Bus { control: &mut control, grants: &grants };
+        let mut bus = Bus::new(&mut control, &grants);
         assert_eq!(net.serve(&chain, &mut bus, 1_500).label, wrote::UNSUPP);
     }
 
@@ -273,7 +279,7 @@ mod tests {
             frame.write = true;
         }
         let chain = Chain { head: 0, parts };
-        let mut bus = Bus { control: &mut control, grants: &grants };
+        let mut bus = Bus::new(&mut control, &grants);
         assert_eq!(net.serve(&chain, &mut bus, 1_500).label, wrote::UNSUPP);
     }
 }

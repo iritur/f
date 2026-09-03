@@ -167,6 +167,11 @@ fn run(asked: Asked) -> Result<(), String> {
             println!("steps      {}", outcome.steps);
             println!("decisions  {}", outcome.decisions);
             println!("records    {}", outcome.trace.len());
+            // Faults, always, and zero for the scenarios that arm none. Printed
+            // rather than omitted when it is zero, so that *this run injected
+            // nothing* is a statement the report makes rather than an absence a
+            // reader has to interpret.
+            println!("injected   {}", outcome.injected);
             println!("finished   {} ns", outcome.finished_ns);
             println!("digest     {:#018x}", outcome.digest());
         }

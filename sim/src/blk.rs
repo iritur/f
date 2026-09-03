@@ -40,6 +40,7 @@
 use f_abi::error;
 
 use crate::dev::{Bus, Protocol, Request, Served};
+use crate::fault::Class;
 use crate::proto::wrote;
 use crate::virtq::{Part, Region};
 
@@ -99,6 +100,10 @@ impl Protocol for Blk {
     const COMPLETE: &'static str = "blk.complete";
     const DROP: &'static str = "blk.drop";
     const COALESCE: &'static str = "blk.coalesce";
+    // Both bus classes: `serve` asks `granted` of the data buffer and
+    // `writes_land` before the status byte, so a scenario may arm either
+    // against this device and see it change the run.
+    const HONOURS: &'static [Class] = &[Class::MapFault, Class::Partial];
 
     fn control_bytes(&self) -> u32 {
         CONTROL_BYTES
@@ -204,6 +209,21 @@ impl Protocol for Blk {
         // reported the request length either way would be a model a driver
         // could not tell a read from a write with.
         let used_len = if reading { data.len.saturating_add(1) } else { 1 };
+
+        // `E1-P02`'s partial write. The payload moved and the device's *last*
+        // write — the status byte — did not, so the used entry says the transfer
+        // happened and the byte the driver reads back is still the `0xFF` it
+        // wrote itself. That is precisely the case `STATUS_NONE` exists to make
+        // visible, and until this class there was nothing in any scenario that
+        // reached it: a used length is not evidence that bytes moved, and
+        // `harvest` below reads the byte rather than the length for that reason.
+        //
+        // Only the successful answer is torn. A refusal that lost its status
+        // byte would be indistinguishable from this, and two causes with one
+        // client-visible answer is a class that cannot be asserted about.
+        if !bus.writes_land() {
+            return Served { used_len, label: wrote::SERVED, fenced: false };
+        }
         Self::answer(bus, status_at, STATUS_OK, used_len)
     }
 
@@ -274,7 +294,7 @@ mod tests {
         queue.offer(head).expect("inside the ring");
         let chain = queue.take().expect("a legal ring").expect("the offered chain");
 
-        let mut bus = Bus { control: &mut control, grants: &grants };
+        let mut bus = Bus::new(&mut control, &grants);
         let served = blk.serve(&chain, &mut bus, 64);
         let result = blk.harvest(served.used_len, &control, 0, reach.len);
         (served, result)
@@ -308,7 +328,7 @@ mod tests {
             let parts =
                 blk.describe(&request(sector, reach), &mut control, 0).expect("a legal request");
             let chain = Chain { head: 0, parts };
-            let mut bus = Bus { control: &mut control, grants: &grants };
+            let mut bus = Bus::new(&mut control, &grants);
             let served = blk.serve(&chain, &mut bus, 64);
             let result = blk.harvest(served.used_len, &control, 0, reach.len);
             if ok {
@@ -335,7 +355,7 @@ mod tests {
         let stray = Reach { address: GRANT_BASE + crate::service::GRANT_STRIDE, len: 512 };
         let parts = blk.describe(&request(0, stray), &mut control, 0).expect("a legal request");
         let chain = Chain { head: 0, parts };
-        let mut bus = Bus { control: &mut control, grants: &grants };
+        let mut bus = Bus::new(&mut control, &grants);
         let served = blk.serve(&chain, &mut bus, 64);
         assert_eq!(served.label, wrote::NOREACH);
         assert_eq!(served.used_len, 0, "a refused transfer reported bytes");
@@ -352,7 +372,7 @@ mod tests {
         let parts = blk.describe(&request(0, reach), &mut control, 0).expect("a legal request");
         control.put32(0, 9).expect("the header this test just wrote");
         let chain = Chain { head: 0, parts };
-        let mut bus = Bus { control: &mut control, grants: &grants };
+        let mut bus = Bus::new(&mut control, &grants);
         let served = blk.serve(&chain, &mut bus, 64);
         assert_eq!(served.label, wrote::UNSUPP);
         assert_eq!(
@@ -368,7 +388,7 @@ mod tests {
         let full = blk.describe(&request(0, reach), &mut control, 0).expect("a legal request");
         for parts in [&full[..1], &full[..2]] {
             let chain = Chain { head: 0, parts: parts.to_vec() };
-            let mut bus = Bus { control: &mut control, grants: &grants };
+            let mut bus = Bus::new(&mut control, &grants);
             assert_eq!(blk.serve(&chain, &mut bus, 64).label, wrote::UNSUPP);
         }
     }

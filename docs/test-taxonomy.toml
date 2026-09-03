@@ -132,7 +132,7 @@ layers  = ["L1", "L4"]
 check   = "nothing"
 cadence = ["never"]
 status  = "gap"
-scheduled_by = ["E1-P02", "E1-P04"]
+scheduled_by = ["E1-P04"]
 
 [[row]]
 id      = "peer-unknown-bits"
@@ -149,10 +149,11 @@ id      = "peer-dies-mid-claim"
 group   = "B"
 class   = "A peer that dies mid-claim, or lies about its epoch"
 layers  = ["L1", "L4"]
-check   = "ring/tests/faults.rs injects at ring.publish, ring.consume and chan.bind"
-cadence = ["every-pr"]
+check   = "ring/tests/faults.rs injects at ring.publish, ring.consume and chan.bind; cargo xtask sim runs the peergone scenario, which kills a device model with work outstanding and asserts that every buffer comes home and that no completion arrives after the reset"
+cadence = ["every-pr", "every-verify"]
 status  = "partially"
-scheduled_by = ["E1-P04", "E1-P02"]
+notes   = "The dying half is asserted at both layers. Lying about an epoch is not: nothing yet writes a hostile cursor, which is E1-P04's."
+scheduled_by = ["E1-P04"]
 
 [[row]]
 id      = "abi-layout-drift"
@@ -231,7 +232,7 @@ layers  = ["P"]
 check   = "cargo xtask cap unmap — one page, one process, one boot"
 cadence = ["every-pr"]
 status  = "partially"
-scheduled_by = ["E1-B14", "E1-P02"]
+scheduled_by = ["E1-B14"]
 
 [[row]]
 id      = "cap-table-outgrown"
@@ -289,7 +290,7 @@ layers  = ["L1", "P"]
 check   = "cargo xtask iommu — two boots on a machine with a VT-d unit and a real virtio-blk device, with the frame's own adversary as the requester: one descriptor inside the grant, which must land bytes, and one outside it, which must be refused and recorded in the unit's own fault registers. cargo xtask blk — three boots with the requester's descriptor written by a driver component, user/virtio-blk, out of a Reach the frame answered its client's registration with: one carries a sector out and back through a ring byte for byte, one withdraws the client's page from the driver's domain between the write and the read (RFC 0024's reclaim, which is the frame's property), and one has the driver add a frame to the address it was answered before writing it into a descriptor and requires the unit to fault at the address the driver invented — which is the only one of the five that is a driver reaching outside its grant rather than a grant being taken away under a driver. All five halves also require the frame to refuse a device translation for a capability carrying no GRANT"
 cadence = ["every-pr"]
 status  = "partially"
-notes   = "E1-B02 made the requester a driver component's own descriptor rather than the frame's adversary: user/virtio-blk writes it out of a Reach the frame answered its client's registration with. cargo xtask blk escape is the clause itself — the component's own arithmetic produces an address it was never granted and the unit faults it there, with Report::verdict requiring that the provocation ran; cargo xtask blk outside is the neighbouring property, a translation withdrawn under a correct descriptor. What is still not true is that the driver's code executes at ring 3 — nothing schedules a component until E1-B08, so the frame calls it — so these boots establish the descriptor's provenance and the unit's refusal, and not the privilege level of the code that built the descriptor. RFC 0033 records that deferral with a date. Both commands are jobs in ci.yml, beside each other, so all five halves keep the cadence this row claims."
+notes   = "E1-B02 made the requester a driver component's own descriptor rather than the frame's adversary: user/virtio-blk writes it out of a Reach the frame answered its client's registration with. cargo xtask blk escape is the clause itself — the component's own arithmetic produces an address it was never granted and the unit faults it there, with Report::verdict requiring that the provocation ran; cargo xtask blk outside is the neighbouring property, a translation withdrawn under a correct descriptor. What is still not true is that the driver's code executes at ring 3 — E1-B08 landed the scheduling half and a component does now run at ring 3 with its own polling loop, but nothing routes a device into a spawned component's address space, so the frame calls this one — so these boots establish the descriptor's provenance and the unit's refusal, and not the privilege level of the code that built the descriptor. RFC 0033 records that deferral with a date. Both commands are jobs in ci.yml, beside each other, so all five halves keep the cadence this row claims."
 scheduled_by = ["E1-B08"]
 
 # --- D — memory ---------------------------------------------------------------
@@ -438,6 +439,16 @@ accepted_because = "Tracked by design. Nothing in the thesis rests on boot time 
 reversal = "Boot time becomes an argument in any document, at which point it needs an owner and a gate."
 
 [[row]]
+id      = "uncounted-kernel-entry"
+group   = "E"
+class   = "A kernel entry on the hot path that nobody counted"
+layers  = ["L5", "P"]
+check   = "cargo xtask runtime — four boots. load requires zero door calls and zero ring-3 faults across sixteen thousand work items a component scheduled inside its own allocation. provoke runs the same load with one crossing on purpose and requires the frame's count and the component's own count to be non-zero and equal, taken on opposite sides of the boundary, so a build that stopped counting publishes zero twice and fails. reclaim posts RFC 0008's notice from the timer handler under load and requires parking at an allocation boundary within one quantum with the runtime's own queue empty, drained by the frame rather than believed, and rings this core's doorbell as the notice goes out so the non-timer interrupt bucket is a number a boot can move. hostile scribbles the control ring header before entry and requires a structured refusal rather than belief. All five buckets are published as state::node::RUNTIME_HOT, RUNTIME_PROVOKED, RUNTIME_BOUNDARY, RUNTIME_TICKS and RUNTIME_INTERRUPTS"
+cadence = ["every-pr"]
+status  = "catches"
+notes   = "The row exists because the check shipped incomplete, and that is the more useful half of it. Four buckets were counted while interrupt_dispatch handled the shootdown, the doorbell and the spurious vector without reading the saved code selector at all, so each of those taken at ring 3 was a kernel entry in no bucket — neither on the hot path nor excluded from it — while RFC 0038 said nothing else is excluded. Nothing went red: the demonstration's boot processor only waits while the runtime runs and issues none of the three, and the blk, cap and user boots that do issue shootdowns publish no entry counts. Two bounds on what this row claims. The counters are armed on every process this kernel builds, but what is asserted about them is asserted on four boots; entries-per-operation with a baseline is E1-P10's. And the reclaim half's greenness depends on a ring-3 timer tick landing between a quarter of the load and the end of it, which holds under QEMU and may not on hardware — the failure mode is red rather than falsely green, and the bound is written on kernel::runtime::RECLAIM_AFTER_ITEMS."
+
+[[row]]
 id      = "small-regression"
 group   = "E"
 class   = "A regression too small for a threshold"
@@ -493,10 +504,10 @@ id      = "sim-site-never-exercised"
 group   = "F"
 class   = "A fault-injection site that is never exercised"
 layers  = ["L1"]
-check   = "the site table is fixed at sixteen and overflow is counted and reported rather than dropped"
+check   = "f_sim::fault requires every class to have a scenario, every armed scenario to strike at three seeds, and every class to be declared by a protocol that reads it — an arming a device would ignore never fires and fails the second check; ring/tests/faults.rs requires each of its three sites to be injected at; env/src/sim.rs counts and reports sites past its fixed table rather than dropping them"
 cadence = ["every-verify", "every-pr"]
-status  = "partially"
-scheduled_by = ["E1-P02", "E1-P03"]
+status  = "catches"
+notes   = "E1-P02. Three ways a site goes unexercised, all three red rather than quiet: a class with no scenario fails a test, a scenario whose class never fires fails a test, and a class armed against a protocol that never reads it cannot strike at all — Protocol::HONOURS gates the consultation, so the arming fails the second check instead of recording a strike that changed nothing."
 
 [[row]]
 id      = "allowlist-in-same-diff"

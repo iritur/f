@@ -41,12 +41,29 @@
 
 #![no_std]
 
+pub mod report;
+
 // The component half is x86-64's, and only because the door is. Nothing in
 // `component.rs` is architecture-specific; the one instruction underneath it is,
 // and `f_abi::door::call` is compiled only where there is a frame to call. The
 // same gate `user/init` has, with the same reversal: an AArch64 frame.
-#[cfg(target_arch = "x86_64")]
+//
+// The second gate is the `image` feature, and it is off in exactly one place:
+// the frame, which links this crate as a library so that it and this component
+// agree about [`report`] rather than each holding a copy of the encoding. A
+// `#[panic_handler]` is a lang item and there may be one per linked artefact,
+// so the module carrying this component's would otherwise collide with the
+// frame's own. `user/store/Cargo.toml` states the reversal. The arrangement is
+// `user/virtio-blk`'s, one crate over, for a different reason and with a
+// different reversal — which is worth noticing rather than generalising.
+#[cfg(all(target_arch = "x86_64", feature = "image"))]
 pub mod component;
+
+// The runtime this component becomes when it is entered with `report::RUN`. It
+// is the image's, for the same two reasons: it calls the door, and it is only
+// ever reached from `component::start`.
+#[cfg(all(target_arch = "x86_64", feature = "image"))]
+pub mod runtime;
 
 #[cfg(test)]
 mod tests {

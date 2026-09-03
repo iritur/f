@@ -525,6 +525,60 @@ impl Grade {
     }
 }
 
+/// A reclaim, which is the one notice that is not about a capability.
+///
+/// # Why it needs a module and the other six do not
+///
+/// Because its subject is not in a table. The five notices about a slot, a
+/// deadline or a peer all name something the component *holds*, and a handle is
+/// what names one; a core is capacity the component was *allocated*, and RFC
+/// 0008 puts the pending state for it beside the allocation rather than in the
+/// table for exactly that reason. So the entry reads differently, and reading
+/// it differently in two places is how two implementations end up disagreeing
+/// about which field the core was in.
+///
+/// **One notice per core, never one for several.** Reclaiming core 3 and then
+/// core 7 before a runtime drains is two facts, and neither may displace the
+/// other: a runtime told only about core 7 parks core 7 and is preempted
+/// mid-task on core 3, which is the outcome the notice exists to prevent.
+pub mod reclaim {
+    use crate::Cqe;
+
+    /// The entry that says a core is leaving an allocation at a deadline.
+    ///
+    /// `core` is a core index and `deadline` is monotonic nanoseconds in the
+    /// control channel's epoch — the same clock and epoch as
+    /// [`crate::Sqe::deadline`], which RFC 0009 governs.
+    #[must_use]
+    pub const fn entry(core: u32, deadline: u64, timestamp: u64) -> Cqe {
+        super::entry(super::notice::RECLAIM, core as u64, deadline, timestamp)
+    }
+
+    /// Which core is being taken back.
+    ///
+    /// Answers `None` for an entry that is not a reclaim, so a reader that
+    /// matched the wrong kind gets nothing rather than a core index invented
+    /// out of a handle. R04.
+    /// Unit: none — a core index.
+    #[must_use]
+    pub const fn core(cqe: &Cqe) -> Option<u32> {
+        if !super::is_notice(cqe) || cqe.result != super::notice::RECLAIM {
+            return None;
+        }
+        Some(cqe.user_data as u32)
+    }
+
+    /// By when the work on it must be parked.
+    /// Unit: nanoseconds, monotonic, in the control channel's epoch.
+    #[must_use]
+    pub const fn deadline(cqe: &Cqe) -> Option<u64> {
+        if !super::is_notice(cqe) || cqe.result != super::notice::RECLAIM {
+            return None;
+        }
+        Some(cqe.ext)
+    }
+}
+
 /// Build the completion entry that carries one notice.
 ///
 /// One constructor, so that the flag, the two readings of `user_data` and the

@@ -28,6 +28,7 @@ use crate::actors::{Client, Service};
 use crate::client::App;
 use crate::deploy::Deployment;
 use crate::dev::{Config, Device};
+use crate::fault::{Class, Injection};
 use crate::native::Native;
 use crate::{ActorId, Message, Outcome, Simulation, Trouble};
 
@@ -82,8 +83,9 @@ pub enum Peer {
     /// service time.
     Native,
     /// **The seam.** Not one peer but a set of them, read from the compiled
-    /// manifest records the boot spawns from — one actor per component, each
-    /// modelled according to the protocol its own record declares.
+    /// manifest records the loader is handed as boot modules — one actor per
+    /// component, each modelled according to the protocol its own record
+    /// declares.
     ///
     /// This is the variant that makes `boot-to-workload` a pair of runs over one
     /// component set rather than two commands that happen to be in one
@@ -169,13 +171,27 @@ pub struct Scenario {
     /// take a buffer back except on evidence that its peer is gone. Ignored by
     /// [`Peer::Queue`] and [`Peer::Native`].
     pub lose_one_in: u32,
+    /// What this scenario breaks, and how often. Unit: see
+    /// [`Injection`](crate::fault::Injection). Empty is a scenario that breaks
+    /// nothing, which is every scenario that shipped before `E1-P02`.
+    ///
+    /// A field rather than a flag on the command line, so that a reproduction
+    /// command stays a scenario's name and a seed. A fault plan reachable only
+    /// from `argv` would make a failing seed an incomplete bug report, which is
+    /// the one thing this apparatus is built not to produce — `fault.rs` argues
+    /// it, RFC 0039 records it, and `E1-P03` is the task that would have paid
+    /// for getting it wrong.
+    pub injects: &'static [Injection],
 }
 
 /// The scenario set.
 ///
-/// Three, and each exists to make a different part of the machinery decide
-/// something. A set where every member exercises the same path is a set of one
-/// wearing three names.
+/// Each member exists to make a different part of the machinery decide
+/// something, and no count is written here because a count in a comment beside
+/// a list is a number that stops matching the list. A set where every member
+/// exercises the same path is a set of one wearing several names — which is why
+/// `net` and `netdrop` are two entries: one link that carries and one that does
+/// not, because for a while the delivery path had no scenario at all.
 pub const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "handshake",
@@ -195,6 +211,7 @@ pub const SCENARIOS: &[Scenario] = &[
         buffer_bytes: 0,
         extent: 0,
         lose_one_in: 0,
+        injects: &[],
     },
     Scenario {
         name: "contention",
@@ -212,6 +229,7 @@ pub const SCENARIOS: &[Scenario] = &[
         buffer_bytes: 0,
         extent: 0,
         lose_one_in: 0,
+        injects: &[],
     },
     Scenario {
         name: "pipeline",
@@ -227,6 +245,7 @@ pub const SCENARIOS: &[Scenario] = &[
         buffer_bytes: 0,
         extent: 0,
         lose_one_in: 0,
+        injects: &[],
     },
     Scenario {
         name: "blk",
@@ -247,6 +266,7 @@ pub const SCENARIOS: &[Scenario] = &[
         // own refusal stays out of the way and what varies is the ordering.
         extent: 4_096,
         lose_one_in: 0,
+        injects: &[],
     },
     Scenario {
         name: "blkfull",
@@ -266,6 +286,7 @@ pub const SCENARIOS: &[Scenario] = &[
         buffer_bytes: 512,
         extent: 4_096,
         lose_one_in: 0,
+        injects: &[],
     },
     Scenario {
         name: "blkloss",
@@ -285,10 +306,33 @@ pub const SCENARIOS: &[Scenario] = &[
         // in one seed of fifty is a fault path a sweep pays for and rarely
         // gets.
         lose_one_in: 3,
+        injects: &[],
     },
     Scenario {
         name: "net",
-        what: "a link that carries some frames and silently drops the rest",
+        what: "a link that carries every frame — the delivery path, which is not the quiet one",
+        peer: Peer::Net,
+        clients: 2,
+        window: 4,
+        depth: 8,
+        operations: 12,
+        service_ns: 200,
+        spread_ns: 400,
+        retry_ns: 2_000,
+        buffer_bytes: 1_024,
+        // Bytes of frame, header included, and comfortably above the 1 036 a
+        // full buffer needs. This scenario exists because the shipped one did
+        // not: `net` used to be the dropping scenario, so `Net::serve`'s
+        // delivery path ran in a unit test and in no scenario at all, and a
+        // regression that broke frame delivery would have moved no digest.
+        // `netdrop` below is the case that was here, kept and named.
+        extent: 4_096,
+        lose_one_in: 0,
+        injects: &[],
+    },
+    Scenario {
+        name: "netdrop",
+        what: "a link every frame is too long for, dropping them where nothing can say so",
         peer: Peer::Net,
         clients: 2,
         window: 4,
@@ -304,6 +348,7 @@ pub const SCENARIOS: &[Scenario] = &[
         // device. `net.rs` is where that is argued.
         extent: 512,
         lose_one_in: 0,
+        injects: &[],
     },
     Scenario {
         name: "gpu",
@@ -323,10 +368,11 @@ pub const SCENARIOS: &[Scenario] = &[
         // shape of failure a device model is for.
         extent: 2,
         lose_one_in: 0,
+        injects: &[],
     },
     Scenario {
         name: "deployment",
-        what: "the component set the boot spawns, one client each — the boot-to-workload seam",
+        what: "every compiled component the build produced, one client each — the seam's half",
         peer: Peer::Deployment,
         // One client per component, and the *count* comes from the deployment
         // rather than from here: a virtqueue has one driver, and how many
@@ -347,6 +393,7 @@ pub const SCENARIOS: &[Scenario] = &[
         // the refusals have scenarios of their own above.
         extent: 4_096,
         lose_one_in: 0,
+        injects: &[],
     },
     Scenario {
         name: "native",
@@ -362,6 +409,163 @@ pub const SCENARIOS: &[Scenario] = &[
         buffer_bytes: 512,
         extent: 0,
         lose_one_in: 0,
+        injects: &[],
+    },
+    // ---- E1-P02: one scenario per fault class ------------------------------
+    //
+    // Seven entries, one per class in [`crate::fault::Class`], and the pairing
+    // is checked rather than trusted — `fault::tests::every_class_has_a_scenario`
+    // holds the set against this table. Each one names its class in `what`, so a
+    // reader of `--list` sees the seven classes rather than seven scenario names
+    // they have to look up.
+    //
+    // All seven point at [`Peer::Blk`] and none of them is arbitrary about it.
+    // The block device is the detailed model — a three-descriptor chain, a
+    // status byte the driver writes `0xFF` into first, and an address decode —
+    // and four of the seven classes are only observable through one of those.
+    // A class whose response is asserted against a queue with a delay would be a
+    // class asserted against the harness.
+    Scenario {
+        name: "alloc",
+        what: "allocation failure — the frame refuses a component the memory it registered for",
+        peer: Peer::Blk,
+        // Two, and this is the field the assertion turns on: an allocation
+        // failure is *one component's*, so the run has to contain a component it
+        // did not happen to. One client would make "contained" unfalsifiable.
+        clients: 2,
+        window: 4,
+        depth: 8,
+        operations: 12,
+        service_ns: 400,
+        spread_ns: 600,
+        retry_ns: 2_000,
+        buffer_bytes: 512,
+        extent: 4_096,
+        lose_one_in: 0,
+        // The second registration, whichever client's that turns out to be —
+        // the seed chooses which of the two channels goes first, so the class is
+        // aimed at an occurrence and not at a component. `after: 0` would refuse
+        // whoever happened to be first, which is a scenario about the timeline.
+        injects: &[Injection { class: Class::Alloc, after: 1, one_in: 1 }],
+    },
+    Scenario {
+        name: "mapfault",
+        what: "translation fault — a descriptor the device's domain declines to translate",
+        peer: Peer::Blk,
+        clients: 1,
+        window: 4,
+        depth: 8,
+        operations: 12,
+        service_ns: 400,
+        spread_ns: 600,
+        retry_ns: 2_000,
+        buffer_bytes: 512,
+        // Larger than anything asked for, so the only refusal in this run is the
+        // injected one. A disk that also refused on its own terms would make the
+        // count the assertion rests on ambiguous.
+        extent: 4_096,
+        lose_one_in: 0,
+        // One in two rather than every one, so the run contains both answers:
+        // requests whose translation held completed, and the rest were refused.
+        // A scenario where everything faults cannot show that the refusal was
+        // confined to the requests it struck.
+        injects: &[Injection { class: Class::MapFault, after: 1, one_in: 2 }],
+    },
+    Scenario {
+        name: "faultin",
+        what: "device page-fault latency — a translation that was there and took far longer",
+        peer: Peer::Blk,
+        clients: 1,
+        window: 4,
+        depth: 8,
+        operations: 10,
+        service_ns: 400,
+        spread_ns: 600,
+        retry_ns: 2_000,
+        buffer_bytes: 512,
+        extent: 4_096,
+        lose_one_in: 0,
+        // Every transfer, because the assertion is that the run finished later
+        // and nothing else moved — and *later* has to be a consequence of the
+        // class rather than of which requests a seed happened to strike.
+        injects: &[Injection { class: Class::FaultIn, after: 0, one_in: 1 }],
+    },
+    Scenario {
+        name: "peergone",
+        what: "peer death mid-operation — a device that stops with work still outstanding",
+        peer: Peer::Blk,
+        clients: 1,
+        window: 4,
+        depth: 8,
+        operations: 12,
+        service_ns: 400,
+        spread_ns: 600,
+        retry_ns: 2_000,
+        buffer_bytes: 512,
+        extent: 4_096,
+        lose_one_in: 0,
+        // The fourth completion the device was about to publish, so that the
+        // word *mid-operation* means something: a peer that died on its first is
+        // a peer that died with nothing out, and the buffers-come-home assertion
+        // would hold over an empty set.
+        injects: &[Injection { class: Class::PeerGone, after: 3, one_in: 1 }],
+    },
+    Scenario {
+        name: "doorbell",
+        what: "torn doorbell — a bell rung with no entry behind it, half the pair of stores",
+        peer: Peer::Blk,
+        clients: 1,
+        window: 4,
+        // Deep enough that nothing is ever refused: the assertion is exactly-once
+        // over the tokens, and a retry re-submits a token, so a run with
+        // back-pressure in it would be a run where a repeat is legitimate.
+        depth: 8,
+        operations: 12,
+        service_ns: 400,
+        spread_ns: 600,
+        retry_ns: 2_000,
+        buffer_bytes: 512,
+        extent: 4_096,
+        lose_one_in: 0,
+        injects: &[Injection { class: Class::Doorbell, after: 0, one_in: 2 }],
+    },
+    Scenario {
+        name: "partial",
+        what: "partial write — the payload landed and the device's status byte did not",
+        peer: Peer::Blk,
+        clients: 1,
+        window: 4,
+        depth: 8,
+        operations: 12,
+        service_ns: 400,
+        spread_ns: 600,
+        retry_ns: 2_000,
+        buffer_bytes: 512,
+        extent: 4_096,
+        lose_one_in: 0,
+        // One in two, for `mapfault`'s reason: the run has to hold transfers
+        // that completed beside the ones that were torn, or the assertion cannot
+        // tell a class that refuses what it struck from a device that is off.
+        injects: &[Injection { class: Class::Partial, after: 1, one_in: 2 }],
+    },
+    Scenario {
+        name: "latecqe",
+        what: "delayed completion — the device finished and the driver was told late",
+        peer: Peer::Blk,
+        clients: 1,
+        window: 4,
+        depth: 8,
+        operations: 10,
+        service_ns: 400,
+        spread_ns: 600,
+        retry_ns: 2_000,
+        buffer_bytes: 512,
+        extent: 4_096,
+        lose_one_in: 0,
+        // Every completion, for `faultin`'s reason. The two together are the
+        // pair `E1-P06`'s exit will quote — *no client observes anything except
+        // added latency* — approached from before the work and from after it.
+        injects: &[Injection { class: Class::LateCqe, after: 0, one_in: 1 }],
     },
 ];
 
@@ -415,6 +619,10 @@ impl Scenario {
         if self.peer == Peer::Deployment && deployment.is_empty() {
             return Err(Trouble::NeedsDeployment);
         }
+        // Armed before anything is installed, so a class is armed for the whole
+        // run or for none of it. `fault.rs` says why there is no way to arm one
+        // part-way through.
+        sim.world().arm(self.injects);
         self.cover(&mut sim, deployment);
         let clients = match self.peer {
             Peer::Queue => self.install_queue(&mut sim),
@@ -444,12 +652,34 @@ impl Scenario {
     /// wording is RFC 0032's decision in the artefact's own bytes: an exit
     /// criterion answered by two commands owes every artefact the sentence
     /// saying which of the two it is.
+    ///
+    /// The deployment header names the components **the build produced**, which
+    /// is what this half of the pair covers, and says so in those words. It
+    /// used to say *the component set the boot spawns*, which was a claim about
+    /// the other half that nothing here can see: a boot instantiates whatever
+    /// the frame instantiates, and today that is the first module only.
+    /// `cargo xtask sim --join` is where the two sets are compared and where
+    /// the difference is declared. RFC 0036.
     fn cover(&self, sim: &mut Simulation, deployment: &Deployment) {
         let world = sim.world();
         for line in COVERS {
             world.cover(line);
         }
         world.cover(&format!("scenario    {}", self.name));
+        // What was broken, in the hashed bytes. An artefact that did not say it
+        // was produced under injection would be quoted later as a clean run —
+        // the same failure the coverage header above exists to prevent, one
+        // level down. The plan and not the strikes: the header is written before
+        // the run and states what was set up, and what actually struck is in the
+        // `fault` records the run wrote.
+        for injection in self.injects {
+            world.cover(&format!(
+                "injects     {} — one consultation in {}, after the first {}",
+                injection.class.label(),
+                injection.one_in,
+                injection.after
+            ));
+        }
         if self.peer != Peer::Deployment {
             return;
         }
@@ -457,13 +687,19 @@ impl Scenario {
             "from        {} compiled manifest record(s), read as the frame reads them",
             deployment.len()
         ));
+        world.cover(
+            "which boot  whichever of them a boot instantiates is the boot's half and is not",
+        );
+        world.cover(
+            "            asserted here: `cargo xtask sim --join` compares the two. RFC 0036",
+        );
         for component in deployment.components() {
             world.cover(&component.cover());
         }
     }
 
-    /// One actor per component the boot spawns, each modelled as its own record
-    /// says.
+    /// One actor per component the loader is handed, each modelled as its own
+    /// record says.
     ///
     /// **This is the join.** Everything about the shape of the run below comes
     /// out of a compiled record: how many components there are, what each one is
@@ -729,7 +965,11 @@ mod tests {
             // A disk's extent is only visible when a request runs past it, so it
             // is moved to a value that refuses rather than by one.
             ("extent (blk)", "blk", |s| s.extent = 1),
-            ("extent (net)", "net", |s| s.extent = 4_096),
+            // Down from a link that carries every frame to one nothing fits
+            // through, which is the difference `net` and `netdrop` ship as two
+            // scenarios: the label the device writes changes, and the digest
+            // with it.
+            ("extent (net)", "net", |s| s.extent = 512),
             ("extent (gpu)", "gpu", |s| s.extent += 1),
             // Turned off rather than nudged: a rate of three and a rate of four
             // can lose the same completion, because both are one draw reduced
@@ -737,6 +977,12 @@ mod tests {
             // that a nudge is not evidence. Off against on is.
             ("lose_one_in", "blkloss", |s| s.lose_one_in = 0),
             ("peer", "blk", |s| s.peer = Peer::Native),
+            // Armed rather than nudged, for `lose_one_in`'s reason and one more:
+            // a scenario with an empty plan consults every class and strikes at
+            // none, so the only move that says the field is read is arming one.
+            ("injects", "blk", |s| {
+                s.injects = &[Injection { class: Class::LateCqe, after: 0, one_in: 1 }];
+            }),
         ];
 
         for (what, from, moved) in cases {
@@ -926,13 +1172,100 @@ mod tests {
     }
 
     #[test]
+    fn the_lowest_address_on_a_disk_is_reachable_and_a_retry_does_not_move() {
+        // Two properties of one number, and both were false until the client
+        // stopped deriving an operation's position from its issue counter.
+        //
+        // A disk one sector long serves exactly the request at sector zero and
+        // refuses every other, so the count below is the whole test: it was
+        // zero when the first request landed at sector one, which meant the
+        // lowest address on every modelled disk in this crate was unreachable
+        // and no scenario could have said so.
+        //
+        // The second property is the one a device would notice. A token refused
+        // for `RESOURCE` is submitted again, and a request that moved between
+        // attempts is a request no driver makes — so no token may appear both
+        // served and refused by the disk. That cannot be arranged by a
+        // scenario: it is a consequence of the position being the token's
+        // rather than the clock's.
+        let mut scenario = base("blk");
+        scenario.clients = 1;
+        scenario.window = 4;
+        // One sector, and a depth of one so that the refusal-and-retry path
+        // runs against it: both properties are read out of the same run.
+        scenario.extent = 1;
+        scenario.depth = 1;
+        scenario.operations = 6;
+
+        for seed in [DEFAULT_SEED, 4, 0xC0FFEE] {
+            let outcome = scenario.run(seed).expect("terminates");
+            let of = |kind: &'static str| {
+                outcome
+                    .trace
+                    .records()
+                    .iter()
+                    .filter(|record| record.actor == crate::blk::Blk::NAME)
+                    .filter(move |record| record.kind == kind)
+                    .map(|record| record.token)
+                    .collect::<Vec<_>>()
+            };
+            let served = of(crate::proto::wrote::SERVED);
+            let refused = of(crate::proto::wrote::IOERR);
+            assert!(
+                !served.is_empty(),
+                "seed {seed:#018x}: a disk of one sector served nothing, so sector zero is \
+                 still out of reach"
+            );
+            assert!(
+                !refused.is_empty(),
+                "seed {seed:#018x}: nothing ran past the end of a one-sector disk, so the \
+                 comparison below is over one outcome"
+            );
+            assert!(
+                served.iter().all(|token| !refused.contains(token)),
+                "seed {seed:#018x}: a token was served on one attempt and refused on \
+                 another, so its sector moved between them"
+            );
+        }
+    }
+
+    #[test]
+    fn a_link_carries_its_frames_and_the_scenario_set_shows_it() {
+        // The gap this pair of scenarios closed. `net` used to be the dropping
+        // scenario, so `Net::serve`'s *delivery* path had a unit test in
+        // `net.rs` and no scenario at all — nothing in any digest reached it,
+        // and a regression that stopped frames being delivered would have moved
+        // no hash in the suite. This is the delivery path with a scenario
+        // behind it.
+        let scenario = base("net");
+        let outcome = scenario.run(DEFAULT_SEED).expect("terminates");
+        assert!(
+            count(&outcome, crate::net::Net::NAME, crate::proto::wrote::SERVED) > 0,
+            "the link carried nothing, so the delivery path is unexercised again"
+        );
+        assert_eq!(
+            count(&outcome, crate::net::Net::NAME, crate::proto::wrote::LINKDOWN),
+            0,
+            "a frame that fits was dropped"
+        );
+        // And the client cannot tell the difference from the dropping scenario,
+        // which is the whole point of the device: same completion count, same
+        // silence.
+        assert_eq!(
+            count(&outcome, crate::client::App::NAME, crate::proto::wrote::DONE),
+            (scenario.clients * scenario.operations) as usize,
+            "a delivered frame reached the client as something other than a completion"
+        );
+    }
+
+    #[test]
     fn a_link_that_drops_every_frame_tells_its_client_nothing() {
         // A transmit queue has no status byte, no response header and a used
         // length of zero, so a dropped frame and a delivered one are the same
         // completion. It reads like a bug in the model and it is the protocol —
         // and a client that expects to hear about a drop has a bug only silence
         // can find. `net.rs` argues it; this is it happening end to end.
-        let scenario = base("net");
+        let scenario = base("netdrop");
         let outcome = scenario.run(DEFAULT_SEED).expect("terminates");
         assert!(
             count(&outcome, crate::net::Net::NAME, crate::proto::wrote::LINKDOWN) > 0,
