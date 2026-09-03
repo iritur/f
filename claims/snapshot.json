@@ -3,6 +3,9 @@
     { "name": "ring-submit-latency", "status": "pending", "milestone": "M5", "file": "claims/0001-ring-submit-latency.toml" },
     { "name": "timer-jitter", "status": "pending", "milestone": "M2", "file": "claims/0002-timer-jitter.toml" },
     { "name": "boot-to-m0", "status": "tracked", "milestone": "M0", "file": "claims/0003-boot-to-m0.toml" },
-    { "name": "buffer-registration-cost", "status": "pending", "milestone": "E1", "file": "claims/0004-buffer-registration-cost.toml" }
+    { "name": "buffer-registration-cost", "status": "pending", "milestone": "E1", "file": "claims/0004-buffer-registration-cost.toml" },
+    { "name": "driver-restart-blast-radius", "status": "gating", "milestone": "E1", "file": "claims/0005-driver-restart-blast-radius.toml" },
+    { "name": "driver-restart-latency", "status": "pending", "milestone": "E1", "file": "claims/0006-driver-restart-latency.toml" },
+    { "name": "snapshot-re-entry-saving", "status": "pending", "milestone": "E1", "file": "claims/0007-snapshot-re-entry-saving.toml" }
   ]
 }

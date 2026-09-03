@@ -64,7 +64,11 @@ pub mod kind {
 }
 
 /// What an actor writes into the trace.
-mod wrote {
+///
+/// Public because `snap::LABELS` has to name every label a run can put in a
+/// record, and a label reachable only from inside this file is a label a
+/// snapshot cannot write. See that table for why one list rather than several.
+pub mod wrote {
     /// A client put an operation on the wire.
     pub const ISSUE: &str = "issue";
     /// A client was refused and will try again.
@@ -146,6 +150,35 @@ impl Client {
         }
     }
 
+    /// Write this client out, tag first. Eight numbers and no ownership types,
+    /// which is the whole difference between stage one's client and
+    /// [`crate::client::App`].
+    pub(crate) fn save(&self, out: &mut crate::snap::Writer) {
+        out.u32(crate::snap::tag::CLIENT);
+        out.u32(self.who);
+        out.u32(self.service.0);
+        out.u32(self.window);
+        out.u32(self.operations);
+        out.u64(self.retry_ns);
+        out.u32(self.issued);
+        out.u32(self.outstanding);
+        out.u32(self.completed);
+    }
+
+    /// Read one back.
+    pub(crate) fn load(input: &mut crate::snap::Reader<'_>) -> Self {
+        let who = input.u32();
+        let service = ActorId(input.u32());
+        let window = input.u32();
+        let operations = input.u32();
+        let retry_ns = input.u64();
+        let mut client = Self::new(who, service, window, operations, retry_ns);
+        client.issued = input.u32();
+        client.outstanding = input.u32();
+        client.completed = input.u32();
+        client
+    }
+
     /// Put one operation on the wire. Used by [`Client::pump`] for a new
     /// operation and by the retry path for one the service had no room for.
     fn issue(&mut self, world: &mut World, me: ActorId, token: u64) {
@@ -193,6 +226,11 @@ impl Actor for Client {
             other => world.record(me, Self::NAME, other, message.token, u64::MAX),
         }
     }
+
+    fn save(&self, out: &mut crate::snap::Writer) -> Result<(), crate::snap::Broken> {
+        Self::save(self, out);
+        Ok(())
+    }
 }
 
 /// A single-server queue with a depth, a service time and an order the seed
@@ -215,6 +253,48 @@ impl Service {
     #[must_use]
     pub fn new(depth: u32, base_ns: u64, spread_ns: u64) -> Self {
         Self { depth: depth.max(1), base_ns, spread_ns, queued: Vec::new(), busy: false }
+    }
+
+    /// Write this service out, tag first.
+    ///
+    /// The queue travels in arrival order, which is the order [`Service::begin`]
+    /// hands to `World::decide` as the list it indexes into — the same reason
+    /// `dev.rs` removes a job with `remove` and not `swap_remove`. A snapshot
+    /// that reordered it would restore a service whose next seeded choice picked
+    /// a different operation, and the divergence would be silent.
+    pub(crate) fn save(&self, out: &mut crate::snap::Writer) {
+        out.u32(crate::snap::tag::SERVICE);
+        out.u32(self.depth);
+        out.u64(self.base_ns);
+        out.u64(self.spread_ns);
+        out.bool(self.busy);
+        out.count(self.queued.len());
+        for (client, token) in &self.queued {
+            out.u32(client.0);
+            out.u64(*token);
+        }
+    }
+
+    /// Read one back.
+    pub(crate) fn load(input: &mut crate::snap::Reader<'_>) -> Self {
+        // Refused rather than left for `Service::new` to clamp, for the reason
+        // `service::Grants::load` states at length: a clamp is a repair, and a
+        // repaired file restores into a world that is plausible and is not the
+        // one the file described.
+        let depth = input.u32();
+        if depth == 0 {
+            input.refuse(crate::snap::Broken::Bounds("a service that would hold no operation"));
+        }
+        let base_ns = input.u64();
+        let spread_ns = input.u64();
+        let mut service = Self::new(depth, base_ns, spread_ns);
+        service.busy = input.bool();
+        let count = input.count(12, "more queued operations than the file could hold");
+        service.queued = Vec::with_capacity(count);
+        for _ in 0..count {
+            service.queued.push((ActorId(input.u32()), input.u64()));
+        }
+        service
     }
 
     /// Take one queued operation and begin it.
@@ -299,6 +379,11 @@ impl Actor for Service {
             }
             other => world.record(me, Self::NAME, other, message.token, u64::MAX),
         }
+    }
+
+    fn save(&self, out: &mut crate::snap::Writer) -> Result<(), crate::snap::Broken> {
+        Self::save(self, out);
+        Ok(())
     }
 }
 

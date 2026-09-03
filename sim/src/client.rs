@@ -54,7 +54,7 @@ use std::collections::VecDeque;
 
 use f_abi::{ABI_VERSION, Cqe, Negotiated, Sqe, error};
 use f_ring::RingError;
-use f_ring::buffers::{BufferSet, Fixed, Idle, InFlight, PeerGone, Refused};
+use f_ring::buffers::{BufferSet, Fixed, Idle, InFlight, PeerGone, Refused, Submitter};
 use f_ring::registry::registration;
 
 use crate::fault::Class;
@@ -72,6 +72,28 @@ use crate::{Actor, ActorId, Message, World};
 /// keeps outstanding — which is the number that decides how much reordering a
 /// device is entitled to.
 pub const BUFFERS: usize = 8;
+
+/// The widest buffer a snapshot may claim a client had. Unit: bytes.
+///
+/// Not a limit on the model — [`App::new`] takes whatever a scenario asks for,
+/// and a scenario is compiled-in source rather than a file. This is a limit on
+/// what [`App::load`] will believe, because that number arrives from a file
+/// nothing in this process wrote and is immediately multiplied by [`BUFFERS`]
+/// and handed to an allocator. A `u32` that is one bit different from `512`
+/// asks for four gigabytes, and an allocation nobody survives is not a refusal:
+/// it is the process dying with a message about `alloc`, which is exactly the
+/// *misread rather than refused* R04 forbids.
+///
+/// Sixty-four kilobytes, which is a hundred and twenty-eight times the widest
+/// buffer any shipped scenario asks for and half a megabyte once carved.
+/// [`tests::no_scenario_asks_for_a_buffer_a_snapshot_would_refuse`] is what
+/// keeps the two facts in agreement, so the day a scenario wants a wider buffer
+/// than this the *test* says so rather than a restore refusing a file that was
+/// perfectly good.
+///
+/// *Reversal:* raise it, with that test as the reason. It exists to separate
+/// *large* from *impossible*, not to police a scenario.
+pub const MAX_BUFFER_BYTES: u32 = 64 * 1024;
 
 /// The sequence number the registration's token carries.
 ///
@@ -154,6 +176,197 @@ impl App {
             completed: 0,
             ended: false,
         }
+    }
+
+    /// Write this client out, tag first.
+    ///
+    /// # The awkward half, and why it is the honest one
+    ///
+    /// Everything above `naming` is a number. Below it are `f_ring::buffers`
+    /// types, and those cannot be copied: an [`Idle`] borrows the set it was
+    /// carved from, an [`InFlight`] has a drop bomb, and neither has a
+    /// constructor a caller can reach. That is RFC 0024 working — *writing an id
+    /// down should not be the shortest path to a naming* — and a snapshot is not
+    /// an exception to it.
+    ///
+    /// So what travels is the **name** of each buffer and the token it is out
+    /// under, and [`App::load`] puts them back by doing what this client did:
+    /// binding the set, carving it, and submitting. Nothing here fabricates an
+    /// ownership type, and a restored client's buffers are as real as the ones
+    /// it had.
+    ///
+    /// The buffers' *bytes* are not written and do not need to be. The only byte
+    /// this client cares about is the pattern it stamps before lending, it
+    /// stamps it again on every submission, and [`App::load`] stamps it for
+    /// every buffer that is out — so the one thing `reap` reads back is exactly
+    /// what it would have read. A model that wrote into a client's data buffer
+    /// would change that, and `check::intact` is the property that would notice;
+    /// RFC 0043 records the dependency rather than leaving it implicit.
+    pub(crate) fn save(&self, out: &mut crate::snap::Writer) {
+        out.u32(crate::snap::tag::APP);
+        out.u32(self.who);
+        out.u32(self.peer.0);
+        out.u32(self.window);
+        out.u32(self.operations);
+        out.u64(self.retry_ns);
+        out.u32(self.buffer_bytes);
+        out.u32(self.depth);
+        out.bool(self.naming.is_some());
+        out.u32(self.naming.map_or(0, |naming| naming.set().bits()));
+        out.count(self.idle.len());
+        for buffer in &self.idle {
+            out.u32(buffer.index());
+        }
+        out.count(self.flight.len());
+        for lent in &self.flight {
+            out.u32(lent.index());
+            out.u64(lent.token());
+        }
+        out.count(self.pending.len());
+        for token in &self.pending {
+            out.u64(*token);
+        }
+        out.u32(self.issued);
+        out.u32(self.completed);
+        out.bool(self.ended);
+    }
+
+    /// Read one back, rebuilding its buffer set the way it was built.
+    pub(crate) fn load(input: &mut crate::snap::Reader<'_>) -> Self {
+        let who = input.u32();
+        let peer = ActorId(input.u32());
+        let window = input.u32();
+        // `App::new` clamps a window to the set, so a saved one is always
+        // between one and `BUFFERS` and a file outside that range is a file this
+        // crate did not write. Refused for the reason the width below is: a
+        // clamp applied on the way in restores a client that keeps a different
+        // number of operations outstanding from the one the file described, and
+        // every seeded decision after the cut would then be taken over a
+        // different set.
+        if window == 0 || window > BUFFERS as u32 {
+            input.refuse(crate::snap::Broken::Bounds("a window no client could have kept"));
+        }
+        let operations = input.u32();
+        let retry_ns = input.u64();
+        let buffer_bytes = input.u32();
+        // Bounded here rather than where it is allocated, because this is the
+        // first moment the value exists and R04 refuses at the boundary the
+        // value crosses. Zero is refused as well as too-large: `App::new`
+        // clamps a zero to one for a scenario that means *the smallest useful
+        // buffer*, and a file is not a scenario — a file saying zero is a file
+        // describing a client this crate cannot have produced, and repairing it
+        // would restore a run nobody had. See [`MAX_BUFFER_BYTES`].
+        if buffer_bytes == 0 || buffer_bytes > MAX_BUFFER_BYTES {
+            input.refuse(crate::snap::Broken::Bounds("a buffer size no scenario can ask for"));
+        }
+        let depth = input.u32();
+        if depth == 0 {
+            // The same asymmetry as `buffer_bytes` above, for the same reason.
+            input.refuse(crate::snap::Broken::Bounds("a client whose wire holds no submission"));
+        }
+        let bound = input.bool();
+        let bits = input.u32();
+        let idle_count = input.count(4, "more idle buffers than the file could hold");
+        let mut idle_at = Vec::with_capacity(idle_count);
+        for _ in 0..idle_count {
+            idle_at.push(input.u32());
+        }
+        let flight_count = input.count(12, "more buffers in flight than the file could hold");
+        let mut flight_at = Vec::with_capacity(flight_count);
+        for _ in 0..flight_count {
+            flight_at.push((input.u32(), input.u64()));
+        }
+        let waiting = input.count(8, "more refused tokens than the file could hold");
+        let mut pending = VecDeque::with_capacity(waiting);
+        for _ in 0..waiting {
+            pending.push_back(input.u64());
+        }
+
+        let mut app = Self::new(who, peer, window, operations, buffer_bytes, retry_ns, depth);
+        app.pending = pending;
+        app.issued = input.u32();
+        app.completed = input.u32();
+        app.ended = input.bool();
+        if !bound || input.faulted() {
+            // A client that never bound a set holds no buffers, which is the
+            // state it is in between `register` and the completion that answers
+            // it. Nothing to rebuild.
+            return app;
+        }
+
+        // A completion carrying the id and nothing else, which is the only door
+        // into `Fixed`. It is the same door the live path uses, and the id came
+        // out of a table that issued it — a restore is not a peer, and this is
+        // not a way to name a set nobody registered.
+        let cqe = Cqe { ext: u64::from(bits), ..Cqe::ZERO };
+        let Ok(naming) = Fixed::from_completion(&cqe) else {
+            input.refuse(crate::snap::Broken::Bounds("a buffer set id nothing could have issued"));
+            return app;
+        };
+        app.naming = Some(naming);
+
+        // `checked_mul` rather than `*`, and a refusal rather than a clamp: the
+        // bound above already rules this out on every path that reaches here, so
+        // this is the second door on the same room. It costs one branch and it
+        // is the difference between a bound that is *stated* and a bound that is
+        // *enforced* — a future edit that moves the check above should fail to
+        // build a run, not silently start trusting the file again.
+        let Some(len) = (app.buffer_bytes as usize).checked_mul(BUFFERS) else {
+            input.refuse(crate::snap::Broken::Bounds("a buffer set larger than memory can hold"));
+            return app;
+        };
+        let region: &'static mut [u8] = Box::leak(vec![0u8; len].into_boxed_slice());
+        let agreed = Negotiated { version: ABI_VERSION, features: 0 };
+        let Ok(set) = BufferSet::bind(naming, agreed, region) else {
+            input.refuse(crate::snap::Broken::Diverged("a buffer set that would not bind again"));
+            return app;
+        };
+        let set: &'static mut BufferSet<'static, Fixed> = Box::leak(Box::new(set));
+        let Ok(buffers) = set.carve::<BUFFERS>() else {
+            input.refuse(crate::snap::Broken::Diverged("a region that would not carve again"));
+            return app;
+        };
+        // `carve` answers buffer `i` at position `i`, so a slot here is named by
+        // the same index the snapshot recorded.
+        let mut slots: Vec<Option<Idle<'static, Fixed>>> = buffers.into_iter().map(Some).collect();
+
+        for (index, token) in flight_at {
+            let Some(mut buffer) = slots.get_mut(index as usize).and_then(Option::take) else {
+                input.refuse(crate::snap::Broken::Bounds("a buffer index outside the set"));
+                return app;
+            };
+            // The pattern this client stamps before lending, stamped again — see
+            // `App::save` for why the rest of the bytes do not travel.
+            if let Some(first) = buffer.bytes_mut().first_mut() {
+                *first = pattern(token);
+            }
+            let entry = Sqe {
+                user_data: token,
+                len: app.buffer_bytes,
+                offset: u64::from(Self::nth(token)),
+                ..Sqe::ZERO
+            };
+            match buffer.submit(&mut Discard, entry) {
+                Ok((lent, _rang)) => app.flight.push(lent),
+                Err((_refused, back)) => {
+                    // Cannot happen — `Discard` never refuses and the length is
+                    // the buffer's own — and handled rather than unwrapped,
+                    // because the buffer coming back has a drop bomb on it and
+                    // an `expect` here would turn a corrupt file into a panic.
+                    slots[index as usize] = Some(back);
+                    input.refuse(crate::snap::Broken::Diverged("a buffer that would not lend"));
+                    return app;
+                }
+            }
+        }
+        for index in idle_at {
+            let Some(buffer) = slots.get_mut(index as usize).and_then(Option::take) else {
+                input.refuse(crate::snap::Broken::Bounds("a buffer index outside the set"));
+                return app;
+            };
+            app.idle.push(buffer);
+        }
+        app
     }
 
     /// The token for this client's `nth` operation.
@@ -498,6 +711,27 @@ impl Actor for App {
             kind::GONE => self.reclaim(world, me),
             other => world.record(me, Self::NAME, other, message.token, u64::MAX),
         }
+    }
+
+    fn save(&self, out: &mut crate::snap::Writer) -> Result<(), crate::snap::Broken> {
+        Self::save(self, out);
+        Ok(())
+    }
+}
+
+/// A [`Submitter`] that takes the entry and does nothing with it.
+///
+/// The one thing [`App::load`] needs that the live path does not: an
+/// [`InFlight`] is made only by [`Idle::submit`], and a restore has to make one
+/// **without** putting a second copy of the entry on a wire that already carries
+/// it. `f_ring::buffers`'s own documentation names this shape — *a test can put
+/// a recorder behind it and exercise the ownership rules with no ring at all* —
+/// and this is that recorder with nothing to record.
+struct Discard;
+
+impl Submitter for Discard {
+    fn submit(&mut self, _entry: Sqe) -> Result<bool, RingError> {
+        Ok(true)
     }
 }
 

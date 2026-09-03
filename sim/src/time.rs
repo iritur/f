@@ -107,6 +107,58 @@ impl Timeline {
         self.scheduled = self.scheduled.saturating_add(1);
     }
 
+    /// When the next message is due, without taking it. Unit: nanoseconds.
+    ///
+    /// `None` when nothing is due, which is the same answer [`Timeline::idle`]
+    /// gives in a different shape. It exists because `E1-P08` places a cut *in
+    /// simulated time* and has to decide whether to stop before a step without
+    /// taking that step — a decision made after the message was taken would be a
+    /// cut in the middle of a step, and there is no such place.
+    #[must_use]
+    pub fn peek(&self) -> Option<u64> {
+        self.due.keys().next().copied()
+    }
+
+    /// Write this timeline out.
+    ///
+    /// Instants outermost and, inside each, the messages in arrival order —
+    /// which is the order [`Timeline::next`] builds its channel list in, so the
+    /// *set of alternatives* a restored run offers the seed is the set the
+    /// original offered. A snapshot that wrote the queue in any other order
+    /// would restore a world where one channel had quietly moved ahead of
+    /// another, and the divergence would begin at the next tie.
+    pub(crate) fn save(&self, out: &mut crate::snap::Writer) {
+        out.u64(self.now);
+        out.u64(self.scheduled);
+        out.count(self.due.len());
+        for (at, queue) in &self.due {
+            out.u64(*at);
+            out.count(queue.len());
+            for pending in queue {
+                crate::snap::write_message(out, pending.to, &pending.message);
+            }
+        }
+    }
+
+    /// Read one back.
+    pub(crate) fn load(input: &mut crate::snap::Reader<'_>) -> Self {
+        let now = input.u64();
+        let scheduled = input.u64();
+        let instants = input.count(12, "more instants than the file could hold");
+        let mut due: BTreeMap<u64, Vec<Pending>> = BTreeMap::new();
+        for _ in 0..instants {
+            let at = input.u64();
+            let count = input.count(28, "more messages at an instant than the file could hold");
+            let mut queue = Vec::with_capacity(count);
+            for _ in 0..count {
+                let (to, message) = crate::snap::read_message(input);
+                queue.push(Pending { to, message });
+            }
+            due.insert(at, queue);
+        }
+        Self { now, due, scheduled }
+    }
+
     /// Take the next message, moving the clock to its instant.
     ///
     /// Returns `None` when nothing is due, which is how a run ends.

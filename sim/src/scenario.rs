@@ -569,10 +569,63 @@ pub const SCENARIOS: &[Scenario] = &[
     },
 ];
 
-/// Find a scenario by name.
+/// The scenarios that are too long to sweep.
+///
+/// # Why a second table rather than a flag on the first
+///
+/// Because [`SCENARIOS`] is not just a list — it *is* the sweep's grid, the
+/// determinism check's list, and the header `sim/corpus.txt` is regenerated
+/// from. A scenario that runs for forty simulated minutes belongs in none of
+/// those: `cargo xtask sweep` would multiply its cost by sixty-four seeds and
+/// `cargo xtask sim` would run it three times per commit, and the thing it is
+/// for — proving that a run of a hundred thousand steps can be re-entered near
+/// its end — is answered once by `cargo xtask snapshot` rather than repeatedly
+/// by every command that iterates the table.
+///
+/// So the split is by *cost*, which is the only property that distinguishes
+/// them, and it is stated here rather than left as a name somebody has to
+/// recognise. Both tables are found by [`find`], both are fingerprinted into
+/// `snap::build`, and a member of either is a legitimate `--seed` and
+/// `--trace` argument. What only [`SCENARIOS`] is, is *swept*.
+///
+/// *Reversal:* the day the sweep can afford a long scenario — because a machine
+/// got faster or because sharding got finer — this table folds back into the
+/// one above and `sweep::Sweep::span` stops taking a count.
+pub const LONG: &[Scenario] = &[Scenario {
+    name: "soak",
+    what: "an hour of disk under a steady client — the scenario a bisect is for",
+    peer: Peer::Blk,
+    clients: 1,
+    window: 4,
+    depth: 8,
+    // Long enough that a full replay is seconds of wall clock and the run has a
+    // minute forty. Both halves matter: a scenario that reached minute forty in
+    // a hundred steps would meet the exit's words and none of its point, because
+    // *bisects in seconds rather than hours* is a claim about work avoided.
+    operations: 120_000,
+    // Sixty milliseconds a request, which is a slow disk and a deliberate one:
+    // the run's simulated length is about `operations * service_ns / window`, so
+    // this is what puts minute forty inside a run whose step count a laptop can
+    // still finish. `claims/0007` is where the two numbers this produces are
+    // registered.
+    service_ns: 60_000_000,
+    spread_ns: 30_000_000,
+    retry_ns: 100_000_000,
+    buffer_bytes: 512,
+    extent: 4_096,
+    lose_one_in: 0,
+    injects: &[],
+}];
+
+/// Find a scenario by name, in either table.
+///
+/// [`SCENARIOS`] first, so that a name in both resolves to the swept one — which
+/// cannot happen, because [`tests::no_scenario_is_in_both_tables`] refuses it,
+/// and the ordering is here so that the day somebody defeats that test the
+/// answer is the conservative one.
 #[must_use]
 pub fn find(name: &str) -> Option<&'static Scenario> {
-    SCENARIOS.iter().find(|scenario| scenario.name == name)
+    SCENARIOS.iter().chain(LONG).find(|scenario| scenario.name == name)
 }
 
 impl Scenario {
@@ -615,6 +668,21 @@ impl Scenario {
     /// produce a short trace, a stable digest, and no evidence at all.
     /// Otherwise as [`Scenario::run`].
     pub fn run_on(&self, seed: u64, deployment: &Deployment) -> Result<Outcome, Trouble> {
+        self.start(seed, deployment)?.run()
+    }
+
+    /// The same, set up and not yet stepped.
+    ///
+    /// Split out of [`Scenario::run_on`] for `E1-P08`, which has to put cuts
+    /// along a run and therefore needs the simulation rather than its outcome.
+    /// Nothing about the setup moved: the two functions are one function with
+    /// the last line taken off, which is what keeps a snapshotted run the same
+    /// run as a plain one.
+    ///
+    /// # Errors
+    ///
+    /// As [`Scenario::run_on`].
+    pub fn start(&self, seed: u64, deployment: &Deployment) -> Result<Simulation, Trouble> {
         let mut sim = Simulation::new(seed, BUDGET);
         if self.peer == Peer::Deployment && deployment.is_empty() {
             return Err(Trouble::NeedsDeployment);
@@ -642,7 +710,7 @@ impl Scenario {
             sim.world().send(0, id, Message { from: id, kind: start, token: 0, detail: 0 });
         }
 
-        sim.run()
+        Ok(sim)
     }
 
     /// Write the header that says what this run covers.
@@ -889,6 +957,78 @@ mod tests {
         use crate::deploy::fixture::component;
         Deployment::of(vec![component("virtio-blk", "blk", 256), component("store", "store", 16)])
             .expect("two names")
+    }
+
+    #[test]
+    fn no_scenario_is_in_both_tables() {
+        // Two entries under one name would make `find` answer whichever came
+        // first and every other command about the scenario ambiguous — a `--seed
+        // soak` that swept and one that did not, told apart by nothing a reader
+        // can see. It is also what `find`'s documentation promises, and a
+        // promise in a doc comment that no test holds is a preference.
+        for long in LONG {
+            assert!(
+                !SCENARIOS.iter().any(|scenario| scenario.name == long.name),
+                "`{}` is in both scenario tables",
+                long.name
+            );
+        }
+        let mut names: Vec<&str> =
+            SCENARIOS.iter().chain(LONG).map(|scenario| scenario.name).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(before, names.len(), "two scenarios share a name");
+    }
+
+    #[test]
+    fn a_long_scenario_reproduces_from_its_seed_like_every_other_one() {
+        // `LONG` is excluded from the sweep and from `cargo xtask sim` by cost,
+        // and cost is the only thing it is excluded by: a scenario nothing
+        // reproduces would be a scenario whose determinism nobody has checked,
+        // and `E1-P08` re-enters one of these at minute thirty-nine. Narrowed to
+        // something a unit test can afford — which is the same narrowing
+        // `sweep::Trial` applies, so what is checked is the scenario and not a
+        // second copy of it.
+        for long in LONG {
+            let mut short = *long;
+            short.operations = 60;
+            let first = short.run(DEFAULT_SEED).expect("a long scenario terminates when narrowed");
+            let second = short.run(DEFAULT_SEED).expect("terminates");
+            assert_eq!(
+                first.trace.text(),
+                second.trace.text(),
+                "`{}` did not reproduce",
+                long.name
+            );
+            assert_eq!(first.log, second.log, "`{}` took two different interleavings", long.name);
+
+            let other = short.run(DEFAULT_SEED ^ 0x5EED).expect("terminates");
+            assert_ne!(
+                first.digest(),
+                other.digest(),
+                "`{}` produced one artefact at two seeds, so its digest cannot fail",
+                long.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_long_table_is_long_enough_to_have_the_minute_its_task_names() {
+        // `E1-P08`'s exit is written in simulated minutes — *a failure at minute
+        // 40* — and a scenario that finished in minute three would meet every
+        // other assertion here while making that sentence meaningless. Checked
+        // as the whole scenario rather than narrowed, because the length is the
+        // property.
+        for long in LONG {
+            let outcome = long.run(DEFAULT_SEED).expect("a long scenario terminates");
+            let minutes = outcome.finished_ns / 60_000_000_000;
+            assert!(
+                minutes >= 40,
+                "`{}` runs for {minutes} simulated minute(s) and E1-P08 is about minute 40",
+                long.name
+            );
+        }
     }
 
     #[test]

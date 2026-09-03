@@ -272,6 +272,63 @@ impl Stream {
         self.c = self.c.rotate_left(ROTATE).wrapping_add(out);
         out
     }
+
+    /// The whole of this stream's state, as the five words it is made of.
+    ///
+    /// # Why a generator has this and the derivation does not
+    ///
+    /// `E1-P08` writes a running simulation to disk and re-enters it, and the
+    /// question it had to answer for every source of nondeterminism in the tree
+    /// was *what has to travel*. For everything derived by [`derive`] the answer
+    /// is **a counter**: a site's answer is a pure function of `(seed, domain,
+    /// site, occurrence)`, so a snapshot carries occurrence counts and the
+    /// values are recomputed. That is RFC 0026's split-by-identity paying for
+    /// itself twice — once as *a new site does not move an old seed*, and again
+    /// as *a snapshot does not have to capture a tree*.
+    ///
+    /// This type is the one exception, and it is exactly the part that is a
+    /// *chain* rather than a derivation: `next_u64` folds its own output back
+    /// into `a`, `b` and `c`, so state `n` is reachable only by taking `n`
+    /// steps. Re-deriving it would mean replaying every draw of the prefix,
+    /// which is the work a snapshot exists not to do. So the five words travel.
+    ///
+    /// # What this does not weaken
+    ///
+    /// Nothing that was ever guaranteed. A stream here is a *reproducibility*
+    /// device and never a secrecy one — [`Self::from_seed`] is public, the
+    /// derivation is public, and `env/src/lib.rs` says in as many words that
+    /// nothing in this crate is unpredictable to anybody holding the seed. A
+    /// caller who can call this could already call `from_seed` with the same
+    /// argument and step it. Where unpredictability is the requirement the
+    /// answer is a hardware source behind a capability, and it is not this
+    /// crate.
+    ///
+    /// Unit: none — four generator words and a step counter, in the order
+    /// [`Self::from_state`] reads them. The order is part of the interface: a
+    /// snapshot on disk is these words in this sequence.
+    #[must_use]
+    pub const fn state(&self) -> [u64; 5] {
+        [self.a, self.b, self.c, self.counter, self.origin]
+    }
+
+    /// A stream at a state [`Self::state`] answered.
+    ///
+    /// The inverse of that method and nothing more: it does **not** warm up,
+    /// because the state it is given is already warm, and warming it again
+    /// would silently answer a different sequence from the one that was saved.
+    /// A caller that wants a fresh stream calls [`Self::from_seed`].
+    ///
+    /// There is no validation and there is nothing to validate: every 320-bit
+    /// value is a reachable state of this generator except the one where `a`,
+    /// `b` and `c` are all zero, which is a fixed point — and that state is not
+    /// reachable from any seed, so a snapshot carrying it did not come from a
+    /// run. The caller that reads snapshots refuses the whole file on a
+    /// checksum before it gets here, which is where that refusal belongs: this
+    /// function has no way to tell a corrupt word from a legitimate one.
+    #[must_use]
+    pub const fn from_state(state: [u64; 5]) -> Self {
+        Self { a: state[0], b: state[1], c: state[2], counter: state[3], origin: state[4] }
+    }
 }
 
 /// The mean of the bit-agreement count over `draws` pairs of outputs.
@@ -566,5 +623,33 @@ mod tests {
         // The empty label is the FNV offset basis, which is a legitimate
         // identity and not a special case. Stated so that nobody adds a guard.
         assert_eq!(label(""), 0xcbf2_9ce4_8422_2325);
+    }
+
+    #[test]
+    fn a_stream_taken_apart_and_put_back_together_answers_the_same_sequence() {
+        // `E1-P08`'s whole requirement of this type, as one assertion: a stream
+        // rebuilt from its state is *the same stream*, not a stream that agrees
+        // for a while. Fifty draws in, fifty draws out, and the tails compared
+        // rather than one value — a state that dropped `counter` would agree on
+        // the next value and diverge on the one after it.
+        let mut original = Stream::from_seed(0xF00D_BEEF_CAFE_1234);
+        for _ in 0..50 {
+            let _ = original.next_u64();
+        }
+        let mut restored = Stream::from_state(original.state());
+        assert_eq!(restored.state(), original.state());
+        for step in 0..50 {
+            assert_eq!(original.next_u64(), restored.next_u64(), "diverged {step} draws in");
+        }
+        assert_eq!(restored.origin(), original.origin(), "a restored stream forgot its seed");
+    }
+
+    #[test]
+    fn a_restored_stream_is_not_warmed_up_a_second_time() {
+        // The one way this pair could be subtly wrong and still look right: if
+        // `from_state` warmed up, a snapshot would replay a sequence that never
+        // happened and every draw after a restore would be plausible and wrong.
+        let fresh = Stream::from_seed(7);
+        assert_eq!(Stream::from_state(fresh.state()).state(), fresh.state());
     }
 }

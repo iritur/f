@@ -42,7 +42,7 @@ document calls L8 the day it grows one.
 | | Layer | Status today |
 |---|---|---|
 | **L0** | Determinism substrate | Built — `env/`, `lint-determinism`, `xtask trace` |
-| **L1** | Deterministic simulation | Built — `sim/`, `cargo xtask sim`: virtual time, seeded ordering, device models and component substitution (`E1-P01`), and seven fault classes each with a scenario and an asserted response (`E1-P02`). No seed sweeps — `E1-P03` |
+| **L1** | Deterministic simulation | Built — `sim/`, `cargo xtask sim`: virtual time, seeded ordering, device models and component substitution (`E1-P01`), seven fault classes each with a scenario and an asserted response (`E1-P02`), and seed sweeps with automatic minimisation (`E1-P03`) — `cargo xtask sweep`, five scenario-independent properties in `sim/src/check.rs`, `sim/corpus.txt` as the regression corpus, and `cargo xtask sweep --mutate` as the evidence the sweep can fail. No snapshot and restore — `E1-P08` |
 | **L2** | Concurrency and memory model | Stress tests only — `ring/tests/litmus.rs` on two architectures. Not a model check |
 | **L3** | Proof | Absent |
 | **L4** | Fuzzing | Instrumentation only — `xtask coverage`. No generator, no corpus, no hostile-peer harness |

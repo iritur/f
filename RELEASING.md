@@ -30,7 +30,7 @@ Eight things. The first is obvious and the other seven are the point.
 | **The source, at a tag** | Obvious, and insufficient on its own — which is the argument for everything below it. |
 | **The claims snapshot** | Every number the release asserts, with its baseline, its workload, its distribution and its reproduction command. Machine-readable, so documents render from it rather than restating it. `claims/snapshot.json`, written by `cargo xtask claims`, and `cargo xtask lint` fails when a document disagrees with it. |
 | **The baseline configuration** | The tuned Linux a comparison was made against, as configuration rather than as prose. This is the one that decays silently: without it, a tuned comparison becomes a stock comparison as the baseline ages and nobody re-checks. `claims/baselines/`, one directory per version — `apply.sh` puts a machine into it, `verify.sh` says when it has drifted out of it, and re-tuning adds a directory rather than editing one. |
-| **The seed corpus and scenario set** | So a third party can run the same sweeps — and so that a reported bug arrives as a seed rather than as a description of a bug. |
+| **The seed corpus and scenario set** | So a third party can run the same sweeps — and so that a reported bug arrives as a seed rather than as a description of a bug. `sim/corpus.txt`: the header is the scenario set, regenerated from the table; every other line is an argument list for `f-sim` that found something once. `cargo xtask sweep` runs N seeds across M scenarios and `cargo xtask sweep --corpus` requires every entry to be clean. RFC 0040. |
 | **A content-addressed system image** | One hash naming an entire bootable generation. Reproducing it from source and getting the same hash is a *test*, and it runs in the release job. |
 | **The dependency manifest and provenance** | What went in, at what version, under what licence, with the imported subtree's terms kept distinct — because the licence boundary and the isolation boundary are deliberately the same boundary. `LICENSING.md`, RFC 0003. |
 | **The honest-status page** | What does not work, what was measured on emulated hardware, what is a hook rather than a system. `docs/TESTING-STATUS.md` is that page and it ships with every release. |
@@ -53,17 +53,34 @@ this holds without anything having to arrange it — and the comparison checks i
 anyway, so that a difference in paths is never reported as a difference in the
 package. `CARGO_TARGET_DIR` is not one of the paths that matters.
 
-One of the eight is not owed yet, and that is a decision rather than an
-omission: **a content is required when the claim that needs it publishes a
-number.** The seed corpus serves `ring-submit-latency`, which is `pending`; the
-day it is not, the packager refuses and names the task that owes it. RFC 0021,
-which also states the consequence for release 0.1 rather than leaving it to be
-discovered.
+**All eight are owed, and the mechanism that let one of them not be is gone.**
+Two of them once were not: the tuned-Linux baseline and the seed corpus were
+owed to `E1` tasks that argued, correctly, that they could not be written yet, so
+RFC 0021 made a content's requirement a predicate over the claims registry — *a
+content is required when the claim that needs it publishes a number*. That was
+the honest answer to a contract listing things that did not exist, and it was
+never meant to outlive them. `E1-D06` landed `claims/baselines/`; `E1-P03` landed
+`sim/corpus.txt`, and with the last conditional row closed, the `Requirement`
+variant in `xtask` is deleted rather than left as a shape for the next deferral
+to grow into — which is exactly what RFC 0021's *what would reverse this* asked
+for, naming that task as the owner.
 
-It was two. `E1-D06` landed the baseline configuration, so that row is
-unconditional again and the deferral it used is down to one content — which is
-the state RFC 0021's *what would reverse this* is about, and the reason the
-variant is now annotated with who deletes it.
+The corpus is one file carrying both halves the row names. Its entries are the
+seed corpus: every trial a sweep has found something with, each one an argument
+list `f-sim` runs, replayed by `cargo xtask sweep --corpus` and required to be
+clean now — which is what makes it a regression suite rather than a list of
+numbers. Its header is the scenario set, regenerated from the shipped table on
+every write so that it cannot quietly stop matching. **Every entry in it today
+was found under a deliberate defect**, `mutate-crossed-completion`, and each says
+so on its own line; a corpus of seeds that are all green and do not say why would
+read as a corpus that never found anything. RFC 0040.
+
+The nightly job grows it. `cargo xtask sweep --record` merges every finding into
+the file before it returns its verdict, and `.github/workflows/nightly.yml`
+uploads the result as an artifact — a scheduled job cannot commit to the tree and
+should not try, so what it hands a person is the exact file to merge. The file is
+append-only, so the diff against the tree is what that night added and nothing
+else. RFC 0042.
 
 ## What a release is not
 

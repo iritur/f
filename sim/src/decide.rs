@@ -119,13 +119,23 @@ pub struct Decisions {
     /// process, which is RFC 0004's whole subject.
     counts: BTreeMap<&'static str, u64>,
     log: Vec<Decision>,
+    /// Decisions taken before this log begins. Unit: decisions.
+    ///
+    /// Zero for every run that starts at the beginning. Non-zero only after a
+    /// *terse* restore, where the log itself did not travel — `trace::Carried`
+    /// argues why, and the argument is the same one twice: a decision log is a
+    /// **record** and not state. What the next draw depends on is `counts`, and
+    /// what the log is for is a person reading a failing run afterwards. So the
+    /// cheap snapshot keeps the state and drops the record, and this is what
+    /// stops the ordinals restarting at zero when it does.
+    carried: u64,
 }
 
 impl Decisions {
     /// A fresh policy for one run.
     #[must_use]
     pub fn new(seed: u64) -> Self {
-        Self { seed, counts: BTreeMap::new(), log: Vec::new() }
+        Self { seed, counts: BTreeMap::new(), log: Vec::new(), carried: 0 }
     }
 
     /// Choose among `arity` alternatives at `site`, and write the choice down.
@@ -159,7 +169,11 @@ impl Decisions {
         // a wrong ordinal rather than panicking mid-run. It would take four
         // billion decisions; the budget in `scenario.rs` stops a run long before
         // that, and this is here so the two limits cannot disagree silently.
-        let ordinal = u32::try_from(self.log.len()).unwrap_or(u32::MAX);
+        //
+        // Counted from `taken` and not from the log's length, because a run
+        // restored from a terse snapshot has a log that starts part-way through
+        // and an ordinal that must not.
+        let ordinal = self.taken();
         self.log.push(Decision { ordinal, at_ns, site, occurrence: at, arity, taken });
         taken
     }
@@ -170,10 +184,85 @@ impl Decisions {
         &self.log
     }
 
+    /// Write this policy out.
+    ///
+    /// **The counts are the whole of the seeded state, and that is RFC 0026
+    /// paying for itself a second time.** There is no generator here to
+    /// capture: [`draw`] is pure in `(seed, domain, site, occurrence)`, so a
+    /// site's next answer is a function of a number this map already holds. A
+    /// design that had split by *drawing from a parent* would have to write out
+    /// a tree of generator states, and every one of them would be a chance to
+    /// lose a field. `env/src/split.rs` is where the same observation is made
+    /// from the other side, about the one stream in this crate that is a chain.
+    ///
+    /// The log travels because the artefact does: `E1-P03` reports a failing
+    /// run's decisions and a restored run that had forgotten its own prefix
+    /// would report half of them.
+    pub(crate) fn save(&self, out: &mut crate::snap::Writer, terse: bool) {
+        out.count(self.counts.len());
+        for (site, count) in &self.counts {
+            out.label(site);
+            out.u64(*count);
+        }
+        if terse {
+            // The counts are the state and the log is the record. A terse
+            // snapshot keeps the first and drops the second, which is what makes
+            // it constant in the length of the run — and what a reader of a
+            // re-entered run gives up is the decisions taken before the cut.
+            out.u64(self.taken().into());
+            out.count(0);
+            return;
+        }
+        out.u64(self.carried);
+        out.count(self.log.len());
+        for decision in &self.log {
+            out.u32(decision.ordinal);
+            out.u64(decision.at_ns);
+            out.label(decision.site);
+            out.u64(decision.occurrence);
+            out.u32(decision.arity);
+            out.u32(decision.taken);
+        }
+    }
+
+    /// Read one back, under the seed the snapshot's header names.
+    pub(crate) fn load(input: &mut crate::snap::Reader<'_>, seed: u64) -> Self {
+        let sites = input.count(12, "more decision sites than the file could hold");
+        let mut counts = BTreeMap::new();
+        for _ in 0..sites {
+            let site = input.label();
+            counts.insert(site, input.u64());
+        }
+        let carried = input.u64();
+        let taken = input.count(28, "more decisions than the file could hold");
+        let mut log = Vec::with_capacity(taken);
+        for _ in 0..taken {
+            log.push(Decision {
+                ordinal: input.u32(),
+                at_ns: input.u64(),
+                site: input.label(),
+                occurrence: input.u64(),
+                arity: input.u32(),
+                taken: input.u32(),
+            });
+        }
+        Self { seed, counts, log, carried }
+    }
+
     /// How many decisions have been taken. Unit: decisions.
+    ///
+    /// The run's count and not the log's: after a terse restore they differ, and
+    /// the one everything outside this file means is the run's.
     #[must_use]
     pub fn taken(&self) -> u32 {
-        u32::try_from(self.log.len()).unwrap_or(u32::MAX)
+        let held = u64::try_from(self.log.len()).unwrap_or(u64::MAX);
+        u32::try_from(self.carried.saturating_add(held)).unwrap_or(u32::MAX)
+    }
+
+    /// Decisions taken before this log begins. Unit: decisions.
+    #[must_use]
+    pub const fn carried(&self) -> u64 {
+        self.carried
     }
 }
 

@@ -148,6 +148,24 @@ impl Region {
         self.bytes.is_empty()
     }
 
+    /// Write this region out, bytes and all.
+    ///
+    /// The bytes are the point. A virtqueue's descriptor table, its available
+    /// ring and its used ring live in one of these, and so does everything a
+    /// device wrote for its driver to read back; a snapshot that rebuilt the
+    /// cursors and left the memory zeroed would restore a device whose ring said
+    /// one thing and whose descriptors said another.
+    pub(crate) fn save(&self, out: &mut crate::snap::Writer) {
+        out.u64(self.device);
+        out.blob(&self.bytes);
+    }
+
+    /// Read one back.
+    pub(crate) fn load(input: &mut crate::snap::Reader<'_>) -> Self {
+        let device = input.u64();
+        Self { bytes: input.blob(), device }
+    }
+
     /// Where the device addresses `offset`. Unit: bytes, device space.
     ///
     /// # Errors
@@ -382,6 +400,51 @@ impl Queue {
     #[must_use]
     pub const fn region(&self) -> &Region {
         &self.region
+    }
+
+    /// Write both ends' private state out, and the memory between them.
+    ///
+    /// Both ends, which is the field a reader should check first. `published`
+    /// and `seen` are the driver's, `taken` and `used` are the device's, and on
+    /// real silicon neither end can read the other's — so a snapshot is the one
+    /// place in this crate where they are written down together, and a snapshot
+    /// that captured one end's would restore a queue in a state no pair of ends
+    /// ever agreed on.
+    pub(crate) fn save(&self, out: &mut crate::snap::Writer) {
+        self.region.save(out);
+        out.u16(self.size);
+        out.u16(self.published);
+        out.u16(self.seen);
+        out.u64(self.held);
+        out.u16(self.taken);
+        out.u16(self.used);
+    }
+
+    /// Read one back.
+    ///
+    /// The geometry is checked rather than trusted: a size that is zero, not a
+    /// power of two or past [`QUEUE_SIZE`] is exactly what [`Queue::new`]
+    /// refuses, and a file naming one is refused here for the same reason —
+    /// every index in this module is masked by `size - 1`.
+    pub(crate) fn load(input: &mut crate::snap::Reader<'_>) -> Self {
+        let region = Region::load(input);
+        let size = input.u16();
+        if size == 0 || !size.is_power_of_two() || size > QUEUE_SIZE {
+            input.refuse(crate::snap::Broken::Bounds("a queue size the layout cannot hold"));
+        }
+        Self {
+            region,
+            size: if size == 0 || !size.is_power_of_two() || size > QUEUE_SIZE {
+                QUEUE_SIZE
+            } else {
+                size
+            },
+            published: input.u16(),
+            seen: input.u16(),
+            held: input.u64(),
+            taken: input.u16(),
+            used: input.u16(),
+        }
     }
 
     /// Descriptors in the ring. Unit: descriptors.

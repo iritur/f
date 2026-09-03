@@ -22,6 +22,23 @@ f-env.workspace = true
 f-abi.workspace = true
 f-ring.workspace = true
 
+# The deliberate defects, off by default and refused as defaults by
+# `cargo xtask lint-mutations`. `sim/src/dev.rs` argues why they live in the
+# shipped source rather than in a patch, and RFC 0040 is the record; the whole
+# of what each does is one `const fn` in that file, named after itself.
+#
+# Two rather than one, because the oracle has five properties and a harness with
+# one defect in it exercises one of them: `mutate-crossed-completion` trips
+# `check::held` and `mutate-silent-reset` trips `check::balance` and
+# `check::bound`. RFC 0042 is where the count and the two that remain unarmed are
+# written down.
+#
+# There is no `default` key here on purpose: a defect on by default is the
+# defect, shipped.
+[features]
+mutate-crossed-completion = []
+mutate-silent-reset = []
+
 # No override. This crate inherits `unsafe_code = "forbid"` from the workspace,
 # and it has no business needing it: it models protocols, it does not touch
 # hardware. `cargo xtask lint-unsafe` is what says that stayed true.

@@ -158,6 +158,57 @@ impl Grants {
     pub fn live(&self) -> usize {
         self.live.len()
     }
+
+    /// Write this domain out.
+    pub(crate) fn save(&self, out: &mut crate::snap::Writer) {
+        out.u32(self.room);
+        out.u64(self.made);
+        out.bool(self.starved);
+        out.count(self.live.len());
+        for translation in &self.live {
+            out.u32(translation.cap);
+            out.u64(translation.address);
+            out.u32(translation.len);
+        }
+    }
+
+    /// Read one back.
+    pub(crate) fn load(input: &mut crate::snap::Reader<'_>) -> Self {
+        // Refused rather than clamped, and the difference is load-bearing here
+        // in a way it is not everywhere. `Service::load` rebuilds the
+        // registration table by replaying the registrations that made it and
+        // then asks [`Grants::same`] whether the rebuilt domain is the one the
+        // file recorded — a second opinion this module argues four paragraphs
+        // for. A clamp is applied to *both* sides of that comparison, so a file
+        // saying `room = 0` would restore as `room = 1` and the check would
+        // agree with itself about a domain no run ever had. R04: a value outside
+        // what its field can mean is refused, not repaired. `Queue::load` two
+        // doors down already reads this way and this is the same sentence.
+        let room = input.u32();
+        if room == 0 {
+            input.refuse(crate::snap::Broken::Bounds("a domain with no room for a translation"));
+        }
+        let made = input.u64();
+        let starved = input.bool();
+        let count = input.count(16, "more translations than the file could hold");
+        let mut live = Vec::with_capacity(count);
+        for _ in 0..count {
+            live.push(Translation { cap: input.u32(), address: input.u64(), len: input.u32() });
+        }
+        Self { live, room, made, starved }
+    }
+
+    /// Are these two domains the same domain?
+    ///
+    /// Used by `E1-P08` to check a domain it rebuilt against the one the
+    /// snapshot recorded beside it — see [`Service::load`] for why one is
+    /// rebuilt rather than copied, and why a second opinion is worth its lines.
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        self.room == other.room
+            && self.made == other.made
+            && self.starved == other.starved
+            && self.live == other.live
+    }
 }
 
 impl Domains for Grants {
@@ -220,6 +271,62 @@ impl Domains for Grants {
 pub struct Service {
     table: Table<SLOTS>,
     grants: Grants,
+    /// Everything that has ever changed the table, in order.
+    ///
+    /// # Why a journal, and why it is not a shadow copy
+    ///
+    /// `E1-P08` writes a running peer out and reads it back, and
+    /// `f_ring::registry::Table` cannot be copied: its slots are private, and
+    /// they are private for a reason — *a registration table that could be
+    /// copied would be two tables issuing one set of identifiers*, which is the
+    /// sentence above this struct. Widening `ring/` so that a snapshot could
+    /// fabricate a table would put a hole in exactly the type RFC 0028 built to
+    /// stop a peer naming a set it was not issued.
+    ///
+    /// So the table is not copied. It is **rebuilt by replaying the operations
+    /// that made it**, through the same `Table::execute` the live path uses,
+    /// against the same domain — which is also what the real system does when a
+    /// component comes back: RFC 0008 has the frame revoke a dead component's
+    /// buffer sets, and a restarted component *re-registers*. The model of a
+    /// restore is therefore the shape of a restore.
+    ///
+    /// The cost, stated: this grows with the number of registrations a peer has
+    /// made rather than staying constant. Every scenario in both tables
+    /// registers once per client and re-registers only after a reset, so it is
+    /// two or three entries in practice; a workload that registered per
+    /// operation would make it linear in the run, and that is the day this
+    /// becomes a slot-level accessor in `ring/` with an argument to go with it.
+    /// RFC 0043.
+    deeds: Vec<Deed>,
+    /// Whether the domain has been told to refuse the next translation.
+    ///
+    /// A shadow of `Grants::starved` kept here so that a journal entry can
+    /// record the state the call was made under. Set and cleared by the same two
+    /// methods that set and clear it on the domain, so the two cannot drift
+    /// without the replay check below noticing.
+    armed: bool,
+}
+
+/// One thing that changed a registration table.
+///
+/// The alphabet of [`Service::deeds`]. Deliberately small: these are the only
+/// two operations in this crate that move a slot's generation or its liveness,
+/// and a third would be a third entry here rather than a special case at
+/// restore.
+#[derive(Clone, Copy, Debug)]
+enum Deed {
+    /// An entry went through `Table::execute`, with the domain armed to refuse
+    /// or not.
+    Executed {
+        /// The entry, as the client wrote it.
+        entry: Sqe,
+        /// The clock the completion was stamped with. Unit: nanoseconds.
+        now: u64,
+        /// Whether the domain had been told to refuse the next translation.
+        starved: bool,
+    },
+    /// Every set was retired, and the translations went with them.
+    RetiredAll,
 }
 
 impl Service {
@@ -227,7 +334,106 @@ impl Service {
     /// translations.
     #[must_use]
     pub fn new(room: u32) -> Self {
-        Self { table: Table::new(), grants: Grants::new(room) }
+        Self { table: Table::new(), grants: Grants::new(room), deeds: Vec::new(), armed: false }
+    }
+
+    /// Write this peer's registration state out.
+    ///
+    /// The journal, the domain, and nothing about the table itself — see
+    /// [`Service::deeds`] for why the table travels as the operations that made
+    /// it rather than as its slots. The domain travels twice over in effect: the
+    /// replay rebuilds one, and this copy is what the rebuild is checked
+    /// against.
+    ///
+    /// What is **not** here is which buffers the device currently holds. That is
+    /// the `lent` bitmap, and it is reconstructed by the caller replaying its own
+    /// jobs — `dev.rs` and `native.rs` each hold exactly the set of buffers they
+    /// have resolved and not released, so the fact already exists there and a
+    /// second copy would be a second thing to keep in step.
+    pub(crate) fn save(&self, out: &mut crate::snap::Writer) {
+        self.grants.save(out);
+        out.bool(self.armed);
+        out.count(self.deeds.len());
+        for deed in &self.deeds {
+            match deed {
+                Deed::Executed { entry, now, starved } => {
+                    out.u8(0);
+                    out.sqe(entry);
+                    out.u64(*now);
+                    out.bool(*starved);
+                }
+                Deed::RetiredAll => out.u8(1),
+            }
+        }
+    }
+
+    /// Read one back, by replaying what made it.
+    ///
+    /// # Errors, as refusals on the reader
+    ///
+    /// [`crate::snap::Broken::Diverged`] when the domain the replay produced is
+    /// not the domain the snapshot recorded. That check is the whole reason the
+    /// domain is written down at all: a replay is only as good as the argument
+    /// that the operations are deterministic, and an argument that is checked is
+    /// worth more than one that is stated.
+    pub(crate) fn load(input: &mut crate::snap::Reader<'_>) -> Self {
+        let recorded = Grants::load(input);
+        let armed = input.bool();
+        let count = input.count(9, "more registration deeds than the file could hold");
+        let mut deeds = Vec::with_capacity(count);
+        for _ in 0..count {
+            match input.u8() {
+                0 => deeds.push(Deed::Executed {
+                    entry: input.sqe(),
+                    now: input.u64(),
+                    starved: input.bool(),
+                }),
+                1 => deeds.push(Deed::RetiredAll),
+                _ => {
+                    input.refuse(crate::snap::Broken::Bounds("a registration deed with no kind"));
+                    break;
+                }
+            }
+        }
+
+        let mut service =
+            Self { table: Table::new(), grants: Grants::new(recorded.room), deeds, armed };
+        if input.faulted() {
+            // A file that has already contradicted itself is not replayed into
+            // a real registration table. The caller refuses the whole load.
+            return service;
+        }
+        for deed in service.deeds.clone() {
+            match deed {
+                Deed::Executed { entry, now, starved } => {
+                    if starved {
+                        service.grants.starve();
+                    }
+                    let _ = service.table.execute(&entry, &mut service.grants, now);
+                    service.grants.relent();
+                }
+                Deed::RetiredAll => {
+                    let _ = service.table.retire_all(&mut service.grants);
+                }
+            }
+        }
+        if armed {
+            service.grants.starve();
+        }
+        if !service.grants.same(&recorded) {
+            input.refuse(crate::snap::Broken::Diverged("a peer's IOMMU domain, after replay"));
+        }
+        service
+    }
+
+    /// Say that the device holds `index` of `set` again, for `len` bytes.
+    ///
+    /// The other half of a restore, called by the peer that owns the jobs. It is
+    /// the real `Table::resolve`, so a buffer the table would refuse is refused
+    /// here too — which is what makes this a reconstruction rather than an
+    /// assertion.
+    pub(crate) fn relend(&mut self, set: SetId, index: u32, len: u32) -> Result<(), Refusal> {
+        self.table.resolve(set, index, len).map(|_| ())
     }
 
     /// The modelled IOMMU, for a device model that has to decode an address.
@@ -243,6 +449,7 @@ impl Service {
     /// the same reason [`Service::register`] exists rather than the peers
     /// driving `Table` directly.
     pub const fn starve(&mut self) {
+        self.armed = true;
         self.grants.starve();
     }
 
@@ -253,6 +460,7 @@ impl Service {
     /// for *that* registration rather than for the next `map` that happens
     /// along — `Grants::starve` states the failure this closes.
     pub const fn relent(&mut self) {
+        self.armed = false;
         self.grants.relent();
     }
 
@@ -270,6 +478,10 @@ impl Service {
     /// is the whole of what `E1-B10` added to that type and the reason the
     /// client cannot mint a naming out of the air.
     pub fn register(&mut self, entry: &Sqe, now: u64) -> Cqe {
+        // Journalled before it happens, because what a snapshot replays is the
+        // call and not its answer. `Service::deeds` argues why a table is put
+        // back this way.
+        self.deeds.push(Deed::Executed { entry: *entry, now, starved: self.armed });
         self.table.execute(entry, &mut self.grants, now)
     }
 
@@ -319,6 +531,7 @@ impl Service {
     /// transfer the device had started faults instead of landing in memory
     /// somebody is about to reuse.
     pub fn retire_all(&mut self) -> usize {
+        self.deeds.push(Deed::RetiredAll);
         self.table.retire_all(&mut self.grants)
     }
 }

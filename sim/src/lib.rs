@@ -120,6 +120,8 @@
 
 pub mod actors;
 pub mod blk;
+pub mod chaos;
+pub mod check;
 pub mod client;
 pub mod decide;
 pub mod deploy;
@@ -131,12 +133,16 @@ pub mod net;
 pub mod proto;
 pub mod scenario;
 pub mod service;
+pub mod snap;
+pub mod sweep;
 pub mod time;
 pub mod trace;
 pub mod virtq;
 pub mod wire;
 
 use f_env::{Env, Instant, Scheduler, WallSource, WallTime, split};
+
+use snap::{Broken, Reader, Writer};
 
 use decide::Decisions;
 use fault::{Class, Fault, Injection, Injector};
@@ -164,6 +170,15 @@ const RANDOM: &str = "sim.random";
 
 /// The identity the simulated wall clock is derived at.
 const WALL: &str = "sim.wall";
+
+/// The site an unlabelled decision — one taken through `f_env::Scheduler` — is
+/// recorded at.
+///
+/// A constant rather than a literal at the one call site, because `E1-P08`
+/// writes decision sites into a snapshot by index into `snap::LABELS` and a
+/// label that exists only as a literal is a label somebody deletes from the
+/// table without the compiler noticing.
+pub const ENV_CHOOSE: &str = "env.choose";
 
 /// Who a message is for, or from.
 ///
@@ -207,6 +222,38 @@ pub trait Actor {
 
     /// Take one message. The only entry point.
     fn deliver(&mut self, world: &mut World, me: ActorId, message: Message);
+
+    /// Write this actor's whole state into a snapshot, its `snap::tag` first.
+    ///
+    /// # Why the default refuses instead of writing nothing
+    ///
+    /// `E1-P08` re-enters a run from a file, and the property that makes such a
+    /// file worth having is that the restored run is *indistinguishable* from
+    /// the run that replayed. An actor that wrote nothing would produce a file
+    /// that loads, restores into a world missing a participant, and diverges
+    /// plausibly — which is worse than no snapshot at all, because it sends
+    /// somebody looking for a bug at a point the system never reached.
+    ///
+    /// So the default is [`snap::Broken::Unsaveable`], naming the actor. A crate
+    /// that has taught some of its actors to save and not others refuses to
+    /// snapshot the runs that contain the others, by name, and says which. R04.
+    ///
+    /// It is a default rather than a required method because `Actor` is
+    /// implemented outside the set of things a scenario installs — `chaos.rs`
+    /// wraps actors in places, and a test installs a stub — and requiring the
+    /// method would make *every* implementor owe a format. What keeps the
+    /// shipped path honest is that `snap`'s tests snapshot every scenario in
+    /// both tables at several cuts, so an actor that reaches a scenario without
+    /// a save turns the suite red.
+    ///
+    /// # Errors
+    ///
+    /// [`snap::Broken::Unsaveable`] by default; otherwise whatever the writer
+    /// refused with.
+    fn save(&self, out: &mut Writer) -> Result<(), Broken> {
+        let _ = out;
+        Err(Broken::Unsaveable(self.name()))
+    }
 }
 
 /// The widest an actor name or a message kind may be, in bytes.
@@ -353,6 +400,12 @@ impl World {
         self.faults.struck()
     }
 
+    /// What this run is armed with. Unit: see [`fault::Injection`].
+    #[must_use]
+    pub const fn plan(&self) -> &'static [Injection] {
+        self.faults.plan()
+    }
+
     /// State something this run covers, in the artefact itself.
     ///
     /// Written before the run starts and hashed with everything after it, so
@@ -377,15 +430,82 @@ impl World {
     }
 
     /// Every decision this run has taken, in order.
+    ///
+    /// The *log*, which after a terse restore begins part-way through the run —
+    /// [`World::decided`] is the run's own count and is the number to compare
+    /// two runs by. `decide::Decisions::carried` says why the two differ.
     #[must_use]
     pub fn decisions(&self) -> &[decide::Decision] {
         self.decisions.log()
+    }
+
+    /// How many decisions this run has taken. Unit: decisions.
+    #[must_use]
+    pub fn decided(&self) -> u32 {
+        self.decisions.taken()
     }
 
     /// The artefact so far.
     #[must_use]
     pub fn trace(&self) -> &Trace {
         &self.trace
+    }
+}
+
+// ---- E1-P08: a world written out and re-entered ---------------------------
+//
+// The save and the load are here rather than in `snap.rs` because these fields
+// are private to this file, and a snapshot that reached them through accessors
+// would mean six accessors nothing else in the crate wants. Each is one
+// statement per field, in one order, next to the fields — which is the
+// arrangement that makes a *new* field's author see the two lines they owe.
+
+impl World {
+    /// Write this world's whole state.
+    ///
+    /// `terse` decides whether the artefact so far travels with it or only its
+    /// running hash — `trace::Carried` is where the trade is argued and RFC 0043
+    /// is where it is measured. Everything else travels either way, because
+    /// everything else is what the *run* is and the artefact is what it wrote.
+    pub(crate) fn save(&self, out: &mut Writer, terse: bool) {
+        out.u64(self.seed);
+        self.line.save(out);
+        self.decisions.save(out, terse);
+        // The one chain in a crate of derivations. `env/src/split.rs` argues why
+        // this needs five words where the ordering and fault streams need only a
+        // counter each.
+        for word in self.random.state() {
+            out.u64(word);
+        }
+        self.faults.save(out);
+        self.wire.save(out);
+        self.trace.save(out, terse, self.line.clock());
+    }
+
+    /// Read one back.
+    ///
+    /// `seed` comes from the snapshot's header rather than from here, and the
+    /// world's own copy is checked against it: two numbers that must agree, in
+    /// a file somebody could have edited, are two chances to notice.
+    pub(crate) fn load(input: &mut Reader<'_>, seed: u64) -> Self {
+        if input.u64() != seed {
+            input.refuse(Broken::Diverged("the world's seed and the header's"));
+        }
+        let line = Timeline::load(input);
+        let decisions = Decisions::load(input, seed);
+        let state = [input.u64(), input.u64(), input.u64(), input.u64(), input.u64()];
+        let faults = Injector::load(input, seed);
+        let wire = Wire::load(input);
+        let trace = Trace::load(input);
+        Self {
+            line,
+            decisions,
+            trace,
+            random: split::Stream::from_state(state),
+            seed,
+            wire,
+            faults,
+        }
     }
 }
 
@@ -400,7 +520,7 @@ impl Scheduler for World {
     /// name. A model that wants to be aimed at calls [`World::decide`] with a
     /// site of its own.
     fn choose(&mut self, n: u32) -> u32 {
-        self.decide("env.choose", n)
+        self.decide(ENV_CHOOSE, n)
     }
 }
 
@@ -517,11 +637,74 @@ impl Outcome {
     }
 }
 
+/// Where a run is asked to stop.
+///
+/// A cut always falls **between two steps**, which is the only place a
+/// simulation has a well-defined state: [`Simulation::run_to`] takes one
+/// message, hands it to one actor and returns, so between two of those nothing
+/// holds a borrow and nothing is half-written. `E1-P08` is why this exists and
+/// [`snap`] is where the argument is made in full.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cut {
+    /// Nowhere: run until there is nothing left to do.
+    Never,
+    /// Before the first step whose message is due at or after this instant.
+    /// Unit: nanoseconds on the simulator's clock.
+    ///
+    /// The unit a bisect is asked in — *minute 39* — and the reason a cut is
+    /// expressed in the model's own time rather than only in steps: a person
+    /// looking at a failure knows when it happened and not how many messages it
+    /// took to get there.
+    Clock(u64),
+    /// Before this many messages have been delivered. Unit: steps.
+    Steps(u32),
+}
+
+impl Cut {
+    /// Should the run stop now, given how many steps it has taken and when the
+    /// next message is due?
+    #[must_use]
+    const fn reached(self, steps: u32, due: Option<u64>) -> bool {
+        match self {
+            Self::Never => false,
+            Self::Clock(at) => match due {
+                Some(next) => next >= at,
+                None => false,
+            },
+            Self::Steps(count) => steps >= count,
+        }
+    }
+}
+
+/// What a run answered when it was asked to stop somewhere.
+pub enum Halt {
+    /// It ran out of work before reaching the cut.
+    ///
+    /// Boxed because an [`Outcome`] carries a whole trace and the other variant
+    /// carries a simulation; an enum as large as its largest variant would make
+    /// every `run_to` move a trace-sized value.
+    Finished(Box<Outcome>),
+    /// It reached the cut. Here is the world at it, ready to be written out or
+    /// to carry on.
+    ///
+    /// Boxed for the same reason the other variant is: a [`Simulation`] carries
+    /// a world and a vector of actors, and an enum as large as its largest
+    /// variant would make every `run_to` move all of it.
+    Paused(Box<Simulation>),
+}
+
 /// A world, the actors in it, and the loop that steps them.
 pub struct Simulation {
     world: World,
     actors: Vec<Box<dyn Actor>>,
     budget: u32,
+    /// Messages delivered so far. Unit: steps.
+    ///
+    /// A field rather than a local of the run loop, because `E1-P08` stops the
+    /// loop and starts it again and the count has to survive the gap: an
+    /// [`Outcome`] reports the steps of the *run*, and a run that was paused
+    /// twice is still one run.
+    steps: u32,
 }
 
 impl Simulation {
@@ -533,7 +716,52 @@ impl Simulation {
     /// running long.
     #[must_use]
     pub fn new(seed: u64, budget: u32) -> Self {
-        Self { world: World::new(seed), actors: Vec::new(), budget }
+        Self { world: World::new(seed), actors: Vec::new(), budget, steps: 0 }
+    }
+
+    /// A simulation at a point a snapshot recorded, with no actors in it yet.
+    ///
+    /// The caller installs the saved actors in the order they were saved, which
+    /// is the order they were installed, which is what makes an [`ActorId`] mean
+    /// the same thing after a restore as before it. [`snap::restore`] is the
+    /// only caller and the only one there should be.
+    #[must_use]
+    pub fn resume(world: World, steps: u32, budget: u32) -> Self {
+        Self { world, actors: Vec::new(), budget, steps }
+    }
+
+    /// The world, to read.
+    #[must_use]
+    pub const fn world_ref(&self) -> &World {
+        &self.world
+    }
+
+    /// Every actor, in installation order.
+    #[must_use]
+    pub fn actors(&self) -> &[Box<dyn Actor>] {
+        &self.actors
+    }
+
+    /// Messages delivered so far. Unit: steps.
+    #[must_use]
+    pub const fn steps(&self) -> u32 {
+        self.steps
+    }
+
+    /// The bound this run is under. Unit: steps.
+    #[must_use]
+    pub const fn budget(&self) -> u32 {
+        self.budget
+    }
+
+    /// When the next message is due, if there is one. Unit: nanoseconds.
+    ///
+    /// Read by a caller placing cuts along a run's simulated time, so the next
+    /// cut can be put past the instant this one stopped at rather than at a
+    /// boundary the clock has already passed.
+    #[must_use]
+    pub fn next_ns(&self) -> Option<u64> {
+        self.world.line.peek()
     }
 
     /// Put an actor in, and answer the id everything else addresses it by.
@@ -557,16 +785,42 @@ impl Simulation {
     /// rather than best-effort continuations: a simulator that quietly dropped a
     /// message would produce a trace that reproduces perfectly and describes a
     /// system nobody built.
-    pub fn run(mut self) -> Result<Outcome, Trouble> {
-        let mut steps: u32 = 0;
+    pub fn run(self) -> Result<Outcome, Trouble> {
+        match self.run_to(Cut::Never)? {
+            Halt::Finished(outcome) => Ok(*outcome),
+            // Unreachable: `Cut::Never` is never reached. A branch and not an
+            // expectation, because a panic here would be a panic in every caller
+            // of the simulator, and the honest answer to *the loop stopped for a
+            // reason that cannot happen* is the outcome it had.
+            Halt::Paused(paused) => Ok((*paused).finished()),
+        }
+    }
+
+    /// The same, stopping at `cut`.
+    ///
+    /// The loop `run` is: one message, one actor, return. `cut` is consulted
+    /// **before** each step, and against the instant the next message is due, so
+    /// a pause falls between two steps and never inside one — which is what
+    /// makes the paused world exactly the sum of its parts and therefore
+    /// writable. [`snap`] is where that is argued.
+    ///
+    /// # Errors
+    ///
+    /// As [`Simulation::run`]. A budget that runs out is still a refusal when
+    /// the run was going to be paused later: the bound is on the whole run and
+    /// not on one leg of it.
+    pub fn run_to(mut self, cut: Cut) -> Result<Halt, Trouble> {
         while !self.world.line.idle() {
-            if steps >= self.budget {
+            if cut.reached(self.steps, self.world.line.peek()) {
+                return Ok(Halt::Paused(Box::new(self)));
+            }
+            if self.steps >= self.budget {
                 return Err(Trouble::Budget(self.budget));
             }
             let Some(pending) = self.world.line.next(&mut self.world.decisions) else {
                 break;
             };
-            steps = steps.saturating_add(1);
+            self.steps = self.steps.saturating_add(1);
 
             // Two disjoint fields borrowed at once, which is the whole reason
             // the actors live beside the world rather than inside it.
@@ -577,15 +831,21 @@ impl Simulation {
             actor.deliver(&mut self.world, pending.to, pending.message);
         }
 
-        Ok(Outcome {
+        Ok(Halt::Finished(Box::new(self.finished())))
+    }
+
+    /// What this run leaves behind.
+    fn finished(self) -> Outcome {
+        let log = self.world.decisions.log().to_vec();
+        Outcome {
             seed: self.world.seed,
-            steps,
+            steps: self.steps,
             decisions: self.world.decisions.taken(),
             finished_ns: self.world.line.clock(),
             trace: self.world.trace,
-            log: self.world.decisions.log().to_vec(),
+            log,
             injected: self.world.faults.struck(),
-        })
+        }
     }
 }
 

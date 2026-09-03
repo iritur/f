@@ -100,6 +100,7 @@ pub struct Gpu {
 
 impl Protocol for Gpu {
     const NAME: &'static str = "gpu";
+    const TAG: u32 = crate::snap::tag::GPU;
     const COMPLETE: &'static str = "gpu.complete";
     const DROP: &'static str = "gpu.drop";
     const COALESCE: &'static str = "gpu.coalesce";
@@ -222,6 +223,28 @@ impl Protocol for Gpu {
             _ => wrote::IOERR,
         };
         Served { used_len: if wrote_response { HEADER_BYTES } else { 0 }, label, fenced }
+    }
+
+    /// The resources the display holds, in creation order.
+    ///
+    /// The one protocol in this crate with state of its own, which is why
+    /// [`Protocol::save_state`] exists as a pair of methods rather than as a
+    /// silence. A snapshot that dropped this would restore a display with room
+    /// it does not have, and the next creation would succeed where the real run
+    /// refused it — a divergence that looks like a working device.
+    fn save_state(&self, out: &mut crate::snap::Writer) {
+        out.count(self.live.len());
+        for resource in &self.live {
+            out.u32(*resource);
+        }
+    }
+
+    fn load_state(&mut self, input: &mut crate::snap::Reader<'_>) {
+        let count = input.count(4, "more display resources than the file could hold");
+        self.live = Vec::with_capacity(count);
+        for _ in 0..count {
+            self.live.push(input.u32());
+        }
     }
 
     fn harvest(&mut self, _written: u32, control: &Region, at: u32, asked: u32) -> i32 {

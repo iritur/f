@@ -301,6 +301,49 @@ impl Injector {
         self.struck
     }
 
+    /// The plan this injector is armed with.
+    ///
+    /// Read by `E1-P08` when it writes a run out, to check that the plan in the
+    /// world is the plan the trial names before trusting a snapshot that carries
+    /// only the trial. Two facts that must agree, checked rather than assumed.
+    #[must_use]
+    pub const fn plan(&self) -> &'static [Injection] {
+        self.plan
+    }
+
+    /// Write this injector's state out.
+    ///
+    /// The counts and the strike total, and **not the plan**: a plan is armed
+    /// before a single actor is installed and is a property of the *scenario*,
+    /// so it travels in a snapshot's header as part of the trial and is re-armed
+    /// on the way back in. Writing it twice would be two copies of one fact,
+    /// which is one copy too many for something a person can edit.
+    ///
+    /// The counts are the whole of the seeded state for the same reason
+    /// `decide.rs` says its counts are: a class's answer is
+    /// `draw(seed, FAULTS, label, occurrence)` and nothing else. Seven `u64`s at
+    /// most, and no generator anywhere.
+    pub(crate) fn save(&self, out: &mut crate::snap::Writer) {
+        out.u32(self.struck);
+        out.count(self.counts.len());
+        for (label, count) in &self.counts {
+            out.label(label);
+            out.u64(*count);
+        }
+    }
+
+    /// Read one back, disarmed. The caller arms it from the trial.
+    pub(crate) fn load(input: &mut crate::snap::Reader<'_>, seed: u64) -> Self {
+        let struck = input.u32();
+        let classes = input.count(12, "more fault classes than the file could hold");
+        let mut counts = BTreeMap::new();
+        for _ in 0..classes {
+            let label = input.label();
+            counts.insert(label, input.u64());
+        }
+        Self { seed, plan: &[], counts, struck }
+    }
+
     /// How many times a class has been consulted. Unit: consultations.
     ///
     /// The number a strike is written into the trace with, so a report can say

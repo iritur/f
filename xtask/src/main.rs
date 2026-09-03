@@ -181,7 +181,20 @@ fn main() -> ExitCode {
         "runtime" => runtime(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
         "component" => components().map(|_| ()),
+        // E1-P06. Every component the build produced, killed under sustained
+        // load and again with nothing killed. The verdict is `f-sim`'s and this
+        // is the driver: the component directory, the two processes the
+        // reproduction check needs, and the declared gap between what the
+        // simulator kills and what a boot can. RFC 0041.
+        "chaos" => chaos(),
         "mutate" => mutate(),
+        // E1-P03. The verb `xtask` owns is the driver: the commit, the
+        // component directory and the wall clock. Everything that decides a
+        // verdict is in `f-sim`, where no clock can reach it. RFC 0040.
+        "sweep" => sweep_verb(args.get(1..).unwrap_or_default()),
+        // E1-P08. A long run, marked as it goes and re-entered one minute
+        // before it fails, with both wall-clock numbers printed. RFC 0043.
+        "snapshot" => snapshot(),
         "panic" => panic_path(),
         "trace" => match args.get(1).map(String::as_str) {
             Some("--hash") => trace_hash_only(),
@@ -229,6 +242,7 @@ fn main() -> ExitCode {
         "lint-callbacks" => lint_callbacks(),
         "lint-claim-owners" => lint_claim_owners(),
         "lint-manifests" => lint_manifests(),
+        "lint-components" => lint_components(),
         "lint-datapath" => lint_datapath(),
         "lint-snapshot" => lint_snapshot(),
         "lint-reproduce" => lint_reproduce(),
@@ -305,6 +319,9 @@ cargo xtask <command>
                      and check it is one
   component          Build every component file: a manifest compiled to its
                      record, its image linked, and one content hash over both
+  chaos              Kill every component under sustained load at seeded
+                     moments, and again with nothing killed. No client may
+                     observe anything except added latency
   mutate             Build the kernel with a deliberate defect, boot it, and
                      require the boot to go red — then require the same boot to
                      go green without it
@@ -328,6 +345,9 @@ cargo xtask <command>
   lint-claim-owners  R09: every claim names the document that owns it
   lint-manifests     Every component manifest fits docs/manifest.md; RFC 0005
                      rule 4 and RFC 0008's shape, checked before a spawn does
+  lint-components    The components this tree declares are the components it
+                     builds — a manifest with nothing building it is a component
+                     no downstream count ever looks for
   lint-datapath      The mechanism behind `blk/copies`: each crate that claims
                      zero copies moves bytes in exactly one function, calls it
                      from exactly one place, and that place is not the data path
@@ -352,6 +372,31 @@ cargo xtask <command>
                      the boot spawned. The two halves of boot-to-workload,
                      joined at an artefact rather than at a sentence
   sim --list         The scenario set
+
+  sweep [n] [m]      N seeds across M scenarios, every failure minimised to a
+                     reproduction command that judges itself. 64 seeds and every
+                     scenario by default; the wall-clock cost is printed beside
+                     the report and is in no verdict in it. A grid too large for
+                     one process is run as consecutive shards of the same seed
+                     derivation, which is a fact about memory and not coverage
+  sweep --base <s>   The seed the sweep derives from, for any of the forms
+                     below. The default is the tree's own; a nightly varies it
+                     so that successive nights cover new seed space, and every
+                     report names the base it used
+  sweep --mutate     Arm a deliberate defect in the simulator, require the sweep
+                     and the corpus to find it, disarm it, and require both to
+                     go quiet
+  sweep --corpus     Replay every trial in sim/corpus.txt and require each to be
+                     clean. The permanent regression half of a seed sweep
+  sweep --record [n] Sweep, and merge what it finds into sim/corpus.txt
+  sweep --record --mutate
+                     The same, with the deliberate defect armed. This is how
+                     the entries in sim/corpus.txt were produced
+
+  snapshot           A long run that goes wrong in simulated minute 40,
+                     re-entered at minute 39 from a snapshot written while it
+                     passed — with both wall-clock numbers, because *bisects in
+                     seconds rather than hours* is a claim about time
 
   reproduce          Every claim, its published reproduction command, the
                      machine class it needs, and whether this one may record
@@ -602,6 +647,93 @@ fn image_dir(name: &str) -> PathBuf {
 /// why that position is the contract. Everything here follows it, each as one
 /// module holding a record and an image.
 const COMPONENTS: &[&str] = &["store", "virtio-blk"];
+
+/// Every component the *source tree* declares, by the name in its manifest.
+///
+/// # Why this exists beside [`COMPONENTS`]
+///
+/// Because [`COMPONENTS`] is a hand-written list and every check that read the
+/// build output was reading it back. `cargo xtask chaos` compared the components
+/// its sweep killed with the components the deployment directory held — two
+/// reads of one directory, so the comparison could not fail, and a component
+/// dropped from [`COMPONENTS`] would have vanished from both sides at once and
+/// printed `coverage 1 of 1` over half the tree. That is the third time in this
+/// epoch a join has been found comparing a set with itself, which is why the
+/// answer here is a second, independently derived set rather than a better
+/// message.
+///
+/// The independent derivation is the one thing in the tree that cannot be
+/// hand-maintained: a `manifest.toml` is what makes a directory a component, and
+/// `manifest::files` finds them by walking. `user/init` has none — RFC 0030 says
+/// why module one is not a component — so what comes back is exactly the set a
+/// deployment should hold.
+///
+/// # Errors
+///
+/// A manifest that does not parse, which [`lint_manifests`] reports properly.
+/// Here it is a hard error, because a set derived from a file nobody could read
+/// is not a set to compare anything against.
+fn declared_components() -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for path in manifest::files(&root(), &target_dir())? {
+        let rel = relative(&path);
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+        let checked = manifest::check(&rel, &text).map_err(|findings| {
+            format!(
+                "{rel} does not fit the schema, so the set of components this tree declares \
+                 cannot be read:\n{}",
+                findings.join("\n")
+            )
+        })?;
+        names.push(checked.name);
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// The build list and the source tree name the same components.
+///
+/// [`COMPONENTS`] decides what is built and therefore what every downstream
+/// check sees — the deployment scenario, `sim --join`, and `cargo xtask chaos`.
+/// Nothing tied it to the manifests the tree declares, so a component crate
+/// added with a manifest and left out of the list was a component no check ever
+/// looked for: it was absent from the build output and absent from every count
+/// taken over the build output, which is a gap that reads as a pass.
+///
+/// # Errors
+///
+/// The names in one set and not the other, in both directions.
+fn lint_components() -> Result<(), String> {
+    let declared = declared_components()?;
+    let mut built: Vec<String> = COMPONENTS.iter().map(|name| (*name).to_string()).collect();
+    built.sort();
+    if declared == built {
+        println!(
+            "lint-components: ok  ({} component(s); the build list is the manifest set)",
+            built.len()
+        );
+        return Ok(());
+    }
+    let missing: Vec<&String> = declared.iter().filter(|name| !built.contains(name)).collect();
+    let extra: Vec<&String> = built.iter().filter(|name| !declared.contains(name)).collect();
+    Err(format!(
+        "the components this tree declares and the components it builds are not the same set.\n\n\
+         declared and not built: {}\n\
+         built and not declared: {}\n\n\
+         `COMPONENTS` in xtask/src/main.rs is what decides what is built, and everything\n\
+         downstream — the deployment scenario, `sim --join`, `cargo xtask chaos` — counts what\n\
+         was built. A component missing from that list is therefore missing from both sides of\n\
+         every one of those comparisons at once, which is a gap that reads as a pass. Add it\n\
+         there, or delete its manifest.",
+        if missing.is_empty() { "none".to_string() } else { join_names(&missing) },
+        if extra.is_empty() { "none".to_string() } else { join_names(&extra) },
+    ))
+}
+
+/// A list of names for a refusal, comma-separated.
+fn join_names(names: &[&String]) -> String {
+    names.iter().map(|name| name.as_str()).collect::<Vec<_>>().join(", ")
+}
 
 /// Where a component file is written: a manifest record and an image, in one
 /// blob the loader hands over as one module. RFC 0030.
@@ -1548,6 +1680,14 @@ const DEFECTS: &[&str] = &[
     "mutate-relaxed-submission",
     "mutate-relaxed-completion",
     "mutate-no-doorbell-fence",
+    // The simulator's, and the first defect in this list that is not the
+    // kernel's. `cargo xtask sweep --mutate` is its harness and RFC 0040 is
+    // where the extension of RFC 0017's argument to this layer is written down.
+    "mutate-crossed-completion",
+    // The second, and it is here because five oracle properties with one defect
+    // between them is one property under test and four decorations. This one
+    // trips a different check — RFC 0042.
+    "mutate-silent-reset",
 ];
 
 /// The seed every reproduction run uses.
@@ -1791,6 +1931,199 @@ fn sim_scenarios() -> Result<Vec<String>, String> {
         return Err("f-sim listed no scenarios, so there is nothing to reproduce".into());
     }
     Ok(names)
+}
+
+/// What `cargo xtask chaos` kills that a boot cannot, declared as a set rather
+/// than left as a silence.
+///
+/// # Why a declaration and not a paragraph
+///
+/// RFC 0036 is the precedent and the argument is the same one: the join between
+/// two halves of a claim has a difference, and a difference that is prose is a
+/// difference nobody re-checks. So the gap is data, each entry naming the file
+/// and the exact text whose *presence* is what keeps the gap open, and this verb
+/// requires every one of them to still be there. The day one goes, this check
+/// goes red and tells whoever closed it to update the RFC — which is the
+/// opposite of the usual failure, where a gap quietly stops being true and the
+/// document keeps describing it.
+///
+/// One entry today, and it is RFC 0033's own reversal condition: *grep for
+/// `Driver::execute` and see which crate calls it*. While the frame calls it,
+/// the component the datapath runs on is not a scheduled component, so the thing
+/// `cargo xtask component` kills at boot is a place's occupant that serves
+/// nobody — and *under sustained load* is a sentence only the simulator can
+/// currently make true. RFC 0041 states it in full.
+const CHAOS_GAP: &[(&str, &str, &str)] = &[(
+    "kernel/src/blk.rs",
+    "driver.execute(",
+    "the frame still calls the driver's service loop, so the component a boot \
+     kills is not the component that serves the datapath",
+)];
+
+/// Kill every component under load, twice over, and judge the pair.
+///
+/// # What this command is, in one paragraph
+///
+/// Every component the build produced is put in a place, driven by a client that
+/// keeps work in flight, and killed at seeded moments; then the same workload is
+/// run against the same component with nothing killed. The simulator holds the
+/// verdict — `sim/src/chaos.rs`, and the exit status is it — and this holds the
+/// three things a verdict cannot: that the run reproduces across two processes,
+/// that it moves when the seed moves, and that the gap between what it kills and
+/// what a boot kills is still the gap that was declared.
+///
+/// # Errors
+///
+/// The verdict, the reproduction check, or the declared gap having closed.
+fn chaos() -> Result<(), String> {
+    components_quietly()?;
+    let dir = component_dir()?;
+
+    // The reproduction check first, and in two processes, for the reason
+    // `sim/src/main.rs` opens with: a harness called twice inside one process
+    // shares an address space and an allocator and can agree with itself for
+    // reasons that have nothing to do with the seed. A chaos test that cannot be
+    // replayed reports a symptom rather than a bug, which is the exact thing
+    // gate G1 exists to stop.
+    println!("chaos reproduction check — seed {TRACE_SEED}\n");
+    let first = chaos_hash(TRACE_SEED, &dir)?;
+    let second = chaos_hash(TRACE_SEED, &dir)?;
+    let other = chaos_hash(SIM_OTHER_SEED, &dir)?;
+    println!("  {:<12} {first}  {second}  {other}", "sweep");
+    if first != second {
+        return Err("two runs of the chaos sweep at one seed produced different results.\n\n\
+             A kill at a seeded moment has to be at *the* seeded moment. Something in the\n\
+             harness is reading a clock, an address or an iteration order the seed does\n\
+             not own, and a failure it finds is a symptom rather than a bug report.\n\
+             RFC 0004, RFC 0041."
+            .into());
+    }
+    if first == other {
+        return Err("the chaos sweep produced the same result at two different seeds.\n\n\
+             That makes the check above worth nothing: a digest over something that does\n\
+             not vary agrees with itself forever. Either the kills are landing at the same\n\
+             moment whatever the seed says, or the digest is taken over less than the run."
+            .into());
+    }
+
+    // Then the run itself, printed. Its exit status is the verdict, and a
+    // failure prints the report above the reason rather than instead of it —
+    // which is the difference between a gate somebody can act on and one they
+    // have to reproduce first.
+    println!();
+    let (ok, report) = chaos_report(TRACE_SEED, &dir)?;
+    print!("{report}");
+    if !ok {
+        return Err("a client observed something other than added latency.\n\n\
+             Gate G1: *a driver is killed under sustained load and the system does not\n\
+             notice*. The report above says which of the three halves of that sentence\n\
+             failed — an operation lost, an operation answered twice, or an answer that\n\
+             disagreed with what was written — and at which component."
+            .into());
+    }
+
+    // And the coverage, against a set this command did not produce.
+    //
+    // The first version of this check compared the number the sweep ran with the
+    // number the deployment directory held — two reads of one directory, so it
+    // could not fail, and a component dropped from `COMPONENTS` would have taken
+    // both sides down together and printed a green `coverage 1 of 1` over half
+    // the tree. So the number on the other side of the comparison is now the set
+    // of `manifest.toml` files the *source tree* carries, which is the one thing
+    // about a component that cannot be hand-maintained: a directory with a
+    // manifest is a component, and `lint-components` separately requires the
+    // build list to be that same set.
+    let ran = report
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("components "))
+        .and_then(|rest| rest.trim().parse::<usize>().ok())
+        .ok_or("the chaos report did not say how many components it ran")?;
+    let declared = declared_components()?;
+    let built: Vec<String> = capture(
+        "cargo",
+        &["run", "-q", "-p", "f-sim", "--", "--deployment", "--components", &dir],
+    )?
+    .lines()
+    .filter_map(|line| line.split_whitespace().next().map(str::to_string))
+    .collect();
+    if ran != declared.len() || built.len() != declared.len() {
+        let missing: Vec<&str> = declared
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !built.iter().any(|had| had == name))
+            .collect();
+        return Err(format!(
+            "the sweep killed {ran} component(s), the build produced {}, and this tree\n\
+             declares {} in its manifests{}.\n\n\
+             *Each driver component in turn* is the exit criterion's own words, so a\n\
+             component the sweep did not reach is a component nobody has killed — and a\n\
+             green result over a smaller set is the failure this check exists to refuse.\n\
+             `cargo xtask lint-components` says which list is short.",
+            built.len(),
+            declared.len(),
+            if missing.is_empty() {
+                String::new()
+            } else {
+                format!(" — not built: {}", missing.join(", "))
+            }
+        ));
+    }
+    println!(
+        "\ncoverage      {ran} component(s) killed, of {} this tree's manifests declare",
+        declared.len()
+    );
+
+    println!("\ndeclared gap  what this kills that a boot cannot, and why it is still true:");
+    for (file, needle, why) in CHAOS_GAP {
+        let path = root().join(file);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {file}: {e}\n\nThe declared gap names a file that is not there, which is a declaration nobody can check."))?;
+        if !text.contains(needle) {
+            return Err(format!(
+                "`{needle}` is gone from {file}.\n\n\
+                 That is the declared gap closing, which is good news and a red build on\n\
+                 purpose: the reason `cargo xtask chaos` is the only half of E1-P06 that can\n\
+                 kill a component under load has stopped being true, so RFC 0041's gap\n\
+                 section and `CHAOS_GAP` in xtask both describe a tree that no longer\n\
+                 exists. Update both, and move the kill into the boot."
+            ));
+        }
+        println!("  {file:<24} {why}");
+    }
+
+    println!(
+        "\nchaos: ok — every component the build produced was killed under load and refilled\n\
+         \x20      under its own declared policy, and no client observed anything except a wait.\n\
+         \x20      The control run beside each of them completed with nothing killed, which is\n\
+         \x20      what makes the survival evidence rather than an absence of trouble."
+    );
+    Ok(())
+}
+
+/// One chaos sweep, as a subprocess, reduced to its digest.
+fn chaos_hash(seed: &str, dir: &str) -> Result<String, String> {
+    let out = capture(
+        "cargo",
+        &["run", "-q", "-p", "f-sim", "--", "--chaos-hash", "--seed", seed, "--components", dir],
+    )?;
+    Ok(out.trim().to_string())
+}
+
+/// One chaos sweep, as a subprocess, with its report and its verdict.
+///
+/// The output is captured rather than streamed and the status is answered rather
+/// than turned into an error, because a failing verdict has to print its report:
+/// a gate that says only *failed* is a gate whose first debugging step is running
+/// the command again by hand.
+fn chaos_report(seed: &str, dir: &str) -> Result<(bool, String), String> {
+    let out = Command::new("cargo")
+        .args(["run", "-q", "-p", "f-sim", "--", "--chaos", "--seed", seed, "--components", dir])
+        .current_dir(root())
+        .output()
+        .map_err(|e| format!("could not run f-sim: {e}"))?;
+    let text =
+        String::from_utf8(out.stdout).map_err(|e| format!("f-sim printed non-UTF-8: {e}"))?;
+    Ok((out.status.success(), text))
 }
 
 /// The scenario set, as the simulator prints it.
@@ -2182,6 +2515,1126 @@ fn spawned_from(log: &str) -> Result<(usize, Vec<u64>), String> {
         return Err("the boot spawned no component at all, so there is nothing to join".into());
     }
     Ok((files, spawned))
+}
+
+// ---------------------------------------------------------------------------
+// E1-P03: the seed sweep, its minimiser and its corpus.
+//
+// The division of labour between this file and `f-sim` is the whole reason the
+// sweep is trustworthy, so it is stated here rather than inferred:
+//
+//   f-sim  decides which trials to run, in what order, and what verdict each
+//          gets, shrinks every failure, and prints the report. It reads no
+//          clock — `cargo xtask lint-determinism` scans `sim/` with no
+//          allow-list entry, so it could not — and its output is a function of
+//          its arguments alone.
+//   xtask  supplies the two things a pure function cannot know: the commit the
+//          run belongs to, and where the build left the component files. It
+//          then times the whole thing, because a sweep nobody can afford to run
+//          is a sweep nobody runs, and prints the cost beside the report rather
+//          than inside it.
+//
+// RFC 0040 is the record.
+// ---------------------------------------------------------------------------
+
+/// How many seeds `cargo xtask sweep` runs when it is not told. Unit: seeds.
+///
+/// The same number `f_sim::sweep::DEFAULT_SEEDS` states, passed explicitly for
+/// [`TRACE_SEED`]'s reason: the contract is about a pair, and a pair with an
+/// implicit half is a pair nobody can quote.
+const SWEEP_SEEDS: u32 = 64;
+
+/// The deliberate defect the sweep's own harness arms.
+///
+/// One, and it lives in `sim/src/dev.rs`, where the argument for putting it in
+/// the shipped source rather than in a patch is written out. It is in
+/// [`DEFECTS`] too, which is what `lint-mutations` reads.
+const SWEEP_DEFECT: &str = "mutate-crossed-completion";
+
+/// The second deliberate defect, and the check it is here to prove can fire.
+///
+/// One defect proves one signature. `mutate-crossed-completion` trips
+/// `check::held`, which is the first entry in the oracle's table and therefore
+/// the only signature it can ever produce — so a harness built on it alone
+/// demonstrates that *a* check can fail and says nothing about the other four.
+/// This one withholds the reset notification a device owes its client, which
+/// leaves operations issued and never answered: `check::balance`, or
+/// `check::bound` in the runs where nothing was in flight when the device fell
+/// over. The harness requires a signature other than `held`, which is the
+/// assertion that makes the table more than one property wide. RFC 0042.
+const SWEEP_DEFECT_TWO: &str = "mutate-silent-reset";
+
+/// Signatures the second defect is allowed to be found by. Unit: none — check
+/// names from `f_sim::check::CHECKS`.
+///
+/// Two rather than one because which of them fires depends on whether the
+/// client had work outstanding when its device fell over, and that is a seeded
+/// property of the scenario rather than a choice. Either is a different check
+/// from `held`, which is the whole requirement.
+const SWEEP_DEFECT_TWO_CHECKS: &[&str] = &["balance", "bound"];
+
+/// How many seeds the mutation harness sweeps. Unit: seeds.
+///
+/// Enough that the defect is reached — it needs two consecutive coalescing
+/// decisions with work behind them, so a handful of seeds would be a coin toss —
+/// and small enough that `verify` does not grow a minute. The harness fails
+/// loudly if this stops being enough, which is the reversal condition rather
+/// than a comment.
+const MUTATE_SEEDS: u32 = 16;
+
+/// How many threads a sweep is given.
+///
+/// A cost knob and never a verdict: `f_sim::sweep` lays the grid out before a
+/// worker starts and assembles the report in grid order, and its own test runs
+/// one sweep at one worker and at five and requires one report. Read from the
+/// machine here rather than defaulted inside `f-sim`, so that the simulator's
+/// output stays a function of its arguments and this file owns the one number
+/// that depends on where it is running.
+fn sweep_jobs() -> String {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get).to_string()
+}
+
+/// The commit half of `(seed, commit)`.
+///
+/// Fatal rather than `unknown`, on `release`'s argument and for the same reason:
+/// a report naming an unidentified tree is not a degraded report, it is a
+/// confident statement about nothing — and a seed without a commit reproduces
+/// nothing at all.
+fn sweep_commit() -> Result<String, String> {
+    capture("git", &["rev-parse", "HEAD"]).map(|out| out.trim().to_string()).map_err(|e| {
+        format!(
+            "cannot read the commit from git: {e}\n\n\
+             A sweep prints `(seed, commit)` pairs, so this is fatal. In a container it \
+             is usually git refusing a working tree owned by another uid; \
+             docker/Dockerfile marks the tree safe, and an image built before that does \
+             not."
+        )
+    })
+}
+
+/// Run `f-sim` with the given features and arguments, answering
+/// `(clean, output)`.
+///
+/// The output is printed as well as returned, because a sweep's report is the
+/// thing a person came for and a harness that swallowed it would make its own
+/// summary the only evidence. A non-zero exit is *a finding* rather than an
+/// error — `f-sim` uses the status that way deliberately — so this cannot use
+/// [`capture`], which treats one as a failure.
+fn f_sim(features: &[&str], args: &[&str]) -> Result<(bool, String), String> {
+    let mut argv: Vec<String> =
+        ["run", "-q", "-p", "f-sim"].iter().map(|s| (*s).to_string()).collect();
+    if !features.is_empty() {
+        argv.push("--features".into());
+        argv.push(features.join(","));
+    }
+    argv.push("--".into());
+    argv.extend(args.iter().map(|s| (*s).to_string()));
+
+    let out = Command::new("cargo")
+        .args(&argv)
+        .current_dir(root())
+        .output()
+        .map_err(|e| format!("could not run cargo: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    print!("{text}");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !stderr.trim().is_empty() {
+        eprint!("{stderr}");
+    }
+    // `f-sim` answers 0 for a clean run and 1 for a finding, and refuses with a
+    // message on standard error for anything it could not do at all. The two are
+    // told apart by whether it printed a report: a refusal prints nothing on
+    // standard output, which is the signal available without inventing a third
+    // exit code that every caller would then have to know about.
+    if text.trim().is_empty() {
+        return Err(format!("f-sim refused: {}", stderr.trim()));
+    }
+    Ok((out.status.success(), text))
+}
+
+// ---------------------------------------------------------------------------
+// E1-P08 — a long run is re-entered near its end rather than replayed.
+// ---------------------------------------------------------------------------
+
+/// The scenario `cargo xtask snapshot` runs.
+///
+/// Not in `f-sim --list` and not in the sweep's grid, because it is forty
+/// simulated minutes long — `sim/src/scenario.rs`'s `LONG` table is where the
+/// split by cost is argued.
+const SNAPSHOT_SCENARIO: &str = "soak";
+
+/// Where the strike goes in, in consultations of `peergone`.
+///
+/// Chosen so that the run goes wrong in **simulated minute 40**, which is the
+/// minute `E1-P08`'s exit names. It is a number about the shipped scenario and
+/// not about a machine: `soak` publishes one completion per operation, the run
+/// is forty-four simulated minutes long over a hundred and twenty thousand of
+/// them, and this is ninety-two per cent of the way through. The harness prints
+/// the minute it actually landed in and refuses if it is not the one the exit
+/// asks about, so a scenario change that moved it fails loudly rather than
+/// quietly demonstrating something else.
+const SNAPSHOT_STRIKE: &str = "peergone:110000:1";
+
+/// The minute the failure must land in, and the minute it is re-entered at.
+const SNAPSHOT_MINUTE: u64 = 40;
+
+/// The saving `cargo xtask snapshot` requires before it calls the exit met.
+///
+/// Ten. The measured figure on the four-core development container is far above
+/// it — `claims/0007` carries the number and its reproduction — and the
+/// threshold is here rather than the measurement because a gate that asserted a
+/// machine's number would go red on a slower machine for a reason that is not a
+/// regression. What ten rules out is the thing worth ruling out: a re-entry that
+/// costs the same order as the replay it exists to avoid, which is what the
+/// *whole* snapshot below actually does and is why both are measured.
+const SNAPSHOT_SAVING: u128 = 10;
+
+/// What a re-entry from a **whole** mark is allowed to cost, as a multiple of
+/// replaying.
+///
+/// Four, and it is a *ceiling* rather than a floor because the honest answer is
+/// that a whole mark is **not a saving at all**. Measured on the four-core
+/// development container it costs about what the replay costs — 526 ms against
+/// 1055 ms in one run of this verb and 1252 ms against 515 ms in another, so the
+/// ratio wanders either side of one — because reading half a million records
+/// back costs the same order as producing them. RFC 0043 measured that, and it
+/// is why there are two kinds of mark at all.
+///
+/// So this number is not a claim that the whole mark is fast. It is the guard
+/// that stops it becoming *slow*: a change that made re-entry cost several
+/// replays would turn the judgeable half of this verb into something nobody
+/// would run, and today nothing would notice. Four rather than two because both
+/// halves are single wall-clock samples on a shared container and the observed
+/// spread already reaches 2.4x.
+///
+/// *Reversal:* the day `check::examine` can judge a tail, the whole mark stops
+/// being the only judgeable artefact and this constant goes with it.
+const SNAPSHOT_WHOLE_CEILING: u128 = 4;
+
+/// How many times each timed command is run before its cost is believed. Unit:
+/// runs.
+const SNAPSHOT_SAMPLES: usize = 3;
+
+/// Build `f-sim` in release with `features`, and put the binary somewhere it
+/// will not be overwritten by the next build.
+///
+/// Two things, and both are about honest numbers.
+///
+/// **Release**, because this verb exists to answer *what does re-entering cost
+/// against replaying*, and a wall-clock number measured on an unoptimised build
+/// is a number about the build. `f_sim` above stays as it is: every other caller
+/// wants a verdict rather than a stopwatch.
+///
+/// **Copied aside**, because the comparison needs two binaries — one with the
+/// deliberate defect and one without — and cargo keeps one `f-sim` per target
+/// directory whatever the features. Building the second would silently replace
+/// the first, and the refusal in step five would then be a binary refusing its
+/// own snapshot for no reason at all.
+///
+/// And the invocation is `cargo build` followed by running the binary, rather
+/// than `cargo run`. That is not tidiness: `cargo run` spends several hundred
+/// milliseconds deciding the build is fresh, and several hundred milliseconds is
+/// two orders of magnitude more than a re-entry costs — so timing through cargo
+/// would measure cargo and report it as the simulator.
+fn f_sim_built(features: &[&str], name: &str) -> Result<PathBuf, String> {
+    let mut argv: Vec<String> =
+        ["build", "-q", "--release", "-p", "f-sim"].iter().map(|s| (*s).to_string()).collect();
+    if !features.is_empty() {
+        argv.push("--features".into());
+        argv.push(features.join(","));
+    }
+    sh("cargo", &argv.iter().map(String::as_str).collect::<Vec<_>>())?;
+
+    let built =
+        target_dir().join("release").join(if cfg!(windows) { "f-sim.exe" } else { "f-sim" });
+    let kept = target_dir().join("snapshot-bin");
+    std::fs::create_dir_all(&kept).map_err(|e| format!("creating {}: {e}", kept.display()))?;
+    let kept = kept.join(name);
+    std::fs::copy(&built, &kept)
+        .map_err(|e| format!("copying {} to {}: {e}", built.display(), kept.display()))?;
+    Ok(kept)
+}
+
+/// Run a built `f-sim`, timed.
+fn f_sim_timed(binary: &Path, args: &[&str]) -> Result<(bool, String, u128), String> {
+    let started = std::time::Instant::now();
+    let out = Command::new(binary)
+        .args(args)
+        .current_dir(root())
+        .output()
+        .map_err(|e| format!("could not run {}: {e}", binary.display()))?;
+    let elapsed = started.elapsed().as_millis();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if text.trim().is_empty() {
+        return Err(format!("f-sim refused: {}", stderr.trim()));
+    }
+    Ok((out.status.success(), text, elapsed))
+}
+
+/// The buffer an oracle's evidence line names, as the sixteen hex digits a
+/// trace prints it with.
+///
+/// Every finding in `check.rs` names one, and this verb needs it for one
+/// purpose: to require that the failure is in the part of the run the re-entry
+/// actually executes. Without that, every assertion here would still pass with
+/// the defect moved to minute five — a whole mark carries the prefix, so it
+/// would report a finding it read off disk — and the sentence this verb prints
+/// would be false while it was green. That is the shape of failure this epoch
+/// has already caught three times.
+fn failing_buffer(evidence: &str) -> Result<String, String> {
+    let at = evidence.find("0x").ok_or_else(|| {
+        format!(
+            "no buffer named in this evidence line, so the failure cannot be located in \
+             the run:\n  {evidence}"
+        )
+    })?;
+    let digits: String = evidence[at + 2..].chars().take_while(char::is_ascii_hexdigit).collect();
+    if digits.len() != 16 {
+        return Err(format!(
+            "the evidence line names `0x{digits}`, which is not one of the sixteen-digit \
+             identifiers a trace prints:\n  {evidence}"
+        ));
+    }
+    Ok(digits)
+}
+
+/// Run a built `f-sim` [`SNAPSHOT_SAMPLES`] times and keep the fastest.
+///
+/// A minimum rather than a mean, and several samples rather than one, because
+/// the number this verb reports is *what re-entering costs* and a single sample
+/// on a shared four-core container measures the container as much as the code.
+/// The first sample in particular pays for paging the binary in: a run of this
+/// verb reported 85 ms for a re-entry that costs 8 ms warm, which is a tenfold
+/// error on the smaller of the two numbers and enough to fail a threshold for a
+/// reason that is not a regression.
+///
+/// A minimum is the right statistic for a cost floor, because noise on a shared
+/// machine only ever adds. And every sample is required to produce the same
+/// bytes, so the repetition is also a reproduction check rather than three
+/// stopwatches: a command whose output moved between two runs is a determinism
+/// failure and is reported as one, before any timing is reported at all.
+fn f_sim_best(binary: &Path, args: &[&str]) -> Result<(bool, String, u128), String> {
+    let (good, text, mut best) = f_sim_timed(binary, args)?;
+    for _ in 1..SNAPSHOT_SAMPLES {
+        let (again, more, ms) = f_sim_timed(binary, args)?;
+        if again != good || more != text {
+            return Err(format!(
+                "two runs of one command answered differently. That is a reproduction failure \
+                 and not a\n\
+                 timing one, and it matters more than the number this verb was measuring:\n  \
+                 {} {}",
+                binary.display(),
+                args.join(" ")
+            ));
+        }
+        best = best.min(ms);
+    }
+    Ok((good, text, best))
+}
+
+/// One field out of an `f-sim` report, by the word it starts with.
+fn field<'r>(report: &'r str, name: &str) -> Result<&'r str, String> {
+    report
+        .lines()
+        .find(|line| line.starts_with(name))
+        .map(|line| line[name.len()..].trim())
+        .ok_or_else(|| format!("no `{name}` line in this report:\n{report}"))
+}
+
+/// A long run, marked as it goes, and re-entered one minute before it fails.
+///
+/// # What this verb is
+///
+/// **`E1-P08`'s exit, as a command.** A scenario that goes wrong in simulated
+/// minute forty is run three ways and the three are compared:
+///
+/// 1. **replayed** from zero, which is what a person has today, and timed;
+/// 2. **scanned** — the same run, with a snapshot written at every simulated
+///    minute as it passes, and timed. This is the pass somebody was going to run
+///    anyway, and the marks cost what they cost;
+/// 3. **re-entered** from the minute-thirty-nine mark, and timed.
+///
+/// The third has to produce the second's ending exactly — the same digest, the
+/// same finishing instant, the same step count — and to cost a small fraction of
+/// the first. Both numbers are printed, because *bisects in seconds rather than
+/// hours* is a claim about time and a claim about time that is not measured is a
+/// hope.
+///
+/// # Why the run has to be built with a defect
+///
+/// Because a fault class in this tree **states its response and gets it**: RFC
+/// 0039 is the whole of `E1-P02`, so injecting one produces a run that is
+/// correct and a report that says nothing went wrong. To have a failure at
+/// minute forty there has to be a bug at minute forty, and the honest way to
+/// have one is the way RFC 0017 and RFC 0040 already established — a deliberate
+/// defect in the shipped source, behind a feature that is off by default.
+/// `mutate-silent-reset` is the one whose symptom needs a fall-over, and
+/// `--inject peergone` is what places the fall-over in minute forty.
+///
+/// That the demonstration needs a defect at all is also what makes it a
+/// demonstration: the same commit, without the feature, runs the same scenario
+/// clean.
+///
+/// # And the two kinds of mark, because they answer different questions
+///
+/// A **whole** mark carries the artefact, so the re-entered run is
+/// indistinguishable from the replay in every respect the oracle included — it
+/// prints the same finding, with the same evidence. A **terse** mark carries the
+/// artefact's running hash instead, so the re-entry is cheap and cannot be
+/// judged. This verb requires both: the whole mark is what says *the same run*,
+/// and the terse mark is what says *in a fraction of the time*. RFC 0043 argues
+/// why one file format could not honestly be both.
+fn snapshot() -> Result<(), String> {
+    let commit = sweep_commit()?;
+    let dir = root().join("target").join("snapshot");
+    let _ = std::fs::remove_dir_all(&dir);
+    // Two directories rather than one, because the two scans below write a file
+    // of the same name — `minute-39.snap` — and the whole scan would otherwise
+    // overwrite the terse mark that step five is written about. It did, and the
+    // step still passed: the build fingerprint is refused before a body is
+    // interpreted, so the refusal held while the file it named was the other
+    // kind. A step whose subject is not what its name says is a step nobody can
+    // read.
+    let terse_dir = dir.join("terse");
+    let whole_dir = dir.join("whole");
+    let at = terse_dir.to_string_lossy().into_owned();
+    let whole_at = whole_dir.to_string_lossy().into_owned();
+    println!(
+        "snapshot and restore — `{SNAPSHOT_SCENARIO}`, built with `{SWEEP_DEFECT_TWO}` so that\n\
+         there is something to find at simulated minute {SNAPSHOT_MINUTE}. RFC 0043.\n"
+    );
+
+    // Built out of the timings, and both binaries built before either is timed:
+    // everything below is measured, and a first invocation that also compiled
+    // would report the compiler's seconds as the simulator's.
+    println!("[0/5] building two simulators, with the defect and without (not timed)");
+    let armed = f_sim_built(&[SWEEP_DEFECT_TWO], "f-sim-armed")?;
+    let plain = f_sim_built(&[], "f-sim-plain")?;
+
+    println!("\n[1/5] replaying the whole run — what a person has today");
+    let (clean, replayed, replay_ms) =
+        f_sim_timed(&armed, &["--check", "--inject", SNAPSHOT_STRIKE, SNAPSHOT_SCENARIO])?;
+    if clean {
+        return Err(format!(
+            "`{SNAPSHOT_SCENARIO}` with `{SWEEP_DEFECT_TWO}` armed and a peer death at \
+             {SNAPSHOT_STRIKE}\n\
+             ran clean. There is then nothing at minute {SNAPSHOT_MINUTE} to re-enter and this \
+             verb\n\
+             demonstrates nothing. Either the defect no longer reaches the client — it needs a\n\
+             fall-over, so a scenario that stopped resetting would hide it — or the scenario's\n\
+             numbers moved and the strike no longer lands where it did."
+        ));
+    }
+    let finding = field(&replayed, "check")?.to_string();
+    let evidence = field(&replayed, "evidence")?.to_string();
+    let failing = failing_buffer(&evidence)?;
+    println!("       {replay_ms} ms");
+
+    // The digest of that same run, which is the number a re-entry has to answer.
+    let (_, hashed, _) =
+        f_sim_timed(&armed, &["--hash", "--inject", SNAPSHOT_STRIKE, SNAPSHOT_SCENARIO])?;
+    let digest = hashed.trim().to_string();
+    let (_, reported, replay_hash_ms) =
+        f_sim_best(&armed, &["--inject", SNAPSHOT_STRIKE, SNAPSHOT_SCENARIO])?;
+    let finished: u64 = field(&reported, "finished")?
+        .trim_end_matches(" ns")
+        .parse()
+        .map_err(|_| "the report's `finished` line is not a number".to_string())?;
+    let minute = finished / 60_000_000_000;
+    if minute != SNAPSHOT_MINUTE {
+        return Err(format!(
+            "the run goes wrong in simulated minute {minute}, and this verb is written about\n\
+             minute {SNAPSHOT_MINUTE} — which is the minute `E1-P08`'s exit names. Move\n\
+             `SNAPSHOT_STRIKE` until it lands there again, or change the exit."
+        ));
+    }
+    println!(
+        "       fails in simulated minute {minute} — {finding}\n       digest {digest}, {} steps",
+        field(&reported, "steps")?
+    );
+
+    println!("\n[2/5] the same run, marked at every simulated minute — terse marks");
+    let (_, scanned, scan_ms) = f_sim_timed(
+        &armed,
+        &[
+            "--scan",
+            "--terse",
+            "--into",
+            &at,
+            "--every",
+            "1",
+            "--commit",
+            &commit,
+            "--inject",
+            SNAPSHOT_STRIKE,
+            SNAPSHOT_SCENARIO,
+        ],
+    )?;
+    if field(&scanned, "digest")? != digest {
+        return Err("marking the run changed it. A scan that moved a digest is a scan whose \
+                    marks describe a run nobody had."
+            .to_string());
+    }
+    let terse = terse_dir.join(format!("minute-{}.snap", SNAPSHOT_MINUTE - 1));
+    let terse_bytes = std::fs::metadata(&terse).map(|m| m.len()).unwrap_or_default();
+    println!("       {scan_ms} ms, and minute {} is {terse_bytes} bytes", SNAPSHOT_MINUTE - 1);
+
+    println!("\n[3/5] re-entering at minute {} — terse", SNAPSHOT_MINUTE - 1);
+    let (_, resumed, resume_ms) =
+        f_sim_best(&armed, &["--resume", &terse.to_string_lossy(), "--commit", &commit])?;
+    if field(&resumed, "digest")? != digest {
+        return Err(format!(
+            "a run re-entered at minute {} ended with a different digest from the run that\n\
+             replayed. That is the one failure a snapshot must not have: it is a plausible\n\
+             run that diverged, and it would send somebody looking for a bug at a point the\n\
+             system never reached. RFC 0043.",
+            SNAPSHOT_MINUTE - 1
+        ));
+    }
+    if field(&resumed, "finished")? != field(&reported, "finished")?
+        || field(&resumed, "steps")? != field(&reported, "steps")?
+    {
+        return Err("a re-entered run ended at a different instant or after a different number \
+                    of steps."
+            .to_string());
+    }
+
+    // And the tail is *read*, not merely hashed. A terse mark carries its prefix
+    // as a number, so `check::examine` refuses to judge it — which left the
+    // gated fast path unable to show anybody a bug, and left this verb unable to
+    // say the failure was after the cut rather than before it. `--resume
+    // --trace` prints the records from the cut onward, and the buffer the replay
+    // failed on has to be among them.
+    //
+    // Untimed, deliberately: printing half a million lines is not part of what a
+    // re-entry costs, and folding it into the number above would deflate the
+    // saving this verb reports.
+    let (_, tail, _) = f_sim_timed(
+        &armed,
+        &["--resume", &terse.to_string_lossy(), "--commit", &commit, "--trace"],
+    )?;
+    if !tail.contains(&failing) {
+        return Err(format!(
+            "the run fails on 0x{failing}, and that is nowhere in the tail re-entered at\n\
+             minute {}. Either the failure is *before* the cut — in which case this verb\n\
+             demonstrates re-entering a run whose bug it skipped, and the minute in its own\n\
+             sentence is wrong — or the tail is not this run's. Move `SNAPSHOT_STRIKE` until\n\
+             the failure lands after the cut again.",
+            SNAPSHOT_MINUTE - 1
+        ));
+    }
+    println!("       {resume_ms} ms, same digest {digest}, and the tail holds 0x{failing}");
+
+    println!("\n[4/5] the same re-entry from a whole mark, which the oracle can judge");
+    let (_, _, whole_scan_ms) = f_sim_timed(
+        &armed,
+        &[
+            "--scan",
+            "--into",
+            &whole_at,
+            "--every",
+            "1",
+            // Only the last few minutes are marked, and only two are kept: a
+            // whole mark carries the artefact, so forty of them is forty copies
+            // of a growing run and about a gigabyte of writing to throw away.
+            // What that gives up is stated where it is chosen — a bisect that
+            // wants an earlier mark scans again, and a scan is a function of
+            // (seed, commit).
+            "--after",
+            "38",
+            "--keep",
+            "2",
+            "--commit",
+            &commit,
+            "--inject",
+            SNAPSHOT_STRIKE,
+            SNAPSHOT_SCENARIO,
+        ],
+    )?;
+    let whole = whole_dir.join(format!("minute-{}.snap", SNAPSHOT_MINUTE - 1));
+    let whole_bytes = std::fs::metadata(&whole).map(|m| m.len()).unwrap_or_default();
+    let (_, judged, whole_resume_ms) =
+        f_sim_best(&armed, &["--resume", &whole.to_string_lossy(), "--commit", &commit])?;
+    if field(&judged, "check")? != finding || field(&judged, "evidence")? != evidence {
+        return Err(format!(
+            "a run re-entered from a whole mark was judged differently from the run that\n\
+             replayed.\n  replayed: {finding}\n            {evidence}\n  re-entered: {}\n\
+             \x20           {}",
+            field(&judged, "check")?,
+            field(&judged, "evidence")?
+        ));
+    }
+    println!(
+        "       {whole_scan_ms} ms to scan, {whole_resume_ms} ms to re-enter, mark is \
+         {whole_bytes} bytes"
+    );
+    println!("       and the same finding: {finding}");
+
+    println!("\n[5/5] a mark from another build is refused rather than read");
+    // The same commit, a different binary: no defect. The snapshot's build
+    // fingerprint folds the compiled-in defects, so this is the case a commit
+    // hash alone cannot catch — and it is the case that would otherwise restore
+    // a run into a model that means something else.
+    let refused = f_sim_timed(&plain, &["--resume", &terse.to_string_lossy(), "--commit", &commit]);
+    match refused {
+        Err(why) if why.contains("snapshot build") => println!("       refused: {}", why.trim()),
+        Err(why) => {
+            return Err(format!(
+                "a snapshot from a build with `{SWEEP_DEFECT_TWO}` in it was refused by a build\n\
+                 without it, but not for the right reason: {why}"
+            ));
+        }
+        Ok(_) => {
+            return Err(format!(
+                "a binary built without `{SWEEP_DEFECT_TWO}` read a snapshot taken by one built\n\
+                 with it. Those are two different models, so the run it would continue is a run\n\
+                 nobody had. The build fingerprint in sim/src/snap.rs is meant to refuse this."
+            ));
+        }
+    }
+
+    let saving = replay_hash_ms.max(1) / resume_ms.max(1);
+    println!(
+        "\nsnapshot: ok — a failure in simulated minute {SNAPSHOT_MINUTE} was re-entered at \
+         minute {},\n\
+        \x20         without re-running the first {}.\n\n\
+        \x20  replay from zero            {replay_hash_ms:>6} ms\n\
+        \x20  scan, marking every minute  {scan_ms:>6} ms   (paid once, and this run was \
+         happening anyway)\n\
+        \x20  re-enter at minute {:<9}{resume_ms:>6} ms   ({saving}x)\n\
+        \x20  terse mark                  {terse_bytes:>6} bytes\n\
+        \x20  whole mark                  {whole_bytes:>6} bytes, {whole_resume_ms} ms to \
+         re-enter, and judgeable\n\n\
+        \x20         The ratio above is the *terse* mark's, and a terse mark is a bisect tool\n\
+        \x20         rather than a verdict: `--resume --trace` reads its tail — which holds\n\
+        \x20         0x{failing}, the buffer this run failed on — while `--check` refuses\n\
+        \x20         to judge a partial artefact and says so. The whole mark is the judgeable\n\
+        \x20         one and is **not** a saving: it costs about what the replay costs, so it\n\
+        \x20         is gated by a ceiling of {SNAPSHOT_WHOLE_CEILING}x rather than a floor, \
+         which is what makes a\n\
+        \x20         regression in it visible. RFC 0043 says why one file could not be both\n\
+        \x20         and claims/0007 carries both numbers.",
+        SNAPSHOT_MINUTE - 1,
+        SNAPSHOT_MINUTE - 1,
+        SNAPSHOT_MINUTE - 1,
+    );
+    if saving < SNAPSHOT_SAVING {
+        return Err(format!(
+            "re-entering cost {resume_ms} ms against {replay_hash_ms} ms to replay, which is \
+             {saving}x and\n\
+             the threshold is {SNAPSHOT_SAVING}x. A re-entry that costs the same order as the \
+             replay it\n\
+             exists to avoid is not a bisect tool. claims/0007 is the claim and RFC 0043 is\n\
+             where the two designs are measured against each other."
+        ));
+    }
+    if whole_resume_ms > replay_hash_ms.max(1).saturating_mul(SNAPSHOT_WHOLE_CEILING) {
+        return Err(format!(
+            "re-entering from a whole mark cost {whole_resume_ms} ms against \
+             {replay_hash_ms} ms to replay,\n\
+             which is past the {SNAPSHOT_WHOLE_CEILING}x ceiling. A whole mark is not \
+             expected to be a saving — it\n\
+             is the artefact the oracle can judge — but it is expected to stay in the same \
+             order as\n\
+             the run it stands in for, and it no longer is. RFC 0043 is where the two \
+             designs are\n\
+             measured against each other."
+        ));
+    }
+    Ok(())
+}
+
+/// The `sweep` verb, and the one argument it owns that is not N or M.
+///
+/// `--base <seed>` is pulled out here rather than taken positionally, because it
+/// is the argument a nightly varies and the two positional ones are the argument
+/// a person varies. Everything downstream takes the base explicitly: a sweep
+/// whose base was implicit would be a report nobody could reproduce from its own
+/// header, which is the argument [`TRACE_SEED`] already carries one level down.
+fn sweep_verb(args: &[String]) -> Result<(), String> {
+    let mut base: Option<String> = None;
+    let mut rest: Vec<&str> = Vec::new();
+    let mut walk = args.iter();
+    while let Some(arg) = walk.next() {
+        if arg == "--base" {
+            let value = walk.next().ok_or("--base needs a seed: 0x-prefixed hex, or decimal")?;
+            base = Some(value.clone());
+        } else {
+            rest.push(arg.as_str());
+        }
+    }
+    let base = base.as_deref().unwrap_or(TRACE_SEED);
+
+    match rest.first().copied() {
+        Some("--mutate") => sweep_mutate(),
+        Some("--corpus") => sweep_corpus(&[]),
+        // `--record --mutate` is how the entries already in the corpus were
+        // produced, and it is spelled rather than left as folklore: the corpus
+        // is the trials that have found something, and on a tree with nothing
+        // wrong with it the only thing to find is the deliberate defect.
+        // Whoever regenerates the file runs this.
+        Some("--record") => match rest.get(1).copied() {
+            Some("--mutate") => sweep_record(base, None, &[SWEEP_DEFECT]),
+            seeds => sweep_record(base, seeds, &[]),
+        },
+        Some(other) if other.starts_with('-') => Err(format!("unknown option for sweep: {other}")),
+        seeds => sweep(base, seeds, rest.get(1).copied(), &[], false),
+    }
+}
+
+/// The largest `--seeds` one `f-sim` process will accept over `scenarios`
+/// scenarios. Unit: seeds.
+///
+/// Asked of `f-sim` rather than computed here, and that is the point: the leak
+/// this bounds belongs to `sim/src/client.rs`, the arithmetic that turns it into
+/// a seed count is `f_sim::sweep::max_seeds`, and a second copy in this file
+/// would be a number that drifts the first time a buffer geometry in the
+/// scenario table changes. RFC 0042.
+fn sweep_ceiling(scenarios: Option<&str>) -> Result<u32, String> {
+    let mut argv: Vec<&str> = vec!["run", "-q", "-p", "f-sim", "--", "--ceiling"];
+    if let Some(scenarios) = scenarios {
+        argv.push("--scenarios");
+        argv.push(scenarios);
+    }
+    let out = capture("cargo", &argv)?;
+    out.trim()
+        .parse::<u32>()
+        .map_err(|_| format!("f-sim --ceiling printed `{}`, which is not a seed count", out.trim()))
+}
+
+/// The sweep, with the wall clock around it.
+///
+/// `seeds` and `scenarios` are the N and the M: how many seeds, and how many
+/// scenarios from the top of the shipped table. Both have defaults, because a
+/// command with no default is a command with a manual.
+///
+/// # Why this loops
+///
+/// Every trial in `f-sim` leaks the buffer regions of the clients it ran, so one
+/// process can hold a bounded number of them and `f-sim` refuses a grid past
+/// that bound rather than being killed for memory half way through a night. The
+/// nightly asks for sixty-five thousand seeds, which is several times the bound,
+/// so this runs it as consecutive shards of the *same* seed derivation — shard
+/// `k` runs exactly the trials one process would have run at those indices, and
+/// each report says which indices it covered. `sim/src/sweep.rs` has the test
+/// that says the shards together are the sweep; RFC 0042 is the record.
+///
+/// One shard is the ordinary case and prints what this printed before: the
+/// default sweep is 64 seeds against a ceiling in the thousands.
+/// `record` merges what is found into `sim/corpus.txt` before returning, and
+/// `features` is how the mutation harness arms a defect. Both are arguments
+/// rather than separate functions because the sharding, the ceiling and the
+/// verdict are the same in every case, and two copies of a loop that decides a
+/// gate is two places for a shard to go missing.
+fn sweep(
+    base: &str,
+    seeds: Option<&str>,
+    scenarios: Option<&str>,
+    features: &[&str],
+    record: bool,
+) -> Result<(), String> {
+    components_quietly()?;
+    let commit = sweep_commit()?;
+    let jobs = sweep_jobs();
+    let dir = component_dir()?;
+    let wanted: u32 = match seeds {
+        None => SWEEP_SEEDS,
+        Some(text) => text.parse().map_err(|_| format!("sweep takes a count, not `{text}`"))?,
+    };
+    // Fail closed here as well as in `f-sim`, so that the verb refuses before it
+    // builds anything. A sweep of no seeds is not a small sweep.
+    if wanted == 0 {
+        return Err("sweep 0 asks for a grid with no trials in it, which is a result that is \
+                    green because it asserted nothing. R04."
+            .to_string());
+    }
+    // The other axis of the same fail-open, refused here rather than left to
+    // `f-sim`: a zero reaching `--ceiling` makes that call fail with a message
+    // about a subprocess, which is a true statement about the wrong thing.
+    if let Some(text) = scenarios {
+        let count: u32 =
+            text.parse().map_err(|_| format!("sweep takes a scenario count, not `{text}`"))?;
+        if count == 0 {
+            return Err("sweep <n> 0 asks for a grid with no scenarios in it, which is a \
+                        result that is green because it asserted nothing. R04."
+                .to_string());
+        }
+    }
+    let ceiling = sweep_ceiling(scenarios)?;
+    let shards = wanted.div_ceil(ceiling.max(1));
+
+    // The one clock in this apparatus, and it is here rather than in the
+    // simulator on purpose: a sweep nobody can finish is a sweep nobody runs, so
+    // the cost has to be reported — and a cost that could reach a verdict would
+    // make two machines disagree about what a commit does. `sim/src/sweep.rs`
+    // states the same split from the other side.
+    let started = std::time::Instant::now();
+    let mut findings = 0u32;
+    for shard in 0..shards {
+        let from = shard.saturating_mul(ceiling);
+        let take = wanted.saturating_sub(from).min(ceiling);
+        let (from, take) = (from.to_string(), take.to_string());
+        if shards > 1 {
+            println!("\n--- shard {} of {shards}\n", shard + 1);
+        }
+        let mut args: Vec<&str> = vec![
+            if record { "--record" } else { "--sweep" },
+            "--commit",
+            &commit,
+            "--seed",
+            base,
+            "--seeds",
+            &take,
+            "--from",
+            &from,
+            "--jobs",
+            &jobs,
+            "--components",
+            &dir,
+        ];
+        if let Some(scenarios) = scenarios {
+            args.push("--scenarios");
+            args.push(scenarios);
+        }
+        let (clean, _) = f_sim(features, &args)?;
+        if !clean {
+            findings = findings.saturating_add(1);
+        }
+    }
+    let elapsed = started.elapsed();
+
+    println!(
+        "\nelapsed    {:.1} s of wall clock at {jobs} worker(s) over {shards} process(es),\n\
+         \x20          and it is in no verdict above. Two machines that disagree about\n\
+         \x20          this number still agree about every line of the report.",
+        elapsed.as_secs_f64()
+    );
+    if findings == 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "the sweep found something, in {findings} of {shards} shard(s). Every finding above \
+         carries the one line that reproduces it, and that line judges itself: it runs \
+         `--check`, which exits non-zero and names the property that broke."
+    ))
+}
+
+/// The corpus, replayed.
+///
+/// Every trial that has ever found something, required to be clean now. That is
+/// what makes `sim/corpus.txt` a regression suite rather than a list of numbers,
+/// and it is the half of `E1-P03` that keeps paying after the sweep that found
+/// an entry has been forgotten.
+fn sweep_corpus(features: &[&str]) -> Result<(), String> {
+    components_quietly()?;
+    let dir = component_dir()?;
+    let (clean, _) = f_sim(features, &["--corpus", "--components", &dir])?;
+    if clean {
+        return Ok(());
+    }
+    Err("a corpus entry that used to be clean is not.\n\n\
+         Each `[--]` line above is an argument list: paste it after \
+         `cargo run -q -p f-sim -- --trace` and read the artefact."
+        .to_string())
+}
+
+/// Sweep, and merge what it found into the corpus.
+///
+/// A wrapper rather than a second loop, because a corpus-growing sweep is the
+/// same sweep: the same grid, the same ceiling, the same shards and the same
+/// verdict. What differs is one flag to `f-sim` and one consequence in the
+/// tree.
+///
+/// **It still fails when it finds something**, and that is the change the
+/// nightly needed: growing the corpus and going red are two things a scheduled
+/// job has to do in one pass, and a `--record` that swallowed the verdict was a
+/// job that could only do one of them per run of a night. Whoever regenerates
+/// the corpus by hand under a deliberate defect gets entries written *and* a
+/// non-zero exit, which is the honest answer — the sweep did find something.
+fn sweep_record(base: &str, seeds: Option<&str>, features: &[&str]) -> Result<(), String> {
+    sweep(base, seeds, None, features, true)
+}
+
+/// The argument list out of the smallest reproduction a report printed.
+///
+/// The `smallest` line when the minimiser shrank anything and the `repro` line
+/// when it did not, because both are reproductions and only one of them exists
+/// in the second case. Everything before ` -- ` is the `git switch` half and the
+/// `cargo run` invocation, which this file supplies itself; everything after is
+/// what `f-sim` is asked, which is the part under test.
+///
+/// Fail closed: a report with no reproduction line in it is a harness failure
+/// and not a zero-length argument list, because an empty argv would run the
+/// default scenario at the default seed and pass.
+fn replayable(report: &str) -> Result<Vec<String>, String> {
+    let line = report
+        .lines()
+        .find(|line| line.starts_with("  smallest   "))
+        .or_else(|| report.lines().find(|line| line.starts_with("  repro      ")))
+        .ok_or("the report carries neither a `repro` nor a `smallest` line")?;
+    let args = line
+        .split_once(" -- ")
+        .map(|(_, rest)| rest)
+        .ok_or_else(|| format!("`{line}` is not a command line this file can replay"))?;
+    let argv: Vec<String> = args.split_whitespace().map(str::to_string).collect();
+    if argv.is_empty() {
+        return Err(format!("`{line}` names no arguments"));
+    }
+    Ok(argv)
+}
+
+/// Every check a report says fired, in the order the report lists them.
+///
+/// Read off the `finding N  <scenario> / <check>` headings, which is the one
+/// place a report states a signature. A parser rather than a substring search
+/// because the question asked of it is *which* checks fired and not *whether a
+/// name appears* — `held` appears in the sentence `balance` prints, and a
+/// harness that matched on that would accept the failure it exists to refuse.
+fn signatures_in(report: &str) -> Vec<String> {
+    report
+        .lines()
+        .filter(|line| line.starts_with("finding "))
+        .filter_map(|line| line.rsplit_once(" / ").map(|(_, check)| check.trim().to_string()))
+        .collect()
+}
+
+/// The mutation harness for the sweep: arm a deliberate defect, require the
+/// sweep to find it, disarm it, require the sweep to be quiet.
+///
+/// # Why the sweep needs this, and why the boot's harness is the precedent
+///
+/// A sweep that has only ever printed *clean* is indistinguishable from a sweep
+/// that cannot print anything else, and the ways it could be that are all cheap
+/// mistakes: an oracle whose checks are vacuous, a grid that runs one trial, a
+/// verdict that is discarded. `cargo xtask mutate` makes the same argument about
+/// the boot suite and RFC 0017 is where it is written down; this is that
+/// argument applied to the layer `E1-P03` builds, and RFC 0040 records the
+/// extension.
+///
+/// # What is required, in order
+///
+/// 1. **The sweep goes red with the defect armed**, and the report has to carry
+///    a minimised reproduction — not just a failure count, because the exit
+///    criterion is about the reproduction, and a harness that accepted *red*
+///    would pass on a sweep that found something and could say nothing about it.
+/// 2. **The corpus goes red with the defect armed.** This is the half that stops
+///    the corpus being decoration: a regression suite whose entries have never
+///    been seen to fail is a file of command lines nobody has tested.
+/// 3. **The corpus goes green with the defect disarmed**, which is what a
+///    regression suite claims.
+/// 4. **The sweep goes green with the defect disarmed**, because a red sweep on
+///    a broken build is a broken build rather than a caught defect — the pair
+///    `mutate` insists on, for the same reason.
+///
+/// The armed half runs first so the tree is left holding a clean build.
+fn sweep_mutate() -> Result<(), String> {
+    components_quietly()?;
+    let commit = sweep_commit()?;
+    let jobs = sweep_jobs();
+    let seeds = MUTATE_SEEDS.to_string();
+    let dir = component_dir()?;
+    let armed: &[&str] = &[SWEEP_DEFECT];
+    let sweeping: Vec<&str> = vec![
+        "--sweep",
+        "--commit",
+        &commit,
+        "--seed",
+        TRACE_SEED,
+        "--seeds",
+        &seeds,
+        "--jobs",
+        &jobs,
+        "--components",
+        &dir,
+    ];
+
+    println!(
+        "sweep mutation harness — two defects, both in sim/src/dev.rs:\n\
+        \x20 `{SWEEP_DEFECT}`, which trips `held`, and\n\
+        \x20 `{SWEEP_DEFECT_TWO}`, which trips a different check.\n\
+         Two rather than one because five properties with one defect between them is one\n\
+         property under test and four decorations. RFC 0042.\n"
+    );
+
+    println!("[1/5] the first defect — the sweep must find it and minimise it");
+    let (clean, report) = f_sim(armed, &sweeping)?;
+    if clean {
+        return Err(format!(
+            "the sweep found nothing on a simulator built with `{SWEEP_DEFECT}`.\n\n\
+             That means this sweep cannot fail, which makes every green result it has\n\
+             ever printed worth nothing. Either the defect is no longer reached — it\n\
+             needs two consecutive coalescing decisions, so a scenario set that stopped\n\
+             coalescing would hide it — or the oracle in sim/src/check.rs has stopped\n\
+             reading what the run wrote."
+        ));
+    }
+    // The exit criterion is *a reproduction command, with no human triage*, so
+    // the harness asserts on the report's shape rather than on its exit status.
+    // A sweep that went red and printed a count would satisfy the status and
+    // prove nothing about the deliverable.
+    //
+    // `smallest` is the one that would otherwise be easy to lose: a minimiser
+    // that accepted no candidate still prints a `minimised` line and still calls
+    // its answer 1-minimal, truthfully, because a trial nothing can shrink is
+    // 1-minimal. Requiring the shrunken command line is what says shrinking
+    // *happened* rather than that it was attempted.
+    for wanted in [
+        "repro      git switch --detach",
+        "smallest   git switch --detach",
+        "minimised  ",
+        "1-minimal against the move",
+    ] {
+        if !report.contains(wanted) {
+            return Err(format!(
+                "the sweep went red and its report has no `{wanted}` line in it.\n\n\
+                 Finding a failure is half of E1-P03; the other half is that what comes\n\
+                 out is a command rather than a symptom. The report is above."
+            ));
+        }
+    }
+    if report.contains("DID NOT REPRODUCE TWICE") {
+        return Err("a minimised failure did not reproduce, so the command the sweep printed \
+                    is not a bug report. RFC 0004."
+            .to_string());
+    }
+
+    // And the sweep run a second time, in a second process, required to produce
+    // the same bytes. This is the claim the exit criterion actually rests on —
+    // *two machines running one sweep find the same failures* — asserted in the
+    // one shape available on one machine, and it is the same shape `sim_check`
+    // uses for a scenario and `trace_check` uses for a boot. It is asserted
+    // against the **armed** sweep on purpose: a sweep that found nothing agrees
+    // with itself trivially, so the comparison is made where there is something
+    // to disagree about.
+    let (_, again) = f_sim(armed, &sweeping)?;
+    if again != report {
+        let differs = report
+            .lines()
+            .zip(again.lines())
+            .position(|(a, b)| a != b)
+            .map_or_else(|| "in its length".to_string(), |line| format!("at line {}", line + 1));
+        return Err(format!(
+            "two processes ran the same sweep and reported differently, {differs}.\n\n\
+             A sweep whose findings depend on the machine is a sweep whose `(seed, commit)`\n\
+             pairs mean nothing to whoever receives them. Something in the grid, the\n\
+             grouping or the minimiser is reading an address, an iteration order or a\n\
+             clock the arguments do not own — RFC 0004, RFC 0040."
+        ));
+    }
+    println!("\n{SWEEP_DEFECT}: and two processes reported it identically");
+    let summary = report
+        .lines()
+        .find(|line| line.contains("distinct check(s)"))
+        .unwrap_or("(the summary line moved)");
+    println!("\n{SWEEP_DEFECT}: caught — {}", summary.trim());
+
+    // And the printed line, executed. Everything above asserts on the *shape* of
+    // the report — that a `smallest` line is there and starts the way a
+    // reproduction starts — and a shape is not a reproduction: a change that
+    // made `Trial::argv` emit a flag `f-sim` does not accept, or drop a field
+    // that narrowed the trial, would leave every assertion above green while the
+    // command in the report replayed a different run or none at all. So the
+    // command the sweep just printed is taken off the report and run, twice.
+    let smallest = replayable(&report)?;
+    let (clean, _) = f_sim(armed, &smallest.iter().map(String::as_str).collect::<Vec<_>>())?;
+    if clean {
+        return Err(format!(
+            "the sweep printed a minimised reproduction and it does not reproduce.\n\n\
+             `{}`\n\
+             exits zero on a simulator built with `{SWEEP_DEFECT}`. A report whose\n\
+             reproduction command does not reproduce is a symptom with a command line\n\
+             attached, which is the thing E1-P03 exists not to produce.",
+            smallest.join(" ")
+        ));
+    }
+    // The control beside it: the same line without the defect has to be quiet,
+    // or what it reproduces is not the defect.
+    let (clean, _) = f_sim(&[], &smallest.iter().map(String::as_str).collect::<Vec<_>>())?;
+    if !clean {
+        return Err(format!(
+            "the minimised reproduction fails on a tree with no defect in it.\n\n\
+             `{}`\n\
+             is red either way, so the red half of this harness says nothing about\n\
+             `{SWEEP_DEFECT}`. Fix the tree first — and this is a real finding.",
+            smallest.join(" ")
+        ));
+    }
+    println!(
+        "\n{SWEEP_DEFECT}: and the line it printed judges itself, run twice:\n\
+        \x20 `{}`\n\
+        \x20 exits non-zero with the defect armed and zero without it",
+        smallest.join(" ")
+    );
+
+    // The second defect, and the one thing it is here to say: a *different*
+    // check fires. `mutate-crossed-completion` trips the first entry in the
+    // oracle's table, which is the only signature it can produce, so a harness
+    // built on it alone leaves the other four properties in the state review
+    // found them in — never observed to fail on a run of the models, only on a
+    // hand-built record vector. RFC 0042.
+    println!("\n[2/5] the second defect — a different check must fire");
+    let (clean, second) = f_sim(&[SWEEP_DEFECT_TWO], &sweeping)?;
+    if clean {
+        return Err(format!(
+            "the sweep found nothing on a simulator built with `{SWEEP_DEFECT_TWO}`.\n\n\
+             That defect withholds the reset notification a device owes its client, so a\n\
+             client is left holding buffers nothing will answer. If no scenario reaches a\n\
+             fall-over any more, this defect is unreachable and a new one is owed; if one\n\
+             does, the oracle has stopped reading what the run wrote."
+        ));
+    }
+    let fired = signatures_in(&second);
+    if !fired.iter().any(|check| SWEEP_DEFECT_TWO_CHECKS.contains(&check.as_str())) {
+        return Err(format!(
+            "`{SWEEP_DEFECT_TWO}` was found, but by {fired:?} rather than by any of\n\
+             {SWEEP_DEFECT_TWO_CHECKS:?}.\n\n\
+             The point of a second defect is that a second property is shown to fail on a\n\
+             run rather than on a forged trace. If the check that fires has legitimately\n\
+             changed, change the list here and say so in RFC 0042 — do not widen it to\n\
+             whatever fired."
+        ));
+    }
+    if !second.contains("repro      git switch --detach") {
+        return Err("the second defect was found and the report carries no reproduction \
+                    line for it."
+            .to_string());
+    }
+    println!("\n{SWEEP_DEFECT_TWO}: caught by {fired:?}, which is not `held`");
+
+    println!("\n[3/5] the first defect — the corpus must go red");
+    let (corpus_armed, _) = f_sim(armed, &["--corpus", "--components", &dir])?;
+    if corpus_armed {
+        return Err(format!(
+            "every corpus entry stayed clean on a simulator built with `{SWEEP_DEFECT}`.\n\n\
+             The corpus is the trials that found this, kept so that they keep finding it.\n\
+             If none of them does, the file is a list of command lines nobody has tested —\n\
+             which is the failure sim/corpus.txt exists to prevent.\n\
+             `cargo xtask sweep --record` is what puts entries in it."
+        ));
+    }
+    println!("\n{SWEEP_DEFECT}: the corpus catches it too");
+
+    println!("\n[4/5] without it — the corpus must go green");
+    sweep_corpus(&[])?;
+
+    println!("\n[5/5] without it — the sweep must go quiet");
+    let (clean, _) = f_sim(&[], &sweeping)?;
+    if !clean {
+        return Err("the sweep finds something on a simulator with no defect in it, so the red\n\
+             result above says nothing about the defect. Fix the tree first — and the\n\
+             finding above is a real one, with a reproduction command already written."
+            .to_string());
+    }
+
+    println!(
+        "\nsweep --mutate: ok — the sweep and the corpus each go red on `{SWEEP_DEFECT}`\n\
+        \x20              and green without it; the line the red half printed was run and\n\
+        \x20              exits non-zero armed and zero disarmed; and `{SWEEP_DEFECT_TWO}`\n\
+        \x20              is found by a different check, so the oracle is more than one\n\
+        \x20              property wide."
+    );
+    Ok(())
 }
 
 const MUTATIONS: &[(&str, &str, &str, &str)] = &[(
@@ -3123,6 +4576,29 @@ fn verify() -> Result<(), String> {
     // the cost of the claim being about the kernel's own behaviour rather than
     // about a directory listing.
     sim_join()?;
+    // And gate G1's own sentence, which is here rather than in CI alone because
+    // `claims/0005` says `status = "gating"` and a gating claim that nothing in
+    // the local loop runs is a claim that gates nothing. It costs a few seconds:
+    // every metric it produces is a count, so there is no machine to wait for
+    // and no reason to defer it — which is the whole argument for splitting the
+    // latency half into `claims/0006` rather than making both wait.
+    chaos()?;
+    // Gate G1's other sentence, and the half of it that says a sweep can fail.
+    // `sim_check` above proves that a scenario reproduces; this proves that a
+    // simulator with a defect in it is *found*, minimised and reported as a
+    // command — which is a different claim, and the one E1-P03's exit is about.
+    // Eleven seconds, because it sweeps sixteen seeds rather than the default
+    // sixty-four: the number here is chosen to reach the defect and no further,
+    // and the overnight grid is `.github/workflows/nightly.yml`. RFC 0040.
+    sweep_mutate()?;
+    // E1-P08's exit, as a command, and in the loop for the reason `chaos` is:
+    // `claims/0007` records a ratio and a claim whose reproduction nothing local
+    // runs is a claim that reproduces on somebody else's machine only. It is
+    // twelve seconds warm, most of which is two release builds of `f-sim` — one
+    // with the deliberate defect that gives the run something to fail at, one
+    // without, because the pair is also what shows a snapshot from another build
+    // being refused. RFC 0043.
+    snapshot()?;
     // Last, and part of the loop rather than beside it. It is the half of
     // E0-P08 that says the suite can fail: everything above proves the
     // properties hold on this tree, and this proves that a tree where one of
@@ -3155,6 +4631,12 @@ fn lint_all() -> Result<(), String> {
     // imported image in `shared`. It runs here so a boot is not the first
     // place a missing field is found.
     lint_manifests()?;
+    // And the list that decides which of those manifests is built. It runs
+    // beside the schema check because the two answer halves of one question —
+    // *is this a component* and *does anything build it* — and the second was
+    // for a while answered only by a hand-written list nothing compared against
+    // anything. RFC 0041.
+    lint_components()?;
     // The mechanism behind `blk/copies`. The counter is published at zero on
     // every datapath boot and would be published at zero by a crate that had
     // grown a second way to move a client's bytes, so the property is checked
@@ -4689,46 +6171,29 @@ struct Content {
     /// Where it comes from, when it exists.
     source: ContentSource,
     /// The task that produces it, when it does not exist yet.
+    ///
+    /// `None` for every row today, and that is the state RFC 0021's *what would
+    /// reverse this* named as its own end: the field stays because a future
+    /// deferral will need it and a row that owes nothing should say so, and the
+    /// **conditional** requirement that used to sit beside it is gone.
     owed_to: Option<&'static str>,
-    /// Whether a release may go out without it, and until when.
-    required: Requirement,
 }
 
-/// Whether a release may go out without one of its contents.
-///
-/// The contract lists eight things a release contains, and two of them — the
-/// tuned-Linux baseline and the seed corpus — were owed to `E1` tasks that
-/// argued, correctly, that they could not be written yet. That left `E0-R01`
-/// with one of two bad options: ship a package the contract says is
-/// incomplete, or quietly shorten the list. `A-07` exists because of the
-/// second.
-///
-/// One of the two has since landed: `E1-D06` wrote `claims/baselines/`, so the
-/// baseline row is `Always` again and this variant now carries exactly one
-/// content, the seed corpus. RFC 0021's *what would reverse this* says the
-/// variant should be deleted rather than left as a shape for the next deferral
-/// to grow into — that is half due now and becomes wholly due at `E1-P01` and
-/// `E1-P03`, which is the deletion's owner. It is named here so that whoever
-/// lands the simulator finds the instruction rather than the shape.
-///
-/// So the requirement is a predicate over the registry rather than a fixed
-/// list. A **pending** claim publishes no number, so nothing it would compare
-/// against is owed yet; the moment that claim leaves `pending` the content
-/// becomes required and the packager refuses, naming the task that owes it.
-/// The scope cut becomes a gate with a known trigger date, and the trigger is a
-/// change to `claims/`, not to this file.
-///
-/// RFC 0021 is the argument, because a future contributor reading
-/// `RELEASING.md` would otherwise reasonably conclude the list is
-/// unconditional.
-enum Requirement {
-    /// Always. Most contents.
-    Always,
-    /// Not while this claim is `pending`, because a claim that publishes no
-    /// number cannot be missing the thing its number would be measured
-    /// against.
-    WhilePending(&'static str),
-}
+// The `Requirement` enum used to live here, and it is gone rather than left
+// empty. It let a content be *not owed while a claim is `pending`*, which was
+// `E0-R01`'s honest answer to a contract listing two things that could not exist
+// yet — `A-07` is the finding that produced it and RFC 0021 is the argument.
+//
+// RFC 0021's *what would reverse this* named the condition precisely: the
+// variant should be deleted rather than left as a shape for the next deferral to
+// grow into, and it named `E1-P01` and `E1-P03` as the owners. `E1-D06` closed
+// the baseline row; `E1-P03` closes the seed corpus, which was the last content
+// carrying the conditional. So the eight contents are unconditional again, which
+// is what `RELEASING.md` says without a footnote.
+//
+// If a ninth content is ever deferred, this comment is the record of how it was
+// done last time — and of the rule that a deferral is a variant somebody deletes
+// rather than a shape that stays.
 
 /// Where a manifest entry's content comes from.
 enum ContentSource {
@@ -4753,6 +6218,29 @@ enum ContentSource {
     /// Produced by the build rather than read from the tree.
     Built(&'static str),
     /// Nothing produces it yet.
+    ///
+    /// **No content is in this state today**, which is why the compiler is told
+    /// to expect it to be unused rather than told to ignore it. `E1-P03` landed
+    /// the seed corpus, the last row that was ever `Absent`, and the `[!!]` arm
+    /// in `release` and the refusal in `build_package` are the two places that
+    /// read this variant.
+    ///
+    /// Kept rather than deleted, unlike the `Requirement` enum this file used to
+    /// carry beside it, and the difference is worth stating because the two look
+    /// alike. `Requirement` encoded *a content may be missing*, which is a
+    /// policy, and RFC 0021 asked for it to go so that the next deferral had to
+    /// argue for itself rather than fill in a shape. This encodes *a content
+    /// does not exist*, which is a fact a manifest has to be able to state — and
+    /// the day one does not, the row says so and the packager refuses.
+    ///
+    /// The expectation is self-correcting in both directions: an unused variant
+    /// is a warning, and an expectation that stops being met is also a warning,
+    /// so adding an `Absent` row deletes this line rather than being silently
+    /// tolerated by it.
+    #[expect(
+        dead_code,
+        reason = "the shape a content with no producer takes; every row has one today"
+    )]
     Absent,
 }
 
@@ -4767,13 +6255,11 @@ const CONTENTS: &[Content] = &[
         name: "the source, at a tag",
         source: ContentSource::Built("git archive of HEAD"),
         owed_to: None,
-        required: Requirement::Always,
     },
     Content {
         name: "the claims snapshot",
         source: ContentSource::File("claims/snapshot.json"),
         owed_to: None,
-        required: Requirement::Always,
     },
     // This row was `Absent`, owed to `E1-D06`, and exempt while
     // `ring-submit-latency` stayed `pending` — because `claims/0001` named
@@ -4794,58 +6280,50 @@ const CONTENTS: &[Content] = &[
         name: "the baseline configuration",
         source: ContentSource::Dir("claims/baselines"),
         owed_to: None,
-        required: Requirement::Always,
     },
+    // This row was `Absent`, owed to `E1-P01` and `E1-P03`, and exempt while
+    // `ring-submit-latency` stayed `pending` — because the corpus exists so a
+    // third party can re-run the sweeps a number came out of, and there was no
+    // sweep and no number.
+    //
+    // `E1-P03` built the sweep, so the exemption is gone rather than satisfied.
+    // One file carries both halves the contract names: the entries are the seed
+    // corpus — every trial that has ever found something, replayed by
+    // `cargo xtask sweep --corpus` and required to be clean — and the header is
+    // the scenario set, regenerated from `SCENARIOS` on every write so that a
+    // list of scenarios in a comment cannot stop matching the table.
+    //
+    // What the row does **not** claim is that these seeds were found in the
+    // wild. Every entry today was found under `mutate-crossed-completion`, the
+    // deliberate defect, and each says so on its own `# under` line — because a
+    // corpus whose entries are all green and do not say why they are green would
+    // read as a corpus that never found anything. RFC 0040.
     Content {
         name: "the seed corpus and scenario set",
-        source: ContentSource::Absent,
-        owed_to: Some("E1-P01, the deterministic simulator, and E1-P03's sweeps"),
-        // The same argument, against the same claim: the corpus exists so a
-        // third party can re-run the sweeps a number came out of, and there is
-        // no number.
-        required: Requirement::WhilePending("ring-submit-latency"),
+        source: ContentSource::File("sim/corpus.txt"),
+        owed_to: None,
     },
     Content {
         name: "a content-addressed system image",
         source: ContentSource::Built("target/<target>/debug/f-kernel.elf32"),
         owed_to: None,
-        required: Requirement::Always,
     },
     Content {
         name: "the dependency manifest and provenance",
         source: ContentSource::File("Cargo.lock"),
         owed_to: None,
-        required: Requirement::Always,
     },
     Content {
         name: "the honest-status page",
         source: ContentSource::File("docs/TESTING-STATUS.md"),
         owed_to: None,
-        required: Requirement::Always,
     },
     Content {
         name: "the decision record",
         source: ContentSource::Tree("docs/rfc", "md"),
         owed_to: None,
-        required: Requirement::Always,
     },
 ];
-
-/// Whether one content is owed by *this* release, given the registry.
-///
-/// Reads the claims registry rather than a constant, so what flips a row from
-/// optional to required is a change to `claims/` and never a change here.
-fn required_now(content: &Content) -> Result<bool, String> {
-    match content.required {
-        Requirement::Always => Ok(true),
-        Requirement::WhilePending(claim) => {
-            let file = find_claim(claim)?;
-            let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
-            let status = toml_field(&text, "status").unwrap_or_else(|| "unknown".into());
-            Ok(status != "pending")
-        }
-    }
-}
 
 /// Every file one content contributes, as `(name in the archive, bytes)`.
 ///
@@ -5007,7 +6485,6 @@ fn release(mode: Option<&str>) -> Result<(), String> {
 
     let mut missing = 0usize;
     for content in CONTENTS {
-        let owed = required_now(content)?;
         match &content.source {
             ContentSource::File(path) => {
                 let full = root().join(path);
@@ -5035,21 +6512,12 @@ fn release(mode: Option<&str>) -> Result<(), String> {
             }
             ContentSource::Absent => {
                 missing += 1;
-                let mark = if owed { "!!" } else { "--" };
-                println!("  [{mark}]  {:<36} nothing produces this yet", content.name);
+                // `!!` and never `--`: every content the contract names is owed,
+                // now that the last conditional row has landed. A row reaching
+                // this arm at all is a release that cannot go out. RFC 0021.
+                println!("  [!!]  {:<36} nothing produces this yet", content.name);
                 if let Some(task) = content.owed_to {
                     println!("        owed to {task}");
-                }
-                if let Requirement::WhilePending(claim) = content.required {
-                    if owed {
-                        println!(
-                            "        REQUIRED NOW: {claim} is no longer `pending`, so the\n\
-                             \x20       number it publishes has something to be compared against\n\
-                             \x20       and this content is owed. RFC 0021."
-                        );
-                    } else {
-                        println!("        not owed while {claim} is `pending` — RFC 0021");
-                    }
                 }
             }
         }
@@ -5104,22 +6572,17 @@ fn build_package(describe: &str, commit: &str) -> Result<(String, PathBuf, usize
     manifest.push_str(&format!("version {describe}\ncommit  {commit}\n\n"));
 
     for content in CONTENTS {
-        let owed = required_now(content)?;
         let gathered = content_files(content)?;
 
         if gathered.is_empty() && !matches!(content.source, ContentSource::Built(_)) {
-            if owed {
-                return Err(format!(
-                    "the release contract requires `{}` and nothing produces it.\n\n\
-                     {}\n\n\
-                     A package missing a content the contract names is not a smaller\n\
-                     release, it is a release nobody can check. RFC 0021.",
-                    content.name,
-                    content.owed_to.unwrap_or("No task owes it, which is worse.")
-                ));
-            }
-            manifest.push_str(&format!("# absent, and not owed yet: {}\n", content.name));
-            continue;
+            return Err(format!(
+                "the release contract requires `{}` and nothing produces it.\n\n\
+                 {}\n\n\
+                 A package missing a content the contract names is not a smaller\n\
+                 release, it is a release nobody can check. RFC 0021.",
+                content.name,
+                content.owed_to.unwrap_or("No task owes it, which is worse.")
+            ));
         }
 
         for (name, bytes) in gathered {
@@ -5753,6 +7216,17 @@ enum Route {
     Boots,
     /// The timer, for as many seconds as the claim's `[workload]` asks for.
     Timer,
+    /// Every component killed under load, twice over. Not a program and not a
+    /// boot: the workload is `cargo xtask chaos`, and the number it produces is
+    /// a *count* — which is why it is the one claim in this epoch that may gate
+    /// on a machine `f_bench::Environment` refuses to time on.
+    Chaos,
+    /// A long run marked as it goes and re-entered one minute before it fails.
+    /// Not a program and not a boot: the workload is `cargo xtask snapshot`, and
+    /// what it produces is a *ratio* between two wall-clock numbers taken in the
+    /// same command on the same machine — which is why `claims/0007` is pending
+    /// on the runner rather than gating on this one. E1-P08, RFC 0043.
+    Snapshot,
 }
 
 const ROUTES: &[(&str, Route)] = &[
@@ -5760,6 +7234,15 @@ const ROUTES: &[(&str, Route)] = &[
     ("timer-jitter", Route::Timer),
     ("boot-to-m0", Route::Boots),
     ("buffer-registration-cost", Route::Bench("buffer_register")),
+    ("driver-restart-blast-radius", Route::Chaos),
+    // The latency half of the same sentence, and the same workload: what
+    // separates the two claims is that one is a count this machine may take and
+    // the other is a time it may not. `claims/0006` says so in its own words,
+    // and the command running the workload while the harness declines to record
+    // is `bench/src/lib.rs` working rather than failing — the same shape
+    // `buffer-registration-cost` has one claim over.
+    ("driver-restart-latency", Route::Chaos),
+    ("snapshot-re-entry-saving", Route::Snapshot),
 ];
 
 /// The registry file one claim name resolves to.
@@ -5844,6 +7327,8 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
             let seconds = toml_table_field(&text, "workload", "seconds");
             timer(seconds.as_deref())?;
         }
+        Route::Chaos => chaos()?,
+        Route::Snapshot => snapshot()?,
     }
 
     // The harness itself refuses in a non-measurement environment and says so

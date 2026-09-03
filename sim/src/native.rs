@@ -105,6 +105,68 @@ impl Native {
         }
     }
 
+    /// Write this peer out, tag first.
+    pub(crate) fn save(&self, out: &mut crate::snap::Writer) {
+        out.u32(crate::snap::tag::NATIVE);
+        out.u32(self.depth);
+        out.u64(self.service_ns);
+        out.u64(self.spread_ns);
+        self.service.save(out);
+        out.bool(self.client.is_some());
+        out.u32(self.client.map_or(0, |id| id.0));
+        out.count(self.jobs.len());
+        for job in &self.jobs {
+            out.u64(job.token);
+            out.u32(job.set.bits());
+            out.u32(job.index);
+            out.u32(job.len);
+        }
+    }
+
+    /// Read one back.
+    ///
+    /// The jobs are what put the registration table's lent bitmap back, exactly
+    /// as they are for a device: a job is a buffer this peer has resolved and
+    /// not released, so the fact lives here and does not need a second copy.
+    pub(crate) fn load(input: &mut crate::snap::Reader<'_>) -> Self {
+        // Refused rather than clamped, for the reason `Grants::load` states: a
+        // repaired file restores into a world that is plausible and is not the
+        // world the file described. A wire of no depth accepts nothing, which is
+        // a peer no scenario can build and therefore a file this crate did not
+        // write.
+        let depth = input.u32();
+        if depth == 0 {
+            input.refuse(crate::snap::Broken::Bounds("a peer that would hold no submission"));
+        }
+        let service_ns = input.u64();
+        let spread_ns = input.u64();
+        let mut service = Service::load(input);
+        let known = input.bool();
+        let who = input.u32();
+        let client = known.then_some(ActorId(who));
+        let count = input.count(20, "more jobs than the file could hold");
+        let mut jobs = Vec::with_capacity(count);
+        for _ in 0..count {
+            jobs.push(Job {
+                token: input.u64(),
+                set: SetId::from_bits(input.u32()),
+                index: input.u32(),
+                len: input.u32(),
+            });
+        }
+        if !input.faulted() {
+            for job in &jobs {
+                if service.relend(job.set, job.index, job.len).is_err() {
+                    input.refuse(crate::snap::Broken::Diverged(
+                        "a buffer the peer held, which its table would not lend again",
+                    ));
+                    break;
+                }
+            }
+        }
+        Self { service, depth, service_ns, spread_ns, client, jobs }
+    }
+
     /// Answer one entry and tell the client.
     fn answer(&self, world: &mut World, me: ActorId, to: ActorId, cqe: f_abi::Cqe) {
         let token = cqe.user_data;
@@ -244,6 +306,11 @@ impl Actor for Native {
             // a note.
             other => world.record(me, Self::NAME, other, message.token, u64::MAX),
         }
+    }
+
+    fn save(&self, out: &mut crate::snap::Writer) -> Result<(), crate::snap::Broken> {
+        Self::save(self, out);
+        Ok(())
     }
 }
 

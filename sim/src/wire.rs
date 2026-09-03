@@ -109,6 +109,62 @@ impl Wire {
     pub fn reap(&mut self, from: ActorId, to: ActorId) -> Option<Cqe> {
         self.completions.get_mut(&(from, to))?.pop_front()
     }
+
+    /// Write every entry in flight out.
+    ///
+    /// Per channel and, within a channel, in the order the producer published —
+    /// which is the ring's guarantee and therefore the one thing about this
+    /// structure a snapshot must not get wrong. A restore that reordered one
+    /// producer's entries would put the model in a state the real ring cannot
+    /// reach, and a bug found from there would be a bug in the snapshot.
+    pub(crate) fn save(&self, out: &mut crate::snap::Writer) {
+        out.count(self.submissions.len());
+        for ((from, to), queue) in &self.submissions {
+            out.u32(from.0);
+            out.u32(to.0);
+            out.count(queue.len());
+            for entry in queue {
+                out.sqe(entry);
+            }
+        }
+        out.count(self.completions.len());
+        for ((from, to), queue) in &self.completions {
+            out.u32(from.0);
+            out.u32(to.0);
+            out.count(queue.len());
+            for entry in queue {
+                out.cqe(entry);
+            }
+        }
+    }
+
+    /// Read one back.
+    pub(crate) fn load(input: &mut crate::snap::Reader<'_>) -> Self {
+        let mut wire = Self::new();
+        let channels = input.count(12, "more submission channels than the file could hold");
+        for _ in 0..channels {
+            let from = ActorId(input.u32());
+            let to = ActorId(input.u32());
+            let count = input.count(60, "more submissions than the file could hold");
+            let mut queue = VecDeque::with_capacity(count);
+            for _ in 0..count {
+                queue.push_back(input.sqe());
+            }
+            wire.submissions.insert((from, to), queue);
+        }
+        let channels = input.count(12, "more completion channels than the file could hold");
+        for _ in 0..channels {
+            let from = ActorId(input.u32());
+            let to = ActorId(input.u32());
+            let count = input.count(32, "more completions than the file could hold");
+            let mut queue = VecDeque::with_capacity(count);
+            for _ in 0..count {
+                queue.push_back(input.cqe());
+            }
+            wire.completions.insert((from, to), queue);
+        }
+        wire
+    }
 }
 
 /// A [`Submitter`] that puts the entry on the wire, and refuses when the ring

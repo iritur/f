@@ -611,6 +611,30 @@ jobs:
       # Without it `boot-to-workload` is two commands that share a directory
       # name, and a shared directory name is not evidence. RFC 0035, RFC 0036.
       - run: cargo xtask sim --join
+      # And the seed corpus: every trial a sweep has ever found something with,
+      # required to be clean now. Seconds, because the corpus is minimised
+      # trials rather than whole scenarios — the million-trial sweep is
+      # nightly.yml's, and this is the part of it that belongs on every change.
+      # RFC 0040.
+      - run: cargo xtask sweep --corpus
+      # Gate G1's first sentence, and the one claim in this epoch that gates on
+      # the machine that produces it: every metric it takes is a *count* from a
+      # virtual clock, so a container is as good as bare metal for it and there
+      # is nothing to wait for. `claims/0005` says `status = "gating"`, and a
+      # gating claim no job runs gates nothing. The latency half is
+      # `claims/0006` and is `pending` on E0-D10's machine — split rather than
+      # weakened. RFC 0041.
+      - run: cargo xtask chaos
+      # E1-P08. A run that goes wrong in simulated minute forty, re-entered at
+      # minute thirty-nine from a snapshot written while the run passed it, with
+      # both wall-clock numbers printed and the ratio gated against a floor. It
+      # is here rather than only in `verify` because `claims/0007` records that
+      # ratio, and a claim whose reproduction no job runs is a claim that
+      # reproduces on one person's afternoon. Twelve seconds warm, most of it two
+      # release builds of `f-sim` — one with the deliberate defect that gives the
+      # run something to fail at and one without, because the pair is also what
+      # shows a snapshot from another build being refused. RFC 0043.
+      - run: cargo xtask snapshot
 
   # The fourth thing the gate was always supposed to run, and the one that was
   # missing: lint, test, run — and claims.

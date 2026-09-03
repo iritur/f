@@ -76,6 +76,7 @@ pub struct Net;
 
 impl Protocol for Net {
     const NAME: &'static str = "net";
+    const TAG: u32 = crate::snap::tag::NET;
     const COMPLETE: &'static str = "net.complete";
     const DROP: &'static str = "net.drop";
     const COALESCE: &'static str = "net.coalesce";

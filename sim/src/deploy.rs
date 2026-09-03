@@ -297,6 +297,24 @@ pub struct Component {
     /// What the supervisor does when it ends. Unit: none — an
     /// `f_abi::manifest::restart` constant.
     pub restart: u8,
+    /// The pause before the first respawn. Unit: timer ticks, at the frame's
+    /// own rate.
+    ///
+    /// The four numbers below are the *policy*, and they are here rather than in
+    /// a scenario for the reason every other field on this structure is: a
+    /// manifest is the reviewable statement of what a component is, and a
+    /// harness that waited a pause of its own choosing would leave
+    /// `user/virtio-blk/manifest.toml`'s backoff ladder as decoration.
+    /// `crate::chaos` is what reads them; nothing else does yet, and saying so
+    /// is cheaper than a reader wondering.
+    pub backoff_first_ticks: u32,
+    /// The cap the pause doubles up to. Unit: timer ticks.
+    pub backoff_max_ticks: u32,
+    /// Respawns inside the window before the place is retired.
+    /// Unit: restarts.
+    pub max_restarts: u32,
+    /// The window that count is taken over. Unit: timer ticks.
+    pub budget_window_ticks: u32,
     /// Bytes of image after the record. Unit: bytes.
     pub image_bytes: u32,
     /// What the simulator puts under it, from [`MODELS`].
@@ -340,6 +358,10 @@ impl Component {
             clients: ring.clients,
             domain: record.domain,
             restart: record.restart,
+            backoff_first_ticks: record.backoff_first_ticks,
+            backoff_max_ticks: record.backoff_max_ticks,
+            max_restarts: record.max_restarts,
+            budget_window_ticks: record.budget_window_ticks,
             image_bytes: record.image_bytes,
             peer,
         })

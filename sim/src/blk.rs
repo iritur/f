@@ -97,6 +97,7 @@ pub struct Blk;
 
 impl Protocol for Blk {
     const NAME: &'static str = "blk";
+    const TAG: u32 = crate::snap::tag::BLK;
     const COMPLETE: &'static str = "blk.complete";
     const DROP: &'static str = "blk.drop";
     const COALESCE: &'static str = "blk.coalesce";

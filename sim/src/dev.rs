@@ -140,6 +140,13 @@ pub trait Protocol {
     /// What the device is called in the trace. At most
     /// [`crate::LABEL_WIDTH`] bytes.
     const NAME: &'static str;
+    /// Which [`crate::snap::tag`] a device over this protocol is written out
+    /// under.
+    ///
+    /// On the protocol rather than on [`Device`] because `Device<P>` is one
+    /// type and a snapshot has to name three, and a tag chosen by the loader
+    /// would be a fourth place that has to agree with this one.
+    const TAG: u32;
     /// Where the choice of what to complete next is recorded.
     const COMPLETE: &'static str;
     /// Where the choice to lose a completion is recorded.
@@ -207,6 +214,26 @@ pub trait Protocol {
     /// Unit of the answer: bytes on success, a packed [`f_abi::error`] result on
     /// a refusal — which is `Cqe::result`'s own rule.
     fn harvest(&mut self, written: u32, control: &Region, at: u32, asked: u32) -> i32;
+
+    /// Write whatever state this protocol keeps of its own into a snapshot.
+    ///
+    /// Nothing, by default, and that default is the honest one: a block device
+    /// and a network interface are functions of the bytes in front of them and
+    /// keep no state between chains. A display controller holds resources and
+    /// overrides this.
+    ///
+    /// It is a pair of methods on the protocol rather than a field the machinery
+    /// serialises because the machinery does not know what a protocol keeps —
+    /// and a snapshot written by somebody who had to guess is the failure this
+    /// whole module is against.
+    fn save_state(&self, out: &mut crate::snap::Writer) {
+        let _ = out;
+    }
+
+    /// Read it back onto a protocol built the way a scenario builds one.
+    fn load_state(&mut self, input: &mut crate::snap::Reader<'_>) {
+        let _ = input;
+    }
 }
 
 /// What is broken about the machine, for the length of one chain.
@@ -758,6 +785,11 @@ impl<P: Protocol> Device<P> {
         if self.reset {
             return;
         }
+        // How many entries this harvest has drained, and the token the first of
+        // them answered. Read by [`crossed`] and by nothing else, and both are
+        // zero-cost when that function is the identity.
+        let mut drained: u32 = 0;
+        let mut first: Option<u64> = None;
         loop {
             let (head, written) = match self.queue.harvest() {
                 Ok(Some(entry)) => entry,
@@ -786,10 +818,17 @@ impl<P: Protocol> Device<P> {
             self.service.release(job.set, job.index).ok();
 
             let now = world.clock();
+            // The deliberate defect's one call site. Off by default, in which
+            // case this is the identity on `job.token` and the compiler emits
+            // nothing for it; on, it answers a coalesced pair's second entry
+            // with the first's token. See [`crossed`].
+            let answered = crossed(drained, first, job.token);
+            first.get_or_insert(job.token);
+            drained = drained.saturating_add(1);
             let cqe = if result < 0 {
-                refusal(job.token, result, u64::from(written), now)
+                refusal(answered, result, u64::from(written), now)
             } else {
-                completion(job.token, result, now)
+                completion(answered, result, now)
             };
             self.answer(world, me, cqe);
         }
@@ -848,7 +887,12 @@ impl<P: Protocol> Device<P> {
         self.jobs.clear();
         world.record(me, P::NAME, wrote::RESET, 0, u64::try_from(retired).unwrap_or(u64::MAX));
         if let Some(client) = self.client {
-            world.send(0, client, Message { from: me, kind: kind::GONE, token: 0, detail: 0 });
+            // The second deliberate defect's one call site. Off by default, in
+            // which case this is `true` and the compiler emits nothing for it;
+            // on, the device resets and never says so. See [`tells_the_client`].
+            if tells_the_client() {
+                world.send(0, client, Message { from: me, kind: kind::GONE, token: 0, detail: 0 });
+            }
         }
     }
 
@@ -856,6 +900,246 @@ impl<P: Protocol> Device<P> {
     fn release_slot(&mut self, slot: u16) {
         self.slots &= !(1u64 << (slot & 63));
     }
+
+    /// Write this device out, tag first.
+    ///
+    /// Every field, in the order they are declared, so that the two functions
+    /// below read as one list beside the struct they are about. The one that is
+    /// not a plain copy is [`Service`], which travels as the registrations that
+    /// made it — `service.rs` argues why — and the `jobs` below are what puts
+    /// its lent bitmap back, because a job *is* a buffer this device has
+    /// resolved and not released.
+    pub(crate) fn save(&self, out: &mut crate::snap::Writer) -> Result<(), crate::snap::Broken> {
+        out.u32(P::TAG);
+        self.proto.save_state(out);
+        out.u32(self.cfg.depth);
+        out.u64(self.cfg.service_ns);
+        out.u64(self.cfg.spread_ns);
+        out.u32(self.cfg.lose_one_in);
+        out.u64(self.cfg.extent);
+        out.u16(self.cfg.queue_size);
+        out.u32(self.cfg.domain);
+        self.queue.save(out);
+        self.control.save(out);
+        self.service.save(out);
+        out.bool(self.client.is_some());
+        out.u32(self.client.map_or(0, |id| id.0));
+        out.count(self.jobs.len());
+        for job in &self.jobs {
+            out.u64(job.token);
+            out.u32(job.set.bits());
+            out.u32(job.index);
+            out.u16(job.head);
+            out.u16(job.slot);
+            out.u32(job.len);
+            out.bool(job.served.is_some());
+            let served = job.served.unwrap_or(Served {
+                used_len: 0,
+                label: crate::proto::wrote::SERVED,
+                fenced: false,
+            });
+            out.u32(served.used_len);
+            out.label(served.label);
+            out.bool(served.fenced);
+            out.bool(job.published);
+            out.u64(job.seq);
+        }
+        out.u64(self.slots);
+        out.u64(self.arrivals);
+        out.bool(self.reset);
+        Ok(())
+    }
+
+    /// Read one back, on a protocol built the way a scenario builds one.
+    pub(crate) fn load(mut proto: P, input: &mut crate::snap::Reader<'_>) -> Self {
+        proto.load_state(input);
+        let cfg = Config {
+            depth: input.u32(),
+            service_ns: input.u64(),
+            spread_ns: input.u64(),
+            lose_one_in: input.u32(),
+            extent: input.u64(),
+            queue_size: input.u16(),
+            domain: input.u32(),
+        };
+        let queue = Queue::load(input);
+        let control = Region::load(input);
+        let mut service = Service::load(input);
+        let known = input.bool();
+        let who = input.u32();
+        let client = known.then_some(ActorId(who));
+        let count = input.count(44, "more jobs than the file could hold");
+        let mut jobs = Vec::with_capacity(count);
+        for _ in 0..count {
+            let token = input.u64();
+            let set = SetId::from_bits(input.u32());
+            let index = input.u32();
+            let head = input.u16();
+            let slot = input.u16();
+            let len = input.u32();
+            let was_served = input.bool();
+            let served =
+                Served { used_len: input.u32(), label: input.label(), fenced: input.bool() };
+            jobs.push(Job {
+                token,
+                set,
+                index,
+                head,
+                slot,
+                len,
+                served: was_served.then_some(served),
+                published: input.bool(),
+                seq: input.u64(),
+            });
+        }
+        let slots = input.u64();
+        let arrivals = input.u64();
+        let reset = input.bool();
+
+        // The lent bitmap, put back through the real `Table::resolve` rather
+        // than copied: a buffer this device could not resolve again is a file
+        // that describes a device state the table cannot hold, and the refusal
+        // is the point.
+        if !input.faulted() {
+            for job in &jobs {
+                if service.relend(job.set, job.index, job.len).is_err() {
+                    input.refuse(crate::snap::Broken::Diverged(
+                        "a buffer the device held, which its table would not lend again",
+                    ));
+                    break;
+                }
+            }
+        }
+
+        Self { proto, queue, control, service, cfg, client, jobs, slots, arrivals, reset }
+    }
+}
+
+/// **A deliberate defect, off by default.** Which token a coalesced pair's
+/// second completion is answered with.
+///
+/// # Why there is a defect in the shipped source at all
+///
+/// RFC 0017 argues it for the kernel and RFC 0040 extends the argument to here:
+/// a sweep that has only ever printed *clean* is indistinguishable from a sweep
+/// that cannot print anything else, and the only way to tell the two apart is to
+/// break something on purpose and require the sweep to find it. A patch somebody
+/// applies would be a patch somebody forgets to apply; a feature is a thing
+/// `cargo xtask lint-mutations` can refuse to let become a default, and
+/// `cargo xtask sweep --mutate` is the harness that turns it on, requires the
+/// sweep to go red, turns it off, and requires the sweep to go green.
+///
+/// # Why *this* defect
+///
+/// Three properties, and it was chosen for all three rather than for being easy
+/// to write.
+///
+/// **It is silent everywhere else.** `cargo xtask sim` stays green on it: every
+/// scenario still reproduces byte for byte at its seed and still moves when the
+/// seed moves, because the defect is deterministic like everything else here. So
+/// is `cargo test`, `cargo xtask lint` and `cargo xtask verify`. That is the
+/// shape of bug this whole apparatus exists for and it is the same shape
+/// `mutate-unseeded-time` has one layer down — nothing *fails*, and the only
+/// thing wrong is a property nobody was checking.
+///
+/// **It needs an ordering to show itself.** The device only harvests two entries
+/// in one turn of the loop when it coalesced, and coalescing is a seeded
+/// decision at `Protocol::COALESCE`. So a sweep of one seed is very likely to
+/// miss it and a sweep of many is very likely to find it — which is the property
+/// that makes *sweep* the right word rather than *run*.
+///
+/// **What it breaks is client-visible without any check written for it.** The
+/// second completion carries a token the client has already had back, so the
+/// client is told about a token it does not hold — `check::held` — and the
+/// operation the entry really finished is never answered, so a buffer is left
+/// out and its client never finishes. Two independent oracle properties catch
+/// it, and neither was written with this defect in mind.
+///
+/// # The cost, stated
+///
+/// A reader of `Device::reap` sees two versions of one line, exactly as a reader
+/// of `kernel/src/cap.rs` sees two versions of one lookup. That is the trade
+/// RFC 0017 made once and this makes a second time, and the reason it is
+/// acceptable is that the alternative — a mutation harness with nothing to
+/// mutate — is a harness whose green result means nothing.
+#[cfg(not(feature = "mutate-crossed-completion"))]
+const fn crossed(_drained: u32, _first: Option<u64>, token: u64) -> u64 {
+    token
+}
+
+/// The defect itself: from the third entry of one harvest onward, answer with
+/// the token the first entry answered.
+///
+/// The third and not the second, and the number is the whole reason this defect
+/// is worth a sweep rather than a run. Draining three entries in one turn takes
+/// two consecutive coalescing decisions with work still behind them, which is
+/// two seeded choices at `Protocol::COALESCE` and a queue deep enough to hold
+/// the work — so most seeds never reach it and the ones that do are not the
+/// same seeds in two scenarios. A defect that fired on the first completion
+/// would be found by `cargo xtask sim` on its default seed, and a mutation
+/// harness that only demonstrated *the checks can fail* would say nothing about
+/// whether sweeping is worth its overnight.
+#[cfg(feature = "mutate-crossed-completion")]
+const fn crossed(drained: u32, first: Option<u64>, token: u64) -> u64 {
+    match first {
+        Some(head) if drained >= 2 => head,
+        _ => token,
+    }
+}
+
+/// **A deliberate defect, off by default.** Whether a device that has reset
+/// tells its client.
+///
+/// # Why a second one, when there is already `crossed`
+///
+/// Because five properties with one defect between them is a table with one
+/// property under test and four decorations, and the review that found it said
+/// so in those terms. `crossed` trips `check::held` — the first check in the
+/// list, so it is the only signature it ever produces — and a harness built on
+/// it alone can say nothing about whether the other four can fail on a run of
+/// the models rather than on a hand-built `Record` vector. This one trips
+/// `check::balance`, and `check::bound` in the runs where nothing was in flight
+/// when the device fell over, which is two more properties shown to work end to
+/// end. RFC 0042 is the record and RFC 0017 is still the argument for why it
+/// lives here rather than in a patch.
+///
+/// # What it is
+///
+/// `fall_over` exists because RFC 0024 leaves a client exactly one way to take a
+/// buffer back without a completion — `PeerGone`, built from evidence that the
+/// peer's outstanding tokens are void — and `kind::GONE` is that evidence
+/// arriving. This defect withholds it. The device is reset, the registrations
+/// are retired and the translations are gone, and the client is never told: it
+/// waits for completions that the device has already decided will never come,
+/// the timeline runs out of events, and the run ends with buffers lent and
+/// operations unanswered.
+///
+/// `client.rs`'s own module documentation calls this out as the protocol hazard
+/// rather than a modelling one — *a device that loses a completion and stays
+/// alive leaves its client holding memory it may never touch again* — which is
+/// why it is the right second defect: it is a bug somebody could write.
+///
+/// **It is silent everywhere the oracle is not.** The trace still reproduces at
+/// its seed and still moves when the seed moves, so `cargo xtask sim` is green
+/// on it. Nothing panics and nothing runs out of budget: a hang here looks like
+/// a short trace, which is exactly why `bound` and `balance` exist as checks
+/// rather than as a stopwatch.
+///
+/// **It needs a fall-over to show itself**, so it is found in the scenarios that
+/// arm `dropcqe` or `peergone` and in the ones whose device loses a completion
+/// by its own seeded choice. That makes it a cheaper defect than `crossed` — it
+/// does not need two consecutive coalescing decisions — and cheaper is the
+/// point: what it is here to demonstrate is a *different check firing*, not a
+/// second argument for sweeping.
+#[cfg(not(feature = "mutate-silent-reset"))]
+const fn tells_the_client() -> bool {
+    true
+}
+
+/// The defect itself: reset, and do not tell the client.
+#[cfg(feature = "mutate-silent-reset")]
+const fn tells_the_client() -> bool {
+    false
 }
 
 impl<P: Protocol> Actor for Device<P> {
@@ -875,6 +1159,10 @@ impl<P: Protocol> Actor for Device<P> {
             // comparison this crate exists to make.
             other => world.record(me, P::NAME, other, message.token, u64::MAX),
         }
+    }
+
+    fn save(&self, out: &mut crate::snap::Writer) -> Result<(), crate::snap::Broken> {
+        Self::save(self, out)
     }
 }
 
