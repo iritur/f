@@ -273,6 +273,320 @@ pub fn check(rel: &str, text: &str) -> Result<Manifest, Vec<String>> {
 }
 
 // ---------------------------------------------------------------------------
+// The compiler: from the source a person writes to the record the frame reads.
+// ---------------------------------------------------------------------------
+
+/// Where every field of `abi::manifest::Record` lives, in bytes from the start.
+///
+/// # Why the offsets are here and not a `#[repr(C)]` struct
+///
+/// Because `xtask` deliberately does not depend on `f-abi`. [`CAP_TYPES`] says
+/// why in one sentence — a dependency edge is a `Cargo.lock` change — and the
+/// answer that constant already uses is the answer here: mirror the source, and
+/// have a test read the original and fail when the mirror drifts.
+/// `the_record_layout_matches_the_abi` is that test, and it reads the same size
+/// assertions `abi/src/manifest.rs` compiles against.
+///
+/// The other half of the guard is stronger than a test: the frame runs
+/// `Record::read` over every component file it is handed, on every boot, and
+/// refuses a record whose fields do not judge. A conversion mistake here is a
+/// boot that goes red naming the field, not a component carrying a wrong number.
+mod record {
+    /// Bytes in a whole record.
+    pub const BYTES: usize = 2216;
+    /// Bytes in one `[[capability]]` slot.
+    pub const NEED: usize = 80;
+    /// Bytes in one `[[ring]]` slot.
+    pub const RING: usize = 104;
+    /// The first byte of the capability array.
+    pub const CAPS_AT: usize = 104;
+    /// The first byte of the ring array.
+    pub const RINGS_AT: usize = CAPS_AT + super::CAPABILITIES_MAX * NEED;
+    /// `abi::manifest::MAGIC`.
+    pub const MAGIC: u64 = 0x465f_4d41_4e00_0001;
+    /// `abi::manifest::NO_CAPABILITY`, which is not zero because zero is a
+    /// capability index.
+    pub const NO_CAPABILITY: u8 = u8::MAX;
+    /// `abi::manifest::ContentId`'s seed.
+    pub const HASH_SEED: u64 = 0xcbf2_9ce4_8422_2325;
+    /// Its prime.
+    pub const HASH_PRIME: u64 = 0x0000_0100_0000_01b3;
+}
+
+/// How many timer ticks a millisecond is.
+///
+/// One, because the frame's timer runs at a kilohertz — `kernel::main::TIMER_HZ`
+/// — and `the_tick_rate_is_the_frames` reads that constant out of the kernel and
+/// fails when it moves. The conversion happens here, once, and RFC 0030 says why
+/// it happens at build time rather than in the frame: `docs/manifest.md` writes a
+/// backoff in milliseconds because a person chooses one, and the record carries
+/// ticks because a supervisor compares them against a count the frame keeps and
+/// RFC 0004 does not let it read a clock.
+pub const TICKS_PER_MS: u64 = 1;
+
+/// Compile a manifest and an image into a component file.
+///
+/// The file is a record followed immediately by the image, and its content hash
+/// — which is what a spawn names — is over the whole of it. RFC 0030.
+///
+/// [`check`] is the authority and runs first: a manifest that does not fit the
+/// schema produces its findings and no file. What happens afterwards is a
+/// *conversion* of fields already judged, which is why it reads them without
+/// re-judging them, and why a mistake in it is caught by `Record::read` at boot
+/// rather than left to be discovered as a wrong number.
+///
+/// # Errors
+///
+/// Every finding [`check`] produces, or one line naming a field the conversion
+/// could not express — a backoff in milliseconds that does not fit thirty-two
+/// bits of ticks is the only such case, and it is refused rather than truncated.
+pub fn compile(rel: &str, text: &str, image: &[u8]) -> Result<Vec<u8>, Vec<String>> {
+    check(rel, text)?;
+    let doc = parse(rel, text)?;
+    let mut out = vec![0u8; record::BYTES + image.len()];
+    let mut findings = Vec::new();
+
+    put64(&mut out, 0, record::MAGIC);
+    put32(&mut out, 32, SCHEMA as u32);
+    put32(&mut out, 36, record::BYTES as u32);
+    put32(&mut out, 40, image.len() as u32);
+
+    let top = &doc.top;
+    put_name(&mut out, 64, &string(top, "name"));
+    put8(&mut out, 96, index_of(DOMAINS, &string(top, "domain")));
+
+    // `[restart]`. Under `never` the four quantities are absent and the record
+    // carries zero for each, which is the same refusal seen from the other
+    // side: `Record::read` refuses a non-zero one under that policy.
+    let restart = doc.tables.get("restart").map(|(_, table)| table);
+    let policy = restart.map_or_else(String::new, |table| string(table, "policy"));
+    put8(&mut out, 97, index_of(RESTART_POLICIES, &policy));
+    if policy != "never" {
+        for (at, key) in
+            [(44usize, "backoff_first_ms"), (48, "backoff_max_ms"), (56, "budget_window_ms")]
+        {
+            let ms = restart.map_or(0, |table| int(table, key));
+            match u32::try_from(ms.saturating_mul(TICKS_PER_MS)) {
+                Ok(ticks) => put32(&mut out, at, ticks),
+                Err(_) => findings.push(format!(
+                    "  {rel}  `{key} = {ms}` is more than a u32 of timer ticks at \
+                     {TICKS_PER_MS} tick(s) per millisecond; the record cannot carry it"
+                )),
+            }
+        }
+        put32(&mut out, 52, narrow(restart.map_or(0, |table| int(table, "max_restarts"))));
+    }
+
+    // `[reservation]`. In the soft class the three CPU fields are absent and the
+    // record carries zero, which is what `Record::read` requires there.
+    let reservation = doc.tables.get("reservation").map(|(_, table)| table);
+    let class = reservation.map_or_else(String::new, |table| string(table, "class"));
+    put8(&mut out, 98, index_of(CLASSES, &class));
+    put64(&mut out, 8, reservation.map_or(0, |table| int(table, "memory_bytes")));
+    if class == "hard" {
+        put32(&mut out, 60, narrow(reservation.map_or(0, |table| int(table, "cores"))));
+        put64(&mut out, 16, reservation.map_or(0, |table| int(table, "cpu_period_ns")));
+        put64(&mut out, 24, reservation.map_or(0, |table| int(table, "cpu_budget_ns")));
+    }
+
+    // `[[capability]]`, in file order — which is the order the supervisor's
+    // spawn entry supplies them and the order the granted notices arrive.
+    let caps: &[(usize, Table)] = doc.arrays.get("capability").map_or(&[], Vec::as_slice);
+    let mut names: Vec<String> = Vec::new();
+    put8(&mut out, 99, narrow8(caps.len()));
+    for (index, (_, table)) in caps.iter().enumerate() {
+        let at = record::CAPS_AT + index * record::NEED;
+        let name = string(table, "name");
+        put_name(&mut out, at, &name);
+        names.push(name);
+        put64(&mut out, at + 32, int(table, "bytes"));
+        put32(&mut out, at + 40, narrow(int(table, "frames")));
+        put8(&mut out, at + 44, index_of(CAP_TYPES, &string(table, "type")));
+        put8(&mut out, at + 45, bits(RIGHTS, &list(table, "rights")));
+        let from = string(table, "from");
+        let route = match from.as_str() {
+            "supervisor" => 1,
+            "powerbox" => 3,
+            // Everything else the checker admits is `sibling:<name>`, and the
+            // name goes in the field beside this one.
+            _ => 2,
+        };
+        put8(&mut out, at + 46, route);
+        put8(&mut out, at + 47, u8::from(boolean(table, "optional")));
+        if let Some(sibling) = from.strip_prefix("sibling:") {
+            put_name(&mut out, at + 48, sibling);
+        }
+    }
+
+    // `[[ring]]`. The control ring is never one of these: RFC 0008 gives every
+    // component exactly one, created with it, and the schema refuses a data ring
+    // that offers `control_events`.
+    let rings: &[(usize, Table)] = doc.arrays.get("ring").map_or(&[], Vec::as_slice);
+    put8(&mut out, 100, narrow8(rings.len()));
+    for (index, (_, table)) in rings.iter().enumerate() {
+        let at = record::RINGS_AT + index * record::RING;
+        put_name(&mut out, at, &string(table, "name"));
+        put_name(&mut out, at + 32, &string(table, "protocol"));
+        put64(&mut out, at + 64, bits64(FEATURES, &list(table, "features")));
+        put64(&mut out, at + 72, bits64(FEATURES, &list(table, "features_required")));
+        put32(&mut out, at + 80, narrow(int(table, "version_min")));
+        put32(&mut out, at + 84, narrow(int(table, "version")));
+        put32(&mut out, at + 88, narrow(int(table, "entries")));
+        put32(&mut out, at + 92, narrow(int(table, "clients")));
+        let role = string(table, "role");
+        put8(&mut out, at + 96, index_of(ROLES, &role));
+        put8(&mut out, at + 97, index_of(PAYLOADS, &string(table, "payload")));
+        // The `to` field is resolved here rather than carried as a name, so the
+        // frame does not resolve it a second time — two resolutions of one name
+        // is how two readers come to disagree about which slot was meant. The
+        // checker has already refused a `to` that names nothing.
+        let through = if role == "client" {
+            let to = string(table, "to");
+            names.iter().position(|n| *n == to).map_or(record::NO_CAPABILITY, narrow8)
+        } else {
+            record::NO_CAPABILITY
+        };
+        put8(&mut out, at + 98, through);
+    }
+
+    if let Some(tail) = out.get_mut(record::BYTES..) {
+        tail.copy_from_slice(image);
+    }
+    if findings.is_empty() { Ok(out) } else { Err(findings) }
+}
+
+/// The identity of a component file: one hash over the record and the image
+/// together.
+///
+/// FNV-1a, the same construction `abi::manifest::ContentId` uses — and the two
+/// must agree, because this is what a build reports and that is what a spawn
+/// compares. `the_record_layout_matches_the_abi` reads the seed and the prime
+/// out of `abi/src/manifest.rs`.
+#[must_use]
+pub fn content_id(bytes: &[u8]) -> u64 {
+    let mut hash = record::HASH_SEED;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(record::HASH_PRIME);
+    }
+    hash
+}
+
+/// A string field of a table that has already been judged. Empty if absent,
+/// which cannot happen for a required field — and which produces a record
+/// `Record::read` refuses if it somehow does.
+fn string(table: &Table, key: &str) -> String {
+    match table.get(key).map(|entry| &entry.value) {
+        Some(Value::Str(text)) => text.clone(),
+        _ => String::new(),
+    }
+}
+
+/// An integer field, or zero.
+fn int(table: &Table, key: &str) -> u64 {
+    match table.get(key).map(|entry| &entry.value) {
+        Some(Value::Int(number)) => *number,
+        _ => 0,
+    }
+}
+
+/// A boolean field, or false — which is what `docs/manifest.md` says an absent
+/// `optional` means, and it is the default that gives less.
+fn boolean(table: &Table, key: &str) -> bool {
+    matches!(table.get(key).map(|entry| &entry.value), Some(Value::Bool(true)))
+}
+
+/// A list field, or empty.
+fn list(table: &Table, key: &str) -> Vec<String> {
+    match table.get(key).map(|entry| &entry.value) {
+        Some(Value::List(items)) => items.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// The wire value of a closed vocabulary: one-based, so that zero is not a
+/// value. Every enum in the record follows that rule for the reason
+/// `abi::cap::CapType` does — a zeroed record names nothing rather than naming
+/// the first of everything.
+fn index_of(allowed: &[&str], value: &str) -> u8 {
+    allowed.iter().position(|word| *word == value).map_or(0, |at| narrow8(at + 1))
+}
+
+/// A bitmap from a list of words, one bit per position in the vocabulary.
+fn bits(allowed: &[&str], words: &[String]) -> u8 {
+    let mut out = 0u8;
+    for word in words {
+        if let Some(bit) = allowed.iter().position(|known| known == word) {
+            out |= 1u8 << bit;
+        }
+    }
+    out
+}
+
+/// As [`bits`], sixty-four wide.
+fn bits64(allowed: &[&str], words: &[String]) -> u64 {
+    let mut out = 0u64;
+    for word in words {
+        if let Some(bit) = allowed.iter().position(|known| known == word) {
+            out |= 1u64 << bit;
+        }
+    }
+    out
+}
+
+/// A NUL-padded name, with nothing after the terminator.
+///
+/// The padding rule is not tidiness: a name with a byte after its terminator
+/// hashes differently from the same name without one, so two component files
+/// could name one component and carry two content identities — and a place
+/// refilled by hash would then refuse its own manifest.
+fn put_name(out: &mut [u8], at: usize, name: &str) {
+    let bytes = name.as_bytes();
+    let len = bytes.len().min(NAME_MAX);
+    if let (Some(slot), Some(source)) = (out.get_mut(at..at + len), bytes.get(..len)) {
+        slot.copy_from_slice(source);
+    }
+}
+
+/// One byte at an offset.
+fn put8(out: &mut [u8], at: usize, value: u8) {
+    if let Some(slot) = out.get_mut(at) {
+        *slot = value;
+    }
+}
+
+/// A little-endian `u32` at an offset. Little-endian because the record is read
+/// by the frame through a pointer cast, and both ends of that are this machine.
+fn put32(out: &mut [u8], at: usize, value: u32) {
+    if let Some(slot) = out.get_mut(at..at + 4) {
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// A little-endian `u64` at an offset.
+fn put64(out: &mut [u8], at: usize, value: u64) {
+    if let Some(slot) = out.get_mut(at..at + 8) {
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// Narrow a judged quantity to the width the record carries it in.
+///
+/// Saturating rather than wrapping, because every one of these has already been
+/// bounded by the checker — an `entries` above 65 536, a `cores` above what a
+/// machine has — so a value that reached the ceiling here is the checker having
+/// stopped bounding it, and a record carrying `u32::MAX` is refused by
+/// `Record::read` where a wrapped one would be believed.
+fn narrow(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// As [`narrow`], one byte wide.
+fn narrow8(value: usize) -> u8 {
+    u8::try_from(value).unwrap_or(u8::MAX)
+}
+
+// ---------------------------------------------------------------------------
 // The reader.
 // ---------------------------------------------------------------------------
 
@@ -1614,6 +1928,123 @@ memory_bytes = 8192
              kernel::cap::TABLE_SLOTS; move it with the table, or say at the constant \
              why the relation ended"
         );
+    }
+
+    /// The record this module writes and the record `abi/` reads are the same
+    /// record, and nothing checks that at compile time because `xtask` does not
+    /// depend on `f-abi` — [`CAP_TYPES`] says why in one sentence. So this reads
+    /// the assertions `abi/src/manifest.rs` compiles against, and the four
+    /// constants the writer mirrors, and fails when either moves.
+    ///
+    /// It is deliberately the *assertions* rather than the struct definition. A
+    /// field reordered inside the struct changes no assertion, and would change
+    /// no offset here either only because both would be wrong — which is why
+    /// the real guard is the frame: `Record::read` judges every field of every
+    /// component file on every boot, so a conversion mistake is a boot that goes
+    /// red naming the field.
+    #[test]
+    fn the_record_layout_matches_the_abi() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let abi =
+            std::fs::read_to_string(root.join("abi/src/manifest.rs")).expect("abi/src/manifest.rs");
+
+        let size_of = |ty: &str| -> usize {
+            let needle = format!("core::mem::size_of::<{ty}>() == ");
+            abi.lines()
+                .find_map(|line| line.split_once(&needle))
+                .and_then(|(_, rest)| rest.trim().trim_end_matches([';', ')']).parse().ok())
+                .unwrap_or_else(|| panic!("no size assertion for {ty} in abi/src/manifest.rs"))
+        };
+        assert_eq!(size_of("Record"), record::BYTES, "the record has changed size");
+        assert_eq!(size_of("Need"), record::NEED, "a capability slot has changed size");
+        assert_eq!(size_of("Ring"), record::RING, "a ring slot has changed size");
+
+        let konst = |name: &str, ty: &str| -> String {
+            let needle = format!("pub const {name}: {ty} = ");
+            abi.lines()
+                .find_map(|line| line.split_once(&needle))
+                .map(|(_, rest)| rest.trim().trim_end_matches(';').replace('_', ""))
+                .unwrap_or_else(|| panic!("no {name} in abi/src/manifest.rs"))
+        };
+        assert_eq!(
+            konst("MAGIC", "u64"),
+            format!("{:#x}", record::MAGIC).replace('_', ""),
+            "abi::manifest::MAGIC has drifted from the one this writer stamps"
+        );
+        assert_eq!(
+            konst("SCHEMA", "u32").parse::<u64>().unwrap(),
+            SCHEMA,
+            "abi::manifest::SCHEMA has drifted from this checker's"
+        );
+        assert_eq!(
+            konst("NAME_MAX", "usize").parse::<usize>().unwrap(),
+            NAME_MAX,
+            "abi::manifest::NAME_MAX has drifted from this checker's"
+        );
+        assert_eq!(
+            konst("CAPABILITIES_MAX", "usize").parse::<usize>().unwrap(),
+            CAPABILITIES_MAX,
+            "abi::manifest::CAPABILITIES_MAX has drifted from this checker's"
+        );
+        assert_eq!(
+            konst("RINGS_MAX", "usize").parse::<usize>().unwrap(),
+            RINGS_MAX,
+            "abi::manifest::RINGS_MAX has drifted from this checker's"
+        );
+    }
+
+    /// The conversion from milliseconds to timer ticks is a number in this file
+    /// and a frequency in the kernel, and nothing but this brings them together.
+    /// A frame that moved to ten kilohertz would leave every compiled manifest
+    /// declaring a backoff a tenth of what its author wrote — silently, because
+    /// the record's unit is ticks and ticks is what it would carry.
+    #[test]
+    fn the_tick_rate_is_the_frames() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let main =
+            std::fs::read_to_string(root.join("kernel/src/main.rs")).expect("kernel/src/main.rs");
+        let hz: u64 = main
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("const TIMER_HZ: u32 = "))
+            .and_then(|rest| rest.trim_end_matches(';').replace('_', "").parse().ok())
+            .expect("kernel::main::TIMER_HZ");
+        assert_eq!(
+            hz / 1_000,
+            TICKS_PER_MS,
+            "TICKS_PER_MS is the frame's tick rate per millisecond; the frame now runs at {hz} Hz"
+        );
+    }
+
+    /// Every manifest in the tree compiles to a record, and the record is what a
+    /// spawn names. A manifest that passes the checker and cannot be compiled is
+    /// a manifest whose author is told it is fine and whose build is not.
+    #[test]
+    fn every_manifest_in_the_tree_compiles() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let build = root.join("target");
+        for path in files(&root, &build).expect("walking for manifests") {
+            let rel = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
+            let text = std::fs::read_to_string(&path).expect(&rel);
+            // A one-byte image, because what is under test is the record and
+            // the length arithmetic around it rather than any particular code.
+            let file = compile(&rel, &text, &[0u8])
+                .unwrap_or_else(|findings| panic!("{rel}:\n{}", findings.join("\n")));
+            assert_eq!(file.len(), record::BYTES + 1, "{rel} produced the wrong length");
+            assert_eq!(
+                u64::from_le_bytes(file[..8].try_into().unwrap()),
+                record::MAGIC,
+                "{rel} does not begin with the manifest magic"
+            );
+            // The identity moves with the image, which is the half a
+            // record-only hash would miss — and the half that decides whether a
+            // place refilled by hash gets the same code back.
+            let other = compile(&rel, &text, &[1u8]).expect("a second image");
+            assert_ne!(
+                content_id(&file),
+                content_id(&other),
+                "{rel}: the image does not reach the content identity"
+            );
+        }
     }
 
     /// The lines between `open` and the first `}` at its indentation.

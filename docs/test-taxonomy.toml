@@ -286,10 +286,11 @@ id      = "iommu-escape"
 group   = "C"
 class   = "A driver addressing memory outside its grant (IOMMU)"
 layers  = ["L1", "P"]
-check   = "nothing — there is no IOMMU and no driver"
-cadence = ["never"]
-status  = "gap"
-scheduled_by = ["E1-B01"]
+check   = "cargo xtask iommu — two boots on a machine with a VT-d unit and a real virtio-blk device: one descriptor inside the grant, which must land bytes, and one outside it, which must be refused and recorded in the unit's own fault registers; both halves also require the frame to refuse a device translation for a capability carrying no GRANT"
+cadence = ["every-pr"]
+status  = "partially"
+notes   = "The requester is the frame's own adversary at ring 0 rather than a ring-3 driver component, because E1-B02, E1-B03 and E1-B04 are blocked on E1-B01. The mechanism is exercised on every PR; that a component cannot reprogram the unit or choose its own domain is argued structurally and not booted."
+scheduled_by = ["E1-B02"]
 
 # --- D — memory ---------------------------------------------------------------
 

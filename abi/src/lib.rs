@@ -14,9 +14,11 @@
 
 pub mod buf;
 pub mod cap;
+pub mod control;
 pub mod deadline;
 pub mod door;
 pub mod layout;
+pub mod manifest;
 pub mod state;
 
 /// The frame's opcode space.
@@ -176,8 +178,15 @@ pub const NO_DEADLINE: u64 = 0;
 #[repr(C, align(32))]
 #[derive(Clone, Copy, Debug)]
 pub struct Cqe {
-    /// Echoed from the submission.
-    /// Unit: none — the submitter's own value, returned unchanged.
+    /// Echoed from the submission, except on a notice.
+    ///
+    /// Unit: none — the submitter's own value, returned unchanged, **except on
+    /// an entry carrying [`cflags::NOTICE`], where it is the handle the notice
+    /// concerns**. The second reading is RFC 0008's and it is stated here
+    /// rather than deduced, because R03 makes this sentence normative and
+    /// `cargo xtask lint-units` reads it: a notice answers no submission, so
+    /// there is no submitter's value for it to carry, and a reader that
+    /// believed there was would match a notice against an outstanding token.
     pub user_data: u64,
     /// Non-negative values are success, and their meaning is per-opcode — for a
     /// transfer it is the count actually transferred, which is how partial
@@ -258,6 +267,19 @@ pub mod cflags {
     /// below its class without a word is how a deadline becomes decorative.
     /// RFC 0025.
     pub const SHORTFALL: u32 = 1 << 2;
+    /// This completion answers no submission: it is a **notice** from the frame.
+    ///
+    /// The whole of RFC 0008's ABI change, and it costs [`Cqe::user_data`] its
+    /// first reading — which is why that field's doc comment now states two.
+    /// On an entry carrying this bit, `result` is the notice kind
+    /// ([`control::notice`](crate::control::notice)), `user_data` is the handle
+    /// the notice concerns, and `ext` carries the rest.
+    ///
+    /// Why a flag on a completion rather than a subscription entry to complete:
+    /// the initial *granted* notices must be in the ring before the component's
+    /// first instruction, and there is no submission yet for them to answer.
+    /// RFC 0008 rejected the `io_uring` multishot shape on exactly that.
+    pub const NOTICE: u32 = 1 << 3;
 }
 
 /// The error space.
@@ -325,6 +347,21 @@ pub mod error {
         /// what it asks for is a promise nobody made to its author (R08).
         /// Detail: the `class` field as written. RFC 0025.
         pub const NOT_HELD: u16 = 4;
+        /// The `Untyped` account a spawn supplied holds less than the manifest
+        /// declares its whole footprint needs.
+        ///
+        /// In [`super::ADMISSION`] rather than [`super::RESOURCE`], and the
+        /// distinction is the one R08 is about. `RESOURCE/QUOTA_EXHAUSTED` is
+        /// an account that ran out *while it was being spent*, which a
+        /// component recovers from by spending less. This is a demand refused
+        /// before anything was spent, because the manifest states what the
+        /// component is made of and the supervisor offered less than that — a
+        /// component does not start and then discover it cannot run. Detail:
+        /// the bytes the account actually holds.
+        ///
+        /// Added by E1-B05, which is the task `CONTRIBUTING.md`'s R02 row names
+        /// as the one that lands the supervisor's `ADMISSION` refusals.
+        pub const MEMORY: u16 = 5;
     }
 
     /// Codes within [`RESOURCE`].
@@ -348,6 +385,18 @@ pub mod error {
         pub const FEATURE_REQUIRED: u16 = 3;
         /// The peer is gone and is not coming back.
         pub const GONE: u16 = 4;
+        /// The place a connect named is still empty at the connect's deadline.
+        ///
+        /// Deliberately **not** [`GONE`], and RFC 0008 is emphatic about the
+        /// difference: a place may yet be refilled by a respawn, so a client
+        /// that can wait longer may submit again, while a client told `GONE`
+        /// would be right to give up. Detail carries the epoch of the last
+        /// occupant, or zero for a place that has never had one.
+        ///
+        /// The third of the three outcomes a pending connect has, added here by
+        /// E1-B05 because RFC 0008 says two outcomes and a silence is how the
+        /// builder and its test each invent the third.
+        pub const EMPTY: u16 = 5;
     }
 
     /// Codes within [`ARGUMENT`].

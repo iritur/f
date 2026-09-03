@@ -138,7 +138,9 @@ fn main() -> ExitCode {
         "fault" => fault(args.get(1).map(String::as_str)),
         "user" => user(args.get(1).map(String::as_str)),
         "cap" => cap(args.get(1).map(String::as_str)),
+        "iommu" => iommu(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
+        "component" => components().map(|_| ()),
         "mutate" => mutate(),
         "panic" => panic_path(),
         "trace" => match args.get(1).map(String::as_str) {
@@ -227,8 +229,13 @@ cargo xtask <command>
                      and check the frame refuses it: grant, unowned, forge,
                      stale, rights, type, flood or unmap. All eight with no
                      argument
+  iommu [half]       Boot into a real device transfer and check the remapping
+                     unit: inside, which must land, or outside, which must
+                     fault and land nothing. Both with no argument
   init               Build user/init into the flat image the loader hands over,
                      and check it is one
+  component          Build every component file: a manifest compiled to its
+                     record, its image linked, and one content hash over both
   mutate             Build the kernel with a deliberate defect, boot it, and
                      require the boot to go red — then require the same boot to
                      go green without it
@@ -494,20 +501,71 @@ fn to_elf32() -> Result<(), String> {
     }
 }
 
-/// Where the `init` image is built, and where the boot loader is told to find
-/// it.
+/// Where a flat image is built, and where the boot loader is told to find it.
 ///
-/// Its own target directory, because it is compiled with different flags from
-/// everything else in the workspace — see [`init_image`] — and two sets of flags
+/// One directory per image, because each is compiled with different flags from
+/// everything else in the workspace — see [`flat_image`] — and two sets of flags
 /// sharing a target directory is two full rebuilds every time the build
 /// alternates between them.
-fn init_dir() -> PathBuf {
-    target_dir().join("init")
+fn image_dir(name: &str) -> PathBuf {
+    target_dir().join(name)
 }
 
-/// The `init` image, as the loader will hand it over: a flat blob, no headers.
-fn init_bin() -> PathBuf {
-    init_dir().join("init.bin")
+/// The components this tree builds, in the order the loader carries them.
+///
+/// Module one is `user/init`'s flat image and is not in this list: it has no
+/// manifest, every existing boot depends on it being first, and RFC 0030 says
+/// why that position is the contract. Everything here follows it, each as one
+/// module holding a record and an image.
+const COMPONENTS: &[&str] = &["store"];
+
+/// Where a component file is written: a manifest record and an image, in one
+/// blob the loader hands over as one module. RFC 0030.
+fn component_path(name: &str) -> PathBuf {
+    target_dir().join("component").join(format!("{name}.fc"))
+}
+
+/// Build one component file: check its manifest, compile it to a record, link
+/// its image, and put the two in one blob.
+///
+/// The order is the point. `manifest::compile` runs the same checker
+/// `cargo xtask lint-manifests` runs — one parser, not two — and refuses before
+/// anything is built, so a manifest that stopped fitting the schema is a build
+/// failure naming the field rather than a component the frame refuses much
+/// later. RFC 0030.
+fn component_image(name: &str) -> Result<(PathBuf, u64, usize), String> {
+    let image = flat_image(&format!("f-{name}"), name)?;
+    let bytes = std::fs::read(&image).map_err(|e| format!("reading {}: {e}", relative(&image)))?;
+
+    let rel = format!("user/{name}/{}", manifest::FILE_NAME);
+    let source = root().join(&rel);
+    let text = std::fs::read_to_string(&source).map_err(|e| format!("reading {rel}: {e}"))?;
+    let file = manifest::compile(&rel, &text, &bytes)
+        .map_err(|findings| format!("{rel} does not fit the schema:\n\n{}", findings.join("\n")))?;
+
+    let out = component_path(name);
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("creating {}: {e}", relative(parent)))?;
+    }
+    std::fs::write(&out, &file).map_err(|e| format!("writing {}: {e}", relative(&out)))?;
+    Ok((out, manifest::content_id(&file), bytes.len()))
+}
+
+/// Build every component file, and say what each one is.
+///
+/// The identity it prints is what a spawn names — one hash over the record and
+/// the image together — so a component whose *code* changed has a different
+/// identity from one whose declaration did, and both are visible here rather
+/// than at the boot that refuses to refill a place.
+fn components() -> Result<Vec<PathBuf>, String> {
+    let mut built = Vec::new();
+    for name in COMPONENTS {
+        let (path, id, image) = component_image(name)?;
+        println!("  {name:<12} {id:#018x}  record + {image} byte image  {}", relative(&path));
+        built.push(path);
+    }
+    Ok(built)
 }
 
 /// Where a component's text is mapped. `kernel::process::TEXT`.
@@ -552,12 +610,33 @@ const INIT_MAX: u64 = 4096;
 /// data — the text page is mapped read-only, so a mutable global would fault on
 /// first write — and that the whole thing fits in the one page the frame maps.
 fn init_image() -> Result<PathBuf, String> {
+    flat_image("f-init", "init")
+}
+
+/// Build one crate into a flat image and check that it is one.
+///
+/// `package` is the crate, `dir` the target directory and the image's base
+/// name. Every component in this tree is linked by `user/init/link.ld`, and
+/// that is a claim rather than a convenience: the script places the entry by
+/// matching the section `component::start` is compiled into, so every crate
+/// whose entry has that path is placed the same way and checked the same way.
+/// A component with a differently named entry would need its own script and
+/// would be a second answer to a question this tree has one answer to.
+fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
     let lld = llvm_tool("rust-lld")?;
     let objcopy = llvm_tool("llvm-objcopy")?;
     let nm = llvm_tool("llvm-nm")?;
 
-    let dir = init_dir();
-    let target = dir.to_str().ok_or("the init target directory is not valid UTF-8")?.to_string();
+    // The base name is kept before the directory shadows it, because the image
+    // is named after the crate rather than called `image.bin` in a directory
+    // that happens to say which crate it was. `target/init/init.bin` is a path
+    // `tools/f-on-metal.sh` and `docs/booting-on-hardware.md` both write down,
+    // and an artefact whose name is only meaningful relative to its directory
+    // is one a script names wrongly the first time somebody moves it.
+    let name = dir;
+    let dir = image_dir(dir);
+    let target =
+        dir.to_str().ok_or("a flat image target directory is not valid UTF-8")?.to_string();
 
     // `relocation-model=static` for the same reason the kernel uses it: this is
     // a fixed-address image, and without it the crate compiles as position
@@ -566,7 +645,7 @@ fn init_image() -> Result<PathBuf, String> {
         .args([
             "build",
             "-p",
-            "f-init",
+            package,
             "--target",
             KERNEL_TARGET,
             // Not `--release`. The root Cargo.toml says at length why a
@@ -585,20 +664,21 @@ fn init_image() -> Result<PathBuf, String> {
         .status()
         .map_err(|e| format!("could not run cargo: {e}"))?;
     if !status.success() {
-        return Err("building user/init failed".into());
+        return Err(format!("building {package} failed"));
     }
 
-    let archive = dir.join(KERNEL_TARGET).join("init").join("libf_init.rlib");
+    let rlib = format!("lib{}.rlib", package.replace('-', "_"));
+    let archive = dir.join(KERNEL_TARGET).join("init").join(&rlib);
     if !archive.exists() {
         return Err(format!(
-            "user/init did not produce {}\n\n\
+            "{package} did not produce {}\n\n\
              That is the library `link.ld` links. If it is missing, the crate has\n\
              stopped being a library — see the note in user/init/Cargo.toml.",
             relative(&archive)
         ));
     }
 
-    let elf = dir.join("init.elf");
+    let elf = dir.join(format!("{name}.elf"));
     // One library and nothing else on the command line, which is a claim about
     // the component rather than a shortcut: everything it calls across a crate
     // boundary is `#[inline]` in `f_abi::door`, so a copy is compiled into this
@@ -620,7 +700,7 @@ fn init_image() -> Result<PathBuf, String> {
         .status()
         .map_err(|e| format!("could not run rust-lld: {e}"))?;
     if !status.success() {
-        return Err("linking user/init against user/init/link.ld failed".into());
+        return Err(format!("linking {package} against user/init/link.ld failed"));
     }
 
     // The symbol at the first byte. `link.ld` places the entry there by naming
@@ -629,7 +709,7 @@ fn init_image() -> Result<PathBuf, String> {
     // makes this fail with a sentence, rather than making a boot jump into the
     // middle of some other function.
     let nm = nm.to_str().ok_or("llvm-nm's path is not valid UTF-8")?.to_string();
-    let elf_path = elf.to_str().ok_or("the init elf path is not valid UTF-8")?.to_string();
+    let elf_path = elf.to_str().ok_or("the image elf path is not valid UTF-8")?.to_string();
     let symbols = capture(&nm, &["--defined-only", "--numeric-sort", &elf_path])?;
     let at_start: Vec<&str> = symbols
         .lines()
@@ -641,7 +721,7 @@ fn init_image() -> Result<PathBuf, String> {
         .collect();
     if !at_start.iter().any(|name| name.contains("9component5start")) {
         return Err(format!(
-            "the first byte of the init image is not `component::start`.\n\n\
+            "the first byte of the {package} image is not `component::start`.\n\n\
              What is there: {}\n\n\
              `user/init/link.ld` places the entry by matching the section its\n\
              function is compiled into, and the pattern has stopped matching —\n\
@@ -667,7 +747,7 @@ fn init_image() -> Result<PathBuf, String> {
         .collect();
     if !writable.is_empty() {
         return Err(format!(
-            "the init image has writable data: {}\n\n\
+            "the {package} image has writable data: {}\n\n\
              Its text page is mapped read-only, so the first write to any of these\n\
              is a page fault in a component with no way to report one. A component\n\
              that genuinely needs writable state has to be given a frame for it —\n\
@@ -676,19 +756,20 @@ fn init_image() -> Result<PathBuf, String> {
         ));
     }
     let objcopy = objcopy.to_str().ok_or("llvm-objcopy's path is not valid UTF-8")?.to_string();
-    let bin = init_bin();
-    let bin_path = bin.to_str().ok_or("the init image path is not valid UTF-8")?.to_string();
+    let bin = dir.join(format!("{name}.bin"));
+    let bin_path = bin.to_str().ok_or("the flat image path is not valid UTF-8")?.to_string();
     capture(&objcopy, &["-O", "binary", &elf_path, &bin_path])?;
 
     let bytes = std::fs::metadata(&bin)
-        .map_err(|e| format!("could not measure the init image: {e}"))?
+        .map_err(|e| format!("could not measure the {package} image: {e}"))?
         .len();
     if bytes == 0 {
-        return Err("the init image is empty: the linker discarded everything".into());
+        return Err(format!("the {package} image is empty: the linker discarded everything"));
     }
     if bytes > INIT_MAX {
         return Err(format!(
-            "the init image is {bytes} bytes and the frame maps one page ({INIT_MAX}) for it.\n\n\
+            "the {package} image is {bytes} bytes and the frame maps one page ({INIT_MAX}) for \
+             it.\n\n\
              A component that outgrows a page needs a loader that reads its headers, \n\
              which is E5. Until then this is a real bound."
         ));
@@ -794,6 +875,52 @@ const BOOT_MEMORY: &str = "128M";
 /// the reason to move it appears.
 const LARGE_MEMORY: &str = "4G";
 
+/// The machine model, and the one piece of hardware it is pinned for.
+///
+/// Until E1-B01 there was no `-machine` here at all: the boot ran on whatever
+/// QEMU defaults to, which is the 1996 desktop chipset, and the pin was
+/// implicit. RFC 0031 makes it explicit and moves it, because the older
+/// chipset has no PCI Express configuration space and no place to put a
+/// remapping unit — so on it the kernel's IOMMU stage has nothing to find, and
+/// a protection nothing exercises is a protection nobody has checked.
+///
+/// The interrupt controller is split because the remapping unit's interrupt
+/// half requires it. This build does not enable interrupt remapping and does
+/// not need it; the option is here because the device refuses to be created
+/// without it, and pinning the machine means pinning that too.
+///
+/// `-net none` is not decoration. From the moment the kernel enables
+/// translation, a device with no domain cannot address memory — so a network
+/// card the emulator adds by default, that nothing in this kernel drives, would
+/// be a bus master that faults the first time a packet arrives. Removing it is
+/// the honest version of *this kernel drives no devices that do DMA*, and the
+/// day one of them does is the day this option comes out and a domain goes in.
+const MACHINE: &[&str] =
+    &["-machine", "q35,kernel-irqchip=split", "-device", "intel-iommu,intremap=on", "-net", "none"];
+
+/// The one device this tree drives that performs DMA, and the disk behind it.
+///
+/// Added only by `iommu`, because it exists to be provoked. Three of its
+/// options are load-bearing and each would silently change what is being
+/// measured:
+///
+/// - `disable-legacy=on` forces the modern register layout. A legacy virtio
+///   device cannot negotiate the feature bit that routes its transfers through
+///   the remapping unit, so it would bypass translation and the provocation
+///   would pass while proving nothing — `kernel/src/arch/x86_64/dma.rs` records
+///   what that cost to find out.
+/// - `iommu_platform=on` is the device half of the same bit.
+/// - `read-zeroes=on` makes the null block driver actually write to the
+///   destination buffer. Without it the device completes a read and touches
+///   nothing, which is indistinguishable from a transfer the unit refused —
+///   which is precisely the distinction the whole check is about.
+const DMA_DEVICE: &[&str] = &[
+    "-drive",
+    "if=none,id=blk0,driver=null-co,size=1048576,read-zeroes=on",
+    "-device",
+    "virtio-blk-pci,drive=blk0,disable-legacy=on,iommu_platform=on",
+];
+
 fn boot(append: Option<&str>) -> Result<Option<i32>, String> {
     match machine(append, &[], Capture::Off)?.0 {
         Ending::TimedOut(seconds) => Err(format!(
@@ -853,26 +980,56 @@ fn machine_with(
     timeout: u64,
     memory: &str,
 ) -> Result<(Ending, String), String> {
+    machine_devices(append, features, capture, timeout, memory, &[])
+}
+
+/// [`machine_with`], plus devices only one command wants.
+///
+/// A parameter rather than a second description of the emulator, because there
+/// is one place the machine is described and a second one would drift from it
+/// exactly as slowly as nobody notices. Every caller but `iommu` passes an
+/// empty slice, and that slice is the whole of the difference between the boot
+/// that is a fixture and the boot that has something to provoke.
+fn machine_devices(
+    append: Option<&str>,
+    features: &[&str],
+    capture: Capture,
+    timeout: u64,
+    memory: &str,
+    devices: &[&str],
+) -> Result<(Ending, String), String> {
     build_with(features)?;
     let kernel = kernel_elf32();
     if !kernel.exists() {
         return Err(format!("kernel image not found at {}", kernel.display()));
     }
     let init = init_image()?;
+    let components = components()?;
 
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.args(["-kernel", kernel.to_str().ok_or("kernel path is not valid UTF-8")?]);
 
-    // The first boot module, which from E0-B10 is `user/init`. Multiboot 1 calls
-    // these modules and QEMU's own loader spells the first one `-initrd`; the
-    // kernel sees a validated extent and nothing about how it arrived.
+    // The boot modules. Multiboot 1 calls them modules and QEMU's own loader
+    // spells them `-initrd` with a comma-separated list; the kernel sees
+    // validated extents and nothing about how they arrived.
+    //
+    // Module one is `user/init`'s flat image and its position is the contract:
+    // it has no manifest, and `main::component` names it by index. Everything
+    // after it is a component file — a record and an image — which the frame
+    // finds by magic rather than by position, so a loader that reordered them
+    // would produce a smaller topology rather than a component built out of the
+    // wrong bytes. RFC 0030.
     //
     // Passed on every boot, including the ones that provoke something. The
     // provocations run the kernel's own adversary, which is a different program
     // — see `kernel::process::Plan` — and the component runs first regardless,
     // because "a second process cannot use the first one's handles" is a
     // property every boot should be checking rather than a special run.
-    qemu.args(["-initrd", init.to_str().ok_or("the init image path is not valid UTF-8")?]);
+    let mut modules = vec![init.to_str().ok_or("the init image path is not valid UTF-8")?];
+    for path in &components {
+        modules.push(path.to_str().ok_or("a component file path is not valid UTF-8")?);
+    }
+    qemu.args(["-initrd", &modules.join(",")]);
 
     if let Some(append) = append {
         qemu.args(["-append", append]);
@@ -915,6 +1072,12 @@ fn machine_with(
         "isa-debug-exit,iobase=0xf4,iosize=0x04",
         "-no-reboot",
     ]);
+
+    // The chipset and the remapping unit, pinned for the same reason the memory
+    // size is and argued at [`MACHINE`]. RFC 0031.
+    qemu.args(MACHINE);
+    // Whatever this one command needs and no other does.
+    qemu.args(devices);
 
     qemu.current_dir(root());
 
@@ -1635,6 +1798,114 @@ fn cap(kind: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// The two halves of E1-B01's exit, as boots.
+///
+/// A real device sets up a real virtqueue and performs a real transfer, once
+/// with its destination buffer translated in the device's own IOMMU domain and
+/// once with it deliberately not. The first must land bytes; the second must be
+/// refused by the remapping unit and recorded in its fault registers.
+///
+/// Neither means anything alone, which is the same argument `mutate` makes
+/// about defects and `panic_path` about endings. A refusal proves nothing if
+/// the identical setup also refuses when it should not — that is a device that
+/// was never started, and it is exactly what the first version of this check
+/// measured before the legacy virtio path was found to bypass translation
+/// entirely.
+const DMA_PROVOCATIONS: &[(&str, &str)] = &[
+    ("inside", "a transfer into a buffer the domain translates: it must land"),
+    ("outside", "a transfer into a buffer it does not: it must fault, and nothing may land"),
+];
+
+/// Boot into a device transfer that is meant to be refused, and one that is
+/// not.
+///
+/// Both must end at 33 — the transfer happened or was refused, and the kernel
+/// finished. That is the sameness with `user` and `cap` and the difference from
+/// `fault`: a device addressing memory it was not given is an event the frame
+/// handles, and a kernel that dies handling one has failed the property rather
+/// than enforced it.
+///
+/// The verdict is the kernel's. It knows which half it was asked for, what the
+/// unit recorded, and what is in the buffer afterwards; this reads an exit code,
+/// because a harness that judged from the log alone could not tell a refused
+/// transfer from a device that never answered.
+fn iommu(kind: Option<&str>) -> Result<(), String> {
+    let chosen: Vec<&(&str, &str)> = match kind {
+        None => DMA_PROVOCATIONS.iter().collect(),
+        Some(name) => {
+            let found = DMA_PROVOCATIONS.iter().find(|(known, _)| *known == name);
+            let Some(found) = found else {
+                let list: Vec<String> = DMA_PROVOCATIONS
+                    .iter()
+                    .map(|(name, what)| format!("  {name:<8} {what}"))
+                    .collect();
+                return Err(format!("unknown dma provocation: {name}\n\n{}", list.join("\n")));
+            };
+            vec![found]
+        }
+    };
+
+    let all = chosen.len() > 1;
+    for (name, what) in chosen {
+        if all {
+            println!("\n--- dma={name}: {what}");
+        }
+        let (ending, log) = machine_devices(
+            Some(&format!("dma={name}")),
+            &[],
+            Capture::Printed,
+            BOOT_TIMEOUT,
+            BOOT_MEMORY,
+            DMA_DEVICE,
+        )?;
+        match ending {
+            Ending::Exited(33) => {}
+            Ending::Exited(35) => {
+                return Err(format!(
+                    "the kernel refused to finish after `dma={name}`. Either a device \
+                     addressed memory outside its grant and the remapping unit did not \
+                     stop it — which is the failure this exists to find — or a granted \
+                     transfer was refused, which is the same failure pointing the other \
+                     way. The serial log above says which."
+                ));
+            }
+            Ending::Exited(0) => {
+                return Err(format!(
+                    "the machine reset with no output during `dma={name}`. A fault taken \
+                     while the remapping unit is enabled and this kernel's own tables are \
+                     under it is the frame having programmed a device wrong."
+                ));
+            }
+            other => return Err(format!("the boot {other}; expected exit 33")),
+        }
+
+        // The exit code says the kernel agreed with itself. This says the
+        // provocation happened at all — a build where the device is absent
+        // would print the refusal and stop, and `dma_provocation` turns that
+        // into a failed boot, so this is belt and braces rather than the
+        // assertion. It is here because the *device* is a command-line option
+        // and a typo in `DMA_DEVICE` is the one way this check could quietly
+        // stop testing anything.
+        if !log.contains("dma verdict") {
+            return Err(format!(
+                "`dma={name}` finished without reaching a verdict.\n\n\
+                 The kernel prints one for every provocation it runs, so this means the \
+                 stage did not run: no remapping unit was found, or the device this boot \
+                 adds was not there to provoke."
+            ));
+        }
+        println!("\ndma={name}: the kernel reached its own verdict and finished");
+    }
+
+    if all {
+        println!(
+            "\nboth halves held: a granted transfer landed, and one outside the grant was a \
+             fault rather than a corruption"
+        );
+    }
+    Ok(())
+}
+
 /// The three endings CI has to tell apart, each produced by a fixture.
 ///
 /// # Why all three and not just the panic
@@ -1779,7 +2050,11 @@ fn test() -> Result<(), String> {
     //
     // A bare-metal target rather than a hosted one, because it is the AArch64
     // target `rust-toolchain.toml` pins and so the only one guaranteed to be
-    // installed. The crates checked are the four the arm job tests.
+    // installed. The crates checked are the ones the arm job tests, and a
+    // component crate belongs in that list for exactly the reason above: its
+    // architecture-specific half is behind a `cfg`, and a `cfg` that stopped
+    // covering everything is a compile error on the other target and nothing at
+    // all on this one.
     sh(
         "cargo",
         &[
@@ -1792,6 +2067,8 @@ fn test() -> Result<(), String> {
             "f-ring",
             "-p",
             "f-init",
+            "-p",
+            "f-store",
             "--target",
             "aarch64-unknown-none",
         ],

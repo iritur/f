@@ -402,6 +402,15 @@ jobs:
       # one the frame does not refuse at all: the process revokes a capability
       # it is entitled to revoke and then reads the page that revoke unmapped.
       - run: cargo xtask cap
+      # The same argument for the bus, which is the one place the two above
+      # cannot reach: every protection they check is a protection against the
+      # *processor* addressing memory it should not, and a device is not the
+      # processor. Two boots — a real virtio block device performing a real
+      # transfer into a buffer its IOMMU domain translates, which must land, and
+      # then into one it does not, which must be refused and recorded in the
+      # remapping unit's fault registers. E1-B01. Neither half means anything
+      # alone: the first is the control that says the device was started at all.
+      - run: cargo xtask iommu
       # The other half of E0-P08, and the half that says the suite can fail. A
       # kernel built with one deliberate defect, booted into the forging sweep,
       # required to go red with a panic in the log — and then the same boot

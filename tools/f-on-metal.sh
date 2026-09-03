@@ -22,6 +22,12 @@
 #
 # `install` takes the two artefacts from ./target by default, or from
 # --kernel <path> --init <path> if they were built elsewhere and copied over.
+#
+# A third module is optional: a *component file* (a compiled manifest followed
+# by an image, RFC 0030). With one, the kernel runs the component lifecycle
+# demonstration and says so; without one it prints a line saying there was no
+# component file and carries on. Neither is a failure, which is why this is not
+# a required artefact.
 
 set -euo pipefail
 
@@ -44,10 +50,14 @@ if [ -f "$REPO/kernel/Cargo.toml" ] && [ -f "$REPO/rust-toolchain.toml" ]; then
     # travelled one, and the first time it was ever booted it did not work.
     KERNEL_DEFAULT="$REPO/target/x86_64-unknown-none/release/f-kernel.elf32"
     INIT_DEFAULT="$REPO/target/init/init.bin"
+    # Optional. `cargo xtask component` writes it; a checkout that has not run
+    # one has no file here and the entry is generated without the module line.
+    COMPONENT_DEFAULT="$REPO/target/component/store.fc"
 else
     IN_REPO=0
     KERNEL_DEFAULT="./f-kernel.elf32"
     INIT_DEFAULT="./init.bin"
+    COMPONENT_DEFAULT="./store.fc"
 fi
 
 # Where the artefacts land, and the file that generates the menu entries.
@@ -543,17 +553,25 @@ cmd_install() {
     need_root
 
     local kernel="$KERNEL_DEFAULT" init="$INIT_DEFAULT" serial=0
+    local component="$COMPONENT_DEFAULT" want_component=0
     while [ $# -gt 0 ]; do
         case "$1" in
-            --kernel) kernel="$2"; shift 2 ;;
-            --init)   init="$2";   shift 2 ;;
-            --serial) serial=1;    shift ;;
+            --kernel)    kernel="$2"; shift 2 ;;
+            --init)      init="$2";   shift 2 ;;
+            --component) component="$2"; want_component=1; shift 2 ;;
+            --serial)    serial=1;    shift ;;
             *) die "unknown option for install: $1" ;;
         esac
     done
 
     [ -f "$kernel" ] || die "kernel not found: $kernel"
     [ -f "$init" ]   || die "init module not found: $init"
+    # Named explicitly and missing is an error; defaulted and missing is not.
+    # The kernel boots either way and says which it got, so a machine without a
+    # component file is a smaller topology rather than a failure.
+    if [ "$want_component" -eq 1 ] && [ ! -f "$component" ]; then
+        die "component file not found: $component"
+    fi
 
     # Validate before touching the bootloader. An entry that points at the wrong
     # kind of file fails at boot, which is the worst place to find out.
@@ -572,6 +590,17 @@ cmd_install() {
     install -d -m 0755 "$DEST"
     install -m 0644 "$kernel" "$DEST/f-kernel.elf32"
     install -m 0644 "$init"   "$DEST/init.bin"
+    # The second module line, or nothing at all. Built as a string so the two
+    # menu entries below cannot disagree about whether it is there.
+    local module_component=""
+    if [ -f "$component" ]; then
+        install -m 0644 "$component" "$DEST/store.fc"
+        module_component="
+    module ${gp}/store.fc"
+        echo "component       $DEST/store.fc  (the lifecycle demonstration will run)"
+    else
+        echo "component       none  (the kernel will say so and carry on)"
+    fi
     echo "artefacts       $DEST/  (GRUB sees them at $gp/)"
 
     # /etc/grub.d exists on any machine with GRUB, so this is belt and braces —
@@ -598,7 +627,7 @@ menuentry "F — milestone M0 (serial ${BAUD} 8N1)" --class f {
     insmod multiboot
     search --no-floppy --file --set=root ${gp}/f-kernel.elf32
     multiboot ${gp}/f-kernel.elf32
-    module ${gp}/init.bin
+    module ${gp}/init.bin${module_component}
 }
 
 menuentry "F — milestone M0, 60s timer jitter run" --class f {
@@ -610,7 +639,7 @@ menuentry "F — milestone M0, 60s timer jitter run" --class f {
     insmod multiboot
     search --no-floppy --file --set=root ${gp}/f-kernel.elf32
     multiboot ${gp}/f-kernel.elf32 timer=60
-    module ${gp}/init.bin
+    module ${gp}/init.bin${module_component}
 }
 MENU
 EOF
@@ -714,6 +743,9 @@ deploy-grub options:
 install options:
   --kernel <path>   default $KERNEL_DEFAULT
   --init   <path>   default $INIT_DEFAULT
+  --component <p>   default $COMPONENT_DEFAULT, and optional: with a component
+                    file the kernel runs the lifecycle demonstration, without
+                    one it says so and carries on
   --serial          also send GRUB's own menu to serial at $BAUD
 
 The procedure is docs/booting-on-hardware.md. Read the two facts that cost an

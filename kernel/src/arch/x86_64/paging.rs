@@ -1228,6 +1228,131 @@ const fn slot_of(virt: u64, shift: u32) -> usize {
     ((virt >> shift) & 0x1FF) as usize
 }
 
+// --- the walk, borrowed by a second kind of table ---------------------------
+//
+// A remapping unit's second-level tables are the same *structure* as the ones
+// above — 512 eight-byte entries, nine bits of index per level, the address in
+// bits 63:12 — and a different *vocabulary*: bit 0 means readable rather than
+// present, and bit 2 means executable rather than reachable from ring 3. So
+// `arch::x86_64::vtd` reuses the four functions below, which are about the
+// structure, and defines its own flag constants, which are about the meaning.
+//
+// The alternative was a second walker with its own descend, its own
+// zeroed-table allocation and its own physical-to-virtual arithmetic — which is
+// three chances to reintroduce a bug this file has already had. What is
+// deliberately *not* shared is anything that names a flag: `map_page` and
+// `map_user` stay private, because an IOMMU entry built out of `PRESENT` would
+// compile, run, and mean something else.
+//
+// The two flushes below are here for the same reason the reads and writes are,
+// and only that reason: pushing an entry out of the processor's caches needs
+// the *virtual* address of that entry, which is the physical-to-virtual
+// arithmetic this module owns. Nothing above ever calls them — the processor
+// walks its own tables through its own caches — so they exist entirely for a
+// walker that does not snoop. See `vtd::Coherency`, which decides whether to.
+
+/// The index into a 512-entry table at a given level, for a walker that is not
+/// this module's.
+///
+/// Exposed for [`super::vtd`]. `shift` is 12 for the leaf level and nine more
+/// for each level above it.
+#[must_use]
+pub const fn level_slot(address: u64, shift: u32) -> usize {
+    slot_of(address, shift)
+}
+
+/// The bits of an entry that hold a physical address, in any of these tables.
+///
+/// Exposed for [`super::vtd`], which masks the same field out of an entry whose
+/// other bits mean something else entirely.
+pub const ENTRY_ADDRESS: u64 = ADDRESS_MASK;
+
+/// Allocate one zeroed frame to be used as a table of entries.
+///
+/// # Errors
+///
+/// [`BuildError::NoFrames`].
+///
+/// # Safety
+///
+/// As [`build`]: `frames` must be rebound onto a mapping in which a frame is
+/// addressable through `frames.virt()`.
+pub unsafe fn fresh_table(frames: &mut FrameAllocator) -> Result<u64, BuildError> {
+    // SAFETY: the caller's guarantee, passed down.
+    unsafe { table(frames) }
+}
+
+/// Read one entry of any table this kernel owns.
+///
+/// # Safety
+///
+/// As [`read`]: `at` must be a frame this kernel owns and `slot` must be below
+/// 512.
+#[must_use]
+pub unsafe fn entry_read(frames: &FrameAllocator, at: u64, slot: usize) -> u64 {
+    // SAFETY: the caller's guarantee, passed down.
+    unsafe { read(frames, at, slot) }
+}
+
+/// Write one entry of any table this kernel owns.
+///
+/// # Safety
+///
+/// As [`entry_read`], and `entry` must be a word the hardware that walks this
+/// table accepts — which for a remapping unit's tables is not the same set of
+/// bits as for the processor's.
+pub unsafe fn entry_write(frames: &FrameAllocator, at: u64, slot: usize, entry: u64) {
+    // SAFETY: the caller's guarantee, passed down.
+    unsafe { write(frames, at, slot, entry) };
+}
+
+/// Push one entry of a table out of the processor's caches.
+///
+/// For a walker that does not snoop them, which on this architecture is a
+/// remapping unit whose extended capability register clears the coherency bit.
+/// An entry is eight bytes and a cache line is at least thirty-two on every
+/// x86-64 part, so one flush reaches all of it whatever the line size is —
+/// which is why this takes no line size and [`table_flush`] does.
+///
+/// # Safety
+///
+/// As [`entry_read`].
+pub unsafe fn entry_flush(frames: &FrameAllocator, at: u64, slot: usize) {
+    let ptr = frames.virt(Frame::from_addr(at)).cast::<u64>().wrapping_add(slot);
+    // SAFETY: the caller owns the table and the slot is in range, so this
+    // address is inside one frame that nothing else is using. `clflush` writes
+    // nothing and faults only on an address that is not mapped.
+    unsafe {
+        core::arch::asm!("clflush [{}]", in(reg) ptr, options(nostack, preserves_flags));
+    }
+}
+
+/// Push a whole table out of the processor's caches.
+///
+/// `line` is the flush granularity the machine reports, and it is a parameter
+/// rather than a constant because a stride larger than the real line size skips
+/// lines — which is the one way this could silently do nothing. The caller
+/// reads it from `cpuid` and passes what the machine said.
+///
+/// # Safety
+///
+/// `at` must be a frame this kernel owns, addressable through `frames.virt()`,
+/// and `line` must be no larger than the machine's own flush granularity.
+pub unsafe fn table_flush(frames: &FrameAllocator, at: u64, line: u64) {
+    let base = frames.virt(Frame::from_addr(at));
+    let step = line.clamp(8, PAGE);
+    let mut offset = 0u64;
+    while offset < PAGE {
+        let ptr = base.wrapping_add(offset as usize);
+        // SAFETY: the caller owns the frame and `offset` stays below one page,
+        // so every address is inside it.
+        unsafe {
+            core::arch::asm!("clflush [{}]", in(reg) ptr, options(nostack, preserves_flags));
+        }
+        offset = offset.saturating_add(step);
+    }
+}
+
 /// Follow an entry to the next table, creating one if there is none.
 ///
 /// # Safety

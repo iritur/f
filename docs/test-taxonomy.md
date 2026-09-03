@@ -175,7 +175,7 @@ from one tree, and stops costing nothing at `E1-B05`.
 | A ring-3 process touching what it was not handed | P | `cargo xtask user` — seven boots, six must fault and one must not | every PR | **catches** |
 | Writing to a read-only grant | P | `cargo xtask cap state` | every PR | **catches** |
 | Speculation across a domain boundary (R02) | X | `cargo xtask lint-manifests` requires the domain field RFC 0005 rule 4 names; the supervisor refusal is not built | every verify | **partially** |
-| A driver addressing memory outside its grant (IOMMU) | L1, P | nothing — there is no IOMMU and no driver | never | **GAP** |
+| A driver addressing memory outside its grant (IOMMU) | L1, P | `cargo xtask iommu` — two boots on a machine with a VT-d unit and a real virtio-blk device: one descriptor inside the grant, which must land bytes, and one outside it, which must be refused and recorded in the unit's own fault registers. Both halves also require the frame to refuse a device translation for a capability carrying no `GRANT` | every PR | **partially** — the requester is the frame's own adversary at ring 0, not a ring-3 driver component; the mechanism is exercised and the component is argued |
 
 The five properties hold and each has something that breaks it, which is
 `E0-P08` met. What none of them is, is a proof: eleven boots sample a space
@@ -335,9 +335,9 @@ reversal condition. Nothing is left as "we should probably".
 | A hostile header or cursor panics the consumer | `E1-P04` (a billion operations), `E1-P12` (panic-freedom, proved) |
 | A hostile header accepted rather than refused | `E1-P04` |
 | A peer that dies mid-claim, or lies about its epoch | `E1-P04`, `E1-P02` |
-| A driver addressing memory outside its grant (IOMMU) | `E1-B01` |
 | Frame leak under churn | `E1-B14` (the unmap-under-churn workload), `E1-P06`, `E1-B10` |
 | Mapping left after revoke, under churn | `E1-B14`, `E1-P02` |
+| A ring-3 **component** addressing memory outside its grant | `E1-B02` — the first driver that is a component; `E1-B01` built the mechanism and stood in for the driver |
 | Authority arriving by inheritance | `E1-B05` — the first lifecycle that could grant it |
 | Speculation across a domain boundary | `E1-B05` — the supervisor refusal RFC 0005 names |
 | Deadline inversion in a device queue | `E1-B06` |
@@ -452,14 +452,18 @@ than leaving to be noticed: `E0-P16` remains the only owner of the gap the
 litmus suite was measured to have, and it is an E0 task carried into E1.
 
 **Which rows move.** Of the eighty-five rows, forty-one say *catches* today,
-twenty-six *partially* and eighteen *GAP*. Twenty-three name an E1 task as an
+twenty-seven *partially* and seventeen *GAP*. Twenty-three name an E1 task as an
 owner, and twenty of those name *only* E1 tasks — so if the rest of the epoch
-lands as written, nine more GAPs close and eleven more rows move from
+lands as written, eight more GAPs close and twelve more rows move from
 *partially* to *catches*, which is about a quarter of everything on this page.
 
-Three rows have already moved and the counts above include them: the
-allocator's split and coalesce row, which `E1-B12` took from *GAP*, and the two
-capability-table rows, which `E1-B13` took from *partially*. A table is bounded
+Four rows have already moved and the counts above include them: the
+allocator's split and coalesce row, which `E1-B12` took from *GAP*, the two
+capability-table rows, which `E1-B13` took from *partially*, and the IOMMU row,
+which `E1-B01` took from *GAP* to *partially* rather than to *catches* — the
+mechanism is booted twice on every PR and the requester is the frame's own
+adversary rather than a driver component, so the row moves one step and names
+`E1-B02` for the other. A table is bounded
 by what its holder paid for now rather than by a constant, so a component
 outgrowing the fixed count is an ordinary thing it does — `cap flood` holds a
 hundred and sixty — and `cap quota` and `cap beyond` are the boots that say

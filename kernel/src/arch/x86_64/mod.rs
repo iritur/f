@@ -11,14 +11,26 @@
 //! call entry, and `probe` is the program on the far side of it. What a process
 //! *is* rather than how it is entered lives outside this module, in
 //! `crate::process`, because none of it is particular to this architecture.
+//!
+//! E1-B01 adds the other kind of memory access. `acpi` finds what the firmware
+//! says the machine has, `pci` addresses a function by the requester id a
+//! remapping unit is keyed on, `vtd` is the unit, and `dma` is the adversary
+//! that provokes it — the bus's answer to `probe`, and there for the same
+//! reason. What a *grant* is rather than how it is programmed lives outside
+//! this module, in `crate::iommu`, for the reason `crate::process` is outside
+//! it: the interface the three driver tasks call is not particular to this
+//! architecture and the four modules above are nothing but.
 
+pub mod acpi;
 pub mod ap;
 pub mod apic;
 pub mod boot;
+pub mod dma;
 pub mod gdt;
 pub mod idt;
 pub mod multiboot;
 pub mod paging;
+pub mod pci;
 pub mod pic;
 pub mod pit;
 pub mod port;
@@ -26,6 +38,7 @@ pub mod probe;
 pub mod ring3;
 pub mod rtc;
 pub mod serial;
+pub mod vtd;
 
 /// Which core is executing this.
 ///

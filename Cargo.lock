@@ -46,6 +46,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "f-store"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+]
+
+[[package]]
 name = "xtask"
 version = "0.0.1"
 dependencies = [

@@ -23,8 +23,10 @@
 
 pub mod arch;
 pub mod cap;
+pub mod component;
 pub mod doorbell;
 pub mod env;
+pub mod iommu;
 pub mod jitter;
 pub mod mem;
 pub mod percpu;
@@ -112,6 +114,28 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     unsafe { core::arch::asm!("int3", options(nomem, nostack)) };
 
     let boot = report_memory(magic, info);
+
+    // The loader's account of what is ordinary memory, copied out **here** and
+    // not where it is used.
+    //
+    // `BootInfo::regions` walks the loader's map through the boot stub's
+    // identity mapping, which stops existing at `paging::activate` a hundred
+    // lines below. Everything else `BootInfo` carries is a copy — the command
+    // line is an array in the struct — and this was the one thing left as a
+    // pointer, because until E1-B01 nothing wanted the map after the switch.
+    // Reading it inside `discover` is a page fault at ring 0, and it is one
+    // this file paid for once already.
+    //
+    // What wants it is `acpi::Ram`: a physical address firmware describes as
+    // device registers is about to become an uncacheable writable mapping, and
+    // the loader's map is the only second opinion available on whether that
+    // address is memory somebody else owns.
+    let mut ram = arch::x86_64::acpi::Ram::new();
+    for region in boot.regions() {
+        if region.kind == RegionKind::Usable {
+            ram.add(region.base, region.len);
+        }
+    }
 
     // The determinism substrate is live from the first line of kernel code that
     // observes anything. Nothing below may read the clock directly.
@@ -423,6 +447,21 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         }
     }
 
+    // E1-B01. What a *device* may address, which is the one protection in this
+    // kernel the processor's page tables have nothing to do with. A driver at
+    // ring 3 that can program a bus master can address every byte of the
+    // machine, and until this stage runs the whole capability system it is
+    // running inside is decoration.
+    //
+    // A machine with no remapping unit takes the other branch, says so, and
+    // carries on: `-machine pc` is that machine, and RFC 0031 is why the
+    // default is no longer.
+    //
+    // SAFETY: the boot processor, once, with the kernel's address space active,
+    // `frames` rebound onto its direct map, and no device in this kernel yet
+    // performing DMA — which is the whole list `vtd::Unit::open` asks for.
+    let mut remapping = unsafe { discover(&ram, &mut frames, &space, features) };
+
     // M4. The five properties, against a real table and against five tables
     // broken on purpose — one per property. This runs before ring 3 exists on
     // this boot, and that order is the point: the negative suite from ring 3
@@ -435,13 +474,20 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // what the frame gave them and once on tables that have bought a page out
     // of an `Untyped` — which is why it needs the allocator, and why the flawed
     // count is ten rather than five.
+    //
+    // Since E1-B05 it also checks the storage under the authority model: the
+    // notice packed into a slot's type byte, the watermark that moves back, and
+    // the name given up along with its descendants. None of those is reachable
+    // through the trait the five properties run over, so a line that reported
+    // only the five would have been reporting on half the file.
     match cap::properties::self_test(&mut frames) {
         Ok(caught) => kprintln!(
-            "  capabilities  {} free slots, {} more per page bought, {} properties hold, \
-             {caught} flawed tables caught",
+            "  capabilities  {} free slots, {} more per page bought, {} properties and {} \
+             storage checks hold, {caught} flawed tables caught",
             cap::TABLE_SLOTS,
             cap::SLOTS_PER_PAGE,
             cap::properties::Property::all().len(),
+            cap::properties::STORAGE_CHECKS,
         ),
         Err(why) => {
             kprintln!("FAIL: capability table: {}", why.message());
@@ -521,6 +567,18 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         }
     }
 
+    // E1-B01's exit, and the only thing in this boot that makes a real device
+    // read a real descriptor. Behind a boot parameter, like every other
+    // provocation in this file: an ordinary boot has no device to provoke and
+    // no business turning one on.
+    //
+    // Before the numbers below rather than after them, and that placement is a
+    // fix rather than a preference: everything this stage does — a domain taken,
+    // frames spent and given back, and a fault recorded — is something the tree
+    // publishes, and a tree rendered first would publish the state of a machine
+    // this boot had not finished being.
+    let provoked = dma_provocation(&boot, &mut frames, &space, features, remapping.as_mut());
+
     // Last of the frame's own numbers, because the allocator is still handing
     // out frames until the line above. The self-test is what says the hash
     // works: two readings with nothing in between must agree, and a reading
@@ -544,6 +602,24 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     tree.set(state::node::MEMORY_REFILL, frames.refill_count());
     tree.set(state::node::MEMORY_REMOTE, frames.remote_count());
     tree.set(state::node::MEMORY_FORCED, allocator.steals);
+    // The remapping unit's three numbers, *after* the provocation above and not
+    // before it. That ordering is the whole of what makes them instruments: a
+    // fault count written before the only code on this boot that can produce a
+    // fault is a node whose value is a constant, and a gauge of domains handed
+    // out, read before anything takes one, is the same defect wearing a
+    // different unit. Both were exactly that until they were read against the
+    // boot log, where the tree printed `faults = 0` twelve lines above the
+    // fault it was meant to be counting.
+    //
+    // `faults` is the one worth a sentence: it is a counter nothing in a
+    // healthy machine moves, so a reader watching it rise is watching a device
+    // try to address memory nobody gave it — and that is a different event from
+    // every other counter in this tree, which all count work being done.
+    if let Some(found) = remapping.as_ref() {
+        tree.set(state::node::IOMMU_DOMAINS, u64::from(found.unit.domains()));
+        tree.set(state::node::IOMMU_USED, u64::from(found.unit.domains_used()));
+        tree.set(state::node::IOMMU_FAULTS, u64::from(provoked));
+    }
     match tree.self_test() {
         Ok(hash) => kprintln!(
             "  state tree    {} nodes, snapshot {hash:#018x}, stable across a re-read",
@@ -555,6 +631,61 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         }
     }
     tree.render();
+
+    // E1-B05. The component lifecycle, end to end, against real memory: a place
+    // built from a manifest the loader carried, a component spawned into it, a
+    // client connected, the component killed, the place refilled under its
+    // declared policy, and the client's connect pending across the gap and
+    // resuming at the higher epoch.
+    //
+    // Before the timer window and not inside it, for the reason `timed_window`
+    // gives about its own contents: this builds address spaces and writes
+    // serial lines, and a window that logged what happened inside it would be a
+    // measurement of the logging. Nothing here is a measurement — every number
+    // it prints is a count — so it has no window to be inside.
+    //
+    // The tick count the restart budget's window is measured against is read
+    // here, from the hardware `Env`, and converted once. RFC 0004 permits no
+    // other route to a clock, and RFC 0008 states the window in timer ticks
+    // because a supervisor compares it against a count the frame keeps rather
+    // than against a duration. Only the *epoch* comes from the machine: the
+    // demonstration advances its own count by the backoff it was told to wait,
+    // which is what a supervisor does, so nothing it prints moves between a
+    // fast host and a slow one.
+    let now = hardware.now().as_nanos() / (1_000_000_000 / u64::from(TIMER_HZ));
+    // SAFETY: the boot processor, once, with the kernel's address space in
+    // `CR3`, `frames` rebound onto its direct map, and no process running. The
+    // direct map covers every module: `reserved_ranges` put them all in the
+    // reserved list before the allocator was populated.
+    match unsafe { component::demonstrate(&mut frames, &space, features, &boot, now) } {
+        Ok(report) => kprintln!(
+            "  supervisor    ok — {} place, {} spawn(s), {} fault(s), {} restart(s), \
+             {} resumed, {} client(s) lost, {} probe(s) refused, {} retired",
+            report.places,
+            report.spawns,
+            report.faults,
+            report.restarts,
+            report.resumed,
+            report.lost,
+            report.probed,
+            report.retired,
+        ),
+        // A machine that carried no component file is not a broken machine.
+        // `docs/booting-on-hardware.md` installs one module and E0-P18 landed a
+        // kernel that boots on metal from exactly that, so a demonstration the
+        // milestone does not require must not be the thing that stops it. The
+        // same shape `discover` uses for a machine with no DMAR, and for the
+        // same reason: a boot log line is what a machine missing something
+        // optional earns, and an exit is what a machine that has it and got it
+        // wrong earns. Every other `Failure` below is the second case.
+        Err(component::Failure::NoComponent) => {
+            kprintln!("  supervisor    no component file among the boot modules; no place to fill");
+        }
+        Err(why) => {
+            kprintln!("FAIL: the component lifecycle: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
 
     // M3. The other privilege level, and the first thing in this system that is
     // not the kernel. It runs inside a timer window on purpose: the milestone's
@@ -1212,6 +1343,319 @@ fn provoke(boot: &BootInfo, features: paging::Features) {
             )
         }
     }
+}
+
+/// Everything E1-B01 found: the unit, and the machine it was found on.
+///
+/// Held by value in `kmain` for the length of the boot, because the unit owns
+/// the root table every device's translation hangs from — a unit dropped while
+/// translation is enabled would be a machine whose devices walk tables nothing
+/// remembers the address of.
+struct Remapping {
+    /// The unit itself.
+    unit: iommu::Unit,
+    /// Where configuration space is, so a provocation can reach a function
+    /// again without re-reading `MCFG`.
+    window: arch::x86_64::pci::Space,
+    /// What answered on the bus.
+    survey: arch::x86_64::pci::Survey,
+}
+
+/// Find the machine's remapping unit, program it, and turn translation on.
+///
+/// # Why every failure here is a line rather than an exit
+///
+/// A machine with no ACPI, no configuration-space window or no `DMAR` is a
+/// machine this kernel runs on with one protection fewer, and there are a great
+/// many of them — every emulator default before RFC 0031, and every machine
+/// whose firmware has the unit switched off. A kernel that refused to boot on
+/// those would be a kernel that boots on strictly fewer machines than one with
+/// no IOMMU support at all, which is the wrong direction for a change whose
+/// whole purpose is a protection.
+///
+/// What is *not* tolerated is a unit that answers and then does not do what it
+/// was told: [`vtd::Unit::enable`](arch::x86_64::vtd::Unit::enable) failing
+/// after the tables are built is the frame having programmed a device wrong,
+/// and it stops the boot.
+///
+/// # Safety
+///
+/// Boot processor, once, with the kernel's address space active and `frames`
+/// rebound onto its direct map.
+unsafe fn discover(
+    ram: &arch::x86_64::acpi::Ram,
+    frames: &mut mem::FrameAllocator,
+    space: &paging::AddressSpace,
+    features: paging::Features,
+) -> Option<Remapping> {
+    use arch::x86_64::{acpi, pci, vtd};
+
+    // SAFETY: the caller's guarantee, which is exactly what `Phys::new` asks
+    // for.
+    let phys = unsafe { acpi::Phys::new(frames, space.direct_limit()) };
+
+    let root = match acpi::root(&phys) {
+        Ok(root) => root,
+        Err(why) => {
+            kprintln!("  acpi          none: {}", why.message());
+            return None;
+        }
+    };
+
+    let ecam = match acpi::ecam(&phys, &root, ram) {
+        Ok(ecam) => ecam,
+        Err(why) => {
+            kprintln!("  acpi          revision {}, no mcfg: {}", root.revision, why.message());
+            return None;
+        }
+    };
+    let dmar = match acpi::dmar(&phys, &root, ram) {
+        Ok(dmar) => dmar,
+        Err(why) => {
+            kprintln!("  acpi          revision {}, no dmar: {}", root.revision, why.message());
+            return None;
+        }
+    };
+    kprintln!(
+        "  acpi          revision {}, mcfg at {:#018x} buses {}..={}, dmar {} unit(s) of {} \
+         structure(s), {}-bit addressing",
+        root.revision,
+        ecam.base,
+        ecam.start_bus,
+        ecam.end_bus,
+        dmar.units,
+        dmar.structures,
+        dmar.host_address_width,
+    );
+
+    let window = pci::Space::new(ecam);
+    // SAFETY: the caller's guarantee, passed down.
+    let survey = match unsafe { pci::survey(frames, space, features, &window) } {
+        Ok(survey) => survey,
+        Err(why) => {
+            kprintln!("FAIL: configuration space: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+    kprintln!(
+        "  pci           {} function(s) on {} bus(es), {} kept, {} page(s) of window mapped",
+        survey.seen,
+        survey.buses,
+        survey.functions().len(),
+        survey.pages,
+    );
+
+    // SAFETY: the caller's guarantee, and `dmar.unit` came from a table whose
+    // checksum was checked before its register base was believed.
+    let mut unit = match unsafe { vtd::Unit::open(frames, space, features, &dmar) } {
+        Ok(unit) => unit,
+        Err(why) => {
+            kprintln!("  iommu         none: {}", why.message());
+            return None;
+        }
+    };
+    let found = iommu::Found::of(&unit);
+    kprintln!(
+        "  iommu         vt-d at {:#018x}, {}-bit in {} levels, {} domains, {}, drhd flags {:#04x}",
+        dmar.unit.register_base,
+        found.width,
+        found.levels,
+        found.domains,
+        if found.caching_mode { "caching mode" } else { "no caching mode" },
+        dmar.unit.flags,
+    );
+    kprintln!("  iommu caps    cap {:#018x}, ecap {:#018x}", found.capability, found.extended);
+    // Which of the two ways the unit is being kept in step with what this
+    // kernel wrote. Printed rather than left to be derived from `ecap` above,
+    // because a build that flushed nothing would produce an identical boot on
+    // this emulator — QEMU reads guest memory directly and has no cache to be
+    // behind — so the log line is the only place the choice is visible at all.
+    kprintln!(
+        "  iommu walks   {}",
+        if found.coherent {
+            "coherent: the unit snoops this kernel's writes to its tables"
+        } else {
+            "not coherent: every table entry is flushed by hand before the invalidation"
+        }
+    );
+
+    // SAFETY: nothing in this kernel drives a device that performs DMA, so
+    // there is no transfer in flight for translation to interrupt. `vtd`'s own
+    // comment states the reversal — firmware that leaves a device transferring.
+    if let Err(why) = unsafe { unit.enable() } {
+        kprintln!("FAIL: the remapping unit: {}", why.message());
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+    // Read back rather than assumed, for the reason `apic::init` reads its
+    // spurious register back: a status bit that was written and not checked is
+    // a protection that is intended rather than on.
+    if !unit.enabled() {
+        kprintln!("FAIL: the remapping unit accepted the command and did not enable");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+    kprintln!("  iommu on      translation enabled; a device with no domain now faults");
+
+    Some(Remapping { unit, window, survey })
+}
+
+/// Make a real device read a real descriptor, and require the right thing to
+/// happen to it.
+///
+/// This is E1-B01's exit criterion, and the two halves are the whole of it:
+/// `dma=outside` points a descriptor at a page the device's domain does not
+/// translate and requires the transaction to be refused *and recorded*, and
+/// `dma=inside` points it at a page the domain does translate and requires the
+/// transfer to land. The second exists because without it the first passes on a
+/// device that was never started, which is the same argument `mutate` makes
+/// about a boot that goes red for the wrong reason.
+///
+/// The verdict is the kernel's rather than the harness's, exactly as `user` and
+/// `cap` already are: the kernel knows what it asked for and what a pass looks
+/// like, and a harness that only read an exit code could not tell a refused
+/// transfer from a device that never answered.
+///
+/// Answers how many faults the unit recorded, so that the caller can publish it
+/// rather than this reaching into the state tree from underneath. A boot with
+/// no provocation answers zero, which is the same number and a different claim
+/// — and the difference is visible in the log, where a boot that provoked
+/// nothing prints no `dma` line at all.
+fn dma_provocation(
+    boot: &BootInfo,
+    frames: &mut mem::FrameAllocator,
+    space: &paging::AddressSpace,
+    features: paging::Features,
+    remapping: Option<&mut Remapping>,
+) -> u32 {
+    let inside = if boot.has_parameter(b"dma=inside") {
+        true
+    } else if boot.has_parameter(b"dma=outside") {
+        false
+    } else {
+        return 0;
+    };
+
+    let Some(found) = remapping else {
+        kprintln!("FAIL: dma provocation asked for on a machine with no remapping unit");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+
+    kprintln!(
+        "  provoking     a device transfer with its buffer {} the grant",
+        if inside { "inside" } else { "outside" }
+    );
+
+    // SAFETY: the kernel's address space is active, `frames` is rebound onto
+    // its direct map, translation is enabled, and nothing else in this kernel
+    // drives the device this finds — the frame has no block driver, which is
+    // why E1-B02 is a later task.
+    let outcome = unsafe {
+        arch::x86_64::dma::provoke(
+            frames,
+            space,
+            features,
+            &mut found.unit,
+            &found.window,
+            &found.survey,
+            inside,
+        )
+    };
+
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(why) => {
+            // A provocation that could not be arranged is not a provocation
+            // that was survived, and reporting it as a pass is how this whole
+            // check would come to mean nothing.
+            kprintln!("FAIL: dma provocation: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+
+    kprintln!(
+        "  dma target    {:#018x}, requester {:#06x}",
+        outcome.target,
+        outcome.bdf.source_id()
+    );
+    // What the interface the three driver tasks build on answered on the way
+    // in. Printed rather than only asserted, because these two are the half of
+    // the exit that is about authority rather than about hardware: the frame
+    // refused to give a device a page whose capability carries no right to hand
+    // it on, and its own page walk agrees with the tables the unit walks.
+    kprintln!(
+        "  dma grant     a capability without GRANT was {}; the domain's walk {} the buffer",
+        if outcome.checks.refused_without_grant { "refused" } else { "ACCEPTED" },
+        if outcome.checks.reaches_data { "reaches" } else { "does not reach" },
+    );
+    kprintln!(
+        "  dma result    {}, status {:#04x}, buffer {}",
+        if outcome.completed { "completed" } else { "no completion" },
+        outcome.status,
+        if outcome.landed { "written" } else { "untouched" },
+    );
+    match outcome.fault {
+        Some(fault) => kprintln!(
+            "  dma fault     requester {:#06x} {} {:#018x}, reason {:#04x} — {} record(s)",
+            fault.source,
+            if fault.read { "read" } else { "wrote" },
+            fault.address,
+            fault.reason,
+            outcome.faults,
+        ),
+        None => kprintln!("  dma fault     none recorded"),
+    }
+
+    // A device's own completion is not evidence that bytes moved, and this is
+    // where that stops being a slogan. The emulator's block device answers a
+    // refused transfer with a *successful* status: the request completed as far
+    // as the device is concerned, and the write went nowhere. So the refused
+    // run is judged on what the unit recorded and on what is in the buffer, and
+    // the device's opinion of itself is printed rather than believed.
+    //
+    // E1-B02 inherits this: a driver that treated a completion as proof its
+    // buffer was filled would be wrong here, on this emulator, today.
+    if !inside && outcome.completed {
+        kprintln!(
+            "  dma note      the device called a refused transfer a success; a completion \
+             is not evidence that bytes moved"
+        );
+    }
+
+    // The verdict. Both halves are asserted here rather than in the harness for
+    // the reason `process::Report::verdict` gives: a protection that did not
+    // fire is not a smaller result than a fault, it is the opposite result.
+    let verdict = if inside {
+        if !outcome.completed {
+            Err("the device never completed a transfer into memory it was granted")
+        } else if !outcome.landed {
+            Err("the device completed and wrote nothing, so nothing was transferred")
+        } else if outcome.faults != 0 {
+            Err("the device faulted on memory it was granted")
+        } else {
+            Ok(())
+        }
+    } else if outcome.faults == 0 {
+        Err("the device addressed memory outside its grant and the unit recorded nothing")
+    } else if outcome.landed {
+        Err("the unit recorded a fault and the transfer landed anyway, which is a corruption")
+    } else {
+        Ok(())
+    };
+
+    match verdict {
+        Ok(()) => kprintln!(
+            "  dma verdict   {}",
+            if inside {
+                "a granted transfer landed"
+            } else {
+                "the attempt was a fault, not a corruption"
+            }
+        ),
+        Err(why) => {
+            kprintln!("FAIL: {why}");
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+    outcome.faults
 }
 
 /// Validate the boot handoff and print what the loader reported.

@@ -81,6 +81,19 @@ pub mod node {
     /// is a zero a working counter produced rather than one nothing could ever
     /// move; this node is what lets a reader take that provocation back out.
     pub const MEMORY_FORCED: u32 = 15;
+    /// The remapping unit.
+    pub const IOMMU: u32 = 16;
+    /// Domain ids the unit has.
+    pub const IOMMU_DOMAINS: u32 = 17;
+    /// Domain ids handed out.
+    pub const IOMMU_USED: u32 = 18;
+    /// Transactions the unit refused and recorded.
+    ///
+    /// A counter and not a gauge, and that is the whole point of publishing it:
+    /// a reader watching this rise is watching a device try to address memory
+    /// nobody gave it. Zero on a healthy machine, and a number nothing else in
+    /// the tree can produce.
+    pub const IOMMU_FAULTS: u32 = 19;
     /// A node of a kind this build does not name, published on purpose.
     ///
     /// RFC 0013's one deliberate exception to R04 is that a reader skips and
@@ -92,7 +105,7 @@ pub mod node {
 }
 
 /// How many nodes this build publishes.
-pub const NODES: usize = 16;
+pub const NODES: usize = 20;
 
 /// The schema, written once and never again for a generation.
 ///
@@ -178,8 +191,26 @@ const SCHEMA: [SchemaEntry; NODES] = [
         unit::EVENTS,
         b"forced",
     ),
+    SchemaEntry::new(node::IOMMU, node::ROOT, 15 * WORD, kind::SUBTREE, unit::NONE, b"iommu"),
+    SchemaEntry::new(
+        node::IOMMU_DOMAINS,
+        node::IOMMU,
+        16 * WORD,
+        kind::GAUGE,
+        unit::SLOTS,
+        b"domains",
+    ),
+    SchemaEntry::new(node::IOMMU_USED, node::IOMMU, 17 * WORD, kind::GAUGE, unit::SLOTS, b"used"),
+    SchemaEntry::new(
+        node::IOMMU_FAULTS,
+        node::IOMMU,
+        18 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"faults",
+    ),
     // Deliberately a kind nothing names. See `node::RESERVED_KIND`.
-    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 15 * WORD, 0xEE, unit::NONE, b"reserved"),
+    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 19 * WORD, 0xEE, unit::NONE, b"reserved"),
 ];
 
 /// Where the schema block starts: immediately after the header, on the

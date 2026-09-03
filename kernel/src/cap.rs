@@ -122,6 +122,7 @@
 )]
 
 use f_abi::cap::{CapType, Handle, rights};
+use f_abi::control::{Grade, Pending, Promise};
 use f_abi::error;
 
 use crate::mem::{FRAME_SIZE, Frame, FrameAllocator};
@@ -278,7 +279,24 @@ pub struct Found {
 /// could disagree with the type.
 #[derive(Clone, Copy)]
 struct Slot {
-    /// A [`CapType`] wire value, or zero for empty.
+    /// A [`CapType`] wire value in the low five bits, or zero for empty, and
+    /// what the frame owes about this slot in the top three.
+    ///
+    /// # Why two fields share a byte
+    ///
+    /// Because the alternative costs a fifth of every table a component buys.
+    /// A slot is exactly thirty-two bytes with no padding, so a sixth field
+    /// would have made it forty and cut a bought page from a hundred and
+    /// twenty-eight slots to a hundred and two — spent on a field with five
+    /// states. [`CapType`]'s wire values run to seven and the type is closed by
+    /// [`CapType::from_wire`], so the top five bits of this byte were already
+    /// unreachable; three of them now hold a [`Pending`], whose five states RFC
+    /// 0008 fixes and `f_abi::control` implements.
+    ///
+    /// The whole cost is that occupancy is a mask rather than a comparison —
+    /// [`Slot::occupied`] — and that is worth stating rather than hiding,
+    /// because a slot that is empty and still owes a *revoked* notice is a real
+    /// state and would look occupied to a naive test.
     kind: u8,
     /// The rights this capability carries.
     rights: u8,
@@ -347,10 +365,63 @@ impl Slot {
     }
 
     /// Is anything here now?
+    ///
+    /// A mask and not a comparison, because the same byte carries the pending
+    /// notice: an empty slot that still owes a *revoked* notice has a non-zero
+    /// `kind` and holds nothing.
     const fn occupied(self) -> bool {
-        self.kind != 0
+        self.kind & KIND_MASK != 0
+    }
+
+    /// What kind of object, or `None` for empty and for a wire value this build
+    /// does not define.
+    const fn cap_kind(self) -> Option<CapType> {
+        CapType::from_wire(self.kind & KIND_MASK)
+    }
+
+    /// What the frame owes about this slot.
+    ///
+    /// A value outside the five reads as [`Pending::Quiet`], which is the
+    /// fail-closed direction here rather than the fail-open one: three bits
+    /// cannot hold a sixth state this build wrote, so a value outside the five
+    /// is memory corruption, and owing nothing is the only answer that cannot
+    /// publish a notice naming a kind the component was never told about.
+    const fn notice(self) -> Pending {
+        match Pending::from_wire(self.kind >> KIND_BITS) {
+            Some(pending) => pending,
+            None => Pending::Quiet,
+        }
+    }
+
+    /// Set what the frame owes, leaving the type alone.
+    const fn set_notice(&mut self, pending: Pending) {
+        self.kind = (self.kind & KIND_MASK) | (pending.to_wire() << KIND_BITS);
+    }
+
+    /// Set the type, leaving what the frame owes alone.
+    const fn set_kind(&mut self, kind: u8) {
+        self.kind = (self.kind & !KIND_MASK) | (kind & KIND_MASK);
     }
 }
+
+/// How many of a slot's type byte hold the type.
+///
+/// Five, which is more than [`CapType`] needs and is where the byte splits
+/// evenly enough to leave three for a [`Pending`]. A seventh capability type
+/// costs nothing; a thirty-second would cost the notice field, and that is the
+/// bound worth stating.
+const KIND_BITS: u8 = 5;
+
+/// Which bits of a slot's type byte hold the type.
+const KIND_MASK: u8 = (1 << KIND_BITS) - 1;
+
+// Every capability type this build defines has to fit under the mask, or a
+// slot would report a type it was never given and the notice field would move
+// under it. Checked rather than assumed, because adding a type is a diff in
+// `abi` that nothing here would otherwise notice.
+const _: () = assert!(CapType::BufferSet.to_wire() <= KIND_MASK);
+// And every notice state has to fit above it.
+const _: () = assert!(Pending::GrantedThenPeerGone.to_wire() < (1 << (8 - KIND_BITS)));
 
 /// Which slots a revocation has condemned, and how far the caller has read.
 ///
@@ -429,6 +500,35 @@ pub struct Table {
     /// See [`Slot::fresh`]. It only ever goes up, and it saturates for the same
     /// reason a slot's generation does.
     floor: u16,
+    /// Whether this table's holder has somewhere to receive a notice.
+    ///
+    /// # Why this is a flag and not simply always true
+    ///
+    /// Because a notice is a completion entry on a control ring, and until
+    /// E1-B05 not every process had one. The pending field exists to bound what
+    /// the frame *owes*; a process with no ring is owed nothing, because there
+    /// is nowhere for the debt to be paid. Setting the field for one would
+    /// change nothing except that its slots would stop being refillable — RFC
+    /// 0008's rule that a slot which is not quiet is not refilled — which is a
+    /// quota shrinking for a component that cannot drain.
+    ///
+    /// *Reversal, and it is a deletion rather than a measurement:* when every
+    /// process in this system is a component with a control ring — RFC 0030
+    /// says that waits on E1-B08's safe adoption — this flag has one value and
+    /// should go.
+    posts_notices: bool,
+    /// The earliest deadline this component has been stopped against.
+    ///
+    /// One word, and it only ever moves earlier: `f_abi::control::Promise` is
+    /// the rule and R08 is why it is a rule rather than a convention.
+    stop: Promise,
+    /// The memory-pressure grade of the account that pays for this component.
+    /// Latest wins.
+    pressure: Grade,
+    /// The system generation. Latest wins. RFC 0006 and RFC 0012 say what a
+    /// component does about it; RFC 0008 reserves the word and this reserves
+    /// the storage.
+    generation: Grade,
 }
 
 /// The table of the process running on this core.
@@ -473,6 +573,10 @@ impl Table {
         pages: [0; MAX_PAGES],
         grown: 0,
         floor: Handle::FIRST_GENERATION,
+        posts_notices: false,
+        stop: Promise::NONE,
+        pressure: Grade::NONE,
+        generation: Grade::NONE,
     };
 
     /// How many slots exist right now: the free ones plus the bought ones.
@@ -519,6 +623,152 @@ impl Table {
         }
         self.pages = [0; MAX_PAGES];
         self.grown = 0;
+
+        // Nothing is owed to a component that no longer exists. RFC 0008 is
+        // explicit that a component's own state tree goes with its memory and
+        // that there are no last words after a fault; the same is true of a
+        // notice, and keeping one would be the frame holding a debt to a
+        // creditor it has already torn the ring down for.
+        for index in 0..TABLE_SLOTS {
+            if let Some(slot) = self.slots.get_mut(index) {
+                slot.set_notice(Pending::Quiet);
+            }
+        }
+        self.posts_notices = false;
+        self.stop = Promise::NONE;
+        self.pressure = Grade::NONE;
+        self.generation = Grade::NONE;
+    }
+
+    /// Say that this table's holder has a control ring, so notices are owed.
+    ///
+    /// Called once, by the spawn that creates the ring, and never unset except
+    /// by [`Table::clear_all`]. See [`Table::posts_notices`].
+    pub const fn owes_notices(&mut self) {
+        self.posts_notices = true;
+    }
+
+    /// Is a notice owed for anything at all?
+    ///
+    /// The question a polling point asks before it walks. Cheap for the two
+    /// promise words and linear in the slots, which is the same bound
+    /// everything else in this file has.
+    #[must_use]
+    pub fn owes(&self) -> u32 {
+        let mut owed = u32::from(self.stop.is_owed())
+            + u32::from(self.pressure.is_owed())
+            + u32::from(self.generation.is_owed());
+        for index in 0..self.capacity() {
+            owed += self.at(index).map_or(0, |slot| slot.notice().owed());
+        }
+        owed
+    }
+
+    /// Stop this component by `deadline`, keeping the earlier of it and any
+    /// stop already pending.
+    ///
+    /// Answers whether the promise moved, which is what lets the caller
+    /// complete a second stop with *which deadline it kept* rather than with a
+    /// bare success the submitter would misread. RFC 0008: a promise that can
+    /// be silently relaxed by whoever made it is not a deadline.
+    pub const fn stop_by(&mut self, deadline: u64) -> bool {
+        self.stop.promise(deadline)
+    }
+
+    /// The deadline this component has been stopped against, if any.
+    #[must_use]
+    pub const fn stop_deadline(&self) -> Option<u64> {
+        self.stop.deadline()
+    }
+
+    /// The pressure grade changed for the account that pays for this component.
+    pub const fn pressure_is(&mut self, grade: u64) -> bool {
+        self.pressure.set(grade)
+    }
+
+    /// The system generation changed.
+    pub const fn generation_is(&mut self, generation: u64) -> bool {
+        self.generation.set(generation)
+    }
+
+    /// Note that the far end of what this handle names has ended.
+    ///
+    /// The frame's side of a peer death: the holder is told, and the capability
+    /// is *not* withdrawn — an endpoint survives its occupant, which is the
+    /// whole of RFC 0008's *a place is not an instance*.
+    ///
+    /// # Errors
+    ///
+    /// As [`Table::inspect`]. A handle that names nothing is a frame bug rather
+    /// than a component's, and it is refused rather than asserted for the
+    /// reason property five gives.
+    pub fn note_peer_gone(&mut self, handle: Handle) -> Result<(), i32> {
+        let index = self.resolve(handle)?;
+        let owes = self.posts_notices;
+        let slot = self.at_mut(index).ok_or_else(no_such)?;
+        if owes {
+            let next = slot.notice().peer_gone();
+            slot.set_notice(next);
+        }
+        Ok(())
+    }
+
+    /// The next notice owed about a *slot*, in slot order.
+    ///
+    /// The first phase of `f_abi::control::ORDER`. `None` when every slot is
+    /// quiet.
+    pub fn next_slot_notice(&mut self, timestamp: u64) -> Option<f_abi::Cqe> {
+        for index in 0..self.capacity() {
+            let slot = self.at(index)?;
+            let (kind, next) = slot.notice().drain();
+            let Some(kind) = kind else { continue };
+            let handle = Handle::new(index as u16, slot.generation);
+            self.at_mut(index)?.set_notice(next);
+            return Some(f_abi::control::entry(kind, u64::from(handle.bits()), 0, timestamp));
+        }
+        None
+    }
+
+    /// The stop notice, if one is owed. The second phase.
+    ///
+    /// `user_data` is the control ring's own handle, which the caller supplies
+    /// because the table does not know which of its slots that is — the frame
+    /// puts it there and the frame is the one publishing.
+    pub const fn next_stop_notice(&mut self, ring: Handle, timestamp: u64) -> Option<f_abi::Cqe> {
+        match self.stop.drain() {
+            Some(deadline) => Some(f_abi::control::entry(
+                f_abi::control::notice::STOP,
+                ring.bits() as u64,
+                deadline,
+                timestamp,
+            )),
+            None => None,
+        }
+    }
+
+    /// The two grades, in the fixed order pressure-then-generation. The fourth
+    /// phase; the third is reclaim, which is the scheduler's and lives beside
+    /// the allocation rather than in a table — RFC 0008 puts it there because
+    /// it is bounded by cores held rather than by slots bought, and
+    /// `component::Instance` splices it in at the position `ORDER` fixes.
+    pub const fn next_grade_notice(&mut self, timestamp: u64) -> Option<f_abi::Cqe> {
+        if let Some(grade) = self.pressure.drain() {
+            return Some(f_abi::control::entry(
+                f_abi::control::notice::PRESSURE,
+                0,
+                grade,
+                timestamp,
+            ));
+        }
+        match self.generation.drain() {
+            Some(generation) => Some(f_abi::control::entry(
+                f_abi::control::notice::GENERATION,
+                0,
+                generation,
+                timestamp,
+            )),
+            None => None,
+        }
     }
 
     /// How many capabilities are held.
@@ -588,7 +838,7 @@ impl Table {
     pub fn inspect(&self, handle: Handle) -> Result<Found, i32> {
         let index = self.resolve(handle)?;
         let slot = self.slot(index)?;
-        let kind = CapType::from_wire(slot.kind).ok_or(no_such())?;
+        let kind = slot.cap_kind().ok_or(no_such())?;
         Ok(Found { kind, rights: slot.rights, object: slot.object, extent: slot.extent })
     }
 
@@ -697,7 +947,7 @@ impl Table {
         for index in 0..self.capacity() {
             let Some(slot) = self.at(index) else { continue };
             if slot.occupied()
-                && slot.kind == CapType::Untyped.to_wire()
+                && slot.cap_kind() == Some(CapType::Untyped)
                 && rights::holds(slot.rights, rights::DERIVE)
                 && slot.extent >= FRAME_SIZE
             {
@@ -732,6 +982,96 @@ impl Table {
             slot.object = slot.object.wrapping_add(FRAME_SIZE);
             slot.extent = slot.extent.wrapping_sub(FRAME_SIZE);
         }
+        Ok(())
+    }
+
+    /// Give up a capability this table holds, and everything derived from it.
+    ///
+    /// # Why this is not the revoke a component makes
+    ///
+    /// [`Table::condemn`] deliberately spares the capability it is given:
+    /// revoke withdraws what was *handed on*, and a holder that wants to give up
+    /// its own authority is asking a different question — which
+    /// `docs/rfc/0015-capabilities-at-the-door.md` leaves unanswered on purpose,
+    /// because "drop this" and "take back what I gave" have different callers
+    /// and different mistakes.
+    ///
+    /// This is the frame answering it for itself, and only for itself. A
+    /// supervisor that minted a `Frame` out of its account on a component's
+    /// behalf still holds that name after the component is torn down, and the
+    /// account is about to hand the same page to the next instance — so a frame
+    /// that did not drop the name would be holding authority over memory the
+    /// next occupant is being given, which is the one thing a restart may not
+    /// leave behind. There is no opcode behind it and there must not be until
+    /// somebody argues for one.
+    ///
+    /// Answers how many slots were emptied, this one included.
+    ///
+    /// # Errors
+    ///
+    /// As [`Table::inspect`], plus [`error::authority::RIGHT_NOT_HELD`] when the
+    /// capability does not carry [`rights::REVOKE`] — the same right giving up
+    /// its descendants needs, because giving up the parent gives them up too.
+    pub fn relinquish(&mut self, handle: Handle) -> Result<u32, i32> {
+        let mut condemned = self.condemn(handle)?;
+        let index = self.resolve(handle)?;
+        condemned.mark(index);
+        Ok(self.sweep(&condemned))
+    }
+
+    /// The mappings a relinquish would have to withdraw first.
+    ///
+    /// The same drain [`Table::next_mapping`] performs for a revocation, and it
+    /// is the caller's to run before [`Table::relinquish`] for the same reason:
+    /// authority is withdrawn only after every translation behind it is gone.
+    pub fn condemn_own(&self, handle: Handle) -> Result<Condemned, i32> {
+        let mut condemned = self.condemn(handle)?;
+        condemned.mark(self.resolve(handle)?);
+        Ok(condemned)
+    }
+
+    /// Give the top of an untyped region back to it.
+    ///
+    /// # Why this exists and why there is no call behind it
+    ///
+    /// RFC 0008 step 4 of a component's death: *return the memory to the
+    /// `Untyped` it was retyped from* — what an account paid for comes back to
+    /// that account, not to a global free list, which is what makes a
+    /// supervisor's quota a real number after its children have lived and died.
+    ///
+    /// A watermark can only give back the top, and that is the whole of the
+    /// bound here: this is sound because a place has one occupant at a time, so
+    /// the frames an instance was made of are exactly the last ones retyped and
+    /// nothing has been retyped since. The general answer — an account that can
+    /// take back memory from anywhere in its middle — is a free list per
+    /// account, which is a structure with an owner and a quota, and that is not
+    /// a structure the frame gets to invent on a component's behalf.
+    ///
+    /// There is no opcode behind this and there must not be. A component that
+    /// could rewind its own watermark could un-spend: hand out a frame, have it
+    /// retyped into somebody else's table, rewind, and retype the same frame
+    /// again. This is the frame refunding an account for a component the frame
+    /// itself has just torn down, which is the one caller for which "nothing
+    /// has been retyped since" is a fact rather than a hope.
+    ///
+    /// # Errors
+    ///
+    /// As [`Table::inspect`], plus [`error::authority::WRONG_TYPE`] when the
+    /// handle does not name an untyped region and
+    /// [`error::argument::BAD_ADDRESS`] when the refund would take the region
+    /// below where it started — which is the frame having lost count, and is
+    /// refused rather than allowed to hand out memory nobody owns.
+    pub fn refund(&mut self, handle: Handle, bytes: u64, floor: u64) -> Result<(), i32> {
+        let index = self.resolve(handle)?;
+        let slot = self.at_mut(index).ok_or_else(no_such)?;
+        if slot.cap_kind() != Some(CapType::Untyped) {
+            return Err(error::pack(error::AUTHORITY, error::authority::WRONG_TYPE));
+        }
+        if slot.object < floor.saturating_add(bytes) {
+            return Err(error::pack(error::ARGUMENT, error::argument::BAD_ADDRESS));
+        }
+        slot.object -= bytes;
+        slot.extent = slot.extent.saturating_add(bytes);
         Ok(())
     }
 
@@ -988,13 +1328,21 @@ impl Table {
         parent: Handle,
     ) -> Result<Handle, i32> {
         let index = self.vacancy().ok_or_else(exhausted)?;
+        let owes = self.posts_notices;
         let slot = self.at_mut(index).ok_or_else(exhausted)?;
-        slot.kind = kind.to_wire();
+        slot.set_kind(kind.to_wire());
         slot.rights = rights;
         slot.object = object;
         slot.extent = extent;
         slot.parent = parent.bits();
         slot.mapped = NOT_MAPPED;
+        // The slot was quiet — `vacancy` says so — so this cannot overwrite a
+        // notice. A component with nowhere to receive one is owed nothing; see
+        // [`Table::posts_notices`].
+        if owes {
+            let next = slot.notice().granted();
+            slot.set_notice(next);
+        }
         let generation = slot.generation;
         // `index` is below MAX_SLOTS, which the assertion at the top of this
         // file keeps below u16::MAX.
@@ -1012,7 +1360,19 @@ impl Table {
     fn vacancy(&self) -> Option<usize> {
         (0..self.capacity()).find(|index| {
             self.at(*index).is_some_and(|slot| {
-                !slot.occupied() && slot.generation != Handle::RETIRED_GENERATION
+                // Not occupied, not retired, and **not owing a notice**. The
+                // third is RFC 0008's, and it is what keeps a handle's
+                // generation honest under a pending one: a *revoked* notice
+                // always names a handle whose slot has not been reissued, so a
+                // component can match it against what it holds rather than
+                // against whatever arrived in the meantime. The cost is that a
+                // component which never drains its control ring runs out of
+                // table before it runs out of memory — which is the failure we
+                // want, local and refused, and is still a failure somebody will
+                // meet.
+                !slot.occupied()
+                    && slot.generation != Handle::RETIRED_GENERATION
+                    && slot.notice().is_quiet()
             })
         })
     }
@@ -1022,7 +1382,7 @@ impl Table {
     fn retype(&mut self, handle: Handle) -> Result<(CapType, u64, u64), i32> {
         let index = self.resolve(handle)?;
         let slot = self.at_mut(index).ok_or_else(no_such)?;
-        let kind = CapType::from_wire(slot.kind).ok_or_else(no_such)?;
+        let kind = slot.cap_kind().ok_or_else(no_such)?;
         if kind != CapType::Untyped {
             return Ok((kind, slot.object, slot.extent));
         }
@@ -1091,8 +1451,19 @@ impl Table {
     /// runs out is retired rather than reused, which turns a hole in the
     /// authority model into a table that is one slot smaller.
     fn clear(&mut self, index: usize) {
+        let owes = self.posts_notices;
         let Some(slot) = self.at_mut(index) else { return };
-        slot.kind = 0;
+        if owes {
+            // Rule 1 and rule 3 of RFC 0008's collision table, both of them in
+            // `Pending::revoked`: an undelivered grant that is revoked posts
+            // nothing and goes quiet, and revoked otherwise supersedes peer
+            // gone. Neither is decided here, which is the point of the state
+            // machine being in `abi` — there is one implementation of the three
+            // rules and it is tested at every collision on the host.
+            let next = slot.notice().revoked();
+            slot.set_notice(next);
+        }
+        slot.set_kind(0);
         slot.rights = rights::NONE;
         slot.object = 0;
         slot.extent = 0;
@@ -1144,10 +1515,12 @@ fn revoked() -> i32 {
 /// alone.
 pub mod properties {
     use super::{
-        Backing, Condemned, Direct, FRAME_SIZE, MAX_SLOTS, TABLE_SLOTS, Table, no_such, revoked,
+        Backing, Condemned, Direct, FRAME_SIZE, MAX_SLOTS, Slot, TABLE_SLOTS, Table, no_such,
+        revoked,
     };
     use crate::mem::{FrameAllocator, Order};
     use f_abi::cap::{CapType, Handle, rights};
+    use f_abi::control::notice;
     use f_abi::error;
 
     /// A property of a capability table, and what it means when it fails.
@@ -1475,7 +1848,7 @@ pub mod properties {
         /// capability rather than as a refusal.
         fn found(&self, index: usize) -> Result<super::Found, i32> {
             let slot = self.table.at(index).ok_or_else(no_such)?;
-            let kind = CapType::from_wire(slot.kind).unwrap_or(CapType::Untyped);
+            let kind = slot.cap_kind().unwrap_or(CapType::Untyped);
             Ok(super::Found { kind, rights: slot.rights, object: slot.object, extent: slot.extent })
         }
     }
@@ -1586,6 +1959,10 @@ pub mod properties {
         /// skipped: a suite that quietly shrinks is a suite that keeps saying
         /// everything holds.
         NoGround,
+        /// A storage property did not hold. Carries the sentence, because
+        /// there are five of them and they are about the bytes rather than
+        /// about the authority model — see [`storage`].
+        Storage(&'static str),
     }
 
     impl Failure {
@@ -1596,7 +1973,7 @@ pub mod properties {
                 Self::Real(property) => property.message(),
                 Self::NotCaught(_) => "a table broken on purpose passed the negative suite",
                 Self::WrongProperty(..) => "a broken table was caught by the wrong property",
-                Self::Types(why) => why,
+                Self::Types(why) | Self::Storage(why) => why,
                 Self::NoGround => "there was no frame for the suite's tables to be grown into",
             }
         }
@@ -1917,6 +2294,189 @@ pub mod properties {
         }
     }
 
+    /// How many storage properties [`storage`] checks.
+    ///
+    /// Reported by the boot log beside the five above, so that a suite that
+    /// quietly stopped running half of itself is visible rather than silent.
+    pub const STORAGE_CHECKS: usize = 5;
+
+    /// What a table's *storage* must do, as against what its authority model
+    /// must.
+    ///
+    /// The five properties above are about who may name what, and they run
+    /// through [`Authority`] so that a broken table can be substituted for a
+    /// sound one. Nothing E1-B05 added to this file is reachable through that
+    /// trait: a notice packed into the spare bits of a type byte, a watermark
+    /// that moves *back*, and a name given up along with everything below it
+    /// are all operations the frame performs on its own behalf and no component
+    /// can ask for. So they are checked here instead, in the one part of this
+    /// file that runs on every boot.
+    ///
+    /// Five, and each is a mistake somebody could make in one line: a mask
+    /// written as a comparison, a notice overwritten by a type, a refund that
+    /// walks past the floor, a relinquish that spares what it should take, and
+    /// a slot refilled while it still owes a notice. The last is the one a
+    /// component's quota depends on, and RFC 0008 is emphatic about it: a
+    /// *revoked* notice always names a handle whose slot has not been reissued.
+    ///
+    /// # Errors
+    ///
+    /// [`Failure::Storage`], carrying the sentence that did not hold.
+    fn storage(frames: &FrameAllocator) -> Result<(), Failure> {
+        let mut table = Table::EMPTY;
+        // SAFETY: `frames` is rebound onto the direct map that is live for the
+        // whole boot, and this table is never grown — everything below fits in
+        // the free part — so the backing exists to satisfy `derive` and is
+        // never asked for a page.
+        let mut ground = unsafe { Direct::new(frames) };
+        table.owes_notices();
+
+        // ---- 1. The type and the notice share one byte and leave each other
+        //         alone. The packing is what keeps a slot thirty-two bytes and
+        //         a bought page a hundred and twenty-eight slots, and the cost
+        //         of it is exactly this: two writers of one byte.
+        let held = rights::ALL & !rights::EXECUTE;
+        let root = table
+            .grant(CapType::Untyped, held, OBJECT_A, FRAME_SIZE * 4)
+            .map_err(|_| Failure::Storage("a table could not hold a storage check's account"))?;
+        if table.owes() != 1 {
+            return Err(Failure::Storage("a grant into a table that owes notices owed none"));
+        }
+        match table.next_slot_notice(0) {
+            Some(entry)
+                if entry.result == notice::GRANTED && entry.user_data == u64::from(root.bits()) => {
+            }
+            _ => {
+                return Err(Failure::Storage(
+                    "a granted notice did not name the handle it was for",
+                ));
+            }
+        }
+        match table.inspect(root) {
+            Ok(found) if found.kind == CapType::Untyped && found.rights == held => {}
+            _ => return Err(Failure::Storage("a notice in a slot's type byte changed its type")),
+        }
+
+        // ---- 2. A watermark that goes back exactly as far as it came, and
+        //         refuses to go further. `Table::refund` is the one operation
+        //         in this file that *unspends*, and it is sound only because
+        //         nothing has been retyped since.
+        let before = table
+            .inspect(root)
+            .map_err(|_| Failure::Storage("an account stopped answering for itself"))?;
+        let child = table
+            .derive(
+                root,
+                rights::READ | rights::WRITE | rights::DERIVE | rights::REVOKE,
+                &mut ground,
+            )
+            .map_err(|_| Failure::Storage("an account could not be retyped from"))?;
+        let spent = table
+            .inspect(root)
+            .map_err(|_| Failure::Storage("an account stopped answering after a retype"))?;
+        if spent.object != before.object + FRAME_SIZE || spent.extent != before.extent - FRAME_SIZE
+        {
+            return Err(Failure::Storage("retyping moved an account by the wrong amount"));
+        }
+        let past = error::pack(error::ARGUMENT, error::argument::BAD_ADDRESS);
+        if table.refund(root, FRAME_SIZE * 2, before.object) != Err(past) {
+            return Err(Failure::Storage("a refund past an account's floor was not refused"));
+        }
+        table
+            .refund(root, FRAME_SIZE, before.object)
+            .map_err(|_| Failure::Storage("a legal refund was refused"))?;
+        let back = table
+            .inspect(root)
+            .map_err(|_| Failure::Storage("an account stopped answering after a refund"))?;
+        if back.object != before.object || back.extent != before.extent {
+            return Err(Failure::Storage("a refund did not restore what the retype took"));
+        }
+
+        // ---- 3. Giving up a name gives up everything below it, where revoking
+        //         spares the capability it is given. Two different questions
+        //         with two different answers, and a file that answered them the
+        //         same way would leave a supervisor holding a name over memory
+        //         the next instance is being handed.
+        let grandchild = table
+            .derive(child, rights::READ, &mut ground)
+            .map_err(|_| Failure::Storage("a frame could not be derived from"))?;
+        let condemned =
+            table.condemn(child).map_err(|_| Failure::Storage("a revoke was refused"))?;
+        if table.sweep(&condemned) != 1 || table.inspect(child).is_err() {
+            return Err(Failure::Storage("a revoke did not spare the capability it was given"));
+        }
+        if table.inspect(grandchild).is_ok() {
+            return Err(Failure::Storage("a revoke left a descendant standing"));
+        }
+        let again = table
+            .derive(child, rights::READ, &mut ground)
+            .map_err(|_| Failure::Storage("a frame could not be derived from twice"))?;
+        // Every notice owed so far is published before the relinquish, because
+        // rule 1 says an undelivered *grant* that is revoked posts nothing — so
+        // a check that skipped this would be checking rule 1 and calling it
+        // rule 2.
+        while table.next_slot_notice(0).is_some() {}
+        let index = child.index() as usize;
+        if table.relinquish(child).map_err(|_| Failure::Storage("a relinquish was refused"))? != 2 {
+            return Err(Failure::Storage(
+                "a relinquish did not take the capability and its descendant",
+            ));
+        }
+        if table.inspect(child).is_ok() || table.inspect(again).is_ok() {
+            return Err(Failure::Storage("a relinquish left a name standing"));
+        }
+
+        // ---- 4. A slot that is empty and still owes a *revoked* notice is a
+        //         real state: it holds nothing, and it is not refilled. The
+        //         second half is what keeps a handle's generation honest under
+        //         a pending notice, and it is the rule a component's quota
+        //         depends on — a component that never drains runs out of table
+        //         before it runs out of memory, which is the failure we want.
+        if table.owes() != 2 {
+            return Err(Failure::Storage("giving up a capability owed no revoked notice"));
+        }
+        if table.at(index).is_some_and(Slot::occupied) {
+            return Err(Failure::Storage("a slot owing a revoked notice still held a capability"));
+        }
+        if table.vacancy() == Some(index) {
+            return Err(Failure::Storage("a slot owing a notice was offered to the next grant"));
+        }
+        match table.next_slot_notice(0) {
+            Some(entry) if entry.result == notice::REVOKED => {}
+            _ => return Err(Failure::Storage("a revoked notice was not published in slot order")),
+        }
+
+        // ---- 5. The words a table holds beside its slots: a promise that may
+        //         only ever move earlier, and grades where the latest wins. R08
+        //         is why the first is not simply a field somebody assigns.
+        if !table.stop_by(100) || table.stop_by(200) || !table.stop_by(50) {
+            return Err(Failure::Storage("a stop deadline moved the wrong way"));
+        }
+        if table.stop_deadline() != Some(50) {
+            return Err(Failure::Storage("a stop kept a deadline it was not promised"));
+        }
+        table.pressure_is(1);
+        if !table.pressure_is(2) {
+            return Err(Failure::Storage("a grade did not take the later value"));
+        }
+        match table.next_stop_notice(root, 0) {
+            Some(entry) if entry.result == notice::STOP && entry.ext == 50 => {}
+            _ => return Err(Failure::Storage("a stop notice did not carry the deadline it kept")),
+        }
+        match table.next_grade_notice(0) {
+            Some(entry) if entry.result == notice::PRESSURE && entry.ext == 2 => {}
+            _ => return Err(Failure::Storage("a pressure notice did not carry the latest grade")),
+        }
+
+        // Nothing is owed to a table that is about to stop existing, and
+        // nothing was bought, so there is no page to give back here.
+        table.clear_all();
+        if table.owes() != 0 {
+            return Err(Failure::Storage("a table that ended still owed a notice"));
+        }
+        Ok(())
+    }
+
     /// Check the properties against a real table, and check that the checks can
     /// fail.
     ///
@@ -2036,6 +2596,11 @@ pub mod properties {
                 ));
             }
         }
+
+        // What the five above cannot see, because none of it is reachable
+        // through `Authority`. Before the flawed fixtures, so that a failure
+        // here reads as *the table is wrong* rather than as *a fixture is*.
+        storage(frames)?;
 
         let mut caught = 0;
         for bought in [false, true] {

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["abi", "env", "ring", "kernel", "user/init", "bench", "xtask"]
+members = ["abi", "env", "ring", "kernel", "user/init", "user/store", "bench", "xtask"]
 
 [workspace.package]
 version = "0.0.1"

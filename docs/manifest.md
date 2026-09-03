@@ -280,9 +280,18 @@ not in this file.
 
 Named so the tasks that own them are not surprised.
 
-- **The wire record.** E1-B05 defines the `#[repr(C)]` form in `abi/`, with
-  `Unit:` on every field, and the hash a spawn names is over it and the image
-  together. Every bound above is a promise that the record fits.
+- ~~**The wire record.**~~ **Decided, at E1-B05.** `abi::manifest::Record` is
+  the `#[repr(C)]` form, with `Unit:` on every field; `cargo xtask component`
+  compiles a manifest into one and appends the image; and the hash a spawn names
+  is over the record and the image together. Every bound above turned out to be
+  a promise the record keeps: a name is thirty-two bytes because that is what a
+  slot affords, sixteen capabilities and eight rings because the arrays are
+  fixed. RFC 0030 is the argument, and the one thing it changes here is a unit:
+  the backoff and the window are milliseconds in this document because a person
+  chooses them, and **timer ticks** in the record because a supervisor compares
+  them against a count the frame keeps and RFC 0004 does not let it read a
+  clock. `xtask` converts, once, and `the_tick_rate_is_the_frames` reads the
+  frame's own rate and fails when it moves.
 - **The topology.** Which supervisor spawns which manifest into which place,
   and which of its endpoints satisfy whose `sibling:` needs. E1-B05.
 - **What rights mean on an `irq` and a `buffer_set`.** E1-B01 and E1-D03.
@@ -292,11 +301,12 @@ Named so the tasks that own them are not surprised.
 
 ## What would reverse this
 
-- **A second reader.** If E1-B05's supervisor or any tool ends up parsing
+- **A second reader.** If a supervisor or any tool ends up parsing
   `manifest.toml` directly rather than the record it compiles to, the subset
   argument collapses — there would then be two parsers of one file — and the
   right fix is to make the record the only thing that is read, not to grow the
-  subset.
+  subset. RFC 0030 inherits this condition and states the observation that would
+  trigger it: a `manifest.toml` opened by anything but `xtask/src/manifest.rs`.
 - **A field that cannot be bounded.** If a component legitimately needs more
   than sixteen routed capabilities, or a variable-length field the record cannot
   carry, the bound moves *with* E1-B13's growable table and a stated cost, not

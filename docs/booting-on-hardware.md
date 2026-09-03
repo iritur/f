@@ -44,12 +44,26 @@ and then falls into a halt loop. `exit_qemu` says so at the call site.
 after printing `M0 ok`.** There is no reboot and no exit code. The exit code is
 an emulator convenience, and on hardware the serial log is the whole result.
 
-## The two files
+## The two files, and an optional third
 
 ```
 target/x86_64-unknown-none/release/f-kernel.elf32   the kernel, ELF32, multiboot 1
 target/init/init.bin                                user/init, a flat blob, no headers
+target/component/store.fc                           optional: a component file
 ```
+
+The third is a **component file** — a compiled manifest followed by an image, in
+one blob named by one hash (RFC 0030) — and it is optional on purpose. With it
+in the module list the kernel runs the component lifecycle end to end and prints
+a line per stage; without it the kernel prints
+
+```
+  supervisor    no component file among the boot modules; no place to fill
+```
+
+and carries on to `M0 ok`. A machine that carries only `init.bin` is a machine
+with a smaller topology, not a broken one, and the milestone this page is about
+does not require the demonstration. `cargo xtask component` builds it.
 
 The *release* image, on purpose. `cargo xtask` builds and tests the debug one,
 and on a 128 MiB emulator the difference does not matter — but the frame
@@ -87,7 +101,8 @@ standalone and says so when it is not in a checkout:
 ```sh
 curl -O https://raw.githubusercontent.com/iritur/f/main/tools/f-on-metal.sh
 chmod +x f-on-metal.sh
-sudo ./f-on-metal.sh install --kernel f-kernel.elf32 --init init.bin
+sudo ./f-on-metal.sh install --kernel f-kernel.elf32 --init init.bin \
+    --component store.fc          # --component is optional
 ```
 
 **Read it before running it.** It writes to your bootloader, and a script you
@@ -134,6 +149,7 @@ in the menu.
 ```sh
 sudo mkdir -p /boot/f
 sudo cp f-kernel.elf32 init.bin /boot/f/
+sudo cp store.fc /boot/f/          # optional, see above
 ```
 
 Add to `/etc/grub.d/40_custom`:
@@ -142,9 +158,14 @@ Add to `/etc/grub.d/40_custom`:
 menuentry "F — M0" {
     multiboot /boot/f/f-kernel.elf32
     module    /boot/f/init.bin
+    module    /boot/f/store.fc     # optional; omit the line if you did not copy it
     boot
 }
 ```
+
+Module order is the contract and only for the first one: `init.bin` is named by
+position because it has no manifest, and every module after it is found by its
+magic rather than by where it sits.
 
 Then `sudo update-grub` (Debian) or `sudo grub2-mkconfig -o /boot/grub2/grub.cfg`
 (Fedora, RHEL).
@@ -173,6 +194,7 @@ sudo mount /dev/sdX1 /mnt
 sudo grub-install --target=i386-pc --boot-directory=/mnt/boot /dev/sdX
 sudo mkdir -p /mnt/boot/f
 sudo cp f-kernel.elf32 init.bin /mnt/boot/f/
+sudo cp store.fc /mnt/boot/f/      # optional, see above
 ```
 
 `/mnt/boot/grub/grub.cfg`:
@@ -186,6 +208,7 @@ set timeout=5
 menuentry "F — M0" {
     multiboot /boot/f/f-kernel.elf32
     module    /boot/f/init.bin
+    module    /boot/f/store.fc     # optional; omit the line if you did not copy it
     boot
 }
 ```

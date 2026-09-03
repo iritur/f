@@ -1,0 +1,128 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# store: the component a *place* holds, and the smallest thing that can be one.
+#
+# `user/virtio-blk/manifest.toml` is the worked example of what a driver
+# declares. This is the worked example of what the lifecycle needs, which is a
+# different and much shorter list: an account to be made out of, an endpoint its
+# clients reach it through, and a restart policy with a budget small enough that
+# a boot can exhaust it on purpose. E1-B05 spawns this into a place on every
+# boot, kills it by making its control ring stop validating, and spawns it again
+# under the policy below — so every number here is a number a boot exercises
+# rather than one waiting for a driver to be written.
+#
+# `docs/manifest.md` is the schema field by field, `cargo xtask lint-manifests`
+# refuses this file when it stops fitting it, and `cargo xtask component`
+# compiles it into the record the frame actually reads. RFC 0030 is why those
+# are three different things.
+
+schema = 1
+name   = "store"
+image  = "user/store"
+
+# `private`, and the argument is shorter than virtio-blk's because this
+# component holds nothing yet — which is exactly why the choice has to be made
+# rather than defaulted. RFC 0005 says nothing inherits a kind and a spawner may
+# only go more isolated, never less, so a component that starts `shared` and
+# later acquires something worth keeping has already been co-resident with
+# everything for however long that took. Starting at `private` costs the flush
+# on every crossing and can be relaxed by a diff somebody has to write; starting
+# at `shared` cannot be tightened by anything except noticing.
+domain = "private"
+
+# --- Needs: routed at spawn, in this order, one handle each -------------------
+
+# The account. RFC 0008: everything a component is made of — address space,
+# page tables, text, stack, control ring, state tree and the capability table
+# itself — is retyped from one supplied `Untyped`, so revoking this ends the
+# component. Eight pages is what two of this component's instances fit in with
+# room for the frame's own bookkeeping; a component that needs more is refused
+# `RESOURCE/QUOTA_EXHAUSTED` at the derive that could not pay, which is the
+# refusal `cap=quota` already boots.
+#
+# `derive` because retyping *is* deriving, and `revoke` because an account you
+# cannot take back is not an account. No `grant`: this component hands nothing
+# on, and `grant` is the bit that would let it.
+[[capability]]
+name   = "account"
+type   = "untyped"
+rights = ["read", "write", "derive", "revoke"]
+from   = "supervisor"
+bytes  = 32_768
+
+# One page of scratch. It exists so that this manifest declares a `frame` as
+# well as an `untyped` — the two kinds a spawn has to retype differently, and a
+# manifest that declared only one would leave the other path unexercised on
+# every boot. Read and write and nothing else: a component that could derive
+# from its own scratch page could hand it on, and nothing here should.
+[[capability]]
+name   = "scratch"
+type   = "frame"
+rights = ["read", "write"]
+from   = "supervisor"
+frames = 1
+
+# The place's own endpoint, routed back to it. `write` is the right to connect
+# and `grant` is the right to hand the endpoint on, which together are what a
+# component needs to introduce a peer to itself without the supervisor having to
+# know every client. Not `revoke`: nothing may stop its own occupant, because a
+# component that could refill its own place is a component that has become its
+# own supervisor.
+[[capability]]
+name   = "self"
+type   = "endpoint"
+rights = ["write", "grant"]
+from   = "supervisor"
+
+# --- Rings: the control ring is implicit; this is the data ring ---------------
+
+# One server ring per client, up to four. `inline` rather than `registered`,
+# and the reason is that this component moves no bytes: what E1-B05 exercises
+# is the *connect*, which is a channel arriving at a client that asked for one
+# while the place was empty. A payload path would be a claim about a datapath
+# that does not exist here, and `registered` is E1-B02's to declare against a
+# device that can transfer.
+[[ring]]
+name        = "data"
+role        = "server"
+protocol    = "store"
+version_min = 1
+version     = 1
+entries     = 16
+payload     = "inline"
+clients     = 4
+features    = []
+
+# --- Restart: the supervisor's policy, the frame's mechanism ------------------
+
+# On a fault, and not on an exit. The fault E1-B05 provokes is RFC 0008's
+# second kind — a control ring whose header the component corrupted, which the
+# frame treats as the component having stopped speaking — so this policy is the
+# one the boot actually takes.
+#
+# The numbers are small on purpose, and that is the difference between this
+# manifest and virtio-blk's. Eight milliseconds and a three-restart budget over
+# three seconds is a policy a single boot can drive to its edge: one restart is
+# the demonstration, and the budget is close enough to reach that E1-P06 can
+# exhaust it and watch the place be retired. A driver's budget is measured in
+# minutes because a driver's faults are; a fixture's is measured in what a boot
+# can observe.
+[restart]
+policy           = "on_fault"
+backoff_first_ms = 8
+backoff_max_ms   = 64
+max_restarts     = 3
+budget_window_ms = 3_000
+
+# --- Reservation: what admission may refuse ----------------------------------
+
+# Soft class, and no CPU fields at all — `docs/manifest.md` refuses them here
+# rather than ignoring them, because a budget declared for a class nothing
+# schedules against is a number nobody reads. Sixty-four kibibytes is what this
+# component's footprint costs twice over: an address space, four page tables, a
+# page of text, a page of stack and a page of control ring, with the second
+# instance's copy of all of it alive at the same moment a client is still
+# holding a channel to the first.
+[reservation]
+class        = "soft"
+memory_bytes = 65_536
