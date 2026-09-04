@@ -1338,6 +1338,27 @@ fn artefacts(emitted: &str, own: &Path) -> Vec<PathBuf> {
         }
         found.push(path);
     }
+    // **Sorted, because cargo's emission order is a property of the build and
+    // not of the tree.** These paths arrive in the order cargo reported the
+    // artefacts, which is the order it finished compiling them — so a cold
+    // build lists them in dependency order and a warm one lists them in
+    // whatever order it revalidated them. The linker takes that as its input
+    // order, `--gc-sections` places what survives in it, and the image comes
+    // out with the same length and different bytes.
+    //
+    // That is the determinism contract failing at one remove: nothing on the
+    // boot path read a clock, but the *image* the boot loads was a function of
+    // whether `target/` happened to be warm. It reached the tree because every
+    // local run is warm and the reproduction check runs both halves in one job:
+    // `cargo xtask trace` built cold for run 1 and warm for run 2, and the two
+    // traces disagreed. Two runners each building cold agreed with each other,
+    // which is why `--address` and `trace --hash` were green on the same commit.
+    //
+    // Sorting by path makes the order a function of the crate set. It is not the
+    // only fix — asking cargo for a dependency-ordered list would be another —
+    // but it is the one that cannot drift, because nothing about it depends on
+    // how the build was scheduled. RFC 0004.
+    found.sort();
     found
 }
 
