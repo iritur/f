@@ -1,0 +1,216 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# virtio-gpu: the third driver outside the frame, and the first one that is not
+# a pipe. `user/virtio-blk/manifest.toml` and `user/virtio-net/manifest.toml`
+# came first and this file is deliberately *not* as close to them as they are to
+# each other — E1-B03 asked whether the shape held for a second device that
+# moves opaque bytes, and E1-B04 asks whether it holds for a device of a
+# different kind. A display controller takes structured commands, answers every
+# one of them, and owns something a block device and a network interface do not:
+# a scanout, which is a standing output that outlives the request that produced
+# it. Written before the driver, the way both of the others were and for the
+# same reason: the shape the driver has to fit predates the driver.
+# `docs/manifest.md` is the schema and `cargo xtask lint-manifests` is what
+# refuses this file when it stops fitting.
+#
+# What it declares, in one paragraph: a display server in the `private`
+# speculation domain, holding the device's register page set, memory for its one
+# virtqueue and its command slots, and the device's interrupt, connected to the
+# broker for anything it may ever have to ask for; serving one typed protocol on
+# one data ring whose pixels never pass through the ring; restarted on a fault
+# and not on an exit; in the soft class, with two mebibytes for everything it is
+# made of.
+
+schema = 1
+name   = "virtio-gpu"
+image  = "user/virtio-gpu"
+
+# `private`, and for the third time by a third route. RFC 0005 leaves the choice
+# to review, so a manifest that reached the word by repeating an earlier
+# manifest's argument would be a review that did not happen.
+#
+# virtio-blk's clients are separated by something its protocol can name: two
+# clients that never name the same sectors never see each other's bytes.
+# virtio-net's are separated by nothing, because one link carries every peer's
+# frames into one receive queue. A display is a third thing again, and it is the
+# only one of the three where the sharing is the *purpose*: a scanout is one
+# output and every client that draws is drawing on it. Two clients of this
+# component are not merely unseparated, they are composited — and the thing they
+# are composited into is what a person is looking at, which is where a password
+# is typed and a document is read.
+#
+# There is a second reason and it is particular to this device. A display
+# controller's resources live in a small integer namespace the *device* owns:
+# `RESOURCE_CREATE_2D` takes an identifier this driver chooses, and a driver
+# that got its bookkeeping wrong would put one client's pixels on another
+# client's scanout with no capability crossing anywhere. `shared` would be a
+# declaration that this cannot matter. It can.
+#
+# The cost is RFC 0005's flush on every crossing into and out of this driver.
+# The number that would reverse it is the one both other drivers name: RFC
+# 0005's cross-domain call cost, measured at E1-P10. It should dominate *less*
+# here than on either of them, and that is a prediction rather than a hope — a
+# display crossing carries a whole frame of pixels and a network crossing
+# carries at most fifteen hundred bytes, so the crossing is amortised over
+# three orders of magnitude more work. If it dominates here it dominates
+# everywhere, and RFC 0005 is where that is argued rather than this file.
+domain = "private"
+
+# --- Needs: routed at spawn, in this order, one handle each -------------------
+
+# The transport's register pages: common configuration, notification, ISR and
+# device configuration, as the modern PCI transport lays them out in one BAR.
+# Four pages, and this is now the third manifest to declare exactly four — which
+# is the strongest statement any of the three makes about the *transport* being
+# the thing that has this shape rather than the block device that was measured
+# first. A device whose BAR is larger is a different device and a different
+# manifest, not a bigger number.
+[[capability]]
+name   = "mmio"
+type   = "frame"
+rights = ["read", "write"]
+from   = "supervisor"
+frames = 4
+
+# Memory the driver retypes into its virtqueue and its command slots. Untyped
+# rather than frames because the driver decides the split, and `derive` is what
+# lets it retype.
+#
+# Sixty-four kibibytes, the same figure the other two declare, and here it is
+# mostly slack: this driver lays out one virtqueue — virtio-gpu's control queue
+# — and one page of command slots, which is twelve kibibytes. The figure is the
+# shape's and not this driver's, and it is left alone deliberately.
+# `kernel::process::prepare_driver` maps whatever a manifest declares into one
+# region at one address for every driver in the tree, and a third manifest
+# inventing a third number for a quantity the frame maps identically would be a
+# number a reader has to check rather than recognise. What the slack costs is
+# fifty-two kibibytes of a component's account, and `[reservation]` below is
+# where that is paid for.
+#
+# The pixels are not in here. They are in a buffer the client registered, and
+# the whole of `crate::driver` is the mechanism that keeps them there.
+[[capability]]
+name   = "queues"
+type   = "untyped"
+rights = ["read", "write", "derive", "revoke"]
+from   = "supervisor"
+bytes  = 65_536
+
+# The device's interrupt, delivered to this component rather than to the frame.
+# No vector is named, for the reason both other manifests give: which vector a
+# device raises is the topology's to bind and the machine's to know.
+#
+# Unused today, and the reversal is further away here than it is for either of
+# the others rather than nearer. A block driver polls a used ring it has just
+# kicked; a network driver's receive queue is owed nothing at all, which is what
+# makes E1-B09 urgent for it. Every command this driver sends is a command the
+# device owes an answer to — a display controller answers `RESOURCE_CREATE_2D`
+# and `RESOURCE_FLUSH` alike — so its spin is bounded by a device that owes it
+# something, exactly as virtio-blk's is. What an interrupt would buy here is not
+# liveness but idleness: a display driver that polls burns a core between
+# frames, and nothing in E1 measures that.
+[[capability]]
+name   = "notify"
+type   = "irq"
+rights = ["read"]
+from   = "supervisor"
+
+# The broker. RFC 0008 says an ask is resolved by connecting to the powerbox,
+# whose endpoint reaches a component through its needs like any other need, and
+# in E1 the supervisor occupies that place. This manifest declares no ask today
+# — a driver bound to its device at spawn has nothing a user picks — so the
+# honest statement is that this handle is held for the asks a later task may
+# add, and that adding one changes this file and therefore the hash a spawn
+# names. Connect-only: `write` on an endpoint is the right to connect and
+# nothing else.
+[[capability]]
+name   = "powerbox"
+type   = "endpoint"
+rights = ["write"]
+from   = "supervisor"
+
+# --- Rings: the control ring is implicit; this is the data ring ---------------
+
+# One server ring per client, up to eight clients, each speaking `gpu` version
+# 1. `registered` is the zero-copy path, and on this protocol it means something
+# neither of the other two protocols could say: a display command names a
+# registered buffer, the device reads it into a resource of its own, and the
+# pixels never enter this component's address space in either direction. There
+# is no direction on this ring where the device writes into a client's memory at
+# all — a 2D display controller reads from the guest and writes to a screen — so
+# the receive-direction ownership question E1-B03 spent itself on does not arise
+# here, and a different one does. `crate::driver` states it where the mechanism
+# is: what a scanout does with a buffer is not a transfer that ends, it is a
+# standing read, and giving the buffer back means undoing it first.
+#
+# `features` is empty. `admission_control` is absent for the reason both other
+# manifests state: this driver floors and reports rather than refusing, and a
+# bit claiming otherwise would be R08 failing in miniature with a feature name
+# on it. `shared_virtual` stays absent because QEMU's virtio offers no address
+# translation service to negotiate it against.
+[[ring]]
+name        = "gpu"
+role        = "server"
+protocol    = "gpu"
+version_min = 1
+version     = 1
+entries     = 256
+payload     = "registered"
+clients     = 8
+features    = []
+
+# --- Restart: the supervisor's policy, the frame's mechanism ------------------
+
+# On a fault, and not on an exit. The numbers are the other two drivers'
+# numbers, and that is a decision rather than a copy: RFC 0008 fixes the budget
+# as how many restarts in what window, the argument for eight in a minute is
+# about how a driver fails rather than about what it drives, and inventing a
+# third pair here would be three numbers with evidence for none of them. E1-P06
+# kills components at random under load and is what would separate them.
+#
+# What differs from both is worth a comment rather than a field, and it is the
+# sharpest consequence of this device's kind. A restart of a block driver loses
+# requests in flight; a restart of a network driver loses posted buffers and the
+# frames in them. A restart of a display driver loses nothing a client is
+# waiting for and everything a client can see: the new occupant holds no
+# resource identifiers, so the scanout it inherits is showing pixels it cannot
+# name, cannot transfer into and cannot free. The honest first act of a
+# restarted display driver is to reset the device, which blanks the screen — and
+# that is why `crate::driver` refuses to reset it on an ordinary end. RFC 0054.
+[restart]
+policy           = "on_fault"
+backoff_first_ms = 10
+backoff_max_ms   = 1_000
+max_restarts     = 8
+budget_window_ms = 60_000
+
+# --- Reservation: what admission may refuse ----------------------------------
+
+# Soft class. A display driver serves deadlines carried in its clients' entries
+# and holds no deadline of its own, so it reserves no core.
+#
+# It is the one of the three where a reader will expect otherwise, so the
+# argument is stated rather than assumed: a display has a refresh rate, and a
+# frame that misses it is visible. That is a property of the scanout, which the
+# hardware performs continuously out of a resource this driver has already
+# handed it, and not of this component, which is asked to move a frame in and is
+# then finished. A driver that declared `hard` on the strength of the screen's
+# refresh would be reserving a core for work the display does without it — R08's
+# own failure, one layer out: a deadline nothing in this component can miss.
+#
+# The word is load-bearing at run time and not only at admission, exactly as it
+# is for both other drivers: the frame reads it out of the compiled record and
+# writes it into the driver's routing page as the ceiling RFC 0025's bound 1
+# clamps against, so a hard-class request this driver serves is served as soft
+# and its completion carries `SHORTFALL`. Changing it to `hard` is a change to
+# what every client of this driver is told, and RFC 0007's schedulability test
+# is what would have to grant it.
+#
+# The memory is the account this component's whole footprint is retyped from —
+# address space, page tables, text, stack, control ring, state tree, capability
+# table — and not the queues above, which are a routed need. Two mebibytes is
+# the figure a soft-class component is refused at if the supplied `Untyped`
+# holds less.
+[reservation]
+class        = "soft"
+memory_bytes = 2_097_152

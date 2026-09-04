@@ -1,0 +1,77 @@
+[package]
+name = "f-ring-proofs"
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+description = "The ring's validation paths, as bounded panic-freedom proofs over arbitrary peer bytes."
+
+# Deliberately outside the workspace, for RFC 0053's reason applied a second
+# time: the toolchain that builds this is Kani's, not the tree's. `Cargo.toml`'s
+# `exclude` at the root is the other half of saying so.
+[workspace]
+
+[lib]
+# Nothing here is a test and nothing here is a doctest. The harnesses are
+# `#[kani::proof]` functions, reachable only by a checker; under an ordinary
+# `cargo build` this crate is the fixture and `f-ring`, and building it is the
+# cheapest way to find out that the fixture still matches the crate.
+test = false
+bench = false
+doctest = false
+
+[dependencies]
+# A path dependency and not a `#[path]` include, which is the one way this
+# crate differs from `kernel/proofs` and the reason is worth a line: `cap.rs`
+# lives inside a bare-metal binary crate that cannot be built for the host, so
+# proving it meant compiling the file a second time. `f-ring` is an ordinary
+# `no_std` library that already builds for the host — its own tests run there —
+# so the proofs link the shipped crate rather than recompiling a file out of
+# it. Same guarantee, one fewer mechanism.
+f-ring = { path = ".." }
+f-abi = { path = "../../abi" }
+
+[features]
+# The ring's deliberate defects, forwarded. None is ever on by default —
+# `cargo xtask lint-mutations` reads this manifest along with every other one.
+# Each is armed by `cargo xtask prove` for exactly one run, and the harness it
+# has to break is named in `xtask`'s `RING_PROOFS` table beside it.
+mutate-believed-header = ["f-ring/mutate-believed-header"]
+mutate-trusted-slot = ["f-ring/mutate-trusted-slot"]
+mutate-unbounded-drain = ["f-ring/mutate-unbounded-drain"]
+mutate-ignored-flag = ["f-ring/mutate-ignored-flag"]
+mutate-lenient-index = ["f-ring/mutate-lenient-index"]
+
+# The four this crate does *not* forward, and the absence is argued rather than
+# accidental. Three are memory-ordering weakenings and CBMC is a sequential
+# checker, so a harness here is insensitive to them by construction; the fourth,
+# `mutate-reusable-slot`, needs sixty-five thousand retirements of one slot,
+# which a bounded checker unrolls rather than summarises. `xtask`'s
+# `RING_PROOF_BLIND` holds all four with their reasons, and a test keeps that
+# list and `ring/Cargo.toml` in step in both directions — because a feature
+# forwarded here and armed by nothing would look like coverage.
+
+# Run the harnesses over a mapping large enough for a ring of eight rather than
+# of two. See `peer::REGION`: the small region is what makes the proofs finish,
+# and a proof whose cost does not depend on the ring size costs the same either
+# way — so those are run at both sizes and the reduction is not load-bearing
+# for them.
+wide-ring = []
+
+[lints.rust]
+# This crate writes symbolic bytes into a region a `Mapping` is then adopted
+# over, which is the peer's half of the protocol and is `unsafe` for exactly
+# the reason the peer's half always is. It is under `ring/`, so `cargo xtask
+# lint-unsafe` permits it; it is outside the workspace, so it inherits nothing
+# and states its own.
+unsafe_code = "allow"
+missing_docs = "deny"
+
+# `cfg(kani)` is set by the checker and by nothing else. Without this the
+# pinned compiler warns about a condition it has never heard of, and in this
+# tree a `warning:` line is a failure.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"

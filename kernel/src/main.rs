@@ -29,6 +29,9 @@ pub mod churn;
 pub mod component;
 pub mod doorbell;
 pub mod env;
+// The third driver's supervisor. Beside `blk` and `net` and deliberately not
+// merged with them; `kernel/src/gpu.rs` says why and RFC 0054 argues it.
+pub mod gpu;
 pub mod iommu;
 pub mod jitter;
 pub mod mem;
@@ -656,6 +659,29 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         tree.physical(),
     );
     let _ = packets;
+
+    // E1-B04. The same shape again with a third driver in it, and the first one
+    // whose result is not inside this machine: a component whose crate forbids
+    // `unsafe` brings a real display controller up through granted register
+    // windows, a client registers a buffer set, draws a pattern into one buffer
+    // and submits one entry, and the driver turns that into six display commands
+    // that put the client's pixels on scanout zero.
+    //
+    // Behind its own parameter like every other provocation in this file, and
+    // for a reason none of the others has: this stage **holds the machine still**
+    // at the end of itself, so that `cargo xtask gpu` can capture the emulator's
+    // framebuffer while the picture is on it. A default boot that ran this would
+    // wait for a harness that is not there.
+    let picture = gpu_datapath(
+        &boot,
+        &mut frames,
+        &space,
+        features,
+        remapping.as_mut(),
+        clocks,
+        tree.physical(),
+    );
+    let _ = picture;
 
     // E1-B07. What this machine can reserve, asked of the machine rather than
     // assumed about it. Behind its own parameter for the fixture's sake, like
@@ -2973,6 +2999,293 @@ fn net_datapath(
             kprintln!("FAIL: {why}");
             arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
         }
+    }
+    Some(report)
+}
+
+/// How long the machine waits for the harness to say it has looked at the
+/// screen. Unit: microseconds.
+///
+/// **The only wall-clock wait in this kernel that is not an anti-wedge bound**,
+/// and it is here because E1-B04's exit criterion is an observation nothing
+/// inside this machine can make. A scanout has no read-back command, so the
+/// evidence that a picture reached the display is a capture taken from outside
+/// the emulator — and a capture needs the machine to still exist when it is
+/// taken.
+///
+/// Sixty seconds, which is far longer than a harness needs and far shorter than
+/// the harness's own boot timeout, so a run where nothing answers ends by this
+/// number rather than by being killed. It is a count of microseconds against
+/// `tsc_khz` like every other bound in this file, so a slow host waits the same
+/// wall-clock time rather than the same number of turns.
+///
+/// RFC 0046 says a hang is a count: this one is counted, it is printed, and the
+/// boot carries on either way. A harness that never answers produces a boot that
+/// says so and still reaches its own verdict, which is the direction to be wrong
+/// in — the picture is then unverified rather than the machine being stuck.
+const CAPTURE_MICROS: u64 = 60_000_000;
+
+/// E1-B04. A third driver, a device of a different kind, and a result that is
+/// not in this machine.
+///
+/// # Why a third one, after `blk` and `net`
+///
+/// Because a block device and a network interface both move opaque bytes, and a
+/// display controller does not: it takes structured commands, answers every one
+/// of them, and owns a scanout. `kernel/src/gpu.rs` and
+/// `docs/rfc/0054-a-third-driver-is-a-device-of-a-different-kind.md` are where
+/// the comparison is written down, and the short version is that four of the
+/// five things RFC 0051 said a second driver could not reuse turn out to have
+/// been about *receiving* rather than about being a second driver.
+///
+/// # Why this stage ends by waiting
+///
+/// The other two datapaths judge themselves: the evidence is bytes in a client's
+/// buffer and records in a remapping unit, and both are inside the machine. A
+/// scanout is not. The 2D display protocol has no command that reads a resource
+/// back, so this kernel can say what the display *accepted* and cannot say what
+/// it drew. So the boot publishes one number — the hash of the client's own
+/// pixels, in the order a screen capture reports them — and then holds still
+/// while `cargo xtask gpu` captures the emulator's framebuffer and compares. The
+/// byte on the serial port is the harness saying it has looked.
+///
+/// The picture survives everything above the wait, and that is not luck:
+/// `TRANSFER_TO_HOST_2D` copies the pixels into a resource on the host's side of
+/// the emulator, so clearing the bus-master bit, detaching the function from its
+/// domain and freeing the client's page leave the scanout exactly as it was.
+/// `user/virtio-gpu` never resets the device, which is the one thing that would
+/// take it away.
+fn gpu_datapath(
+    boot: &BootInfo,
+    frames: &mut mem::FrameAllocator,
+    space: &paging::AddressSpace,
+    features: paging::Features,
+    remapping: Option<&mut Remapping>,
+    clocks: arch::x86_64::apic::Clocks,
+    tree: u64,
+) -> Option<gpu::Report> {
+    let half = if boot.has_parameter(b"gpu=inside") {
+        gpu::Half::Inside
+    } else if boot.has_parameter(b"gpu=blank") {
+        gpu::Half::Blank
+    } else if boot.has_parameter(b"gpu=escape") {
+        gpu::Half::Escape
+    } else {
+        return None;
+    };
+
+    let Some(found) = remapping else {
+        kprintln!("FAIL: the display datapath asked for on a machine with no remapping unit");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+
+    // Another core, always, for `blk_datapath`'s reason: a driver and its client
+    // are two ends of a ring and this frame is the client, so a machine with one
+    // core has nowhere to put the server.
+    let me = arch::x86_64::current_cpu();
+    let Some(worker) = (smp::started() > 1).then(smp::first_worker).filter(|core| *core != me)
+    else {
+        kprintln!(
+            "FAIL: the display datapath needs a second core - the driver serves from ring 3 \
+             and the frame is its client"
+        );
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+
+    kprintln!(
+        "  picture       a third driver outside the frame, and the {} half: {}",
+        half.name(),
+        match half {
+            gpu::Half::Inside => "a client's pixels are put on a scanout through a ring",
+            gpu::Half::Blank => "the same pixels, and nothing submitted, so nothing may appear",
+            gpu::Half::Escape =>
+                "the driver points the device past what it was answered, at the memory the \
+                 display reads a frame out of",
+        }
+    );
+
+    // SAFETY: the boot processor, with the kernel's address space in `CR3`,
+    // `frames` rebound onto its direct map, translation enabled, and nothing
+    // else in this kernel driving the device this finds - the `dma`, `blk` and
+    // `net` stages run on different parameters and drive different functions.
+    let outcome = unsafe {
+        gpu::demonstrate(
+            frames,
+            space,
+            features,
+            &mut found.unit,
+            &found.window,
+            &found.survey,
+            boot,
+            half,
+            gpu::Scheduling {
+                cpu: worker,
+                hz: TIMER_HZ,
+                target: RUNTIME_TICKS,
+                tsc_khz: clocks.tsc_khz,
+                tree,
+            },
+        )
+    };
+
+    let report = match outcome {
+        Ok(report) => report,
+        Err(why) => {
+            match why.bound() {
+                Some(micros) => {
+                    kprintln!(
+                        "FAIL: the display datapath ran out of time: {} of {} us",
+                        why.message(),
+                        micros,
+                    );
+                    kprintln!(
+                        "      That is an anti-wedge bound and not a check of the datapath: \
+                         nothing above this line reported a failure, and a red here is a \
+                         component that is stuck or a machine slower than the bound."
+                    );
+                }
+                None => kprintln!("FAIL: the display datapath: {}", why.message()),
+            }
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+
+    kprintln!(
+        "  gpu manifest  virtio-gpu declares {} register page(s) and {} B of untyped for its \
+         queue, content {:#018x}",
+        report.declared.frames,
+        report.declared.bytes,
+        report.declared.id.bits(),
+    );
+    kprintln!(
+        "  gpu device    requester {:#06x}, {} page(s) of register window",
+        report.bdf.source_id(),
+        report.windows,
+    );
+    kprintln!(
+        "  gpu component core {} at ring 3, {} entr(ies) drained from its own loop, {} served, \
+         {} refused, {} translation(s) asked of the frame, ended {}",
+        report.cpu,
+        report.drained,
+        report.counters.served,
+        report.counters.refused,
+        report.asked,
+        if report.exited { "by EXIT" } else { "in a FAULT" },
+    );
+    kprintln!(
+        "  gpu grant     the client registered one page at {:#018x}; a capability with no \
+         right to grant was {}",
+        report.registered_at,
+        if report.refused_without_grant { "refused" } else { "ACCEPTED" },
+    );
+    // The device's own vocabulary, which is the thing this driver has and
+    // neither of the other two does: every display command is answered with a
+    // typed response, so *the display refused this* is a number rather than a
+    // silence.
+    kprintln!(
+        "  gpu commands  {} answered by the display, {} declined, {} resource(s) created and \
+         never freed, {} frame(s) flushed",
+        report.counters.commands,
+        report.counters.declined,
+        report.counters.resources,
+        report.counters.shown,
+    );
+    kprintln!(
+        "  gpu copies    {} byte(s) copied on the data path of {} transferred; {} byte(s) \
+         moved through the same function on purpose",
+        report.counters.copies,
+        report.counters.bytes,
+        report.counters.provoked,
+    );
+    if report.half.beyond() == 0 {
+        kprintln!(
+            "  gpu escape    {} backing entr(ies) pointed past a registration's answer; this \
+             half expects no fault",
+            report.counters.escaped,
+        );
+    } else {
+        kprintln!(
+            "  gpu escape    {} backing entr(ies) pointed past a registration's answer; this \
+             half expects a read fault at {:#018x}",
+            report.counters.escaped,
+            report.expected_fault(),
+        );
+    }
+    kprintln!(
+        "  gpu deadline  admitted {}, {} completion(s) reported a shortfall, {} entr(ies) \
+         refused for a class the client does not hold",
+        report.declared.admitted,
+        report.counters.shortfall,
+        report.counters.unadmitted,
+    );
+    match report.fault {
+        Some(fault) => kprintln!(
+            "  gpu fault     requester {:#06x} {} {:#018x}, reason {:#04x} - {} record(s)",
+            fault.source,
+            if fault.read { "read" } else { "wrote" },
+            fault.address,
+            fault.reason,
+            report.faults,
+        ),
+        None => kprintln!("  gpu fault     none recorded"),
+    }
+
+    match report.verdict() {
+        Ok(()) => kprintln!(
+            "  gpu verdict   {}",
+            match half {
+                gpu::Half::Inside =>
+                    "the display accepted every command and the client's buffer came back \
+                     unwritten, with nothing copied",
+                gpu::Half::Blank =>
+                    "the same client submitted nothing and the display was sent nothing",
+                gpu::Half::Escape =>
+                    "the driver pointed the device outside its grant at the memory a display \
+                     reads, and the unit faulted it on a read",
+            }
+        ),
+        Err(why) => {
+            kprintln!("FAIL: {why}");
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+
+    // The line the harness waits for, and the only line in this kernel written
+    // for a reader outside the machine. It carries what the harness cannot
+    // derive: how large the picture is, and the hash of the client's own pixels
+    // in the order a screen capture reports them. `cargo xtask gpu` captures the
+    // emulator's framebuffer when it sees this, hashes what it got, and requires
+    // the two to agree on the half that shows and to disagree on the two that do
+    // not.
+    //
+    // Deliberately *after* the verdict, so that a boot whose datapath failed has
+    // already exited and the harness never captures a screen from a run that
+    // went red.
+    kprintln!(
+        "  gpu display   {} x {} pixels, client rgb fnv1a {:#018x}",
+        report.width(),
+        report.height(),
+        report.display_hash,
+    );
+
+    // And now the wait. See `CAPTURE_MICROS`.
+    let deadline = smp::deadline_after(clocks.tsc_khz, CAPTURE_MICROS);
+    let mut acknowledged = false;
+    while !smp::past(deadline) {
+        if arch::x86_64::serial::Serial.received().is_some() {
+            acknowledged = true;
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    if acknowledged {
+        kprintln!("  gpu captured  the harness acknowledged the frame");
+    } else {
+        kprintln!(
+            "  gpu captured  nothing acknowledged the frame inside {} us, so the picture on \
+             the display is unverified by this boot",
+            CAPTURE_MICROS,
+        );
     }
     Some(report)
 }

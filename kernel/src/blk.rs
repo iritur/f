@@ -1120,7 +1120,7 @@ pub unsafe fn demonstrate(
             window,
             survey,
             virtio::VIRTIO_BLK_MODERN,
-            virtio::VIRTIO_BLK_TRANSITIONAL,
+            Some(virtio::VIRTIO_BLK_TRANSITIONAL),
         )
     }
     .map_err(Trouble::Device)?;

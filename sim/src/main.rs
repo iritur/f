@@ -120,6 +120,51 @@ struct Asked {
     /// Whether `--scan` writes marks that carry the artefact's running hash
     /// instead of the artefact.
     terse: bool,
+    /// What the caller knows about the tree that produced this binary, beside
+    /// the commit it named.
+    ///
+    /// Told rather than discovered, because this binary runs no subprocess and
+    /// reads no repository: a simulator that consulted the working tree would
+    /// stop being a function of its arguments, which is the one property every
+    /// report it prints rests on. RFC 0004. The caller that knows is
+    /// `cargo xtask sweep`, which asks git for the commit a line earlier.
+    ///
+    /// It reaches no trial and no verdict. What it decides is the one thing a
+    /// report is otherwise free to get wrong about itself — whether the
+    /// reproduction line may begin `git switch`. RFC 0055.
+    tree: Tree,
+}
+
+/// What is known about the working tree a report was produced in.
+///
+/// Three states rather than a `bool` because *nobody said* is not *it was
+/// clean*, and a two-valued flag would have to pick one of those to be its
+/// default. R04: the state that asserts least is the one a caller falls into by
+/// saying nothing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tree {
+    /// Nobody stated it. The default, and it claims nothing: this binary cannot
+    /// find out, so a report from here says the commit is what it was *told*
+    /// and stops.
+    Unstated,
+    /// The working tree is the commit named and nothing else. Only then does
+    /// `git switch --detach <commit>` reach the code that produced the finding.
+    Clean,
+    /// The commit named, plus changes git does not have.
+    Dirty,
+}
+
+impl Tree {
+    /// Whether a reproduction line may tell a reader to check the commit out.
+    ///
+    /// True in exactly one of the three states. That is the whole of this type:
+    /// `git switch --detach <sha>` in a tree with uncommitted work in it
+    /// discards the changes that produced the finding and then runs a different
+    /// program, and a reader who followed the line would be looking at a clean
+    /// run and concluding the report was wrong.
+    fn switchable(self) -> bool {
+        self == Tree::Clean
+    }
 }
 
 /// Which of the things this command does.
@@ -176,6 +221,35 @@ enum What {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Help is answered here — on stdout, exit zero — rather than by `parse`,
+    // which returns it as an error and so printed it to stderr behind an
+    // `f-sim:` prefix and exited 1. That was tolerable while the only reader was
+    // somebody already working in this tree. It is not tolerable now that this
+    // text is the published answer to *what is a scenario, what is a seed, and
+    // what do I do with a finding*: a stranger pipes `--help` into a pager and
+    // gets nothing, or reads a usage screen that announces itself as a failure.
+    // A request the program understood and served is not a refusal, and R04 is
+    // about unknown input rather than about this. E1-R01, RFC 0055.
+    //
+    // `parse`'s own `--help` arm stays, because `parse` is also what reads a
+    // corpus entry, and there a help request really is an entry the binary
+    // cannot run.
+    //
+    // And it is the *whole* command line or nothing. `--seed 0x1 blk -h` is not
+    // a help request — it is a real invocation carrying an argument this binary
+    // does not accept — and answering it with a usage screen and a zero exit
+    // would run no trial while reporting the status a clean run reports. That
+    // is the fail-open R04 exists to refuse, and it has a second victim here:
+    // `xtask`'s `f_sim` tells a refusal from a verdict by whether anything
+    // reached standard output, so a usage screen printed there reads to it as a
+    // sweep that found nothing. Every other argument list falls through to
+    // `parse`, which refuses on stderr with a non-zero status as it did.
+    if matches!(args.as_slice(), [only] if only == "--help" || only == "-h") {
+        println!("{}", usage());
+        return ExitCode::SUCCESS;
+    }
+
     match parse(&args).and_then(run) {
         Ok(good) => {
             if good {
@@ -239,6 +313,10 @@ fn parse(args: &[String]) -> Result<Asked, String> {
         // oracle would be a default that answers a smaller question than the one
         // asked. `trace::Carried` is the argument.
         terse: false,
+        // Unstated, which is the state that asserts nothing. A default of
+        // `Clean` would make every hand-run sweep claim a tree it never looked
+        // at, and that claim is the one this field exists to stop being free.
+        tree: Tree::Unstated,
     };
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -282,6 +360,26 @@ fn parse(args: &[String]) -> Result<Asked, String> {
             "--keep" => asked.keep = count("--keep", &value("--keep")?)?,
             "--after" => asked.after = u64::from(offset("--after", &value("--after")?)?),
             "--terse" => asked.terse = true,
+            // A value rather than a bare `--dirty`, so that *clean* is
+            // something a caller says and not something it fails to say. The
+            // set is closed: a spelling this does not know is refused rather
+            // than read as one of the two, because a typo that silently meant
+            // `clean` is exactly the over-claim the type is for. R04.
+            "--tree" => {
+                asked.tree = match value("--tree")?.as_str() {
+                    "clean" => Tree::Clean,
+                    "dirty" => Tree::Dirty,
+                    other => {
+                        return Err(format!(
+                            "--tree takes `clean` or `dirty`, not `{other}`.\n\
+                             It says whether the tree that built this binary is the\n\
+                             commit --commit names, which decides whether a\n\
+                             reproduction line may begin `git switch`. Omitting it\n\
+                             is allowed and claims nothing."
+                        ));
+                    }
+                };
+            }
             "--components" => asked.components = Some(PathBuf::from(value("--components")?)),
             "--corpus-file" => asked.corpus = Some(PathBuf::from(value("--corpus-file")?)),
             "--commit" => asked.commit = Some(value("--commit")?),
@@ -391,7 +489,7 @@ fn usage() -> String {
     let mut out = String::from(
         "f-sim [--seed <n>] [--hash | --trace | --check] <scenario>\n\
          f-sim --sweep --commit <sha> [--seeds <n>] [--from <k>] [--scenarios <m>]\n\
-        \x20        [--jobs <j>] [<scenario>]\n\
+        \x20        [--jobs <j>] [--tree clean|dirty] [<scenario>]\n\
          f-sim --ceiling [--scenarios <m>]\n\
          f-sim --record --commit <sha> [--corpus-file <path>] ...\n\
          f-sim --corpus [--corpus-file <path>]\n\
@@ -427,6 +525,79 @@ fn usage() -> String {
         out.push_str(&format!("  {:<12} {}\n", scenario.name, scenario.what));
     }
     out.push_str(&format!("\ndefault seed: {DEFAULT_SEED:#018x}\n"));
+
+    // Everything below is what a stranger needs that a list of flags does not
+    // say: what a seed *is*, what a finding looks like, and what to do with one.
+    //
+    // It is here rather than in a document on purpose. `RELEASING.md` ships the
+    // seed corpus and the scenario set as one of a release's eight contents, and
+    // a corpus is a file of argument lists — it can carry the seeds and it
+    // cannot carry their meaning. A page in `docs/` could, and would be a second
+    // account that drifts from the tables the sweep actually runs; this text is
+    // compiled from those tables, ships inside the binary a corpus entry is an
+    // argv for, and cannot be stale while the binary runs. RFC 0055.
+    out.push_str(
+        "\nwhat a seed is\n\
+        \x20 The whole of a run's nondeterminism. A run is a function of\n\
+        \x20 (seed, commit): every ordering, every arrival and every injected\n\
+        \x20 fault is drawn from it through `f_env::Env`, so the same pair on\n\
+        \x20 another machine produces the same bytes. That is what makes a seed a\n\
+        \x20 bug report somebody else can run rather than a description of one.\n\
+        \x20 RFC 0004.\n\
+        \n\
+        \x20 The commit half is only worth what the tree behind it is worth, and\n\
+        \x20 this binary cannot look: --commit is what a caller said HEAD was, and\n\
+        \x20 HEAD says nothing about uncommitted changes. --tree clean|dirty is\n\
+        \x20 how a caller states that, a sweep's report prints what it was told,\n\
+        \x20 and a reproduction line begins `git switch` only when it was told\n\
+        \x20 `clean`. `cargo xtask sweep` states it; by hand, nobody does.\n\
+        \n\
+        \x20 A sweep does not draw seeds at random — it derives them from one\n\
+        \x20 base, so `--from k --seeds n` runs exactly the trials the unsharded\n\
+        \x20 sweep would have run at indices k..k+n, and a finding's index is an\n\
+        \x20 index into the whole sweep rather than into a shard.\n\
+        \nwhat a finding is\n\
+        \x20 A trial in which one of these properties failed. They name no\n\
+        \x20 scenario, no fault class and no defect, which is what lets a sweep\n\
+        \x20 find a bug nobody wrote an assertion for. RFC 0040.\n",
+    );
+    // Rendered from `CHECKS` rather than listed here, for the reason the
+    // scenario table above is: a help text that restates a table is a second
+    // copy of it, and the copy is what goes stale.
+    for check in f_sim::check::CHECKS {
+        out.push_str(&format!("  {:<12} {}\n", check.name, check.what));
+    }
+    out.push_str(
+        "\x20 A finding prints the property, the evidence, the seed and its index,\n\
+        \x20 and two command lines: the trial as drawn, and the same failure\n\
+        \x20 minimised. Both are spelled --check, which exits non-zero and names\n\
+        \x20 the property — so pasting one is a verdict rather than seventy lines\n\
+        \x20 to read.\n\
+        \nwhat to do with one\n\
+        \x20 1. Paste the `repro` line. It judges itself: it runs --check, which\n\
+        \x20    exits non-zero and names the property. It begins `git switch`\n\
+        \x20    when the tree it was found in was stated clean, and does not\n\
+        \x20    when it was not — there the line reproduces in that tree\n\
+        \x20    only, and the report says so beside it.\n\
+        \x20 2. Replace --check with --trace for the artefact behind the verdict.\n\
+        \x20 3. Add the argument list to sim/corpus.txt, or let\n\
+        \x20    `cargo xtask sweep --record` do it. The file is append-only, and\n\
+        \x20    `cargo xtask sweep --corpus` replays every entry and requires it\n\
+        \x20    to be clean — which is what turns one seed into a permanent\n\
+        \x20    regression test rather than a fixed bug nobody can re-check.\n\
+        \x20 4. Report the argument list, not the symptom.\n\
+        \nthe seed corpus\n\
+        \x20 sim/corpus.txt. Every line in it that is not a comment is an\n\
+        \x20 argument list for this binary, and its header is the scenario set\n\
+        \x20 above, regenerated from the same table on every write and refused by\n\
+        \x20 --corpus when it is not the set this binary ships. There is no\n\
+        \x20 format beyond *a line is an argv*, so an entry this binary cannot\n\
+        \x20 run is an entry that fails to load.\n\
+        \nsweeping your own checkout\n\
+        \x20 docker compose -f docker/compose.yaml run --rm dev cargo xtask sweep\n\
+        \x20 Docker is the only prerequisite. README.md is the whole route, and\n\
+        \x20 `cargo xtask sweep --help` is this argument from the other end.\n",
+    );
     out
 }
 
@@ -1036,7 +1207,7 @@ fn sweep(asked: &Asked) -> Result<bool, String> {
 
     if asked.what == What::Record {
         let path = corpus_path(asked.corpus.as_deref());
-        let added = record(&path, &report, &commit)?;
+        let added = record(&path, &report, &commit, asked.tree)?;
         println!("\ncorpus     {added} entr(y/ies) added to {}", path.display());
     }
     Ok(report.clean())
@@ -1046,6 +1217,25 @@ fn sweep(asked: &Asked) -> Result<bool, String> {
 fn print_sweep(report: &Report, asked: &Asked, commit: &str, leak: u64) {
     println!("sweep — {} trial(s)", report.trials);
     println!("commit  {commit}");
+    // And what the caller said about the tree, on its own line and always
+    // printed. A report that named a commit and stopped was asserting a
+    // correspondence nobody had checked: git's HEAD says which commit is
+    // checked out and says nothing at all about the files the compiler read.
+    // The three states are printed rather than the two interesting ones,
+    // because a line that appears only when something is wrong is a line a
+    // reader has not learned to look for. RFC 0055.
+    println!(
+        "tree    {}",
+        match asked.tree {
+            Tree::Clean => "the commit above and nothing else",
+            Tree::Dirty =>
+                "the commit above plus uncommitted changes, so nothing\n\
+                            \x20       below reproduces from that commit alone",
+            Tree::Unstated =>
+                "not stated. The commit above is what the caller\n\
+                               \x20       named, and not a claim about these files",
+        }
+    );
     println!("base    {:#018x}", asked.seed);
     // What this grid left at `'static`, beside the bound it was checked against.
     // The refusal that bound produces is only as good as the model behind it, so
@@ -1099,20 +1289,20 @@ fn print_sweep(report: &Report, asked: &Asked, commit: &str, leak: u64) {
         report.signatures()
     );
     for (nth, found) in report.found.iter().enumerate() {
-        print_found(nth + 1, found, commit);
+        print_found(nth + 1, found, commit, asked.tree);
     }
     println!("\nsweep: {} finding(s) — each line above reproduces on its own.", report.found.len());
 }
 
 /// One finding, with the two lines that are the deliverable.
-fn print_found(nth: usize, found: &Found, commit: &str) {
+fn print_found(nth: usize, found: &Found, commit: &str, tree: Tree) {
     let minimal = &found.minimal;
     println!("\nfinding {nth}  {} / {}", found.scenario, found.signature);
     println!("  property   {}", found.what);
     println!("  evidence   {}", found.evidence);
     println!("  seen       {} trial(s) of this scenario", found.occurrences);
     println!("  seed       {:#018x}  (seed {} of the sweep)", found.seed, found.at);
-    println!("  repro      {}", line(&Trial::of(found_base(found), found.seed), commit));
+    println!("  repro      {}", line(&Trial::of(found_base(found), found.seed), commit, tree));
     println!(
         "  minimised  {}{}",
         minimal.size.line(),
@@ -1125,7 +1315,27 @@ fn print_found(nth: usize, found: &Found, commit: &str) {
         if minimal.stable { "reproduced twice" } else { "DID NOT REPRODUCE TWICE" }
     );
     if !minimal.trial.is_whole() {
-        println!("  smallest   {}", line(&minimal.trial, commit));
+        println!("  smallest   {}", line(&minimal.trial, commit, tree));
+    }
+    // Said once per finding and beside the lines it is about, rather than only
+    // in the header. The lines above are what gets copied out of a report and
+    // pasted into a message, and a caveat the reader has to scroll back for is
+    // one that does not travel with the thing it qualifies.
+    if !tree.switchable() {
+        println!(
+            "  tree       {}",
+            match tree {
+                Tree::Dirty =>
+                    "this checkout, which is not any commit. The line(s) above\n\
+                     \x20            carry no `git switch`: checking that commit out\n\
+                     \x20            would discard the changes that found this.\n\
+                     \x20            Commit before sending one anywhere.",
+                _ =>
+                    "not stated, so the line(s) above carry no `git switch`:\n\
+                     \x20            checking that commit out may not produce this\n\
+                     \x20            program. `cargo xtask sweep` states it.",
+            }
+        );
     }
     // The artefact, named rather than printed as a second command line. Both
     // lines above run `--check`, which exits non-zero and names the property, so
@@ -1154,13 +1364,60 @@ fn found_base(found: &Found) -> &'static Scenario {
 /// the checkout. The `git` half is a no-op for a reader who is already there,
 /// which is deliberate: a reproduction that only works after a checkout is one
 /// nobody runs while looking at the failure.
-fn line(trial: &Trial, commit: &str) -> String {
-    format!("git switch --detach {commit} && {}", trial.command())
+///
+/// # Why the `git` half is conditional
+///
+/// Because it is a no-op in exactly one of the three trees this can be run in,
+/// and the other two are the ordinary case for the audience this tool was
+/// published for. Somebody sweeping their own checkout to find something new is
+/// usually sweeping a checkout they have changed — that is why they are
+/// sweeping it — and `git switch --detach <sha>` in a tree with uncommitted
+/// work in it throws away the changes that produced the finding and then runs a
+/// different program. A reader who followed that line would get a clean run and
+/// conclude the report had lied to them, which is worse than no line at all.
+///
+/// So the line is emitted in the form that is true of the tree the caller
+/// stated: with the checkout when the tree is exactly the commit, and as the
+/// bare command — which reproduces here, where the reader already is — when
+/// it
+/// is not, or when nobody said. [`print_found`] prints the caveat beside it.
+/// RFC 0055.
+fn line(trial: &Trial, commit: &str, tree: Tree) -> String {
+    if tree.switchable() {
+        format!("git switch --detach {commit} && {}", trial.command())
+    } else {
+        trial.command()
+    }
 }
 
 /// Replay every corpus entry and require each to be clean.
 fn corpus(asked: &Asked) -> Result<bool, String> {
     let path = corpus_path(asked.corpus.as_deref());
+
+    // The header is half of what `RELEASING.md` ships under one row — *the seed
+    // corpus and scenario set* — and until now nothing read it back. It is
+    // regenerated on every write so that it cannot state a set the table does
+    // not have, and that guarantee is only as good as how often something
+    // writes. So the guarantee is checked here, where the corpus is already
+    // being replayed and a stranger is already being told what this file is:
+    // a scenario added to the table with no finding to record leaves a release
+    // shipping a scenario set that is one short, which is a wrong answer to the
+    // first question somebody asks of this file. RFC 0055.
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let wanted = corpus_header();
+    if !text.starts_with(&wanted) {
+        return Err(format!(
+            "{}'s header is not the scenario set this binary ships.\n\n\
+             The header states the set so that a list of scenarios in a comment cannot \
+             stop matching\nthe table — and it is regenerated on a write, so a scenario \
+             added while no sweep\nfound anything leaves it one short. \
+             `cargo xtask sweep --record` rewrites it.\n\n\
+             This is a stale document, not a failed trial: no entry has been replayed yet.",
+            path.display()
+        ));
+    }
+
     let entries = read_corpus(&path)?;
     if entries.is_empty() {
         return Err(format!(
@@ -1228,7 +1485,7 @@ fn read_corpus(path: &Path) -> Result<Vec<Vec<String>>, String> {
 /// Existing entries are kept exactly as they are — the corpus is append-only for
 /// the same reason `docs/rfc/` is: an entry that was removed because somebody
 /// believed the bug was gone is the entry that would have caught it coming back.
-fn record(path: &Path, report: &Report, commit: &str) -> Result<usize, String> {
+fn record(path: &Path, report: &Report, commit: &str, tree: Tree) -> Result<usize, String> {
     let existing = read_corpus(path).unwrap_or_default();
     let held: Vec<String> = existing.iter().map(|argv| argv.join(" ")).collect();
 
@@ -1252,15 +1509,40 @@ fn record(path: &Path, report: &Report, commit: &str) -> Result<usize, String> {
         }
         added += 1;
         text.push_str(&format!(
-            "\n# {}\n# found     {} — {}\n# commit    {commit}\n# under     {}\n# evidence  {}\n{argv}\n",
+            "\n# {}\n# found     {} — {}\n# commit    {commit}{}\n# under     {}\n# evidence  {}\n{argv}\n",
             "-".repeat(70),
             found.signature,
             found.what,
+            // The commit an entry is attributed to carries the same caveat the
+            // report's `repro` line does, and for the same reason: this file is
+            // shipped, so `# commit <sha>` is read months later by somebody who
+            // was not here, and an entry recorded from a modified tree was not
+            // produced by that commit. The argv below is unaffected — it is
+            // replayed against whatever tree replays it, which is the point of
+            // a corpus.
+            match tree {
+                Tree::Clean => "",
+                Tree::Dirty => " (plus uncommitted changes)",
+                Tree::Unstated => " (as named by the caller; the tree was not stated)",
+            },
             BUILT_WITH.unwrap_or("no deliberate defect; this tree, as it shipped"),
             found.evidence,
         ));
     }
-    if added > 0 || !path.exists() {
+    // Written whenever the bytes differ, and not only when an entry was added.
+    //
+    // That was the condition, and it made the sentence four lines above false.
+    // The header states the scenario set so that the set cannot drift from the
+    // table — but the header is only regenerated on a write, and a write only
+    // happened when a sweep *found* something. A scenario added to the table on
+    // a tree with nothing wrong with it therefore left the corpus stating a set
+    // that was one short, silently and for as long as nobody found a bug. It
+    // did: `deadline` was in `SCENARIOS` and absent from the shipped header
+    // until E1-R01 went looking, which is the whole of why a header claiming it
+    // cannot go stale has to be checked rather than believed. `corpus` is the
+    // check; this is the fix. RFC 0040, RFC 0055.
+    let unchanged = std::fs::read_to_string(path).is_ok_and(|previous| previous == text);
+    if !unchanged {
         std::fs::write(path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
     }
     Ok(added)
@@ -1338,4 +1620,44 @@ fn read_components(dir: Option<&Path>) -> Result<Deployment, String> {
 /// without needing a build to have happened first.
 fn deployment_for(scenario: &Scenario, dir: Option<&Path>) -> Result<Deployment, String> {
     if scenario.needs_components() { read_components(dir) } else { Ok(Deployment::default()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Tree, line};
+    use f_sim::scenario::SCENARIOS;
+    use f_sim::sweep::Trial;
+
+    /// The one thing a reproduction line is allowed to say about a tree.
+    ///
+    /// # Why this is a unit test and not left to `cargo xtask sweep --mutate`
+    ///
+    /// The harness does assert this, and it asserts the right half: it asks git
+    /// what tree it is standing in and requires the shape that answer implies.
+    /// But that means each half is only ever exercised where it is true — the
+    /// checkout form on a clean CI checkout, the bare form on a developer's
+    /// tree — so a change that broke the clean half would go green on every
+    /// local `verify` and be found by CI, which is the wrong end of the loop
+    /// for a defect in the line a stranger is told to paste. Both halves are
+    /// decided here by an argument rather than by the tree, so both are checked
+    /// wherever tests run. RFC 0055.
+    #[test]
+    fn a_reproduction_line_offers_a_checkout_only_from_a_stated_clean_tree() {
+        let trial = Trial::of(&SCENARIOS[0], 1);
+        let sha = "0123456789abcdef";
+
+        let clean = line(&trial, sha, Tree::Clean);
+        assert!(clean.starts_with(&format!("git switch --detach {sha} && ")), "{clean}");
+        assert!(clean.ends_with(&trial.command()), "{clean}");
+
+        // The two that claim nothing about the files produce the command and
+        // nothing in front of it. A `git switch` here would tell a reader to
+        // discard the work that produced the finding.
+        for unswitchable in [Tree::Dirty, Tree::Unstated] {
+            let printed = line(&trial, sha, unswitchable);
+            assert_eq!(printed, trial.command());
+            assert!(!printed.contains("git switch"), "{printed}");
+            assert!(!printed.contains(sha), "{printed}");
+        }
+    }
 }

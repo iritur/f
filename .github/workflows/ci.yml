@@ -218,6 +218,19 @@ jobs:
       # declaration anywhere, so a file-scope attribute is the only gate it can
       # carry, and `ring/tests/litmus.rs` is one of those files. RFC 0045.
       - run: cargo xtask lint-arch-tests
+      # E1-P07. `kernel/proofs` compiles `kernel/src/cap.rs` a second time, so
+      # that file now has a second set of module dependencies it must keep
+      # satisfying — and the crate is outside the workspace, so `cargo xtask
+      # test`, the `clippy --workspace` above and the `fmt --all` above all
+      # miss it. Without this step the only thing that notices a broken
+      # stand-in is the nightly `prove` job, twenty minutes long and hours
+      # after the person who wrote the line has gone. It needs no Kani: the
+      # harnesses are behind `cfg(kani)`, so this is `cap.rs` and three short
+      # files under the pinned toolchain, in the three feature configurations
+      # `prove` uses. It also re-checks that nightly.yml still says what
+      # E1-P07's exit rests on, which is the only half of *runs on a schedule*
+      # a machine in this repository can decide. RFC 0053.
+      - run: cargo xtask lint-proofs
 
   # The same suite on both architectures, and *the same command* on both, which
   # is the part that was missing.
@@ -496,6 +509,28 @@ jobs:
       # RFC 0051, which also records what the frame turned out to owe a second
       # driver.
       - run: cargo xtask net
+      # The **third** driver, and the first device that is not a pipe. Three
+      # boots of a display datapath: `inside` fills one buffer of a registered
+      # set with a pattern, submits one entry, and the driver turns it into six
+      # display commands that put the client's pixels on scanout zero — and this
+      # job then captures the emulator's own framebuffer over the monitor socket
+      # and requires it to hold those pixels. That capture is the reason this
+      # line is not like the two above it: a scanout has no read-back command in
+      # the 2D protocol, so nothing inside the machine can observe what is on the
+      # screen, and the kernel's own verdict stops at the commands the display
+      # accepted. `blank` is the identical client with the submission removed —
+      # the pixels are in guest memory for the whole boot and must not reach the
+      # display — and `escape` points the device one page past what the
+      # registration answered at the memory a display *reads*, which the
+      # remapping unit must fault on a read while the screen shows none of the
+      # client's bytes.
+      #
+      # It needs nothing this job does not already have: the emulator's monitor
+      # is a loopback socket this harness opens itself, and the machine is the
+      # same one every other boot here runs on with `-vga none` so that there is
+      # exactly one display in it. E1-B04, RFC 0054, which records what the frame
+      # turned out to owe a third driver and why the harness is part of the check.
+      - run: cargo xtask gpu
       # The same datapath, asked an ordering rather than an isolation question.
       # Three more boots of one client script: six batch reads are queued, a
       # hard-class read carrying a deadline arrives last, and the driver hands

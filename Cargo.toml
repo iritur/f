@@ -1,6 +1,23 @@
 [workspace]
 resolver = "3"
-members = ["abi", "env", "ring", "kernel", "user/init", "user/store", "user/virtio-blk", "user/virtio-net", "bench", "sim", "xtask"]
+members = ["abi", "env", "ring", "kernel", "user/init", "user/store", "user/virtio-blk", "user/virtio-net", "user/virtio-gpu", "bench", "sim", "xtask"]
+
+# The checker's crate, and it is excluded rather than absent for the reason RFC
+# 0022 gave the last one: a verification tool's toolchain is the tool's
+# business. `kernel/proofs` compiles `kernel/src/cap.rs` a second time under
+# the rustc `cargo kani setup` installs, which is not the one pinned above. A
+# member would be built by `cargo xtask test` under the pin, which buys nothing
+# and breaks on the day the two compilers disagree. `cargo xtask prove` is the
+# only thing that builds it, and deleting the directory is the whole of undoing
+# this. RFC 0053.
+#
+# `ring/proofs` is excluded for the same reason and reaches the crate it proves
+# a different way: `f-ring` is an ordinary `no_std` library that builds for the
+# host, so that crate takes it as a path dependency rather than compiling a file
+# out of it. The exclusion is still needed — the checker's rustc is still not
+# the pinned one — and `cargo xtask prove` is still the only thing that builds
+# it. RFC 0057.
+exclude = ["kernel/proofs", "ring/proofs"]
 
 [workspace.package]
 version = "0.0.1"
@@ -31,6 +48,12 @@ f-virtio-blk = { path = "user/virtio-blk", default-features = false }
 # property of *being a component*, not of being the block driver, and a reader
 # who wants to disagree should note that neither line had to be argued twice.
 f-virtio-net = { path = "user/virtio-net", default-features = false }
+# The third driver, on the same terms again. Three lines that differ only in a
+# name is no longer a finding, it is a shape — and RFC 0054 says so and declines
+# to fix it here for the reason it gives: what these three crates share is the
+# whole of the component-linked-by-the-frame arrangement, and a fourth crate
+# holding the shared half is a change to two closed tasks' evidence.
+f-virtio-gpu = { path = "user/virtio-gpu", default-features = false }
 # The same arrangement, one crate over and for a different reason:
 # `user/store/Cargo.toml` says which, and the frame links this so that
 # `f_store::report` has one definition rather than two.

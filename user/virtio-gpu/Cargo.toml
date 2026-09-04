@@ -1,0 +1,56 @@
+[package]
+name = "f-virtio-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The display driver, outside the frame. Speaks the modern virtio transport and copies nothing."
+
+# A library and not a binary, for the reason `user/init/Cargo.toml` states at
+# length and both other driver crates repeat: a binary needs an entry point,
+# naming one means `#[unsafe(no_mangle)]`, and that is an unsafe attribute a
+# crate forbidding unsafe code cannot write. `user/init/link.ld` finds the entry
+# by the section `component::start` was compiled into, which is why this crate's
+# entry has that path too — one script, one placement rule, one check, now
+# across four component crates rather than three.
+
+[dependencies]
+f-abi.workspace = true
+f-ring.workspace = true
+
+# No override. This crate inherits `unsafe_code = "forbid"` from the workspace,
+# and that inheritance is the subject of RFC 0033: a driver that touches device
+# registers and writes virtqueue descriptors, with no `unsafe` anywhere in it,
+# because `f_ring::device` discharges the obligation once on the frame's side of
+# the boundary. `cargo xtask lint-unsafe` fails the build if this stops being
+# true.
+#
+# RFC 0033 was written with one driver in it and RFC 0051 added a second without
+# a line changing in `ring/src/device.rs`. This is the third, and it is the
+# first that is not a pipe: a display controller takes structured commands and
+# owns a scanout. Not one line was added to `ring/src/device.rs` for it either,
+# which is the evidence RFC 0033 asked for and could not supply from one
+# example. RFC 0054 records what did have to change, which is shorter than a
+# reader would guess and is not where a reader would guess.
+[lints]
+workspace = true
+
+# The image half, on by default and turned off by the one crate that links this
+# as a library rather than building it into a component file.
+#
+# It exists because a `#[panic_handler]` is a lang item and there may be exactly
+# one in a linked artefact. `component::start` needs one — a component has no
+# serial port and no unwinder, so stopping is the whole handler — and the frame
+# already has its own. The frame links this crate for `routing`'s offsets and
+# `driver::Counters`' shape, so the two would collide; `kernel/Cargo.toml` turns
+# this off and says why.
+#
+# *Reversal:* the day nothing links this as a library, `default-features =
+# false` disappears from the kernel's manifest and this feature stops earning
+# its keep. Three crates now carry this identical paragraph, which is the
+# argument for the routing layout moving into `abi/` rather than for any of them
+# changing. RFC 0051 said that at two and RFC 0054 says it again at three, which
+# is the last time it is worth saying rather than doing.
+[features]
+default = ["image"]
+image = []

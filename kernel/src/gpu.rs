@@ -1,86 +1,71 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! The network datapath, end to end: a second driver outside the frame, a client
-//! with a registered buffer, a real device, a real host network backend, and one
-//! frame that goes out and comes back into memory the driver never touched.
+//! The display datapath, end to end: a third driver outside the frame, a client
+//! with a registered buffer full of pixels, a real display controller, and a
+//! picture that leaves the machine.
 //!
 //! # What this file is, and the one thing it is evidence of
 //!
-//! It is the **supervisor's half** of E1-B03. `user/virtio-net` is the driver:
-//! the transport handshake, two virtqueues, the registration table and the
-//! service loop, in a crate that forbids `unsafe` and holds no mapping of any
-//! client's memory. What is here is everything a supervisor does around one —
-//! find the device, program its domain, route it four register windows and one
-//! untyped region, stand a client up on the other end of a ring, and judge what
-//! happened.
+//! It is the **supervisor's half** of E1-B04. `user/virtio-gpu` is the driver:
+//! the transport handshake, one virtqueue, the registration table, six display
+//! commands and the service loop, in a crate that forbids `unsafe` and holds no
+//! mapping of any client's memory. What is here is everything a supervisor does
+//! around one — find the device, program its domain, route it four register
+//! windows and one untyped region, stand a client up on the other end of a ring,
+//! and judge what happened.
 //!
-//! It is not a second implementation of the driver, and it is not a second
-//! implementation of `kernel/src/blk.rs` either — though it looks like one, and
-//! that resemblance is the finding this task exists to produce.
-//! `docs/rfc/0051-a-second-driver-is-what-says-the-shape-is-a-shape.md` counts
-//! the resemblance exactly: what a second driver could reuse unchanged, what it
-//! had to write again, and what it found that one driver could not.
+//! **And here it cannot finish the judging, which is the difference.**
+//! `kernel/src/blk.rs` decides whether a sector went out and came back by
+//! reading the client's own memory. `kernel/src/net.rs` decides whether a frame
+//! arrived by reading the client's own memory and the unit's fault registers.
+//! Neither of those is available for a scanout: the 2D display protocol has no
+//! command that reads a resource back, so **nothing inside this machine can
+//! observe what is on the screen**. Every counter this file prints is a
+//! statement about commands the display *accepted*, and a display that accepted
+//! all six and drew nothing would move every one of them.
 //!
-//! **This file is the largest single entry on the *written again* list.**
-//! [`Registers`], [`Supervising`], [`Reported`], [`declared`] and `order_for`
-//! are `kernel/src/blk.rs`'s, adapted only in which manifest name they look for
-//! and which counters they read. That duplication is deliberate and it is
-//! bounded — the same trade `kernel/src/arch/x86_64/virtio.rs` made about
-//! `dma.rs`'s duplicated capability walk, and for a sharper reason: `blk.rs` is
-//! the evidence a closed task's exit rests on, and refactoring it to share a
-//! supervisor with a later task would change closed evidence for the
-//! convenience of the later task. *What would merge them is a third driver*,
-//! which is E1-B04, at which point the shared half moves out of both and neither
-//! of them is closed evidence any more.
+//! So this file computes one number the harness can check its own observation
+//! against — [`Report::display_hash`], taken over the client's own pixels in the
+//! order a screen capture would report them — prints it, and then **holds the
+//! machine still** while `cargo xtask gpu` captures the framebuffer from outside
+//! the emulator. RFC 0054 argues why that is the honest reading of the exit
+//! criterion and why a driver's own report cannot stand in for it.
 //!
 //! # Three halves, and the middle one is the control
 //!
-//! `net=inside` registers the client's page, posts one receive buffer, forms an
-//! ARP request for the gateway by hand, transmits it, and requires an ARP
-//! **reply addressed to the MAC this boot invented** to land in the registered
-//! buffer. That last clause is what makes it a demonstration rather than a
-//! coincidence: the host's user-mode network backend answers ARP for its own
-//! address, and it cannot have produced a reply carrying a target hardware
-//! address it was never told.
+//! `gpu=inside` registers the client's page, fills one buffer of it with a
+//! pattern, and submits one `show`. The driver creates a resource, attaches the
+//! client's buffer as its backing, transfers, sets scanout zero, flushes and
+//! detaches. The harness must then find that pattern on the host's display.
 //!
-//! `net=silent` is the identical client with the transmit removed. The receive
-//! buffer is posted and nothing is sent, and **nothing may land**. Without it
-//! `inside` establishes only that a frame arrived, not that this driver's
-//! transmit caused it — and a link with an unsolicited broadcast on it would
-//! make the first half pass on its own. It is also the only half that exercises
-//! the teardown obligation the receive direction creates: a buffer posted and
-//! never filled has to be given back as a cancellation, and
-//! `f_virtio_net::driver::Driver::cancel` argues why RFC 0024 leaves a client no
-//! other exit.
+//! `gpu=blank` is the identical client with the `show` removed. The pattern is
+//! written into the registered buffer and **nothing is submitted**, so nothing
+//! may reach the screen. That is the control the exit criterion needs and it is
+//! sharper than a control that wrote nothing: the pixels are in guest memory the
+//! whole time, and a harness that found them on the display would have found
+//! them by some route other than the ring.
 //!
-//! `net=escape` transmits exactly as `inside` does and has the driver add
-//! [`BEYOND`] to the address the registration answered before it becomes a
-//! **receive** descriptor. Nothing is taken away from the driver; it points the
-//! device at memory it never held, and the device's next act would be to *write*
-//! there. The remapping unit must fault it, nothing may land, and the client's
-//! buffer must still hold its poison.
+//! `gpu=escape` submits the identical `show` and has the driver add [`BEYOND`]
+//! to the address the registration answered before it becomes the backing entry
+//! the display reads out of. The remapping unit must fault it — on a **read**,
+//! which is the direction a display controller works in — the display must
+//! refuse the command, and nothing may appear.
 //!
-//! The block driver's `escape` and this one are the same provocation in
-//! different directions and the difference is worth the second boot: there, an
-//! unrefused escape is a device *reading* memory it was not granted, bounded by
-//! a request that was outstanding. Here it is a device *writing* into memory it
-//! was not granted, at a moment nothing in this system chose, for as long as the
-//! buffer stays posted.
+//! The three provocations in this tree now cover the three things a device can
+//! do with an address it should not have: `blk` reads memory it was not granted
+//! into a client's buffer, `net` writes into memory nobody granted at a moment
+//! nothing chose, and this one **reads memory it was not granted and puts it on
+//! a screen**. That last one is the only one of the three whose consequence
+//! leaves the machine.
 //!
 //! # What the demonstration does not show
 //!
-//! It uses one host backend, one frame, one protocol and no stack. It says
-//! nothing about throughput, nothing about many buffers in flight, nothing about
-//! a frame larger than the one it sends, and nothing about what happens when the
-//! link is busy — `f_virtio_net::driver::Counters::spun` is published so that
-//! *how long this waited* is a number rather than an impression, and it is the
-//! argument for E1-B09 rather than a measurement of anything.
-//!
-//! It also cannot show that a transmit was **delivered**. virtio-net's transmit
-//! queue publishes a used entry with no status anywhere, so a frame the link
-//! dropped and a frame delivered intact are the same completion — `sim/src/net.rs`
-//! models exactly that silence. What stands in for delivery here is the reply:
-//! the only evidence this boot has that the frame left the machine is that
-//! something outside it answered.
+//! One frame, one format, one scanout, sixteen pixels square, no window system.
+//! It says nothing about refresh rate, nothing about partial updates, nothing
+//! about more than one client drawing at once, and nothing about what a display
+//! does when two resources want the same scanout. It also cannot show that a
+//! *person* would see the picture: what it shows is that the emulator's display
+//! surface holds the client's bytes, which is as far outside the machine as this
+//! tree can currently reach.
 
 #![deny(
     clippy::indexing_slicing,
@@ -97,8 +82,8 @@ use f_abi::{ABI_VERSION, Negotiated, class, error, feature};
 use f_ring::device::Window;
 use f_ring::registry::{Domains, registration};
 use f_ring::{BufferSet, Collector, Consumer, Fixed, Mapping, Poster, Producer};
-use f_virtio_net::driver;
-use f_virtio_net::routing;
+use f_virtio_gpu::driver;
+use f_virtio_gpu::routing;
 
 use crate::arch::x86_64::multiboot::BootInfo;
 use crate::arch::x86_64::paging::{self, AddressSpace, Features};
@@ -111,36 +96,37 @@ use crate::iommu;
 use crate::mem::{FRAME_SIZE, Frame, FrameAllocator, Order};
 
 /// The one address a driver component holds as a constant, agreed — for the
-/// second time, in a second crate.
+/// third time, in a third crate.
 ///
-/// `f_virtio_net::routing::AT` is written down in the component and
+/// `f_virtio_gpu::routing::AT` is written down in the component and
 /// `kernel::process::BLK_BOARD` in the frame, and they are linked separately.
-/// The kernel is the one artefact that links both definitions, so the agreement
+/// The kernel is the one artefact that links every definition, so the agreement
 /// is a check rather than a comment.
 ///
-/// **That there are now two of these assertions is the point of the file they
-/// are in.** The frame builds one driver shape, so every driver scheduled into
-/// it finds its board at the same address, and each driver crate holds that
-/// address as its own constant with no way to see the others. Two crates, two
-/// assertions, and a third driver adds a third. RFC 0051 says where the constant
-/// should live instead and why moving it is not this task's to do.
+/// **Three of these assertions is what RFC 0051 said should stop happening at
+/// three.** It has not stopped, and RFC 0054 says why: the layout belongs in
+/// `abi/`, moving it touches two closed tasks' evidence, and a third assertion
+/// costs one line while the move costs a review of `user/virtio-blk`.
 const _: () = assert!(
     crate::process::BLK_BOARD == routing::AT,
-    "the frame and the network driver disagree about where the routing page is"
+    "the frame and the display driver disagree about where the routing page is"
 );
 
-/// The two drivers' routing pages are told apart by their magic and by nothing
+/// The three drivers' routing pages are told apart by their magic and by nothing
 /// else.
 ///
 /// They are mapped at the same address, in the same shape, by the same loader.
-/// If the two magics were equal, a build that routed one driver's supervisor at
-/// the other driver's image would find a page whose magic matched and whose
-/// fields meant something else — a driver reading another driver's board as its
-/// own, with no refusal anywhere. The assertion is here rather than in either
-/// component because this is the only place both constants exist at once.
+/// If any two magics were equal, a build that routed one driver's supervisor at
+/// another driver's image would find a page whose magic matched and whose fields
+/// meant something else. The assertion is here rather than in any component
+/// because this is the only place all three constants exist at once — and it
+/// names all three rather than only the new one, because the cheap thing to get
+/// wrong at three is to check the third against the first and forget the second.
 const _: () = assert!(
-    routing::MAGIC != f_virtio_blk::routing::MAGIC,
-    "the two drivers' routing pages are mapped at one address and must not answer to one magic"
+    routing::MAGIC != f_virtio_blk::routing::MAGIC
+        && routing::MAGIC != f_virtio_net::routing::MAGIC
+        && f_virtio_blk::routing::MAGIC != f_virtio_net::routing::MAGIC,
+    "the drivers' routing pages are mapped at one address and must not answer to one magic"
 );
 
 /// Entries on the client's data ring.
@@ -148,128 +134,160 @@ const _: () = assert!(
 /// Sixteen, which is what fits one frame beside its completion ring and its
 /// index ring — the same number and the same reason as a control ring's. The
 /// manifest declares two hundred and fifty-six, which is what a real client gets
-/// when a component pays for its own channel; this demonstration submits four
+/// when a component pays for its own channel; this demonstration submits three
 /// entries in total.
 const ENTRIES: u32 = 16;
 
 /// Buffers the client's registered set holds.
 ///
-/// Two: one to receive into and one to transmit from. They have to be different
-/// buffers and the reason is sharper here than on the block driver — the device
-/// is *writing* one of them while the client is filling the other, so a single
-/// buffer would be a client and a network card racing over the same bytes with
-/// nothing between them.
-const BUFFERS: u32 = 2;
-
-/// Which buffer of the set the device writes into. Unit: buffers, zero-based.
+/// Four, over one page, so each is exactly [`FRAME_BYTES`] and the first one
+/// starts at the base of the page. That is what makes
+/// [`Report::expected_fault`] the registration's own answer plus [`BEYOND`] with
+/// no per-buffer arithmetic between the boot log and the unit's fault record.
 ///
-/// Zero, so that the address a registration answers for it is the base of the
-/// client's page — which makes [`Report::expected_fault`] the registration's own
-/// answer plus [`BEYOND`], with no per-buffer arithmetic between the boot log
-/// and the unit's fault record.
-const SINK: usize = 0;
+/// Three of them are never used, and that is deliberate rather than untidy: a
+/// set with one buffer in it is a set where *the buffer* and *the set* are the
+/// same object, and every off-by-one in the registration path would be invisible.
+const BUFFERS: u32 = 4;
 
-/// Which buffer the client transmits from. Unit: buffers, zero-based.
-const SOURCE: usize = 1;
+/// Which buffer of the set holds the pixels. Unit: buffers, zero-based.
+const CANVAS: usize = 0;
 
-/// The byte the sink is filled with before anything is posted.
+/// How wide the frame this boot draws is. Unit: pixels.
 ///
-/// Not a byte an ARP reply contains, so a sink still full of it is a sink
-/// nothing wrote. The same trick `dma.rs` uses and for the same reason: *the
-/// transfer was refused* and *the transfer happened and wrote nothing* are
-/// different claims, and only one of them is an exit criterion.
+/// Sixteen, and small on purpose. What has to be true of this number is that the
+/// bytes it produces fit one buffer of a one-page registration, that the picture
+/// is large enough for a *transposed* or *shifted* capture to disagree with the
+/// original, and that the harness can hold the whole of it in memory to hash. A
+/// larger frame would test nothing further and would put a longer wait between
+/// the flush and the capture.
+const WIDTH: u32 = 16;
+
+/// How tall it is. Unit: pixels.
+///
+/// The same as [`WIDTH`], which would normally be a defect in a fixture — a
+/// square frame cannot tell a transposed image from a correct one. It is not one
+/// here because the *pattern* is not symmetric: [`pixel`] is a different colour
+/// at `(x, y)` than at `(y, x)` for every pixel off the diagonal, so a capture
+/// with the axes swapped hashes differently. Saying that here is cheaper than
+/// making the frame oblong and leaving the reason to be rediscovered.
+const HEIGHT: u32 = 16;
+
+/// Bytes one pixel occupies, in the one format the driver creates resources in.
+/// Unit: bytes.
+const BYTES_PER_PIXEL: u32 = driver::BYTES_PER_PIXEL;
+
+/// Bytes of pixels one frame is. Unit: bytes.
+const FRAME_BYTES: u32 = WIDTH * HEIGHT * BYTES_PER_PIXEL;
+
+const _: () = assert!(FRAME_BYTES * BUFFERS <= FRAME_SIZE as u32);
+
+/// The byte the whole page is filled with before the pattern is written.
+///
+/// Not a byte the pattern contains at any position where it matters, so a buffer
+/// still full of it is a buffer nothing wrote. It is also what the *unused*
+/// three buffers of the set keep, which is what makes a display that transferred
+/// the wrong buffer produce a hash that does not match rather than a picture
+/// that is merely wrong.
 const POISON: u8 = 0xA5;
 
-/// The interface address this boot invents.
+/// The colour of the pixel at `(x, y)`, as the four bytes it occupies in memory.
 ///
-/// Invented rather than read out of the device, because `VIRTIO_NET_F_MAC` is
-/// not negotiated — `f_virtio_net::transport` says why — and because an invented
-/// address is *better evidence*. The host's network backend cannot produce a
-/// reply carrying a target hardware address it was never told, so a reply
-/// carrying this one is a reply to the request this boot sent.
+/// # Why a gradient rather than a flag or a solid colour
 ///
-/// The first three bytes are the prefix QEMU uses for its own guests, which
-/// makes a frame captured on the host recognisable as this machine's.
-const OUR_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0xF0, 0x0D, 0x01];
-
-/// The protocol address this boot claims.
+/// Because the check has to fail for a picture that is *nearly* right. A solid
+/// colour survives a transposition, a one-row shift, a wrong stride and a
+/// half-height transfer; a gradient in three channels survives none of them. The
+/// exclusive-or in the blue channel is what makes it asymmetric, which is what
+/// lets [`WIDTH`] and [`HEIGHT`] be equal without the fixture losing the ability
+/// to notice swapped axes.
 ///
-/// The address the host's user-mode network backend assigns a guest, which is
-/// what makes the backend willing to answer at all. It is not configured
-/// anywhere on this machine and nothing here has an IP stack: it is four bytes
-/// in a frame this file forms by hand.
-const OUR_IP: [u8; 4] = [10, 0, 2, 15];
-
-/// The protocol address the request asks about: the backend's own gateway.
-const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
-
-/// Ethernet's type for address resolution.
-const ETHERTYPE_ARP: u16 = 0x0806;
-
-/// An address-resolution request.
-const ARP_REQUEST: u16 = 1;
-
-/// An address-resolution reply.
-const ARP_REPLY: u16 = 2;
-
-/// Bytes in the frame this boot forms: an Ethernet header and an ARP body over
-/// Ethernet and IPv4. Unit: bytes.
-const FRAME_BYTES: u32 = 42;
-
-/// Where each field of that frame is. Unit: bytes from the frame's first.
-mod at {
-    /// The destination hardware address.
-    pub const DESTINATION: usize = 0;
-    /// The source hardware address.
-    pub const SOURCE: usize = 6;
-    /// What the payload is.
-    pub const ETHERTYPE: usize = 12;
-    /// Which kind of hardware address the body names.
-    pub const HARDWARE: usize = 14;
-    /// Which kind of protocol address.
-    pub const PROTOCOL: usize = 16;
-    /// How long a hardware address is.
-    pub const HARDWARE_LEN: usize = 18;
-    /// How long a protocol address is.
-    pub const PROTOCOL_LEN: usize = 19;
-    /// Request or reply.
-    pub const OPERATION: usize = 20;
-    /// The sender's hardware address.
-    pub const SENDER_MAC: usize = 22;
-    /// The sender's protocol address.
-    pub const SENDER_IP: usize = 28;
-    /// The target's hardware address.
-    pub const TARGET_MAC: usize = 32;
-    /// The target's protocol address.
-    pub const TARGET_IP: usize = 38;
+/// # The one place two definitions of a format meet
+///
+/// `user/virtio-gpu/src/driver.rs` names the format
+/// (`VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM`) and this function is what knows what
+/// that means in memory: four bytes, blue first, then green, then red, then a
+/// byte the display ignores. [`rgb_at`] is the same knowledge in the other
+/// direction — how the bytes come back out when a screen capture reports them —
+/// and the pair of them is the only thing in this tree that could be wrong about
+/// a pixel layout without anything else noticing.
+///
+/// What keeps that honest is that the harness holds **neither** of them:
+/// `cargo xtask gpu` hashes the bytes it captured and compares the number with
+/// the one this file printed, so a wrong belief about the layout here produces a
+/// hash that does not match a capture rather than one that agrees with itself.
+const fn pixel(x: u32, y: u32) -> [u8; 4] {
+    // Sixteen steps of eight, so the whole of each channel's range below 128 is
+    // used and no channel is ever zero everywhere. Truncation is intended and
+    // cannot lose anything: `x` and `y` are below `WIDTH` and `HEIGHT`.
+    #[allow(clippy::cast_possible_truncation)]
+    let (red, green, blue) = ((x * 8) as u8, (y * 8) as u8, ((x ^ y) * 8) as u8);
+    [blue, green, red, 0]
 }
 
-/// How many turns the driver's loop may spend with nothing arriving.
+/// The three bytes a screen capture reports for the pixel whose four bytes are
+/// `memory`.
 ///
-/// Told to the component rather than chosen by it, because how long to wait for
-/// a network is a property of the machine and its backend, which the frame knows
-/// and a component cannot. It is a **backstop and not the mechanism**: on every
-/// half of this demonstration the frame's own client gives up first and posts a
-/// stop, so a run that reached this number is a run where the frame stopped
-/// serving — which is a different failure and wants a different answer.
+/// The inverse of [`pixel`]'s layout knowledge, and stated as its own function
+/// so that the two are beside each other: a capture reports red, green and blue
+/// in that order, and the fourth byte of the pixel is not reported at all.
+const fn rgb_at(memory: [u8; 4]) -> [u8; 3] {
+    [memory[2], memory[1], memory[0]]
+}
+
+/// Hash the pixels of a frame as a screen capture would report them.
+///
+/// FNV-1a over sixty-four bits, which is chosen for exactly one property: it is
+/// short enough to implement identically in two places without either copy being
+/// a thing anybody has to check. `cargo xtask gpu` holds the other copy and runs
+/// it over the bytes it captured from the emulator.
+///
+/// **It is not a checksum of the client's buffer**, and the difference is the
+/// whole point: what is hashed is the buffer *transformed the way a display
+/// would report it*, so a match means the picture on the host is the picture the
+/// client owns, and not merely that some bytes arrived.
+///
+/// A hash and not a byte-for-byte comparison, because the alternative is putting
+/// a kilobyte of pixels in a boot log. What it costs is stated rather than
+/// hidden: this is not a cryptographic hash and a deliberate collision is
+/// constructible. The adversary here is a defect and not an attacker — nothing
+/// on the far side of this comparison is chosen by anybody — and the day
+/// something adversarial writes to a framebuffer, this is a comparison over the
+/// bytes themselves and the boot log is not where it happens.
+fn hash_frame(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut at = 0;
+    while at + BYTES_PER_PIXEL as usize <= bytes.len() {
+        let Some(chunk) = bytes.get(at..at + BYTES_PER_PIXEL as usize) else { break };
+        let mut memory = [0u8; 4];
+        for (slot, byte) in memory.iter_mut().zip(chunk) {
+            *slot = *byte;
+        }
+        for byte in rgb_at(memory) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        at += BYTES_PER_PIXEL as usize;
+    }
+    hash
+}
+
+/// How many turns the driver's loop may spend with nothing on either ring.
+///
+/// Told to the component rather than chosen by it, and it is a **backstop and
+/// not the mechanism**: on every half of this demonstration the frame's own
+/// client gives up first and posts a stop, so a run that reached this number is
+/// a run where the frame stopped serving — a different failure, wanting a
+/// different answer. `f_virtio_gpu::routing::stopped::IDLE` is its own outcome
+/// for exactly that reason.
 ///
 /// A count and not a duration, because RFC 0004 offers a component no clock and
-/// because a count is the same number on every host, which is what keeps
-/// `cargo xtask trace`'s fixture a fixture.
-///
-/// A hundred million, and the size is the argument. It has to be **larger than
-/// anything the frame's own bounds allow**, or it stops being a backstop and
-/// becomes the mechanism: the `silent` half was measured spinning one million
-/// nine hundred thousand turns inside [`RECEIVE_MICROS`], so a bound anywhere
-/// near that would fire before the frame's stop and the control would be
-/// measuring this constant rather than an empty link. What catches a driver that
-/// is genuinely stuck is [`EXIT_MICROS`] and the harness's boot timeout, both of
-/// which are the frame's and neither of which a component can outlast.
-///
+/// because a count is the same number on every host. A hundred million, which is
+/// larger than anything the frame's own bounds allow.
 /// Unit: turns.
-const RECEIVE_SPINS: u64 = 100_000_000;
+const IDLE_SPINS: u64 = 100_000_000;
 
-/// The deadline the client's transmit carries.
+/// The deadline the client's `show` carries.
 /// Unit: nanoseconds, monotonic, in the channel's epoch.
 ///
 /// A millisecond, which is outside [`FLOOR_NS`] by two orders of magnitude, so
@@ -278,13 +296,12 @@ const RECEIVE_SPINS: u64 = 100_000_000;
 /// which of the three ways, so the frame cannot tell a class demotion from a
 /// floored deadline. This constant is what leaves only one of them possible, and
 /// it is an argument rather than a check — the check would need a field on the
-/// completion, which is an ABI change under RFC 0011. The same constant and the
-/// same argument as `kernel/src/blk.rs`'s, because it is the same one bit.
+/// completion, which is an ABI change under RFC 0011.
 const HARD_DEADLINE_NS: u64 = 1_000_000;
 
 /// The floor the driver is told it needs. Unit: nanoseconds.
 ///
-/// Ten microseconds, the same figure the block datapath routes and for the same
+/// Ten microseconds, the same figure both other datapaths route and for the same
 /// reason: what it bounds on this boot is nothing, because a component has no
 /// clock and the arrival it floors from is zero. It is routed anyway, because a
 /// frame that left the field at zero would be telling the driver it needs no
@@ -293,25 +310,31 @@ const HARD_DEADLINE_NS: u64 = 1_000_000;
 const FLOOR_NS: u64 = 10_000;
 
 /// The manifest this datapath routes for, by name.
-///
-/// A name and not an index, because the loader's module order is a contract
-/// about `user/init` and about nothing else. The bytes are what `manifest.toml`'s
-/// `name` compiles to.
-const DRIVER: &[u8] = b"virtio-net";
+const DRIVER: &[u8] = b"virtio-gpu";
 
 /// The need in that manifest that names the register pages.
 const NEED_MMIO: &[u8] = b"mmio";
 
-/// The need that names the untyped region the driver splits into its queues.
+/// The need that names the untyped region the driver splits into its queue.
 const NEED_QUEUES: &[u8] = b"queues";
 
 /// The rights a component holds over memory it means to hand to a device.
 ///
 /// `GRANT` is the load-bearing one and [`iommu::Grant::map`] argues why: putting
 /// a page in a device's domain is a transfer to something the capability system
-/// does not mediate. `WRITE` because a receive is the device writing — which on
-/// this driver is not an incidental half of the story but the whole clause the
-/// task turns on.
+/// does not mediate.
+///
+/// `WRITE` is here and **should not need to be**, which is RFC 0051's second gap
+/// arriving for the second time and from the other side. A display controller
+/// only ever *reads* a client's backing — there is no 2D command that writes one
+/// — so this registration is the clearest case in the tree of a set that wants to
+/// be device-read-only and has no field to say so. `iommu::Grant::map` derives
+/// writability from the capability's own rights, so a client that held its
+/// canvas through a read-only `Frame` would get a read-only translation and this
+/// datapath would still work. That is the workaround RFC 0051 named as available
+/// today, and it is deliberately **not** taken here: taking it would make this
+/// datapath prove something about a careful client rather than about the ABI,
+/// and the gap would stop being visible in the one place it is easiest to see.
 const GRANTABLE: u8 = rights::READ | rights::WRITE | rights::GRANT;
 
 /// How far past a registration's answer the `escape` half points the device.
@@ -325,15 +348,6 @@ pub const BEYOND: u64 = FRAME_SIZE;
 /// How long the frame waits for one completion from a driver it is a client of.
 /// Unit: microseconds.
 const ANSWER_MICROS: u64 = 5_000_000;
-
-/// How long it waits for a frame that may never come. Unit: microseconds.
-///
-/// The same five seconds, and it is used in two opposite ways: on `inside` a
-/// bound that passes is a failure, and on `silent` and `escape` a bound that
-/// passes is the result. One number for both, because a control that waited less
-/// than the experiment would be a control that proves only that it was more
-/// impatient.
-const RECEIVE_MICROS: u64 = 5_000_000;
 
 /// How long it waits for the core afterwards. Unit: microseconds.
 const EXIT_MICROS: u64 = 5_000_000;
@@ -371,7 +385,8 @@ pub enum Trouble {
     Geometry,
     /// A registration was refused. Carries the packed refusal.
     Registration(i32),
-    /// A transmit or a receive was refused. Carries the packed refusal.
+    /// A `show` was refused on a half where it had to be served. Carries the
+    /// packed refusal.
     Transfer(i32),
     /// The frame's own count of what it took and what it gave back disagreed.
     Leaked,
@@ -391,21 +406,6 @@ pub enum Trouble {
     /// The driver's core was still holding its job when the frame's bound
     /// passed. Carries that bound. Unit: microseconds.
     Overdue(u64),
-    /// A frame was required and none arrived inside the frame's own bound.
-    /// Carries that bound. Unit: microseconds.
-    ///
-    /// **A bound and not a finding**, which is the whole reason it is a variant
-    /// rather than a `landed` left false. [`RECEIVE_MICROS`] is read two
-    /// opposite ways on this demonstration — on `silent` and `escape` a bound
-    /// that passes is the *result*, and on `inside` it is a failure — and
-    /// review found the diagnosis had only been split one way: a slow runner and
-    /// a broken receive path both printed *nothing came back on the receive
-    /// queue*, under the same heading as every failure the frame actually
-    /// observed. This is what puts a receive that ran out of time under the same
-    /// paragraph as every other wall-clock bound in this file, which says
-    /// plainly that a red here is a wedged component or a machine slower than
-    /// the number.
-    NoFrame(u64),
 }
 
 impl Trouble {
@@ -424,9 +424,9 @@ impl Trouble {
             Self::Channel(_) => "the client's data ring could not be laid out or bound",
             Self::Geometry => "the client's region does not divide into the buffers declared",
             Self::Registration(_) => "the driver refused to register the client's buffer set",
-            Self::Transfer(_) => "the driver refused an operation that was supposed to be served",
+            Self::Transfer(_) => "the driver refused a show that was supposed to be served",
             Self::Leaked => "the demonstration's frames did not all come back",
-            Self::NoManifest => "no boot module declares the virtio-net component",
+            Self::NoManifest => "no boot module declares the virtio-gpu component",
             Self::Manifest => {
                 "the driver's manifest and this machine disagree about what has to be routed"
             }
@@ -436,14 +436,13 @@ impl Trouble {
             }
             Self::NoAnswer(_) => "the driver did not answer a completion inside the bound",
             Self::Overdue(_) => "the driver's core did not report finished inside the bound",
-            Self::NoFrame(_) => "no frame reached the client's buffer inside the bound",
         }
     }
 
     /// The wall-clock bound this refusal is, when it is one.
     ///
-    /// Three of these variants are not findings: they are spins that ran out of
-    /// a number derived from `tsc_khz`, so they fire for a component that is
+    /// Two of these variants are not findings: they are spins that ran out of a
+    /// number derived from `tsc_khz`, so they fire for a component that is
     /// wedged and for a runner slower than the number alike, and nothing here
     /// can tell those apart. Printing them under the same sentence as the rest
     /// is how a slow CI machine comes to be read as a datapath defect.
@@ -451,7 +450,7 @@ impl Trouble {
     #[must_use]
     pub const fn bound(self) -> Option<u64> {
         match self {
-            Self::NoAnswer(micros) | Self::Overdue(micros) | Self::NoFrame(micros) => Some(micros),
+            Self::NoAnswer(micros) | Self::Overdue(micros) => Some(micros),
             _ => None,
         }
     }
@@ -461,7 +460,7 @@ impl Trouble {
 ///
 /// Read out of the record `cargo xtask component` compiled, on every run, rather
 /// than repeated as constants here. That is the whole point of the detour:
-/// `user/virtio-net/manifest.toml` was written before the driver *and before this
+/// `user/virtio-gpu/manifest.toml` was written before the driver *and before this
 /// file*, and a datapath that routed numbers of its own choosing would leave the
 /// manifest as decoration.
 #[derive(Clone, Copy, Debug)]
@@ -471,12 +470,10 @@ pub struct Declared {
     pub id: ContentId,
     /// Register pages the manifest routes. Unit: pages.
     pub frames: u32,
-    /// Untyped bytes it routes for the queues. Unit: bytes.
+    /// Untyped bytes it routes for the queue. Unit: bytes.
     pub bytes: u64,
-    /// The reservation class the manifest declares, as `f_abi::class` reads it —
-    /// the ceiling this component is admitted for. Read out of the record like
-    /// everything else here and never written down in the frame, for the reason
-    /// RFC 0025 bound 2 gives about ceilings. Unit: none — a class ordinal.
+    /// The reservation class the manifest declares, as `f_abi::class` reads it.
+    /// Unit: none — a class ordinal.
     pub admitted: u16,
     /// The component's own image, out of the same component file.
     pub image: &'static [u8],
@@ -531,16 +528,15 @@ pub unsafe fn declared(boot: &BootInfo) -> Result<Declared, Trouble> {
 /// Which of the three experiments a run is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Half {
-    /// A receive buffer is posted, an ARP request is transmitted, and the reply
-    /// must land in the registered buffer. The positive control, without which
-    /// neither result below proves anything.
+    /// The client fills a registered buffer and submits one `show`. The picture
+    /// must reach the host's display.
     Inside,
-    /// The identical client with the transmit removed. Nothing may land, and the
-    /// posted buffer must come back as a cancellation.
-    Silent,
-    /// The transmit happens and the driver points the device past what the
-    /// registration answered before the address becomes a receive descriptor.
-    /// The unit must fault it and nothing may land.
+    /// The identical client with the `show` removed. The pixels are in guest
+    /// memory the whole time and nothing may reach the display.
+    Blank,
+    /// The `show` happens and the driver points the device past what the
+    /// registration answered before the address becomes the resource's backing.
+    /// The unit must fault it on a read and nothing may appear.
     Escape,
 }
 
@@ -550,26 +546,26 @@ impl Half {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Inside => "inside",
-            Self::Silent => "silent",
+            Self::Blank => "blank",
             Self::Escape => "escape",
         }
     }
 
-    /// Does this half put a frame on the link?
+    /// Does this half submit a `show`?
     #[must_use]
-    pub const fn transmits(self) -> bool {
+    pub const fn shows(self) -> bool {
         matches!(self, Self::Inside | Self::Escape)
     }
 
-    /// Must a frame come back?
+    /// Must the picture reach the display?
     ///
     /// True on exactly one half, and that is the design. The other two are the
-    /// two different ways a frame can fail to arrive — nothing was sent, and
-    /// something was sent and the unit refused where it was to be written — and
-    /// a suite that could not tell those apart would be claiming one of them
-    /// while showing the other.
+    /// two different ways a picture can fail to appear — nothing was submitted,
+    /// and something was submitted and the unit refused where the pixels were to
+    /// be read from — and a suite that could not tell those apart would be
+    /// claiming one of them while showing the other.
     #[must_use]
-    pub const fn expects_frame(self) -> bool {
+    pub const fn expects_picture(self) -> bool {
         matches!(self, Self::Inside)
     }
 
@@ -585,9 +581,10 @@ impl Half {
 
     /// Which of the component's lives this half asks for.
     ///
-    /// Two and not three: `inside` and `silent` differ in what the *client*
-    /// does and not in what the driver does at all, which is what makes the
-    /// second a control for the first. Unit: none — a selector ordinal.
+    /// Two and not three: `inside` and `blank` differ in what the *client* does
+    /// and not in what the driver does at all, which is what makes the second a
+    /// control for the first.
+    /// Unit: none — a selector ordinal.
     #[must_use]
     pub const fn selector(self) -> u32 {
         match self {
@@ -615,42 +612,30 @@ pub struct Report {
     pub registered_at: u64,
     /// Whether a registration of a capability carrying no `GRANT` was refused.
     pub refused_without_grant: bool,
-    /// Whether the transmit completed without a refusal.
+    /// Whether the `show` completed without a refusal.
     ///
-    /// **Not evidence of delivery.** virtio-net's transmit queue answers with no
-    /// status, so this says the device took the frame and nothing more. What
-    /// stands in for delivery on this boot is [`Report::landed`].
-    pub transmitted: bool,
-    /// Whether a receive completion arrived carrying a frame.
-    pub landed: bool,
-    /// How many bytes of frame that completion reported. Unit: bytes.
-    pub frame_bytes: u32,
-    /// Whether what landed is an ARP reply from the gateway addressed to
-    /// [`OUR_MAC`].
+    /// **Not evidence that anything is on the screen.** It says the display
+    /// accepted six commands. What stands in for the picture is
+    /// [`Report::display_hash`] and the harness's own capture.
+    pub shown: bool,
+    /// The hash of the client's pixels, as a screen capture would report them.
     ///
-    /// Read out of the client's own buffer rather than inferred from a
-    /// completion, because a completion is evidence the device finished and
-    /// never evidence that bytes moved — and because the target hardware address
-    /// is the field the backend could not have produced without the request this
-    /// boot sent.
-    pub matched: bool,
-    /// How many bytes of the sink still hold [`POISON`], over the length of the
-    /// frame this boot formed. Unit: bytes.
+    /// The number `cargo xtask gpu` compares its capture against.
+    /// Unit: none — an FNV-1a-64 digest.
+    pub display_hash: u64,
+    /// Whether the client's canvas still holds the pattern it wrote.
     ///
-    /// Published rather than reduced to a boolean because *nothing landed* and
-    /// *some of it landed* are different failures and only one of them is the
-    /// expected result of the two refused halves.
-    pub untouched: u32,
+    /// A display controller reads a backing and never writes one, so this must
+    /// be true on every half — including the one where the transfer was refused.
+    /// It is the check that a device given an address it should not have did not
+    /// also scribble on the address it should.
+    pub intact: bool,
     /// What the driver counted, read out of the board rather than out of a
     /// structure in this address space. Unit: see [`driver::Counters`].
     pub counters: driver::Counters,
     /// Which core the driver held. Unit: none — a core index.
     pub cpu: usize,
     /// Whether it ended by `EXIT` rather than by a fault.
-    ///
-    /// The frame's own reading, taken from `process::reap`: a driver that
-    /// faulted mid-run could write nothing afterwards, and one that scribbled
-    /// its own board could write anything.
     pub exited: bool,
     /// How many entries it took off its data ring. Unit: entries.
     pub drained: u64,
@@ -661,8 +646,8 @@ pub struct Report {
     /// makes it evidence: it is the one number here a component could not
     /// produce if the route it names had never been used. Unit: operations.
     pub asked: u32,
-    /// Why its loop ended, as one of `f_virtio_net::routing::stopped`. Zero for
-    /// a component that never wrote a report at all. Unit: none — an ordinal.
+    /// Why its loop ended, as one of `f_virtio_gpu::routing::stopped`. Zero for a
+    /// component that never wrote a report at all. Unit: none — an ordinal.
     pub stopped: u64,
     /// The first fault the remapping unit recorded, if it recorded one.
     pub fault: Option<Fault>,
@@ -674,10 +659,9 @@ impl Report {
     /// Whether the run produced what the half it was asked for requires.
     ///
     /// The verdict is the kernel's rather than the harness's, exactly as `user`,
-    /// `cap`, `iommu` and `blk` already are: this knows which half it was asked
-    /// for, what the unit recorded and what is in the client's buffer
-    /// afterwards, and a harness reading an exit code could not tell a refused
-    /// transfer from a link with nothing on it.
+    /// `cap`, `iommu`, `blk` and `net` already are — **for everything except the
+    /// picture**, which no code inside this machine can see. That one clause is
+    /// the harness's and RFC 0054 argues why it has to be.
     ///
     /// # Errors
     ///
@@ -708,73 +692,65 @@ impl Report {
         if self.counters.provoked == 0 {
             return Err("the driver's own copy self-check moved nothing");
         }
-        // The route RFC 0047 is about, counted on the frame's side. A driver
-        // that had stopped asking would be a driver whose translations came from
-        // somewhere else.
+        // The route RFC 0047 is about, counted on the frame's side.
         if self.asked == 0 {
             return Err("the driver asked the frame for no translation");
         }
-        // Every half posts exactly one receive buffer, and it is the same one.
-        //
-        // What that leaves untested is the multi-slot machinery: the head the
-        // device gives back is the only thing that says which of four posted
-        // buffers filled, and no boot in this tree reaches slot one. It is
-        // covered by `f_virtio_net::driver`'s unit tests against a
-        // memory-backed device, which go red under both of the formulas that
-        // break it, and the taxonomy row for this verb says so in place of a
-        // boot.
-        if self.counters.posted != 1 {
-            return Err("the driver did not post exactly one receive buffer");
-        }
-        // Zero on every half of this demonstration, and it is a *property*
-        // rather than a tally of something that happens: a transfer that failed
-        // after its buffer was already with the device has no refusal available
-        // to it, because a refusal hands the client back a buffer a network card
-        // still holds a write descriptor into. The driver's answer is to reset
-        // the device and end, which would also make `stopped` above disagree —
-        // so this is the number that says *which* of the two happened, and a
-        // boot where it moved is a boot where the receive path took the exit
-        // that exists for a failure and not the one that exists for a client.
+        // The counter behind the one thing this device makes possible that
+        // neither of the others does: a client's buffer the device holds across
+        // four completed chains. A boot where it moved is a boot where the
+        // detach failed and the display had to be reset to make *the client owns
+        // its buffer* true when it was said.
         if self.counters.halted != 0 {
-            return Err("a transfer failed after its buffer was already with the device");
+            return Err("a display command failed while the device held the client's buffer");
         }
-        // R08, on this driver as on the other. The client's transmit is the one
-        // entry here that asks for the hard class, and this driver's manifest
-        // declares the soft one — so its completion must say it was served below
-        // what it asked. A zero would mean the demotion happened and nobody was
-        // told, which is the one outcome R08 refuses.
-        //
-        // Only on the halves that transmit, because only they submit that entry:
-        // every other entry in this demonstration carries `Sqe::ZERO`'s class,
-        // which is batch, and a batch request at a soft-class service is not
-        // demoted at all. Requiring a shortfall from the control half would be
-        // requiring a demotion nothing asked for.
-        if self.half.transmits() && self.counters.shortfall == 0 {
+        // A display controller reads a backing and never writes one, on every
+        // half including the refused one.
+        if !self.intact {
+            return Err("the client's canvas was written by a device that only ever reads");
+        }
+        // R08, on this driver as on the other two. The client's `show` is the
+        // one entry here that asks for the hard class, and this driver's
+        // manifest declares the soft one.
+        if self.half.shows() && self.counters.shortfall == 0 {
             return Err("no completion reported the demotion the manifest requires");
         }
-        if !self.half.transmits() && self.counters.shortfall != 0 {
+        if !self.half.shows() && self.counters.shortfall != 0 {
             return Err("a completion reported a demotion on a half that asked for nothing");
         }
 
         match self.half {
             Half::Inside => {
-                if !self.transmitted {
-                    return Err("the transmit did not complete");
+                if !self.shown {
+                    return Err("the show did not complete");
                 }
-                // Second, and it is the client that reports this first: an
-                // empty sink on this half comes back as `Trouble::NoFrame`,
-                // which is printed as the wall-clock bound it is. Kept here
-                // because a `Report` is the kernel's verdict on its own and a
-                // verdict that trusted its caller to have checked would be a
-                // verdict with a hole in it.
-                if !self.landed {
-                    return Err("nothing came back on the receive queue");
+                if self.counters.shown != 1 {
+                    return Err("the driver did not report exactly one frame flushed");
                 }
-                if !self.matched {
-                    return Err("what came back is not a reply to the frame this boot sent");
+                // Six commands, and the number is brittle in the direction a
+                // fixture should be brittle in: create, attach, transfer, set
+                // scanout, flush, detach.
+                //
+                // **It is also the only thing standing behind one clause of
+                // E1-B04's exit, and that is worth stating rather than
+                // discovering.** The harness's capture proves the client's
+                // pixels are in the host's resource; it does not prove
+                // `RESOURCE_FLUSH` did anything, because a screen capture makes
+                // the emulator refresh its own surface and a scanout shares the
+                // resource's image. So a driver that dropped the flush would
+                // show the same picture to the same capture and be caught only
+                // *here*. The number is therefore not decoration and must not be
+                // relaxed into a range: a command dropped from
+                // `Driver::sequence` has exactly one check between it and a
+                // green run.
+                if self.counters.commands != 6 {
+                    return Err("the driver did not send the six commands one show is made of");
                 }
-                if self.counters.received != 1 {
-                    return Err("the driver did not report exactly one frame received");
+                if self.counters.declined != 0 {
+                    return Err("the display refused a command on the half that must not fail");
+                }
+                if self.counters.resources != 1 {
+                    return Err("the driver did not create exactly one resource");
                 }
                 if self.counters.escaped != 0 {
                     return Err("the driver pointed the device past a registration's answer");
@@ -782,74 +758,66 @@ impl Report {
                 if self.faults != 0 {
                     return Err("the remapping unit faulted on the half that must not fault");
                 }
-                // The buffer came back through its completion rather than
-                // through a cancellation, which is the difference between a
-                // receive that was answered and one that was abandoned.
-                if self.counters.cancelled != 0 {
-                    return Err("a receive that was answered was also cancelled");
-                }
                 Ok(())
             }
-            Half::Silent => {
-                if self.transmitted {
-                    return Err("the control half put a frame on the link");
+            Half::Blank => {
+                if self.shown {
+                    return Err("the control half submitted a show");
                 }
-                if self.counters.sent != 0 {
-                    return Err("the control half transmitted");
+                if self.counters.shown != 0 || self.counters.commands != 0 {
+                    return Err("the control half sent a display command");
                 }
-                if self.landed || self.counters.received != 0 {
-                    return Err("something arrived on a link this boot put nothing on");
-                }
-                if self.untouched != FRAME_BYTES {
-                    return Err("the receive buffer was written on the half that sent nothing");
+                if self.counters.resources != 0 {
+                    return Err("the control half created a resource");
                 }
                 if self.faults != 0 {
-                    return Err("the remapping unit faulted with nothing on the link");
-                }
-                // The obligation the receive direction creates, observed rather
-                // than assumed: a posted buffer no frame ever filled has to come
-                // back as a cancellation, because RFC 0024 leaves its holder no
-                // other exit.
-                if self.counters.cancelled != 1 {
-                    return Err("the posted receive buffer was not given back as a cancellation");
+                    return Err("the remapping unit faulted with nothing submitted");
                 }
                 Ok(())
             }
             Half::Escape => {
-                if !self.transmitted {
-                    return Err("the escape half did not put a frame on the link");
-                }
                 // The provocation ran. An isolation proof whose provocation
                 // never ran is the same green as a protection that held.
                 if self.counters.escaped == 0 {
                     return Err("the driver never pointed the device past what it was answered");
                 }
-                // **The client's own memory, and this is the check.** Nothing
-                // about a completion is asserted here, and the first version of
-                // this arm asserted the wrong thing: it required the receive
-                // queue to publish nothing, and this emulator publishes a used
-                // entry with a length for a transfer the remapping unit refused.
-                // `kernel/src/arch/x86_64/dma.rs` recorded exactly that about the
-                // block device — *a completion is evidence the device finished
-                // and never evidence that bytes moved* — and a second driver
-                // found it again from the other direction. A driver that
-                // believed the used ring here would hand its client a length and
-                // the client would read poison.
-                if self.untouched != FRAME_BYTES {
-                    return Err("the receive buffer was written through a refused translation");
-                }
-                if self.matched {
-                    return Err("a reply reached the client through a descriptor the unit refused");
-                }
-                // And the unit's own fault-recording registers, which are the one
-                // piece of evidence on this boot that neither the component nor
-                // the device wrote. Checked *at the address the driver invented*
-                // rather than merely counted: a fault somewhere else would mean
-                // something other than this provocation was refused, and the
-                // count alone cannot tell those apart.
+                // **Nothing is asserted about what the display said, and the
+                // first version of this arm asserted the opposite and went
+                // red.** It required `declined` to have moved, on the reasoning
+                // that a virtio-gpu command carries a typed response and a
+                // backing the device cannot map should come back as a refusal.
+                // This emulator answers `OK`: a translation the remapping unit
+                // refuses still produces a mapping — of a bounce buffer holding
+                // none of the client's bytes — so the attach succeeds, the
+                // transfer copies that buffer, and the flush puts it on the
+                // screen. The unit records the fault and the device notices
+                // nothing.
+                //
+                // That is the third time this tree has had to learn the same
+                // sentence, and `kernel/src/arch/x86_64/dma.rs` wrote it first:
+                // *a completion is evidence the device finished and never
+                // evidence that bytes moved.* RFC 0051 records the network
+                // driver finding it again from the other direction — a used
+                // entry with a length for a receive the unit refused — and this
+                // is the display's version, which is the sharpest of the three
+                // because a display's completion is a *typed response* and
+                // therefore the most convincing thing to believe.
+                //
+                // So `declined` and `shown` are published and required to be
+                // nothing. What stands instead is the unit's own fault record
+                // below, at the address the driver invented and on the direction
+                // a display reads — and, outside this machine entirely, the
+                // capture `cargo xtask gpu` takes of the screen, which must not
+                // hold the client's pixels. Neither of those is a device's word.
+                // And the unit's own fault-recording registers, which are the
+                // one piece of evidence on this boot that neither the component
+                // nor the device wrote. Checked *at the address the driver
+                // invented* rather than merely counted: a fault somewhere else
+                // would mean something other than this provocation was refused,
+                // and the count alone cannot tell those apart.
                 match self.fault {
                     None => {
-                        return Err("the remapping unit recorded no fault for the refused write");
+                        return Err("the remapping unit recorded no fault for the refused read");
                     }
                     Some(fault) => {
                         if fault.address != self.expected_fault() {
@@ -858,10 +826,10 @@ impl Report {
                                  invented",
                             );
                         }
-                        if fault.read {
+                        if !fault.read {
                             return Err(
-                                "the unit faulted on a read, so the descriptor under test was \
-                                 not the one the device writes",
+                                "the unit faulted on a write, so the transaction under test was \
+                                 not the display reading its backing",
                             );
                         }
                     }
@@ -877,12 +845,21 @@ impl Report {
     pub const fn expected_fault(&self) -> u64 {
         self.registered_at.wrapping_add(self.half.beyond())
     }
+
+    /// How wide the frame this boot drew is. Unit: pixels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        WIDTH
+    }
+
+    /// How tall it is. Unit: pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        HEIGHT
+    }
 }
 
 /// What the frame stands a scheduled driver up with.
-///
-/// The same bundle `blk::Scheduling` is, written again for the reason the module
-/// comment gives about every other type in this file.
 #[derive(Clone, Copy)]
 pub struct Scheduling {
     /// The core the driver is given. Unit: none — a core index.
@@ -911,9 +888,14 @@ struct Setup<'a> {
 /// A component may not be told four unrelated addresses. A modern virtio
 /// transport publishes its four structures inside one base-address register, and
 /// what the manifest declares is *four register frames* — one window, whole,
-/// which the driver narrows with `Window::slice`. Narrowing only ever goes
-/// inwards, so a driver that got an offset wrong reads its own registers wrongly
-/// and cannot read anybody else's.
+/// which the driver narrows with `Window::slice`.
+///
+/// **This is `kernel/src/blk.rs`'s type and `kernel/src/net.rs`'s type, for the
+/// third time.** RFC 0051 predicted that a third driver would be the moment the
+/// shared half moved out of all of them; RFC 0054 declines to move it and says
+/// why, and `OWED_REVERSALS` in xtask carries the deviation so that the day
+/// somebody does move it, the build says which documents describe a duplication
+/// that is gone.
 #[derive(Clone, Copy)]
 struct Registers {
     /// The first page of the span, physical. Unit: bytes, physical.
@@ -932,7 +914,7 @@ impl Registers {
     ///
     /// [`Trouble::Manifest`] for a span wider than the manifest declares or than
     /// the driver's address space reserves — which is the direction
-    /// `user/virtio-net/manifest.toml` insists on: *a device whose BAR is larger
+    /// `user/virtio-gpu/manifest.toml` insists on: *a device whose BAR is larger
     /// is a different device and a different manifest, not a bigger number.*
     fn of(found: &virtio::Found, declared: &Declared) -> Result<Self, Trouble> {
         let structures = [found.common, found.notify, found.isr, found.device];
@@ -966,10 +948,6 @@ impl Registers {
 
 /// The frame's half of a scheduled driver's run: the client's ring, the driver's
 /// control ring, and the authority behind both.
-///
-/// What is here is exactly what a *supervisor* holds and a driver does not: the
-/// remapping unit, the domain the device is attached to, the allocator, and the
-/// client's capability table.
 struct Supervising<'a, 'm> {
     /// What the driver asked for.
     asks: &'a Consumer<'m>,
@@ -1032,9 +1010,9 @@ impl Supervising<'_, '_> {
     /// R04 at the bottom: an opcode this build does not implement is refused and
     /// never ignored. The two it does implement are the ones a driver cannot
     /// perform for itself, and both go through the same [`iommu::Grant`] the
-    /// block datapath uses — so the check that stands between a component's
+    /// other two datapaths use — so the check that stands between a component's
     /// clients and each other's memory is the same check, on the same table,
-    /// with the same refusal, for both drivers.
+    /// with the same refusal, for all three drivers.
     fn execute(&mut self, entry: &f_abi::Sqe) -> f_abi::Cqe {
         let mut asking = iommu::Grant {
             unit: &mut *self.unit,
@@ -1072,13 +1050,6 @@ impl Supervising<'_, '_> {
     /// Take the client's next completion if one arrives inside `micros`, serving
     /// the driver until it does.
     ///
-    /// Answers `None` for a bound that passed, which on this datapath is a
-    /// **result** on two halves out of three and a failure on the third — see
-    /// [`RECEIVE_MICROS`]. That is the one place this file's shape differs from
-    /// `kernel/src/blk.rs`'s, and the reason is the reason for the whole task:
-    /// a block request is a question a device owes an answer to, and a posted
-    /// receive is not.
-    ///
     /// # Errors
     ///
     /// Whatever [`Supervising::serve`] refuses.
@@ -1109,10 +1080,6 @@ impl Supervising<'_, '_> {
     }
 
     /// Tell the driver to stop.
-    ///
-    /// RFC 0008's stop, as the one notice this run posts. On this driver it is
-    /// also what triggers the cancellation of every receive buffer the device is
-    /// still holding, which is an obligation the block driver never has.
     ///
     /// # Errors
     ///
@@ -1157,22 +1124,14 @@ pub unsafe fn demonstrate(
     // module.
     let declared = unsafe { declared(boot) }?;
 
-    // The same finder the block datapath uses, with two different constants —
-    // which is the whole of what the frame's device discovery owed a second
-    // driver. `kernel/src/arch/x86_64/virtio.rs` was written parameterised by
-    // device id and named this task as the caller that would use it, and it was
-    // right.
+    // The same finder both other datapaths use, and the **one** place the frame's
+    // device discovery had to change for a third driver: a display controller has
+    // no transitional PCI device id, because it was defined after the modern
+    // transport, and `virtio::route` took one as an ordinary argument.
+    // `virtio::VIRTIO_GPU_MODERN` argues the `Option` at length. RFC 0054.
     // SAFETY: the caller's guarantee, passed down.
     let found = unsafe {
-        virtio::route(
-            frames,
-            space,
-            features,
-            window,
-            survey,
-            virtio::VIRTIO_NET_MODERN,
-            Some(virtio::VIRTIO_NET_TRANSITIONAL),
-        )
+        virtio::route(frames, space, features, window, survey, virtio::VIRTIO_GPU_MODERN, None)
     }
     .map_err(Trouble::Device)?;
 
@@ -1183,8 +1142,7 @@ pub unsafe fn demonstrate(
     }
 
     let before = frames.free_count();
-    // What the *unit* keeps, as opposed to what the demonstration spends. A
-    // bus's context table is the unit's for the life of the machine.
+    // What the *unit* keeps, as opposed to what the demonstration spends.
     let kept = unit.tables().len();
     // A domain of the component's own, before anything is allocated for it: a
     // driver with no domain is a driver whose device addresses physical memory.
@@ -1217,10 +1175,16 @@ pub unsafe fn demonstrate(
     };
 
     // Whatever happened, the device stops being able to address memory before
-    // its domain is freed. On a network device that ordering carries more than
-    // it does on a block one: a device with posted receive buffers writes into
-    // them when a packet arrives, and a packet arriving is not something this
-    // kernel decides.
+    // its domain is freed.
+    //
+    // **And the display keeps its picture**, which is the one thing about this
+    // teardown that is not either of the other two datapaths'. Clearing the
+    // bus-master bit and detaching the function stop the device reaching guest
+    // memory; neither touches the resource the scanout is made of, because that
+    // resource lives on the host's side of the emulator — which is what
+    // `TRANSFER_TO_HOST_2D` put it there for. That is why `cargo xtask gpu` can
+    // capture the framebuffer after this function has returned, and why
+    // `user/virtio-gpu` must not reset the device on its way out.
     // SAFETY: `found.config` is the function's configuration space.
     unsafe { pci::command_clear(found.config, pci::COMMAND_BUS_MASTER) };
     // SAFETY: the caller's guarantee, and `bdf` is the function `run` attached.
@@ -1385,11 +1349,10 @@ unsafe fn run(
         // The client is admitted for the hard class on every half. RFC 0025's
         // bound 2 — a peer claiming a class it does not hold — is the block
         // datapath's `unadmitted` half and is not re-run here: it is a property
-        // of `f_abi::deadline::inherit`, which both drivers call, and a second
-        // boot of the same arithmetic would be a fixture rather than evidence.
+        // of `f_abi::deadline::inherit`, which all three drivers call.
         (routing::at::CLIENT_ADMITTED, u64::from(class::HARD)),
         (routing::at::FLOOR, FLOOR_NS),
-        (routing::at::RECEIVE_SPINS, RECEIVE_SPINS),
+        (routing::at::IDLE_SPINS, IDLE_SPINS),
     ] {
         board.write64(offset, value).map_err(Trouble::Channel)?;
     }
@@ -1440,8 +1403,7 @@ unsafe fn run(
     };
     let observed = client(&mut supervising, &mut producer, page, asking);
     // Told to stop whatever happened above, because a driver left serving a
-    // client that has gone is a core this boot never gets back. It is also what
-    // makes the driver give its posted receive buffers back.
+    // client that has gone is a core this boot never gets back.
     let told = supervising.stop();
     // SAFETY: `start_on` was called for this core and nothing else has joined it.
     // `serve` touches only the driver's control ring, whose two ends are
@@ -1463,45 +1425,30 @@ unsafe fn run(
     let ended = unsafe { crate::process::reap(frames, prepared) }.map_err(Trouble::Process)?;
     let exited = matches!(ended.death, crate::process::Death::Exited(_));
 
-    // What the component said about itself, printed only when the *client* gave
-    // up — and it is here rather than in `blk.rs` because this datapath can fail
-    // in a way that one cannot. A block client that stops getting answers has a
-    // driver that is wedged or a machine that is slow; a network client can also
-    // be waiting for a packet it caused nothing to send, and all three read
-    // identically from outside. This line is what separates *the component
-    // faulted before it read its own routing page* from *the component is serving
-    // and nothing has arrived*, and without it the only evidence either way is a
-    // bound that passed.
-    //
-    // The death comes first because it is the frame's own reading and everything
-    // after it is the component's: a driver that faulted wrote no report, so a
-    // row of zeroes below a fault means *nothing ran* and the same row below an
-    // `EXIT` means *it ran and did nothing*.
     if observed.is_err() {
         match ended.death {
             crate::process::Death::Killed { vector, error, address, rip } => crate::kprintln!(
-                "  net stalled   the component was killed: vector {vector}, error {error:#x}, \
+                "  gpu stalled   the component was killed: vector {vector}, error {error:#x}, \
                  address {address:#018x}, at {rip:#018x}"
             ),
             crate::process::Death::Exited(status) => {
                 crate::kprintln!(
-                    "  net stalled   the component ended by EXIT with status {status}"
+                    "  gpu stalled   the component ended by EXIT with status {status}"
                 );
             }
             crate::process::Death::Running => {
-                crate::kprintln!("  net stalled   the component never reported an ending");
+                crate::kprintln!("  gpu stalled   the component never reported an ending");
             }
         }
         crate::kprintln!(
-            "  net stalled   it reported outcome {}, having drained {} entr(ies), served {}, \
-             refused {}, posted {}, received {}, spun {}",
+            "  gpu stalled   it reported outcome {}, having drained {} entr(ies), served {}, \
+             refused {}, {} command(s) answered, {} declined",
             reported.outcome,
             reported.drained,
             reported.counters.served,
             reported.counters.refused,
-            reported.counters.posted,
-            reported.counters.received,
-            reported.counters.spun,
+            reported.counters.commands,
+            reported.counters.declined,
         );
     }
 
@@ -1521,11 +1468,9 @@ unsafe fn run(
         windows: registers.pages,
         registered_at: observed.registered_at,
         refused_without_grant: observed.refused_without_grant,
-        transmitted: observed.transmitted,
-        landed: observed.landed,
-        frame_bytes: observed.frame_bytes,
-        matched: observed.matched,
-        untouched: observed.untouched,
+        shown: observed.shown,
+        display_hash: observed.display_hash,
+        intact: observed.intact,
         counters: reported.counters,
         cpu: setup.scheduling.cpu,
         exited,
@@ -1558,34 +1503,23 @@ struct Observed {
     /// Unit: bytes, in the device's address space.
     registered_at: u64,
     refused_without_grant: bool,
-    transmitted: bool,
-    landed: bool,
-    /// Unit: bytes.
-    frame_bytes: u32,
-    matched: bool,
-    /// Unit: bytes.
-    untouched: u32,
+    shown: bool,
+    /// Unit: none — an FNV-1a-64 digest.
+    display_hash: u64,
+    intact: bool,
 }
 
-/// The token each of the client's four entries carries.
-///
-/// Distinct constants rather than a running number, because on this datapath the
-/// completions **do not arrive in submission order**: the receive is submitted
-/// first and answered last, or not at all. A client that assumed the order would
-/// hand the wrong buffer back — and `InFlight::complete` is what refuses that,
-/// by requiring the token to match.
+/// The token each of the client's entries carries.
 mod token {
     /// The registration that must be refused for want of `GRANT`.
     pub const PROBE: u64 = 1;
     /// The registration that must succeed.
     pub const REGISTER: u64 = 2;
-    /// The receive buffer, posted before anything is sent.
-    pub const RECEIVE: u64 = 3;
-    /// The frame put on the link.
-    pub const TRANSMIT: u64 = 4;
+    /// The frame put on the scanout.
+    pub const SHOW: u64 = 3;
 }
 
-/// The client's whole run: register, post, send, and look at what arrived.
+/// The client's whole run: register, draw, show, and look at what is left.
 ///
 /// Every wait in here serves the driver's control ring while it waits — so the
 /// client and its server make progress against each other on two cores, through
@@ -1628,257 +1562,119 @@ fn client(
     // is the only thing here that reaches bytes, a submission *moves* it, and the
     // completion is what hands it back — RFC 0024.
     //
-    // On this driver that rule is doing the work it was designed for rather than
-    // a milder version of it. The block driver's `InFlight` is a buffer a device
-    // is reading or writing during one function call on another core; this one is
-    // a buffer a **network card** may write into at any moment until a frame
-    // arrives, and there is no method on `InFlight` that reaches its bytes.
+    // On this driver the rule is doing something the other two never asked of it.
+    // A block transfer and a network transmit hand the device a buffer for the
+    // duration of one chain; a display *attaches* one, and goes on holding it
+    // across four more chains until the driver detaches it. The `InFlight` here
+    // therefore spans a sequence and not a request, and the fact that nothing in
+    // `f_ring::buffers` had to change to express that is the strongest single
+    // thing E1-B04 says about RFC 0024.
     let mut set = BufferSet::bind(naming, asking.negotiated, page).map_err(Trouble::Channel)?;
     let carved = set.carve::<{ BUFFERS as usize }>().map_err(|_| Trouble::Geometry)?;
-    // The pattern below is what makes [`SINK`] and [`SOURCE`] true, and an
-    // assertion is what says so rather than a comment: [`Report::expected_fault`]
-    // is the registration's own answer plus [`BEYOND`] *only* while the sink is
-    // buffer zero, so a reader who swapped the two names here would move an
-    // address the boot log prints and nothing would notice.
-    const _: () = assert!(SINK == 0 && SOURCE == 1);
-    let [mut sink, mut source] = carved;
-    if sink.len() < driver::FRAME_MAX as usize || source.len() < FRAME_BYTES as usize {
+    // Destructured rather than indexed, because a submission *moves* an `Idle`
+    // and there is nothing to leave behind in an array — which is RFC 0024's
+    // typestate doing its job at the one place a reader might reach for an
+    // index. `CANVAS` is buffer zero, and the assertion is what keeps that true:
+    // a reader who renamed it would move an address the boot log prints and
+    // nothing else would notice.
+    //
+    // The three spares are never submitted. They exist so that *the set* and
+    // *the buffer* are different objects, which is what makes an off-by-one in
+    // the registration path visible at all.
+    const _: () = assert!(CANVAS == 0);
+    let [mut canvas, _spare_one, _spare_two, _spare_three] = carved;
+    if canvas.len() < FRAME_BYTES as usize {
         return Err(Trouble::Geometry);
     }
 
-    // Poison, so that *nothing landed* and *something landed* are different
-    // observations rather than one.
-    for byte in sink.bytes_mut().iter_mut() {
+    // Poison first, then the pattern over it. The poison is what makes *the
+    // buffer was not written* and *the buffer was written* different
+    // observations; the pattern is what the display has to show.
+    for byte in canvas.bytes_mut().iter_mut() {
         *byte = POISON;
     }
-    form_request(source.bytes_mut())?;
+    draw(canvas.bytes_mut())?;
+    let Some(drawn) = canvas.bytes().get(..FRAME_BYTES as usize) else {
+        return Err(Trouble::Geometry);
+    };
+    let display_hash = hash_frame(drawn);
 
-    // --- the receive, posted before anything is sent ------------------------
-    //
-    // Before, and it is not an optimisation: a reply that arrives with no buffer
-    // posted is a frame the device drops, and a run that posted afterwards would
-    // be a run whose result depended on which of two machines was quicker.
-    //
-    // Nothing is awaited here. A receive is accepted and answered later — that is
-    // the whole shape of this driver — so a client that waited on it would wait
-    // for a packet it has not yet caused.
-    let recv = driver::recv(token::RECEIVE, sink.len() as u32);
-    let (lent_sink, _) = sink.submit(producer, recv).map_err(|_| Trouble::Channel(0))?;
-    // In an `Option` for the whole of the rest of this function, and it is the
-    // receive direction that forces it. A block client submits and awaits, so
-    // its buffer is in flight across one statement; this one is in flight across
-    // a transmit, a bounded wait, a stop and a second bounded wait, and
-    // `InFlight::complete` consumes the buffer to answer *is this yours*. The
-    // `Option` is the state between asking and being told.
-    let mut lent_sink = Some(lent_sink);
-
-    // --- the frame on the link ----------------------------------------------
-    let mut transmitted = false;
-    let source = if asking.half.transmits() {
+    // --- the frame on the scanout -------------------------------------------
+    let mut shown = false;
+    let canvas = if asking.half.shows() {
         // The hard class, written explicitly, because `Sqe::ZERO` writes
         // `class::BATCH` and a batch entry at a soft-class service is not
         // demoted at all — so a client that left the field alone would never
         // exercise R08 here and the counter beside it would read zero for a
-        // reason that has nothing to do with the driver. This is the one entry
-        // in this demonstration that asks for urgency, and the manifest's
-        // `class = "soft"` is what refuses it: the frame must be *told* the
-        // request was served below what it asked.
-        let mut send = driver::send(token::TRANSMIT, FRAME_BYTES);
-        send.class = f_abi::deadline::pack(class::HARD, 0);
-        send.deadline = HARD_DEADLINE_NS;
-        let (lent, _) = source.submit(producer, send).map_err(|_| Trouble::Channel(0))?;
+        // reason that has nothing to do with the driver.
+        let mut entry = driver::show(token::SHOW, WIDTH, HEIGHT);
+        entry.class = f_abi::deadline::pack(class::HARD, 0);
+        entry.deadline = HARD_DEADLINE_NS;
+        let (lent, _) = canvas.submit(producer, entry).map_err(|_| Trouble::Channel(0))?;
         let answer = supervising.awaited(asking.tsc_khz)?;
-        transmitted = !answer.is_error();
+        shown = !answer.is_error();
         lent.complete(&answer).map_err(|_| Trouble::Transfer(0))?
     } else {
-        source
+        canvas
     };
 
-    // --- what came back, or did not -----------------------------------------
-    //
-    // One bound for all three halves, used in two opposite ways: on `inside` a
-    // bound that passes is a failure and on the other two it is the result. A
-    // control that waited less than the experiment would be a control that proves
-    // only that it was more impatient.
-    let mut landed = false;
-    let mut frame_bytes = 0;
-    let mut sink_back = None;
-    // Whether this client has already told the driver to stop. Once, and the
-    // once matters: `run` tells it again on the way out whatever happened here,
-    // and a client that told it on every turn of the loop below would be filling
-    // a control ring with notices for a component that has already ended.
-    let mut stopped = false;
-    if let Some(answer) = supervising.within(asking.tsc_khz, RECEIVE_MICROS)?
-        && let Some(lent) = lent_sink.take()
-    {
-        match lent.complete(&answer) {
-            Ok(idle) => {
-                landed = !answer.is_error();
-                if landed {
-                    frame_bytes = u32::try_from(answer.result).unwrap_or(0);
-                }
-                sink_back = Some(idle);
-            }
-            // A completion this client is not waiting for. There is none in this
-            // build; keeping the buffer rather than dropping it is what stops an
-            // unexpected entry becoming an abort.
-            Err(still) => lent_sink = Some(still),
-        }
-    }
-
-    // The buffer, when it did not come back through a completion — which is the
-    // ordinary case on two halves out of three, and is the shape of thing a
-    // block client never has to deal with.
-    //
-    // Told to stop, the driver gives every posted receive back as a
-    // cancellation. That exchange exists because RFC 0024 gives an in-flight
-    // buffer exactly three exits — a completion carrying its token, `reclaim` on
-    // evidence the peer is gone, and a drop that ends the component — and a
-    // **live, healthy peer with nothing to give back** is none of the three.
-    // `f_virtio_net::driver::Driver::cancel` is the service's half of it and
-    // this is the client's, and it is written as a wait rather than as a
-    // `reclaim` because the peer is not gone and `PeerGone` cannot be
-    // constructed from *the service stopped politely*.
-    while sink_back.is_none()
-        && let Some(lent) = lent_sink.take()
-    {
-        if !stopped {
-            supervising.stop()?;
-            stopped = true;
-        }
-        let Some(answer) = supervising.within(asking.tsc_khz, RECEIVE_MICROS)? else {
-            // Nothing came, and there is no legal way to take the buffer back.
-            // Dropping it is what happens on the way out of this function and it
-            // is the right thing: `f_ring::buffers` refuses a dropped in-flight
-            // buffer loudly, and under `panic = "abort"` that ends the frame —
-            // which is the outcome a client holding a buffer a device may still
-            // be pointed at has earned. A quiet `Trouble` here would be this file
-            // deciding that a network card writing into memory nobody owns is a
-            // reportable condition.
-            drop(lent);
-            return Err(Trouble::Transfer(error::pack(error::PEER, error::peer::GONE)));
-        };
-        match lent.complete(&answer) {
-            Ok(idle) => sink_back = Some(idle),
-            Err(still) => lent_sink = Some(still),
-        }
-    }
-
-    let Some(sink) = sink_back else { return Err(Trouble::Geometry) };
-
-    // --- the bound, said as a bound -----------------------------------------
-    //
-    // Here rather than at the wait itself, and *after* the buffer is back:
-    // `lent_sink` still held an in-flight buffer at the wait, and returning
-    // there would drop it — which `f_ring::buffers` refuses loudly, ending the
-    // frame under `panic = "abort"` instead of printing a reason. So the
-    // obligation is discharged first and the diagnosis given second.
-    //
-    // [`Half::expects_frame`] is the predicate, and it is called rather than
-    // matched on so that *which half must receive* has one definition. On the
-    // other two halves an empty sink is the result and this says nothing.
-    if asking.half.expects_frame() && !landed {
-        return Err(Trouble::NoFrame(RECEIVE_MICROS));
-    }
-
     // --- what is actually in the client's memory ----------------------------
-    let mut untouched = 0;
-    for index in 0..FRAME_BYTES as usize {
-        let Some(got) = sink.bytes().get(index) else { return Err(Trouble::Geometry) };
-        if *got == POISON {
-            untouched += 1;
-        }
-    }
-    let matched = landed && is_reply_to_us(sink.bytes());
-    // Read back rather than trusted: the source buffer must still hold the frame
-    // this client formed, because a device that wrote into the *transmit* buffer
-    // would be a corruption nothing else here would notice.
+    //
+    // Read back rather than trusted, and on every half. A display controller
+    // reads a backing and never writes one, so a canvas that changed is a device
+    // doing something no command in this protocol asks for — which is exactly the
+    // shape of thing an escape provocation might produce and which no counter
+    // would show.
     let mut formed = [0u8; FRAME_BYTES as usize];
-    form_request(&mut formed)?;
+    draw(&mut formed)?;
+    let mut intact = true;
     for index in 0..FRAME_BYTES as usize {
-        let (Some(got), Some(want)) = (source.bytes().get(index), formed.get(index)) else {
+        let (Some(got), Some(want)) = (canvas.bytes().get(index), formed.get(index)) else {
             return Err(Trouble::Geometry);
         };
         if got != want {
-            return Err(Trouble::Transfer(0));
+            intact = false;
+        }
+    }
+    // And the rest of the page, which no command named at all.
+    for index in FRAME_BYTES as usize..canvas.len() {
+        let Some(got) = canvas.bytes().get(index) else { return Err(Trouble::Geometry) };
+        if *got != POISON {
+            intact = false;
         }
     }
 
-    Ok(Observed {
-        registered_at,
-        refused_without_grant,
-        transmitted,
-        landed,
-        frame_bytes,
-        matched,
-        untouched,
-    })
+    if asking.half.expects_picture() && !shown {
+        return Err(Trouble::Transfer(0));
+    }
+
+    Ok(Observed { registered_at, refused_without_grant, shown, display_hash, intact })
 }
 
-/// Form the address-resolution request this boot puts on the link.
+/// Write the frame this boot draws into `into`.
 ///
 /// By hand, in the client, and both of those are decisions. **By hand** because
-/// there is no network stack in this system and building one to send one frame
-/// would be building the thing E2 owes rather than the thing E1-B03 owes. **In
-/// the client** because the frame's addresses are the client's — a driver that
-/// chose them would be a driver with an identity of its own, which is what
-/// `VIRTIO_NET_F_MAC` would have given it and which this driver deliberately does
-/// not negotiate.
+/// there is nothing in this system that draws, and building one to fill sixteen
+/// rows would be building the thing E2 owes rather than the thing E1-B04 owes.
+/// **In the client** because what is in a frame is the client's — a driver that
+/// chose the pixels would be a driver with a picture of its own.
 ///
 /// # Errors
 ///
 /// [`Trouble::Geometry`] for a buffer shorter than the frame, which the caller
 /// has already refused.
-fn form_request(into: &mut [u8]) -> Result<(), Trouble> {
+fn draw(into: &mut [u8]) -> Result<(), Trouble> {
     let Some(frame) = into.get_mut(..FRAME_BYTES as usize) else { return Err(Trouble::Geometry) };
-    for byte in frame.iter_mut() {
-        *byte = 0;
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let at = ((y * WIDTH + x) * BYTES_PER_PIXEL) as usize;
+            let Some(slot) = frame.get_mut(at..at + BYTES_PER_PIXEL as usize) else {
+                return Err(Trouble::Geometry);
+            };
+            slot.copy_from_slice(&pixel(x, y));
+        }
     }
-    let put = |frame: &mut [u8], at: usize, bytes: &[u8]| -> Result<(), Trouble> {
-        let Some(slot) = frame.get_mut(at..at + bytes.len()) else { return Err(Trouble::Geometry) };
-        slot.copy_from_slice(bytes);
-        Ok(())
-    };
-    // Broadcast, because nothing on this machine knows the gateway's hardware
-    // address — which is the question the frame asks.
-    put(frame, at::DESTINATION, &[0xFF; 6])?;
-    put(frame, at::SOURCE, &OUR_MAC)?;
-    put(frame, at::ETHERTYPE, &ETHERTYPE_ARP.to_be_bytes())?;
-    // One is Ethernet and 0x0800 is IPv4, in the body's own numbering. Written
-    // big-endian because every multi-byte field on a wire is, which is the one
-    // place in this tree where that is true and is worth the explicit
-    // conversion rather than a comment.
-    put(frame, at::HARDWARE, &1u16.to_be_bytes())?;
-    put(frame, at::PROTOCOL, &0x0800u16.to_be_bytes())?;
-    put(frame, at::HARDWARE_LEN, &[6])?;
-    put(frame, at::PROTOCOL_LEN, &[4])?;
-    put(frame, at::OPERATION, &ARP_REQUEST.to_be_bytes())?;
-    put(frame, at::SENDER_MAC, &OUR_MAC)?;
-    put(frame, at::SENDER_IP, &OUR_IP)?;
-    // The target hardware address is zero in a request: it is what is being
-    // asked for.
-    put(frame, at::TARGET_IP, &GATEWAY_IP)?;
     Ok(())
-}
-
-/// Is this frame a reply to the request [`form_request`] formed?
-///
-/// Five fields, and the last is the one that makes this a demonstration rather
-/// than an observation. A host network backend answers address resolution for
-/// its own gateway, so *an ARP reply arrived* would be satisfied by a link with
-/// any traffic on it at all. A reply whose **target hardware address is the one
-/// this boot invented** is a reply to this boot's request: nothing outside this
-/// machine had that address until the request carried it.
-fn is_reply_to_us(frame: &[u8]) -> bool {
-    let field = |at: usize, len: usize| frame.get(at..at + len);
-    let two = |at: usize| {
-        field(at, 2).and_then(|bytes| <[u8; 2]>::try_from(bytes).ok()).map(u16::from_be_bytes)
-    };
-    two(at::ETHERTYPE) == Some(ETHERTYPE_ARP)
-        && two(at::OPERATION) == Some(ARP_REPLY)
-        && field(at::SENDER_IP, 4) == Some(&GATEWAY_IP[..])
-        && field(at::TARGET_IP, 4) == Some(&OUR_IP[..])
-        && field(at::TARGET_MAC, 6) == Some(&OUR_MAC[..])
 }
 
 /// What the component wrote about itself into the half of its board that is its
@@ -1888,7 +1684,7 @@ struct Reported {
     counters: driver::Counters,
     /// Unit: entries.
     drained: u64,
-    /// One of `f_virtio_net::routing::stopped`. Unit: none — an ordinal.
+    /// One of `f_virtio_gpu::routing::stopped`. Unit: none — an ordinal.
     outcome: u64,
 }
 
@@ -1901,10 +1697,7 @@ impl Reported {
     /// property, arrived at by the component never having run.
     ///
     /// Every `u32` field is converted rather than cast, because this is the frame
-    /// reading a page a ring-3 component writes and R04 applies: a component that
-    /// put `1 << 32` into `SERVED` would otherwise be reported as having served
-    /// none, and a truncation that lands on a plausible tally is worse than one
-    /// that lands on an implausible one.
+    /// reading a page a ring-3 component writes and R04 applies.
     fn of(board: &Window) -> Self {
         let read = |offset: u32| board.read64(offset).unwrap_or(0);
         if read(routing::reported::MAGIC) != routing::MAGIC {
@@ -1923,11 +1716,11 @@ impl Reported {
         ) else {
             return Self::NOTHING_AT_ALL;
         };
-        let (Ok(sent), Ok(received), Ok(posted), Ok(cancelled), Ok(halted)) = (
-            u32::try_from(read(routing::reported::SENT)),
-            u32::try_from(read(routing::reported::RECEIVED)),
-            u32::try_from(read(routing::reported::POSTED)),
-            u32::try_from(read(routing::reported::CANCELLED)),
+        let (Ok(shown), Ok(commands), Ok(declined), Ok(resources), Ok(halted)) = (
+            u32::try_from(read(routing::reported::SHOWN)),
+            u32::try_from(read(routing::reported::COMMANDS)),
+            u32::try_from(read(routing::reported::DECLINED)),
+            u32::try_from(read(routing::reported::RESOURCES)),
             u32::try_from(read(routing::reported::HALTED)),
         ) else {
             return Self::NOTHING_AT_ALL;
@@ -1942,11 +1735,11 @@ impl Reported {
                 provoked: read(routing::reported::PROVOKED),
                 shortfall,
                 unadmitted,
-                sent,
-                received,
-                posted,
+                shown,
+                commands,
+                declined,
+                resources,
                 spun: read(routing::reported::SPUN),
-                cancelled,
                 halted,
             },
             drained: read(routing::reported::DRAINED),
@@ -1956,10 +1749,6 @@ impl Reported {
 
     /// What the frame knows about a component that reported nothing it can
     /// believe.
-    ///
-    /// Zero everywhere, and the zero on `provoked` is the one that matters:
-    /// [`Report::verdict`] requires it to move, so a component that never ran
-    /// fails on the same line a component whose self-check stopped working would.
     const NOTHING_AT_ALL: Self = Self { counters: NOTHING, drained: 0, outcome: 0 };
 }
 
@@ -1973,11 +1762,11 @@ const NOTHING: driver::Counters = driver::Counters {
     provoked: 0,
     shortfall: 0,
     unadmitted: 0,
-    sent: 0,
-    received: 0,
-    posted: 0,
+    shown: 0,
+    commands: 0,
+    declined: 0,
+    resources: 0,
     spun: 0,
-    cancelled: 0,
     halted: 0,
 };
 

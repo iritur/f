@@ -75,7 +75,23 @@ const RESP_OK_NODATA: u32 = 0x1100;
 const RESP_ERR_UNSPEC: u32 = 0x1200;
 
 /// The display holds as many resources as it can.
-const RESP_ERR_OUT_OF_MEMORY: u32 = 0x1202;
+///
+/// `0x1201`, and it was `0x1202` until E1-B04 wrote the real driver beside this
+/// model. `0x1202` is `VIRTIO_GPU_RESP_ERR_INVALID_SCANOUT_ID` in the
+/// specification's enumeration — the error codes run consecutively from
+/// `ERR_UNSPEC` at `0x1200` — so this model was answering *no such scanout* to a
+/// display that had run out of room, and the scenario that reads the refusal was
+/// reading a number that means something else.
+///
+/// Worth a paragraph rather than a silent fix, because it is what a second
+/// implementation is *for*. Nothing in this crate could have caught it: the
+/// tests here assert against this constant, so they agreed with the model
+/// whatever it said, and `Protocol::harvest` passes the device's number through
+/// to the client unchanged — which is right, and which is also why a wrong
+/// number travels the whole way. `user/virtio-gpu` does not use this code at all
+/// (it passes through whatever a real display answers), so what found the defect
+/// was a person reading the two files side by side. RFC 0054.
+const RESP_ERR_OUT_OF_MEMORY: u32 = 0x1201;
 
 /// No resource by that name.
 const RESP_ERR_INVALID_RESOURCE_ID: u32 = 0x1203;
@@ -95,7 +111,40 @@ pub struct Gpu {
     /// creation order, which is what a reader of a trace wants. Small by
     /// construction — a scenario that wanted thousands would be a scenario about
     /// something else.
+    ///
+    /// **The device's, not the driver's.** [`Gpu::asked`] is the driver's and
+    /// the two are separated for the reason that paragraph gives.
     live: Vec<u32>,
+    /// Resources the *driver* has asked the display to create.
+    /// Unit: none — resource identifiers.
+    ///
+    /// # Why this is not [`Gpu::live`]
+    ///
+    /// Because a driver knows what it asked for and not what the display holds,
+    /// and the two come apart in exactly two places. A creation the display
+    /// refused is in `asked` and not in `live`, which is what makes the transfer
+    /// after a full display a transfer into a resource that does not exist —
+    /// the failure this model exists to produce. And a **restarted** driver has
+    /// asked for nothing, which is the case E1-B04 found.
+    ///
+    /// Chaos kills an occupant and refills its place, and `spawner` says what
+    /// that means: *the same function, called again, with no state carried over
+    /// from the instance that died.* That is right for a driver and wrong for a
+    /// device, and this model was the only `Protocol` in the crate with state to
+    /// notice — `Net` and `Blk` are unit structs. With one field the model was
+    /// destroying a display's resources every time its driver died, and then
+    /// transferring into them: four refusals a client could not retry, on a
+    /// scenario whose whole claim is that a client observes nothing but latency.
+    ///
+    /// Splitting the two fixes it in the direction that is true rather than the
+    /// one that is convenient. The device's resources still die with the model
+    /// — making them outlive it is a change to `spawner`'s contract and belongs
+    /// to whoever owns that scenario — but the *driver* now behaves the way a
+    /// restarted driver does: it holds no identifiers, so it creates rather than
+    /// transferring into something it cannot name. `user/virtio-gpu` is the real
+    /// one and does the same thing for the same reason, one frame at a time.
+    /// RFC 0054.
+    asked: Vec<u32>,
 }
 
 impl Protocol for Gpu {
@@ -128,8 +177,18 @@ impl Protocol for Gpu {
         // likes, and a creation may not finish after a later creation, or the
         // driver would not know which resource identifier the display had run
         // out on.
-        let creating = request.at.is_multiple_of(2);
+        //
+        // The alternation is read out of what this driver has **asked for**
+        // rather than out of the sequence number, and [`Gpu::asked`] argues why
+        // at length. On an uninterrupted run the two are the same thing — even
+        // sequences create and odd ones transfer — and they come apart exactly
+        // where a driver restarts: an occupant that has asked for nothing
+        // creates, because it holds no identifier it could transfer into.
         let resource = resource_of(request.at);
+        let creating = !self.asked.contains(&resource);
+        if creating {
+            self.asked.push(resource);
+        }
         let kind = if creating { CMD_CREATE_2D } else { CMD_TRANSFER_TO_HOST_2D };
         let flags = if creating { FLAG_FENCE } else { 0 };
 
@@ -237,6 +296,16 @@ impl Protocol for Gpu {
         for resource in &self.live {
             out.u32(*resource);
         }
+        // The driver's half, saved beside the device's rather than derived from
+        // it. A restore that rebuilt `asked` from `live` would hand the restored
+        // driver a record of a creation the display refused, and the next
+        // request would transfer into a resource that does not exist where the
+        // original run created one — which is a divergence that looks like a
+        // display running out of room. RFC 0054.
+        out.count(self.asked.len());
+        for resource in &self.asked {
+            out.u32(*resource);
+        }
     }
 
     fn load_state(&mut self, input: &mut crate::snap::Reader<'_>) {
@@ -244,6 +313,11 @@ impl Protocol for Gpu {
         self.live = Vec::with_capacity(count);
         for _ in 0..count {
             self.live.push(input.u32());
+        }
+        let count = input.count(4, "more display requests than the file could hold");
+        self.asked = Vec::with_capacity(count);
+        for _ in 0..count {
+            self.asked.push(input.u32());
         }
     }
 

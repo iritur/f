@@ -9,6 +9,7 @@ no Rust, no QEMU, nothing on `PATH`.
 .\docker\dev.ps1 lint       # cargo xtask lint
 .\docker\dev.ps1 test       # cargo xtask test
 .\docker\dev.ps1 run        # cargo xtask run — the kernel, in QEMU
+.\docker\dev.ps1 x sweep    # cargo xtask sweep — the seed sweep
 .\docker\dev.ps1 shell      # everything else
 ```
 
@@ -18,6 +19,14 @@ On Linux or macOS, or inside WSL2, skip the wrapper:
 docker compose -f docker/compose.yaml build dev
 docker compose -f docker/compose.yaml run --rm dev cargo xtask lint
 ```
+
+The sweep is listed here and documented in `README.md` rather than the other
+way round, and the split is deliberate: this file is *what the environment is*
+and that one is *what somebody who has just cloned this does with it*. The seed
+sweep is the second — it is a released tool with a corpus and a scenario set
+behind it, not an everyday chore of the container. It appears in the list above
+anyway, because a verb absent from the environment's own command list reads as
+a verb the environment does not support. `E1-R01`, RFC 0055.
 
 ## Why this exists
 
@@ -49,13 +58,78 @@ That change is proposed in "Using this in CI" below rather than applied.
 | Image tools | `xorriso`, `mtools`, `dosfstools` | Not needed yet. Needed at `E0-B02`, when a bootloader handoff arrives and the kernel has to be put in something bootable. |
 | Debugging | `gdb`, `lld`, `file`, `jq`, `python3` | The ordinary tools every task in `TODO.md` quietly assumes. |
 | **`full` image only** | `cargo-deny`, `cargo-llvm-cov`, `cargo-nextest` | The dependency-policy job, coverage summarising, and a faster test runner. Pinned by version; an unpinned tool is an ambient dependency, which is the thing this image exists to remove. |
+| **`full` image only** | `kani` | The bounded model checker `cargo xtask prove` runs against the capability table and against the ring's validation paths. It brings a compiler with it, which is why it is here and not in `dev` — see "Two toolchains, and why the second one is not a mistake" below. |
 
 Two images, one Dockerfile: `dev` is the default and covers every CI job except
-dependency policy. `full` adds the three tools above and takes longer to build.
+dependency policy and proof. `full` adds the four tools above and takes longer
+to build.
 
 ```powershell
 .\docker\dev.ps1 build full
 .\docker\dev.ps1 full cargo deny check
+```
+
+## Two toolchains, and why the second one is not a mistake
+
+The `full` image contains two Rust compilers. That is deliberate, it is the
+decision in RFC 0022, and it is worth a paragraph because the second one is
+older than the first and looks like a mistake until you know what it is for.
+
+| | Which | Who chose it | What it builds |
+|---|---|---|---|
+| The pin | `rust-toolchain.toml` | this repository | everything in the workspace, and every number in `claims/` |
+| The checker's | `nightly-2025-11-21`, installed by `cargo kani setup` into `/opt/kani` and `/opt/rustup` | Kani | `kernel/proofs` and `ring/proofs` only, and only when `cargo xtask prove` runs |
+
+**A verification tool's toolchain requirement is the tool's business.** Kani
+pins a specific nightly because its compiler plugin is built against a specific
+rustc internal API; that pin moves when Kani moves, on Kani's schedule. Moving
+`rust-toolchain.toml` to meet it would invert the relationship between the thing
+being measured and the thing measuring it — the pin is what every claim in
+`claims/` was measured under — and `CLAUDE.md` forbids moving it as a side
+effect of another change for exactly that reason. So the checker gets its own,
+in the image target only the checking job uses.
+
+Nothing else in the tree is compiled by it. `kernel/proofs` is outside the
+workspace (`Cargo.toml`'s `exclude`), so `cargo xtask verify` never builds it
+and `cargo xtask test` never sees it. Deleting the directory and the two jobs in
+`nightly.yml` — `prove` and the `image_full` build it is the only consumer of —
+is the whole of undoing this, which is what keeps the arrangement cheap to
+abandon.
+
+**What it costs.** 1.48 GB on top of the `full` image, measured rather than
+estimated: `docker images` says 4.18 GB against 2.70 GB without it, which is a
+483 MB release bundle under `/opt/kani` and a 573 MB rustup toolchain. The
+launcher itself compiles in about fifteen seconds. `cargo kani setup` needs the
+network at image-build time — it downloads both — so a build behind a proxy that
+cannot reach GitHub releases fails at that layer and says so.
+
+That layer is also the first in this file to have found a *builder* network
+problem rather than a host one, and it is worth knowing before spending an hour
+on it. On this Windows machine the BuildKit container resolved
+`static.crates.io` and `objects.githubusercontent.com` to IPv6 addresses it had
+no route to, so the layer failed with `Could not connect to server` while the
+identical commands succeeded under `docker run`. The fix is one flag:
+
+```powershell
+docker build --network=host -f docker/Dockerfile --target full -t f-dev:full .
+```
+
+It is a property of the builder, not of this Dockerfile, so it is recorded here
+rather than worked around in the file. GitHub's runners are not expected to need
+it — they are Linux hosts with working IPv4 to both hosts — but nothing has
+built this image on one yet, so that is an expectation and not an observation.
+The nightly `image_full` job is where it will first be tested, and it is a job
+of its own precisely so that being wrong about this costs one check rather than
+seven.
+
+**And what it does not cost.** Nothing in `claims/`. The checker produces a
+verdict rather than a number, so a Kani upgrade triggers no re-measurement.
+That is the property that makes a second toolchain affordable at all, and it is
+the first thing to check before adding a third.
+
+```powershell
+.\docker\dev.ps1 build full
+.\docker\dev.ps1 full cargo xtask prove
 ```
 
 ## What this environment is **not** for

@@ -163,6 +163,15 @@ const DATAPATH: &[(&str, &str, &str)] = &[
     // reads the frame to find out how long it is. This one takes the length
     // off the used ring instead, and that is what the row holds it to.
     ("user/virtio-net/", "stage", "provoke_copy"),
+    // `E1-B04`, and the row is here to be *weaker* than the two above it rather
+    // than stronger. A display driver is not between the device and the pixels
+    // in either direction — the device reads a client's buffer and writes to a
+    // screen — so a zero here is easier to hold than the network driver's and
+    // saying otherwise would be dishonest. What the row still buys is the shape:
+    // one function that moves bytes, called once, from the boot's own
+    // self-check, so the published zero remains a measurement rather than an
+    // absence.
+    ("user/virtio-gpu/", "stage", "provoke_copy"),
 ];
 
 /// The constructors that turn a bare address into a granted window.
@@ -235,6 +244,10 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
     // crate spells its own. Delete `user/virtio-net`'s `Driver` and this
     // row goes red, which is exactly what the third field is for.
     ("kernel/", "Driver::", "user/virtio-net/"),
+    // The third, and the doc comment above predicted it exactly. The needle is
+    // the same string for the third time and the third field is what keeps the
+    // rule from being satisfied by a name nothing defines.
+    ("kernel/", "Driver::", "user/virtio-gpu/"),
 ];
 
 /// The reversal conditions that have fallen due and are **not paid**, declared
@@ -316,6 +329,23 @@ const OWED_REVERSALS: &[Gap] = &[
          receive buffers rather than as many as its clients would give it",
         "docs/rfc/0051; user/virtio-net/src/driver.rs's RECEIVE_SLOTS_STACK_BOUND; \
          kernel/src/net.rs's module comment; kernel/src/process.rs's SPAWN_STACK",
+    ),
+    // `E1-B04`'s, and it is a promise rather than a wall: RFC 0051 said *what
+    // would merge them is a third driver, at which point the shared half moves
+    // out of both and neither is closed evidence any more*. There are three
+    // drivers now and the half has not moved. RFC 0054 argues why — the move
+    // rewrites `kernel/src/blk.rs`, which is the evidence a closed task's exit
+    // rests on, in a task whose own evidence is a picture on a screen — and this
+    // row is what stops that argument from quietly becoming permanent. The
+    // needle is the type the three supervisors duplicate; the day it leaves
+    // `blk.rs` the build names every document that says it is still there.
+    (
+        "kernel/src/blk.rs",
+        "struct Supervising",
+        "RFC 0051: three driver supervisors hold one `Registers`, `Supervising`, `Reported`, \
+         `declared` and `order_for` between them, and the third driver was to have merged them",
+        "docs/rfc/0051; docs/rfc/0054; the module comments of kernel/src/blk.rs, \
+         kernel/src/net.rs and kernel/src/gpu.rs; kernel/src/gpu.rs's Registers",
     ),
 ];
 
@@ -468,6 +498,7 @@ fn main() -> ExitCode {
         "iommu" => iommu(args.get(1).map(String::as_str)),
         "blk" => blk(args.get(1).map(String::as_str)),
         "net" => net(args.get(1).map(String::as_str)),
+        "gpu" => gpu(args.get(1).map(String::as_str)),
         "deadline" => deadline(args.get(1).map(String::as_str)),
         "runtime" => runtime(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
@@ -479,6 +510,7 @@ fn main() -> ExitCode {
         // simulator kills and what a boot can. RFC 0041.
         "chaos" => chaos(),
         "mutate" => mutate(),
+        "prove" => prove(args.get(1).map(String::as_str)),
         // E1-B14. What an unmap costs under churn, counted both ways in one
         // boot, and the host workload beside the E1-P10 claims that asks the
         // same question of a clock which refuses to answer. RFC 0052.
@@ -563,6 +595,7 @@ fn main() -> ExitCode {
         "lint-arch-tests" => lint_arch_tests(),
         "lint-snapshot" => lint_snapshot(),
         "lint-reproduce" => lint_reproduce(),
+        "lint-proofs" => lint_proofs(),
         "unsafe" => unsafe_report(args.get(1).map(String::as_str) == Some("--by-file")),
         "release" => release(args.get(1).map(String::as_str)),
         "history" => match args.get(1).map(String::as_str) {
@@ -632,6 +665,16 @@ cargo xtask <command>
                      the driver pointing the device past what it was answered on
                      the descriptor the *device writes* — escape. All three with
                      no argument
+  gpu [half]         Boot the display datapath: a third driver component puts a
+                     client's pixels on a scanout through a ring, and this
+                     harness captures the emulator's framebuffer and requires it
+                     to hold them — inside; the identical client with nothing
+                     submitted, where nothing may reach the screen — blank; and
+                     the driver pointing the device past what it was answered at
+                     the memory a display *reads* — escape. All three with no
+                     argument. The only check here that observes something from
+                     outside the machine, because a scanout cannot be read back
+                     from inside one
   deadline [half]    Boot the block datapath with batch work queued and a
                      hard-class read submitted behind it: ordered, where the
                      read must be handed to the device first; arrival, the
@@ -661,6 +704,12 @@ cargo xtask <command>
   mutate             Build the kernel with a deliberate defect, boot it, and
                      require the boot to go red — then require the same boot to
                      go green without it
+  prove [harness]    Bounded model checking, in two crates: the five capability
+                     properties over arbitrary handles, and the ring's
+                     validation paths over arbitrary peer bytes. Every harness
+                     must pass, at both bounds where the bound does not bind it,
+                     and then each deliberate defect must fail the harness that
+                     states the property it breaks. Needs Kani, `full` image
   timer [seconds]    Run the 1 kHz timer and print a jitter histogram. Sixty
                      seconds by default. A measurement, not an assertion
   test               test-host, then cross. Both halves, on this machine
@@ -699,6 +748,10 @@ cargo xtask <command>
   lint-snapshot      claims/snapshot.json holds what the registry holds
   lint-arch-tests    No test is compiled on one architecture and not the other
                      without a reason and a reversal recorded beside it
+  lint-proofs        kernel/proofs and ring/proofs still compile against the
+                     code they prove, under the pinned toolchain and in every
+                     feature configuration `prove` builds. Both are outside the
+                     workspace, so nothing else in the gate builds them
 
   unsafe             The number A-05 reports: lines inside `unsafe` as a share
                      of the frame crates and of the whole tree, against
@@ -726,6 +779,9 @@ cargo xtask <command>
                      the report and is in no verdict in it. A grid too large for
                      one process is run as consecutive shards of the same seed
                      derivation, which is a fact about memory and not coverage
+  sweep --help       What a seed is, what the scenario set is, what a finding
+                     looks like and what to do with one. The published entry
+                     point for somebody who has just cloned this
   sweep --base <s>   The seed the sweep derives from, for any of the forms
                      below. The default is the tree's own; a nightly varies it
                      so that successive nights cover new seed space, and every
@@ -1039,7 +1095,7 @@ fn image_dir(name: &str) -> PathBuf {
 /// manifest, every existing boot depends on it being first, and RFC 0030 says
 /// why that position is the contract. Everything here follows it, each as one
 /// module holding a record and an image.
-const COMPONENTS: &[&str] = &["store", "virtio-blk", "virtio-net"];
+const COMPONENTS: &[&str] = &["store", "virtio-blk", "virtio-net", "virtio-gpu"];
 
 /// Every component the *source tree* declares, by the name in its manifest.
 ///
@@ -1200,7 +1256,8 @@ const INIT_TEXT: u64 = 0x0040_0000;
 /// difference is only how many pages the frame reserved. E5 is where the
 /// headers are read and where both of these stop existing.
 /// Unit: bytes.
-const IMAGE_MAX: &[(&str, u64)] = &[("virtio-blk", 16 * 4096), ("virtio-net", 16 * 4096)];
+const IMAGE_MAX: &[(&str, u64)] =
+    &[("virtio-blk", 16 * 4096), ("virtio-net", 16 * 4096), ("virtio-gpu", 16 * 4096)];
 
 /// What a component whose shape [`IMAGE_MAX`] does not name may be.
 /// Unit: bytes.
@@ -1795,21 +1852,29 @@ fn machine_with(
     machine_devices(append, features, capture, timeout, memory, &[])
 }
 
-/// [`machine_with`], plus devices only one command wants.
+/// The emulator, described once.
 ///
-/// A parameter rather than a second description of the emulator, because there
+/// Extracted from [`machine_devices`] rather than copied into the one caller
+/// that could not use it, and the reason is that function's own comment: *there
 /// is one place the machine is described and a second one would drift from it
-/// exactly as slowly as nobody notices. Every caller but `iommu` passes an
-/// empty slice, and that slice is the whole of the difference between the boot
-/// that is a fixture and the boot that has something to provoke.
-fn machine_devices(
+/// exactly as slowly as nobody notices.* `cargo xtask gpu` has to interleave
+/// with a running boot — it reads the serial log as it arrives, captures the
+/// emulator's framebuffer over a monitor socket when a line appears, and writes
+/// a byte back — so it cannot use a function that spawns and waits. What it can
+/// use is this.
+///
+/// Everything below this line is verbatim from where it used to live, including
+/// the comments, so that the diff that moved it is a move.
+///
+/// # Errors
+///
+/// A build that failed, or an image or module path that is not valid UTF-8.
+fn emulator(
     append: Option<&str>,
     features: &[&str],
-    capture: Capture,
-    timeout: u64,
     memory: &str,
     devices: &[&str],
-) -> Result<(Ending, String), String> {
+) -> Result<Command, String> {
     build_with(features)?;
     let kernel = kernel_elf32();
     if !kernel.exists() {
@@ -1892,6 +1957,25 @@ fn machine_devices(
     qemu.args(devices);
 
     qemu.current_dir(root());
+    Ok(qemu)
+}
+
+/// [`machine_with`], plus devices only one command wants.
+///
+/// A parameter rather than a second description of the emulator, because there
+/// is one place the machine is described and a second one would drift from it
+/// exactly as slowly as nobody notices. Every caller but `iommu` passes an
+/// empty slice, and that slice is the whole of the difference between the boot
+/// that is a fixture and the boot that has something to provoke.
+fn machine_devices(
+    append: Option<&str>,
+    features: &[&str],
+    capture: Capture,
+    timeout: u64,
+    memory: &str,
+    devices: &[&str],
+) -> Result<(Ending, String), String> {
+    let mut qemu = emulator(append, features, memory, devices)?;
 
     // Spawned rather than run to completion, because a boot that never ends has
     // to be a result this function can return. `status()` and `output()` both
@@ -2449,6 +2533,55 @@ const CHAOS_GAP: &[Gap] = &[(
      condition; docs/rfc/0047's *Foreclosed*; sim/src/chaos.rs's module comment; \
      claims/0006-driver-restart-latency.toml's [workload] and [hardware] notes",
 )];
+
+/// Why release 0.2 carries none of the four datapath numbers, as data.
+///
+/// # Why this is a declared quantity and not the paragraph it replaces
+///
+/// `RELEASING.md` names four numbers `E1-P10` would register — ring submit under
+/// load, doorbells per operation, copies per operation, kernel entries per
+/// operation — and says the release does not contain them. An absence stated in
+/// prose has the failure mode this tree has already been bitten by twice: the
+/// reason stops being true, and the paragraph goes on being read. Here the
+/// paragraph is load-bearing in the worst way, because it is the one a reader
+/// checks the honesty of a release against.
+///
+/// So the two reasons are needles, and the build goes red the day either one is
+/// gone. Two rows and either alone is sufficient, which is why they are separate
+/// rows rather than one:
+///
+/// - **There is no workload.** `Bell::new` refuses [`Path::UserInterrupt`] on a
+///   build whose hardware does not report the feature, and that is every machine
+///   this project can reach — TCG implements no part of UINTR and no `-cpu`
+///   model advertises the bit. `E1-B09` needs that path to execute; `E1-P10`
+///   needs `E1-B09`.
+/// - **There is no machine.** All four are times, and `f_bench::Environment`
+///   refuses to record one where `F_ENVIRONMENT=container`. `E0-D10` owns
+///   obtaining a machine that may.
+///
+/// Neither substitutes for the other, and the row that goes first says which
+/// half of the section in `RELEASING.md` has stopped being true. The day both
+/// go, that section is deleted rather than amended — RFC 0056 says so, and this
+/// is what makes the build say it out loud instead of waiting for somebody to
+/// re-read a document. `E1-R02`.
+const DATAPATH_GAP: &[Gap] = &[
+    (
+        "ring/src/doorbell.rs",
+        "!hardware.user_interrupts",
+        "the user-interrupt doorbell refuses to construct on every machine this project can \
+         reach, so E1-B09 has no path that executes and E1-P10 has no workload",
+        "TODO.md E0-B15, E1-B09 and E1-P10; RELEASING.md's *Release 0.2, and the four numbers \
+         that are not in it*; docs/rfc/0056; docs/TESTING-STATUS.md's user-interrupt bullet",
+    ),
+    (
+        "bench/src/lib.rs",
+        "WHY_CONTAINER",
+        "no machine this project has may record a timing, so all four datapath numbers are \
+         pending on E0-D10 rather than on four different things",
+        "TODO.md E0-D10; RELEASING.md's *Release 0.2, and the four numbers that are not in it*; \
+         docs/rfc/0056; claims/runner-class-A.md; every claim whose status is `pending`",
+    ),
+];
 
 /// Kill every component under load, twice over, and judge the pair.
 ///
@@ -3655,16 +3788,166 @@ fn sweep_jobs() -> String {
 /// a report naming an unidentified tree is not a degraded report, it is a
 /// confident statement about nothing — and a seed without a commit reproduces
 /// nothing at all.
+///
+/// # Why there is a second source, and why it is not a weakening
+///
+/// A release package is the one tree that is exactly a commit and has no
+/// repository in it. `git archive` writes files and no `.git`, which is the
+/// property that makes the source content-addressable at all — and it is also
+/// why `E1-R01` measured the published sweep refusing to run from an unpacked
+/// package with `cannot read the commit from git`. The refusal was right and
+/// the tree was not unidentified: the packager had already written the commit
+/// into `MANIFEST`, and nothing looked there.
+///
+/// So the order is git first and the manifest second, never the other way
+/// round. In a checkout git is the only witness worth believing, because a
+/// `MANIFEST` there is a file anybody can write; in an unpacked package git is
+/// absent, and the manifest is the packager's own statement, hashed into the
+/// address the package is named by. A tree with neither is still fatal, which
+/// is the whole of what this function was protecting.
+///
+/// It does not make the tree *clean*. [`sweep_dirty`] reads a git that cannot
+/// answer as dirty and keeps doing so here: an unpacked package is that commit
+/// by construction, nothing in it can check that it still is, and so a finding
+/// from one carries the commit without the `git switch` line in front of it.
+/// RFC 0056.
 fn sweep_commit() -> Result<String, String> {
-    capture("git", &["rev-parse", "HEAD"]).map(|out| out.trim().to_string()).map_err(|e| {
+    if let Ok(out) = capture("git", &["rev-parse", "HEAD"]) {
+        return Ok(out.trim().to_string());
+    }
+    match manifest_commit() {
+        Ok(commit) => Ok(commit),
+        Err(why) => Err(format!(
+            "cannot read the commit from git, and no release MANIFEST names one\n\n  \
+             {why}\n\n{}",
+            SWEEP_COMMIT_ADVICE
+        )),
+    }
+}
+
+/// The paragraph both halves of the refusal above end with.
+const SWEEP_COMMIT_ADVICE: &str = "A sweep prints `(seed, commit)` pairs, so this is fatal. In a container it \
+         is usually git refusing a working tree owned by another uid; \
+         docker/Dockerfile marks the tree safe, and an image built before that does \
+         not. In an unpacked release package the commit comes from `MANIFEST`, which \
+         is a member of the package tar rather than of `source.tar`, so unpack both \
+         into one directory. RELEASING.md, RFC 0056.";
+
+/// The commit a release package's `MANIFEST` names, when there is no repository.
+///
+/// Fails closed three times over, because this is the path with no witness
+/// behind it. The line has to begin `commit` at column zero — a hash row begins
+/// with its own digest and cannot be mistaken for one — the value has to be
+/// forty lowercase hex digits, which is what `git rev-parse HEAD` writes and
+/// what a truncated or re-wrapped manifest does not, and at least one file the
+/// manifest names has to be here with the hash it states.
+///
+/// # What the third check is for, and what it cannot do
+///
+/// It ties the manifest to *this* tree. The failure it catches is ordinary
+/// rather than adversarial: two releases unpacked in the same place, or a
+/// `MANIFEST` left behind from an earlier one, and a sweep that then prints
+/// seeds against a commit whose source is not the source it just ran. One
+/// matching row is enough and the search stops there, so the usual cost is one
+/// small file hashed; requiring *the first* row to match would refuse a package
+/// a stranger has legitimately edited to chase a finding, which is the reason
+/// somebody unpacks one.
+///
+/// It cannot detect a manifest that is internally consistent and false, because
+/// the hash rows and the commit line are in the same file and whoever edits one
+/// edits the other. Nothing inside an unpacked package can — the package's own
+/// address is over the archive and is not in it. That is the same limit
+/// [`sweep_dirty`] states by calling such a tree dirty, and it is why the
+/// commit travels without a `git switch` line in front of it. RFC 0056.
+///
+/// Every refusal returns *why*, because the three cases want three different
+/// actions from a reader: unpack the second tar, get a manifest that is not
+/// truncated, or unpack into a directory of its own.
+fn manifest_commit() -> Result<String, String> {
+    let text = std::fs::read_to_string(root().join("MANIFEST"))
+        .map_err(|_| "no MANIFEST sits at the root of this tree".to_string())?;
+    let value = text
+        .lines()
+        .find_map(|line| line.strip_prefix("commit"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .ok_or_else(|| "the MANIFEST here has no `commit` line".to_string())?;
+    let hex = value.len() == 40
+        && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if !hex {
+        return Err(format!(
+            "the MANIFEST here names `{value}`, which is not a forty-digit commit"
+        ));
+    }
+    manifest_names_this_tree(&text)?;
+    Ok(value.to_string())
+}
+
+/// One hash row of a manifest, checked against the file on disk it names.
+///
+/// Rows are `<64 hex>  <path>` and nothing else in the file has that shape, so
+/// the version, commit, sweep and claim lines and every comment are skipped by
+/// the same test that recognises a row. A file the manifest names and the tree
+/// does not have is skipped rather than fatal: `source.tar` unpacks over the
+/// package's own copies, and a stranger is told to unpack it second.
+fn manifest_names_this_tree(text: &str) -> Result<(), String> {
+    let mut rows = 0usize;
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(hash), Some(name), None) = (fields.next(), fields.next(), fields.next()) else {
+            continue;
+        };
+        let hex = hash.len() == 64
+            && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !hex {
+            continue;
+        }
+        rows += 1;
+        let Ok(bytes) = std::fs::read(root().join(name)) else { continue };
+        if pack::hex(&pack::sha256(&bytes)) == hash {
+            return Ok(());
+        }
+    }
+    Err(if rows == 0 {
+        "the MANIFEST here lists no files, so nothing ties it to this tree".to_string()
+    } else {
         format!(
-            "cannot read the commit from git: {e}\n\n\
-             A sweep prints `(seed, commit)` pairs, so this is fatal. In a container it \
-             is usually git refusing a working tree owned by another uid; \
-             docker/Dockerfile marks the tree safe, and an image built before that does \
-             not."
+            "none of the {rows} file(s) this MANIFEST names is here with the hash it \
+             states, so it is a manifest for some other tree"
         )
     })
+}
+
+/// The other half of the same question: whether the tree is that commit.
+///
+/// # Why a commit alone was not enough, and why this is not fatal
+///
+/// `sweep_commit` answers *which commit is checked out*, and a report that
+/// printed only that was asserting something nobody had checked. HEAD names a
+/// commit; it says nothing about the files the compiler read. On a tree with
+/// uncommitted work in it — the ordinary state of the audience `E1-R01`
+/// published this for, because somebody sweeping their own checkout to find
+/// something new is usually sweeping a checkout they have changed — the
+/// report's own `repro` line said `git switch --detach <sha> && ...`, and
+/// following it discards the changes that produced the finding and then runs a
+/// different program.
+///
+/// Refusing would be the wrong end of R04: it would break the published command
+/// on exactly the trees it was published for. So the fact is measured and passed
+/// on, `f-sim` prints it, and the reproduction line is emitted in the form that
+/// is true of the tree. `release` names its package `-dirty` and `reproduce`
+/// prints *(dirty — not a quotable tree)* off the same two words; this is the
+/// third caller and the mechanism is theirs. RFC 0055.
+///
+/// A git that cannot answer is read as *dirty*, which is the answer that claims
+/// least: the alternative is a clean-looking report from a tree nothing
+/// identified.
+fn sweep_dirty() -> bool {
+    !capture("git", &["status", "--porcelain"]).is_ok_and(|out| out.trim().is_empty())
+}
+
+/// `clean` or `dirty`, as `f-sim --tree` spells it.
+fn sweep_tree() -> &'static str {
+    if sweep_dirty() { "dirty" } else { "clean" }
 }
 
 /// Run `f-sim` with the given features and arguments, answering
@@ -4222,6 +4505,11 @@ fn sweep_verb(args: &[String]) -> Result<(), String> {
     let base = base.as_deref().unwrap_or(TRACE_SEED);
 
     match rest.first().copied() {
+        // Before every other arm, because the one thing a stranger types when a
+        // command is unfamiliar used to land in the `unknown option` arm below
+        // and answer a question about the tool with a complaint about the
+        // argument. E1-R01, RFC 0055.
+        Some("--help" | "-h") => sweep_help(),
         Some("--mutate") => sweep_mutate(),
         Some("--corpus") => sweep_corpus(&[]),
         // `--record --mutate` is how the entries already in the corpus were
@@ -4233,9 +4521,136 @@ fn sweep_verb(args: &[String]) -> Result<(), String> {
             Some("--mutate") => sweep_record(base, None, &[SWEEP_DEFECT]),
             seeds => sweep_record(base, seeds, &[]),
         },
-        Some(other) if other.starts_with('-') => Err(format!("unknown option for sweep: {other}")),
+        Some(other) if other.starts_with('-') => Err(format!(
+            "unknown option for sweep: {other}\n\n\
+             `cargo xtask sweep --help` is the forms, what a seed is, and what to do \
+             with a finding."
+        )),
         seeds => sweep(base, seeds, rest.get(1).copied(), &[], false),
     }
+}
+
+/// What a sweep is, for somebody who has just cloned this.
+///
+/// # Why this is help text and not a page in `docs/`
+///
+/// Because `RELEASING.md` ships the seed corpus and the scenario set as one of
+/// eight contents, and the exit this pays is *a third party runs a seed sweep
+/// against their own checkout using the published command*. A stranger who
+/// reaches for a command reaches for its `--help` before they reach for a
+/// directory of Markdown; a document that answers this would be a second account
+/// of the same tables, and the second account is the one that goes stale. So the
+/// question *what does this tool do and what do I do with what it says* is
+/// answered by the tools themselves, here and in `f-sim`'s own usage. RFC 0055.
+///
+/// # Why it does not print the scenario set
+///
+/// Because the scenario set is `f_sim::scenario::SCENARIOS` and this crate does
+/// not link `f-sim` — it runs it. Rendering the table here would mean either a
+/// second copy that drifts from the shipped one, or a `--help` that compiles a
+/// binary before it can answer, and a help text with a build in it is one nobody
+/// waits for. It names the two commands that print the table from the table
+/// instead.
+fn sweep_help() -> Result<(), String> {
+    println!(
+        "\
+cargo xtask sweep — N seeds across M scenarios, and every failure minimised
+
+  A sweep runs the simulator over a grid of (scenario, seed) pairs, checks each
+  run against five properties that name no scenario and no defect, and reduces
+  anything that fails to the smallest reproduction that keeps the same
+  signature. What it hands back is a command line, not a symptom. RFC 0040.
+
+the forms
+
+  cargo xtask sweep              {SWEEP_SEEDS} seeds against every scenario in the table
+  cargo xtask sweep <n>          n seeds
+  cargo xtask sweep <n> <m>      n seeds against the first m scenarios
+  cargo xtask sweep --base <s>   the seed the whole derivation starts from;
+                                 the default is this tree's own, {TRACE_SEED}
+  cargo xtask sweep --corpus     replay every trial that has ever found
+                                 something, and require each to be clean
+  cargo xtask sweep --mutate     arm a deliberate defect and require the sweep
+                                 and the corpus to find it, then disarm it and
+                                 require both to go quiet
+  cargo xtask sweep --record [n] sweep, and merge what it finds into
+                                 sim/corpus.txt
+  cargo xtask sweep --record --mutate
+                                 how the entries in sim/corpus.txt were produced
+
+  A grid too large for one process is run as consecutive shards of the same seed
+  derivation. That is a fact about memory rather than about coverage: shard k
+  runs exactly the trials one process would have run at those indices. RFC 0042.
+
+what a seed is
+
+  The whole of a run's nondeterminism. A run is a function of (seed, commit) —
+  every ordering, every arrival and every injected fault is drawn from the seed
+  through `f_env::Env`, so the same pair on another machine produces the same
+  bytes. That is what makes a finding a thing you can send somebody rather than
+  describe to them. RFC 0004.
+
+  The commit half is worth what the tree behind it is worth, and a commit is not
+  a tree: `git rev-parse HEAD` names what is committed and says nothing about
+  what you have changed since. This verb asks git both questions and tells the
+  simulator, which prints the answer on the report's `tree` line and shapes its
+  reproduction lines to match. A sweep of a modified checkout is a perfectly
+  good way to find a bug — it is how you would find one in work you are doing —
+  and it is not a bug report anybody else can run until the changes are
+  committed.
+
+what the scenario set is, printed from the table rather than from a document
+
+  cargo xtask sim --list         the name and one line each
+  cargo run -q -p f-sim -- --help
+                                 the same, plus the long scenarios, the five
+                                 properties, and what to do with a finding
+
+  sim/corpus.txt's header is the same set, regenerated from the same table on
+  every write, so a list of scenarios in a comment cannot stop matching.
+
+what a finding looks like, and what to do with one
+
+  finding 1  blk / held
+    property   a client is never told about a token it does not hold
+    evidence   ...
+    seed       0x...  (seed 37 of the sweep)
+    repro      git switch --detach <commit> && cargo run -q -p f-sim -- --check ...
+    minimised  ...
+    artefact   the same line with `--check` replaced by `--trace`
+
+  The `git switch` half appears when the sweep ran in a tree that was exactly
+  its commit, and is absent when it was not. That is not cosmetic: checking a
+  commit out to run a line found in a tree that is not that commit discards the
+  changes that found it and then runs a different program, so on a modified
+  checkout the report prints the bare command — which reproduces where you
+  already are — and says so on the finding's `tree` line.
+
+  1. Paste the repro line. It judges itself: it runs `--check`, which exits
+     non-zero and names the property that broke. Commit before sending one
+     anywhere, or it names a program the receiver cannot build.
+  2. Swap `--check` for `--trace` to read the artefact behind the verdict.
+  3. Keep it: append the argument list to sim/corpus.txt, or run
+     `cargo xtask sweep --record`. The file is append-only and
+     `cargo xtask sweep --corpus` replays all of it, which is what turns one
+     seed into a permanent regression test.
+
+what it costs, and what it cannot catch
+
+  The report prints its own wall clock and that number is in no verdict in it.
+  A clean sweep is worth exactly what the oracle is worth, which is why
+  `--mutate` exists: three of the five properties are falsifiable end to end by
+  a defect in the shipped source, and `intact` and `clock` are not. RFC 0042
+  states the count rather than leaving it to be discovered.
+
+running this against your own checkout, with Docker as the only prerequisite
+
+  docker compose -f docker/compose.yaml run --rm dev cargo xtask sweep
+
+  README.md, \"Sweeping your own checkout\", is the whole route.
+"
+    );
+    Ok(())
 }
 
 /// The largest `--seeds` one `f-sim` process will accept over `scenarios`
@@ -4291,6 +4706,10 @@ fn sweep(
 ) -> Result<(), String> {
     components_quietly()?;
     let commit = sweep_commit()?;
+    // Measured once and passed to every shard, so that a tree edited half way
+    // through a long sweep cannot make one shard's reproduction lines a
+    // different shape from another's. One report, one answer.
+    let tree = sweep_tree();
     let jobs = sweep_jobs();
     let dir = component_dir()?;
     let wanted: u32 = match seeds {
@@ -4345,6 +4764,8 @@ fn sweep(
             &from,
             "--jobs",
             &jobs,
+            "--tree",
+            tree,
             "--components",
             &dir,
         ];
@@ -4486,6 +4907,7 @@ fn signatures_in(report: &str) -> Vec<String> {
 fn sweep_mutate() -> Result<(), String> {
     components_quietly()?;
     let commit = sweep_commit()?;
+    let tree = sweep_tree();
     let jobs = sweep_jobs();
     let seeds = MUTATE_SEEDS.to_string();
     let dir = component_dir()?;
@@ -4500,9 +4922,20 @@ fn sweep_mutate() -> Result<(), String> {
         &seeds,
         "--jobs",
         &jobs,
+        "--tree",
+        tree,
         "--components",
         &dir,
     ];
+    // What a reproduction line has to start with, which is a function of the
+    // tree this is running in and not a constant. On a committed tree the line
+    // begins with the checkout, and requiring that is what says the report can
+    // be sent to somebody else; on a modified tree `f-sim` deliberately omits
+    // it, because checking that commit out would discard the changes under
+    // test. Requiring the checkout unconditionally would have made this harness
+    // fail on every tree anybody develops in, and requiring nothing would have
+    // stopped it asserting the half of E1-P03 that matters. RFC 0055.
+    let starts = if sweep_dirty() { "cargo run" } else { "git switch --detach" };
 
     println!(
         "sweep mutation harness — two defects, both in sim/src/dev.rs:\n\
@@ -4535,12 +4968,12 @@ fn sweep_mutate() -> Result<(), String> {
     // 1-minimal. Requiring the shrunken command line is what says shrinking
     // *happened* rather than that it was attempted.
     for wanted in [
-        "repro      git switch --detach",
-        "smallest   git switch --detach",
-        "minimised  ",
-        "1-minimal against the move",
+        format!("repro      {starts}"),
+        format!("smallest   {starts}"),
+        "minimised  ".to_string(),
+        "1-minimal against the move".to_string(),
     ] {
-        if !report.contains(wanted) {
+        if !report.contains(&wanted) {
             return Err(format!(
                 "the sweep went red and its report has no `{wanted}` line in it.\n\n\
                  Finding a failure is half of E1-P03; the other half is that what comes\n\
@@ -4650,7 +5083,7 @@ fn sweep_mutate() -> Result<(), String> {
              whatever fired."
         ));
     }
-    if !second.contains("repro      git switch --detach") {
+    if !second.contains(&format!("repro      {starts}")) {
         return Err("the second defect was found and the report carries no reproduction \
                     line for it."
             .to_string());
@@ -4777,6 +5210,1365 @@ fn mutate() -> Result<(), String> {
 
     println!("\nall {} mutation(s) caught", MUTATIONS.len());
     Ok(())
+}
+
+/// Where the checker's crate is.
+///
+/// Outside the workspace, because it is compiled by a toolchain this tree does
+/// not pin — RFC 0022's decision, applied a second time and to a tool that
+/// takes it further than RustMC did: `cargo kani setup` installs a rustc of its
+/// own. Nothing `cargo xtask verify` runs builds this directory, which is what
+/// makes deleting it the whole of undoing the arrangement.
+const PROOFS: &str = "kernel/proofs";
+
+/// Every harness `prove` requires, and the sentence each one is.
+///
+/// The list is here rather than left to whatever the crate happens to contain,
+/// for the reason `PROVOCATIONS` is: a proof that stopped being compiled would
+/// otherwise take a whole property with it and the run would still say
+/// `SUCCESSFUL`. `prove` runs them by name, so a harness that went missing is a
+/// red run rather than a shorter green one.
+///
+/// The middle field is **run this one again at the wider bound**. It was
+/// *does this harness grow a table*, negated, until `ring/proofs` arrived and
+/// the two crates wanted opposite answers from the same question: the kernel's
+/// wide pass re-runs the harnesses whose cost the page size does *not* touch,
+/// to show the reduction binds only `total_bought`, and the ring's re-runs
+/// exactly the harnesses that *do* read the fixture, because the ones that take
+/// an argument list never see the region at all and running those twice would
+/// be a check that cannot fail. Stating the field as what `prove` does with it
+/// lets both crates say what they mean. RFC 0057.
+const PROOF_HARNESSES: &[(&str, bool, &str)] = &[
+    (
+        "unnamed",
+        true,
+        "a handle is not a global name: it resolves only in the table that issued it",
+    ),
+    ("forged", true, "exactly the handles a table issued resolve, over all 2^32 of them"),
+    ("forged_across_a_process", true, "nothing the last process held resolves in the next one"),
+    (
+        "stale",
+        true,
+        "after a revoke, the one handle still standing is the one it was told to spare",
+    ),
+    ("narrowing", true, "a derive weakens and never widens, over the whole 256x256 rights lattice"),
+    ("total_lookup", true, "inspect and invoke refuse every handle the table did not issue"),
+    ("total_derive", true, "and so does derive, over every rights bitmap at once"),
+    ("total_revoke", true, "and condemn, condemn_own and relinquish"),
+    ("total_frame_side", true, "and the four the frame performs on a component's behalf"),
+    ("total_bought", false, "the same lookups on a table that has bought part of itself"),
+    // There is no second entry for a bought table, and the absence is argued
+    // rather than accidental: the harness that would have said *a bought slot
+    // does not answer the handle it answered last* was written, run, and taken
+    // out because it did not terminate in forty-five minutes. `kernel/proofs`
+    // states the gap where the harness was, and `cap::properties::forged`
+    // checks the same sentence at every boot at the real page size.
+];
+
+/// The bound this crate is proved inside, and the harnesses it actually binds.
+///
+/// `kernel/proofs/src/mem.rs` sets `FRAME_SIZE` to 256 rather than 4096, so a
+/// page of slots is eight rather than a hundred and twenty-eight and the
+/// revocation walk is a loop a checker finishes. RFC 0053 argues it.
+///
+/// **The reduction binds one of the ten, and that is checked rather than
+/// asserted.** `FRAME_SIZE` reaches `cap.rs` in exactly two places — the
+/// arithmetic in `retype` and the page `grow` buys — so a harness that never
+/// grows its table cannot depend on it. Nine of these never grow, and rather
+/// than leave that as an argument this verb runs all nine a second time with
+/// `wide-page`, which is the kernel's own 4096. If the nine are really
+/// independent of the page size they pass both ways; if one of them is not,
+/// this is where that is discovered instead of being reasoned about.
+///
+/// `total_bought` is the one that grows, and it is proved at the reduced size
+/// only. That is the whole of the bound, and it is one harness wide rather than
+/// ten.
+const PROOF_WIDE: &str = "wide-page";
+
+/// The harness the deliberate defect has to break.
+///
+/// `total_lookup` and not one of the others, because it is the narrowest
+/// harness that hands an arbitrary handle to `Table::resolve`, which is the
+/// function the defect removes the bounds check from. It is also the property
+/// that has no fixture: `kernel/src/cap.rs` argues at `Table::slot` why *a process cannot
+/// make the kernel panic by trying* cannot be broken by a table handed to the
+/// suite, and `MUTATIONS` is the boot that answers it. This is the third
+/// instrument on that one property, and the only one of the three that says
+/// *no handle does this* rather than *these handles did not*.
+///
+/// Most of the others fail under the defect too — every harness that hands an
+/// arbitrary handle to a lookup does — and
+/// requiring one is deliberate: an armed run costs what a clean one costs, and
+/// what the pair has to demonstrate is that the proof *can* fail, not how
+/// widely it does.
+const PROOF_DEFECT_BREAKS: &str = "total_lookup";
+
+/// The deliberate defect this verb arms, which is the one `mutate` boots.
+const PROOF_DEFECT: &str = "mutate-unchecked-index";
+
+/// The module the harnesses live in, which is half of the name Kani knows them
+/// by.
+///
+/// Named in full and matched with `--exact`, because Kani's harness filter is a
+/// substring: `--harness forged` selects `forged_across_a_process` and
+/// `forged_across_a_bought_page` as well, and a run that quietly did three
+/// proofs when it was asked for one is a timing nobody can read and a failure
+/// attributed to the wrong harness.
+const PROOF_MODULE: &str = "proofs";
+
+/// Where the ring's proofs are.
+///
+/// A second crate rather than a second module of the first, because the two are
+/// built by one checker over two *different* dependency graphs: `kernel/proofs`
+/// compiles a file out of a bare-metal binary against stand-ins, and this one
+/// takes `f-ring` as an ordinary path dependency because `f-ring` builds for the
+/// host. RFC 0057 argues why that difference is worth two directories.
+const RING_PROOFS: &str = "ring/proofs";
+
+/// The bound the ring's proofs are stated inside, widened.
+///
+/// `ring/proofs/src/peer.rs` sets `REGION` to 640 bytes, which `f_abi::layout`
+/// turns into a ring of one or two entries. This is the same fixture at 1216,
+/// which holds a ring of eight. Same role as [`PROOF_WIDE`] one crate over: the
+/// harnesses whose cost does not depend on the ring size are run twice, so
+/// *the small ring binds only the harnesses that walk it* is a check rather
+/// than an argument.
+const RING_PROOF_WIDE: &str = "wide-ring";
+
+/// Every harness the ring's proofs require, and the sentence each one is.
+///
+/// The middle field is **run this one again at the wider bound**, and here that
+/// means the four harnesses that adopt `peer::Region` and walk it — because
+/// they are the only ones the region's size reaches. The twelve that take an
+/// argument list never construct a region at all, so running them under
+/// `wide-ring` would be a check that cannot fail, which is the one kind of
+/// check this file refuses to add.
+///
+/// `draining_an_arbitrary_channel` is the fifth that reads a region and is
+/// **not** in the wide pass, and the reason is cost rather than principle: it
+/// inlines `f_ring::execute` once per loop iteration, which is where its
+/// minutes go, and a region holding a ring of eight is eight iterations rather
+/// than two. What it would add over `popping_an_arbitrary_entry` at that bound
+/// is the budget arithmetic, which does not read the region. Stated here rather
+/// than left as an absence somebody has to notice.
+const RING_PROOF_HARNESSES: &[(&str, bool, &str)] = &[
+    (
+        "adopting_an_arbitrary_layout",
+        false,
+        "a layout is adopted from exactly the headers this build would have written",
+    ),
+    (
+        "negotiating_with_an_arbitrary_peer",
+        false,
+        "RFC 0011: peers meet in the middle, over every header and every feature pair",
+    ),
+    ("adopting_arbitrary_bytes", true, "a mapping is bound over bytes a solver chose, or refused"),
+    (
+        "popping_an_arbitrary_entry",
+        true,
+        "`pop` refuses every cursor pair and every slot number rather than panicking",
+    ),
+    ("taking_an_arbitrary_completion", true, "and `take`, over every cursor pair"),
+    (
+        "submitting_against_an_arbitrary_cursor",
+        true,
+        "and `submit`, which is peer-facing too because the consumer owns `tail`",
+    ),
+    (
+        "draining_an_arbitrary_channel",
+        false,
+        "a drain does no more work than its budget, over every channel",
+    ),
+    (
+        "executing_an_arbitrary_entry",
+        false,
+        "`execute` checks the envelope in R04's order, over every entry there is",
+    ),
+    (
+        "reading_an_arbitrary_registration",
+        false,
+        "and so does `Request::read`, which is reached instead of the executor",
+    ),
+    ("reading_an_arbitrary_buffer_name", false, "both readings of the twelve bytes at offset 32"),
+    (
+        "believing_an_arbitrary_completion",
+        false,
+        "a client believes a set id only where the wire type says it may",
+    ),
+    (
+        "registering_from_an_arbitrary_entry",
+        false,
+        "a translation is outstanding exactly when a slot is live",
+    ),
+    (
+        "resolving_an_arbitrary_buffer_name",
+        false,
+        "what a resolve answers is inside the registration it names",
+    ),
+    ("retiring_an_arbitrary_set", false, "after a retirement no id resolves, over all 2^32"),
+    (
+        "lending_a_buffer_over_an_arbitrary_completion",
+        false,
+        "a lent buffer comes back exactly when the completion carrying its token does",
+    ),
+    (
+        "both_transports_refuse_a_name_of_the_wrong_kind",
+        false,
+        "RFC 0028's two paths differ in nothing but the name they take",
+    ),
+    (
+        "narrowing_a_granted_window",
+        false,
+        "RFC 0033: a sub-window cannot name a byte the whole one did not",
+    ),
+];
+
+/// One harness: its name, whether the wide pass runs it again, and the sentence
+/// it is.
+///
+/// A named type rather than a tuple written out at each use, because `prove`
+/// carries a borrowed one of these per crate and the resulting signature is
+/// the kind clippy asks to be given a name.
+type Harness = (&'static str, bool, &'static str);
+
+/// A crate of proofs: where it is, what it is about, and what must break it.
+///
+/// Two of these, and the shape is the argument for a table rather than a second
+/// copy of `prove`: the *phases* are identical — verify, verify again at the
+/// wider bound, then arm a defect and require a failure — and only the lists
+/// differ. A second verb would have been a second place for the third phase to
+/// quietly stop being run.
+struct ProofCrate {
+    /// The directory, relative to the root.
+    dir: &'static str,
+    /// What it proves, in one clause, for the report's first line.
+    about: &'static str,
+    /// The feature that widens the bound.
+    wide: &'static str,
+    /// What that feature widens it *to*, for the phase-two banner.
+    wide_says: &'static str,
+    /// The harnesses, and whether each pays for the bound the wide pass moves.
+    harnesses: &'static [Harness],
+    /// Whether every harness here owes a `kani::cover!` for each answer it can
+    /// produce, and every one of them must be satisfiable.
+    ///
+    /// The checker will not enforce this and says so plainly: Kani 0.67.0
+    /// prints `1 of 2 cover properties satisfied (1 unreachable)` and then
+    /// `VERIFICATION:- SUCCESSFUL`, exit 0. There is no flag to buy the
+    /// behaviour — `cargo kani --help` in the image this job names has no
+    /// `--fail-uncoverable` — so a rule stated in five comments and enforced by
+    /// nothing is CONTRIBUTING R01's worst case: a check somebody believes is
+    /// happening. `prove_one` reads the count and refuses instead, and this
+    /// field is which crates it refuses for.
+    ///
+    /// False for `kernel/proofs`, whose harnesses quantify over handles rather
+    /// than over bytes and carry no covers: there the fixture cannot fail to
+    /// reach the code, because there is no fixture between the harness and the
+    /// table. Turning this on there would demand a line no report has, which is
+    /// a check that fails for a reason nobody chose.
+    covered: bool,
+    /// The deliberate defects a proof here has to fail on.
+    armed: &'static [Armed],
+}
+
+/// One deliberate defect, the harness it must break, and where it must break.
+///
+/// The `site` is the part that stops the third phase from passing for the wrong
+/// reason. A checker that fails to compile, an unwinding assertion, a harness
+/// with a bug of its own — all three exit non-zero and none of them is the
+/// proof noticing the defect. So what is asserted is that a check which
+/// *failed* carries this text, and `what` is the sentence printed when it does
+/// not.
+struct Armed {
+    /// The feature to arm, which is the same name `mutate`, `hostile` or
+    /// `entries` arms for the boot or the fuzzer.
+    feature: &'static str,
+    /// The harness that must fail with it on.
+    harness: &'static str,
+    /// Text a *failing* check must carry, in its location or its description.
+    site: &'static str,
+    /// What that text is, for the message when no failing check has it.
+    what: &'static str,
+}
+
+/// The two crates, in the order `prove` runs them.
+///
+/// The kernel's first, because it is E1-P07's and the exit clause about a
+/// schedule is stated against it; the ring's second, because E1-P12 needed the
+/// apparatus to exist before it could use it.
+const PROOF_CRATES: &[ProofCrate] = &[
+    ProofCrate {
+        dir: PROOFS,
+        about: "the five capability properties, over arbitrary handles",
+        wide: PROOF_WIDE,
+        wide_says: "the kernel's own 4096 — the nine the page size does not reach",
+        harnesses: PROOF_HARNESSES,
+        covered: false,
+        armed: &[Armed {
+            feature: PROOF_DEFECT,
+            harness: PROOF_DEFECT_BREAKS,
+            site: "cap.rs",
+            what: "the shipped file the `#[path]` reaches",
+        }],
+    },
+    ProofCrate {
+        dir: RING_PROOFS,
+        about: "the ring's validation paths, over arbitrary peer bytes",
+        wide: RING_PROOF_WIDE,
+        wide_says: "a region holding a ring of eight — the four that read one",
+        harnesses: RING_PROOF_HARNESSES,
+        // Every harness here is a fixture standing between the solver and the
+        // crate, so every one of them can stop reaching it — and a harness that
+        // reaches nothing verifies instantly. `prove_one` requires the report's
+        // cover line to be present and every cover in it satisfied.
+        covered: true,
+        // Five of the ring's nine deliberate defects, and the pairing is the
+        // assertion rather than the exit code: each must break *the harness
+        // that states the property it breaks*, and break it where the defect
+        // is. RFC 0042's arithmetic is why they are not one — a harness with a
+        // single defect behind it demonstrates that one property can fail and
+        // decorates the rest. The other four are in `RING_PROOF_BLIND`, which
+        // says why a proof here cannot see them.
+        armed: &[
+            Armed {
+                feature: "mutate-trusted-slot",
+                harness: "popping_an_arbitrary_entry",
+                site: "f_ring::Consumer",
+                what: "`Consumer::pop` in the shipped `ring/src/lib.rs`, where the \
+                       bounds check on a peer's slot number is",
+            },
+            Armed {
+                feature: "mutate-believed-header",
+                harness: "adopting_arbitrary_bytes",
+                site: "unwrap_failed",
+                what: "the panic a failing `expect` makes, which is where this defect turns \
+                       `Layout::adopt`'s refusal in `ring/src/mapping.rs`. Named as the \
+                       helper rather than as the call site because that is what the report \
+                       says: Kani attributes the failure to `core`'s `unwrap_failed` and \
+                       cannot format the message, so `Mapping::adopt` appears only on \
+                       *passing* checks. `adopting_arbitrary_bytes` contains no `unwrap` \
+                       or `expect` of its own — grep is the check on that sentence — which \
+                       is what makes the attribution unambiguous",
+            },
+            Armed {
+                feature: "mutate-unbounded-drain",
+                harness: "draining_an_arbitrary_channel",
+                site: "a drain did more work than its budget",
+                what: "the harness's own assertion, named rather than a location \
+                       because this defect produces a wrong answer and not a fault: \
+                       the loop still returns, and only the count is wrong",
+            },
+            Armed {
+                feature: "mutate-ignored-flag",
+                harness: "executing_an_arbitrary_entry",
+                site: "the envelope is checked in the wrong order, or with the wrong list",
+                what: "the harness's own assertion again, and for the same reason: R04's \
+                       failure is two peers disagreeing about what happened, which \
+                       nothing in the process faults on. `ring/tests/entries.rs` needed \
+                       an oracle for exactly this, and so does a proof",
+            },
+            Armed {
+                feature: "mutate-lenient-index",
+                harness: "resolving_an_arbitrary_buffer_name",
+                site: "a buffer past the end of the set was resolved",
+                what: "the harness's own assertion, and it has to be: with the bounds \
+                       check gone the mask is all that is left, and the address the \
+                       arithmetic then produces is a *plausible* one inside somebody \
+                       else's buffer rather than a fault. RFC 0048 calls that the reach \
+                       oracle, and this is the same oracle over every index at once",
+            },
+        ],
+    },
+];
+
+/// What a bounded model checker over this tree is blind to, as a set.
+///
+/// `PROVE_RUN_GAP` is the precedent and the argument is the same one. Five of
+/// `ring/Cargo.toml`'s nine deliberate defects fail a harness in
+/// `ring/proofs`; four cannot, and the honest move is to name them rather than
+/// to let a reader infer from a page of green harnesses that the ring is
+/// proved.
+///
+/// Arming one of these and requiring a failure would be the mistake the comment
+/// on `MUTATIONS` records nearly making — a run that fails for the wrong reason
+/// satisfies an exit status and proves nothing. Arming one and *not* requiring
+/// a failure would be worse, because it would look like coverage.
+///
+/// Each names its own reason and they are not the same reason: three are the
+/// memory model, which E0-P16 is the task that owes an instrument, and one is
+/// the unwinding bound. The test
+/// `every_ring_defect_is_either_armed_by_a_proof_or_declared_invisible_to_one`
+/// is what keeps this list and that manifest in step, in both directions.
+const RING_PROOF_BLIND: &[&str] = &[
+    "mutate-relaxed-submission — the submission ring's publishing store weakened to \
+     `Relaxed`, in both the single-entry and the batch path. CBMC is a sequential checker \
+     with no weak memory model in it, so a proof here is insensitive to this by \
+     construction — as is the stress suite: the one CI run that asked it to catch this \
+     found that it does not",
+    "mutate-relaxed-completion — the same on the completion ring, which RFC 0018 built \
+     as the mirror and gave the ordering argument to by inheritance. Not caught either",
+    "mutate-no-doorbell-fence — the `SeqCst` fence between publishing an entry and \
+     reading `NEED_WAKEUP` removed. The one of the three the litmus suite *does* catch, \
+     on the x86 runner, because store-load is the reordering total store order performs. \
+     Still outside a proof here, and named so that two green instruments are not read as \
+     one",
+    "mutate-reusable-slot — a registration slot refilled after its generations have run \
+     out. Not an ordering question and not invisible in principle: it needs a slot at \
+     `SetId::RETIRED_GENERATION`, which is sixty-five thousand five hundred and \
+     thirty-four retirements of one slot, and a bounded checker unrolls that loop rather \
+     than summarising it. This is the *depth* bound rather than the memory model, and it \
+     is in the same list because the consequence for a reader is identical. \
+     `ring/tests/entries.rs` keeps a ledger of every id a table has issued for exactly \
+     this defect, and is where it is caught",
+];
+
+/// Prove what the checker can prove, then require a defect to break it.
+///
+/// # Why this is a command and not a test
+///
+/// For `mutate`'s reason, one layer up. What it asserts about the last phase is
+/// a *failure*, and the only place a failed proof is observable is the exit
+/// status of a checker `cargo test` cannot run: Kani brings its own rustc, so
+/// both proof crates are outside the workspace and nothing in `verify` reaches
+/// them.
+///
+/// # Why every phase
+///
+/// Neither half means anything alone, and this is the fourth time that sentence
+/// is written in this file. A green proof says nothing if the same proof is
+/// green on a build with the check taken out — that is a harness that has
+/// stopped reading the code, which is exactly what a proof over a stale copy
+/// would be. `kernel/proofs` compiles the shipped file through `#[path]` and
+/// `ring/proofs` links the shipped crate; the armed phase is what demonstrates
+/// that either arrangement still reaches what it claims to.
+///
+/// # Why the covers are checked here and not left to the checker
+///
+/// Because a proof over arbitrary bytes has a failure mode a proof over
+/// arbitrary handles does not: a fixture that never gets past the first check
+/// verifies instantly and proves nothing. `ring/proofs` carries `kani::cover!`
+/// for every answer a harness can produce, and the rule is that an
+/// unsatisfiable cover is a *failed* proof.
+///
+/// Kani does not implement that rule. It prints
+/// `1 of 2 cover properties satisfied (1 unreachable)` and then
+/// `VERIFICATION:- SUCCESSFUL` with exit 0, and the version in the image this
+/// verb runs in has no flag that changes it. So `prove_one` reads the count and
+/// refuses on it — see `cover_check`. Until it did, the rule was written in
+/// five places and mechanised in none, which is the one shape CONTRIBUTING R01
+/// calls worse than an honestly manual check. RFC 0057.
+fn prove(only: Option<&str>) -> Result<(), String> {
+    let version = kani_version()?;
+    println!("prove: {version}");
+
+    let mut wanted: Vec<(&ProofCrate, Vec<&Harness>)> = Vec::new();
+    for krate in PROOF_CRATES {
+        let picked: Vec<_> = match only {
+            Some(name) => {
+                krate.harnesses.iter().filter(|(harness, _, _)| *harness == name).collect()
+            }
+            None => krate.harnesses.iter().collect(),
+        };
+        if !picked.is_empty() {
+            wanted.push((krate, picked));
+        }
+    }
+    if wanted.is_empty() {
+        let name = only.unwrap_or("");
+        let list = PROOF_CRATES
+            .iter()
+            .flat_map(|krate| {
+                krate
+                    .harnesses
+                    .iter()
+                    .map(move |(harness, _, what)| format!("  {harness:<48} {what}"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!("no harness called `{name}`. They are:\n{list}"));
+    }
+
+    let total: usize = wanted.iter().map(|(_, picked)| picked.len()).sum();
+    println!("       {total} harness(es), in {} crate(s)", wanted.len());
+
+    let mut wide_total = 0usize;
+    let mut armed_total = 0usize;
+    for (krate, picked) in &wanted {
+        println!("\n=== {} — {}", krate.dir, krate.about);
+
+        println!("\n[1/3] the proofs, at the bound the fixture reduces");
+        for (harness, _, what) in picked {
+            println!("\n  {harness}: {what}");
+            prove_one(krate, harness, &[])?;
+        }
+
+        let wide: Vec<&str> =
+            picked.iter().filter(|(_, again, _)| *again).map(|(harness, _, _)| *harness).collect();
+        wide_total += wide.len();
+        println!("\n[2/3] the {} of them worth running again, at {}", wide.len(), krate.wide_says);
+        println!("      — which is what turns the reduced bound from an argument into a");
+        println!("      check that fails on the day it stops being true");
+        for harness in &wide {
+            println!("\n  {harness}");
+            prove_one(krate, harness, &["--features", krate.wide])?;
+        }
+
+        let armed: Vec<&Armed> = krate
+            .armed
+            .iter()
+            .filter(|a| picked.iter().any(|(harness, _, _)| *harness == a.harness))
+            .collect();
+        armed_total += armed.len();
+        println!("\n[3/3] with the defects — {} of them, each on its own harness", armed.len());
+        for defect in armed {
+            prove_armed(krate, defect)?;
+        }
+    }
+
+    println!(
+        "\nprove: ok — {total} proof(s) hold, {wide_total} of them at both bounds, and\n\
+        \x20      {armed_total} deliberate defect(s) each fail the harness that states\n\
+        \x20      the property they break, where they break it."
+    );
+    if wanted.iter().any(|(krate, _)| krate.dir == RING_PROOFS) {
+        println!(
+            "\n  {} thing(s) a sequential checker cannot see, declared rather than \
+             checked (RING_PROOF_BLIND):",
+            RING_PROOF_BLIND.len()
+        );
+        for gap in RING_PROOF_BLIND {
+            println!("  - {gap}");
+        }
+    }
+    Ok(())
+}
+
+/// One harness, verified, or the report that says why not.
+fn prove_one(krate: &ProofCrate, harness: &str, extra: &[&str]) -> Result<(), String> {
+    let name = format!("{PROOF_MODULE}::{harness}");
+    let mut args = vec!["--exact", "--harness", name.as_str()];
+    args.extend_from_slice(extra);
+    let (ok, log) = kani(krate.dir, &args, None)?;
+    if !ok || kani_verdict(&log) != Some(true) {
+        return Err(format!(
+            "`{harness}` did not verify{}.\n\n{}\n\n\
+             A failed check here is a counterexample rather than a flaky run:\n\
+             `cargo kani --exact --harness {name} --concrete-playback=print`, in\n\
+             {}, turns the assignment that produced it into a test case.\n\n\
+             An *unsatisfiable cover* is the other way this fails, and it arrives\n\
+             with the opposite status: the checker calls such a run SUCCESSFUL, so\n\
+             `cover_check` is what turns it into a different error instead.",
+            if extra.is_empty() { String::new() } else { format!(" with {}", extra.join(" ")) },
+            kani_findings(&log),
+            krate.dir,
+        ));
+    }
+    if krate.covered {
+        cover_check(&log).map_err(|why| {
+            format!(
+                "`{harness}` verified{}, and that verdict says nothing.\n\n{why}\n\n\
+                 A cover this harness cannot satisfy is a fixture that has stopped\n\
+                 reaching the code it is about — `peer::REGION` drifting against\n\
+                 `f_abi::layout`, an assume that now excludes what it used to admit,\n\
+                 a region no longer adopted. It is the failure this arrangement is\n\
+                 exposed to and it looks exactly like a fast green run: Kani does\n\
+                 not fail on one, it prints the count and reports SUCCESSFUL, which\n\
+                 is why the count is read here rather than trusted.\n\n\
+                 Which cover: `cargo kani --exact --harness {name}`, in {}, lists\n\
+                 every cover property with its status.",
+                if extra.is_empty() { String::new() } else { format!(" with {}", extra.join(" ")) },
+                krate.dir,
+            )
+        })?;
+    }
+    println!("  {harness}: verified{}", covers(&log));
+    Ok(())
+}
+
+/// One deliberate defect, and the failure it has to produce.
+fn prove_armed(krate: &ProofCrate, defect: &Armed) -> Result<(), String> {
+    let Armed { feature, harness, site, what } = defect;
+    println!("\n  {feature}: `{harness}` must fail, at {what}");
+    let name = format!("{PROOF_MODULE}::{harness}");
+    let (ok, log) = kani(krate.dir, &["--exact", "--harness", &name], Some(feature))?;
+
+    if ok || kani_verdict(&log) == Some(true) {
+        return Err(format!(
+            "`{harness}` verified on a build carrying `{feature}`.\n\n\
+             That is the proof failing rather than holding. Either the feature no\n\
+             longer reaches the code it names — check that {} still depends on the\n\
+             crate it proves rather than on a copy — or the harness has stopped\n\
+             presenting the input the defect needs.",
+            krate.dir
+        ));
+    }
+    if kani_verdict(&log).is_none() {
+        return Err(format!(
+            "the armed run did not reach a verdict, so it says nothing about\n\
+             `{feature}`. A checker that fails to start also exits non-zero, and that\n\
+             is not a proof failing. The tail of its output:\n\n{}",
+            kani_findings(&log)
+        ));
+    }
+
+    // The *failing checks*, not the log. A Kani report names the file under
+    // proof in hundreds of ordinary check locations whether it passes or fails
+    // — a clean `SUCCESSFUL` run carries several in its last forty lines — so
+    // asking whether the log mentions it is a guard every possible armed run
+    // satisfies, which is a guard that is not there. What has to be true is
+    // that a check *which failed* is the one the defect was supposed to break.
+    let sites = kani_failure_sites(&log);
+    if !sites.iter().any(|found| found.contains(*site)) {
+        let where_they_are = if sites.is_empty() {
+            "  (the report located no failing check at all)".to_string()
+        } else {
+            sites.iter().map(|found| format!("  {found}")).collect::<Vec<_>>().join("\n")
+        };
+        return Err(format!(
+            "`{harness}` failed on the armed build, and not for the reason it was\n\
+             supposed to: no *failing* check carries `{site}`, which is {what}.\n\n\
+             A proof that fails somewhere else — an unwinding assertion, a fixture\n\
+             that has stopped matching the crate, a panic in the harness itself —\n\
+             satisfies an exit status and proves nothing. Where the failures are:\n\n\
+             {where_they_are}\n\n\
+             The report:\n\n{}",
+            kani_findings(&log)
+        ));
+    }
+    println!("  {harness}: fails, at `{site}`");
+    Ok(())
+}
+
+/// What a report says about its cover properties, or nothing when it has none.
+///
+/// Printed beside every verified harness because an unsatisfiable cover is the
+/// failure mode a proof over arbitrary bytes has and a proof over arbitrary
+/// handles does not — see `prove`'s own documentation. The count is read out of
+/// the report rather than counted here, so a harness that lost a cover shows a
+/// smaller number in the log rather than nothing at all.
+fn covers(log: &str) -> String {
+    cover_line(log).map(|line| format!("  ({line})")).unwrap_or_default()
+}
+
+/// The report's cover summary, as it wrote it.
+fn cover_line(log: &str) -> Option<&str> {
+    log.lines()
+        .find(|line| line.contains("cover properties"))
+        .map(|line| line.trim().trim_start_matches("** ").trim())
+}
+
+/// Every cover the report lists is satisfiable, or why that is not known.
+///
+/// # Why this is a check and not a printed number
+///
+/// Because the checker will not make it one. Kani 0.67.0 treats an
+/// unsatisfiable cover as information: it prints
+/// `** 1 of 2 cover properties satisfied (1 unreachable)` and then
+/// `VERIFICATION:- SUCCESSFUL` with exit 0, and the image the nightly names
+/// carries no flag that changes that. So the sentence RFC 0057 rests its own
+/// honesty on — *an unsatisfiable cover is a failed proof* — was true of
+/// nothing until it was read here. That is the shape CONTRIBUTING R01 calls
+/// worse than an honestly manual rule: a check somebody believes is happening.
+///
+/// # Why a missing line is also a failure
+///
+/// For the crates this runs on, a report with no cover summary in it is a
+/// harness whose covers compiled out — the same vacuum, arriving by a different
+/// route and reading as an even quieter green. `ProofCrate::covered` is what
+/// says which crates owe the line at all.
+fn cover_check(log: &str) -> Result<(usize, usize), String> {
+    let Some(line) = cover_line(log) else {
+        return Err("the report carries no cover summary at all, so this harness states\n\
+                    no reachability. Either its `kani::cover!` calls compiled out, or\n\
+                    it never had any — and a harness over arbitrary bytes with no\n\
+                    cover cannot be told from a fixture that refuses everything."
+            .to_string());
+    };
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let parsed = match (words.first(), words.get(1), words.get(2)) {
+        (Some(satisfied), Some(&"of"), Some(total)) => {
+            satisfied.parse::<usize>().ok().zip(total.parse::<usize>().ok())
+        }
+        _ => None,
+    };
+    let Some((satisfied, total)) = parsed else {
+        return Err(format!(
+            "the cover summary `{line}` is not the shape this reads — `N of M cover\n\
+             properties satisfied`. The checker's report format moved, and a count\n\
+             that cannot be parsed must not be read as a count that is fine."
+        ));
+    };
+    if satisfied != total {
+        return Err(format!(
+            "{}, so {} of them cannot be reached at all: `{line}`",
+            if total == 1 {
+                "1 cover property".to_string()
+            } else {
+                format!("{total} cover properties")
+            },
+            total - satisfied,
+        ));
+    }
+    Ok((satisfied, total))
+}
+
+/// Which Kani is installed, or the sentence that says where to find one.
+fn kani_version() -> Result<String, String> {
+    let out =
+        Command::new("cargo").args(["kani", "--version"]).current_dir(root().join(PROOFS)).output();
+    match out {
+        Ok(out) if out.status.success() => {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        }
+        _ => Err("no `cargo kani` on PATH.\n\n\
+             The checker brings its own toolchain — RFC 0022, and Kani takes that\n\
+             further than RustMC did by shipping a rustc — so it is in the `full`\n\
+             image rather than in `dev`:\n\n\
+             \x20 docker compose -f docker/compose.yaml build full\n\
+             \x20 docker compose -f docker/compose.yaml run --rm -T full cargo xtask prove\n\n\
+             docker/README.md says what that costs. Nothing else in this tree needs\n\
+             it, and `cargo xtask verify` does not run this verb."
+            .to_string()),
+    }
+}
+
+/// Run the checker in one proof crate, armed or not, and hand back its report.
+///
+/// Captured rather than streamed, because every phase of this verb is an
+/// assertion about the *report*: a run that fails for the wrong reason
+/// satisfies an exit status and proves nothing, which is the mistake the
+/// comment on `MUTATIONS` records having nearly made.
+fn kani(dir: &str, args: &[&str], armed: Option<&str>) -> Result<(bool, String), String> {
+    let mut command = Command::new("cargo");
+    command.arg("kani").args(args).current_dir(root().join(dir));
+    if let Some(feature) = armed {
+        command.args(["--features", feature]);
+    }
+    let out = command.output().map_err(|e| format!("could not run cargo kani: {e}"))?;
+    let mut log = String::from_utf8_lossy(&out.stdout).into_owned();
+    log.push_str(&String::from_utf8_lossy(&out.stderr));
+    Ok((out.status.success(), log))
+}
+
+/// What the report says, or `None` when it does not say.
+///
+/// Read out of the text rather than taken from the exit status, because a
+/// checker that failed to *start* also exits non-zero and would otherwise read
+/// as a proof that failed — which is exactly the half of this verb that must
+/// not pass for the wrong reason.
+fn kani_verdict(log: &str) -> Option<bool> {
+    log.lines().rev().find_map(|line| match line.trim() {
+        "VERIFICATION:- SUCCESSFUL" => Some(true),
+        "VERIFICATION:- FAILED" => Some(false),
+        _ => None,
+    })
+}
+
+/// The lines of a report worth putting in front of a person.
+fn kani_findings(log: &str) -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    let mut carry = 0usize;
+    for line in log.lines() {
+        if line.contains("Status: FAILURE") || line.starts_with("VERIFICATION") {
+            lines.push(line.trim_end());
+            carry = 3;
+        } else if carry > 0 && (line.contains("Description:") || line.contains("Location:")) {
+            lines.push(line.trim_end());
+            carry -= 1;
+        }
+    }
+    if lines.is_empty() {
+        // A report with no failing check in it is a checker that did not run,
+        // and its tail is where that always says so.
+        let tail: Vec<&str> = log.lines().collect();
+        let from = tail.len().saturating_sub(30);
+        return tail[from..].join("\n");
+    }
+    lines.join("\n")
+}
+
+/// Both proof crates still compile against the code they prove.
+///
+/// # Why this is in `lint` and not left to the schedule
+///
+/// RFC 0053 names one standing cost of compiling `kernel/src/cap.rs` a second
+/// time: adding a `use crate::` naming a fourth kernel module to that file
+/// breaks a build that nothing in `cargo xtask verify` runs. It then offers as
+/// the mitigation that the crate compiles under the *pinned* nightly as well
+/// as under Kani's — "which is what makes *the stand-ins still match `mem`* a
+/// thing an ordinary `cargo build` can find out rather than something the
+/// schedule discovers". Nothing was running that build, so the mitigation was
+/// a sentence: the first thing to notice a fourth dependency would have been a
+/// nightly `prove` job costing twenty minutes, hours after the person who
+/// wrote the line had moved on. That is the shape CONTRIBUTING R01 calls a
+/// rule written as a mechanism while remaining a plan.
+///
+/// So the build runs here. It needs no Kani — `cfg(kani)` is off, the
+/// harnesses compile out, and what is left is `cap.rs` and three stand-ins.
+///
+/// `ring/proofs` is here for a related but not identical reason, and the
+/// difference is worth a sentence because it is the whole of what RFC 0057
+/// decided differently. That crate takes `f-ring` as a path dependency rather
+/// than compiling a file out of it, so there is no stand-in to fall out of
+/// step and no `#[path]` to stop reaching anything. What it buys instead is
+/// every *call* the proofs make: `mod proofs` is compiled by this build too —
+/// only the `kani::proof` and `kani::unwind` attributes are conditional, and
+/// `kani::any`, `kani::assume` and `kani::cover!` have a shim — so
+/// `Consumer::pop`, `Mapping::adopt`, `Table::register`, `execute` and
+/// `BufferSet::carve` are all typechecked against their real signatures here.
+/// While `mod proofs` was `#[cfg(kani)]` this build saw the three trait
+/// implementations in `peer` and none of that, which is most of what the check
+/// exists for; it found a dead import the moment it stopped being.
+///
+/// What it still cannot catch is the *fixture's arithmetic*: `peer::REGION` is
+/// computed against `f_abi::layout`'s offsets, and a change to those moves
+/// which ring sizes the proofs admit without moving a type. Only the covers
+/// catch that, at `prove` time, and `proofs::reached` is the pair of them that
+/// names a ring size. So this check is weaker there than here and says so.
+///
+/// # Why every feature configuration
+///
+/// Because all but the first are built by nothing else in the gate: the wide
+/// bound by `prove`'s second pass and each deliberate defect by its third. A
+/// feature that stopped compiling would otherwise be found by the run whose
+/// job is to assert a *failure*, where a build error and a failed proof are
+/// the same exit status. `prove` distinguishes them by reading the verdict
+/// rather than the status, and that is still a worse place to find it than
+/// here.
+///
+/// `cargo fmt --check` is here for a smaller reason with the same shape:
+/// `lint_all`'s own `cargo fmt --all` is workspace-scoped and both crates are
+/// excluded from the workspace, so nothing was checking their formatting.
+fn lint_proofs() -> Result<(), String> {
+    let mut built = 0usize;
+    for krate in PROOF_CRATES {
+        let dir = root().join(krate.dir);
+        if !dir.join("Cargo.toml").is_file() {
+            // Deleting the directory is the documented whole of undoing this
+            // arrangement — RFC 0053's last reversal condition, and RFC 0057
+            // keeps it — so the lint refuses to be the thing that makes that
+            // expensive.
+            println!("lint-proofs: skipped  ({} is not present)", krate.dir);
+            continue;
+        }
+        // Every configuration `prove` builds, because all but the first are
+        // built by nothing else in the gate: the wide bound by phase two and
+        // each defect by phase three. A feature that stopped compiling would
+        // otherwise be found by the run whose job is to assert a *failure*,
+        // where a build error and a failed proof are the same exit status.
+        // `prove` distinguishes them by reading the verdict rather than the
+        // status, and that is still a worse place to find it than here.
+        let mut configurations: Vec<Vec<&str>> = vec![vec![], vec!["--features", krate.wide]];
+        configurations.extend(krate.armed.iter().map(|defect| vec!["--features", defect.feature]));
+        for extra in &configurations {
+            let mut args = vec!["check", "--quiet"];
+            args.extend_from_slice(extra);
+            // `RUSTFLAGS` and not `-- -D warnings`, which `cargo check` does not
+            // take. It is here for the reason every other invocation in `lint_all`
+            // carries `-D warnings`: in this tree a `warning:` line is a failure,
+            // and these crates are outside the workspace, so they inherit no lint
+            // table and nothing else would turn one into one.
+            run_in_with(&dir, "cargo", &args, &[("RUSTFLAGS", "-D warnings")])?;
+        }
+        run_in(&dir, "cargo", &["fmt", "--", "--check"])?;
+        built += configurations.len();
+    }
+    let dependents = proof_schedule()?;
+    println!(
+        "lint-proofs: ok  ({} crate(s) build against the code they prove under the pinned \
+         toolchain, in {built} configuration(s) between them; the nightly still runs \
+         `cargo xtask prove`, and {dependents} job depends on the checker's image)",
+        PROOF_CRATES.len()
+    );
+    println!(
+        "  {} thing(s) a sequential checker cannot see (RING_PROOF_BLIND, declared \
+         rather than checked): {}",
+        RING_PROOF_BLIND.len(),
+        RING_PROOF_BLIND
+            .iter()
+            .filter_map(|gap| gap.split_once(' ').map(|(name, _)| name))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!(
+        "  {} propert{} of E1-P07's exit the schedule establishes and this machine \
+         cannot (PROVE_RUN_GAP, declared rather than checked):",
+        PROVE_RUN_GAP.len(),
+        if PROVE_RUN_GAP.len() == 1 { "y" } else { "ies" }
+    );
+    for gap in PROVE_RUN_GAP {
+        println!("  - {gap}");
+    }
+    Ok(())
+}
+
+/// The schedule still runs the proofs, and still only the proofs pay for the
+/// checker.
+///
+/// # What this can and cannot say
+///
+/// `E1-P07`'s exit is *the proofs run in CI on a schedule, and a mutation to
+/// the capability code fails them*. The second clause is an assertion
+/// `cargo xtask prove` makes on this machine. The first is a statement about
+/// GitHub, and nothing in this repository can observe a workflow run — so the
+/// honest move is not to claim it but to check the half that is here: that the
+/// file still says what the clause rests on. A `prove` job renamed, or a
+/// `cargo xtask prove` quietly dropped out of its `run:`, is how that clause
+/// stops being true without anybody deciding it should, and this is the only
+/// place noticing is cheap.
+///
+/// # The third check, which is the one review added
+///
+/// `image_full` is a job of its own, and exactly one job may depend on it.
+///
+/// It was a second step inside `image` first. Six nightly jobs carry
+/// `needs: [environment, image]`, so a Kani layer there — a `cargo install`
+/// from crates.io and a 483 MB download from GitHub releases, both at
+/// image-build time — put the sweep, both fuzzers, the Miri job and the join
+/// behind the checker's toolchain, none of which have ever heard of it. That is
+/// not hypothetical: `docker/README.md` records that exact download failing on
+/// one machine. The count is *checked* rather than described because the
+/// cheapest way to reintroduce it is to add `image_full` to a `needs:` list
+/// while thinking about something else.
+fn proof_schedule() -> Result<usize, String> {
+    let text = std::fs::read_to_string(root().join(NIGHTLY)).map_err(|e| {
+        format!(
+            "reading {NIGHTLY}: {e}\n\n\
+             The schedule half of E1-P07's exit is a job in that file, so a check on it \
+             cannot be run without it."
+        )
+    })?;
+    for (needle, what) in [
+        ("cron:", "a schedule at all"),
+        ("cargo xtask prove", "the verb the `prove` job exists to run"),
+        ("outputs.image_full", "the image that carries the checker"),
+    ] {
+        if !text.contains(needle) {
+            return Err(format!(
+                "{NIGHTLY} no longer contains `{needle}`, which is {what}.\n\n\
+                 E1-P07's exit says the proofs run on a schedule. Nothing in this tree can\n\
+                 watch GitHub run them, so what it checks instead is that the file still\n\
+                 says so — and it no longer does. If the job moved, move this check with\n\
+                 it. If it went, `docs/TESTING-STATUS.md`'s L3 row and RFC 0053 now\n\
+                 describe a schedule that does not exist."
+            ));
+        }
+    }
+    let dependents = text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("needs:") && line.contains("image_full"))
+        .count();
+    if dependents != 1 {
+        return Err(format!(
+            "{dependents} job(s) in {NIGHTLY} depend on `image_full`, and exactly one may.\n\n\
+             That image carries Kani's own rustc, built by fetching a crate and a 483 MB\n\
+             release at image-build time. Every job waiting on it is a job the checker's\n\
+             toolchain can take down — and the sweep, the two fuzzers and the Miri job\n\
+             assert things that have nothing to do with a proof. A check that does not run\n\
+             asserts nothing, so the blast radius of that layer is one job on purpose.\n\
+             RFC 0053, and the header of the `image_full` job itself."
+        ));
+    }
+    Ok(dependents)
+}
+
+/// The schedule E1-P07's exit names.
+const NIGHTLY: &str = ".github/workflows/nightly.yml";
+
+/// What the local loop cannot observe about the scheduled proofs, as a set
+/// rather than a sentence.
+///
+/// `ARCH_RUN_GAP` is the precedent and the argument is the same one. E1-P07's
+/// exit has two clauses. *A mutation to the capability code fails them* is
+/// decided by running something, so it is decided here, by `cargo xtask
+/// prove`'s third phase. *The proofs run in CI on a schedule* is decided by
+/// GitHub, and nothing in this repository can watch GitHub — so rather than
+/// write "CI covers it" and move on, the honest move is to name exactly what
+/// is unobserved and to check the part that is not.
+///
+/// [`proof_schedule`] is the part that is not: the file still holds a
+/// schedule, still runs the verb, still names the checker's image, and exactly
+/// one job depends on that image. Everything below is what remains, and the
+/// list is short on purpose — a long one would mean the verb had stopped being
+/// worth running locally.
+const PROVE_RUN_GAP: &[&str] = &[
+    "that GitHub runs the `prove` job at all — the schedule, the container pull and the \
+     runner's own two cores are outside anything this tree can execute, so a green \
+     `cargo xtask prove` here is evidence about the *proofs* and not about the cadence",
+    "that the `full` image builds on a GitHub runner — the Kani layer fetches a crate from \
+     crates.io and a 483 MB release from GitHub, and the only builder it has ever run on \
+     needed `--network=host` to do it (docker/README.md). `image_full` is a job of its own \
+     so that being wrong about this costs one check rather than seven",
+];
+
+/// [`sh`], somewhere other than the root.
+///
+/// One caller: `kernel/proofs` is not a workspace member, so a `cargo` run
+/// against it has to start inside it — from the root, cargo finds the
+/// workspace this crate is deliberately excluded from.
+fn run_in(dir: &Path, program: &str, args: &[&str]) -> Result<(), String> {
+    run_in_with(dir, program, args, &[])
+}
+
+/// [`run_in`], with environment variables set for the child.
+fn run_in_with(
+    dir: &Path,
+    program: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<(), String> {
+    let status = Command::new(program)
+        .args(args)
+        .envs(env.iter().copied())
+        .current_dir(dir)
+        .status()
+        .map_err(|e| format!("could not run {program}: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{program} {} failed in {}", args.join(" "), relative(dir)))
+    }
+}
+
+/// Where the checks that *failed* are, and nothing about the ones that passed.
+///
+/// [`kani_findings`] is text for a person to read; this is what the armed half
+/// asserts on, and the two must not be the same lines. Kani emits a
+/// `Location:` for every check it generates, so a report over `kernel/proofs`
+/// names `cap.rs` hundreds of times on a run where nothing failed at all — a
+/// clean `narrowing` carries three in its last forty lines. Asking whether the
+/// *log* mentions the file is therefore a question every possible armed run
+/// answers yes to. Asking where the failures are is not.
+///
+/// A `Status: FAILURE` line is followed by that check's `Description:` and
+/// `Location:`, so the first of each after a failure is the failure's and no
+/// other line qualifies.
+///
+/// # Why the description is here as well as the location
+///
+/// Because three of the ring's five armed defects produce a **plausible wrong
+/// answer** rather than a fault — an ignored flag, an unbounded drain, a
+/// lenient index — and nothing in the process faults on one. What fails for
+/// those is a harness assertion, and what identifies it is the sentence that
+/// assertion carries. A guard that could only read locations would have to
+/// accept *some check in proofs.rs failed*, which every unwinding assertion in
+/// the file also satisfies. So a site is the description and the location
+/// together, and `RING_PROOFS`'s table says for each defect which half it is
+/// matching on. RFC 0057.
+fn kani_failure_sites(log: &str) -> Vec<String> {
+    let mut sites: Vec<String> = Vec::new();
+    let mut failing = false;
+    let mut open: Option<String> = None;
+    for line in log.lines() {
+        // Kani indents these under the check they belong to, and the leading
+        // bullet is part of the format rather than of the text.
+        let line = line.trim().trim_start_matches("- ").trim();
+        if line.starts_with("Status:") {
+            // Any `Status:` closes the previous check, so a failure whose
+            // location the report omits cannot inherit the next check's.
+            if let Some(partial) = open.take() {
+                sites.push(partial);
+            }
+            failing = line.contains("FAILURE");
+        } else if failing && line.starts_with("Description:") {
+            open = Some(line.to_string());
+        } else if failing && line.starts_with("Location:") {
+            let described = open.take().map_or_else(String::new, |text| format!("{text}  "));
+            sites.push(format!("{described}{line}"));
+            failing = false;
+        }
+    }
+    if let Some(partial) = open {
+        sites.push(partial);
+    }
+    sites
+}
+
+#[cfg(test)]
+mod proof_report {
+    /// A report where nothing failed still names the file all over.
+    ///
+    /// This is the fixture for the mistake the armed half made first:
+    /// `log.contains("cap.rs")` is true of the text below, which is a
+    /// `SUCCESSFUL` run. A guard satisfied by a passing report is a guard
+    /// satisfied by every armed run there could be, and the exit clause it was
+    /// standing for — *a mutation to the capability code fails them* — would
+    /// have been green on a proof that never noticed the defect.
+    const CLEAN: &str = "Check 411: cap::Table::place.assertion.1
+	 - Status: SUCCESS
+	 - Description: \"assertion failed\"
+	 - Location: src/../../src/cap.rs:1346:26 in function cap::Table::place
+
+VERIFICATION:- SUCCESSFUL
+";
+
+    /// The armed report, in the shape `cargo xtask prove` actually reads.
+    const ARMED: &str = "Check 12: cap::Table::slot.assertion.1
+	 - Status: SUCCESS
+	 - Description: \"\"
+	 - Location: src/../../src/cap.rs:1300:9 in function cap::Table::slot
+
+Check 13: cap::Table::slot.bounds.1
+	 - Status: FAILURE
+	 - Description: \"index out of bounds: the length is less than or equal to the given index\"
+	 - Location: src/../../src/cap.rs:1283:12 in function cap::Table::slot
+
+VERIFICATION:- FAILED
+";
+
+    /// A failure that is the harness's own, which must not satisfy the guard.
+    const ELSEWHERE: &str = "Check 7: proofs::stale.unwind.0
+	 - Status: FAILURE
+	 - Description: \"unwinding assertion loop 0\"
+	 - Location: src/proofs.rs:174:5 in function proofs::stale
+
+VERIFICATION:- FAILED
+";
+
+    #[test]
+    fn a_passing_report_yields_no_failure_sites() {
+        assert!(super::kani_failure_sites(CLEAN).is_empty());
+        // And the thing that makes the test worth having: the naive guard the
+        // careful one replaced is satisfied by exactly this text.
+        assert!(CLEAN.contains("cap.rs"));
+    }
+
+    #[test]
+    fn an_armed_report_locates_its_failure_in_the_shipped_file() {
+        let sites = super::kani_failure_sites(ARMED);
+        assert_eq!(sites.len(), 1, "{sites:?}");
+        assert!(sites[0].contains("cap.rs"), "{sites:?}");
+        assert!(sites[0].contains("cap::Table::slot"), "{sites:?}");
+    }
+
+    #[test]
+    fn the_half_of_the_exit_this_machine_cannot_see_is_declared_and_still_unseen() {
+        // Both directions, the way `ARCH_RUN_GAP` and `JOIN_GAP` are checked.
+        // An empty list would say the local loop observes the schedule, which
+        // is false and is the shape of a gap quietly deleted rather than
+        // closed. The second assertion is the other direction: the half that
+        // *is* local has to still hold, so that the day somebody renames the
+        // job, `cargo xtask test-host` says so as well as `lint`.
+        assert!(
+            !super::PROVE_RUN_GAP.is_empty(),
+            "nothing here can watch GitHub run the proofs, so this owes a list of what it              therefore does not know"
+        );
+        super::proof_schedule().expect("the nightly no longer says what the exit rests on");
+    }
+
+    #[test]
+    fn a_failure_in_the_harness_is_not_a_failure_in_cap_rs() {
+        let sites = super::kani_failure_sites(ELSEWHERE);
+        assert_eq!(sites.len(), 1, "{sites:?}");
+        assert!(
+            !sites.iter().any(|site| site.contains("cap.rs")),
+            "an unwinding assertion in the harness would satisfy the guard: {sites:?}"
+        );
+    }
+
+    /// A wrong answer fails an assertion, and the sentence is what names it.
+    ///
+    /// Three of the ring's five armed defects produce no fault at all, so the
+    /// only thing that tells their failure from an unwinding assertion in the
+    /// same file is the message the assertion carries. This is the fixture for
+    /// that: the location alone would be satisfied by any failure in
+    /// `proofs.rs`, and the pair is not.
+    const WRONG_ANSWER: &str = "Check 91: proofs::draining_an_arbitrary_channel.assertion.2
+	 - Status: FAILURE
+	 - Description: \"a drain did more work than its budget\"
+	 - Location: src/proofs.rs:395:13 in function proofs::draining_an_arbitrary_channel
+
+VERIFICATION:- FAILED
+";
+
+    #[test]
+    fn a_wrong_answer_is_identified_by_its_sentence_and_not_by_its_file() {
+        let sites = super::kani_failure_sites(WRONG_ANSWER);
+        assert_eq!(sites.len(), 1, "{sites:?}");
+        assert!(sites[0].contains("a drain did more work than its budget"), "{sites:?}");
+        assert!(sites[0].contains("src/proofs.rs"), "{sites:?}");
+        // And the guard that would have been satisfied by any failure in the
+        // file, which is the one this replaced.
+        let unwinding = super::kani_failure_sites(ELSEWHERE);
+        assert_eq!(unwinding.len(), 1, "{unwinding:?}");
+        assert!(
+            !unwinding[0].contains("a drain did more work than its budget"),
+            "an unwinding assertion satisfied a wrong-answer defect's site: {unwinding:?}"
+        );
+    }
+
+    /// The harness the header defect must break carries no `expect` of its own.
+    ///
+    /// `RING_PROOFS` matches that defect against `unwrap_failed`, because Kani
+    /// attributes a failing `expect` to `core`'s helper rather than to the call
+    /// site — so the sentence that makes the attribution unambiguous is *this
+    /// harness has no other one*. That sentence is checkable, so it is checked
+    /// rather than written in the table and left.
+    #[test]
+    fn the_harness_the_header_defect_breaks_has_no_unwrap_of_its_own() {
+        let path = super::root().join(super::RING_PROOFS).join("src/proofs.rs");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            // Deleting the directory is the documented whole of undoing the
+            // arrangement; this test refuses to be what makes that expensive.
+            return;
+        };
+        let Some(start) = text.find("fn adopting_arbitrary_bytes()") else {
+            panic!("the harness `mutate-believed-header` is matched against is gone");
+        };
+        let body = &text[start..];
+        let end = body.find("\n}").map_or(body.len(), |at| at + 2);
+        let body = &body[..end];
+        for reached in ["unwrap(", "expect("] {
+            assert!(
+                !body.contains(reached),
+                "`adopting_arbitrary_bytes` now contains `{reached}`, so a panic from it \
+                 would be attributed to `unwrap_failed` exactly as the defect's is, and \
+                 `cargo xtask prove`'s third phase could no longer tell the two apart. \
+                 Either take it out or give that entry in `RING_PROOFS` a site that can."
+            );
+        }
+    }
+
+    /// A verified report whose fixture stopped reaching the code.
+    ///
+    /// Captured from the checker in the image the nightly names rather than
+    /// written from memory: a throwaway crate with one satisfiable cover and
+    /// one made unreachable by an `assume` produces exactly this, verdict
+    /// included. That verdict is the finding — Kani does not fail on an
+    /// unreachable cover — so this is the fixture for the thing `prove_one`
+    /// had to start doing instead.
+    const VACUOUS: &str = "Check 2: mixed.cover.2
+	 - Status: UNREACHABLE
+	 - Description: \"impossible\"
+	 - Location: src/lib.rs:9:9 in function mixed
+
+SUMMARY:
+ ** 0 of 1 failed
+
+ ** 1 of 2 cover properties satisfied (1 unreachable)
+
+
+VERIFICATION:- SUCCESSFUL
+";
+
+    /// The same report with every cover reached.
+    const REACHED: &str = "SUMMARY:
+ ** 0 of 301 failed (3 unreachable)
+
+ ** 3 of 3 cover properties satisfied
+
+
+VERIFICATION:- SUCCESSFUL
+";
+
+    #[test]
+    fn a_cover_nothing_can_reach_is_a_failure_the_verdict_does_not_carry() {
+        // The half that is the finding: the checker verified it.
+        assert_eq!(super::kani_verdict(VACUOUS), Some(true));
+        assert!(super::kani_failure_sites(VACUOUS).is_empty());
+        // And the half that is the fix.
+        let why = super::cover_check(VACUOUS).expect_err("an unreachable cover was accepted");
+        assert!(why.contains("1 of them cannot be reached"), "{why}");
+        assert_eq!(super::cover_check(REACHED), Ok((3, 3)));
+    }
+
+    #[test]
+    fn a_report_with_no_cover_summary_is_refused_where_one_is_owed() {
+        // `kernel/proofs` carries no covers and is not asked for any; the ring's
+        // crate is, and a report that lost the line is the same vacuum arriving
+        // more quietly than an unreachable cover does.
+        assert!(super::cover_check(CLEAN).is_err());
+        let owed: Vec<bool> = super::PROOF_CRATES.iter().map(|krate| krate.covered).collect();
+        assert!(owed.contains(&true), "no crate owes its covers, so nothing is checked");
+        assert!(
+            super::PROOF_CRATES
+                .iter()
+                .any(|krate| krate.dir == super::RING_PROOFS && krate.covered),
+            "the crate whose harnesses are fixtures over bytes stopped owing its covers"
+        );
+    }
+
+    /// Every harness in `ring/proofs` carries at least one `kani::cover!`.
+    ///
+    /// The other direction of the same rule. `cover_check` refuses a report
+    /// with no summary in it, but that is a twenty-minute run away; a harness
+    /// added with no cover at all is findable here in a second, and it is the
+    /// cheapest way this proof goes quietly vacuous.
+    #[test]
+    fn every_ring_harness_states_something_it_can_reach() {
+        let path = super::root().join(super::RING_PROOFS).join("src/proofs.rs");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        for (harness, _, _) in super::RING_PROOF_HARNESSES {
+            let start = text
+                .find(&format!("fn {harness}()"))
+                .unwrap_or_else(|| panic!("`{harness}` is in the table and not in the file"));
+            let body = &text[start..];
+            let end = body.find("\n}").map_or(body.len(), |at| at + 2);
+            assert!(
+                body[..end].contains("kani::cover!"),
+                "`{harness}` states no cover, so nothing says its fixture reaches the\n\
+                 code it is about. A harness over arbitrary bytes whose first check\n\
+                 refuses everything verifies instantly and proves nothing."
+            );
+        }
+    }
+
+    /// Every deliberate defect in `ring/Cargo.toml` is either armed by a proof
+    /// or declared as one a proof cannot see.
+    ///
+    /// The check that stops `RING_PROOF_BLIND` from becoming decoration. Nine
+    /// defects, six armed by a fuzzer and three by a boot or a litmus test —
+    /// what matters here is that none of them is in *neither* list, because a
+    /// defect nobody has decided about is how a reader comes to believe that
+    /// ten green harnesses mean the ring is proved. Adding a tenth defect to
+    /// that manifest and to neither list fails here, which is the cheapest
+    /// place to find out.
+    #[test]
+    fn every_ring_defect_is_either_armed_by_a_proof_or_declared_invisible_to_one() {
+        let manifest = std::fs::read_to_string(super::root().join("ring/Cargo.toml"))
+            .expect("ring/Cargo.toml");
+        let declared: Vec<&str> = manifest
+            .lines()
+            .filter_map(|line| line.split_once(" = []"))
+            .map(|(name, _)| name.trim())
+            .filter(|name| name.starts_with("mutate-"))
+            .collect();
+        assert!(!declared.is_empty(), "the manifest stopped declaring defects at all");
+
+        let armed: Vec<&str> = super::PROOF_CRATES
+            .iter()
+            .filter(|krate| krate.dir == super::RING_PROOFS)
+            .flat_map(|krate| krate.armed.iter().map(|defect| defect.feature))
+            .collect();
+        assert!(!armed.is_empty(), "no ring defect is armed, so the third phase asserts nothing");
+
+        for defect in &declared {
+            let blind = super::RING_PROOF_BLIND.iter().any(|gap| gap.starts_with(defect));
+            assert!(
+                armed.contains(defect) || blind,
+                "`{defect}` is in ring/Cargo.toml and in neither RING_PROOFS nor \
+                 RING_PROOF_BLIND. A defect nobody has decided about is how a reader \
+                 comes to believe a green `prove` covers more than it does: either a \
+                 harness must fail on it, or this file must say why one cannot."
+            );
+            assert!(
+                !(armed.contains(defect) && blind),
+                "`{defect}` is both armed and declared invisible, which is two answers \
+                 to one question"
+            );
+        }
+        // And the other direction, so the list cannot outlive the manifest.
+        for gap in super::RING_PROOF_BLIND {
+            let name = gap.split(' ').next().unwrap_or_default();
+            assert!(
+                declared.contains(&name),
+                "RING_PROOF_BLIND names `{name}`, which ring/Cargo.toml no longer \
+                 declares — a gap that outlived the thing it was about"
+            );
+        }
+    }
 }
 
 /// A deliberate defect must never be on by default.
@@ -5398,6 +7190,596 @@ fn net(kind: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// The display device `cargo xtask gpu` adds, and the one the machine loses to
+/// make room for it.
+///
+/// `-vga none` is the half a reader will not expect. The q35 machine adds a
+/// standard VGA adapter by default, and QEMU numbers displays in the order the
+/// devices were created — so with the default adapter still there the display
+/// controller this check drives would be console **one**, and a screen capture
+/// with no console named takes console zero. That would capture a blank VGA
+/// text screen on every half of this check, on which the pattern never appears,
+/// and the two halves that must *not* show the pattern would pass for a reason
+/// that has nothing to do with them. Naming the console in the capture would
+/// work equally well and would be one more number to get wrong; taking the other
+/// adapter away means there is only one display in the machine and it is the one
+/// under test.
+///
+/// Two of the options are `DMA_DEVICE`'s and the reasoning is not repeated:
+/// `disable-legacy=on` forces the modern register layout, and
+/// `iommu_platform=on` is the device half of the feature bit that routes the
+/// device's transfers through the remapping unit. On a *display* controller
+/// getting that wrong is worse than a green test, and worse than it is on either
+/// of the other two devices: what this device reads it puts on a screen, so a
+/// transfer that bypassed translation would be a page of somebody's memory shown
+/// to whoever is looking at the machine.
+///
+/// There is deliberately no `-display` option here. `machine_devices` passes
+/// `-display none` on every boot in this file, and it is worth saying plainly
+/// that it does **not** mean *no framebuffer*: QEMU still models the display and
+/// still keeps a surface for it, and `screendump` reads that surface whether or
+/// not anybody is drawing it in a window. What `-display none` removes is a user
+/// interface, which is exactly what a check must not depend on.
+const GPU_DEVICE: &[&str] =
+    &["-vga", "none", "-device", "virtio-gpu-pci,disable-legacy=on,iommu_platform=on"];
+
+/// The line the kernel prints when the picture is on the display and the machine
+/// is about to hold still.
+///
+/// The harness waits for this and not for the verdict, because the verdict comes
+/// first: a boot whose datapath failed has already exited by then, so a capture
+/// is only ever taken from a run that reached its own verdict. `kernel/src/main.rs`
+/// prints them in that order for exactly this reason.
+const GPU_MARKER: &str = "gpu display";
+
+/// The byte the harness writes back when it has looked.
+///
+/// One byte on the serial port, which the kernel polls for. Any byte would do
+/// and the value is not read; what matters is that *something* arrived, which is
+/// the only thing the guest needs to know. `kernel/src/arch/x86_64/serial.rs`
+/// argues why a kernel that only ever printed now reads.
+const GPU_ACK: &[u8] = b"k\n";
+
+/// The three halves, and the middle one is what makes the first mean anything.
+///
+/// `inside` puts a client's pixels on a scanout through a ring and the harness
+/// must find them on the host's display. `blank` is the identical client with
+/// the submission removed — the pixels are in guest memory the whole time and
+/// must not reach the display, which is a sharper control than a client that
+/// wrote nothing. `escape` submits the same entry and has the driver point the
+/// device one page past what the registration answered, so the remapping unit
+/// must fault a **read** and nothing may appear.
+///
+/// All three must end at 33. A device reading memory it was not given is an
+/// event the frame handles, and a kernel that died handling one would have
+/// failed the property rather than enforced it.
+const GPU_PROVOCATIONS: &[(&str, &str)] = &[
+    ("inside", "a client's pixels reach the host's display through a ring"),
+    ("blank", "the same pixels, submitted to nothing, must not reach it"),
+    ("escape", "the driver points the device past what it was answered, at what a display reads"),
+];
+
+/// What one watched boot produced.
+struct Watched {
+    ending: Ending,
+    log: String,
+    /// The screen capture, when the marker appeared and the monitor answered.
+    shot: Option<PathBuf>,
+}
+
+/// A frame captured from the emulator, as a screen capture reports it.
+struct Frame {
+    /// Unit: pixels.
+    width: u32,
+    /// Unit: pixels.
+    height: u32,
+    /// Unit: none — an FNV-1a-64 digest over the red, green and blue bytes.
+    hash: u64,
+}
+
+/// FNV-1a over sixty-four bits.
+///
+/// The second of two copies, and the first is `kernel/src/gpu.rs`'s. A hash is
+/// duplicated here rather than a *pattern*, and that is the whole design of this
+/// check: the kernel knows what it drew and how a display reports it, this side
+/// knows neither, and what crosses between them is one number. A wrong belief
+/// about the pixel layout on the kernel's side therefore produces a capture that
+/// does not match rather than two sides agreeing with each other.
+///
+/// Not a cryptographic hash, and the cost is stated rather than hidden: a
+/// deliberate collision is constructible. Nothing on the far side of this
+/// comparison is chosen by anybody — the adversary is a defect — and the day
+/// something adversarial writes to a framebuffer this is a comparison over the
+/// bytes and not over a digest.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Read a binary portable-pixmap: the format QEMU's screen capture writes.
+///
+/// `P6`, three ASCII numbers, one whitespace byte, then three bytes per pixel in
+/// row-major order. Parsed by hand for the reason this tree parses every format
+/// by hand — a dependency for eleven lines is a dependency — and refused rather
+/// than guessed at: a capture this function cannot read is a capture nothing
+/// should be concluded from.
+///
+/// # Errors
+///
+/// A magic that is not `P6`, a header that does not hold three numbers, a
+/// maximum value other than 255, or a body that is not three bytes per pixel.
+fn read_ppm(bytes: &[u8]) -> Result<Frame, String> {
+    let mut at = 0usize;
+    let token = |bytes: &[u8], at: &mut usize| -> Result<String, String> {
+        while bytes.get(*at).is_some_and(|b| b.is_ascii_whitespace()) {
+            *at += 1;
+        }
+        // A comment runs to the end of its line. QEMU writes none; the format
+        // allows them, and skipping them is three lines against a capture that
+        // would otherwise be unreadable for a reason nobody would guess.
+        while bytes.get(*at) == Some(&b'#') {
+            while bytes.get(*at).is_some_and(|b| *b != b'\n') {
+                *at += 1;
+            }
+            while bytes.get(*at).is_some_and(|b| b.is_ascii_whitespace()) {
+                *at += 1;
+            }
+        }
+        let start = *at;
+        while bytes.get(*at).is_some_and(|b| !b.is_ascii_whitespace()) {
+            *at += 1;
+        }
+        if start == *at {
+            return Err("the capture ended in the middle of its header".to_string());
+        }
+        String::from_utf8(bytes.get(start..*at).unwrap_or_default().to_vec())
+            .map_err(|_| "the capture's header is not text".to_string())
+    };
+
+    if token(bytes, &mut at)? != "P6" {
+        return Err("the capture is not a binary portable pixmap".to_string());
+    }
+    let number = |text: String| -> Result<u32, String> {
+        text.parse::<u32>().map_err(|_| format!("`{text}` is not a number in the capture's header"))
+    };
+    let width = number(token(bytes, &mut at)?)?;
+    let height = number(token(bytes, &mut at)?)?;
+    let maximum = number(token(bytes, &mut at)?)?;
+    if maximum != 255 {
+        return Err(format!("the capture reports {maximum} as its maximum value, not 255"));
+    }
+    // Exactly one whitespace byte separates the header from the body, and it is
+    // consumed rather than skipped: skipping would eat a pixel whose red channel
+    // happens to be a space.
+    at += 1;
+    let body = bytes.get(at..).ok_or("the capture has a header and no pixels")?;
+    let needed = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or("the capture claims more pixels than could exist")?;
+    if body.len() < needed {
+        return Err(format!(
+            "the capture claims {width}x{height} and carries {} of the {needed} bytes that needs",
+            body.len()
+        ));
+    }
+    let body = body.get(..needed).unwrap_or_default();
+    Ok(Frame { width, height, hash: fnv1a(body) })
+}
+
+/// What the kernel said it drew, read out of its own boot log.
+///
+/// Parsed rather than assumed, and this is the one place the harness learns
+/// anything about the picture. It holds no copy of the pattern, no copy of the
+/// geometry and no copy of the pixel layout — `kernel/src/gpu.rs` holds all
+/// three — so a change to any of them on that side changes this line and is
+/// checked against a capture rather than against a second belief.
+///
+/// # Errors
+///
+/// A log with no such line, or one this cannot read.
+fn gpu_claim(log: &str) -> Result<Frame, String> {
+    let line = log
+        .lines()
+        .find(|line| line.contains(GPU_MARKER))
+        .ok_or("the boot printed no display line")?;
+    // `  gpu display   16 x 16 pixels, client rgb fnv1a 0x????????????????`
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let at = |index: usize| -> Result<&str, String> {
+        fields.get(index).copied().ok_or_else(|| format!("the display line is too short: {line}"))
+    };
+    let number = |text: &str| -> Result<u32, String> {
+        text.parse::<u32>().map_err(|_| format!("`{text}` is not a number in: {line}"))
+    };
+    let width = number(at(2)?)?;
+    let height = number(at(4)?)?;
+    let digits = at(fields.len() - 1)?.trim_start_matches("0x");
+    let hash = u64::from_str_radix(digits, 16)
+        .map_err(|_| format!("`{digits}` is not a hash in: {line}"))?;
+    Ok(Frame { width, height, hash })
+}
+
+/// Ask the emulator's monitor one question and wait for its answer.
+///
+/// The monitor speaks a line of JSON per message. This writes one and reads
+/// until a line carrying `"return"` or `"error"`, which is a substring test
+/// rather than a parser — deliberately, because the alternative is a JSON reader
+/// in a build tool for three messages, and because everything this needs to know
+/// is whether the emulator did what it was asked.
+///
+/// Events arrive on the same connection and are stepped over by the same test,
+/// which is why the loop reads until it finds an answer rather than reading one
+/// line.
+///
+/// # Errors
+///
+/// A monitor that refused, or that stopped answering inside the read timeout its
+/// caller set.
+fn monitor_ask(
+    reader: &mut std::io::BufReader<std::net::TcpStream>,
+    writer: &mut std::net::TcpStream,
+    request: &str,
+) -> Result<(), String> {
+    use std::io::{BufRead, Write};
+    writeln!(writer, "{request}").map_err(|e| format!("writing to the monitor: {e}"))?;
+    writer.flush().map_err(|e| format!("flushing the monitor: {e}"))?;
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line).map_err(|e| format!("reading the monitor: {e}"))?;
+        if read == 0 {
+            return Err(format!("the monitor closed before answering `{request}`"));
+        }
+        if line.contains("\"error\"") {
+            return Err(format!("the monitor refused `{request}`: {}", line.trim()));
+        }
+        if line.contains("\"return\"") {
+            return Ok(());
+        }
+    }
+}
+
+/// Capture the emulator's framebuffer to `into`.
+///
+/// Three messages: the greeting the monitor sends unprompted, the handshake it
+/// requires before it will take a command, and the capture itself. The file is
+/// written by the **emulator** and not by this process, which is why the path
+/// crosses the connection as text.
+///
+/// # Errors
+///
+/// Anything [`monitor_ask`] refuses, and a path that is not valid UTF-8.
+fn monitor_capture(stream: &std::net::TcpStream, into: &Path) -> Result<(), String> {
+    use std::io::BufRead;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(|e| format!("setting a bound on the monitor: {e}"))?;
+    let mut reader = std::io::BufReader::new(
+        stream.try_clone().map_err(|e| format!("cloning the monitor connection: {e}"))?,
+    );
+    let mut writer =
+        stream.try_clone().map_err(|e| format!("cloning the monitor connection: {e}"))?;
+
+    let mut greeting = String::new();
+    reader.read_line(&mut greeting).map_err(|e| format!("reading the monitor's greeting: {e}"))?;
+    if !greeting.contains("QMP") {
+        return Err(format!("the monitor did not greet this connection: {}", greeting.trim()));
+    }
+    monitor_ask(&mut reader, &mut writer, "{\"execute\":\"qmp_capabilities\"}")?;
+
+    if let Some(parent) = into.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("creating {}: {e}", relative(parent)))?;
+    }
+    // Removed first, so that a capture the emulator refused to write cannot be
+    // read as this run's. A stale file from a previous run is exactly the shape
+    // of pass this whole family of commands exists to refuse.
+    let _ = std::fs::remove_file(into);
+    let path = into.to_str().ok_or("the capture path is not valid UTF-8")?;
+    monitor_ask(
+        &mut reader,
+        &mut writer,
+        &format!("{{\"execute\":\"screendump\",\"arguments\":{{\"filename\":\"{path}\"}}}}"),
+    )
+}
+
+/// Boot the display datapath and watch it from outside.
+///
+/// # Why this is not [`machine_devices`]
+///
+/// Because it has to act *while the machine is running*. Every other check in
+/// this file spawns a boot, waits for it to end and then reads its log; this one
+/// reads the log as it arrives, and when the kernel says the picture is on the
+/// display it captures the emulator's framebuffer and writes a byte back to tell
+/// the kernel it may carry on. Both halves of that are the same fact: a scanout
+/// is on the far side of the emulator, so the only moment it can be observed is
+/// while the emulator exists.
+///
+/// [`emulator`] is what keeps the machine described once. What is here is the
+/// spawning, the watching and the two messages.
+///
+/// # Errors
+///
+/// A boot that could not be started, a monitor that never connected, or a
+/// capture the emulator refused.
+fn watched_boot(append: &str, shot: &Path) -> Result<Watched, String> {
+    use std::io::{BufRead, Write};
+
+    // Bound before the emulator is spawned and held for the whole run, so there
+    // is no window in which the port is free for something else to take: the
+    // emulator connects *out* to this listener rather than listening itself,
+    // which is what makes the port safe to choose here and impossible to race.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("could not open a monitor socket: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("could not read the monitor socket's port: {e}"))?
+        .port();
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("could not poll the monitor socket: {e}"))?;
+    let monitor = format!("tcp:127.0.0.1:{port}");
+
+    let mut devices: Vec<&str> = GPU_DEVICE.to_vec();
+    devices.push("-qmp");
+    devices.push(&monitor);
+
+    let mut qemu = emulator(Some(append), &[], BOOT_MEMORY, &devices)?;
+    qemu.stdout(Stdio::piped());
+    // The other direction, which no other boot in this file needs: the byte that
+    // says the capture has been taken.
+    qemu.stdin(Stdio::piped());
+    let mut child = qemu.spawn().map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
+    let mut stdin = child.stdin.take();
+
+    // A line at a time down a channel rather than a string read to the end,
+    // because this side has to notice a line *before* the process ends. The
+    // thread is what keeps a full pipe from deadlocking the reader, which is the
+    // same reason `machine_devices` has one.
+    let (lines, arriving) = std::sync::mpsc::channel::<String>();
+    let reader = child.stdout.take().map(|out| {
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(out).lines() {
+                let Ok(line) = line else { break };
+                if lines.send(line).is_err() {
+                    break;
+                }
+            }
+        })
+    });
+
+    let mut log = String::new();
+    let mut captured = None;
+    let mut connection: Option<std::net::TcpStream> = None;
+    let mut trouble: Option<String> = None;
+
+    // The same counted sleeps `machine_devices` uses, and its comment is the
+    // argument: sleep drift errs towards waiting too long, and only one of the
+    // two failure directions is survivable.
+    const TICK_MS: u64 = 20;
+    let mut ticks = BOOT_TIMEOUT.saturating_mul(1000 / TICK_MS);
+
+    let ending = loop {
+        if connection.is_none()
+            && let Ok((stream, _)) = listener.accept()
+        {
+            connection = Some(stream);
+        }
+
+        let mut marker = false;
+        while let Ok(line) = arriving.try_recv() {
+            let line = line.trim_end_matches('\r').to_string();
+            println!("{line}");
+            log.push_str(&line);
+            log.push('\n');
+            if line.contains(GPU_MARKER) {
+                marker = true;
+            }
+        }
+
+        if marker && captured.is_none() && trouble.is_none() {
+            match connection.as_ref() {
+                Some(stream) => match monitor_capture(stream, shot) {
+                    Ok(()) => captured = Some(shot.to_path_buf()),
+                    Err(why) => trouble = Some(why),
+                },
+                None => {
+                    trouble = Some("the emulator's monitor never connected".to_string());
+                }
+            }
+            // The byte back, and it goes whether or not the capture worked: a
+            // machine left holding still for a harness that has given up is a
+            // boot that ends on its own bound minutes later, which turns one
+            // failure into a slow one.
+            if let Some(pipe) = stdin.as_mut() {
+                let _ = pipe.write_all(GPU_ACK);
+                let _ = pipe.flush();
+            }
+        }
+
+        match child.try_wait().map_err(|e| format!("waiting for qemu: {e}"))? {
+            Some(status) => break status.code().map_or(Ending::Signalled, Ending::Exited),
+            None if ticks == 0 => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Ending::TimedOut(BOOT_TIMEOUT);
+            }
+            None => {
+                ticks -= 1;
+                std::thread::sleep(Duration::from_millis(TICK_MS));
+            }
+        }
+    };
+
+    // Whatever the reader had not handed over yet. The sender is dropped when
+    // its thread ends, which is what stops this loop.
+    while let Ok(line) = arriving.recv() {
+        let line = line.trim_end_matches('\r').to_string();
+        println!("{line}");
+        log.push_str(&line);
+        log.push('\n');
+    }
+    if let Some(handle) = reader {
+        let _ = handle.join();
+    }
+    if let Some(why) = trouble {
+        return Err(why);
+    }
+    Ok(Watched { ending, log, shot: captured })
+}
+
+/// The exit criterion of E1-B04, as a command.
+///
+/// # What it asserts, and why one of the assertions is not the kernel's
+///
+/// Every other datapath check in this file reads an exit code and one line of a
+/// boot log, because the kernel reached its own verdict and a harness that
+/// second-guessed it would be a second implementation of the check. That holds
+/// here for everything except the picture. A scanout has no read-back command,
+/// so nothing inside the machine can observe what is on the display: the
+/// kernel's verdict covers the commands the display accepted, the client's
+/// buffer coming back unwritten, the copy counter, the refused grant and the
+/// remapping unit's fault record, and it stops there.
+///
+/// So this captures the emulator's framebuffer while the boot holds still, and
+/// compares it with a number the kernel printed: the hash of the client's own
+/// pixels in the order a screen capture reports them. The harness holds no copy
+/// of the pattern and no copy of the pixel layout, which is what makes the
+/// comparison a comparison rather than two sides agreeing with each other.
+///
+/// The control is `blank`: the identical client with the submission removed. The
+/// pixels are in guest memory for the whole of that boot and the capture must
+/// **not** match — without it, `inside` would establish that a picture appeared
+/// and not that this ring put it there.
+fn gpu(kind: Option<&str>) -> Result<(), String> {
+    let chosen: Vec<&(&str, &str)> = match kind {
+        None => GPU_PROVOCATIONS.iter().collect(),
+        Some(name) => {
+            let found = GPU_PROVOCATIONS.iter().find(|(known, _)| *known == name);
+            let Some(found) = found else {
+                let list: Vec<String> = GPU_PROVOCATIONS
+                    .iter()
+                    .map(|(name, what)| format!("  {name:<8} {what}"))
+                    .collect();
+                return Err(format!("unknown display provocation: {name}\n\n{}", list.join("\n")));
+            };
+            vec![found]
+        }
+    };
+
+    let all = chosen.len() > 1;
+    for (name, what) in chosen {
+        if all {
+            println!("\n--- gpu={name}: {what}");
+        }
+        let shot = target_dir().join("gpu").join(format!("{name}.ppm"));
+        let watched = watched_boot(&format!("gpu={name}"), &shot)?;
+
+        match watched.ending {
+            Ending::Exited(33) => {}
+            Ending::Exited(35) => {
+                return Err(format!(
+                    "the kernel refused to finish after `gpu={name}`. Either the display did \
+                     not accept the commands it was sent, or the driver copied something on \
+                     the data path, or a backing pointing outside the driver's grant was not \
+                     stopped, or the client's own buffer came back written — which is the \
+                     failure this exists to find. The serial log above says which."
+                ));
+            }
+            Ending::Exited(0) => {
+                return Err(format!(
+                    "the machine reset with no output during `gpu={name}`. A fault taken \
+                     while the remapping unit is enabled and this kernel's own tables are \
+                     under it is the frame having programmed a device wrong."
+                ));
+            }
+            other => return Err(format!("the boot {other}; expected exit 33")),
+        }
+
+        if !watched.log.contains("gpu verdict") {
+            return Err(format!(
+                "`gpu={name}` finished without reaching a verdict.\n\n\
+                 The kernel prints one for every run it makes, so this means the stage did \
+                 not run: no remapping unit was found, or the device this boot adds was not \
+                 there to drive."
+            ));
+        }
+        // The kernel was told the capture had been taken. Without this the boot
+        // would still pass, having waited a minute and said so — and a check
+        // that quietly stopped talking to the machine it is watching is a check
+        // measuring a timeout.
+        if !watched.log.contains("the harness acknowledged the frame") {
+            return Err(format!(
+                "`gpu={name}` never saw this harness acknowledge its frame, so the boot \
+                 waited out its own bound. The capture, if there was one, was taken from a \
+                 machine that had already given up on being watched."
+            ));
+        }
+
+        let claimed = gpu_claim(&watched.log)?;
+        let Some(shot) = watched.shot else {
+            return Err(format!("`gpu={name}` produced no screen capture"));
+        };
+        let bytes = std::fs::read(&shot)
+            .map_err(|e| format!("reading the capture at {}: {e}", relative(&shot)))?;
+        let seen = read_ppm(&bytes)?;
+
+        println!(
+            "\ngpu={name}: the kernel drew {} x {} with hash {:#018x}; the display showed \
+             {} x {} with hash {:#018x}",
+            claimed.width, claimed.height, claimed.hash, seen.width, seen.height, seen.hash,
+        );
+
+        if *name == "inside" {
+            if seen.width != claimed.width || seen.height != claimed.height {
+                return Err(format!(
+                    "the display is {} x {} and the client drew {} x {}. A capture at the \
+                     emulator's own default size is a display no scanout was ever set on, \
+                     which is a driver that did not reach `SET_SCANOUT`.",
+                    seen.width, seen.height, claimed.width, claimed.height,
+                ));
+            }
+            if seen.hash != claimed.hash {
+                return Err(format!(
+                    "the display is the size the client asked for and does not hold the \
+                     client's pixels: {:#018x} on the screen against {:#018x} in the \
+                     buffer.\n\n\
+                     The geometry matching and the contents not is the interesting failure: \
+                     the scanout was set, so the resource exists and is the right shape, and \
+                     what did not happen is the transfer or the flush. A driver that dropped \
+                     `TRANSFER_TO_HOST_2D` produces exactly this.",
+                    seen.hash, claimed.hash,
+                ));
+            }
+        } else if seen.hash == claimed.hash {
+            return Err(format!(
+                "`gpu={name}` put the client's pixels on the display. That is the control \
+                 failing, and it fails the whole check rather than one third of it: if the \
+                 pattern reaches the screen on a boot that submitted nothing to the ring — \
+                 or on one whose backing the remapping unit refused — then `gpu=inside` \
+                 established that a picture appeared and not that this driver put it there."
+            ));
+        }
+        println!("gpu={name}: the kernel reached its own verdict and the display agreed");
+    }
+
+    if all {
+        println!(
+            "\nall three halves held: a client's pixels went out through one ring, six \
+             display commands and a device that reads guest memory, and came back off the \
+             emulator's own framebuffer byte for byte; the identical client that submitted \
+             nothing put nothing on the screen, so the first half measured a datapath and \
+             not a display; and the driver reaching one page past what its client's \
+             registration answered — on the direction a display reads — was faulted at the \
+             address it invented, refused by the device, and drew nothing"
+        );
+    }
+    Ok(())
+}
+
 /// What `E1-B06` still cannot show, declared as a set rather than left in a
 /// paragraph.
 ///
@@ -5986,6 +8368,7 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-store", host: None, bare: None },
     Portability { krate: "f-virtio-blk", host: None, bare: None },
     Portability { krate: "f-virtio-net", host: None, bare: None },
+    Portability { krate: "f-virtio-gpu", host: None, bare: None },
     Portability {
         krate: "f-bench",
         host: None,
@@ -7167,6 +9550,11 @@ fn lint_all() -> Result<(), String> {
     // first or it grades its own homework.
     lint_snapshot()?;
     lint_reproduce()?;
+    // The build RFC 0053 promised an ordinary `cargo build` could find a
+    // broken stand-in with, and which nothing was running. `kernel/proofs` is
+    // outside the workspace, so the two invocations below reach it and neither
+    // does the `fmt --all` above. Under fifteen seconds, and no checker.
+    lint_proofs()?;
     // The same check the CI policy job runs. It lives here because a local
     // `lint` that is a subset of the gate teaches people the gate is passing
     // when it is not — which is how a formatting failure reached CI on a tree
@@ -7931,6 +10319,26 @@ fn unsafe_report(by_file: bool) -> Result<(), String> {
 
     for path in rust_sources()? {
         let rel = relative(&path);
+        // The checker's harness is not the checked. `kernel/proofs` is under
+        // `kernel/` — so `lint-unsafe` permits its one `unsafe impl`, which is
+        // right — but it is not part of the trusted computing base this number
+        // measures: it never ships, it is not linked into anything, and it is
+        // not even built by this workspace. Counting it would move A-05 in
+        // *both* directions for a reason that has nothing to do with the
+        // frame, and the direction that matters is the flattering one: a
+        // couple of hundred lines of proof harness would dilute the share and
+        // make the metric improve because somebody wrote a proof.
+        //
+        // *Reversal:* the day something under `kernel/proofs` is linked into an
+        // image. Then it is the frame and belongs in the denominator.
+        //
+        // `ring/proofs` is the same argument one crate over and it matters
+        // more there, because that crate's fixture writes symbolic bytes into
+        // a region and is therefore several `unsafe` blocks of harness. RFC
+        // 0057.
+        if rel.starts_with(PROOFS) || rel.starts_with(RING_PROOFS) {
+            continue;
+        }
         let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
         let (inside, code) = unsafe_share(&text);
 
@@ -9091,7 +11499,34 @@ fn release(mode: Option<&str>) -> Result<(), String> {
     println!("release manifest{}\n", if dry_run { " (dry run)" } else { "" });
     println!("  version   {describe}");
     println!("  commit    {commit}");
-    println!("  contract  RELEASING.md\n");
+    println!("  contract  RELEASING.md");
+    let route = packaged_sweep_route(&commit)?;
+    println!("  sweep     {route}\n");
+    if route != SWEEP_FROM_MANIFEST {
+        // Loud rather than a row, because this is the one line here that says a
+        // route `RELEASING.md` publishes will not work for the package about to
+        // be built. It is checked instead of asserted for a reason that had
+        // already bitten once: the fallback lives in `xtask/src/main.rs`, the
+        // package reaches a stranger only through `source.tar`, and `git
+        // archive` takes that from the commit — so a working tree that carries
+        // the fallback and a package that does not are the ordinary state of an
+        // uncommitted change, and the document cannot tell them apart.
+        println!(
+            "  The source this package would carry cannot read a commit out of MANIFEST,\n\
+             \x20 so `cargo xtask sweep` from the unpacked package refuses with `cannot read\n\
+             \x20 the commit from git`. RELEASING.md's *From the package alone* holds for\n\
+             \x20 packages built at or after the commit that lands that fallback; this is\n\
+             \x20 not one. Commit it and package again. RFC 0056.\n"
+        );
+    }
+
+    // The manifest head, printed here because `RELEASING.md` sends a human to
+    // `--dry-run` to read the claims block before authorising a tag, and until
+    // now this command did not print one — prose drifting from a generated file,
+    // which is the failure RFC 0056 was written against, in RFC 0056's own diff.
+    // Verbatim rather than re-rendered: this is the text the package carries,
+    // and a second rendering is a second thing that can disagree with `claims/`.
+    print!("{}", claims_block()?);
 
     let mut missing = 0usize;
     for content in CONTENTS {
@@ -9203,7 +11638,15 @@ fn build_package(describe: &str, commit: &str) -> Result<(String, PathBuf, usize
     manifest.push_str("# Every line is a file and its SHA-256. The package's own address is\n");
     manifest
         .push_str("# the SHA-256 of the archive these are in. RELEASING.md is the contract.\n\n");
-    manifest.push_str(&format!("version {describe}\ncommit  {commit}\n\n"));
+    manifest.push_str(&format!("version {describe}\ncommit  {commit}\n"));
+    manifest.push_str(
+        "# Whether `cargo xtask sweep` runs inside this package with no repository:\n\
+         # the source below either reads the commit line above when git cannot answer,\n\
+         # or predates that fallback and refuses. Derived from the packaged source, not\n\
+         # asserted. RELEASING.md, *From the package alone*; RFC 0056.\n",
+    );
+    manifest.push_str(&format!("sweep   {}\n\n", packaged_sweep_route(commit)?));
+    manifest.push_str(&claims_block()?);
 
     for content in CONTENTS {
         let gathered = content_files(content)?;
@@ -9267,6 +11710,126 @@ fn build_package(describe: &str, commit: &str) -> Result<(String, PathBuf, usize
     std::fs::write(&path, &archive).map_err(|e| format!("writing {}: {e}", relative(&path)))?;
 
     Ok((address, path, count + 1, total))
+}
+
+/// What `MANIFEST` says when the packaged source can sweep without a repository.
+const SWEEP_FROM_MANIFEST: &str = "from MANIFEST";
+
+/// The same field when it cannot.
+const SWEEP_NEEDS_REPOSITORY: &str = "needs a repository";
+
+/// Whether the source this package will carry can identify itself without git.
+///
+/// # Why this is derived rather than written down
+///
+/// `RELEASING.md` publishes a route — unpack the package and its `source.tar`
+/// into one directory, then sweep — and the fallback that makes the route work
+/// lives in this file. A stranger reaches this file only through `source.tar`,
+/// which is `git archive` of the commit, so a working tree that has the fallback
+/// and a package that does not is not an exotic state: it is every moment
+/// between writing the fallback and committing it. That is exactly how the route
+/// was published false once, and a sentence in a document could not have caught
+/// it because the document is right about the tree and wrong about the artefact.
+///
+/// So the packager reads the source it is about to ship and states what it
+/// found, in the file that is about the package. A stranger holding a package
+/// learns from one line whether the route holds for *that* package, instead of
+/// from a document describing some other one.
+///
+/// The test is a search of the shipped bytes for the fallback's name, which is
+/// weaker than running it and is chosen for which way it fails. Renaming
+/// `manifest_commit` makes this report `needs a repository` for a package that
+/// can in fact sweep — a pessimistic manifest and a nuisance — where anything
+/// that inferred the route from the packager's own binary would report the route
+/// as present because *this* build has it, which is the false direction and the
+/// one that already happened. If the rename ever occurs, the honest repair is to
+/// unpack a package and sweep it in the release job rather than to loosen this.
+fn packaged_sweep_route(commit: &str) -> Result<&'static str, String> {
+    let shipped =
+        capture("git", &["show", &format!("{commit}:xtask/src/main.rs")]).map_err(|e| {
+            format!(
+                "cannot read xtask/src/main.rs at {commit}: {e}\n\n\
+             The manifest states whether a sweep runs from this package without a\n\
+             repository, and it reads the source the package will carry to say so.\n\
+             A commit whose xtask is unreadable is one nothing can state that about."
+            )
+        })?;
+    Ok(if shipped.contains("fn manifest_commit") {
+        SWEEP_FROM_MANIFEST
+    } else {
+        SWEEP_NEEDS_REPOSITORY
+    })
+}
+
+/// What the release asserts, as the manifest states it.
+///
+/// # Why the manifest says this at all, when `claims/snapshot.json` is in the
+/// package one row down
+///
+/// Because they answer different questions and only one of them is about the
+/// release. The snapshot is the registry, serialised: it is what a document
+/// renders a number from, and `lint-snapshot` requires it to be exactly what
+/// `claims/` implies. This is the packager saying, in the file that is *about*
+/// the package, which of those entries the release it just built is asserting
+/// as gating — which is `RELEASING.md`'s second stopping condition written
+/// where somebody opening the archive will read it rather than left as a thing
+/// they have to go and look up.
+///
+/// Derived, never restated. Both this and the snapshot come from `claim_files`
+/// and `claim_value`, so a claim whose status changes moves in both or in
+/// neither, and a release note that repeated these counts in prose would be the
+/// third copy and the first one able to drift. It is why `RELEASING.md` does not
+/// repeat them.
+///
+/// A status this function does not know about is printed under its own name
+/// rather than dropped. The registry's vocabulary is three words today; a
+/// fourth added without this file noticing would otherwise produce a manifest
+/// whose counts do not add up to its rows, which is the one failure a summary
+/// must not have. E1-R02, RFC 0056.
+fn claims_block() -> Result<String, String> {
+    // Insertion order is the order these are printed in, and `claim_files` is
+    // sorted, so the block is a function of the registry and of nothing else.
+    // A `HashMap` here would be non-deterministic output in a content address.
+    let mut by_status: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for path in claim_files()? {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+        let status = claim_value(&text, "status").unwrap_or_else(|| "unknown".into());
+        by_status.entry(status).or_default().push(claim_name(&text, &path));
+    }
+
+    // Named rather than sorted alphabetically, because the order is what the
+    // reader wants: what gates, then what is recorded, then what is owed.
+    // Anything else follows, so a new status word appears rather than vanishes.
+    let mut order: Vec<String> = ["gating", "tracked", "pending"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .filter(|s| by_status.contains_key(s))
+        .collect();
+    for status in by_status.keys() {
+        if !order.contains(status) {
+            order.push(status.clone());
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("# What this release asserts, derived from claims/ at the moment the\n");
+    out.push_str("# package was built. `gating` fails the build on a regression, `tracked`\n");
+    out.push_str("# records without gating, `pending` has a threshold and no number. The\n");
+    out.push_str("# baseline, the workload and the one-command reproduction of each are in\n");
+    out.push_str("# claims/<file>, inside source.tar; claims/snapshot.json is this same\n");
+    out.push_str("# statement machine-readably. RELEASING.md is the contract.\n\n");
+
+    let tally: Vec<String> =
+        order.iter().map(|status| format!("{} {status}", by_status[status].len())).collect();
+    out.push_str(&format!("claims  {}\n", tally.join(", ")));
+    for status in &order {
+        for name in &by_status[status] {
+            out.push_str(&format!("  {status:<8} {name}\n"));
+        }
+    }
+    out.push('\n');
+    Ok(out)
 }
 
 /// The measurement history.
@@ -9695,8 +12258,21 @@ fn lint_claims() -> Result<(), String> {
     let references = claim_references()?;
     let stale: Vec<&Reference> = references.iter().filter(|r| r.rendered != r.actual).collect();
 
+    // Checked here rather than as an eighteenth verb, because it is the same
+    // question this check already asks — whether a document still agrees with
+    // the registry — asked about the four entries the registry does *not* have.
+    // A number a document claims and the registry lacks is caught above; a
+    // number a document says is absent, and the reason it is absent, is caught
+    // by this. `E1-R02`, RFC 0056.
+    gap_holds("DATAPATH_GAP", DATAPATH_GAP)?;
+
     if stale.is_empty() {
         println!("lint-claims: ok  ({} citation(s) match the registry)", references.len());
+        println!(
+            "lint-claims: the four datapath numbers are absent for {} declared reason(s), \
+             each still true",
+            DATAPATH_GAP.len()
+        );
         return Ok(());
     }
 

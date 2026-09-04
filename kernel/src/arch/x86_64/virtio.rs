@@ -86,6 +86,31 @@ pub const VIRTIO_NET_MODERN: u16 = 0x1041;
 /// isolate it*.
 pub const VIRTIO_NET_TRANSITIONAL: u16 = 0x1000;
 
+/// The display controller, which identifies itself one way and only one way.
+///
+/// **There is no transitional constant beside this one, and its absence is the
+/// only thing the frame's device discovery owed a third driver.** The
+/// transitional device ids are the sixteen numbers from `0x1000` that the
+/// original specification assigned, and every device defined after the modern
+/// transport arrived — the display controller among them — has a modern id and
+/// nothing else. There is no legacy virtio-gpu to refuse.
+///
+/// [`route`] was written taking a transitional id as an ordinary argument, on
+/// the assumption every virtio device has a twin to be refused. It takes an
+/// [`Option`] now, and the change is one line in each of three callers. Two
+/// things are worth stating about it rather than leaving it as a diff:
+///
+/// - It is a **widening of a refusal into a choice**, which is the direction R04
+///   says to be careful in. The care is that `None` means *this device has no
+///   transitional form*, which is a fact about the specification, and never
+///   *do not check* — a caller that passed `None` for a device that does have
+///   one would be a caller turning the legacy refusal off, and the constant
+///   beside each modern id is what makes that visible in the call.
+/// - It is the first change this module has needed for a second or third
+///   caller. `dma.rs` keeps its frozen copy, the walk itself is untouched, and
+///   what moved is a parameter. RFC 0054.
+pub const VIRTIO_GPU_MODERN: u16 = 0x1050;
+
 /// Where a function's capability list starts, in configuration space.
 const CAP_POINTER: u64 = 0x34;
 
@@ -213,9 +238,13 @@ pub unsafe fn route(
     window: &pci::Space,
     survey: &Survey,
     modern: u16,
-    transitional: u16,
+    transitional: Option<u16>,
 ) -> Result<Found, Trouble> {
-    if survey.find(VIRTIO_VENDOR, transitional).is_some() {
+    // `None` is *this device has no transitional form*, which is a fact about
+    // the specification and not a caller declining the check — see
+    // [`VIRTIO_GPU_MODERN`], which is the device that has none and the reason
+    // this parameter is an `Option` at all.
+    if transitional.is_some_and(|id| survey.find(VIRTIO_VENDOR, id).is_some()) {
         return Err(Trouble::Legacy);
     }
     let found = survey.find(VIRTIO_VENDOR, modern).ok_or(Trouble::NoDevice)?;

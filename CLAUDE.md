@@ -7,18 +7,22 @@ has stopped being a convention and become a document — move it to `docs/`.
 
 ```
 cargo xtask verify     # the whole local loop: lint, test, boot. Run this before asking for review.
-cargo xtask lint       # four policy checks, then fmt and clippy
+cargo xtask lint       # every policy check, then fmt and clippy. `cargo xtask` lists them
 cargo xtask test       # workspace tests, x86-64 and AArch64
 cargo xtask run        # boot the kernel in QEMU; expects exit code 33
 cargo xtask fault pf   # boot into a deliberate fault; pf, ud, df, nx, wx or stack
 cargo xtask user       # seven boots: a process violates one rule each, and is killed
-cargo xtask cap        # nine boots: a process tries to escape its capabilities
+cargo xtask cap        # eight boots: a process tries to escape its capabilities
 cargo xtask mutate     # build the kernel wrong on purpose; the boot must go red
-cargo xtask timer 60   # run the 1 kHz timer and print a jitter histogram
-cargo xtask unsafe     # the number A-05 reports: lines inside `unsafe`, as a share
+cargo xtask iommu      # a real device transfers outside its domain, and is faulted
+cargo xtask blk|net|gpu # the three datapath boots; each has a control that must fail
+cargo xtask sim        # the simulator: every scenario reproduces from its seed
+cargo xtask sweep      # N seeds x M scenarios, minimised to a reproduction command
+cargo xtask hostile    # a billion hostile peer operations; `entries` is its sibling
+cargo xtask prove      # Kani on the capability and ring properties. Slow; nightly
 cargo xtask claims     # the claims registry and what gates
-cargo xtask todo E0    # what is available to start now, ranked by what it unblocks
-cargo xtask coverage   # host tests with instrumentation
+cargo xtask lint-owed  # reversal conditions that have fallen due and are unpaid
+cargo xtask todo E1    # what is available to start now, ranked by what it unblocks
 ```
 
 Healthy output for `verify` ends with `verify: all green` and exit code 0.

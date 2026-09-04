@@ -32,6 +32,7 @@
 #   doorbell     torn doorbell — a bell rung with no entry behind it, half the pair of stores
 #   partial      partial write — the payload landed and the device's status byte did not
 #   latecqe      delayed completion — the device finished and the driver was told late
+#   deadline     batch reads queued behind a hard-class one — a device queue ordered by deadline
 #
 # ---- entries ----
 

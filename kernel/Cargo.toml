@@ -47,6 +47,19 @@ f-virtio-blk.workspace = true
 # `lint-unsafe`'s frame list gets two crates shorter to justify. RFC 0051.
 f-virtio-net.workspace = true
 
+# The display driver, on exactly the same terms and for exactly the same three
+# shared vocabularies: `routing`'s offsets, `driver::Counters`' shape, and the
+# constants `kernel/src/gpu.rs` checks a manifest against. The frame calls none
+# of its code and `cargo xtask lint-datapath` holds that rather than leaving it
+# to a reader.
+#
+# Three copies of one paragraph. RFC 0051 said at two that the reversal was
+# those vocabularies moving into `abi/`; RFC 0054 says at three that the
+# argument has not improved by being made again, records who owes the move, and
+# declines to make it in a task whose evidence is a picture on a screen. Reading
+# this comment and the two above it in one sitting is the argument.
+f-virtio-gpu.workspace = true
+
 # The component a place holds, and — from E1-B08 — the runtime that holds a
 # core. The frame links it for one thing: `f_store::report` is the encoding a
 # runtime's exit status carries, and one definition the compiler checks is worth

@@ -78,10 +78,14 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE: ${{ github.repository_owner }}/f-dev
-  # 65 536 seeds across the eighteen shipped scenarios is 1 179 648 trials, and
-  # it took 226 s on the four-core development container — measured, not
-  # estimated. A GitHub runner has two cores, so the number to expect here is
-  # roughly twice that. It is a nightly: the budget is the night.
+  # 65 536 seeds against every shipped scenario. That was eighteen scenarios and
+  # 1 179 648 trials when it was measured, and it took 226 s on the four-core
+  # development container — measured, not estimated. The table grows: this
+  # comment is the one account of the scenario set with nothing keeping it in
+  # line, so read the total as a rate and ask `cargo xtask sweep --help` or
+  # `f-sim --list` for today's count. A GitHub runner has two cores, so the
+  # number to expect here is roughly twice that. It is a nightly: the budget is
+  # the night.
   #
   # It is also seven processes rather than one, and that is not a performance
   # choice. Every trial leaks its clients' buffer regions — `sim/src/client.rs`
@@ -126,6 +130,7 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       image: ${{ steps.tag.outputs.image }}
+      image_full: ${{ steps.tag.outputs.image_full }}
     steps:
       - uses: actions/checkout@v7
       - id: tag
@@ -133,6 +138,11 @@ jobs:
           hash=$(echo "${{ hashFiles('docker/Dockerfile', 'docker/entrypoint.sh', 'rust-toolchain.toml') }}" | cut -c1-16)
           echo "tag=env-$hash" >> "$GITHUB_OUTPUT"
           echo "image=${REGISTRY}/${IMAGE}:env-$hash-amd64" >> "$GITHUB_OUTPUT"
+          # The `full` image, which is the only one carrying Kani. It is a
+          # second tag off the same hash rather than a second hash: both are
+          # built from the same three files, so a commit that leaves the
+          # environment alone is a cache hit for both.
+          echo "image_full=${REGISTRY}/${IMAGE}:full-env-$hash-amd64" >> "$GITHUB_OUTPUT"
           echo "environment tag: env-$hash"
 
   # x86-64 only. The sweep runs above the frame, in a host crate with no
@@ -163,6 +173,47 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ needs.environment.outputs.tag }}-amd64
           cache-from: type=gha,scope=dev-amd64
           cache-to: type=gha,mode=max,scope=dev-amd64
+
+  # `full` adds Kani, which the `prove` job needs and which nothing else here
+  # does. It is a separate target for the reason docker/Dockerfile states at the
+  # layer — the checker's toolchain is about 1.4 GB and exactly one job pulls it
+  # — and it is a separate *job* for a reason worth stating, because it was a
+  # second step in `image` first and that was wrong:
+  #
+  # six jobs below carry `needs: [environment, image]`. A Kani layer inside
+  # `image` puts all six behind a `cargo install` from crates.io and a 483 MB
+  # download from GitHub releases, at image-build time, on every commit that
+  # misses the cache — which is precisely the commit that changes
+  # docker/Dockerfile. A network failure in the checker's own toolchain would
+  # then take down the sweep, the fuzzers and the Miri job, none of which have
+  # ever heard of it. docker/README.md records that exact download failing on
+  # one machine already. A check that does not run asserts nothing, so the
+  # blast radius of this layer is one job by construction rather than by luck.
+  image_full:
+    name: environment image, with the checker
+    needs: environment
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: full
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:full-${{ needs.environment.outputs.tag }}-amd64
+          cache-from: type=gha,scope=full-amd64
+          cache-to: type=gha,mode=max,scope=full-amd64
 
   # The half that says a clean sweep means something. It runs first and the sweep
   # depends on it, so a night where the harness has broken reports *the harness
@@ -393,5 +444,101 @@ jobs:
         with:
           name: entries-report
           path: entries-report.txt
+          retention-days: 90
+          if-no-files-found: error
+
+  # E1-P07 and E1-P12. The five capability properties and the ring's validation
+  # paths, proved rather than sampled.
+  #
+  # ## Why one job and not two
+  #
+  # Because `lint-proofs` requires that exactly **one** job depend on
+  # `image_full`, and it is right to: that image carries Kani's own rustc, built
+  # by fetching a crate and a 483 MB release at image-build time, so every job
+  # waiting on it is a job the checker's toolchain can take down. E1-P12 wanted
+  # a second `prove` job and got the check firing correctly on the first thing
+  # that tried to do what it was written against. So `cargo xtask prove` runs
+  # both crates, prints how many, and this stays one job. RFC 0057.
+  #
+  # ## Why this is on a schedule and not in the gate
+  #
+  # Two reasons, and the smaller one is the time: `cargo xtask prove` is about
+  # twenty minutes on the four-core development container, which is a nightly's
+  # budget rather than a pull request's. That is context and not a claim — a
+  # container wall clock is the one number this tree refuses to publish, which
+  # is why `bench/src/lib.rs` will not record one and why there is no figure to
+  # the second here.
+  #
+  # The larger reason is what it needs. Kani ships a rustc of its own, so the
+  # image that carries it is 1.48 GB larger than the one every job in `ci.yml`
+  # pulls, and putting the checker in the gate's image would charge every
+  # pull-request job for a verb one of them runs. `E1-P07`'s exit says *on a
+  # schedule*, and this is the schedule it meant. RFC 0022 for the toolchain,
+  # RFC 0053 for the proofs.
+  #
+  # ## What checks that this job is still here
+  #
+  # Nothing in the repository can watch GitHub run it, so `cargo xtask
+  # lint-proofs` checks the half that is local: that this file still holds a
+  # schedule, still runs `cargo xtask prove`, still names the checker's image,
+  # and that exactly one job depends on that image. It is the difference between
+  # a clause somebody verified once and a clause the gate re-verifies.
+  #
+  # ## Why the run is a pair, like every other harness in this file
+  #
+  # `cargo xtask prove` verifies every harness in both crates — the count is on
+  # its own first line, so read it there rather than here — and then arms the
+  # deliberate defects, the same ones `cargo xtask mutate`, `hostile` and
+  # `entries` arm for a boot or a fuzzer, and requires each to *fail* the
+  # harness that states the property it breaks, where it breaks it. Their count
+  # is on the verb's own last line for the same reason the harness count is:
+  # a number written here is one nothing keeps true, and the last one was
+  # already wrong. A proof that
+  # passes on a build with a known defect in the code it is about is not a proof
+  # of anything, and it is the way this job would rot: a `#[path]` that stopped
+  # reaching `kernel/src/cap.rs`, or a `ring/proofs` that started proving a copy
+  # of `f-ring` rather than the crate, would leave green harnesses verifying
+  # code nobody runs. Every half is inside the one verb rather than in separate
+  # steps, because they have to fail together or the pair means nothing.
+  # RFC 0017, RFC 0053, RFC 0057.
+  #
+  # The ring's proofs also carry `kani::cover!` for every answer a harness can
+  # produce, and an unsatisfiable cover is a *failed* verification. That is the
+  # failure mode a proof over arbitrary bytes has and a proof over arbitrary
+  # handles does not: a fixture whose region is never adopted verifies instantly
+  # and proves nothing.
+  #
+  # The checker does not enforce that and this job would be green if it were
+  # left to: Kani prints `1 of 2 cover properties satisfied (1 unreachable)` and
+  # then `VERIFICATION:- SUCCESSFUL`, exit 0. `cargo xtask prove` reads the
+  # count out of every report and refuses on it, which is what makes the
+  # sentence above a property of this job rather than a hope about it. The
+  # satisfied count is printed beside each harness too, so a run that lost a
+  # cover is readable in this job's artifact and not only in its exit status.
+  #
+  # ## What it does *not* do
+  #
+  # It opens no issue. The sweep above does, because a finding there is a seed
+  # nobody can reproduce from the log alone; a failed proof is a counterexample
+  # Kani prints in full, and `--concrete-playback` turns it into a test case. The
+  # report is kept as an artifact for ninety days and the job goes red, which is
+  # what a deterministic failure on a fixed input needs and no more.
+  prove:
+    name: the capability properties and the ring's validation paths, proved
+    needs: [environment, image_full]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image_full }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: both crates, and the deliberate defects that must break them
+        run: |
+          set -o pipefail
+          cargo xtask prove 2>&1 | tee prove-report.txt
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prove-report
+          path: prove-report.txt
           retention-days: 90
           if-no-files-found: error
