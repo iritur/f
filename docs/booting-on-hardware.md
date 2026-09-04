@@ -44,18 +44,21 @@ and then falls into a halt loop. `exit_qemu` says so at the call site.
 after printing `M0 ok`.** There is no reboot and no exit code. The exit code is
 an emulator convenience, and on hardware the serial log is the whole result.
 
-## The two files, and an optional third
+## The two files, and the optional rest
 
 ```
 target/x86_64-unknown-none/release/f-kernel.elf32   the kernel, ELF32, multiboot 1
 target/init/init.bin                                user/init, a flat blob, no headers
-target/component/store.fc                           optional: a component file
+target/component/*.fc                               optional: the component files
 ```
 
-The third is a **component file** — a compiled manifest followed by an image, in
-one blob named by one hash (RFC 0030) — and it is optional on purpose. With it
-in the module list the kernel runs the component lifecycle end to end and prints
-a line per stage; without it the kernel prints
+Each of the rest is a **component file** — a compiled manifest followed by an
+image, in one blob named by one hash (RFC 0030) — and they are optional on
+purpose. `cargo xtask component` builds four of them today: the `store` runtime
+and the three drivers. **The frame fills one place per component file it is
+given** (RFC 0044), in the order the loader hands the modules over, so what they
+decide is how large a topology this boot has. With none of them the kernel
+prints
 
 ```
   supervisor    no component file among the boot modules; no place to fill
@@ -63,7 +66,15 @@ a line per stage; without it the kernel prints
 
 and carries on to `M0 ok`. A machine that carries only `init.bin` is a machine
 with a smaller topology, not a broken one, and the milestone this page is about
-does not require the demonstration. `cargo xtask component` builds it.
+does not require the demonstration.
+
+Two consequences worth reading before the boot rather than after. A component
+is found by the magic in its record and never by its position, so a loader that
+reorders the modules changes which *place* each one occupies and never which
+bytes it is built from. And `tools/f-on-metal.sh` carries them in sorted order
+while the QEMU boot uses the hand-written list in `xtask`, so the place indices
+in a hardware log will not match the emulated one — which is one of the
+differences `E0-P18`’s exit asks to be accounted for, and not a fault.
 
 The *release* image, on purpose. `cargo xtask` builds and tests the debug one,
 and on a 128 MiB emulator the difference does not matter — but the frame
@@ -102,7 +113,7 @@ standalone and says so when it is not in a checkout:
 curl -O https://raw.githubusercontent.com/iritur/f/main/tools/f-on-metal.sh
 chmod +x f-on-metal.sh
 sudo ./f-on-metal.sh install --kernel f-kernel.elf32 --init init.bin \
-    --component store.fc          # --component is optional
+    --components .                # optional: a directory of *.fc files
 ```
 
 **Read it before running it.** It writes to your bootloader, and a script you
