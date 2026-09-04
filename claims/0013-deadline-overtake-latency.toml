@@ -1,0 +1,96 @@
+# The time half of E1-B06's exit, split off from claim 0012 rather than folded
+# into it.
+#
+# *A hard-class read overtakes queued batch work* is only worth saying if the
+# overtake is worth something, because an ordering nobody can feel is a
+# reordering with a discipline's name on it. But what it is worth is a
+# **latency** — the difference between what the read waited for and what it
+# would have waited for behind the burst — and `bench/src/lib.rs` refuses to
+# record a timing in a container, correctly, for the reason
+# `claims/runner-class-A.md` states at length. So the sentence splits: the count
+# gates today in claim 0012, and this is the number that waits.
+#
+# Splitting was the alternative to weakening, and claims 0005 and 0006 are the
+# same pair. A single claim carrying both would have had to be `pending`, which
+# would have put a correctness result this machine *can* take behind a machine
+# it does not need.
+name       = "deadline-overtake-latency"
+status     = "pending"          # pending | tracked | gating
+milestone  = "E1"
+
+statement  = """
+A hard-class read submitted behind queued batch work completes in the time one
+device round trip takes, and not in the time the queue ahead of it would have
+taken.
+
+Measured as a client-observed latency on the same burst claim 0012 counts: from
+the submission the client made to the completion it reaped, for the hard-class
+read, on the `ordered` half and on the `arrival` half of `cargo xtask deadline`.
+The claim is the ratio between the two, and the shape of the answer is fixed by
+the mechanism rather than by the measurement: with a queue of `burst` requests
+and an in-flight depth of one, the ordered read waits for the request already in
+the device and the arrival read waits for the whole queue, so the saving is
+bounded above by `burst - 1` round trips and below by zero.
+
+It is a *client-observed* latency and not a service time: it includes the ring
+crossing, the driver's own poll loop and the device. It is not the time the
+driver spent choosing, which is a different number owned by a different
+subsystem and is arithmetic over eight array slots.
+"""
+
+[baseline]
+system  = "none"
+notes   = "Claim 0012's argument, and claim 0002's before it. This is an absolute statement about what this system's own ordering saves its own client, measured against the same system with the ordering off — so the control *is* the baseline, and it is produced by the same command on the same machine in the same run. A configuration of somebody else's system would be a baseline of a different question."
+
+[owner]
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "02"
+notes    = "The same owner as claim 0012 and deliberately so: they are two halves of one sentence, and an owner asked about the count and not the time could answer *the read was handed over first* about an ordering that saved nobody anything. The subsystem is the block driver — `user/virtio-blk/src/pending.rs` — and RFC 0049 is the design."
+
+[workload]
+path   = "kernel/src/blk.rs"
+halves = 3
+burst  = 7
+notes  = "The workload exists and the measurement does not, and that gap is exact. `cargo xtask deadline` runs the burst on both orderings and prints **counts only**: where the read came back, what it overtook, how deep the queue was, how many requests were in flight. No wall-clock figure is printed, and that is a refusal rather than an omission — the boot's own clock is the emulator's, and `kernel/src/runtime.rs` already records one unchanged load measuring between 18 and 260 timer ticks under TCG, a spread that would swamp anything this claim is about. What would make it this claim's number is the same two boots on a machine meeting claims/runner-class-A.md, with the client stamping its own submissions from a clock the frame publishes. That last part is owed: RFC 0004 gives a component no clock, `DEADLINE_GAP` in xtask declares what that already costs RFC 0025's third bound, and the same absence is why this claim has no instrument."
+
+[metrics]
+primary   = "ns_hard_read_wait_ordered_p99"
+secondary = [
+  "ns_hard_read_wait_arrival_p99",
+  "ns_hard_read_wait_ordered_p50",
+  "ns_hard_read_wait_arrival_p50",
+  "ns_hard_read_wait_ordered_max",
+  # The number that says the saving is the ordering and not the weather: what
+  # one request costs when nothing is queued ahead of it. The ordered read
+  # should sit within one of these of it.
+  "ns_uncontended_read",
+]
+
+[threshold]
+# Written before there is a number, and derived from the mechanism rather than
+# fitted to a measurement. With an in-flight depth of one, the ordered read
+# waits for at most the request already in the device plus its own; the arrival
+# read waits for the whole burst. Two round trips against seven, expressed as
+# multiples of the uncontended read so that the bound survives a change of
+# machine — which is rule 4 of claims/README.md applied to a latency that has no
+# instruction count to fall back on.
+ns_hard_read_wait_ordered_p99 = { max_multiple_of = "ns_uncontended_read", value = 2 }
+ns_hard_read_wait_arrival_p99 = { min_multiple_of = "ns_uncontended_read", value = 5 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "A latency needs a machine whose clock and whose interference are both accounted for, which is claims 0001, 0002 and 0006's requirement and this one's. It needs one thing more that those do not: a *client* that can stamp its own submissions, which under RFC 0004 means a clock the frame publishes and a component reads. Under emulation the figure would be QEMU's translation cache as much as it would be the ordering — the first transfer of a run pays for a block of guest code being compiled — and a claim measured through that would be reporting the emulator."
+
+[reproduce]
+# The same command claim 0012 names, and the same three boots: they are two
+# readings of one workload, which is why splitting them was the honest move
+# rather than a way of getting a green. The command runs the burst and then
+# says, in the words xtask reserves for a `pending` claim, that what it printed
+# is not a recorded number — and what it printed is counts, because this boot
+# measures no time at all.
+command = "cargo xtask claim deadline-overtake-latency"
+
+[diagnosis]
+ordered_near_arrival = "the read is waiting for the queue rather than for the device, which means it was not handed over first. That is claim 0012 failing and this claim reporting it a second way; read `batch_operations_overtaken` first, because a latency that says the ordering did nothing is less specific than a count that says so"
+both_near_uncontended = "nothing was queued when the read arrived, so neither half measured a wait. The hold is what puts the burst in front of it — `queued_max` in claim 0012 is the number that says whether it held — and a run where it did not is a run whose two halves are the same experiment twice"
+ordered_above_two_round_trips = "the read waited for more than the request already in the device. With an in-flight depth of one there is nothing else it can be waiting for, so either the depth is no longer one — `in_flight`, and E1-B09 is what changes it — or the driver is choosing between picks rather than at them, which would be work in `Pending::take` that belongs in nobody's budget"

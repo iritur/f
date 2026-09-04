@@ -174,6 +174,34 @@ pub mod class {
             _ => "unknown",
         }
     }
+
+    /// The ceiling a component declaring this class is admitted for, as
+    /// [`crate::deadline::Admitted`] reads it.
+    ///
+    /// Two vocabularies meet here and neither is wrong: this module's ordinals
+    /// are *what a manifest may declare* and start at one so that a zeroed
+    /// record declares no class, and [`crate::class`]'s are *how urgent* and
+    /// start at zero because smaller is more urgent. A supervisor reading a
+    /// record and handing the result to `deadline::inherit` needs the map, and
+    /// it belongs here rather than at each supervisor: two spellings of it is
+    /// one too many, and the second would be discovered on the day they
+    /// disagree.
+    ///
+    /// `None` for a value this build does not know, which is R04 rather than a
+    /// convenience — a record whose class byte is a value no schema produced
+    /// must not be read as the nearest class. A component declaring nothing is
+    /// admitted for [`crate::class::BATCH`] by RFC 0025, and that is the
+    /// *caller's* substitution to make: it is a policy about missing
+    /// declarations, and this function is a translation between two ordinal
+    /// spaces.
+    #[must_use]
+    pub const fn admitted(value: u8) -> Option<u16> {
+        match value {
+            SOFT => Some(crate::class::SOFT),
+            HARD => Some(crate::class::HARD),
+            _ => None,
+        }
+    }
 }
 
 /// Where a declared capability is routed from.
@@ -1422,5 +1450,35 @@ mod tests {
             first,
             "the record does not reach the identity"
         );
+    }
+
+    #[test]
+    fn a_declared_class_maps_onto_the_ceiling_a_service_is_admitted_for() {
+        // The two ordinal spaces, checked against each other rather than
+        // assumed equal. They are not equal and never were: a manifest's
+        // `soft` is 1 and so is `class::SOFT`, which is a coincidence at one
+        // value and a trap at the other — a manifest's `hard` is 2 and
+        // `class::HARD` is 0, so a supervisor that cast one to the other would
+        // admit a hard-class driver at the *batch* ceiling and every request it
+        // served would silently be batch work.
+        assert_eq!(class::admitted(class::SOFT), Some(crate::class::SOFT));
+        assert_eq!(class::admitted(class::HARD), Some(crate::class::HARD));
+        assert_ne!(u16::from(class::HARD), crate::class::HARD, "the trap this map exists for");
+
+        // Everything else is refused rather than approximated, including the
+        // zero a record that declares no reservation carries. What a component
+        // with no declaration is admitted for is RFC 0025's answer and the
+        // caller's to apply.
+        for value in [0u8, 3, 4, 0xFF] {
+            assert_eq!(class::admitted(value), None, "{value} was read as a class");
+            assert!(!class::known(value));
+        }
+
+        // And every ordinal this map answers is one `Admitted` will accept, so
+        // a supervisor never holds a ceiling the ABI would refuse to build.
+        for value in [class::SOFT, class::HARD] {
+            let ordinal = class::admitted(value).expect("a known class");
+            assert!(crate::deadline::Admitted::new(ordinal).is_some());
+        }
     }
 }

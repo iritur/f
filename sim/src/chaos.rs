@@ -1524,6 +1524,17 @@ pub struct Chaos {
 /// `scenario::DOMAIN`.
 const DOMAIN: u32 = 2;
 
+/// Client **phases** every component in this deployment is driven through.
+///
+/// Ninety-six, which is forty-eight operations for a component whose peer has
+/// state behind it — a write and a read-back each — and ninety-six for one whose
+/// peer has not. The number that is held equal between two components is this
+/// one and not the operation count, because it is the one the run's *length* is
+/// made of, and length is what a kill plan needs in order to land.
+///
+/// Unit: phases.
+const OPERATIONS: u32 = 96;
+
 impl Chaos {
     /// The workload every component in the deployment is driven with.
     ///
@@ -1533,6 +1544,16 @@ impl Chaos {
     /// two results incomparable.
     #[must_use]
     pub fn of(component: &Component, policy: Policy, kills: u32) -> Self {
+        // Which peers have state behind them is a fact about the peer. A disk's
+        // sectors outlive its driver and an object store's objects outlive the
+        // component serving them; a link holds nothing and a display's resources
+        // are its driver's own, which is why the read-back is not asked of them.
+        // RFC 0041 records the second half of that as a gap rather than as an
+        // omission.
+        //
+        // Read here rather than in the initialiser below because the operation
+        // count now depends on it — see `OPERATIONS`.
+        let durable = matches!(component.peer, Peer::Blk | Peer::Native);
         Self {
             // Leaked so that the name is `'static` like every other label in a
             // trace. One per component per process, which is a handful.
@@ -1541,7 +1562,23 @@ impl Chaos {
             policy,
             window: 4,
             depth: 8,
-            operations: 48,
+            // Phases and not operations, because *the same amount of work* is
+            // what makes two runs comparable and the operation count is only a
+            // proxy for it. A durable component spends each operation in two
+            // phases — a write and a read-back — and a non-durable one in a
+            // single phase, so a shared operation count would give a link half
+            // the run a disk gets.
+            //
+            // **That is not a symmetry for its own sake, it is what makes the
+            // kill plan land.** A kill that finds an idle occupant is deferred
+            // rather than taken, up to `DEFERRALS_MAX`, so a run that finishes
+            // early abandons the kills it had left and `verdict` fails it for
+            // reporting a smaller experiment than the one it names. E1-B03 added
+            // the first non-durable component to this tree's deployment and
+            // found exactly that: three planned kills, two landed. The
+            // arithmetic is the same one `Report::of` uses to compute what a run
+            // owes, run backwards.
+            operations: OPERATIONS / if durable { 2 } else { 1 },
             service_ns: 400,
             spread_ns: 600,
             retry_ns: 2_000,
@@ -1552,13 +1589,7 @@ impl Chaos {
             // the assertions rest on ambiguous.
             extent: 4_096,
             kills,
-            // Which peers have state behind them is a fact about the peer.
-            // A disk's sectors outlive its driver and an object store's objects
-            // outlive the component serving them; a link holds nothing and a
-            // display's resources are its driver's own, which is why the
-            // read-back is not asked of them. RFC 0041 records the second half
-            // of that as a gap rather than as an omission.
-            durable: matches!(component.peer, Peer::Blk | Peer::Native),
+            durable,
             lazy: false,
             volatile: false,
             // The component's own declaration, and the only field here read out
@@ -1601,6 +1632,12 @@ impl Chaos {
             extent: self.extent,
             queue_size: crate::virtq::QUEUE_SIZE,
             domain: DOMAIN,
+            // Arrival order, and it is a statement rather than a default: this
+            // workload is about what a *restart* costs a client, and a queue
+            // that reordered would put a second reason under every latency it
+            // measures. `claims/0005` and `claims/0006` are read off this run,
+            // and neither is a claim about an ordering.
+            ordered: false,
         };
         let place = sim.install(Box::new(Place::new(spawner(self.peer), cfg, self)));
         let client = sim.install(Box::new(Load::new(

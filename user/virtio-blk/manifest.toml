@@ -86,9 +86,20 @@ from   = "supervisor"
 # of a read or a write never pass through this ring or through this
 # component. That is the sentence E1-B02's exit counts — "zero copies on the
 # data path, verified by counter" — stated here as the mechanism rather than
-# the intention. `features` is empty until something is built: E1-B06 adds
-# `admission_control` when this queue orders by deadline, and QEMU's virtio
-# has no address translation service, so `shared_virtual` is not offered.
+# the intention.
+#
+# `features` is empty, and after E1-B06 that is a decision rather than a gap.
+# This line used to say E1-B06 would add `admission_control` when the queue
+# ordered by deadline. The queue orders by deadline now — RFC 0049 — and the
+# bit is still not declared, because the bit does not mean what that sentence
+# assumed. `f_abi::feature::ADMISSION_CONTROL` is *the consumer honours the
+# hard class: it will refuse a deadline it cannot meet rather than accept one
+# it will miss*, and this driver floors and reports instead, which is what RFC
+# 0025 chose at the ABI. Declaring it would be R08's own failure in miniature:
+# a promise nothing can refuse, with a feature bit's name on it. E1-B07 builds
+# a refusal that can say no, and that task is what adds this word.
+# `shared_virtual` stays absent for its own reason: QEMU's virtio has no
+# address translation service to negotiate it against.
 [[ring]]
 name        = "blk"
 role        = "server"
@@ -123,7 +134,17 @@ budget_window_ms = 60_000
 # --- Reservation: what admission may refuse ----------------------------------
 
 # Soft class. A block driver serves deadlines carried in its clients' entries
-# (E1-B06) and holds no deadline of its own, so it reserves no core. The
+# (E1-B06) and holds no deadline of its own, so it reserves no core.
+#
+# This word is now load-bearing at run time and not only at admission: the
+# frame reads it out of the compiled record and writes it into the driver's
+# routing page as the ceiling RFC 0025's bound 1 clamps against, so a
+# hard-class request this driver serves is served as *soft* and its completion
+# carries `SHORTFALL`. Changing it to `hard` is therefore a change to what
+# every client of this driver is told, and RFC 0007's schedulability test is
+# what would have to grant it. RFC 0049.
+#
+# The
 # memory is the account its whole footprint is retyped from — address space,
 # page tables, text, stack, control ring, state tree, capability table — and
 # not the queues above, which are a routed need. Two mebibytes is the figure

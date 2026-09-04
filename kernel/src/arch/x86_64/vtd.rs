@@ -197,6 +197,43 @@ const IOTLB_IVT: u64 = 1 << 63;
 /// Global granularity, in the translation-buffer register.
 const IOTLB_IIRG_GLOBAL: u64 = 1 << 60;
 
+/// When a run of pages being taken away is published to the unit.
+///
+/// The two halves of `E1-B14`'s measurement, and both are in the tree on
+/// purpose rather than one of them being a commit message: the improvement a
+/// batch buys is a *ratio between two runs*, and a ratio whose denominator was
+/// deleted is a number nobody can re-check when the rate changes again.
+///
+/// [`Unit::unmap_range`] is where the difference is, and its documentation is
+/// where the argument for the default lives.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Invalidation {
+    /// One global round trip per page cleared.
+    ///
+    /// What this build did until `E1-B14` measured it: `iommu::Grant::unmap`
+    /// was a loop over [`Unit::unmap`], and each iteration paid for its own.
+    /// Kept as the control the batch is measured against, and reachable only
+    /// from the measurement — the frame does not choose it.
+    PerPage,
+    /// One global round trip for the whole request.
+    ///
+    /// What the frame does. Sound because the invalidation is global rather
+    /// than ranged: see [`Unit::unmap_range`].
+    PerRequest,
+}
+
+/// Serialising register round trips one global invalidation costs.
+///
+/// Two: the context cache and then the translation buffer, each a write
+/// followed by a spin on the unit clearing the request bit. [`Unit::invalidate`]
+/// is where both happen and says why the order is that way round.
+///
+/// A named constant rather than a `2` inside a print, because it is the
+/// quantity `E1-B14`'s measurement is *about* — the unit of cost that a batch
+/// amortises — and a number in a format string is a number nobody can find when
+/// the queued invalidation interface arrives and makes it something else.
+pub const INVALIDATION_ROUND_TRIPS: u64 = 2;
+
 /// How many times a status bit is read before the unit is called unresponsive.
 ///
 /// A count rather than a duration, for the reason the whole tree gives: a
@@ -556,6 +593,38 @@ pub struct Unit {
     /// Which bus each context table belongs to, in the same order.
     buses: [u8; MAX_BUS_TABLES],
     bus_count: usize,
+    /// What this unit has been asked to forget, and what that cost.
+    ///
+    /// Three counters and not one, because they answer three different
+    /// questions and E1-B14's whole difficulty was that nothing told them
+    /// apart. `unmaps` is how many *requests* arrived —
+    /// [`crate::iommu::Grant::unmap`] calls, one per buffer set retired.
+    /// `pages_unmapped` is how many leaf entries those requests cleared.
+    /// `invalidations` is how many global round trips this unit was made to
+    /// perform on their behalf. The ratios between them are the measurement:
+    /// pages per request is what a batch could amortise, and invalidations per
+    /// page is whether anything is being amortised today.
+    ///
+    /// Counted here rather than computed at the caller from a rule somebody
+    /// wrote down, for the reason `state.rs` gives about every other counter in
+    /// this kernel: a number derived from a stated rule stops being true the
+    /// day the rule changes, and nothing notices. These move where the work
+    /// happens, so a batch that did not batch reports the old ratio.
+    unmaps: u64,
+    pages_unmapped: u64,
+    invalidations: u64,
+    /// The share of `invalidations` an unmap caused, and the pages a map made.
+    ///
+    /// Both exist because the first measurement without them was wrong in the
+    /// direction that would have been believed: `invalidations` is the unit's
+    /// total, a registration maps its pages before anything retires them, and
+    /// `Unit::map` invalidates per page exactly as `unmap` did. So a churn
+    /// cycle's delta was *twice* the unmap's cost and the ratio a batch bought
+    /// looked half what it is. Separating them is what turned the mapping half
+    /// into a number as well — `CHURN_GAP` in `xtask` is that number and names
+    /// the task that owes it.
+    unmap_invalidations: u64,
+    pages_mapped: u64,
 }
 
 /// How many buses may have a context table.
@@ -760,6 +829,11 @@ impl Unit {
             table_count: 0,
             buses: [0; MAX_BUS_TABLES],
             bus_count: 0,
+            unmaps: 0,
+            pages_unmapped: 0,
+            invalidations: 0,
+            unmap_invalidations: 0,
+            pages_mapped: 0,
         };
         unit.record_table(Frame::from_addr(root))?;
 
@@ -811,6 +885,60 @@ impl Unit {
     #[must_use]
     pub const fn domains_used(&self) -> u32 {
         self.next_domain.saturating_sub(1)
+    }
+
+    /// Unmap requests this unit has been given. Unit: requests.
+    ///
+    /// One per [`Unit::unmap_range`] call, which is one per
+    /// [`crate::iommu::Grant::unmap`] and so one per buffer set retired. See
+    /// [`Unit::unmap_range`] for why the request boundary is visible here at
+    /// all.
+    ///
+    /// [`Unit::unmap`] deliberately does **not** move it. That entry point is
+    /// one page with its own invalidation, and its only caller is
+    /// `Grant::map`'s undo loop taking back a partial mapping — which is an
+    /// unmap that no client asked for, inside a request that is about to be
+    /// refused. Counting it as a request would put a denominator under
+    /// `claims/0014`'s ratios that no client produced. It still moves
+    /// [`Unit::pages_unmapped`] and [`Unit::unmap_invalidations`], because those
+    /// count work the unit actually did, and the churn's verdict compares those
+    /// two against each other rather than against this one.
+    #[must_use]
+    pub const fn unmaps(&self) -> u64 {
+        self.unmaps
+    }
+
+    /// Leaf entries cleared. Unit: pages.
+    #[must_use]
+    pub const fn pages_unmapped(&self) -> u64 {
+        self.pages_unmapped
+    }
+
+    /// Global invalidations this unit has been made to perform. Unit: rounds.
+    ///
+    /// Every cause: a map, an unmap, an attach, a release. Multiply by
+    /// [`INVALIDATION_ROUND_TRIPS`] for the number of serialising register
+    /// round trips, which is what actually costs.
+    #[must_use]
+    pub const fn invalidations(&self) -> u64 {
+        self.invalidations
+    }
+
+    /// The share of [`Unit::invalidations`] an unmap caused. Unit: rounds.
+    #[must_use]
+    pub const fn unmap_invalidations(&self) -> u64 {
+        self.unmap_invalidations
+    }
+
+    /// Leaf entries written. Unit: pages.
+    ///
+    /// Beside [`Unit::pages_unmapped`] rather than instead of it, because a
+    /// churn is a map and an unmap per cycle and the two costs are not the same
+    /// number — one of them was batched by `E1-B14` and one was left with its
+    /// number written down.
+    #[must_use]
+    pub const fn pages_mapped(&self) -> u64 {
+        self.pages_mapped
     }
 
     /// Whether the unit's page walks snoop the processor's caches.
@@ -1125,6 +1253,7 @@ impl Unit {
                 // SAFETY: as above, into an entry that was not present.
                 unsafe { self.put(frames, at, slot, phys | SL_READ | write) };
                 domain.pages = domain.pages.saturating_add(1);
+                self.pages_mapped = self.pages_mapped.saturating_add(1);
                 break;
             }
 
@@ -1164,6 +1293,45 @@ impl Unit {
         domain: &mut Domain,
         device: u64,
     ) -> Result<(), Refuse> {
+        // SAFETY: the caller's guarantee, passed straight down.
+        unsafe { self.unmap_entry(frames, domain, device) }?;
+        self.invalidate_for_unmap()
+    }
+
+    /// [`Unit::invalidate`], attributed to an unmap.
+    ///
+    /// The attribution is the measurement, not bookkeeping: `E1-B14`'s first
+    /// run read the unit's total and reported a churn cycle's unmap as costing
+    /// twice what it does, because the registration that preceded it had
+    /// invalidated per page too. A total is not a cost until something says
+    /// what caused it.
+    fn invalidate_for_unmap(&mut self) -> Result<(), Refuse> {
+        self.unmap_invalidations = self.unmap_invalidations.saturating_add(1);
+        self.invalidate()
+    }
+
+    /// Clear one leaf entry and invalidate **nothing**.
+    ///
+    /// The walk, separated from the round trip that publishes it, so that
+    /// [`Unit::unmap_range`] can pay for the round trip once. Private, because
+    /// a caller outside this file that forgot the invalidation would leave a
+    /// device holding a translation this kernel believes it has taken away —
+    /// which is the whole failure the unit exists to prevent, arrived at by an
+    /// optimisation.
+    ///
+    /// # Errors
+    ///
+    /// As [`Unit::unmap`].
+    ///
+    /// # Safety
+    ///
+    /// As [`Unit::unmap`].
+    unsafe fn unmap_entry(
+        &mut self,
+        frames: &mut FrameAllocator,
+        domain: &mut Domain,
+        device: u64,
+    ) -> Result<(), Refuse> {
         let mut at = domain.root;
         let shifts = domain.shifts();
         let last = shifts.len().saturating_sub(1);
@@ -1179,6 +1347,7 @@ impl Unit {
                 // SAFETY: as above, over an entry that was present.
                 unsafe { self.put(frames, at, slot, 0) };
                 domain.pages = domain.pages.saturating_sub(1);
+                self.pages_unmapped = self.pages_unmapped.saturating_add(1);
                 break;
             }
             if existing & (SL_READ | SL_WRITE) == 0 {
@@ -1195,7 +1364,127 @@ impl Unit {
         // entries per unmap — the same trade `mem::coalesce` makes and refuses
         // to make on the hot path. They are freed when the domain is released,
         // which is the point at which the whole answer is known.
-        self.invalidate()
+        Ok(())
+    }
+
+    /// Take a whole run of pages away, as one request.
+    ///
+    /// # Why this exists rather than a loop at the caller
+    ///
+    /// Because the request boundary is the thing `E1-B14` is measuring, and a
+    /// loop at the caller makes it invisible: the unit sees `pages` unmaps and
+    /// cannot tell one buffer set from eight of them. `iommu::Grant::unmap`
+    /// was that loop, and moving it here is what let [`Unit::unmaps`] be a
+    /// count of *requests* while [`Unit::pages_unmapped`] stays a count of
+    /// pages. The ratio between the two is what a batch could amortise, and
+    /// before this it was not a number anything could read.
+    ///
+    /// # What it does and does not batch
+    ///
+    /// The walk is per page and the invalidation is per request. Both of those
+    /// are decisions rather than accidents:
+    ///
+    /// The walk cannot be shared, because two pages of one request may sit
+    /// under different tables and this build constructs no larger leaf — a run
+    /// that spans a table boundary is two walks whatever the caller asked for.
+    /// That is arithmetic, not a trade.
+    ///
+    /// The invalidation is `when`'s to decide, and that *is* a trade rather
+    /// than arithmetic, which is why it is a parameter and why both values are
+    /// in the tree. It was [`Invalidation::PerPage`] everywhere until E1-B14
+    /// measured it — the module comment called that the wrong trade for a
+    /// datapath and named this task as what would settle it — and the frame now
+    /// asks for [`Invalidation::PerRequest`] while the measurement keeps the
+    /// other as its control. What makes batching sound here rather than merely
+    /// faster: [`Unit::invalidate`] is *global* — it
+    /// throws away everything the unit has cached, not a range — so one at the
+    /// end covers every entry this loop cleared exactly as well as one after
+    /// each. And the contract [`crate::iommu::Grant::unmap`] owes its caller is
+    /// about the moment it *returns*: RFC 0024 rests on a transfer faulting
+    /// rather than landing once the unmap has run, and it has run when this
+    /// returns. Nothing observes the interior of the loop.
+    ///
+    /// The window that does widen is the one between the *first* entry being
+    /// cleared and the invalidation: a device holding a cached translation for
+    /// page 0 keeps it until page N's walk is done rather than until page 0's.
+    /// That window existed before — it was one page's walk long — and it is
+    /// bounded either way by the request. It is stated because it is the only
+    /// thing this change makes worse, and R12 says a concession is written as a
+    /// cost.
+    ///
+    /// # Errors
+    ///
+    /// The **first** refusal, after every page of the request has been
+    /// attempted. Two decisions in that sentence and both are deliberate:
+    ///
+    /// A refused page does not stop the request. A run with a hole in it — page
+    /// k not mapped, k+1 still mapped — would otherwise come back with the
+    /// pages after the hole still translated, which is a device still reaching
+    /// memory the caller has said it may not have, produced by an error path
+    /// being tidy. No caller can construct such a run today (`Grant::map` undoes
+    /// a partial failure before it refuses, so a set is wholly mapped or wholly
+    /// absent), and *no caller can construct it* is the kind of sentence that
+    /// stops being true one diff after somebody reads it as permission.
+    ///
+    /// Nothing is put back. An unmap that stopped half way has taken authority
+    /// away, and restoring it would be re-granting a device access the caller
+    /// asked to remove — the same shape [`Domain::pages`] already has.
+    /// [`crate::iommu::Grant::unmap`] cannot refuse at all and drops this,
+    /// which is that trait's rule rather than this function's opinion.
+    ///
+    /// # Safety
+    ///
+    /// As [`Unit::unmap`].
+    pub unsafe fn unmap_range(
+        &mut self,
+        frames: &mut FrameAllocator,
+        domain: &mut Domain,
+        device: u64,
+        pages: u64,
+        when: Invalidation,
+    ) -> Result<(), Refuse> {
+        self.unmaps = self.unmaps.saturating_add(1);
+        let mut cleared = 0u64;
+        let mut refusal = None;
+        for page in 0..pages {
+            let at = device.saturating_add(page.saturating_mul(4096));
+            // SAFETY: the caller's guarantee, passed straight down.
+            match unsafe { self.unmap_entry(frames, domain, at) } {
+                Ok(()) => {
+                    cleared = cleared.saturating_add(1);
+                    if when == Invalidation::PerPage {
+                        self.invalidate_for_unmap()?;
+                    }
+                }
+                // Recorded and *not* returned yet, and the loop goes on. This
+                // was a `break` for one revision and the narrowing was in the
+                // one direction that matters: a hole at page k would have left
+                // pages k+1..N translated, which is a device still reaching
+                // memory a request said it may not have. The loop it replaced
+                // — `for page in 0..pages { let _ = unmap(page); }` — attempted
+                // every page and dropped every error, and this is that
+                // behaviour with the invalidation moved. First refusal rather
+                // than last, because the first is the one that says where the
+                // request stopped being what its caller thought it was.
+                Err(why) => {
+                    if refusal.is_none() {
+                        refusal = Some(why);
+                    }
+                }
+            }
+        }
+        // One invalidation for the request, and none at all when nothing was
+        // cleared: a request that changed no table has nothing to publish, and
+        // a round trip for it would be a cost with no cause. The caller that
+        // produces one is a second unmap of a set already retired, which
+        // `Grant::unmap` documents as the only way to get here.
+        if when == Invalidation::PerRequest && cleared > 0 {
+            self.invalidate_for_unmap()?;
+        }
+        match refusal {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
     }
 
     /// Does this domain translate every byte of `len` at `device`?
@@ -1384,6 +1673,11 @@ impl Unit {
     /// Global, on both caches, after every change. See the module comment for
     /// why this build does not do better and what number would make it.
     fn invalidate(&mut self) -> Result<(), Refuse> {
+        // Counted before the round trip rather than after it, so that a unit
+        // that wedged in `spin_until64` is counted as having been asked. The
+        // number this publishes is *what this build made the unit do*, and a
+        // request that did not come back is still a request.
+        self.invalidations = self.invalidations.saturating_add(1);
         // Every flush this change issued, made visible before the unit is told
         // to go and re-read what was flushed. See [`Coherency::settle`]; on a
         // unit that snoops this is not even a fence.

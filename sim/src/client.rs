@@ -132,7 +132,39 @@ pub struct App {
     issued: u32,
     completed: u32,
     ended: bool,
+    /// Whether one operation in [`URGENT_EVERY`] carries the hard class and a
+    /// deadline.
+    ///
+    /// A property of the client and not of a scenario's whole population, and
+    /// the reason is this model's own shape: a virtqueue has exactly one
+    /// driver, so `install_peers` gives every client a device of its own and
+    /// two clients never share a queue. The contention an ordering needs has to
+    /// come from *one* client's own mix — which is also the honest case, because
+    /// a component with a hard-class client and a batch one behind the same
+    /// storage ring is what RFC 0025's inversion is made of.
+    urgent: bool,
 }
+
+/// How far ahead of arrival an urgent operation's deadline sits.
+/// Unit: nanoseconds on the model's clock.
+///
+/// Ten microseconds, which is above `dev::FLOOR_NS` by a factor of five — so an
+/// urgent operation's deadline is not floored and the scenario measures the
+/// *order* rather than RFC 0025's third bound. A scenario that wanted to
+/// measure the floor would ask for a deadline inside it, which is a scenario
+/// away rather than a code change.
+const URGENT_SLACK_NS: u64 = 10_000;
+
+/// One operation in this many carries the hard class, on a client that carries
+/// any. Unit: operations.
+///
+/// Four, and the urgent one is the *last* of each group rather than the first.
+/// That is the shape `cargo xtask deadline` submits and it is the shape the
+/// failure has: batch work is already queued and the urgent request arrives
+/// behind it, so arrival order and deadline order disagree. A client where
+/// every operation were urgent would be a client with no batch work to overtake,
+/// which is a scenario that cannot fail.
+const URGENT_EVERY: u32 = 4;
 
 impl App {
     /// What this actor is called in the trace.
@@ -175,7 +207,20 @@ impl App {
             issued: 0,
             completed: 0,
             ended: false,
+            urgent: false,
         }
+    }
+
+    /// The same client, with one operation in [`URGENT_EVERY`] carrying the
+    /// hard class and a deadline.
+    ///
+    /// A method rather than a seventh argument to [`App::new`], because six
+    /// call sites take that constructor positionally and a seventh `bool`
+    /// among them is a call nobody can read.
+    #[must_use]
+    pub const fn urgent(mut self, yes: bool) -> Self {
+        self.urgent = yes;
+        self
     }
 
     /// Write this client out, tag first.
@@ -211,6 +256,7 @@ impl App {
         out.u64(self.retry_ns);
         out.u32(self.buffer_bytes);
         out.u32(self.depth);
+        out.bool(self.urgent);
         out.bool(self.naming.is_some());
         out.u32(self.naming.map_or(0, |naming| naming.set().bits()));
         out.count(self.idle.len());
@@ -264,6 +310,7 @@ impl App {
             // The same asymmetry as `buffer_bytes` above, for the same reason.
             input.refuse(crate::snap::Broken::Bounds("a client whose wire holds no submission"));
         }
+        let urgent = input.bool();
         let bound = input.bool();
         let bits = input.u32();
         let idle_count = input.count(4, "more idle buffers than the file could hold");
@@ -282,7 +329,8 @@ impl App {
             pending.push_back(input.u64());
         }
 
-        let mut app = Self::new(who, peer, window, operations, buffer_bytes, retry_ns, depth);
+        let mut app =
+            Self::new(who, peer, window, operations, buffer_bytes, retry_ns, depth).urgent(urgent);
         app.pending = pending;
         app.issued = input.u32();
         app.completed = input.u32();
@@ -383,6 +431,17 @@ impl App {
     /// position is a property of the *operation* rather than of when it happened
     /// to be submitted. A retry re-submits the same position, which is what a
     /// driver does; deriving the position from a counter meant a retry moved.
+    /// Does this client's operation `token` carry the hard class?
+    ///
+    /// Derived from the token rather than counted, so that a *retried* token
+    /// carries the same class it carried the first time. A counter would have
+    /// made a request change class between attempts, which is the same defect
+    /// `Sqe::offset` already records having had here.
+    #[must_use]
+    pub const fn is_urgent(urgent: bool, token: u64) -> bool {
+        urgent && Self::nth(token) % URGENT_EVERY == URGENT_EVERY - 1
+    }
+
     const fn nth(token: u64) -> u32 {
         (token & 0xFFFF_FFFF) as u32
     }
@@ -507,6 +566,21 @@ impl App {
                 // its direction from this number, so a retry could even flip
                 // from a read to a write.
                 offset: u64::from(Self::nth(token)),
+                // RFC 0025's two fields, written by the component that
+                // originates the request: the class ordinal at depth zero,
+                // because nothing forwarded this, and a deadline relative to
+                // *now* on the model's own clock. A batch client writes
+                // neither, which is what `Sqe::ZERO` already says.
+                class: if Self::is_urgent(self.urgent, token) {
+                    f_abi::deadline::pack(f_abi::class::HARD, 0)
+                } else {
+                    Sqe::ZERO.class
+                },
+                deadline: if Self::is_urgent(self.urgent, token) {
+                    world.clock().saturating_add(URGENT_SLACK_NS)
+                } else {
+                    0
+                },
                 ..Sqe::ZERO
             };
 

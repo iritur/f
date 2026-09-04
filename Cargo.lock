@@ -37,6 +37,7 @@ dependencies = [
  "f-ring",
  "f-store",
  "f-virtio-blk",
+ "f-virtio-net",
 ]
 
 [[package]]
@@ -66,6 +67,14 @@ dependencies = [
 
 [[package]]
 name = "f-virtio-blk"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-ring",
+]
+
+[[package]]
+name = "f-virtio-net"
 version = "0.0.1"
 dependencies = [
  "f-abi",

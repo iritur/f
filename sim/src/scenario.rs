@@ -182,6 +182,21 @@ pub struct Scenario {
     /// it, RFC 0039 records it, and `E1-P03` is the task that would have paid
     /// for getting it wrong.
     pub injects: &'static [Injection],
+    /// Whether this scenario's first client carries the hard class with a
+    /// deadline, and its peer orders its queue by what
+    /// `f_abi::deadline::inherit` returned rather than by arrival.
+    ///
+    /// `E1-B06` and RFC 0049. One field and not two, and that is a choice with
+    /// a cost: a control run turns *both* halves off, so `deadline` against
+    /// itself-with-this-false compares a run where one client is urgent and the
+    /// queue orders against a run where nobody is and it does not. That is
+    /// still a control — under it every client is symmetric, so the first
+    /// client's mean position is the mean position and any advantage it shows
+    /// is the ordering — and the sharp version, where only the *queue* changes,
+    /// is the boot's: `cargo xtask deadline` runs the identical burst against
+    /// both orders. What the model is for is that a sweep can reach the rule at
+    /// all.
+    pub deadlines: bool,
 }
 
 /// The scenario set.
@@ -212,6 +227,7 @@ pub const SCENARIOS: &[Scenario] = &[
         extent: 0,
         lose_one_in: 0,
         injects: &[],
+        deadlines: false,
     },
     Scenario {
         name: "contention",
@@ -230,6 +246,7 @@ pub const SCENARIOS: &[Scenario] = &[
         extent: 0,
         lose_one_in: 0,
         injects: &[],
+        deadlines: false,
     },
     Scenario {
         name: "pipeline",
@@ -246,6 +263,7 @@ pub const SCENARIOS: &[Scenario] = &[
         extent: 0,
         lose_one_in: 0,
         injects: &[],
+        deadlines: false,
     },
     Scenario {
         name: "blk",
@@ -267,6 +285,7 @@ pub const SCENARIOS: &[Scenario] = &[
         extent: 4_096,
         lose_one_in: 0,
         injects: &[],
+        deadlines: false,
     },
     Scenario {
         name: "blkfull",
@@ -287,6 +306,7 @@ pub const SCENARIOS: &[Scenario] = &[
         extent: 4_096,
         lose_one_in: 0,
         injects: &[],
+        deadlines: false,
     },
     Scenario {
         name: "blkloss",
@@ -307,6 +327,7 @@ pub const SCENARIOS: &[Scenario] = &[
         // gets.
         lose_one_in: 3,
         injects: &[],
+        deadlines: false,
     },
     Scenario {
         name: "net",
@@ -329,6 +350,7 @@ pub const SCENARIOS: &[Scenario] = &[
         extent: 4_096,
         lose_one_in: 0,
         injects: &[],
+        deadlines: false,
     },
     Scenario {
         name: "netdrop",
@@ -349,6 +371,7 @@ pub const SCENARIOS: &[Scenario] = &[
         extent: 512,
         lose_one_in: 0,
         injects: &[],
+        deadlines: false,
     },
     Scenario {
         name: "gpu",
@@ -369,6 +392,7 @@ pub const SCENARIOS: &[Scenario] = &[
         extent: 2,
         lose_one_in: 0,
         injects: &[],
+        deadlines: false,
     },
     Scenario {
         name: "deployment",
@@ -394,6 +418,7 @@ pub const SCENARIOS: &[Scenario] = &[
         extent: 4_096,
         lose_one_in: 0,
         injects: &[],
+        deadlines: false,
     },
     Scenario {
         name: "native",
@@ -410,6 +435,7 @@ pub const SCENARIOS: &[Scenario] = &[
         extent: 0,
         lose_one_in: 0,
         injects: &[],
+        deadlines: false,
     },
     // ---- E1-P02: one scenario per fault class ------------------------------
     //
@@ -447,6 +473,7 @@ pub const SCENARIOS: &[Scenario] = &[
         // aimed at an occurrence and not at a component. `after: 0` would refuse
         // whoever happened to be first, which is a scenario about the timeline.
         injects: &[Injection { class: Class::Alloc, after: 1, one_in: 1 }],
+        deadlines: false,
     },
     Scenario {
         name: "mapfault",
@@ -470,6 +497,7 @@ pub const SCENARIOS: &[Scenario] = &[
         // A scenario where everything faults cannot show that the refusal was
         // confined to the requests it struck.
         injects: &[Injection { class: Class::MapFault, after: 1, one_in: 2 }],
+        deadlines: false,
     },
     Scenario {
         name: "faultin",
@@ -489,6 +517,7 @@ pub const SCENARIOS: &[Scenario] = &[
         // and nothing else moved — and *later* has to be a consequence of the
         // class rather than of which requests a seed happened to strike.
         injects: &[Injection { class: Class::FaultIn, after: 0, one_in: 1 }],
+        deadlines: false,
     },
     Scenario {
         name: "peergone",
@@ -509,6 +538,7 @@ pub const SCENARIOS: &[Scenario] = &[
         // a peer that died with nothing out, and the buffers-come-home assertion
         // would hold over an empty set.
         injects: &[Injection { class: Class::PeerGone, after: 3, one_in: 1 }],
+        deadlines: false,
     },
     Scenario {
         name: "doorbell",
@@ -528,6 +558,7 @@ pub const SCENARIOS: &[Scenario] = &[
         extent: 4_096,
         lose_one_in: 0,
         injects: &[Injection { class: Class::Doorbell, after: 0, one_in: 2 }],
+        deadlines: false,
     },
     Scenario {
         name: "partial",
@@ -547,6 +578,7 @@ pub const SCENARIOS: &[Scenario] = &[
         // that completed beside the ones that were torn, or the assertion cannot
         // tell a class that refuses what it struck from a device that is off.
         injects: &[Injection { class: Class::Partial, after: 1, one_in: 2 }],
+        deadlines: false,
     },
     Scenario {
         name: "latecqe",
@@ -566,6 +598,41 @@ pub const SCENARIOS: &[Scenario] = &[
         // pair `E1-P06`'s exit will quote — *no client observes anything except
         // added latency* — approached from before the work and from after it.
         injects: &[Injection { class: Class::LateCqe, after: 0, one_in: 1 }],
+        deadlines: false,
+    },
+    Scenario {
+        name: "deadline",
+        what: "batch reads queued behind a hard-class one — a device queue ordered by deadline",
+        peer: Peer::Blk,
+        // One, and it is this model's shape rather than a preference: a
+        // virtqueue has exactly one driver, so `install_peers` gives every
+        // client a device of its own and two clients never share a queue. The
+        // contention an ordering needs therefore comes from one client's own mix
+        // of urgent and batch work, which is also what RFC 0025's inversion is
+        // made of.
+        clients: 1,
+        // The whole buffer set, so the client keeps eight requests out at once
+        // and there is something for an urgent one to overtake.
+        window: 8,
+        // One. The device holds a single chain at a time, so seven of the eight
+        // outstanding requests wait in the *driver's* queue whenever the device
+        // is busy — and the driver's queue is the only place an order can exist,
+        // because a virtqueue is consumed in the order the driver posts. It is
+        // also `f_virtio_blk::pending::IN_FLIGHT`, which is the real driver's
+        // depth and the granularity of every overtake it performs.
+        depth: 1,
+        operations: 24,
+        service_ns: 400,
+        // Non-zero, so the seed moves the timing as well as the interleaving:
+        // an ordering that only holds when every request takes the same time is
+        // an ordering a sweep should be able to break.
+        spread_ns: 200,
+        retry_ns: 1_000,
+        buffer_bytes: 512,
+        extent: 4_096,
+        lose_one_in: 0,
+        injects: &[],
+        deadlines: true,
     },
 ];
 
@@ -615,6 +682,11 @@ pub const LONG: &[Scenario] = &[Scenario {
     extent: 4_096,
     lose_one_in: 0,
     injects: &[],
+    // The long run is about re-entering a snapshot near its end, and adding an
+    // ordering to it would change what is being re-entered without changing
+    // what is being asked. `deadline` in `SCENARIOS` is where the ordering is
+    // swept.
+    deadlines: false,
 }];
 
 /// Find a scenario by name, in either table.
@@ -793,6 +865,7 @@ impl Scenario {
                 extent: self.extent,
                 queue_size: crate::virtq::QUEUE_SIZE,
                 domain: DOMAIN,
+                ordered: self.deadlines,
             };
             let actor: Box<dyn crate::Actor> = match component.peer {
                 Peer::Blk => Box::new(
@@ -816,7 +889,7 @@ impl Scenario {
                 }
             };
             let peer = sim.install(actor);
-            clients.push(sim.install(Box::new(App::new(
+            let app = App::new(
                 u32::try_from(who).unwrap_or(u32::MAX),
                 peer,
                 self.window,
@@ -828,7 +901,9 @@ impl Scenario {
                 // the one a client can feel: a ring of sixteen refuses where a
                 // ring of two hundred and fifty-six does not.
                 component.entries,
-            ))));
+            )
+            .urgent(self.deadlines && who == 0);
+            clients.push(sim.install(Box::new(app)));
         }
         clients
     }
@@ -874,6 +949,7 @@ impl Scenario {
             // `dma.rs` writes the same number into a real device's register.
             queue_size: crate::virtq::QUEUE_SIZE,
             domain: DOMAIN,
+            ordered: self.deadlines,
         };
 
         // Peers first, for the same legibility reason the queue path installs
@@ -908,7 +984,7 @@ impl Scenario {
             .enumerate()
             .map(|(who, peer)| {
                 let who = u32::try_from(who).unwrap_or(u32::MAX);
-                sim.install(Box::new(App::new(
+                let app = App::new(
                     who,
                     peer,
                     self.window,
@@ -922,7 +998,12 @@ impl Scenario {
                     // `RingError::Full` before anything leaves this side and
                     // the device's arrives as a completion.
                     self.depth,
-                )))
+                )
+                // The first client, and only the first: a run where everybody
+                // is urgent is a run where nobody is, and what the scenario
+                // measures is this client's position among the rest.
+                .urgent(self.deadlines && who == 0);
+                sim.install(Box::new(app))
             })
             .collect()
     }
@@ -1123,6 +1204,10 @@ mod tests {
             ("injects", "blk", |s| {
                 s.injects = &[Injection { class: Class::LateCqe, after: 0, one_in: 1 }];
             }),
+            // Off against on, for `lose_one_in`'s reason: the field turns two
+            // things on together — a client that claims urgency and a queue
+            // that reads it — and a run with neither is the control.
+            ("deadlines", "deadline", |s| s.deadlines = false),
         ];
 
         for (what, from, moved) in cases {
@@ -1135,6 +1220,83 @@ mod tests {
                 "{what} changed nothing against `{from}`"
             );
         }
+    }
+
+    /// Where each of a client's operations sat in the order its peer put them
+    /// into the virtqueue, as a mean scaled by a thousand.
+    ///
+    /// The device writes `wrote::QUEUED` at the moment a chain is offered, which
+    /// is exactly the moment the driver's choice is made — before it, a request
+    /// is in the driver's queue; after it, it belongs to the device and nothing
+    /// can move it. So this is the ordering and not a completion time, which
+    /// would also carry the device's own reordering and the seed's service
+    /// spread. Unit: positions per thousand operations.
+    fn mean_position(scenario: &Scenario, seed: u64, urgent: bool) -> u64 {
+        let outcome = scenario.run(seed).expect("a shipped scenario terminates");
+        let queued: Vec<u64> = outcome
+            .trace
+            .records()
+            .iter()
+            .filter(|record| record.kind == crate::proto::wrote::QUEUED)
+            .map(|record| record.token)
+            .collect();
+        // Which operations carry the hard class is asked of the client that
+        // marks them rather than recomputed here: two derivations of one rule is
+        // one too many, and this copy would go stale silently.
+        let mine: Vec<usize> = queued
+            .iter()
+            .enumerate()
+            .filter(|(_, token)| crate::client::App::is_urgent(true, **token) == urgent)
+            .map(|(at, _)| at)
+            .collect();
+        assert!(!mine.is_empty(), "no operation of that kind was queued");
+        let sum: usize = mine.iter().sum();
+        (sum as u64).saturating_mul(1_000) / mine.len() as u64
+    }
+
+    #[test]
+    fn a_hard_class_read_reaches_the_device_ahead_of_queued_batch_work() {
+        // `E1-B06` in the model, and the reason the model has it at all: a rule
+        // the simulator does not share is a rule `E1-P03`'s sweep cannot
+        // explore. The boot proves the ordering against a control that differs
+        // in one ordinal; this proves the *model* does the same thing, so that a
+        // seed which breaks it arrives as a reproduction command.
+        let ordered = base("deadline");
+        let mut flat = ordered;
+        flat.deadlines = false;
+
+        // Several seeds, because one is an anecdote and this is an ordering
+        // under a service time the seed varies. Every one of them and not a
+        // majority: the rule is arithmetic, so a seed that breaks it is a bug
+        // rather than noise.
+        for seed in [DEFAULT_SEED, 1, 2, 3, 0xfeed_face_dead_beef] {
+            let urgent = mean_position(&ordered, seed, true);
+            let control = mean_position(&flat, seed, true);
+            assert!(
+                urgent < control,
+                "seed {seed:#x}: hard-class operations sat at {urgent} per thousand with the \
+                 queue ordering and at {control} without it, so the ordering bought them nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn the_batch_work_is_what_moves_back() {
+        // The other half of the same run, and the half that says this is an
+        // *ordering* rather than a queue that got faster: what the hard-class
+        // operations gained, the batch operations behind them paid for. A run
+        // where both moved forward would be a run where something other than the
+        // order changed.
+        let ordered = base("deadline");
+        let mut flat = ordered;
+        flat.deadlines = false;
+        let batch = mean_position(&ordered, DEFAULT_SEED, false);
+        let control = mean_position(&flat, DEFAULT_SEED, false);
+        assert!(
+            batch >= control,
+            "batch work moved forward when the queue started ordering, so the ordering is not \
+             what moved the hard-class work"
+        );
     }
 
     /// Only what the client itself wrote, which is the whole of what a client

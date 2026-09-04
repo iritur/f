@@ -59,11 +59,14 @@
 //! carries the difference, shrunk to exactly that.
 
 use f_abi::control::{is_notice, notice};
+use f_abi::deadline::Admitted;
 use f_abi::{Cqe, Negotiated, Sqe, door, error, feature};
 use f_ring::adopt::{Adopted, Client};
 use f_ring::device::{Region, Window};
+use f_ring::refusal;
 use f_ring::registry::{Domains, Refusal};
 
+use crate::pending::{Admission, Order, Pending};
 use crate::routing::{self, at, life, reported, stopped};
 use crate::transport::Windows;
 
@@ -118,18 +121,19 @@ fn serve(selector: u32) -> ! {
     // looks like, and a zero length taken for a length reads as a device
     // problem rather than as a frame that did not speak.
     if board.read64(at::MAGIC) != Ok(routing::MAGIC) {
-        report(&board, None, 0, stopped::NO_ROUTING);
+        report(&board, None, None, 0, stopped::NO_ROUTING);
         end(stopped::NO_ROUTING)
     }
 
     let Some(parts) = laid_out(&board) else {
-        report(&board, None, 0, stopped::BAD_ROUTING);
+        report(&board, None, None, 0, stopped::BAD_ROUTING);
         end(stopped::BAD_ROUTING)
     };
 
-    let Ok(mut driver) = crate::driver::Driver::start(parts.windows, parts.queues, parts.agreed)
+    let Ok(mut driver) =
+        crate::driver::Driver::start(parts.windows, parts.queues, parts.agreed, parts.admission)
     else {
-        report(&board, None, 0, stopped::NO_DEVICE);
+        report(&board, None, None, 0, stopped::NO_DEVICE);
         end(stopped::NO_DEVICE)
     };
 
@@ -139,12 +143,21 @@ fn serve(selector: u32) -> ! {
     // one call in this crate that moves bytes, and `cargo xtask lint-datapath`
     // is what keeps that true.
     if driver.provoke_copy().is_err() {
-        report(&board, Some(&driver), 0, stopped::NO_SELF_CHECK);
+        report(&board, Some(&driver), None, 0, stopped::NO_SELF_CHECK);
         end(stopped::NO_SELF_CHECK)
     }
 
     let mut route = Route { control: parts.control, token: 0, told: false };
+    // What has been taken off the ring and not yet handed to the device. This
+    // is the whole of `E1-B06` in this component: the ring is drained into it in
+    // arrival order and the device is fed out of it in the order
+    // `f_abi::deadline::inherit` decided. RFC 0049.
+    let mut queue = Pending::new();
     let mut drained: u64 = 0;
+    // Whether the frame's hold has been satisfied once. Once, and then never
+    // again: a hold that re-armed would stall on whatever the first pick left
+    // behind, and the pick it exists to make deterministic has already happened.
+    let mut held_once = false;
     let outcome = loop {
         // The control ring first, because a stop is the one thing that ends
         // this loop and an entry taken after it would be work done for a client
@@ -157,15 +170,82 @@ fn serve(selector: u32) -> ! {
             break stopped::TOLD;
         }
 
-        let taken = match parts.data.pop() {
-            Ok(taken) => taken,
-            Err(_) => break stopped::NO_RING,
-        };
-        let Some(entry) = taken else {
+        // Take everything the client has published, up to what this queue can
+        // hold. Draining before choosing is what makes a choice possible at
+        // all: a loop that took one entry and served it has no queue and
+        // therefore no order, which is what this driver was until now.
+        //
+        // Every entry is admitted on the way in — RFC 0025's bound on the
+        // caller, answered before the request has a rank at all — so an entry
+        // claiming a class its submitter does not hold is refused here and
+        // never joins the queue. It is refused *after* being counted as
+        // drained, because it did cross the boundary.
+        let mut stopping = None;
+        while !queue.is_full() {
+            let taken = match parts.data.pop() {
+                Ok(taken) => taken,
+                Err(_) => {
+                    stopping = Some(stopped::NO_RING);
+                    break;
+                }
+            };
+            let Some(entry) = taken else { break };
+            drained += 1;
+            // Zero, and it is a literal for `Driver::execute`'s reason: this
+            // crate observes no clock. `Admission::floor` states what that
+            // costs bound 3, and `DEADLINE_GAP` in xtask is what goes red the
+            // day this stops being a literal.
+            let admitted = match driver.admit(&entry, 0) {
+                Ok(order) => Some(order),
+                Err(cqe) => {
+                    if parts.data.post(cqe).is_err() {
+                        stopping = Some(stopped::NO_RING);
+                    }
+                    None
+                }
+            };
+            let Some(order) = admitted else {
+                if stopping.is_some() {
+                    break;
+                }
+                continue;
+            };
+            if let Err((packed, detail)) = queue.push(entry, order) {
+                // Unreachable while the queue is at least as deep as the
+                // client's ring, which `pending::CAPACITY` argues it is.
+                // Answered rather than dropped anyway: a request that vanished
+                // because something more urgent arrived is a client that waits
+                // forever, and a service may not do that quietly.
+                if parts.data.post(refusal(entry.user_data, packed, detail, 0)).is_err() {
+                    stopping = Some(stopped::NO_RING);
+                }
+                break;
+            }
+        }
+        if let Some(why) = stopping {
+            break why;
+        }
+
+        if queue.is_empty() {
             core::hint::spin_loop();
             continue;
+        }
+        // The frame's hold, and it is a fixture rather than a policy --
+        // `routing::at::HOLD` says why at length. It applies to one pick, after
+        // the frame's own prelude has been served, and its whole effect is that
+        // what is queued at that pick is a fact the boot chose instead of a
+        // race between two cores.
+        if !held_once && drained > parts.hold_after {
+            if (queue.len() as u64) < parts.hold {
+                core::hint::spin_loop();
+                continue;
+            }
+            held_once = true;
+        }
+        let Some(waiting) = queue.take(parts.order) else {
+            continue;
         };
-        drained += 1;
+        let entry = waiting.entry;
 
         // Two entry points and not a flag, so the provocation is greppable: the
         // data path calls `execute`, and only the escape life reaches
@@ -181,9 +261,9 @@ fn serve(selector: u32) -> ! {
         // this code ran in the frame.
         let bend = selector == life::ESCAPE && entry.opcode == crate::driver::op::READ;
         let answer = if bend {
-            driver.provoke_escape(&entry, &mut route, 0, parts.beyond)
+            driver.provoke_escape(&entry, waiting.order, &mut route, 0, parts.beyond)
         } else {
-            driver.execute(&entry, &mut route, 0)
+            driver.execute(&entry, waiting.order, &mut route, 0)
         };
         if parts.data.post(answer).is_err() {
             break stopped::NO_RING;
@@ -195,7 +275,7 @@ fn serve(selector: u32) -> ! {
     // because a device left able to address memory the frame is about to hand
     // to somebody else is the corruption this whole subsystem is about.
     let _ = driver.stop();
-    report(&board, Some(&driver), drained, outcome);
+    report(&board, Some(&driver), Some((&queue, parts.order)), drained, outcome);
     end(outcome)
 }
 
@@ -208,6 +288,16 @@ struct Parts {
     agreed: Negotiated,
     /// Unit: bytes.
     beyond: u64,
+    /// Which order work is handed to the device in.
+    order: Order,
+    /// What this component is admitted for and what its channel says about the
+    /// peer submitting on it.
+    admission: Admission,
+    /// How many requests to accumulate before the first choice among them.
+    /// Unit: requests.
+    hold: u64,
+    /// How many to serve before that hold applies. Unit: requests.
+    hold_after: u64,
 }
 
 /// Read the routing page and state everything it names.
@@ -264,6 +354,24 @@ fn laid_out(board: &Window) -> Option<Parts> {
     .ok()?
     .server();
 
+    // The two ceilings, refused rather than approximated: `Admitted::new`
+    // answers `None` for anything that is not one of the four class ordinals,
+    // and a routing page carrying one is a frame that did not speak rather than
+    // a frame that meant batch. R04, at the same place the magic is checked.
+    let admission = Admission {
+        mine: Admitted::new(u16::try_from(board.read64(at::ADMITTED).ok()?).ok()?)?,
+        client: Admitted::new(u16::try_from(board.read64(at::CLIENT_ADMITTED).ok()?).ok()?)?,
+        floor: board.read64(at::FLOOR).ok()?,
+    };
+    // A hold deeper than the queue is a hold that can never be satisfied, which
+    // is a component that stops serving and looks exactly like one that wedged.
+    // Refused here, where it is a routing page this build cannot honour, rather
+    // than discovered five seconds later as an unanswered completion.
+    let hold = board.read64(at::HOLD).ok()?;
+    if hold > crate::pending::CAPACITY as u64 {
+        return None;
+    }
+
     Some(Parts {
         windows,
         queues,
@@ -274,6 +382,10 @@ fn laid_out(board: &Window) -> Option<Parts> {
             features: board.read64(at::NEGOTIATED_FEATURES).ok()?,
         },
         beyond: board.read64(at::BEYOND).ok()?,
+        order: Order::from_ordinal(board.read64(at::ORDERING).ok()?),
+        admission,
+        hold,
+        hold_after: board.read64(at::HOLD_AFTER).ok()?,
     })
 }
 
@@ -285,7 +397,13 @@ fn laid_out(board: &Window) -> Option<Parts> {
 /// plausible tally. RFC 0013's *read, never delivered* — the frame takes these
 /// numbers out of memory it granted, and this component is never asked for
 /// them.
-fn report(board: &Window, driver: Option<&crate::driver::Driver>, drained: u64, outcome: u64) {
+fn report(
+    board: &Window,
+    driver: Option<&crate::driver::Driver>,
+    queue: Option<(&Pending, Order)>,
+    drained: u64,
+    outcome: u64,
+) {
     if let Some(driver) = driver {
         let counters = driver.counters();
         let _ = board.write64(reported::SERVED, u64::from(counters.served));
@@ -295,6 +413,25 @@ fn report(board: &Window, driver: Option<&crate::driver::Driver>, drained: u64, 
         let _ = board.write64(reported::ESCAPED, u64::from(counters.escaped));
         let _ = board.write64(reported::PROVOKED, counters.provoked);
         let _ = board.write64(reported::CAPACITY, driver.capacity());
+        let _ = board.write64(reported::SHORTFALL, u64::from(counters.shortfall));
+        let _ = board.write64(reported::UNADMITTED, u64::from(counters.unadmitted));
+    }
+    if let Some((queue, order)) = queue {
+        let _ = board.write64(reported::OVERTAKEN, u64::from(queue.overtaken()));
+        let _ = board.write64(reported::QUEUED_MAX, u64::from(queue.deepest()));
+        let _ = board.write64(reported::IN_FLIGHT, u64::from(crate::pending::IN_FLIGHT));
+        // What this component *did*, and not what it was told to do. The frame
+        // wrote the ordinal into the other half of this page and can read it
+        // back from there; what it cannot know without being told is whether
+        // this component understood it, and a control run that quietly used the
+        // ordering would pass every comparison between the two halves.
+        let _ = board.write64(
+            reported::ORDERED,
+            match order {
+                Order::Rank => 1,
+                Order::Arrival => 0,
+            },
+        );
     }
     let _ = board.write64(reported::DRAINED, drained);
     let _ = board.write64(reported::OUTCOME, outcome);

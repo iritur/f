@@ -293,6 +293,16 @@ status  = "partially"
 notes   = "E1-B02 made the requester a driver component's own descriptor rather than the frame's adversary: user/virtio-blk writes it out of a Reach the frame answered its client's registration with. cargo xtask blk escape is the clause itself — the component's own arithmetic produces an address it was never granted and the unit faults it there, with Report::verdict requiring that the provocation ran; cargo xtask blk outside is the neighbouring property, a translation withdrawn under a correct descriptor. What is still not true is that the driver's code executes at ring 3 — E1-B08 landed the scheduling half and a component does now run at ring 3 with its own polling loop, but nothing routes a device into a spawned component's address space, so the frame calls this one — so these boots establish the descriptor's provenance and the unit's refusal, and not the privilege level of the code that built the descriptor. RFC 0033 records that deferral with a date. Both commands are jobs in ci.yml, beside each other, so all five halves keep the cadence this row claims."
 scheduled_by = ["E1-B08"]
 
+[[row]]
+id      = "device-writes-outside-grant"
+group   = "C"
+class   = "A device writing outside the driver's grant, on the direction the device chooses when"
+layers  = ["L1", "P"]
+check   = "cargo xtask net — three boots on a machine with a VT-d unit and a real virtio-net device, driven by user/virtio-net at ring 3 on a core the frame allocated it: inside forms an ARP request in a registered buffer, posts a receive, and requires the reply to land in that buffer carrying the MAC this boot invented; silent is the identical client with the transmit removed, and requires the buffer to come back untouched as a cancellation, which is what makes inside a reply rather than a link; escape displaces the receive data descriptor by one page and requires the unit to fault at the address the driver invented, on a write, with the client's buffer still holding all 42 poison bytes. All three also require copies = 0 beside a non-zero provoked, and a registration of a capability with no GRANT to be refused"
+cadence = ["every-pr"]
+status  = "catches"
+notes   = "The direction blk cannot reach: a receive is the device writing into a client's memory at a moment nothing in this system chose, with no request outstanding — so escape's verdict rests on the client's own bytes and on the unit's fault record being a *write* at the invented address, and deliberately not on the used ring, which this emulator publishes for a transfer the unit refused. Three bounds on what this row claims. The component is *scheduled* rather than spawned into a place, which is what CHAOS_GAP in xtask carries. Every boot posts exactly one receive buffer, so the multi-slot machinery — the head that says which of four posted buffers filled — is covered by f_virtio_net::driver's unit tests against a memory-backed device and by no boot; both of the formulas that break it turn those tests red. And RECEIVE_MICROS is a wall-clock bound, so a red carrying Trouble::NoFrame is a wedged component or a slow runner and says so on its own line. RFC 0051."
+
 # --- D — memory ---------------------------------------------------------------
 
 [[row]]
@@ -309,11 +319,32 @@ notes   = "One process, one death. Churn is a different row."
 id      = "frame-leak-under-churn"
 group   = "D"
 class   = "Frame leak under churn"
-layers  = ["L1", "L5"]
-check   = "nothing"
-cadence = ["never"]
-status  = "gap"
-scheduled_by = ["E1-B14", "E1-P06", "E1-B10"]
+layers  = ["L1", "L5", "P"]
+check   = "cargo xtask churn — the allocator's free count is read before the churn and again after every set is retired, the domain released and the workload's own memory handed back, and the boot fails if they differ. Forty register-and-retire cycles per half over two invalidation policies, each cycle a registration that makes the remapping unit build second-level tables and a retirement that clears them"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+scheduled_by = ["E1-P06", "E1-B10"]
+notes   = "E1-B14 landed and closed the registration path: the churn is the one workload in this tree that maps, retires and releases at a rate where a leak of a single table frame per cycle stops being invisible, and claims/0014's frames_leaked_by_the_churn bounds it at zero. What is still open is the churn the other two tasks name — components dying and being refilled under load, where the frames are a process's rather than a domain's. process::reap covers one death and the frame-leak-on-death row is that; nobody has run a thousand."
+
+[[row]]
+id      = "unmap-invalidates-per-page-under-churn"
+group   = "D"
+class   = "An unmap that invalidates the remapping unit once per page under datapath churn"
+layers  = ["L1", "P"]
+check   = "cargo xtask churn — one boot runs the churn under both invalidation policies over the identical geometry and requires each to mean what it says: the per-page control must invalidate once per page and the batched candidate once per request, so a build where the policy argument stopped being read reports one number twice and goes red. claims/0014 carries both as thresholds, plus the round trips saved per set and a minimum of two pages per set, because at one page the two halves are the same run"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "E1-B14. The control is kept in the tree rather than deleted with the commit that beat it: a ratio whose denominator was removed is a number nobody can re-check when the rate changes again. What this row does not cover is the *mapping* half of the same cycle, which is still one invalidation per page — CHURN_GAP in xtask declares it, claims/0014's map_invalidations_per_page bounds it in both directions, and the three go red together the day it is closed. RFC 0052."
+
+[[row]]
+id      = "mapping-left-after-revoke-under-churn"
+group   = "D"
+class   = "Mapping left after revoke, under churn"
+layers  = ["L1", "P"]
+check   = "cargo xtask churn — every retirement is followed by a walk of the remapping unit's own second-level tables requiring the set's eight pages to be gone, and every registration by the same walk requiring that they are there. Both counted, both bounded by claims/0014 (sets_still_translated_after_unmap = 0 beside sets_reachable_while_registered = 80), and the boot names which of the two failed. A third pass makes the one request shape no client can produce — a set with a page taken out from under it — and requires one batched request over the whole set to leave nothing translated beyond the hole"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+notes   = "E1-B14's batch clears N entries and publishes one global invalidation for the request, so *the entries are gone* is exactly what a reader is entitled to disbelieve — this row is that read back. The positive half is what makes the zero worth anything: a walk that answered no to everything would report a perfect revocation over a domain that never mapped anything. What is still not observed is a **device**: nothing is attached to the churn's domain, and the one boot that watches a device fault after a withdrawal — cargo xtask blk's outside half — registers a single page, where the batched and per-page policies are the same run. REVOKE_GAP in xtask is that residual declared as a checked quantity, and it goes red the day a device is attached to the churn's domain or that boot registers more than a page. RFC 0052."
 
 [[row]]
 id      = "allocator-split-coalesce"
@@ -372,40 +403,45 @@ id      = "deadline-inversion"
 group   = "E"
 class   = "Deadline inversion in a device queue"
 layers  = ["L1", "L5"]
-check   = "nothing — RFC 0025 decides the rule and nothing orders a device queue yet"
-cadence = ["never"]
-status  = "gap"
-scheduled_by = ["E1-B06"]
+check   = "cargo xtask deadline — three boots of one client script against one ring-3 virtio-blk component, and one of them is a control: the ordered half must return the hard-class read at position 0 of 7 having overtaken 6 queued batch reads it was submitted behind, the arrival half must return the identical burst with the read last having overtaken 0, and the unadmitted half must refuse a class the client does not hold rather than serve it. The overtake is read twice — the frame's completion order and the component's own queue counter — and the two are required to agree. claims/0012 gates on the counts"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "Two limits, declared rather than implied. The depth of six is a *fixture*: the frame tells the driver to hold the whole burst before it picks (`f_virtio_blk::routing::at::HOLD`), because without it the queue depth at the first pick is a race between two cores. And the count is what gates; the *time* the overtake saved a client is `claims/0013`, `pending` on the machine E0-D10 owes. What this row does not cover is deadline-within-class ordering at a boot — this driver is admitted for the soft class, so on the boot the class term decides — which is `pending::tests::the_earlier_deadline_goes_first_within_a_class` and the model's `deadline` scenario. RFC 0049."
 
 [[row]]
 id      = "deadline-inheritance-unbounded"
 group   = "E"
 class   = "A component claiming urgency forever"
 layers  = ["L1", "L3"]
-check   = "RFC 0025 decides the decay; nothing enforces it"
-cadence = ["never"]
+check   = "abi/src/deadline.rs's the_depth_bound_is_enforced, and that is a unit test. E1-B06 landed the ordering and did not close this: RFC 0025's bound 4 decays a caller's urgency over MAX_DEPTH rings, and this tree has no chain for it to decay along — every entry that reaches a scheduler was written at depth zero by whoever originated it, and Inherited::rank does not read the depth"
+cadence = ["every-verify", "every-pr"]
 status  = "gap"
-scheduled_by = ["E1-B06", "E1-B07"]
+scheduled_by = ["E1-B05", "E1-B07"]
+notes   = "The absence is now a *checked* quantity rather than an unwritten one: `DEADLINE_DEPTH_GAP` in xtask requires that nothing outside `abi/` calls `Inherited::class_field`, so the day a service forwards an inherited class the build goes red and names the documents — this row among them — that describe a tree that no longer exists. The cadence above is that check and not a test of the bound. The cheap way to close this is a `sim` scenario with two services in a chain, whose clock is the model's own; the honest way is a component that submits downstream on a caller's behalf."
 
 [[row]]
 id      = "admission-starvation"
 group   = "E"
 class   = "A granted reservation misses its deadline under load"
 layers  = ["L1", "L5", "L6"]
-check   = "nothing — there is no admission control"
-cadence = ["never"]
-status  = "gap"
-scheduled_by = ["E1-B07"]
+check   = "cargo xtask admission — three arms at one seed, and two of them are controls: the unreserved arm must miss and the over-subscribed one must be refused without running, or the granted arm's zero is about the workload. claims/0010 gates on the counts"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+scheduled_by = ["E1-B07", "E0-D10"]
+notes   = "E1-B07 landed and the row moved to `partially` rather than `catches`, because the number that would close it is a *time*. The model has a virtual clock, so `met its deadline` is a count of slots — the same number on a fast host and a slow one — and that is what gates. What no machine in reach can produce is the margin in nanoseconds on a part that delivers all four of RFC 0007's components; `claims/0011` is that number and it is `pending` on E0-D10's machine. The boot half says so out loud: on QEMU there is no thread level, no cache topology and no RDT, so `cargo xtask admission` reports that this machine hosts no hard-class reservation at all."
+
 
 [[row]]
 id      = "admission-oversubscribed"
 group   = "E"
 class   = "An over-subscribed reservation is admitted"
 layers  = ["L3", "P"]
-check   = "nothing"
-cadence = ["never"]
-status  = "gap"
+check   = "f_abi::reserve's host tests over the arithmetic, and cargo xtask admission over a boot and a model: the machine's capacity is granted, the same demand is made again, and it must be refused in the ADMISSION domain of RFC 0010 naming which of RFC 0007's four components could not be delivered — and must run nothing at all"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
 scheduled_by = ["E1-B07"]
+notes   = "The row that closed, and what closes it is two thresholds rather than one: `oversubscribed_refusals` has a minimum and `periods_run_oversubscribed` has a maximum of zero. Without the second, a reservation that was admitted and then missed would satisfy the first — which is the state R08 says the word deadline must not be used for, and is exactly what an admission test that refuses too late looks like. RFC 0050."
+
 
 [[row]]
 id      = "timer-jitter-regression"

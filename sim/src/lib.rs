@@ -131,6 +131,7 @@ pub mod gpu;
 pub mod native;
 pub mod net;
 pub mod proto;
+pub mod reserve;
 pub mod scenario;
 pub mod service;
 pub mod snap;

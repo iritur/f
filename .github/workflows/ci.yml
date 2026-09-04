@@ -482,6 +482,53 @@ jobs:
       # halves, and a cadence claimed by a row and kept by nobody is worse than
       # a row that admits it runs on no cadence at all.
       - run: cargo xtask blk
+      # The **second** driver, which is what says the first one's shape is a
+      # shape rather than a coincidence. Three more boots of a network datapath:
+      # `inside` posts a receive buffer, transmits a hand-formed
+      # address-resolution request and requires the reply to land in the
+      # registered buffer carrying the hardware address this boot invented, which
+      # the host's backend could not have produced without the request. `silent`
+      # is the identical client with the transmit removed and requires nothing to
+      # arrive — without it, *a frame arrived* is satisfied by any link with
+      # traffic on it. `escape` applies the displacement to the **receive**
+      # descriptor, so what the remapping unit must refuse is a device *writing*
+      # into memory the component never held, at a moment nothing chose. E1-B03,
+      # RFC 0051, which also records what the frame turned out to owe a second
+      # driver.
+      - run: cargo xtask net
+      # The same datapath, asked an ordering rather than an isolation question.
+      # Three more boots of one client script: six batch reads are queued, a
+      # hard-class read carrying a deadline arrives last, and the driver hands
+      # the device what `f_abi::deadline::inherit` ranked first. `ordered`
+      # requires the read back at position zero, having overtaken six;
+      # `arrival` is the control and requires it back last, because an overtake
+      # with nothing beside it is an array that came out conveniently; and
+      # `unadmitted` requires a client that does not hold the hard class to be
+      # refused it rather than served at it. The overtake is counted on both
+      # sides of the privilege boundary and the two must agree. E1-B06, RFC
+      # 0049, and `claims/0012` gates on the count.
+      - run: cargo xtask deadline
+      # What it costs to undo the isolation the two jobs above prove. One boot
+      # retires forty registered buffer sets — thirty-two register-and-retire
+      # cycles, then a driver restart's whole grant in one pass — under each of
+      # the two invalidation policies, and the host workload beside it drives
+      # the identical registry churn while `f_bench::Environment` declines to
+      # publish a time. The counts are what gate: one global invalidation per
+      # unmap request rather than one per page, and *zero* shootdowns and zero
+      # interrupts from the churn against a boot whose running total is one —
+      # which is what makes the zero a property of the datapath rather than of
+      # a counter nobody wired up. The boot also reads the unit's own tables
+      # back after every retirement — nothing may still be translated, and
+      # everything must have been while it was registered — walks the free
+      # count either side of the whole thing, and makes the one request shape
+      # no client can produce: a set with a page taken out from under it, which
+      # one batched request must clear either side of. And it times a thousand
+      # and twenty-four unmap requests through the shipped path, which on this
+      # runner is recorded and refused rather than published: `F_ENVIRONMENT`
+      # is not a measurement class here, so `cargo xtask churn` requires the
+      # refusal to appear. E1-B14, RFC 0052, and `claims/0014` gates on the
+      # counts while `claims/0015` waits on a machine.
+      - run: cargo xtask churn
       # The scheduler, and the one exit on this list that is an *absence*. Four
       # boots. A component holds a core, adopts its control ring and its own
       # work ring in safe code — `f_ring::adopt`, RFC 0037 — and puts sixteen

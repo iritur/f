@@ -21,15 +21,18 @@
 #![no_std]
 #![no_main]
 
+pub mod admit;
 pub mod arch;
 pub mod blk;
 pub mod cap;
+pub mod churn;
 pub mod component;
 pub mod doorbell;
 pub mod env;
 pub mod iommu;
 pub mod jitter;
 pub mod mem;
+pub mod net;
 pub mod percpu;
 pub mod process;
 pub mod ring;
@@ -581,6 +584,17 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // this boot had not finished being.
     let provoked = dma_provocation(&boot, &mut frames, &space, features, remapping.as_mut());
 
+    // E1-B14. What it costs to take a translation back, at the rate the
+    // datapath produces one. Behind its own parameter for the reason every
+    // stage here is: it takes a domain and a quarter of a mebibyte, and an
+    // ordinary boot has no business doing either.
+    //
+    // Beside `dma_provocation` rather than inside it, because it is asking a
+    // different question of the same unit: that one asks whether a device is
+    // confined, this one asks what confining it costs to undo. Before the tree
+    // is rendered, for the reason recorded above.
+    churn_measurement(&boot, &mut frames, remapping.as_mut());
+
     // E1-B02. The datapath, with the driver outside the frame: a component
     // whose crate forbids `unsafe` brings a real device up through granted
     // register windows, a client registers a buffer set and writes a sector
@@ -617,6 +631,36 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // above.
     let scheduled =
         runtime_demonstration(&boot, &mut frames, &space, features, clocks, tree.physical());
+
+    // E1-B03. The same shape as the stage above it, with a second driver in it:
+    // a component whose crate forbids `unsafe` brings a real network device up
+    // through granted register windows, a client registers a buffer set, posts
+    // one receive buffer through a ring, puts a hand-formed frame on the link,
+    // and requires the answer to land in the registered buffer.
+    //
+    // Behind its own parameter, like every other provocation in this file, and
+    // for the sharper version of their reason: an ordinary boot has no network
+    // device at all — `MACHINE` passes `-net none` — so this stage is the only
+    // one that adds a bus master the default machine does not have.
+    //
+    // Before the tree is rendered, because everything it does is something the
+    // tree publishes and a tree rendered first would publish the state of a
+    // machine this boot had not finished being.
+    let packets = net_datapath(
+        &boot,
+        &mut frames,
+        &space,
+        features,
+        remapping.as_mut(),
+        clocks,
+        tree.physical(),
+    );
+    let _ = packets;
+
+    // E1-B07. What this machine can reserve, asked of the machine rather than
+    // assumed about it. Behind its own parameter for the fixture's sake, like
+    // the three stages above, and printing nothing on a default boot.
+    admission_demonstration(&boot);
 
     // Last of the frame's own numbers, because the allocator is still handing
     // out frames until the line above. The self-test is what says the hash
@@ -1739,6 +1783,335 @@ fn dma_provocation(
     outcome.faults
 }
 
+/// What an unmap costs under churn, both ways, in one boot.
+///
+/// `E1-B14`. The task permits two outcomes and demands a number either way, so
+/// this stage's job is to produce the number rather than to defend a design:
+/// it drives the two churn sources the datapath actually has — a client cycling
+/// its registered buffers, and a driver restart retiring a component's whole
+/// grant — and reports what each cost under each invalidation policy.
+///
+/// # What is asserted here and what is only printed
+///
+/// The counts are printed, because they are the result. What is *asserted* is
+/// the set of things that would let a run report a flattering result while
+/// nothing was measured:
+///
+/// - both halves retired the same number of sets, so the improvement is a ratio
+///   between two runs of one workload rather than between two workloads;
+/// - both cleared the same number of pages, for the same reason;
+/// - a set spanned more than one page, because a one-page set makes a batched
+///   unmap and an unbatched one the same run and the ratio would be 1 while the
+///   code was wrong in either direction;
+/// - the control's invalidations equal its pages and the candidate's equal its
+///   requests, which is what each policy *means* — a build where the policy
+///   argument had stopped being read would report one number twice and pass
+///   every other check here.
+///
+/// The shootdown counters are printed as a delta and a total. The delta is the
+/// finding — zero — and the total is what makes the zero worth reading, for the
+/// reason `state.rs` gives about every counter beside it: a number nothing in a
+/// boot can move is indistinguishable from a number that does not work.
+fn churn_measurement(
+    boot: &BootInfo,
+    frames: &mut mem::FrameAllocator,
+    remapping: Option<&mut Remapping>,
+) {
+    if !boot.has_parameter(b"churn=unmap") {
+        return;
+    }
+
+    let Some(found) = remapping else {
+        kprintln!("FAIL: the unmap churn was asked for on a machine with no remapping unit");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+
+    // The control first and the candidate second, so that a reader following
+    // the log reads the cost before the saving. Both against the same unit, in
+    // fresh domains of their own — `churn::run` takes and releases one per half
+    // — so neither inherits the other's tables.
+    let mut measured = [churn::Counts::default(); 2];
+    for (index, when) in
+        [iommu::Invalidation::PerPage, iommu::Invalidation::PerRequest].into_iter().enumerate()
+    {
+        // SAFETY: the kernel's address space is active, `frames` is rebound onto
+        // its direct map, and the unit is one this boot programmed and enabled.
+        match unsafe { churn::run(frames, &mut found.unit, when) } {
+            Ok(counts) => {
+                if let Some(slot) = measured.get_mut(index) {
+                    *slot = counts;
+                }
+            }
+            Err(why) => {
+                // A workload that could not be arranged is not a workload that
+                // reported a small number, which is `dma_provocation`'s rule
+                // one stage up and the reason this ends the boot.
+                kprintln!("FAIL: unmap churn: {}", why.message());
+                arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+            }
+        }
+    }
+
+    let [control, batched] = measured;
+    let (shot_pages, shot_ipis) = smp::shootdowns();
+
+    kprintln!(
+        "  churn work    {} set(s) registered and {} retired per half; {} page(s) per set",
+        control.registered,
+        control.retired,
+        control.pages.checked_div(control.requests).unwrap_or(0)
+    );
+    kprintln!(
+        "  churn perpage {} unmap request(s), {} page(s), {} invalidation(s), {} round trip(s)",
+        control.requests,
+        control.pages,
+        control.invalidations,
+        control.round_trips()
+    );
+    kprintln!(
+        "  churn batched {} unmap request(s), {} page(s), {} invalidation(s), {} round trip(s)",
+        batched.requests,
+        batched.pages,
+        batched.invalidations,
+        batched.round_trips()
+    );
+    kprintln!(
+        "  churn saved   {} of {} round trip(s) — {}% of what one page at a time cost",
+        control.round_trips().saturating_sub(batched.round_trips()),
+        control.round_trips(),
+        batched.round_trips().saturating_mul(100).checked_div(control.round_trips()).unwrap_or(0)
+    );
+    // The other side of the same cycle, and it is not this task's to fix. A
+    // registration maps its pages one at a time and invalidates after each,
+    // exactly as the unmap did — so the saving above is half the saving that is
+    // there. Printed rather than left out, because a measurement that reported
+    // only the half it improved would be `R12`'s concession hidden in a metric.
+    // `CHURN_GAP` in `xtask` carries the number and names the owner.
+    kprintln!(
+        "  churn mapping {} page(s) mapped cost {} invalidation(s) — still one per page, \
+             unbatched, per half",
+        control.pages_mapped,
+        control.map_invalidations
+    );
+    // The number the task named, and the number it turned out to be. Delta over
+    // the churn, then the machine's running total, because the second is what
+    // says the first is a finding.
+    kprintln!(
+        "  churn shoot   {} shootdown(s) and {} ipi(s) from the churn; {} and {} on this boot",
+        control.shootdowns.saturating_add(batched.shootdowns),
+        control.ipis.saturating_add(batched.ipis),
+        shot_pages,
+        shot_ipis
+    );
+
+    // What the tables say, after the batch cleared them and published one
+    // invalidation for the lot. Printed before the verdict reads it, because
+    // these are the lines here that are an observation rather than a count.
+    kprintln!(
+        "  churn revoke  {} set(s) reachable while registered, {} still reachable after the \
+             unmap",
+        control.reachable_registered.saturating_add(batched.reachable_registered),
+        control.standing_after_unmap.saturating_add(batched.standing_after_unmap)
+    );
+    kprintln!(
+        "  churn frames  {} free before the churn, {} after everything was given back",
+        control.frames_before,
+        batched.frames_after
+    );
+    // The correctness half of the batch, and it is a separate pass because it is
+    // not a measurement: a set with a page taken out from under it, unmapped as
+    // one request, with every page walked afterwards. `unmap_range` returns the
+    // first refusal *after* attempting the rest, and a version that stopped at
+    // the hole would leave the pages beyond it translated — a device still
+    // reaching memory a client took back. No client can make such a set, which
+    // is why the stage makes one.
+    // SAFETY: as the counted halves above.
+    let holed = match unsafe { churn::hole(frames, &mut found.unit) } {
+        Ok(holed) => holed,
+        Err(why) => {
+            kprintln!("FAIL: the unmap churn's hole stage: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+    kprintln!(
+        "  churn hole    {} page(s) mapped, {} taken out from under the request, {} still \
+             translated after it",
+        holed.mapped,
+        holed.punched,
+        holed.standing
+    );
+    churn_cost(boot, frames, found);
+
+    let verdict = if control.retired != batched.retired || control.pages != batched.pages {
+        Err("the two halves did not do the same work, so the ratio between them is not a saving")
+    } else if control.requests == 0 || control.pages <= control.requests {
+        Err("a buffer set spanned one page or none, so batching an unmap could save nothing \
+                 and this run would report that whether or not anything was wrong")
+    } else if control.invalidations != control.pages {
+        Err("the per-page control did not invalidate once per page, which is what that \
+                 policy means")
+    } else if batched.invalidations != batched.requests {
+        Err("the batched half did not invalidate once per request, which is what that \
+                 policy means")
+    } else if control.map_invalidations != control.pages_mapped
+        || batched.map_invalidations != batched.pages_mapped
+    {
+        Err("the mapping half no longer invalidates once per page, which is either the \
+                 gap `CHURN_GAP` declares having been closed — update it — or the attribution \
+                 between the two halves having stopped working")
+    } else if control.shootdowns != 0 || batched.shootdowns != 0 {
+        Err("the churn issued a shootdown, which would mean the datapath has grown a path \
+                 into a running process's address space — read RFC 0052 before changing this")
+    } else if shot_pages == 0 {
+        Err("this boot recorded no shootdown at all, so the zero above is a counter that \
+                 does not work rather than a datapath that does not shoot down")
+    } else if control.standing_after_unmap != 0 || batched.standing_after_unmap != 0 {
+        Err("a retired buffer set is still translated in the unit's own tables, so an unmap \
+                 counted pages it did not clear — which under `Invalidation::PerRequest` is a \
+                 device left reaching memory its client took back")
+    } else if control.reachable_registered != control.registered
+        || batched.reachable_registered != batched.registered
+    {
+        Err("a registered set was not reachable in the unit's tables, so the zero beside it \
+                 is a walk that answers no to everything rather than a revocation that worked")
+    } else if holed.standing != 0 {
+        Err("a batched unmap over a set with a hole in it left pages translated after the \
+                 hole, so the request stopped at the first page it could not clear rather than \
+                 attempting the rest — a device still reaching memory its client took back")
+    } else if holed.mapped < 3 || holed.punched == 0 {
+        Err("the hole stage did not arrange a hole with pages on both sides of it, so the \
+                 zero beside it is a request that had nothing to skip")
+    } else if control.frames_after != control.frames_before
+        || batched.frames_after != batched.frames_before
+    {
+        Err("the churn did not give back every frame it took, which is a leak under exactly \
+                 the churn `docs/test-taxonomy`'s frame-leak-under-churn row names")
+    } else {
+        Ok(())
+    };
+
+    match verdict {
+        Ok(()) => kprintln!(
+            "  churn verdict batching the invalidation is worth {} round trip(s) per set; \
+                 the churn shoots down nothing",
+            control.round_trips().saturating_sub(batched.round_trips()) / control.requests.max(1)
+        ),
+        Err(why) => {
+            kprintln!("FAIL: {why}");
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+}
+
+/// The time half of `E1-B14`, recorded here and published only where a
+/// nanosecond may be published.
+///
+/// # Why the boot is the workload and the host binary is not
+///
+/// `claims/0015` is a p99 for one unmap request, and most of that number is on
+/// the far side of a device register: a page-table walk over the set, then one
+/// global invalidation — two register writes and two spins on the unit clearing
+/// a request bit. `bench/src/bin/unmap_churn.rs` cannot reach any of it, has
+/// never claimed to, and says so on every run: there is no remapping unit on
+/// the host, so what it times is the registry arithmetic above the hardware.
+/// The operation the claim is about exists inside a boot on a machine with a
+/// unit, so the workload is `churn::time` and this is where it runs.
+///
+/// # Why it refuses here
+///
+/// Recording is not publishing. The distribution is taken on every churn boot,
+/// because a measurement apparatus that only runs on a machine nobody has yet
+/// is an apparatus nobody has checked — `worst` being zero is what says the
+/// clock did not move, and it is checked here rather than on the owed machine.
+/// What is gated is the *quotable* number: percentiles are printed only when
+/// the command line says this is a measurement environment, and `xtask` writes
+/// that parameter from `f_bench::Environment::detect`. One rule about what may
+/// be quoted, decided in the one place that already owns it, rather than a
+/// second rule in the kernel that could disagree with it.
+///
+/// The refusal is the honest reading and not a formality: QEMU answers a global
+/// invalidation instantly and in software, so a p99 taken here would be a
+/// measurement of the emulator's dispatch loop wearing a hardware unit's name.
+/// `claims/0015`'s `[hardware]` note is that sentence.
+fn churn_cost(boot: &BootInfo, frames: &mut mem::FrameAllocator, remapping: &mut Remapping) {
+    // The instrument's own arithmetic first, because it is the one part of this
+    // that no host test can reach: `kernel/` builds for `x86_64-unknown-none`,
+    // so the bucketing and the percentile underneath `claims/0015` are checked
+    // the way `mem::self_test` checks the allocator — on the boot that is about
+    // to use them.
+    if let Err(why) = churn::Cost::self_test() {
+        kprintln!("FAIL: the timed churn's own histogram: {why}");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+
+    // SAFETY: as the counting pass one function up — the kernel's address space
+    // is active, `frames` is rebound onto its direct map, and the unit is one
+    // this boot programmed and enabled.
+    let cost = match unsafe { churn::time(frames, &mut remapping.unit) } {
+        Ok(cost) => cost,
+        Err(why) => {
+            kprintln!("FAIL: the timed unmap churn: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+
+    // Both halves of *the instrument works*, and both are counts rather than
+    // durations, so they mean the same thing on this machine and on the one
+    // E0-D10 owes. A short run is a loop that stopped early; a zero maximum is
+    // a timestamp counter that did not move, which is the failure that would
+    // otherwise publish a beautiful p99 of nothing.
+    if cost.taken() as usize != churn::OBSERVATIONS {
+        kprintln!(
+            "FAIL: the timed churn recorded {} observation(s) and owed {}",
+            cost.taken(),
+            churn::OBSERVATIONS
+        );
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+    if cost.worst() == 0 {
+        kprintln!(
+            "FAIL: every timed unmap took zero ticks, so the clock did not move and this \
+                 distribution is an instrument that does not work"
+        );
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+
+    let khz = arch::x86_64::apic::tsc_khz();
+    kprintln!(
+        "  churn cost    {} timed unmap request(s) through the shipped path, worst {} tick(s)",
+        cost.taken(),
+        cost.worst()
+    );
+
+    if !boot.has_parameter(b"measure") || khz == 0 {
+        kprintln!(
+            "  churn cost    latency refused — this machine is not a measurement environment"
+        );
+        kprintln!(
+            "                a global invalidation is answered instantly and in software here, \
+                 so a"
+        );
+        kprintln!(
+            "                percentile would be the emulator's dispatch loop wearing a \
+                 hardware unit's"
+        );
+        kprintln!("                name. claims/0015, pending on the machine E0-D10 owes.");
+        return;
+    }
+
+    // A line shaped so that a reader knows it is not part of the fixture, which
+    // is `boot_time`'s convention and its reason: a boot log carrying a
+    // measurement is a fixture that fails at random.
+    kprintln!(
+        "  churn cost    p50 {} ns, p99 {} ns, p999 {} ns, max {} ns per unmap request \
+             (measurement run; not the fixture log)",
+        churn::nanos(cost.ticks_at(500), khz),
+        churn::nanos(cost.ticks_at(990), khz),
+        churn::nanos(cost.ticks_at(999), khz),
+        churn::nanos(cost.worst(), khz)
+    );
+}
+
 /// Give a component a core, let it schedule its own work inside it, and count
 /// what crossed.
 ///
@@ -1959,6 +2332,134 @@ const RUNTIME_TICKS: u64 = 3_000;
 /// Unit: nanoseconds, monotonic, in the control channel's epoch.
 const RECLAIM_DEADLINE_NS: u64 = 1_000_000;
 
+/// Ask this machine what it can reserve, and require the arithmetic to be able
+/// to say both things.
+///
+/// **E1-B07**, and the half of its exit a boot can honestly observe. RFC 0007's
+/// admission control is arithmetic over a machine description, and `admit.rs`
+/// is the only place in the tree that fills one in from `cpuid`. What is printed
+/// is what this part reports and what the arithmetic did with it — including,
+/// on QEMU, a refusal: no thread level, no cache topology and no RDT allocation
+/// leaf means one contention domain covering every core, the frame's own core
+/// inside it, and no whole domain left to give. That is RFC 0007's expensive
+/// branch taken rather than waived, and it is the honest answer on this machine
+/// rather than a disappointment.
+///
+/// A stage that could only ever refuse would pass on a build whose admission
+/// control had become a function that returns `Err`. So the same arithmetic is
+/// asked a second time about a *described* part with siblings and RDT, which
+/// must grant, must record all four of RFC 0007's components as obtained by a
+/// mechanism, and must then refuse a second demand its capacity cannot hold.
+/// The described half is not a claim about any machine and the log says so on
+/// its own line — `blk`'s two boots and `mutate`'s argument, in one stage.
+///
+/// The other half of the exit — *a granted one meets its deadline under
+/// adversarial load* — is `cargo xtask admission`, and `sim/src/reserve.rs`
+/// says why it cannot be here: a deadline met is a timing, and under TCG a
+/// timing is a property of the emulator.
+fn admission_demonstration(boot: &BootInfo) {
+    if !boot.has_parameter(b"admission") {
+        return;
+    }
+
+    let report = match admit::demonstrate() {
+        Ok(report) => report,
+        Err(why) => {
+            kprintln!(
+                "FAIL: admission: the described part is one the table refuses: {}",
+                why.why()
+            );
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+
+    let machine = report.machine;
+    kprintln!(
+        "  machine       {} physical core(s), {} thread(s) each; cache by {}, bandwidth \
+         by {}, {} partition(s); the frame keeps {}",
+        machine.physical_cores,
+        machine.threads_per_core,
+        if matches!(machine.cache, f_abi::reserve::Offers::Partition) {
+            "partition"
+        } else {
+            "exclusion"
+        },
+        if matches!(machine.bandwidth, f_abi::reserve::Offers::Partition) {
+            "partition"
+        } else {
+            "exclusion"
+        },
+        machine.partitions,
+        machine.frame_cores,
+    );
+    kprintln!(
+        "  contention    {} core(s) per cache domain, {} per bandwidth domain; the \
+         sibling clause here would be {}",
+        machine.cores_per_cache,
+        machine.cores_per_bandwidth,
+        report.sibling_here(),
+    );
+    match report.here {
+        Some(why) => kprintln!("  here          REFUSED ADMISSION/{}: {}", why.reason(), why.why()),
+        None => kprintln!("  here          admitted: this part can hold the demand"),
+    }
+
+    // And the described part. Named as described on its own line, every time,
+    // because a number about a machine nobody has is a number somebody will
+    // otherwise quote.
+    match report.there {
+        Some(grant) => kprintln!(
+            "  described     NOT THIS MACHINE — a part with siblings and RDT grants {} \
+             core(s), {} held idle; sibling by {}, cache by {}, bandwidth by {}, \
+             memory by {}",
+            grant.cores.count_ones(),
+            grant.excluded.count_ones(),
+            f_abi::reserve::obtained::label(grant.sibling),
+            f_abi::reserve::obtained::label(grant.cache),
+            f_abi::reserve::obtained::label(grant.bandwidth),
+            f_abi::reserve::obtained::label(grant.memory),
+        ),
+        None => kprintln!("  described     nothing was granted"),
+    }
+    kprintln!(
+        "  described     {} admission(s), {} refusal(s); the second demand was {}",
+        report.admissions,
+        report.refusals,
+        match report.over {
+            Some(why) => why.why(),
+            None => "ADMITTED, which it must not be",
+        }
+    );
+    // The two rows `claims/0010` publishes out of a boot rather than out of the
+    // model, under the names it publishes them under. Prose above for a reader,
+    // a key and a number here for `xtask::admission_reached` — because a claim
+    // whose reproduction command does not print its own numbers is a claim
+    // nobody can check, and these two were only ever in a sentence.
+    //
+    // `machine_grants` is deliberately not gated, and `claims/0010` writes out
+    // why at length: zero is QEMU and non-zero is RDT silicon, and a threshold
+    // either way makes one of those a red build for the wrong reason.
+    kprintln!("  machine_grants {}", u32::from(report.here.is_none()));
+    kprintln!("  described_grants {}", report.admissions);
+    kprintln!(
+        "  idle depth    state {} computed from the reservation table for the granted \
+         core, and a core under no reservation answered {}",
+        report.depth,
+        if report.fallback { "fallback rather than a number" } else { "A NUMBER IT DID NOT EARN" },
+    );
+
+    match report.verdict() {
+        Ok(()) => kprintln!(
+            "  admission verdict  the arithmetic granted what fits, refused what does not, \
+             and named which of RFC 0007's four components it could not deliver"
+        ),
+        Err(why) => {
+            kprintln!("FAIL: admission: {why}");
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+}
+
 /// Drive the block datapath through a driver that lives outside the frame, and
 /// require the right thing to happen to it.
 ///
@@ -1993,6 +2494,12 @@ fn blk_datapath(
         blk::Half::Outside
     } else if boot.has_parameter(b"blk=escape") {
         blk::Half::Escape
+    } else if boot.has_parameter(b"deadline=ordered") {
+        blk::Half::Ordered
+    } else if boot.has_parameter(b"deadline=arrival") {
+        blk::Half::Arrival
+    } else if boot.has_parameter(b"deadline=unadmitted") {
+        blk::Half::Unadmitted
     } else {
         return None;
     };
@@ -2024,6 +2531,11 @@ fn blk_datapath(
             blk::Half::Inside => "the client's buffer stays in the driver's grant",
             blk::Half::Outside => "the client takes its page back between the two transfers",
             blk::Half::Escape => "the driver points the device past what it was answered",
+            blk::Half::Ordered =>
+                "batch work is queued and a hard-class read is submitted behind it",
+            blk::Half::Arrival => "the same burst, with the driver ordering by arrival instead",
+            blk::Half::Unadmitted =>
+                "the same burst from a client admitted for the batch class, writing HARD",
         }
     );
 
@@ -2152,6 +2664,30 @@ fn blk_datapath(
         report.counters.escaped,
         report.expected_fault(),
     );
+    // E1-B06's numbers, printed on every block boot rather than only on the
+    // halves that are about them: a driver ordering by deadline when nothing
+    // asked it to is as much a finding as one that would not.
+    kprintln!(
+        "  blk deadline  admitted {}, client {}, ordering asked {} used {}; {} request(s) \
+         deepest in the queue, {} overtaken, {} in flight at once",
+        report.declared.admitted,
+        report.half.client_admitted(),
+        report.half.ordering(),
+        report.ordered,
+        report.queued_max,
+        report.overtaken,
+        report.in_flight,
+    );
+    kprintln!(
+        "  blk overtake  the hard-class read came back at position {} of {}, ahead of {} \
+         batch request(s) submitted before it; {} completion(s) reported a shortfall, {} \
+         entr(ies) refused for a class the client does not hold",
+        report.hard_at,
+        report.burst(),
+        report.overtook,
+        report.counters.shortfall,
+        report.counters.unadmitted,
+    );
     match report.fault {
         Some(fault) => kprintln!(
             "  blk fault     requester {:#06x} {} {:#018x}, reason {:#04x} — {} record(s)",
@@ -2174,6 +2710,263 @@ fn blk_datapath(
                     "the grant was withdrawn under a live registration and the transfer faulted",
                 blk::Half::Escape =>
                     "the driver pointed the device outside its own grant and the unit faulted it",
+                blk::Half::Ordered =>
+                    "a hard-class read submitted last was handed to the device first, and the \
+                     batch work queued ahead of it waited",
+                blk::Half::Arrival =>
+                    "the same burst in arrival order put the read last, so the half above \
+                     measured an ordering and not an array",
+                blk::Half::Unadmitted =>
+                    "a client that was not admitted for the hard class wrote it and was \
+                     refused rather than served",
+            }
+        ),
+        Err(why) => {
+            kprintln!("FAIL: {why}");
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+    Some(report)
+}
+
+/// E1-B03: a second driver outside the frame, and one frame in and out.
+///
+/// # Why a second driver has a stage of its own
+///
+/// Because it is a different device, a different domain and a different
+/// experiment — and because the point of it is the *comparison*. `blk_datapath`
+/// asks whether a component can drive hardware with no `unsafe` and copy
+/// nothing; this asks whether the shape that answer arrived in is a shape or a
+/// coincidence, which is a question only a second sample can be evidence about.
+/// `kernel/src/net.rs` and
+/// `docs/rfc/0051-a-second-driver-is-what-says-the-shape-is-a-shape.md` are
+/// where the comparison is written down.
+///
+/// Three halves, and the middle one is what makes the first mean anything.
+/// `net=inside` sends an address-resolution request and requires the reply to
+/// land in a registered buffer. `net=silent` is the identical client with the
+/// transmit removed and requires nothing to land. `net=escape` sends the same
+/// request and has the driver point the device past what its registration
+/// answered before the address becomes a *receive* descriptor, so what the
+/// remapping unit must refuse is a device **writing** into memory the component
+/// never held.
+///
+/// The verdict is the kernel's rather than the harness's, exactly as `user`,
+/// `cap`, `iommu` and `blk` already are: a harness reading an exit code could
+/// not tell a refused write from a link with nothing on it.
+fn net_datapath(
+    boot: &BootInfo,
+    frames: &mut mem::FrameAllocator,
+    space: &paging::AddressSpace,
+    features: paging::Features,
+    remapping: Option<&mut Remapping>,
+    clocks: arch::x86_64::apic::Clocks,
+    tree: u64,
+) -> Option<net::Report> {
+    let half = if boot.has_parameter(b"net=inside") {
+        net::Half::Inside
+    } else if boot.has_parameter(b"net=silent") {
+        net::Half::Silent
+    } else if boot.has_parameter(b"net=escape") {
+        net::Half::Escape
+    } else {
+        return None;
+    };
+
+    let Some(found) = remapping else {
+        kprintln!("FAIL: the network datapath asked for on a machine with no remapping unit");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+
+    // Another core, always, for `blk_datapath`'s reason: a driver and its client
+    // are two ends of a ring and this frame is the client, so a machine with one
+    // core has nowhere to put the server.
+    let me = arch::x86_64::current_cpu();
+    let Some(worker) = (smp::started() > 1).then(smp::first_worker).filter(|core| *core != me)
+    else {
+        kprintln!(
+            "FAIL: the network datapath needs a second core - the driver serves from ring 3 \
+             and the frame is its client"
+        );
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+
+    kprintln!(
+        "  packets       a second driver outside the frame, and the {} half: {}",
+        half.name(),
+        match half {
+            net::Half::Inside => "a frame goes out and the answer lands in a registered buffer",
+            net::Half::Silent => "the same client with nothing sent, so nothing may arrive",
+            net::Half::Escape =>
+                "the driver points the device past what it was answered, on the descriptor \
+                 the device writes",
+        }
+    );
+
+    // SAFETY: the boot processor, with the kernel's address space in `CR3`,
+    // `frames` rebound onto its direct map, translation enabled, and nothing
+    // else in this kernel driving the device this finds - the `dma` and `blk`
+    // stages run on different parameters and drive a different function.
+    let outcome = unsafe {
+        net::demonstrate(
+            frames,
+            space,
+            features,
+            &mut found.unit,
+            &found.window,
+            &found.survey,
+            boot,
+            half,
+            net::Scheduling {
+                cpu: worker,
+                hz: TIMER_HZ,
+                target: RUNTIME_TICKS,
+                tsc_khz: clocks.tsc_khz,
+                tree,
+            },
+        )
+    };
+
+    let report = match outcome {
+        Ok(report) => report,
+        Err(why) => {
+            // A datapath that could not be set up is not a datapath that was
+            // exercised. A wall-clock bound running out is said apart from
+            // everything else, for the reason `blk_datapath` gives at length:
+            // every other arm is something the frame observed going wrong, and
+            // these two fire for a wedged component and for a slow runner alike.
+            match why.bound() {
+                Some(micros) => {
+                    kprintln!(
+                        "FAIL: the network datapath ran out of time: {} of {} us",
+                        why.message(),
+                        micros,
+                    );
+                    kprintln!(
+                        "      That is an anti-wedge bound and not a check of the datapath: \
+                         nothing above this line reported a failure, and a red here is a \
+                         component that is stuck or a machine slower than the bound."
+                    );
+                }
+                None => kprintln!("FAIL: the network datapath: {}", why.message()),
+            }
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+
+    kprintln!(
+        "  net manifest  virtio-net declares {} register page(s) and {} B of untyped for its \
+         queues, content {:#018x}",
+        report.declared.frames,
+        report.declared.bytes,
+        report.declared.id.bits(),
+    );
+    kprintln!(
+        "  net device    requester {:#06x}, {} page(s) of register window",
+        report.bdf.source_id(),
+        report.windows,
+    );
+    kprintln!(
+        "  net component core {} at ring 3, {} entr(ies) drained from its own loop, {} served, \
+         {} refused, {} translation(s) asked of the frame, ended {}",
+        report.cpu,
+        report.drained,
+        report.counters.served,
+        report.counters.refused,
+        report.asked,
+        if report.exited { "by EXIT" } else { "in a FAULT" },
+    );
+    kprintln!(
+        "  net grant     the client registered one page at {:#018x}; a capability with no \
+         right to grant was {}",
+        report.registered_at,
+        if report.refused_without_grant { "refused" } else { "ACCEPTED" },
+    );
+    // The two directions side by side, and neither says what the other does. A
+    // transmit that completed is a device that took the frame and never evidence
+    // that it was delivered - virtio-net answers a transmit with no status at
+    // all - so the only thing on this line that says a frame left the machine is
+    // that something outside it answered.
+    kprintln!(
+        "  net frame     transmit {}, {} buffer(s) posted, {} frame(s) received, {} byte(s) \
+         landed, {} byte(s) of the buffer still unwritten, reply {}",
+        if report.transmitted { "taken by the device" } else { "not sent" },
+        report.counters.posted,
+        report.counters.received,
+        report.frame_bytes,
+        report.untouched,
+        if report.matched { "answers this boot's request" } else { "ABSENT" },
+    );
+    // The exit criterion, as two numbers rather than as a sentence, and it is
+    // the receive half of it that is the hard one: this component is the only
+    // thing between a device and a client's buffer, and the obvious
+    // implementation reads the frame to find out how long it is.
+    kprintln!(
+        "  net copies    {} byte(s) copied on the data path of {} transferred; {} byte(s) \
+         moved through the same function on purpose",
+        report.counters.copies,
+        report.counters.bytes,
+        report.counters.provoked,
+    );
+    // The obligation the receive direction creates, as a number. A posted
+    // receive is a buffer with no answer owed, so a driver that stopped while
+    // holding one would leave its client with an in-flight buffer RFC 0024 gives
+    // no way to take back.
+    kprintln!(
+        "  net teardown  {} receive buffer(s) given back as cancellations; {} turn(s) of the \
+         receive poll found nothing",
+        report.counters.cancelled,
+        report.counters.spun,
+    );
+    // The expectation, printed only by the half that holds it. Two halves out of
+    // three require `faults == 0`, so a line telling their reader to expect a
+    // fault at an address is a boot log stating something the run must not do.
+    if report.half.beyond() == 0 {
+        kprintln!(
+            "  net escape    {} descriptor(s) pointed past a registration's answer; this half \
+             expects no fault",
+            report.counters.escaped,
+        );
+    } else {
+        kprintln!(
+            "  net escape    {} descriptor(s) pointed past a registration's answer; this half \
+             expects a fault at {:#018x}",
+            report.counters.escaped,
+            report.expected_fault(),
+        );
+    }
+    kprintln!(
+        "  net deadline  admitted {}, {} completion(s) reported a shortfall, {} entr(ies) \
+         refused for a class the client does not hold",
+        report.declared.admitted,
+        report.counters.shortfall,
+        report.counters.unadmitted,
+    );
+    match report.fault {
+        Some(fault) => kprintln!(
+            "  net fault     requester {:#06x} {} {:#018x}, reason {:#04x} - {} record(s)",
+            fault.source,
+            if fault.read { "read" } else { "wrote" },
+            fault.address,
+            fault.reason,
+            report.faults,
+        ),
+        None => kprintln!("  net fault     none recorded"),
+    }
+
+    match report.verdict() {
+        Ok(()) => kprintln!(
+            "  net verdict   {}",
+            match half {
+                net::Half::Inside =>
+                    "a frame went out and the answer came back into a registered buffer, and \
+                     nothing was copied",
+                net::Half::Silent =>
+                    "the same client sent nothing and nothing arrived, so the half above \
+                     measured a reply and not a link",
+                net::Half::Escape =>
+                    "the driver pointed the device outside its grant on the direction the \
+                     device writes, and the unit faulted it",
             }
         ),
         Err(why) => {

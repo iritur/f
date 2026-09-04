@@ -1,0 +1,206 @@
+# The count half of `E1-B14`, and it may gate here for `claims/0005`'s reason
+# rather than for a new one: **it is a count**. `bench/src/lib.rs` refuses to
+# record a timing in a container and is right to — a shared instance under an
+# emulator cannot produce defensible tail latency — but *how many invalidations
+# an unmap cost* is the same number on a fast machine and a slow one, because it
+# is a property of what the code was made to do rather than of how long it took.
+#
+# The time half is claim 0015 and it is `pending` on the machine `E0-D10` owes.
+# Splitting was the alternative to weakening, exactly as it was for 0005/0006
+# and 0012/0013: a count that carried a nanosecond threshold would have had to
+# be `pending` too, and the number that decided this task would have waited on a
+# machine it does not need.
+name       = "unmap-churn"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E1"
+
+statement  = """
+Taking a translation back, at the rate the datapath produces one, costs the
+machine nothing between its cores and one global invalidation per request at
+its remapping unit.
+
+`TODO.md` `E1-B14` permitted two outcomes and demanded a number either way, and
+the workload produced both:
+
+  **The churn issues no shootdowns and no inter-processor interrupts.** Every
+  revoke-unmap in this kernel is one page, one interrupt per other running core,
+  one spin on an acknowledgement — and the datapath's churn reaches none of it.
+  A registered buffer set is a *device* translation, so retiring one edits the
+  remapping unit's second-level tables and no processor's; a driver restart's
+  teardown has no shootdown either, because an instance's address space has
+  never been in `CR3`. One page, one interrupt was already under any bound worth
+  stating on this workload, because the workload performs none of them.
+
+  **What the churn does cost is at the remapping unit, and it was one global
+  invalidation per page.** Two serialising register round trips each — the
+  context cache, then the translation buffer, each a write and a spin on the
+  unit clearing the request bit. Batching them per request rather than per page
+  removes seven of every eight at the set size this workload cycles.
+
+Both halves are read out of the same boot, over the same geometry, and the
+per-page policy is kept in the tree as the control. A ratio whose denominator
+was deleted is a number nobody can re-check when the rate changes again.
+
+The zero is a finding rather than an absence because the same boot publishes the
+machine's running shootdown total beside it, and that total is not zero: this
+kernel withdraws the application-processor on-ramp during bring-up, and that
+shootdown is on every boot. A counter nothing in a boot can move is
+indistinguishable from a counter that does not work.
+"""
+
+[baseline]
+# No comparison, and `claims/0005` gives the reason this one inherits: it is an
+# absolute statement about what this system makes its own hardware do, not a
+# ratio against somebody else's. The peer that would make a comparison mean
+# something is a kernel that retires a device's translations at a component
+# boundary and can be asked how many invalidations it issued to do it; Linux's
+# VFIO does have that number, and this tree has no baseline directory for it.
+# Adding one is a versioned directory under claims/baselines/ and a diff
+# somebody writes, never an edit here.
+system  = "none"
+notes   = "The tuned-Linux baseline claims 0001 and 0004 compare against does not perform this operation at this boundary. Linux unmaps an IOMMU domain when a VFIO container is torn down, not when a component's buffer set is retired under a running driver — so `invalidations per unmap request` is a question the baseline can be asked only about a different event. A comparison against a system answering a different question is worse than none."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/fast-path.html"
+section  = "13"
+notes    = "Section 13 is where the sentence being priced lives — a registration is a cost paid once and amortised over the buffers it names — and this is the other end of it: what the amortisation costs to undo. The subsystem that owns the number is the remapping unit, `kernel/src/arch/x86_64/vtd.rs`, with `kernel/src/iommu.rs` as the boundary a component reaches it through and `kernel/src/churn.rs` as the workload. RFC 0052 is the decision and RFC 0031 is the machine it rests on."
+
+[workload]
+path      = "kernel/src/churn.rs"
+# Both churn sources the datapath has, in one boot, under each invalidation
+# policy. The geometry is the load-bearing part and is stated rather than left
+# in the source: a set of one page would make a batched unmap and an unbatched
+# one the same run, and this claim would report an improvement of nothing while
+# nothing was wrong.
+set_pages = 8
+sets      = 8
+cycles    = 32
+notes     = "What stands in, said here rather than left for a reader to find: the registration table, the grant and the remapping unit are the shipped ones, and the *caller* is not. The frame drives the churn itself rather than a driver at ring 3 doing it, so this measures what one unmap costs and not the rate a real client produces — a datapath whose clients cycle their buffers less often than this pays less than this says. It does not touch the ratios, which is what every threshold below is, and it is the same absence `CHAOS_GAP` declares one subsystem over: a supervisor that can start a driver and a client and let them run is E1-B05's. — Forty sets registered and forty retired per half — thirty-two register-and-retire cycles, which is a client taking its own memory back under RFC 0024, then eight sets retired in one pass by `Table::retire_all`, which is the call RFC 0008's teardown makes. Eight pages per set is `buffer_register`'s geometry: thirty-two kilobytes in eight four-kilobyte buffers, one page each, which is the grain a remapping unit works in. The host half — `bench/src/bin/unmap_churn.rs` — drives the identical registry churn and `cargo xtask churn` requires the two to report the same counts, so a workload whose constants drifted from the frame's is a red run rather than a second experiment wearing this one's name. — What the workload observes and what it only counts, because the difference is the whole of two of the rows below: every retirement is followed by a walk of the unit's own second-level tables asking whether the set's pages are gone, and every registration by the same walk asking whether they are there. What no boot in this tree observes is a *device* faulting after a batched multi-page unmap: nothing is attached to this domain, and the boot that does watch a device fault after a withdrawal — `cargo xtask blk`'s `outside` half — registers one page, where the two invalidation policies are the same run. `REVOKE_GAP` in xtask is that residual, declared as a quantity that goes red when it closes."
+
+[metrics]
+primary   = "unmap_invalidations_per_page_batched"
+secondary = [
+  # The two the task named. Both are zero and both are counted rather than
+  # argued: `smp::shootdowns` is read before and after the churn.
+  "shootdowns_from_the_churn",
+  "ipis_from_the_churn",
+  # And the machine's running total, which is what makes the two zeros above
+  # readable. Same argument `MEMORY_FORCED` makes beside `MEMORY_REMOTE` in
+  # `state.rs`: a counter nothing can move is indistinguishable from one that
+  # does not work.
+  "shootdowns_on_the_boot",
+  # The control, and the saving against it.
+  "unmap_invalidations_per_page_control",
+  "unmap_round_trips_saved_per_set",
+  # The geometry, because every ratio above is a ratio over it and a run that
+  # quietly cycled one-page sets would report a perfect batch that saved nothing.
+  "pages_per_set",
+  "unmap_requests_per_round",
+  # The half this task measured and did not fix. `CHURN_GAP` in xtask is the
+  # declared quantity; this is its number.
+  "map_invalidations_per_page",
+  # The two rows that are an *observation* rather than a count. Everything above
+  # is the frame reporting what it did; these are the unit's own second-level
+  # tables read back after a batched multi-page unmap and asked whether the
+  # pages are gone — and asked, first, whether they were ever there. The second
+  # question is what stops the first being free: a walk that answers no to
+  # everything reports a perfect revocation over a domain that never mapped
+  # anything.
+  "sets_still_translated_after_unmap",
+  "sets_reachable_while_registered",
+  # And the same question asked of the one request shape no client can produce:
+  # a set with a page taken out from under it. `unmap_range` returns the first
+  # refusal after attempting the rest, and a version that stopped at the hole
+  # would leave every page beyond it translated.
+  "pages_translated_after_a_holed_unmap",
+  "pages_mapped_before_the_holed_unmap",
+  # And what the churn gave back. Forty register-and-retire cycles per half is
+  # where a leak of a single table frame per cycle stops being invisible, which
+  # is `docs/test-taxonomy`'s *frame leak under churn* row and is why that row
+  # named this task.
+  "frames_leaked_by_the_churn",
+]
+
+[threshold]
+# Written before the workload was run and not moved since. Every one of them is
+# an exact count or an exact ratio, which is what a claim about *what the code
+# was made to do* looks like: there is nothing here to tune when a run goes red,
+# only something to explain.
+#
+# The primary. One global invalidation per unmap request, whatever the request
+# spans — which is what `Invalidation::PerRequest` means, and a build where the
+# policy argument had stopped being read reports the control's number here.
+unmap_invalidations_per_page_batched   = { min = 1, max = 1 }
+# The two the exit named, and the answer that closed half of it.
+shootdowns_from_the_churn              = { max = 0 }
+ipis_from_the_churn                    = { max = 0 }
+# Not zero, or the two zeros above are a counter that does not work. One, from
+# the on-ramp withdrawal at bring-up, on every boot with a second core.
+shootdowns_on_the_boot                 = { min = 1 }
+# The control has to still be the control. This is `PerPage` meaning what it
+# says, and it is the denominator of the saving.
+unmap_invalidations_per_page_control   = { min = 1, max = 1 }
+# Two round trips per invalidation, seven invalidations saved per eight-page
+# set. A minimum rather than an exact value, because closing `CHURN_GAP` or
+# widening the set moves it upward and neither is a regression.
+unmap_round_trips_saved_per_set        = { min = 14 }
+# The load-bearing minimum, and the one that stops every ratio above being free.
+# A one-page set makes the batched and unbatched halves the same run: the
+# primary would read 1, the control would read 1, and the saving would be zero
+# with nothing red. The boot refuses such a run rather than reporting it.
+pages_per_set                          = { min = 2 }
+# And the workload has to have done something. Forty requests per round is the
+# geometry above; a run that registered nothing retires nothing and divides by
+# zero into a perfect score.
+unmap_requests_per_round               = { min = 40 }
+# Zero, and this is the row that observes rather than counts. A batched request
+# clears N entries and publishes one invalidation for the lot, so *the entries
+# are gone* is precisely the claim a reader is entitled to disbelieve — and
+# until this row existed the workload counted the clearing and never looked.
+# What it does not observe is a *device*: nothing is attached to the churn's
+# domain, so a translation cached inside one is out of reach, and `REVOKE_GAP`
+# in xtask is that residual declared rather than left in a paragraph.
+sets_still_translated_after_unmap      = { max = 0 }
+# The positive control for the row above, and the reason the zero is worth
+# anything. Eighty: forty sets per half, both halves, every page of each
+# reachable in the unit's tables while it was registered.
+sets_reachable_while_registered        = { min = 80 }
+# What the churn took and did not give back: the sets' memory, the domain's
+# root, every second-level table a registration made the unit build.
+frames_leaked_by_the_churn             = { max = 0 }
+# The hole stage, and it is a correctness row rather than a cost row. A set is
+# mapped, one page in the middle is taken out from under it with the unit's own
+# single-page entry point, and one batched request is made over the whole set:
+# nothing may be translated afterwards. Its own positive control is the row
+# below — a hole with pages on both sides of it, or the zero is a request that
+# had nothing to skip.
+pages_translated_after_a_holed_unmap   = { max = 0 }
+pages_mapped_before_the_holed_unmap    = { min = 3 }
+# The declared gap's number, bounded in *both* directions on purpose. Below one
+# would mean the attribution between the map and unmap halves has stopped
+# working — the first version of this measurement read the unit's total and
+# reported an unmap as costing twice what it does. Above one is impossible.
+# Exactly one is the gap, and the day it is closed this row and `CHURN_GAP` go
+# red together, which is the mechanism working.
+map_invalidations_per_page             = { min = 1, max = 1 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "**This claim does not need that machine, and says so rather than pretending.** Every metric is a count of what the frame made its own remapping unit do, taken by the frame itself, and it is the same count on any machine that has a unit at all — `f_bench::Environment` refuses to record a *timing* here and this records none. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it. What this claim *does* need is a machine with a remapping unit, which RFC 0031 pinned the emulator to and `runner-class-A.md` already requires by name for `E1-B01`. Claim 0015 is the half that needs the rest of that machine."
+
+[reproduce]
+command = "cargo xtask claim unmap-churn"
+
+[diagnosis]
+# Recorded while the system is understood rather than at 2 a.m. when it is not.
+shootdowns_not_zero = "the datapath has grown a path into a running process's address space, which is the thing this claim says it does not have. Read `process::withdraw` and `component::tear_down` together: the second says an instance's address space is never in `CR3`, and if that has stopped being true then the teardown owes a shootdown it is not making. RFC 0052's *what would reverse this* is this exact case, and it is a design change rather than a number moving"
+shootdowns_on_the_boot_zero = "the counter is not working, and every zero above is worthless. `smp::SHOOT_PAGES` is bumped in `shootdown` and the on-ramp withdrawal in `smp::start` is what moves it on an ordinary boot — so either that withdrawal has gone, or this is a one-core machine where `shootdown` tells nobody and counts nothing. A one-core boot is a legitimate machine and an illegitimate place to take this claim"
+batched_equals_control = "the invalidation policy argument has stopped being read, so both halves are running the same code and the saving is a subtraction of a number from itself. `vtd::Unit::unmap_range` is where `when` is consulted; a refactor that dropped the parameter would pass every other check here"
+pages_per_set_one = "a set is one page, so batching an unmap saves nothing and this whole claim is a ratio of one to one. Either `SET_PAGES` moved or the registration geometry did — and note that this is the failure mode the claim exists to catch in the *workload*, not in the system: the system is fine and the measurement has stopped measuring"
+map_invalidations_moved = "either `CHURN_GAP` has been closed — in which case this row, that constant and RFC 0052's Consequences are all stale in the same diff and should be updated in it — or the attribution between map-caused and unmap-caused invalidations has broken. `vtd::Unit::invalidate_for_unmap` is the attribution and `Unit::invalidations` is the total it is a share of"
+sets_still_translated = "an unmap cleared fewer entries than it counted, and a device attached to that domain would still reach the memory its client took back. Read `vtd::Unit::unmap_range` first: it clears one entry per page and publishes one global invalidation for the request, and the two things that break it are a walk that stops early — it records the first refusal and *continues*, and a version that broke out of the loop would leave every page after a hole translated — and an invalidation policy that stopped being applied. This is the one row here that is a correctness failure rather than a measurement failure"
+pages_translated_after_a_hole = "a batched unmap stopped at the first page it could not clear instead of attempting the rest, so every page beyond the hole is still translated. `vtd::Unit::unmap_range` records the first refusal and *continues* — it broke out of the loop for one revision of E1-B14 and nothing but this row would have noticed, because no client can construct a holed set: `iommu::Grant::map` undoes a partial mapping before it refuses. The stage constructs one on purpose"
+sets_reachable_low = "the walk that reads the unit's tables back is answering no to translations that are there, so the zero beside it is worthless: it is not a revocation that worked, it is a question nobody asked properly. `Unit::reaches` walks the same tables the unit walks, so a level count or a domain width that moved is where to look"
+frames_leaked = "the churn did not give back every frame it took. Forty cycles per half over two halves is the rate that makes a single leaked table frame visible, and the allocator's own free count is the reading. `vtd::Unit::release` is what returns a domain's tables; `mem::FrameAllocator::free_count` is the number. This is `docs/test-taxonomy`'s frame-leak-under-churn row going red, which is the row working"
+counts_disagree = "the boot and the host workload measured different churn, so they are two experiments sharing one claim. The geometry is declared twice, in `kernel/src/churn.rs` and `bench/src/bin/unmap_churn.rs`, and the two have drifted — which is exactly what `cargo xtask churn`'s cross-check exists to catch and is a reason to consider whether one of them should derive from the other"

@@ -8,6 +8,12 @@
     { "name": "driver-restart-latency", "status": "pending", "milestone": "E1", "file": "claims/0006-driver-restart-latency.toml" },
     { "name": "snapshot-re-entry-saving", "status": "pending", "milestone": "E1", "file": "claims/0007-snapshot-re-entry-saving.toml" },
     { "name": "hostile-peer-operations", "status": "gating", "milestone": "E1", "file": "claims/0008-hostile-peer-operations.toml" },
-    { "name": "entry-validation-coverage", "status": "gating", "milestone": "E1", "file": "claims/0009-entry-validation-coverage.toml" }
+    { "name": "entry-validation-coverage", "status": "gating", "milestone": "E1", "file": "claims/0009-entry-validation-coverage.toml" },
+    { "name": "admission-refusals", "status": "gating", "milestone": "E1", "file": "claims/0010-admission-refusals.toml" },
+    { "name": "reservation-margin", "status": "pending", "milestone": "E1", "file": "claims/0011-reservation-margin.toml" },
+    { "name": "deadline-overtake", "status": "gating", "milestone": "E1", "file": "claims/0012-deadline-overtake.toml" },
+    { "name": "deadline-overtake-latency", "status": "pending", "milestone": "E1", "file": "claims/0013-deadline-overtake-latency.toml" },
+    { "name": "unmap-churn", "status": "gating", "milestone": "E1", "file": "claims/0014-unmap-churn.toml" },
+    { "name": "unmap-churn-cost", "status": "pending", "milestone": "E1", "file": "claims/0015-unmap-churn-cost.toml" }
   ]
 }

@@ -87,6 +87,37 @@ static SHOOT_SEQ: PerCpu<u64> = PerCpu::new(0);
 /// whoever asked.
 static SHOOT_ACK: PerCpu<u64> = PerCpu::new(0);
 
+/// How many pages this core has asked the machine to forget, and how many
+/// interrupts that cost.
+///
+/// # Why these are not a fifth word
+///
+/// RFC 0016's rule is about *slots two cores reach*, and there are four of
+/// those. These two are not among them: each is written and read only by the
+/// core whose slot it is — the initiator counts its own shootdowns as it
+/// performs them, and nothing else ever looks at another core's copy except
+/// [`shootdowns`], which runs on the boot processor after every other core has
+/// been idle since its last acknowledgement. So the rule this file bends is not
+/// bent any further, and no argument is owed. Stated here rather than left to a
+/// reader who counts `PerCpu` declarations and gets six.
+///
+/// # Why they exist at all
+///
+/// `E1-B14` asks whether shootdown batching is worth building, and TODO.md's
+/// ordering rule 3 forbids designing the batch before the measurement exists.
+/// A measurement needs a counter, and a counter that only the batching change
+/// would add is a measurement taken after the decision. These are that counter,
+/// and the number they report is what closed the question — see the claim.
+///
+/// Two and not one, because the ratio is the whole point: one page costs one
+/// interrupt *per other running core*, so the cost of a shootdown is a property
+/// of the machine and not of the unmap. A single counter would have made a
+/// two-core boot and a sixteen-core boot report the same number.
+static SHOOT_PAGES: PerCpu<u64> = PerCpu::new(0);
+
+/// Interrupts sent on their behalf. See [`SHOOT_PAGES`].
+static SHOOT_IPIS: PerCpu<u64> = PerCpu::new(0);
+
 /// Everything a core needs to be told before it can find anything out for
 /// itself.
 ///
@@ -650,6 +681,13 @@ pub enum NotJoined {
 /// every core being told must have interrupts enabled.
 pub unsafe fn shootdown(page: u64) -> Result<(), usize> {
     let me = current_cpu();
+    // Counted before the loop rather than after it: a shootdown that could not
+    // be acknowledged still happened, and a count that dropped the failures
+    // would report a machine quieter than the one that wedged. The interrupts
+    // are counted inside, one per core actually told, because "told everybody"
+    // is a different number on a one-core machine and on a sixteen-core one and
+    // that difference is the measurement.
+    bump(&SHOOT_PAGES, me, 1);
     // Read here rather than passed in, because this is reached from the
     // system-call path, where the only thing the caller has is a handle. Every
     // core has the same measurement — one core measures and the rest adopt it —
@@ -674,6 +712,12 @@ pub unsafe fn shootdown(page: u64) -> Result<(), usize> {
         // SAFETY: this core's mapped register window, a core that is running,
         // and a vector `idt::init` installs on every core.
         unsafe { ap::send(apic::window(), cpu, apic::SHOOTDOWN_VECTOR) };
+        // Here rather than at the end of the loop, so that a shootdown that
+        // wedges on an acknowledgement still reports the interrupts it sent.
+        // The `return Err` below is fatal at every caller, so the difference is
+        // in what the boot log says about the machine that died — which is the
+        // only thing that reading is for.
+        bump(&SHOOT_IPIS, me, 1);
 
         let deadline = read_tsc().saturating_add(tsc_khz.saturating_mul(SHOOTDOWN_MICROS) / 1_000);
         loop {
@@ -687,6 +731,50 @@ pub unsafe fn shootdown(page: u64) -> Result<(), usize> {
         }
     }
     Ok(())
+}
+
+/// What this machine has spent on translation invalidation between cores.
+///
+/// Answers `(pages, interrupts)`: how many pages a core asked the rest of the
+/// machine to forget, and how many inter-processor interrupts that cost.
+/// Summed across every core's own slot, because a shootdown is counted by
+/// whoever initiated it and this kernel has more than one core that could.
+///
+/// Unit: pages, and interrupts.
+///
+/// # Why a boot prints this even when it is zero
+///
+/// Because zero is the answer `E1-B14` found and a zero nobody printed is
+/// indistinguishable from a counter that does not work. The datapath's churn —
+/// buffer sets cycling, a driver restarting — unmaps *device* translations,
+/// which never reach this function; the capability revocation path does reach
+/// it, and `cargo xtask cap unmap` is the boot where this is not zero. Reading
+/// both is what makes the zero a finding rather than an absence.
+#[must_use]
+pub fn shootdowns() -> (u64, u64) {
+    let mut pages = 0u64;
+    let mut ipis = 0u64;
+    for cpu in 0..MAX_CPUS {
+        pages = pages.saturating_add(load(&SHOOT_PAGES, cpu, Ordering::Relaxed));
+        ipis = ipis.saturating_add(load(&SHOOT_IPIS, cpu, Ordering::Relaxed));
+    }
+    (pages, ipis)
+}
+
+/// Add to one of this core's own counters.
+///
+/// `Relaxed` on both halves, and that is not a shortcut: the slot belongs to
+/// the core doing the arithmetic, nothing is published through it, and the one
+/// reader that crosses a core boundary — [`shootdowns`] — runs on the boot
+/// processor after the work it is counting is over. An ordering here would be
+/// naming a happens-before that nothing depends on, which is worse than none:
+/// this file's whole argument is that every ordering in it is load-bearing.
+fn bump(shard: &'static PerCpu<u64>, cpu: usize, by: u64) {
+    if by == 0 {
+        return;
+    }
+    let value = load(shard, cpu, Ordering::Relaxed).saturating_add(by);
+    store(shard, cpu, value, Ordering::Relaxed);
 }
 
 /// Answer a shootdown: forget the page, then say so.

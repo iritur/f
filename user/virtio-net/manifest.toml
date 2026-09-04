@@ -1,0 +1,193 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# virtio-net: the second driver that lives outside the frame, and the reason
+# there is a second one. `user/virtio-blk/manifest.toml` came first and this
+# file is deliberately close to it — E1-B03 exists to find out whether the
+# shape that task produced is a shape or a coincidence, and a manifest that had
+# to be argued from scratch would already be the answer. Written before the
+# driver, the way virtio-blk's was and for the same reason: the shape the driver
+# has to fit predates the driver. `docs/manifest.md` is the schema and
+# `cargo xtask lint-manifests` is what refuses this file when it stops fitting.
+#
+# What it declares, in one paragraph: a network interface server in the
+# `private` speculation domain, holding the device's register page set, memory
+# for its two virtqueues and the device's interrupt, connected to the broker for
+# anything it may ever have to ask for; serving one typed protocol on one data
+# ring whose payload never passes through the ring; restarted on a fault and not
+# on an exit; in the soft class, with two mebibytes for everything it is made
+# of.
+
+schema = 1
+name   = "virtio-net"
+image  = "user/virtio-net"
+
+# `private`, and the argument is deliberately not virtio-blk's argument
+# repeated. RFC 0005 leaves the choice to review, and the two drivers reach the
+# same word by different routes — worth saying, because a reviewer who sees
+# `private` twice will assume the second one was copied.
+#
+# A block driver's clients are separated by something the protocol can name: a
+# request carries an offset, and two clients that never name the same sectors
+# never see each other's bytes even where the driver is careless. A network
+# driver has no such field. Every client's frames traverse one link and arrive
+# in one receive queue, and which client a frame belongs to is a question
+# answered *above* this component by a stack that does not exist yet — so for
+# the whole of E1 this driver holds every byte every peer sends and receives,
+# with nothing in the protocol separating them. `shared` would be a declaration
+# that no two users of the network hold anything from each other, which is the
+# proposition a network exists to deny.
+#
+# The cost is RFC 0005's flush on every crossing into and out of this driver,
+# and it is paid deliberately. The number that would reverse it is the one
+# virtio-blk names: RFC 0005's cross-domain call cost, measured at E1-P10. If it
+# dominates for a *network* driver first that is information rather than a
+# coincidence, because a frame is smaller than a sector and the crossing is
+# amortised over fewer bytes.
+domain = "private"
+
+# --- Needs: routed at spawn, in this order, one handle each -------------------
+
+# The transport's register pages: common configuration, notification, ISR and
+# device configuration, as the modern PCI transport lays them out in one BAR and
+# as QEMU places them. Four pages is that layout, and it is *the same four*
+# virtio-blk declares because it is a property of the transport rather than of
+# the device — which is the first thing this task set out to learn and the first
+# thing it found. A device whose BAR is larger is a different device and a
+# different manifest, not a bigger number.
+[[capability]]
+name   = "mmio"
+type   = "frame"
+rights = ["read", "write"]
+from   = "supervisor"
+frames = 4
+
+# Memory the driver retypes into its virtqueues. Untyped rather than frames
+# because the driver decides the split, and `derive` is what lets it retype.
+#
+# Sixty-four kibibytes, the same figure virtio-blk declares, and here the slack
+# is doing more work: this driver lays out **two** queues rather than one —
+# receive and transmit are separate virtqueues in virtio-net, each a descriptor
+# table and two rings — plus a control page for the twelve-byte headers the
+# device reads and writes. That is twenty kibibytes of layout inside a
+# sixty-four kibibyte grant, and the difference is deliberate for the reason
+# virtio-blk states: a manifest sized to exactly what a build needs is a
+# manifest that has to change every time the build does.
+[[capability]]
+name   = "queues"
+type   = "untyped"
+rights = ["read", "write", "derive", "revoke"]
+from   = "supervisor"
+bytes  = 65_536
+
+# The device's interrupt, delivered to this component rather than to the frame.
+# No vector is named, for the reason virtio-blk's manifest gives: which vector a
+# device raises is the topology's to bind and the machine's to know, and a
+# manifest that named one would be bound to one machine.
+#
+# Unused today and declared anyway, exactly as virtio-blk declares it. What is
+# different is that the reversal is nearer here. A block driver polls a used
+# ring it has just kicked, so its spin is bounded by a device that owes it an
+# answer; a **receive** queue is the one place in this system where the driver
+# is owed nothing and a packet arrives when a peer sends one, which may be
+# never. E1-B09 is what turns this handle into a wait. Until it does, this
+# driver spins on a bounded count and *publishes the bound* rather than
+# pretending it waited.
+[[capability]]
+name   = "notify"
+type   = "irq"
+rights = ["read"]
+from   = "supervisor"
+
+# The broker. RFC 0008 says an ask is resolved by connecting to the powerbox,
+# whose endpoint reaches a component through its needs like any other need, and
+# in E1 the supervisor occupies that place. This manifest declares no ask today
+# — a driver bound to its device at spawn has nothing a user picks — so the
+# honest statement is that this handle is held for the asks a later task may
+# add, and that adding one changes this file and therefore the hash a spawn
+# names. Connect-only: `write` on an endpoint is the right to connect and
+# nothing else.
+[[capability]]
+name   = "powerbox"
+type   = "endpoint"
+rights = ["write"]
+from   = "supervisor"
+
+# --- Rings: the control ring is implicit; this is the data ring ---------------
+
+# One server ring per client, up to eight clients, each speaking `net` version
+# 1. `registered` is the zero-copy path, and on this protocol it is the clause
+# the whole task turns on rather than an optimisation: a **receive** names a
+# registered buffer the client owns, the device writes the frame into it
+# directly, and the bytes of a packet never pass through this ring or through
+# this component. `cargo xtask lint-datapath` is what keeps that structural.
+#
+# What `registered` does *not* say, and it is written here because a reader will
+# assume it does: a registration is a whole set, and a direction is a property
+# of one operation. So the translation this component asks the frame for is
+# read-write for every buffer in a set, whichever way any one buffer is used,
+# and a set a client only ever transmits from is nonetheless writable by the
+# device. That is not a defect of this manifest — there is no field here that
+# could say otherwise — and it is what a second driver found that the first
+# could not. `docs/rfc/0051` is the record.
+#
+# `features` is empty. `admission_control` is absent for the reason virtio-blk
+# states one protocol over: this driver floors and reports rather than refusing,
+# and a bit claiming otherwise would be R08 failing in miniature with a feature
+# name on it. `shared_virtual` stays absent because QEMU's virtio offers no
+# address translation service to negotiate it against.
+[[ring]]
+name        = "net"
+role        = "server"
+protocol    = "net"
+version_min = 1
+version     = 1
+entries     = 256
+payload     = "registered"
+clients     = 8
+features    = []
+
+# --- Restart: the supervisor's policy, the frame's mechanism ------------------
+
+# On a fault, and not on an exit. The numbers are virtio-blk's numbers, and that
+# is a decision rather than a copy: RFC 0008 fixes the budget as *how many
+# restarts in what window*, the argument for eight in a minute is about how a
+# driver fails rather than about what it drives, and inventing a different pair
+# here would be two numbers with evidence for neither. E1-P06 kills components
+# at random under load and is what would separate them.
+#
+# One thing does differ and it belongs in a comment rather than in a field: a
+# restart of a *network* driver loses every receive buffer the device held, and
+# the frames in them are gone with no completion and no record anywhere. RFC
+# 0024's reclaim is what makes that safe rather than corrupting — the
+# translation goes away with the registration, so a transfer already started
+# faults instead of landing in memory somebody else now owns — and it is also
+# what makes it lossy. For this protocol lossy is the ordinary case; for a block
+# driver it would be a bug.
+[restart]
+policy           = "on_fault"
+backoff_first_ms = 10
+backoff_max_ms   = 1_000
+max_restarts     = 8
+budget_window_ms = 60_000
+
+# --- Reservation: what admission may refuse ----------------------------------
+
+# Soft class. A network driver serves deadlines carried in its clients' entries
+# and holds no deadline of its own, so it reserves no core.
+#
+# The word is load-bearing at run time and not only at admission, exactly as it
+# is for virtio-blk: the frame reads it out of the compiled record and writes it
+# into the driver's routing page as the ceiling RFC 0025's bound 1 clamps
+# against, so a hard-class request this driver serves is served as *soft* and
+# its completion carries `SHORTFALL`. Changing it to `hard` is a change to what
+# every client of this driver is told, and RFC 0007's schedulability test is
+# what would have to grant it.
+#
+# The memory is the account this component's whole footprint is retyped from —
+# address space, page tables, text, stack, control ring, state tree, capability
+# table — and not the queues above, which are a routed need. Two mebibytes is
+# the figure a soft-class component is refused at if the supplied `Untyped`
+# holds less.
+[reservation]
+class        = "soft"
+memory_bytes = 2_097_152

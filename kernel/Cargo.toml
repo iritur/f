@@ -32,6 +32,21 @@ f-ring.workspace = true
 # gets one crate shorter to justify.
 f-virtio-blk.workspace = true
 
+# The network driver, on exactly the same terms and for exactly the same three
+# shared vocabularies: `routing`'s offsets, `driver::Counters`' shape, and the
+# constants `kernel/src/net.rs` checks a manifest against. The frame calls none
+# of its code and `cargo xtask lint-datapath` holds that rather than leaving it
+# to a reader.
+#
+# That this line is a copy of the one above with a name changed is the finding
+# E1-B03 exists to produce, not an oversight: the arrangement a component crate
+# needs in order to be linkable by the frame turned out to be a property of
+# being a component. The *reversal* is the same one and it is now twice as
+# well argued — those three vocabularies belong in `abi/`, where a wire layout
+# two crates agree on belongs, and the day they move both of these lines go and
+# `lint-unsafe`'s frame list gets two crates shorter to justify. RFC 0051.
+f-virtio-net.workspace = true
+
 # The component a place holds, and — from E1-B08 — the runtime that holds a
 # core. The frame links it for one thing: `f_store::report` is the encoding a
 # runtime's exit status carries, and one definition the compiler checks is worth

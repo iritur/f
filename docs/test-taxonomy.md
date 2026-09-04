@@ -205,25 +205,34 @@ costing nothing at `E1-B05`.
 | Writing to a read-only grant | P | `cargo xtask cap state` | every PR | **catches** |
 | Speculation across a domain boundary (R02) | X | `cargo xtask lint-manifests` requires the domain field RFC 0005 rule 4 names; the supervisor refusal is not built | every verify | **partially** |
 | A driver addressing memory outside its grant (IOMMU) | L1, P | `cargo xtask iommu` — two boots on a machine with a VT-d unit and a real virtio-blk device, with the frame's own adversary as the requester: one descriptor inside the grant, which must land bytes, and one outside it, which must be refused and recorded in the unit's own fault registers. `cargo xtask blk` — three boots with the requester's descriptor written by a driver **component**, `user/virtio-blk`, out of a `Reach` the frame answered its client's registration with: one carries a sector out and back through a ring byte for byte, one withdraws the client's page from the driver's domain between the write and the read (RFC 0024's reclaim, the frame's property), and one has the driver add a frame to the address it was answered before writing it into a descriptor, requiring the unit to fault at the address the driver invented — the only one of the five that is a driver *reaching* outside its grant. All five halves also require the frame to refuse a device translation for a capability carrying no `GRANT` | every PR | **partially** — the descriptor and the arithmetic behind it are a driver component's own, and the component's *code* is still called by the frame because nothing routes a device into a spawned component's address space — E1-B08 landed the scheduling half, so a component now runs at ring 3 with its own polling loop, and RFC 0038 names the routing half as what is left: four register windows and a DMA region mapped into a spawned component with its IOMMU domain programmed. Both commands are jobs in `ci.yml`, so all five halves keep the cadence claimed here |
+| A device writing outside the driver's grant, on the direction the device chooses when | L1, P | `cargo xtask net` — three boots on a machine with a VT-d unit and a real virtio-net device, driven by `user/virtio-net` at ring 3 on a core the frame allocated it: `inside` forms an ARP request in a registered buffer, posts a receive, and requires the reply to land **in that buffer** carrying the MAC this boot invented; `silent` is the identical client with the transmit removed and requires the buffer back untouched as a cancellation, which is what makes `inside` a reply rather than a link; `escape` displaces the receive *data* descriptor by one page and requires the unit to fault at the address the driver invented, on a **write**, with the client's buffer still holding all 42 poison bytes. All three also require `copies = 0` beside a non-zero `provoked`, and a registration of a capability with no `GRANT` to be refused | every PR | **catches** — with three bounds. The component is *scheduled* and not spawned into a place (`CHAOS_GAP`). Every boot posts exactly one receive buffer, so the multi-slot machinery is covered by `f_virtio_net::driver`'s unit tests against a memory-backed device and by no boot. And `RECEIVE_MICROS` is wall-clock, so a red carrying `Trouble::NoFrame` is a wedged component or a slow runner, and says so on its own line |
 
 The five properties hold and each has something that breaks it, which is
 `E0-P08` met. What none of them is, is a proof: eleven boots sample a space
 `E1-P07` is meant to exhaust with Kani, and the honest reading of a green `cap`
 run is that the escapes somebody thought of were refused.
 
-The `unmap` row changes character in this epoch. Today a revoke is one page, one
-IPI, one spin on an acknowledgement, and one boot exercises it once. `E1-B14`
-writes the workload where that stops being enough — registered buffers cycling,
-a driver restart unmapping a whole grant page by page — and that workload is
-also the first thing that could observe a mapping surviving a revoke under
-churn.
+The `unmap` row changed character in this epoch, and not in the direction it was
+expected to. `E1-B14` wrote the workload where one page, one IPI would stop
+being enough — registered buffers cycling, a driver restart retiring a whole
+grant — and the workload found that the churn issues *no* shootdowns at all: a
+registered buffer set is a device translation, so retiring one edits the
+remapping unit's tables and no processor's. So the `cap unmap` row above is
+still the only boot that shoots down, and it is still one page. What the churn
+did buy is one global invalidation per request instead of one per page (RFC
+0052, `claims/0014`), and what it now observes is in the *memory* section
+below: the unit's own tables read back after each retirement, and the free count
+either side of the whole thing. The half it still does not observe is a device
+faulting after a batched multi-page unmap, which `REVOKE_GAP` declares.
 
 ## D — memory
 
 | Bug class | Layers | Check today | Cadence | Status |
 |---|---|---|---|---|
 | Frame leak on process death | P | `process::reap` fails the boot if the count does not return; the boot line reports `user frames N given back, free count unchanged` | every verify, every PR | **catches** (one death) |
-| Frame leak under churn | L1, L5 | nothing | never | **GAP** |
+| Frame leak under churn | L1, L5, P | `cargo xtask churn` — the allocator's free count before the churn and after every set is retired, the domain released and the workload's own memory handed back; the boot fails if they differ. Forty register-and-retire cycles per half, each building and clearing second-level tables in the remapping unit | every verify, every PR | **partially** — `E1-B14` closed the registration path and `claims/0014` bounds it at zero leaked frames; the churn `E1-P06` and `E1-B10` name is components dying and being refilled under load, where the frames are a process's rather than a domain's |
+| An unmap that invalidates the remapping unit once per page under datapath churn | L1, P | `cargo xtask churn` — one boot runs the churn under both invalidation policies over the identical geometry and requires each to mean what it says: the control once per page, the candidate once per request. `claims/0014` bounds both, plus the round trips saved per set and a minimum of two pages per set — at one page the two halves are the same run | every verify, every PR | **catches** — the *mapping* half of the same cycle is still one invalidation per page, declared as `CHURN_GAP` with its number in `claims/0014` |
+| Mapping left after revoke, under churn | L1, P | `cargo xtask churn` — every retirement is followed by a walk of the unit's own second-level tables requiring the set's eight pages to be gone, and every registration by the same walk requiring that they are there, plus a pass that makes a set with a page taken out from under it and requires one batched request to leave nothing translated beyond the hole; `claims/0014` bounds all of it | every verify, every PR | **partially** — the tables are read back, a **device** is not. Nothing is attached to the churn's domain, and the boot that does watch a device fault after a withdrawal (`cargo xtask blk`'s `outside` half) registers one page, where the batched and per-page policies are the same run. `REVOKE_GAP` in `xtask` is that residual, declared |
 | Allocator split/coalesce corruption | L1, P | `cargo xtask run` — `mem::self_test` phases two to four: an `Env`-driven mix of orders, a probe upward from order 9, and a 2 MiB block handed back as 512 shuffled frames that must reappear as a 2 MiB block. `cargo xtask orders` boots a machine with a gibibyte in it and requires order 18 | every verify, every PR | **catches** |
 | Kernel-global mutable state outside `PerCpu` | X | `cargo xtask lint-percpu` | every verify, every PR | **catches** |
 | A fifth word crossing a core with no named ordering | X | `REVIEW.md` pass 2, RFC 0016; `lint-percpu` does not count atomics | every PR | **partially** |
@@ -234,8 +243,8 @@ churn.
 
 | Bug class | Layers | Check today | Cadence | Status |
 |---|---|---|---|---|
-| Deadline inversion in a device queue | L1, L5 | nothing — RFC 0025 decides the rule and nothing orders a device queue yet | never | **GAP** |
-| A component claiming urgency forever | L1, L3 | RFC 0025 decides the decay; nothing enforces it | never | **GAP** |
+| Deadline inversion in a device queue | L1, L5 | `cargo xtask deadline` — three boots of one client script against one ring-3 `virtio-blk` component, and one of them is a control: the ordered half must return the hard-class read at position 0 of 7 having overtaken the 6 batch reads it was submitted behind, the arrival half must return the identical burst with the read last having overtaken 0, and the unadmitted half must refuse a class the client does not hold rather than serve it. The overtake is read twice — the frame's completion order and the component's own queue counter — and required to agree. `claims/0012` gates on the counts; the depth of six is a fixture and the *time* it saved is `claims/0013`, `pending` | every verify, every PR | **catches** |
+| A component claiming urgency forever | L1, L3 | `abi/src/deadline.rs`'s `the_depth_bound_is_enforced`, and that is a unit test. `E1-B06` landed the ordering and did not close this: there is no chain here for RFC 0025's bound 4 to decay along. The absence is checked rather than assumed — `DEADLINE_DEPTH_GAP` in `xtask` goes red the day anything outside `abi/` forwards an inherited class | every verify, every PR | **GAP** |
 | A granted reservation misses its deadline under load | L1, L5, L6 | nothing — there is no admission control | never | **GAP** |
 | An over-subscribed reservation is admitted | L3, P | nothing | never | **GAP** |
 | Timer jitter regression | L5, L7 | `cargo xtask timer 60`; claim 0002 is `pending` and gates nothing | on demand | **GAP** |
@@ -373,15 +382,14 @@ reversal condition. Nothing is left as "we should probably".
 | A hostile header or cursor panics the consumer | `E1-P12` (panic-freedom, proved). `E1-P04` landed the billion operations and did not close the row, because sampling does not close it |
 | A hostile header accepted rather than refused | `E1-P12`. `E1-P04` landed and made every refusal domain a counter with a minimum in `claims/0008`; what it does not assert is that a particular drawn header was refused |
 | A peer that dies mid-claim, or lies about its epoch | Both halves are driven — `E1-P02`'s `peergone` for the dying half, `E1-P04`'s restarts and moved epochs for the lying half. What is left is a code: `PEER/EPOCH_CHANGED` required by name rather than folded in with `Corrupt`, which is a line in `headers.rs`. `E1-P05` was named here as the other candidate and is not: an entry fuzzer's cases are self-contained by construction, so nothing in it holds a channel across an epoch change |
-| Frame leak under churn | `E1-B14` (the unmap-under-churn workload), `E1-P06`, `E1-B10` |
-| Mapping left after revoke, under churn | `E1-B14` — `E1-P02`'s `peergone` asserts a *model's* translations go with its registrations; the frame under churn is `E1-B14`'s |
+| Frame leak under churn | **Partially closed by `E1-B14`** for the registration path — `cargo xtask churn` requires the allocator's free count to return across forty register-and-retire cycles per half, and `claims/0014` bounds it at zero. `E1-P06` and `E1-B10` own the rest: components dying and being refilled under load |
+| Mapping left after revoke, under churn | **Partially closed by `E1-B14`**, and the residual is declared rather than owned. `cargo xtask churn` walks the remapping unit's own second-level tables after every retirement and requires the set's pages to be gone, with the registration walk beside it so the zero is not a walk that answers no to everything. What no boot observes is a **device** faulting after a batched multi-page unmap: nothing is attached to the churn's domain and `cargo xtask blk`'s `outside` half registers one page. `REVOKE_GAP` in `xtask` goes red when either changes. `E1-P02`'s `peergone` still covers the *model*'s half |
 | A ring-3 **component** addressing memory outside its grant | `E1-B02` — the first driver that is a component; `E1-B01` built the mechanism and stood in for the driver |
 | Authority arriving by inheritance | `E1-B05` — the first lifecycle that could grant it |
 | Speculation across a domain boundary | `E1-B05` — the supervisor refusal RFC 0005 names |
-| Deadline inversion in a device queue | `E1-B06` |
-| A component claiming urgency forever | `E1-B06`, `E1-B07` |
-| A granted reservation missing its deadline | `E1-B07` |
-| An over-subscribed reservation admitted | `E1-B07` |
+| A component claiming urgency forever | `E1-B05` or `E1-B07` — whichever first has a service submitting downstream on a caller's behalf. `E1-B06` was named here and landed without closing it: RFC 0025's bound 4 needs a chain, this tree is a client and a leaf, and `DEADLINE_DEPTH_GAP` now says so as a check rather than as a sentence |
+| A granted reservation missing its deadline | **Partially closed by `E1-B07`**, and the residual is a number rather than a mechanism. `cargo xtask admission` runs three arms at one seed and gates on the counts: the granted arm meets every period, the unreserved arm must *miss* — without which the first proves nothing — and the over-subscribed arm must be refused. All of it is on a virtual clock, so *met its deadline* is a count of slots. The margin in nanoseconds, on a part that can deliver all four of RFC 0007's components, is `claims/0011` and is `pending` on `E0-D10`'s machine. On QEMU there is no sibling, no cache topology and no RDT, so the boot half reports that this machine hosts no hard-class reservation at all |
+| An over-subscribed reservation admitted | Closed by `E1-B07`. `f_abi::reserve::Table::admit` refuses in the `ADMISSION` domain naming which of RFC 0007's four components could not be delivered, and `claims/0010` gates on two rows rather than one — a minimum on refusals *and* a maximum of zero on periods run — because a reservation admitted and then missed would satisfy the first alone |
 | Timer jitter regression | `E0-P06`, itself blocked on `E0-D10` and `E0-P18` |
 | Ring submit latency regression | `E0-P05`; the datapath set is `E1-P10` |
 | A regression too small for a threshold | `E2-P09` — change-point detection over the stored history |
@@ -487,11 +495,23 @@ L2 is the layer E1 does **not** build, and that is worth saying out loud rather
 than leaving to be noticed: `E0-P16` remains the only owner of the gap the
 litmus suite was measured to have, and it is an E0 task carried into E1.
 
-**Which rows move.** Of the eighty-six rows, forty-three say *catches* today,
-twenty-six *partially* and seventeen *GAP*. Twenty-two name an E1 task as an
+**Which rows move.** Of the eighty-nine rows, fifty say *catches* today,
+twenty-seven *partially* and twelve *GAP* — counted from the `status` fields in
+`docs/test-taxonomy.toml` rather than by hand, because this sentence is the part
+of the page that goes quietly false first, and `E1-P09`'s lint is what will one
+day read them from there instead of from here. Twenty-two name an E1 task as an
 owner, and nineteen of those name *only* E1 tasks — so if the rest of the epoch
 lands as written, eight more GAPs close and eleven more rows move from
 *partially* to *catches*, which is about a quarter of everything on this page.
+
+`E1-B14` moved two more, and the counts above include them: *frame leak under
+churn* and *mapping left after revoke, under churn* went from GAP to
+*partially*, both on the strength of one workload — `cargo xtask churn` reads
+the allocator's free count either side of the churn and walks the remapping
+unit's own tables after every retirement — and both keep a named residual rather
+than a rounded-up status, `E1-P06`/`E1-B10` for the first and `REVOKE_GAP` for
+the second. A third row, *an unmap that invalidates the unit once per page under
+datapath churn*, is new and says *catches*.
 
 Five rows have already moved and the counts above include them: the
 allocator's split and coalesce row, which `E1-B12` took from *GAP*, the two

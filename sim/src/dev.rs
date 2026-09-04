@@ -66,7 +66,8 @@
 //! path with a different cause, and it is already built.
 
 use f_abi::buf::SetId;
-use f_abi::{Cqe, Sqe, buf, error};
+use f_abi::deadline::{Admitted, Callee, Caller, Inherited};
+use f_abi::{Cqe, Sqe, buf, class, error};
 use f_ring::registry::Reach;
 use f_ring::{completion, refusal};
 
@@ -75,6 +76,43 @@ use crate::proto::{kind, wrote};
 use crate::service::Service;
 use crate::virtq::{Chain, Part, Queue, Region, Trouble};
 use crate::{Actor, ActorId, Message, World};
+
+/// The class a modelled driver is admitted for. Unit: none — an `f_abi::class`
+/// ordinal.
+///
+/// Soft, because that is what `user/virtio-blk/manifest.toml` declares and this
+/// model is of that driver. It is a ceiling, so a hard-class request arriving
+/// here is served as soft and the completion says so — which is the same
+/// `SHORTFALL` the real boot prints, reached by the same call.
+pub const ADMITTED: u16 = class::SOFT;
+
+/// What a modelled channel says about the peer submitting on it.
+/// Unit: none — an `f_abi::class` ordinal.
+///
+/// Hard, so that a client claiming the hard class is not refused for it and the
+/// scenario is about the *order* rather than about bound 2. The refusal path is
+/// `cargo xtask deadline unadmitted`'s and `abi/src/deadline.rs`'s; a scenario
+/// that exercised it here would be a third copy of one assertion.
+pub const CLIENT_ADMITTED: u16 = class::HARD;
+
+/// The least a modelled driver claims to need from arrival to completion.
+/// Unit: nanoseconds.
+///
+/// **The bound the boot cannot reach.** RFC 0025's third bound floors an
+/// inherited deadline at arrival plus this, and arrival on the real driver is
+/// zero because a component has no clock — `DEADLINE_GAP` in `xtask` is that
+/// declared. Here the clock is the model's own and arrival is real, so a
+/// deadline in the past or inside this window is floored exactly as the RFC
+/// says. A sweep that explores the ordering therefore explores one bound more
+/// than any boot does.
+pub const FLOOR_NS: u64 = 2_000;
+
+/// How many requests a modelled driver holds before it refuses. Unit: requests.
+///
+/// Larger than any scenario's `clients * window`, so that the refusal is
+/// reachable by writing a scenario rather than by accident — the same reason
+/// `Config::domain` keeps a spare translation.
+const PENDING_MAX: usize = 64;
 
 /// Where a device model puts its virtqueue. Unit: bytes, device space.
 pub const QUEUE_BASE: u64 = 0x2000_0000;
@@ -353,6 +391,20 @@ pub struct Config {
     pub queue_size: u16,
     /// Translations the component's domain will hold. Unit: translations.
     pub domain: u32,
+    /// Whether the driver half orders what it posts by what
+    /// `f_abi::deadline::inherit` returned, rather than by arrival.
+    ///
+    /// `E1-B06` and RFC 0049. False is every scenario that shipped before it,
+    /// and false is the path this file had: an entry taken off the wire goes
+    /// straight into the virtqueue, and one that does not fit is refused
+    /// `DEVICE_FULL`. True is the real driver's shape — the entry waits in a
+    /// queue on the *driver's* side of the virtqueue, and what leaves that
+    /// queue next is what the deadline field says.
+    ///
+    /// The two are one field rather than two models because a model that
+    /// ordered differently from the driver would be a model whose sweep
+    /// explored a system nobody ships.
+    pub ordered: bool,
 }
 
 /// One request, from the moment the driver takes it to the moment its client
@@ -374,6 +426,32 @@ struct Job {
     seq: u64,
 }
 
+/// What one entry is served as at a modelled driver.
+///
+/// One call, so that the model and `user/virtio-blk` cannot drift: both ask
+/// `f_abi::deadline::inherit`, with this file's [`ADMITTED`], [`CLIENT_ADMITTED`]
+/// and [`FLOOR_NS`] standing in for what the real frame writes into a routing
+/// page.
+///
+/// # Errors
+///
+/// What `inherit` refuses, as `(packed, detail)`.
+fn admit(entry: &Sqe, arrival: u64) -> Result<Inherited, (i32, u64)> {
+    // `expect` is unreachable and would be a panic in a model: both constants
+    // are class ordinals this file wrote, and `Admitted::new` refuses only a
+    // value that is not one. Written as a fallback rather than an unwrap so
+    // that a future edit to either constant is a wrong answer rather than a
+    // crash in a fuzzer.
+    let (Some(mine), Some(client)) = (Admitted::new(ADMITTED), Admitted::new(CLIENT_ADMITTED))
+    else {
+        return Err((error::pack(error::ARGUMENT, error::argument::BAD_CLASS), 0));
+    };
+    f_abi::deadline::inherit(
+        &Caller::of(entry, client),
+        Callee { admitted: mine, arrival, floor: FLOOR_NS },
+    )
+}
+
 /// A device model: one virtqueue, one registration table, one protocol.
 pub struct Device<P: Protocol> {
     proto: P,
@@ -386,6 +464,15 @@ pub struct Device<P: Protocol> {
     /// which is a second device.
     client: Option<ActorId>,
     jobs: Vec<Job>,
+    /// Requests the driver half has taken off the wire and not yet put in the
+    /// virtqueue, each with the moment it arrived.
+    ///
+    /// Empty unless [`Config::ordered`]. The arrival is kept rather than the
+    /// `Inherited` it produces, because `f_abi::deadline::inherit` is pure: two
+    /// fields on the wire plus this instant give the same answer every time,
+    /// and a snapshot that carried the answer could carry one the rule no
+    /// longer gives. Unit of the second: nanoseconds on the model's clock.
+    pending: Vec<(Sqe, u64)>,
     /// One bit per control slot, set while a job holds it.
     slots: u64,
     arrivals: u64,
@@ -413,6 +500,7 @@ impl<P: Protocol> Device<P> {
             cfg,
             client: None,
             jobs: Vec::new(),
+            pending: Vec::new(),
             slots: 0,
             arrivals: 0,
             reset: false,
@@ -521,7 +609,88 @@ impl<P: Protocol> Device<P> {
             return;
         }
 
+        if self.cfg.ordered {
+            // The driver's own queue, on the driver's side of the virtqueue.
+            // Everything above this line is the same for both shapes — a
+            // registration is answered where it always was, because a
+            // registration touches no queue and ordering one would be ordering
+            // the thing that makes ordering possible.
+            self.enqueue(world, me, entry);
+            self.pump(world, me);
+            return;
+        }
         self.accept(world, me, &entry);
+    }
+
+    /// Take one entry into the driver's queue, or refuse it there.
+    ///
+    /// The admission is `f_abi::deadline::inherit`'s and this adds nothing to
+    /// it: RFC 0025 decided the rule, `abi/src/deadline.rs` is the rule, and a
+    /// model with a second opinion about it would be a model whose sweep
+    /// explored a system nobody ships. `user/virtio-blk/src/pending.rs` makes
+    /// the same call at the same moment for the same reason.
+    fn enqueue(&mut self, world: &mut World, me: ActorId, entry: Sqe) {
+        let token = entry.user_data;
+        let now = world.clock();
+        if let Err((packed, detail)) = admit(&entry, now) {
+            // A peer claiming a class it does not hold, or a class field no
+            // conforming service wrote. Refused rather than demoted, which is
+            // the bound that makes urgency cost something to claim.
+            world.record(me, P::NAME, wrote::DENIED, token, detail);
+            self.deny(world, me, token, packed, detail);
+            return;
+        }
+        if self.pending.len() >= PENDING_MAX {
+            self.deny(
+                world,
+                me,
+                token,
+                error::pack(error::RESOURCE, error::resource::QUOTA_EXHAUSTED),
+                PENDING_MAX as u64,
+            );
+            return;
+        }
+        self.pending.push((entry, now));
+    }
+
+    /// Hand the virtqueue as much of the driver's queue as it has room for,
+    /// most urgent first.
+    ///
+    /// **This is where the ordering happens, and it is the only place it can
+    /// be.** A virtqueue is consumed in the order the driver posts, so a
+    /// request that has already been offered cannot be overtaken by anything —
+    /// which makes `Config::depth` the granularity of every reordering below,
+    /// exactly as `f_virtio_blk::pending::IN_FLIGHT` is on the real driver.
+    fn pump(&mut self, world: &mut World, me: ActorId) {
+        while u32::from(self.queue.outstanding()) < self.cfg.depth {
+            let Some(at) = self.most_urgent() else { return };
+            let (entry, _) = self.pending.remove(at);
+            self.accept(world, me, &entry);
+        }
+    }
+
+    /// Which waiting request the device should be given next.
+    ///
+    /// Each rank is re-derived from the entry and the instant it arrived, and
+    /// never from the clock now: `inherit` is pure, so this answers what it
+    /// answered when the entry turned up. The tie-break is that arrival instant
+    /// and then the position in the queue, which is first-come-first-served
+    /// within a rank — `user/virtio-blk/src/pending.rs` argues at length why
+    /// that is load-bearing rather than tidy.
+    fn most_urgent(&self) -> Option<usize> {
+        let mut best: Option<(usize, (u16, u64), u64)> = None;
+        for (at, (entry, arrival)) in self.pending.iter().enumerate() {
+            let Ok(order) = admit(entry, *arrival) else { continue };
+            let rank = order.rank();
+            let better = match best {
+                None => true,
+                Some((_, held, when)) => (rank, *arrival) < (held, when),
+            };
+            if better {
+                best = Some((at, rank, *arrival));
+            }
+        }
+        best.map(|(at, _, _)| at)
     }
 
     /// Resolve one entry's buffer and build its chain, or refuse it.
@@ -781,6 +950,13 @@ impl<P: Protocol> Device<P> {
     }
 
     /// The driver harvests the used ring and answers its client.
+    ///
+    /// Where an ordering driver looks at its queue again: a completion is what
+    /// frees the slot the next request goes into, so it is the only other
+    /// moment at which the choice `pump` makes can be made. Without it a
+    /// request that arrived while the device was full would wait for the next
+    /// doorbell rather than for the next completion — which is a driver that
+    /// stalls when its client stops submitting.
     fn reap(&mut self, world: &mut World, me: ActorId) {
         if self.reset {
             return;
@@ -831,6 +1007,13 @@ impl<P: Protocol> Device<P> {
                 completion(answered, result, now)
             };
             self.answer(world, me, cqe);
+            // A slot just came free, so the choice `pump` makes is available
+            // again. Inside the loop rather than after it: a harvest that
+            // drained two completions has two slots to fill, and filling them
+            // one at a time is what a driver does.
+            if self.cfg.ordered {
+                self.pump(world, me);
+            }
         }
     }
 
@@ -919,6 +1102,7 @@ impl<P: Protocol> Device<P> {
         out.u64(self.cfg.extent);
         out.u16(self.cfg.queue_size);
         out.u32(self.cfg.domain);
+        out.bool(self.cfg.ordered);
         self.queue.save(out);
         self.control.save(out);
         self.service.save(out);
@@ -944,6 +1128,11 @@ impl<P: Protocol> Device<P> {
             out.bool(job.published);
             out.u64(job.seq);
         }
+        out.count(self.pending.len());
+        for (entry, arrival) in &self.pending {
+            out.sqe(entry);
+            out.u64(*arrival);
+        }
         out.u64(self.slots);
         out.u64(self.arrivals);
         out.bool(self.reset);
@@ -961,6 +1150,7 @@ impl<P: Protocol> Device<P> {
             extent: input.u64(),
             queue_size: input.u16(),
             domain: input.u32(),
+            ordered: input.bool(),
         };
         let queue = Queue::load(input);
         let control = Region::load(input);
@@ -992,6 +1182,11 @@ impl<P: Protocol> Device<P> {
                 seq: input.u64(),
             });
         }
+        let waiting = input.count(72, "more queued requests than the file could hold");
+        let mut pending = Vec::with_capacity(waiting);
+        for _ in 0..waiting {
+            pending.push((input.sqe(), input.u64()));
+        }
         let slots = input.u64();
         let arrivals = input.u64();
         let reset = input.bool();
@@ -1011,7 +1206,7 @@ impl<P: Protocol> Device<P> {
             }
         }
 
-        Self { proto, queue, control, service, cfg, client, jobs, slots, arrivals, reset }
+        Self { proto, queue, control, service, cfg, client, jobs, pending, slots, arrivals, reset }
     }
 }
 

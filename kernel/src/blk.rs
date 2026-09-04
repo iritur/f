@@ -127,12 +127,13 @@
 
 use f_abi::cap::{CapType, rights};
 use f_abi::control;
-use f_abi::manifest::{ContentId, Record, route};
-use f_abi::{ABI_VERSION, Negotiated, error, feature};
+use f_abi::manifest::{self, ContentId, Record, route};
+use f_abi::{ABI_VERSION, Negotiated, cflags, class, error, feature};
 use f_ring::device::Window;
 use f_ring::registry::{Domains, registration};
-use f_ring::{BufferSet, Collector, Consumer, Fixed, Mapping, Poster, Producer};
+use f_ring::{BufferSet, Collector, Consumer, Fixed, InFlight, Mapping, Poster, Producer};
 use f_virtio_blk::driver;
+use f_virtio_blk::pending;
 use f_virtio_blk::routing;
 use f_virtio_blk::transport::SECTOR_BYTES;
 
@@ -198,6 +199,70 @@ const POISON: u8 = 0xA5;
 
 /// Where on the disk the demonstration works. Unit: bytes.
 const AT: u64 = 0;
+
+/// Buffers the client's registered set holds on an ordering half.
+/// Unit: buffers.
+///
+/// Eight, which is the client's one page divided by a sector: one to write the
+/// pattern from and seven to read it back into. Seven, because each request in
+/// flight holds a buffer of its own — RFC 0024 — so the burst this
+/// demonstration can queue is bounded by the page the client registered and not
+/// by anything about the ordering. A deeper burst is a bigger page and the same
+/// experiment.
+const ORDERING_BUFFERS: u32 = 8;
+
+/// Reads in the burst. Unit: entries.
+///
+/// One per sink. The last of them is the hard-class read and the rest are batch
+/// work, which is the shape `E1-B06`'s exit names: *a hard-class read overtakes
+/// queued batch work*, with the read arriving last so that arrival order and
+/// deadline order are opposites rather than merely different.
+const BURST: u32 = ORDERING_BUFFERS - 1;
+
+/// Entries the client submits before the burst, and therefore how many the
+/// driver serves before its hold applies. Unit: entries.
+///
+/// Three: the registration that must be refused for want of `GRANT`, the one
+/// that is served, and the write that puts the pattern on the disk. Each is
+/// awaited before the next is sent, so the driver never has more than one of
+/// them in front of it — which is why a count is enough to say when the prelude
+/// is over.
+const PRELUDE: u64 = 3;
+
+/// The token the hard-class read carries. Unit: none — the client's own value.
+///
+/// Far from the batch tokens so that a boot log reading `100` beside a column of
+/// `1x` says which request is which without a legend.
+const HARD_TOKEN: u64 = 100;
+
+/// The first token the batch reads carry, one apart. Unit: none.
+const BATCH_TOKEN: u64 = 10;
+
+/// The deadline the hard-class read carries.
+/// Unit: nanoseconds, monotonic, in the channel's epoch.
+///
+/// A millisecond, which is outside [`FLOOR_NS`] by two orders of magnitude, so
+/// this request is *not* floored.
+///
+/// That matters because `cflags::SHORTFALL` is **one bit**: a completion says
+/// the request got less than it asked for and not which of the three ways, so
+/// the frame cannot tell a class demotion from a floored deadline. This
+/// constant is what leaves only one of them possible, and it is an argument
+/// rather than a check — the check would need a field on the completion, which
+/// is an ABI change under RFC 0011 and not this task's. A boot that wanted to
+/// test the floor would ask for a deadline inside it, and would then be unable
+/// to tell the two apart in the other direction.
+const HARD_DEADLINE_NS: u64 = 1_000_000;
+
+/// The floor the driver is told it needs. Unit: nanoseconds.
+///
+/// Ten microseconds. What it bounds on this boot is nothing, and
+/// `pending::Admission::floor` says why in the component's own words: a
+/// component has no clock, so the arrival it floors from is zero. It is routed
+/// anyway, because the field exists and a frame that left it at zero would be
+/// telling the driver it needs no time at all — which is a different claim from
+/// *this driver cannot measure the difference*.
+const FLOOR_NS: u64 = 10_000;
 
 /// The manifest this datapath routes for, by name.
 ///
@@ -367,6 +432,16 @@ pub struct Declared {
     pub frames: u32,
     /// Untyped bytes it routes for the queues. Unit: bytes.
     pub bytes: u64,
+    /// The reservation class the manifest declares, as
+    /// `f_abi::class` reads it — the ceiling this component is admitted for and
+    /// therefore the most urgent class it can serve anything at.
+    ///
+    /// Read out of the record like everything else here and never written down
+    /// in the frame, for the reason RFC 0025 bound 2 gives about ceilings: a
+    /// ceiling somebody restated is a ceiling that can drift from the manifest
+    /// it was declared in, and the drift is invisible until a hard-class client
+    /// is quietly served as batch. Unit: none — an `f_abi::class` ordinal.
+    pub admitted: u16,
     /// The component's own image, out of the same component file.
     ///
     /// Read here rather than found again later, because it is the same
@@ -413,7 +488,14 @@ pub unsafe fn declared(boot: &BootInfo) -> Result<Declared, Trouble> {
         }
         let (Some(frames), Some(bytes)) = (frames, bytes) else { return Err(Trouble::Manifest) };
         let Ok(image) = record.image(module) else { return Err(Trouble::Manifest) };
-        return Ok(Declared { id: ContentId::of(module), frames, bytes, image });
+        // R04 at a byte the frame did not write: a class this build cannot name
+        // is a record from a schema this build cannot read, and reading it as
+        // the nearest class would admit a component at a ceiling nobody
+        // declared.
+        let Some(admitted) = manifest::class::admitted(record.class) else {
+            return Err(Trouble::Manifest);
+        };
+        return Ok(Declared { id: ContentId::of(module), frames, bytes, image, admitted });
     }
     Err(Trouble::NoManifest)
 }
@@ -460,6 +542,23 @@ pub enum Half {
     /// before writing it into a descriptor. Nothing is taken away from it; it
     /// reaches for memory it never held.
     Escape,
+    /// `E1-B06`. Six batch reads are queued, a hard-class read is submitted
+    /// behind them, and the driver hands the device what
+    /// `f_abi::deadline::inherit` ranked first. The read must come back before
+    /// every batch request that was submitted ahead of it.
+    Ordered,
+    /// The control for [`Half::Ordered`], and the reason that half means
+    /// anything: the identical client, the identical burst, the identical
+    /// driver, told to hand work over in arrival order. The read must come back
+    /// **last**. A run where both halves overtake is a run whose ordering was
+    /// never being exercised.
+    Arrival,
+    /// The same burst on a channel whose client is admitted for the batch class
+    /// and writes `HARD` anyway. RFC 0025 bound 2: refused
+    /// `ADMISSION`/`NOT_HELD` rather than demoted, because a caller that loses
+    /// nothing by claiming urgency claims it on every entry. R08 is the rule
+    /// this half is the mechanism for.
+    Unadmitted,
 }
 
 impl Half {
@@ -470,7 +569,76 @@ impl Half {
             Self::Inside => "inside",
             Self::Outside => "outside",
             Self::Escape => "escape",
+            Self::Ordered => "ordered",
+            Self::Arrival => "arrival",
+            Self::Unadmitted => "unadmitted",
         }
+    }
+
+    /// Is this one of `E1-B06`'s halves?
+    ///
+    /// The three above run a write and a read and judge a fault; the three
+    /// below run a burst and judge an *order*. Keeping them one enum keeps one
+    /// datapath — the alternative was a second copy of `run`, which is the
+    /// thing this file's own module comment says to check for first.
+    #[must_use]
+    pub const fn orders(self) -> bool {
+        matches!(self, Self::Ordered | Self::Arrival | Self::Unadmitted)
+    }
+
+    /// Which order this half asks the driver to hand work to the device in, as
+    /// a `f_virtio_blk::pending::Order` ordinal. Unit: none — an ordinal.
+    #[must_use]
+    pub const fn ordering(self) -> u64 {
+        match self {
+            // One is rank. Every other half — including the control — asks for
+            // the arrival order, which is what this driver did before `E1-B06`
+            // and what a routing page nobody filled in still says.
+            Self::Ordered | Self::Unadmitted => 1,
+            _ => 0,
+        }
+    }
+
+    /// What the *channel* says the client is admitted for. Unit: none — an
+    /// `f_abi::class` ordinal.
+    ///
+    /// A fact about the channel and never a field of an entry, which is the
+    /// whole of RFC 0025 bound 2 and the reason it is written into the routing
+    /// page by the frame rather than carried by the client.
+    #[must_use]
+    pub const fn client_admitted(self) -> u16 {
+        match self {
+            Self::Unadmitted => class::BATCH,
+            _ => class::HARD,
+        }
+    }
+
+    /// How many requests the driver accumulates before it makes the choice this
+    /// half is about. Unit: requests.
+    ///
+    /// The burst, except on [`Half::Unadmitted`], where one of the burst is
+    /// refused at admission and never joins the queue — so a hold of the whole
+    /// burst would be a driver waiting for a request that is never coming.
+    #[must_use]
+    pub const fn hold(self) -> u64 {
+        match self {
+            Self::Ordered | Self::Arrival => BURST as u64,
+            Self::Unadmitted => (BURST - 1) as u64,
+            _ => 0,
+        }
+    }
+
+    /// How many entries the driver serves before that hold applies.
+    /// Unit: requests.
+    #[must_use]
+    pub const fn hold_after(self) -> u64 {
+        if self.orders() { PRELUDE } else { 0 }
+    }
+
+    /// Buffers the client registers. Unit: buffers.
+    #[must_use]
+    pub const fn buffers(self) -> u32 {
+        if self.orders() { ORDERING_BUFFERS } else { BUFFERS }
     }
 
     /// How far past the registration's answer this half points the device.
@@ -569,6 +737,60 @@ pub struct Report {
     /// Zero for a component that never wrote a report at all.
     /// Unit: none — an ordinal.
     pub stopped: u64,
+    /// Where in the completion order the hard-class read came back, zero-based.
+    /// Unit: completions. `u32::MAX` for a run that never saw it.
+    ///
+    /// **The measurement.** Read by the frame out of the order its own
+    /// completion ring handed entries back in, which is evidence the component
+    /// could not fabricate: it is not a counter the driver published, it is
+    /// what the client observed happening. Zero on [`Half::Ordered`] and
+    /// [`BURST`] minus one on [`Half::Arrival`], from the same burst.
+    pub hard_at: u32,
+    /// How many batch reads submitted *before* the hard-class read came back
+    /// *after* it. Unit: requests.
+    ///
+    /// The client's own reading of the overtake, derived from
+    /// [`Report::hard_at`] and the burst size. `Report::overtaken` is the
+    /// driver's reading of the same event, taken on the other side of a
+    /// privilege boundary from different evidence, and `verdict` requires the
+    /// two to agree — because a demonstration that rested on one number a
+    /// component published would be a demonstration that component could pass
+    /// by writing a number.
+    pub overtook: u32,
+    /// Requests the driver's queue said it handed the device ahead of something
+    /// that arrived first. Unit: requests.
+    pub overtaken: u64,
+    /// The most requests that were waiting in the driver's queue at once.
+    /// Unit: requests.
+    ///
+    /// What the overtake was performed out of. An overtake count with no depth
+    /// beside it cannot be told from a queue that was never deep.
+    pub queued_max: u64,
+    /// How many requests the driver kept inside the device at once, as the
+    /// component reports `f_virtio_blk::pending::IN_FLIGHT`. Unit: requests.
+    ///
+    /// The **cost** of every overtake above, published beside it rather than
+    /// left out of the sentence: a request already handed to the device cannot
+    /// be overtaken by anything, so this is the granularity at which the
+    /// ordering works. R12.
+    pub in_flight: u64,
+    /// The ordering ordinal the component says it used, beside the one this
+    /// boot asked for. Unit: none — ordinals.
+    ///
+    /// Two numbers and not one, because a control half that silently used the
+    /// ordering it is the control *for* would satisfy every comparison between
+    /// the two halves while proving nothing.
+    pub ordered: u64,
+    /// Whether the hard-class read's completion carried
+    /// `f_abi::cflags::SHORTFALL`.
+    ///
+    /// Expected **true** on the halves that serve it: this driver's manifest
+    /// declares the soft class, so a hard-class request is served as soft. R08
+    /// is that the demotion is reported rather than silent, and this is the bit
+    /// that reports it.
+    pub shortfall: bool,
+    /// Whether the hard-class read was refused `ADMISSION`/`NOT_HELD`.
+    pub unadmitted: bool,
     /// The first fault the remapping unit recorded, if it recorded one.
     pub fault: Option<Fault>,
     /// How many it recorded. Unit: transactions.
@@ -643,6 +865,10 @@ impl Report {
             return Err("the escape provocation did not run, or ran on a half that is not it");
         }
 
+        if self.half.orders() {
+            return self.ordering_verdict();
+        }
+
         if matches!(self.half, Half::Inside) {
             if !self.read {
                 return Err("the read was refused over memory the driver's domain translates");
@@ -686,6 +912,154 @@ impl Report {
             return Err("part of a refused transfer landed, which is a partial corruption");
         }
         Ok(())
+    }
+
+    /// Whether an `E1-B06` half produced what it was asked for.
+    ///
+    /// Split out of [`Report::verdict`] rather than folded into it, because
+    /// these three halves judge an **order** and the other three judge a
+    /// **fault**, and one function that did both would be a function whose
+    /// reader has to hold two experiments in their head to check either.
+    /// Everything before the branch is common and stays there: a driver that
+    /// copied, or never ran, or never asked the frame for a translation has
+    /// already failed, whichever question this half is asking.
+    ///
+    /// # Errors
+    ///
+    /// A sentence naming what did not hold.
+    const fn ordering_verdict(&self) -> Result<(), &'static str> {
+        // What the component says it did, against what it was told to do. This
+        // is first because every comparison below is between two halves that
+        // differ *only* in this ordinal, and a control run that quietly used
+        // the ordering would pass all of them.
+        if self.ordered != self.half.ordering() {
+            return Err("the driver did not use the ordering this half asked for, so the two \
+                        halves differ in something other than the thing under test");
+        }
+        // The queue has to have been deep, or an overtake of zero is a
+        // statement about an empty queue rather than about an ordering. The
+        // hold is what makes this a number the boot chose; requiring it is what
+        // makes a hold that silently did nothing a red run.
+        if self.queued_max != self.half.hold() {
+            return Err("the driver's queue never reached the depth this half held for, so \
+                        whatever it ordered, it ordered out of something smaller than the burst");
+        }
+        // The cost, required rather than merely printed: the claim this run
+        // feeds names the depth the overtake is performed at, and a run whose
+        // depth was something else is a run feeding that claim a different
+        // number.
+        if self.in_flight != pending::IN_FLIGHT as u64 {
+            return Err("the driver reported a different in-flight depth from the one the \
+                        overtake claim is bounded by");
+        }
+        // The two readings of the same event, from opposite sides of a
+        // privilege boundary. Neither is worth much alone: the client's is
+        // blind to what the queue held, and the driver's is a number a
+        // component wrote about itself.
+        //
+        // **They are equal here and are not the same quantity**, which is
+        // stated rather than left for whoever changes the burst to discover.
+        // `Pending::overtaken` is cumulative — summed over every pick, one for
+        // each waiting request that pick left behind — and `overtook` is
+        // positional, a reading of where one completion came back. Exactly one
+        // pick in this burst overtakes anything, because exactly one request in
+        // it is urgent, so the two collapse onto one number. A burst with a
+        // second urgent request makes the driver's count the larger of the two
+        // and this line fails with a message that blames the run rather than
+        // the arithmetic: the check to write then is `overtaken >= overtook`
+        // plus a first-pick reading published beside the cumulative one, which
+        // is the number the client can actually see. `pending`'s
+        // `the_earlier_deadline_goes_first_within_a_class` is the case that
+        // already diverges.
+        if self.overtaken != self.overtook as u64 {
+            return Err("the driver and its client disagree about how many requests were \
+                        overtaken, so at least one of the two readings is not of this run");
+        }
+
+        if matches!(self.half, Half::Unadmitted) {
+            if !self.unadmitted {
+                return Err("a client admitted for the batch class wrote HARD and was served, \
+                            which is R08's hard class becoming a hint with a better name");
+            }
+            if self.counters.unadmitted != 1 {
+                return Err("the driver did not count exactly one entry refused for a class its \
+                            submitter does not hold");
+            }
+            if self.read {
+                return Err("the refused hard-class read completed, so nothing was refused");
+            }
+            if self.untouched != TRANSFER {
+                return Err("part of a refused request's transfer landed, which is a refusal \
+                            that was not one");
+            }
+            return Ok(());
+        }
+
+        // The two halves that serve the read. Everything from here is about
+        // where it came back.
+        if self.unadmitted {
+            return Err("a class the client holds was refused");
+        }
+        if !self.read {
+            return Err("the hard-class read was refused, so its position proves nothing");
+        }
+        if !self.matched {
+            return Err("a read this driver completed did not put the sector in the client's \
+                        buffer, so the ordering was over requests that did not happen");
+        }
+        if self.untouched != 0 {
+            return Err("part of a completed transfer did not land");
+        }
+        // R08's other half, and the one this driver exercises on every run: its
+        // manifest declares the soft class, so a hard-class request is served
+        // as soft — and the completion has to say so. A run where the demotion
+        // happened and the flag did not is the silent demotion RFC 0025
+        // forecloses.
+        if !self.shortfall {
+            return Err("a hard-class request was served at this driver's own lower class and \
+                        the completion did not say so, which is the silent demotion R08 exists \
+                        to exclude");
+        }
+        if self.counters.shortfall == 0 {
+            return Err("the driver counted no shortfall, so the flag above came from \
+                        somewhere other than the service that set it");
+        }
+
+        if matches!(self.half, Half::Ordered) {
+            if self.hard_at != 0 {
+                return Err("the hard-class read did not come back first, so it did not \
+                            overtake the batch work queued ahead of it");
+            }
+            if self.overtook + 1 != BURST {
+                return Err("the hard-class read came back first and did not overtake the whole \
+                            burst, so something else was ahead of it");
+            }
+            return Ok(());
+        }
+
+        // `Half::Arrival`. The control, and it fails by *succeeding*: a run
+        // where the read overtakes anything here is a run where the ordering
+        // was never off, and every number the ordered half produced is then a
+        // number about the same configuration twice.
+        if self.hard_at + 1 != BURST {
+            return Err("the control half did not answer in arrival order, so it is not a \
+                        control and the ordered half is comparing itself with itself");
+        }
+        if self.overtook != 0 {
+            return Err("something overtook in the arrival order");
+        }
+        Ok(())
+    }
+
+    /// How many requests this half submitted as one burst. Unit: entries.
+    ///
+    /// Zero for the three halves that submit no burst, and that zero is what
+    /// makes the ordering line in the boot log honest on them: *the read came
+    /// back at position 4294967295 of 0* reads as an absence, which is what it
+    /// is, rather than as a position.
+    #[must_use]
+    pub const fn burst(&self) -> u32 {
+        if self.half.orders() { BURST } else { 0 }
     }
 
     /// Where this half's refused transaction must have faulted.
@@ -1307,6 +1681,17 @@ unsafe fn run(
         (routing::at::NEGOTIATED_VERSION, u64::from(negotiated.version)),
         (routing::at::NEGOTIATED_FEATURES, negotiated.features),
         (routing::at::BEYOND, half.beyond()),
+        // What `E1-B06` routes, and every one of them is a *fact the frame
+        // holds and the component may not invent*: the order to serve in, the
+        // ceiling the manifest declared for this component, what the channel
+        // says about its client, the floor, and the fixture that makes the
+        // queue's contents at the first pick a number rather than a race.
+        (routing::at::ORDERING, half.ordering()),
+        (routing::at::ADMITTED, u64::from(declared.admitted)),
+        (routing::at::CLIENT_ADMITTED, u64::from(half.client_admitted())),
+        (routing::at::FLOOR, FLOOR_NS),
+        (routing::at::HOLD, half.hold()),
+        (routing::at::HOLD_AFTER, half.hold_after()),
     ] {
         board.write64(offset, value).map_err(Trouble::Channel)?;
     }
@@ -1346,7 +1731,15 @@ unsafe fn run(
     // call, and no other reference into it exists.
     let page = unsafe { core::slice::from_raw_parts_mut(frames.virt(owned), FRAME_SIZE as usize) };
     let tsc_khz = setup.scheduling.tsc_khz;
-    let asking = Asking { half, owned_cap, ungrantable_cap, bytes, tsc_khz, negotiated };
+    let asking = Asking {
+        half,
+        owned_cap,
+        ungrantable_cap,
+        bytes,
+        buffers: half.buffers(),
+        tsc_khz,
+        negotiated,
+    };
 
     let mut supervising = Supervising {
         asks: &asks,
@@ -1411,6 +1804,14 @@ unsafe fn run(
         drained: reported.drained,
         stopped: reported.outcome,
         asked,
+        hard_at: observed.hard_at,
+        overtook: observed.overtook,
+        overtaken: reported.overtaken,
+        queued_max: reported.queued_max,
+        in_flight: reported.in_flight,
+        ordered: reported.ordered,
+        shortfall: observed.shortfall,
+        unadmitted: observed.unadmitted,
         fault: faults.first,
         faults: faults.records,
     })
@@ -1426,6 +1827,9 @@ struct Asking {
     ungrantable_cap: u32,
     /// How many bytes of it. Unit: bytes.
     bytes: u32,
+    /// How many buffers the client carves that page into, which is how many
+    /// requests it can have in flight at once. Unit: buffers.
+    buffers: u32,
     /// Unit: kilohertz.
     tsc_khz: u64,
     negotiated: Negotiated,
@@ -1442,6 +1846,16 @@ struct Observed {
     matched: bool,
     /// Unit: bytes.
     untouched: u32,
+    /// Where the hard-class read came back in the completion order, zero-based.
+    /// `u32::MAX` on a half that submits none. Unit: completions.
+    hard_at: u32,
+    /// Batch reads submitted before the hard-class read that came back after
+    /// it. Unit: requests.
+    overtook: u32,
+    /// Whether the hard-class read's completion carried `SHORTFALL`.
+    shortfall: bool,
+    /// Whether it was refused `ADMISSION`/`NOT_HELD`.
+    unadmitted: bool,
 }
 
 /// The client's whole run: register, write, read, compare.
@@ -1462,7 +1876,7 @@ fn client(
     // in a driver's domain. Provoked on every run because a check nobody has
     // watched fail is indistinguishable from one that cannot fail — and this is
     // the check standing between a component's clients and each other's memory.
-    let probe = registration(1, asking.ungrantable_cap, asking.bytes, BUFFERS);
+    let probe = registration(1, asking.ungrantable_cap, asking.bytes, asking.buffers);
     producer.submit(probe).map_err(|_| Trouble::Channel(0))?;
     let answer = supervising.awaited(asking.tsc_khz)?;
     let refused_without_grant =
@@ -1472,7 +1886,7 @@ fn client(
     }
 
     // --- the registration ---------------------------------------------------
-    let asked = registration(2, asking.owned_cap, asking.bytes, BUFFERS);
+    let asked = registration(2, asking.owned_cap, asking.bytes, asking.buffers);
     producer.submit(asked).map_err(|_| Trouble::Channel(0))?;
     let answer = supervising.awaited(asking.tsc_khz)?;
     let naming = Fixed::from_completion(&answer)
@@ -1482,6 +1896,14 @@ fn client(
     // the client's: nothing in the completion the *client* reaped carries an
     // address, and RFC 0024 is why.
     let registered_at = supervising.answered_at();
+
+    // Two experiments from here, and the split is what each half is *asking*.
+    // Everything above is common because it has to be: a burst whose
+    // registration was never refused for want of `GRANT`, or whose driver
+    // copied, is a burst nobody should read an ordering out of.
+    if asking.half.orders() {
+        return ordering(supervising, producer, page, asking, naming, registered_at);
+    }
 
     // --- the client's buffers -----------------------------------------------
     //
@@ -1553,7 +1975,213 @@ fn client(
         }
     }
 
-    Ok(Observed { registered_at, refused_without_grant, wrote, read, matched, untouched })
+    Ok(Observed {
+        registered_at,
+        refused_without_grant,
+        wrote,
+        read,
+        matched,
+        untouched,
+        // Nothing about an order, and said as an absence rather than a zero:
+        // `u32::MAX` is where the hard-class read came back on a half that
+        // submitted none, and zero would be *it came back first*.
+        hard_at: u32::MAX,
+        overtook: 0,
+        shortfall: false,
+        unadmitted: false,
+    })
+}
+
+/// The burst, and where the hard-class read comes back in it.
+///
+/// # What this measures and what it deliberately does not
+///
+/// It measures **the order the client's own completion ring hands entries
+/// back in**. Not a counter the driver published — the driver publishes one
+/// too, and `Report::ordering_verdict` requires the two to agree — because a
+/// demonstration that rested on a number a component wrote about itself is a
+/// demonstration that component passes by writing a number.
+///
+/// It does not measure a latency. What a hard-class read *saved* by overtaking
+/// is a time, this machine may not record one, and `claims/0013` is that half
+/// registered as `pending` rather than folded in here and weakened.
+fn ordering(
+    supervising: &mut Supervising<'_, '_>,
+    producer: &mut Producer<'_>,
+    page: &mut [u8],
+    asking: Asking,
+    naming: Fixed,
+    registered_at: u64,
+) -> Result<Observed, Trouble> {
+    let mut set = BufferSet::bind(naming, asking.negotiated, page).map_err(Trouble::Channel)?;
+    // Eight, spelled as a literal because a const-generic argument is where the
+    // compiler stops helping, and pinned to the constant beside it so that a
+    // manifest-sized change cannot leave the two disagreeing.
+    const _: () = assert!(ORDERING_BUFFERS == 8);
+    let [mut source, s0, s1, s2, s3, s4, s5, s6] =
+        set.carve::<8>().map_err(|_| Trouble::Geometry)?;
+    if source.len() < TRANSFER as usize {
+        return Err(Trouble::Geometry);
+    }
+
+    for (index, byte) in source.bytes_mut().iter_mut().take(TRANSFER as usize).enumerate() {
+        *byte = pattern(index);
+    }
+    let mut sinks = [s0, s1, s2, s3, s4, s5, s6];
+    for sink in &mut sinks {
+        for byte in sink.bytes_mut().iter_mut().take(TRANSFER as usize) {
+            *byte = POISON;
+        }
+    }
+
+    // --- the write, and it is the positive control --------------------------
+    //
+    // Awaited on its own, before the burst, and that is what `PRELUDE` counts:
+    // every read below reads the sector this put there, so a burst that ran
+    // before it would compare sinks against a sector nobody wrote and fail for
+    // a reason that has nothing to do with an order.
+    let entry = driver::write(3, AT, TRANSFER);
+    let (lent, _) = source.submit(producer, entry).map_err(|_| Trouble::Channel(0))?;
+    let answer = supervising.awaited(asking.tsc_khz)?;
+    let wrote = !answer.is_error();
+    let source = taken(lent, &answer)?;
+    if !wrote {
+        return Err(Trouble::Transfer(0));
+    }
+
+    // --- the burst ----------------------------------------------------------
+    //
+    // Submitted without waiting, batch work first and the hard-class read last,
+    // so that arrival order and deadline order are opposites. The driver holds
+    // until it has all of them — `routing::at::HOLD`, which is a fixture and
+    // says so — and then chooses.
+    let mut lent: [Option<InFlight<'_, Fixed>>; BURST as usize] = core::array::from_fn(|_| None);
+    for (index, (slot, sink)) in lent.iter_mut().zip(sinks).enumerate() {
+        let urgent = index + 1 == BURST as usize;
+        let token = if urgent { HARD_TOKEN } else { BATCH_TOKEN.saturating_add(index as u64) };
+        let mut entry = driver::read(token, AT, TRANSFER);
+        if urgent {
+            // The class field as RFC 0025 reads it: an ordinal in the low byte
+            // and the rings this urgency has crossed in the high one. Zero
+            // crossings, because this client originated the request.
+            entry.class = f_abi::deadline::pack(class::HARD, 0);
+            entry.deadline = HARD_DEADLINE_NS;
+        }
+        let (in_flight, _) = sink.submit(producer, entry).map_err(|_| Trouble::Channel(0))?;
+        *slot = Some(in_flight);
+    }
+
+    // --- what came back, and in what order ----------------------------------
+    let mut hard_at = u32::MAX;
+    let mut shortfall = false;
+    let mut unadmitted = false;
+    let mut served = [false; BURST as usize];
+    let mut back: [Option<f_ring::Idle<'_, Fixed>>; BURST as usize] =
+        core::array::from_fn(|_| None);
+    for position in 0..BURST {
+        let answer = supervising.awaited(asking.tsc_khz)?;
+        if answer.user_data == HARD_TOKEN {
+            hard_at = position;
+            shortfall = answer.flags & cflags::SHORTFALL != 0;
+            unadmitted =
+                matches!(answer.error(), Some((error::ADMISSION, error::admission::NOT_HELD)));
+        }
+        // Ask each buffer still out whether this completion is its own, which
+        // is the loop `InFlight::complete`'s own documentation describes. The
+        // token is the whole of the test and every token here is distinct.
+        for ((slot, kept), good) in lent.iter_mut().zip(back.iter_mut()).zip(served.iter_mut()) {
+            let Some(held) = slot.as_ref() else { continue };
+            if held.token() != answer.user_data {
+                continue;
+            }
+            let Some(held) = slot.take() else { continue };
+            match held.complete(&answer) {
+                Ok(idle) => {
+                    *good = !answer.is_error();
+                    *kept = Some(idle);
+                }
+                // Unreachable: the token matched and no completion here carries
+                // `MORE`. Put back rather than dropped, because dropping an
+                // in-flight buffer is the one misuse RFC 0024's types cannot
+                // refuse and `f_ring::buffers` ends the frame over.
+                Err(again) => *slot = Some(again),
+            }
+            break;
+        }
+    }
+    // Every buffer accounted for. A slot still holding one is a completion that
+    // never arrived, and letting it fall out of scope would end the frame in a
+    // drop bomb rather than in a sentence.
+    for slot in &lent {
+        if slot.is_some() {
+            return Err(Trouble::Transfer(0));
+        }
+    }
+
+    // --- what is actually in the client's memory ----------------------------
+    //
+    // Every sink, not only the hard-class read's: a run where the ordering was
+    // right and five of the six batch reads landed nothing is not a run this
+    // should pass. A sink whose read was refused must be *whole* poison, which
+    // is what makes `untouched` mean `nothing landed` on the refused half and
+    // `nothing is missing` on the other two.
+    let mut matched = true;
+    let mut untouched = 0u32;
+    for (kept, good) in back.iter().zip(served.iter()) {
+        let Some(idle) = kept else { continue };
+        for index in 0..TRANSFER as usize {
+            let Some(got) = idle.bytes().get(index) else { return Err(Trouble::Geometry) };
+            if *good && *got != pattern(index) {
+                matched = false;
+            }
+            if *got == POISON {
+                untouched = untouched.saturating_add(1);
+            }
+        }
+    }
+    // The source is read back for the reason the other half reads it back: a
+    // device that wrote into the buffer the pattern came from would be a
+    // corruption every comparison above would report as a success.
+    for index in 0..TRANSFER as usize {
+        let Some(got) = source.bytes().get(index) else { return Err(Trouble::Geometry) };
+        if *got != pattern(index) {
+            return Err(Trouble::Transfer(0));
+        }
+    }
+
+    // A refused entry never joined the queue, so it overtook nothing — it was
+    // answered on the way in, before there was an order to be in. Counting an
+    // immediate refusal as an overtake is the one reading the `unadmitted` half
+    // must not support, so it is excluded here rather than in the verdict.
+    //
+    // The consequence is worth naming, because it cost the verdict an assertion
+    // and a check that cannot go red is what `mutate` exists to argue against:
+    // `overtook` is *forced* to zero on exactly the runs where `unadmitted` is
+    // true, so a verdict line reading `overtook != 0` under that half could
+    // never fire, and one used to. The teeth on that half are four lines that
+    // can: the completion carried `ADMISSION`/`NOT_HELD`, the driver counted
+    // exactly one entry refused for a class its submitter does not hold, the
+    // read did not complete, and the sink is whole poison. Each of those goes
+    // red if the entry reaches the queue, which is what the deleted line was
+    // aiming at.
+    let overtook = if unadmitted || hard_at == u32::MAX {
+        0
+    } else {
+        BURST.saturating_sub(1).saturating_sub(hard_at)
+    };
+
+    Ok(Observed {
+        registered_at,
+        refused_without_grant: true,
+        wrote,
+        read: served.last().copied().unwrap_or(false),
+        matched,
+        untouched,
+        hard_at,
+        overtook,
+        shortfall,
+        unadmitted,
+    })
 }
 
 /// What the component wrote about itself into the half of its board that is
@@ -1567,6 +2195,15 @@ struct Reported {
     drained: u64,
     /// One of `f_virtio_blk::routing::stopped`. Unit: none — an ordinal.
     outcome: u64,
+    /// `Pending::overtaken`. Unit: requests.
+    overtaken: u64,
+    /// `Pending::deepest`. Unit: requests.
+    queued_max: u64,
+    /// `f_virtio_blk::pending::IN_FLIGHT`, as the component reports it.
+    /// Unit: requests.
+    in_flight: u64,
+    /// The ordering ordinal the component says it used. Unit: none.
+    ordered: u64,
 }
 
 impl Reported {
@@ -1603,6 +2240,12 @@ impl Reported {
         ) else {
             return Self::NOTHING_AT_ALL;
         };
+        let (Ok(shortfall), Ok(unadmitted)) = (
+            u32::try_from(read(routing::reported::SHORTFALL)),
+            u32::try_from(read(routing::reported::UNADMITTED)),
+        ) else {
+            return Self::NOTHING_AT_ALL;
+        };
         Self {
             counters: driver::Counters {
                 served,
@@ -1611,16 +2254,31 @@ impl Reported {
                 copies: read(routing::reported::COPIES),
                 escaped,
                 provoked: read(routing::reported::PROVOKED),
+                shortfall,
+                unadmitted,
             },
             capacity: read(routing::reported::CAPACITY),
             drained: read(routing::reported::DRAINED),
             outcome: read(routing::reported::OUTCOME),
+            overtaken: read(routing::reported::OVERTAKEN),
+            queued_max: read(routing::reported::QUEUED_MAX),
+            in_flight: read(routing::reported::IN_FLIGHT),
+            ordered: read(routing::reported::ORDERED),
         }
     }
 
     /// What the frame knows about a component that reported nothing it can
     /// believe. See [`NOTHING`] for why every field of it is zero.
-    const NOTHING_AT_ALL: Self = Self { counters: NOTHING, capacity: 0, drained: 0, outcome: 0 };
+    const NOTHING_AT_ALL: Self = Self {
+        counters: NOTHING,
+        capacity: 0,
+        drained: 0,
+        outcome: 0,
+        overtaken: 0,
+        queued_max: 0,
+        in_flight: 0,
+        ordered: 0,
+    };
 }
 
 /// What a component that never reported has done, as far as the frame knows.
@@ -1628,8 +2286,16 @@ impl Reported {
 /// Zero everywhere, and the zero on `provoked` is the one that matters:
 /// `Report::verdict` requires it to move, so a component that never ran fails
 /// on the same line a component whose self-check stopped working would.
-const NOTHING: driver::Counters =
-    driver::Counters { served: 0, refused: 0, bytes: 0, copies: 0, escaped: 0, provoked: 0 };
+const NOTHING: driver::Counters = driver::Counters {
+    served: 0,
+    refused: 0,
+    bytes: 0,
+    copies: 0,
+    escaped: 0,
+    provoked: 0,
+    shortfall: 0,
+    unadmitted: 0,
+};
 
 /// Take a buffer back from the completion that answers it.
 ///

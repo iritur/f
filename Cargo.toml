@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["abi", "env", "ring", "kernel", "user/init", "user/store", "user/virtio-blk", "bench", "sim", "xtask"]
+members = ["abi", "env", "ring", "kernel", "user/init", "user/store", "user/virtio-blk", "user/virtio-net", "bench", "sim", "xtask"]
 
 [workspace.package]
 version = "0.0.1"
@@ -25,6 +25,12 @@ f-ring = { path = "ring" }
 # `cargo xtask component` does to produce the image — uses its own defaults and
 # is unaffected.
 f-virtio-blk = { path = "user/virtio-blk", default-features = false }
+# The second driver, on the same terms and for the same reason. Two lines that
+# differ only in a name is the point rather than a duplication: the arrangement
+# a component crate needs to be linkable by the frame turned out to be a
+# property of *being a component*, not of being the block driver, and a reader
+# who wants to disagree should note that neither line had to be argued twice.
+f-virtio-net = { path = "user/virtio-net", default-features = false }
 # The same arrangement, one crate over and for a different reason:
 # `user/store/Cargo.toml` says which, and the frame links this so that
 # `f_store::report` has one definition rather than two.

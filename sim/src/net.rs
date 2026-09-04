@@ -32,10 +32,38 @@
 //! request-and-answer one. Adding it would change the client, and the client is
 //! the thing component substitution is a claim about.
 //!
-//! *Reversal:* the first component that receives rather than transmits, which is
-//! E2's network stack. What changes then is the client, not this file: `serve`
-//! gains a receive queue and the driver gains a path that posts buffers with no
-//! outstanding token. Recorded here rather than discovered there.
+//! The sentence above is kept as it was written and is now known to be wrong in
+//! its premise: a receive does **not** need a submission path that offers memory
+//! without asking for anything. `user/virtio-net` posts a receive as an ordinary
+//! request carrying an ordinary token, and answers it late. See the reversal
+//! below.
+//!
+//! *Reversal:* the first component that receives rather than transmits.
+//!
+//! **It has arrived, at E1-B03 rather than at E2, and the prediction this
+//! paragraph used to make was wrong in two specifics.** `user/virtio-net`
+//! receives, and RFC 0051 records what it took. The corrections are worth
+//! keeping because they are the reason a reversal condition is written down at
+//! all:
+//!
+//! - This paragraph said *what changes then is the client*. The client did not
+//!   change. `f_ring::buffers` was used unmodified: an `Idle` is moved into the
+//!   posting entry and comes back from the completion, exactly as it does for a
+//!   transmit, and RFC 0024's typestate turned out to express the receive
+//!   direction without an edit.
+//! - It said the driver gains *a path that posts buffers with no outstanding
+//!   token*. It posts them **with** one. The ring protocol above the driver
+//!   stays request-and-answer, and the token is what RFC 0024 requires to return
+//!   the buffer — a tokenless post would leave a client holding an `InFlight`
+//!   that no completion could ever answer.
+//!
+//! What is actually needed here is unchanged in shape and is not done: `serve`
+//! gains a receive queue, this file gains a device that writes rather than
+//! reads, and the fault classes and snapshot tags gain the cases that go with
+//! it. That is its own task. Until then the model covers the transmit half of a
+//! protocol whose interesting half is the other one, and saying so is better
+//! than a reversal condition that describes a future which has already
+//! happened.
 
 use crate::dev::{Bus, Protocol, Request, Served};
 use crate::fault::Class;

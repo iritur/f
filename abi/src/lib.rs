@@ -19,6 +19,7 @@ pub mod deadline;
 pub mod door;
 pub mod layout;
 pub mod manifest;
+pub mod reserve;
 pub mod state;
 
 /// The frame's opcode space.

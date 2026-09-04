@@ -166,6 +166,12 @@ enum What {
     /// Run a scenario once, writing a snapshot every `--every` simulated
     /// minutes. `E1-P08`, RFC 0043.
     Scan,
+    /// A reservation under adversarial load, and the two arms that make the
+    /// result mean anything. Exit status is the verdict. `E1-B07`, RFC 0050.
+    Admission,
+    /// The same, reduced to one digest so that two processes can be compared
+    /// without parsing a report.
+    AdmissionHash,
 }
 
 fn main() -> ExitCode {
@@ -256,6 +262,12 @@ fn parse(args: &[String]) -> Result<Asked, String> {
             // tool's own argument parser.
             "--chaos-hash" => asked.what = What::ChaosHash,
             "--scan" => asked.what = What::Scan,
+            "--admission" => asked.what = What::Admission,
+            // Its own flag rather than `--admission --hash`, for the reason
+            // `--chaos-hash` gives: `what` is one value, and a pair of flags
+            // whose meaning depended on their order would be a command line
+            // with a bug in it.
+            "--admission-hash" => asked.what = What::AdmissionHash,
             // A *source*, not a `what`. `--resume file --trace` and `--trace
             // --resume file` mean the same thing, which they did not when this
             // set `what`: one order printed a usage banner and the other
@@ -602,6 +614,8 @@ fn run(asked: Asked) -> Result<bool, String> {
         What::Scan => return scan(&asked),
         What::Chaos => return chaos(&asked, false),
         What::ChaosHash => return chaos(&asked, true),
+        What::Admission => return admission(&asked, false),
+        What::AdmissionHash => return admission(&asked, true),
         What::Hash | What::Trace | What::Check | What::Report => {}
     }
 
@@ -619,6 +633,125 @@ fn run(asked: Asked) -> Result<bool, String> {
         _ => report(&trial, &outcome),
     }
     Ok(true)
+}
+
+/// A reservation admitted, the same load without one, and one demand too many.
+///
+/// **`E1-B07`.** Three arms, and two of them are controls: the unreserved arm
+/// must *miss*, or the granted arm's zero is a property of the workload rather
+/// than of admission control, and the over-subscribed arm must be *refused*
+/// rather than admitted and then late. `f_sim::reserve` is where the model, the
+/// adversary and the verdict live; this prints what they produced and turns a
+/// failure into an exit status.
+///
+/// `Ok(false)` is *the command worked and found something*, the same convention
+/// `--check`, `--sweep` and `--chaos` use.
+fn admission(asked: &Asked, hash_only: bool) -> Result<bool, String> {
+    use f_sim::reserve;
+
+    let runs = reserve::sweep(asked.seed);
+    if hash_only {
+        println!("{:#018x}", reserve::digest(&runs));
+        return Ok(true);
+    }
+
+    println!("seed       {:#018x}", asked.seed);
+    println!(
+        "machine    {} physical core(s), no sibling, no cache or bandwidth partitioning",
+        reserve::machine().physical_cores
+    );
+    println!(
+        "demand     {} core(s), {} ns period, {} ns budget, hard class",
+        reserve::demand().cores,
+        reserve::demand().period_ns,
+        reserve::demand().budget_ns,
+    );
+    println!("periods    {} per arm, {} ns per slot (virtual)", reserve::PERIODS, reserve::SLOT_NS);
+    println!();
+    // Every count the claim names is a column, because a claim whose
+    // reproduction command does not print its own numbers is a claim nobody can
+    // check. `stolen` and `missed` are the two the granted arm is about;
+    // `refused` and `stretches` are what say the adversary existed; `idle` is
+    // R12's cost written beside the number rather than under it.
+    println!(
+        "  {:<15} {:>9} {:>7} {:>7} {:>7} {:>8} {:>9} {:>8} {:>7} {:>8} {:>6} {:>7} {:>8}",
+        "arm",
+        "admitted",
+        "periods",
+        "met",
+        "missed",
+        "stolen",
+        "refusals",
+        "stretch",
+        "burst",
+        "clamped",
+        "excl",
+        "slack",
+        "idle",
+    );
+    for run in &runs {
+        let slack =
+            if run.slack_min == u32::MAX { "-".to_string() } else { run.slack_min.to_string() };
+        println!(
+            "  {:<15} {:>9} {:>7} {:>7} {:>7} {:>8} {:>9} {:>8} {:>7} {:>8} {:>6} {:>7} {:>8}",
+            run.arm.name(),
+            run.admitted,
+            run.periods,
+            run.met,
+            run.missed,
+            run.stolen,
+            run.refused_placements,
+            run.stretches,
+            run.bursts,
+            run.clamped,
+            run.excluded,
+            slack,
+            run.reserved_idle,
+        );
+    }
+    println!();
+    // And the same numbers again under the names the registry publishes them
+    // under, because the table above is for a reader and this is for a tool:
+    // `xtask::admission_reached` checks every one of these against
+    // `claims/0010`'s `[threshold]`, and a row the command does not print is a
+    // published minimum nothing enforces. `claims/0008` and `claims/0009` each
+    // grew a lint of this shape; this is the third and it prints its inputs.
+    println!("  claims/0010-admission-refusals, as this run measured them:");
+    for (key, value) in reserve::metrics(&runs) {
+        println!("    {key:<30} {value}");
+    }
+    println!();
+    // The record RFC 0007 requires to travel with every number collected under
+    // a reservation, printed rather than assumed: this part has no sibling, so
+    // the mechanism was never exercised, so nothing here is a claim about four
+    // delivered components.
+    println!(
+        "  all four exercised: {} — this part reports no thread-level sibling, so RFC 0005",
+        runs[0].exercised
+    );
+    println!("  rule 2's record is `unexercised` rather than `satisfied`, and RFC 0007 says a");
+    println!("  number collected under such a reservation is not a number about this system.");
+    println!("  What is a number about it: every count above, taken on a virtual clock.");
+    println!();
+    println!("  digest   {:#018x}", reserve::digest(&runs));
+
+    match reserve::verdict(&runs) {
+        Ok(()) => {
+            println!();
+            println!(
+                "admission  OK  an over-subscribed reservation was refused ADMISSION and ran \
+nothing; a granted one met every one of {} deadlines under a load that made the same \
+component miss {} of them without it",
+                runs[0].periods, runs[1].missed,
+            );
+            Ok(true)
+        }
+        Err(why) => {
+            println!();
+            println!("admission  FAILED\n\n{why}");
+            Ok(false)
+        }
+    }
 }
 
 /// Kill every component in the deployment under load, and judge each pair.

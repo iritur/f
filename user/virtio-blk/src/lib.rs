@@ -80,6 +80,12 @@
 #![no_std]
 
 pub mod driver;
+// The queue *above* the virtqueue: what this component has been given and not
+// yet handed to the device, in the order `f_abi::deadline::inherit` says. It is
+// its own module and not a field of `driver` because the ordering is the thing
+// `E1-B06` is about and a reader looking for it should find a file rather than a
+// paragraph. RFC 0049.
+pub mod pending;
 pub mod queue;
 // Outside the `image` gate, because it is the one module both sides read: the
 // frame writes the page this describes and the component reads it, and a set of

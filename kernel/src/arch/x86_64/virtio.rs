@@ -66,6 +66,26 @@ pub const VIRTIO_BLK_MODERN: u16 = 0x1042;
 /// useful thing to read in a log.
 pub const VIRTIO_BLK_TRANSITIONAL: u16 = 0x1001;
 
+/// The network device, as a modern-only one identifies itself.
+///
+/// The second caller this module's comment predicted, and it arrived needing
+/// two constants and no code. That is worth stating rather than assuming: the
+/// walk above was written parameterised by device id on the argument that
+/// E1-B03 would be the third reader of a virtio capability list, and it was —
+/// so `dma.rs` keeps its frozen copy and the two live callers share this one,
+/// exactly as this file said they would.
+pub const VIRTIO_NET_MODERN: u16 = 0x1041;
+
+/// The network device, as a transitional one does.
+///
+/// Recognised for [`VIRTIO_BLK_TRANSITIONAL`]'s reason, and the refusal matters
+/// more here: a transitional network device is a bus master that writes into
+/// memory whenever a packet arrives, with no request outstanding and nothing
+/// timing it, and it addresses physical memory by specification. *No device
+/// found* would be a much worse thing to read in a log than *this build cannot
+/// isolate it*.
+pub const VIRTIO_NET_TRANSITIONAL: u16 = 0x1000;
+
 /// Where a function's capability list starts, in configuration space.
 const CAP_POINTER: u64 = 0x34;
 

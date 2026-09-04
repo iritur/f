@@ -50,23 +50,33 @@
 //! 0013 — rather than asserted in a comment, which is the difference the exit
 //! criterion is asking for.
 //!
-//! # One request at a time, and the deadline field that is read and not used
+//! # One request at a time, and the deadline field that decides which one
 //!
-//! [`Driver::execute`] answers one entry before it takes the next.
-//! `Sqe::deadline` and `Sqe::class` are carried into the completion untouched
-//! and order nothing, because ordering a device queue by the deadline field is
-//! E1-B06's and doing it here would be this file deciding a question that task
-//! owns. What is true today is written down rather than implied: this driver is
-//! first-come-first-served, and its manifest's `features` list is empty for
-//! exactly that reason.
+//! [`Driver::execute`] answers one entry before it takes the next, and that has
+//! not changed: a chain is offered, the doorbell rings, and the used ring is
+//! polled until it comes back. What changed at `E1-B06` is *which* entry it is
+//! asked to answer. The sentence that used to be here said `Sqe::deadline` and
+//! `Sqe::class` were carried into the completion untouched and ordered nothing;
+//! [`crate::pending`] is where they order something now, and the two halves of
+//! this file's part in it are [`Driver::admit`], which asks
+//! `f_abi::deadline::inherit` what a request is served as, and
+//! [`Driver::execute`], which reports on the completion whatever the request
+//! lost on the way.
+//!
+//! The cost of answering one at a time is [`crate::pending::IN_FLIGHT`] and is
+//! published rather than implied: a request already in the device cannot be
+//! overtaken, so one is the granularity of every reordering this component
+//! performs.
 
 use f_abi::buf::{Name, opcode};
-use f_abi::{Cqe, Negotiated, Sqe, error, flags};
+use f_abi::deadline::Inherited;
+use f_abi::{Cqe, Negotiated, Sqe, cflags, error, flags};
 use f_ring::device::Region;
 use f_ring::registry::{Domains, Refusal, Registered, Table, Transport as _};
 use f_ring::{completion, refusal};
 
 use crate::Trouble;
+use crate::pending::Admission;
 use crate::queue::{DESC_NEXT, DESC_WRITE, QUEUE_BYTES, QUEUE_SIZE, Queue};
 use crate::transport::{SECTOR_BYTES, Transport, Windows};
 
@@ -234,6 +244,28 @@ pub struct Counters {
     /// counter nothing can move is not a counter, so the boot moves this one on
     /// purpose and a reader can see that the mechanism behind the zero works.
     pub provoked: u64,
+    /// Completions that carried [`f_abi::cflags::SHORTFALL`] — requests served
+    /// below what their entry asked for. Unit: completions.
+    ///
+    /// RFC 0025's last paragraph: *served differently is a fact the caller can
+    /// handle; served differently silently is the failure the whole discipline
+    /// exists to exclude.* This is that sentence as a number a supervisor can
+    /// watch, and it is expected to be **large** on this boot rather than zero:
+    /// `user/virtio-blk/manifest.toml` declares the soft class, so every
+    /// hard-class request this driver serves is served as soft and says so.
+    /// A zero here on a run that submitted a hard-class read would mean the
+    /// demotion happened and nobody was told, which is the one outcome R08
+    /// refuses.
+    pub shortfall: u32,
+    /// Entries refused `ADMISSION`/`NOT_HELD`: a class the submitting component
+    /// was not admitted for. Unit: entries.
+    ///
+    /// Counted apart from [`Counters::refused`] and not instead of it, because
+    /// they answer different questions. `refused` is *how often this service
+    /// said no*; this is *how often a peer asked for urgency it does not hold*,
+    /// which is a fact about the peer and the number a starvation investigation
+    /// starts from. RFC 0025 bound 2.
+    pub unadmitted: u32,
 }
 
 /// The block driver.
@@ -247,6 +279,11 @@ pub struct Driver {
     control: Region,
     table: Table<SETS>,
     agreed: Negotiated,
+    /// What this component is admitted for and what its channel says about its
+    /// client. Not a field a driver chooses: `crate::routing` argues why a
+    /// component is told rather than assuming, and a ceiling is the one thing a
+    /// component must not be able to raise.
+    admission: Admission,
     /// Sectors the device says it holds. Unit: sectors of [`SECTOR_BYTES`].
     capacity: u64,
     counters: Counters,
@@ -272,7 +309,12 @@ impl Driver {
     /// anything [`Transport::open`] refuses — including
     /// [`Trouble::NoPlatformAddressing`], which is the refusal that keeps this
     /// driver from running with no isolation at all.
-    pub fn start(windows: Windows, granted: Region, agreed: Negotiated) -> Result<Self, Trouble> {
+    pub fn start(
+        windows: Windows,
+        granted: Region,
+        agreed: Negotiated,
+        admission: Admission,
+    ) -> Result<Self, Trouble> {
         if granted.len() < GRANT_BYTES {
             return Err(Trouble::Layout);
         }
@@ -295,6 +337,7 @@ impl Driver {
             control,
             table: Table::new(),
             agreed,
+            admission,
             capacity,
             counters: Counters::default(),
         })
@@ -304,6 +347,45 @@ impl Driver {
     #[must_use]
     pub const fn counters(&self) -> Counters {
         self.counters
+    }
+
+    /// What this component is admitted for, and what its channel says about the
+    /// peer submitting on it.
+    #[must_use]
+    pub const fn admission(&self) -> Admission {
+        self.admission
+    }
+
+    /// Decide what one entry is served as here, before it joins the queue.
+    ///
+    /// The answer is `f_abi::deadline::inherit`'s and this adds nothing to it
+    /// except the counting and the completion a refusal owes. It is a method on
+    /// the driver rather than a free function so that the refusal is *tallied*:
+    /// a peer claiming urgency it does not hold is a fact worth a number, and a
+    /// free function would have left every caller to remember to keep one.
+    ///
+    /// `now` is passed in rather than read, for [`Driver::execute`]'s reason and
+    /// with [`Admission::floor`]'s consequence: this crate observes no clock, so
+    /// the only caller passes zero and bound 3 is a constant floor rather than
+    /// one measured from arrival.
+    ///
+    /// # Errors
+    ///
+    /// The completion to post instead of serving the entry. Already counted, so
+    /// a caller writes it to the ring and does nothing else.
+    pub fn admit(&mut self, entry: &Sqe, now: u64) -> Result<Inherited, Cqe> {
+        match crate::pending::admit(entry, self.admission, now) {
+            Ok(order) => Ok(order),
+            Err((packed, detail)) => {
+                self.counters.refused = self.counters.refused.saturating_add(1);
+                if error::unpack(packed).is_some_and(|(domain, code)| {
+                    domain == error::ADMISSION && code == error::admission::NOT_HELD
+                }) {
+                    self.counters.unadmitted = self.counters.unadmitted.saturating_add(1);
+                }
+                Err(refusal(entry.user_data, packed, detail, now))
+            }
+        }
     }
 
     /// Sectors the device says it holds. Unit: sectors of [`SECTOR_BYTES`].
@@ -337,13 +419,24 @@ impl Driver {
     /// `now` is passed in rather than read. This crate observes no clock —
     /// RFC 0004 — and a driver that stamped its own completions would be a
     /// component with a second opinion about time.
-    pub fn execute<D: Domains>(&mut self, entry: &Sqe, domains: &mut D, now: u64) -> Cqe {
+    ///
+    /// `order` is what [`Driver::admit`] answered for this entry, carried from
+    /// the queue rather than recomputed. Recomputing it would be a second
+    /// reading of the same fields at a different moment, which is exactly how a
+    /// request comes to be *ordered* as one thing and *reported* as another.
+    pub fn execute<D: Domains>(
+        &mut self,
+        entry: &Sqe,
+        order: Inherited,
+        domains: &mut D,
+        now: u64,
+    ) -> Cqe {
         // The literal is the whole point, and it is the same shape as
         // [`stage`]'s tally-as-an-argument: the address that reaches a
         // descriptor is the one a registration answered, plus a displacement
         // this path passes as a constant zero. There is no field to set and no
         // branch to take.
-        self.answer(entry, domains, now, 0)
+        self.answer(entry, order, domains, now, 0)
     }
 
     /// Answer one entry with `beyond` bytes added to the address the
@@ -376,33 +469,58 @@ impl Driver {
     pub fn provoke_escape<D: Domains>(
         &mut self,
         entry: &Sqe,
+        order: Inherited,
         domains: &mut D,
         now: u64,
         beyond: u64,
     ) -> Cqe {
-        self.answer(entry, domains, now, beyond)
+        self.answer(entry, order, domains, now, beyond)
     }
 
-    fn answer<D: Domains>(&mut self, entry: &Sqe, domains: &mut D, now: u64, beyond: u64) -> Cqe {
-        if opcode::is_registration(entry.opcode) {
+    fn answer<D: Domains>(
+        &mut self,
+        entry: &Sqe,
+        order: Inherited,
+        domains: &mut D,
+        now: u64,
+        beyond: u64,
+    ) -> Cqe {
+        let mut cqe = if opcode::is_registration(entry.opcode) {
             let cqe = self.table.execute(entry, domains, now);
             if cqe.is_error() {
                 self.counters.refused += 1;
             } else {
                 self.counters.served += 1;
             }
-            return cqe;
-        }
-        match self.transfer(entry, now, beyond) {
-            Ok(cqe) => {
-                self.counters.served += 1;
-                cqe
+            cqe
+        } else {
+            match self.transfer(entry, now, beyond) {
+                Ok(cqe) => {
+                    self.counters.served += 1;
+                    cqe
+                }
+                Err((packed, detail)) => {
+                    self.counters.refused += 1;
+                    refusal(entry.user_data, packed, detail, now)
+                }
             }
-            Err((packed, detail)) => {
-                self.counters.refused += 1;
-                refusal(entry.user_data, packed, detail, now)
-            }
+        };
+        // Whatever the answer was, it says whether the request got what it asked
+        // for. Set here rather than at each producer of a completion above,
+        // because *every* answer this service gives owes the flag and a
+        // per-branch version is a branch somebody adds without it — which is
+        // the silent demotion RFC 0025 forecloses, arrived at by a missing
+        // line rather than by a decision.
+        //
+        // On a refusal as well as on a success, and that is not redundant: a
+        // request demoted to this service's class and *then* refused for its
+        // length was still demoted, and a client re-submitting it needs to know
+        // the class it will be served at next time.
+        if order.fell_short() {
+            cqe.flags |= cflags::SHORTFALL;
+            self.counters.shortfall = self.counters.shortfall.saturating_add(1);
         }
+        cqe
     }
 
     /// One read or one write, all the way to the device and back.

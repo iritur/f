@@ -77,7 +77,7 @@ use crate::arch::x86_64::vtd::{self, Refuse};
 use crate::cap::Table;
 use crate::mem::{FRAME_SIZE, FrameAllocator};
 
-pub use crate::arch::x86_64::vtd::{Domain, Fault, Faults, Unit};
+pub use crate::arch::x86_64::vtd::{Domain, Fault, Faults, Invalidation, Unit};
 
 /// Turn a refusal from the unit into one a client can act on.
 ///
@@ -224,14 +224,34 @@ impl Domains for Grant<'_> {
     /// its device's access by declining. A page that was not mapped is skipped
     /// rather than reported, because the only caller that can produce one is a
     /// second unmap of the same set — and the second one has nothing to do.
+    ///
+    /// *Skipped* is load-bearing and is the unit's behaviour rather than this
+    /// function's: [`vtd::Unit::unmap_range`] attempts every page of the request
+    /// and returns the first refusal at the end. A version that stopped at the
+    /// first would leave every page after a hole translated, which is a device
+    /// still reaching memory a client took back, arrived at by an error path
+    /// being tidy — and this call cannot see the difference, because the trait
+    /// forbids it from reporting anything.
     fn unmap(&mut self, _cap: u32, address: u64, len: u32) {
         let Ok(pages) = Self::pages(len) else { return };
-        for page in 0..pages {
-            let at = address.saturating_add(page.saturating_mul(FRAME_SIZE));
-            // SAFETY: as `map`: the allocator is rebound onto the direct map,
-            // and this walks tables this module made.
-            let _ = unsafe { self.unit.unmap(self.frames, self.domain, at) };
-        }
+        // One request, not `pages` of them, and the difference is the whole of
+        // `E1-B14`. This was a loop over `Unit::unmap`, which invalidated the
+        // remapping unit's caches globally once per page — so retiring an
+        // eight-page buffer set cost eight global invalidations and sixteen
+        // serialising register round trips, where one and two would have done.
+        // `vtd::Unit::unmap_range` argues why one at the end is not weaker, and
+        // `claims/0014-unmap-churn.toml` is the measurement that bought it.
+        // SAFETY: as `map`: the allocator is rebound onto the direct map, and
+        // this walks tables this module made.
+        let _ = unsafe {
+            self.unit.unmap_range(
+                self.frames,
+                self.domain,
+                address,
+                pages,
+                vtd::Invalidation::PerRequest,
+            )
+        };
     }
 }
 

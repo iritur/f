@@ -163,7 +163,15 @@ claims/0006-copies-per-operation.toml       NEW: E1-P10
 claims/0007-kernel-entries-per-operation.toml
                                             NEW: E1-P10
 claims/0008-unmap-under-churn.toml          NEW: E1-B14's workload, registered
-                                            before the batching it may buy
+                                            before the batching it may buy.
+                                            LANDED as two claims and at other
+                                            numbers, because concurrent tasks
+                                            took 0008 to 0013 first: claims/
+                                            0014-unmap-churn (gating, the
+                                            counts) and claims/0015-unmap-churn-
+                                            cost (pending, the time). The split
+                                            is claims/0005 and 0006's, and the
+                                            name moved with it
 claims/snapshot.json                        the five new entries, pending
 docs/test-taxonomy.md                       NEW: E1-P09. Which layer catches
                                             what, and how often it runs
@@ -274,8 +282,14 @@ cargo xtask fuzz                           E1-P04, E1-P05
 cargo xtask kani                           E1-P07, E1-P12
 cargo xtask claims                         E1-P10's four, pending, with their
                                            workloads and reproduction commands
-cargo xtask claim unmap-under-churn        E1-B14 — the number that either buys
-                                           batching or closes the task
+cargo xtask claim unmap-churn              E1-B14 — the number that either buys
+                                           batching or closes the task. It
+                                           bought it, at the remapping unit
+                                           rather than between cores (RFC 0052).
+                                           Written here as `unmap-under-churn`
+                                           before it landed; the time half is
+                                           `cargo xtask claim unmap-churn-cost`
+                                           and both run `cargo xtask churn`
 ```
 
 Two exits no command here can close, and they are the two that matter most:

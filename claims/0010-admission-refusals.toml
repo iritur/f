@@ -1,0 +1,204 @@
+# The count half of `E1-B07`'s exit, and the split is `claims/0005`'s argument
+# used a second time. *An over-subscribed reservation is refused with ADMISSION;
+# a granted one meets its deadline under adversarial load* is two sentences with
+# two shapes of number in them. How many demands were refused, how many periods
+# were met, how many slots of a reserved core somebody else took: those are
+# **counts**, the same on a fast host and a slow one, and this machine may take
+# them. How many nanoseconds of margin the reservation actually had: that is a
+# **timing**, and `claims/0011` is where it goes, `pending` on the machine
+# `E0-D10` owes.
+#
+# `bench/src/lib.rs` refuses to record a timing in a container and is right to.
+# Nothing here is a timing. The model has a virtual clock, every draw comes from
+# `f_env::Env`, and a seed reproduces a run byte for byte — so *when* something
+# happened is a count of slots and not a reading of anything.
+name       = "admission-refusals"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E1"
+
+statement  = """
+Admission control refuses what a machine cannot keep, and what it grants is met
+under a load built to break it.
+
+Three arms at one seed, and two of them are controls:
+
+  over-subscribed — the machine's capacity is granted, then the same demand is
+    made again. It is refused in the ADMISSION domain of RFC 0010, naming which
+    of RFC 0007's four components could not be delivered, and it runs nothing at
+    all: zero periods. A reservation that was admitted and then missed is the
+    state R08 says the word *deadline* must not be used for, and this arm is
+    what separates the two outcomes.
+
+  unreserved — the same component, the same seed and the same adversary, in the
+    soft class, so nothing stands between it and the load. It must MISS, and
+    slots of its core must be taken. This is the arm that makes the third one
+    evidence: a model in which the adversary could never reach the component's
+    core by construction would report zero misses while testing nothing.
+
+  granted — the reservation is admitted and the adversary is placed by the
+    table. Every period is met, and no slot of a reserved core is ever taken by
+    anything else.
+
+The adversary is drawn from `f_env::Env` and is four things: non-preemptible
+stretches whose length is DRAWN, up to a bound longer than the reservation's
+slack; bursts aimed at the reservation's own release instants, landing on the
+cores the draw picks; a job that asks for up to three times its budget — past
+the period, not merely past the budget — and is clamped; and work that asks the
+table for every core on the machine every period. A run in which none of the
+four happened is refused rather than reported: an adversary that never tried is
+not an adversary, and every one of those is a way for the zeros above to be
+about a workload that did nothing.
+
+Every one of those four is DRAWN rather than fixed, and that sentence is
+load-bearing rather than descriptive. Ask what input would make every arm, every
+threshold and both reproduction guards below green while the property was false,
+and the answer is `f_env::Env` returning a constant. So: `f_sim::reserve::digest`
+hashes what the model produced and NOT the seed it was handed, because a digest
+that ate the seed would make two seeds differ for any implementation whatever —
+including one that never read a seed, which is precisely what the differing-seed
+check in `cargo xtask admission` is trying to rule out. Beside it,
+`the_adversary_varies_with_the_seed` requires these counts to move across seeds,
+`the_mid_period_stretch_is_reachable` requires the burst not to have blanketed
+every free core, and `without_the_clamp` runs the granted arm with the budget
+clamp removed and requires it to MISS — because a counter whose removal changes
+no outcome is not a mechanism, and `budget_overruns_clamped` below is a minimum
+on one.
+
+Beside the model, the frame's own arithmetic on the machine this tree boots. It
+answers for that machine and it answers for a described part with siblings and
+RDT allocation, and the second must GRANT — because a refusal from a function
+that only ever refuses is not a refusal.
+"""
+
+[baseline]
+# No comparison, for `claims/0005`'s reason rather than as an omission. This is
+# an absolute statement about the system's own behaviour: a reservation is
+# refused or it is kept. The honest peer would be a system that refuses a CPU
+# reservation and then holds it — `SCHED_DEADLINE` does admit against a
+# utilisation bound and would be a real comparison — but the tuned-Linux
+# baseline this tree carries is configured for the datapath claims and has no
+# reservation in it. Adding one is a versioned directory under claims/baselines/
+# and a diff somebody writes, never an edit here.
+system  = "none"
+notes   = "The comparison worth making is against SCHED_DEADLINE's admission test, which refuses on a utilisation bound and grants a core it does not hold exclusively — so the interesting number is not *does it refuse* but *what does a granted one survive*. That needs the same adversarial load run against a Linux deadline task on the same part, which is `E0-D10`'s machine and `claims/0011`'s question rather than this one's."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "01"
+notes    = "Section 01 is where the sentence being tested lives — *a reservation is granted only if the resource can prove it is schedulable, and refused otherwise* — and the subsystem that owns the number is admission control: `abi/src/reserve.rs` for the arithmetic, `kernel/src/admit.rs` for what this machine says about itself, `sim/src/reserve.rs` for the load. RFC 0007 is the design, RFC 0050 is where the arithmetic went, and RFC 0006 reads the same table for idle depth."
+
+[workload]
+path    = "sim/src/reserve.rs"
+seed    = "0xf00dbeefcafe1234"
+periods = 512
+notes   = "Five hundred and twelve periods per arm, on an eight-core part in two four-core cache domains with no sibling and no partitioning. The part is described small and honestly rather than large and optimistically, and that is what makes the over-subscribed arm reachable: the frame sits in the first domain, so the machine grants exactly one hard-class reservation and refuses the second. A larger part would need a longer arm to reach the same refusal and would prove the same thing."
+
+[metrics]
+primary   = "deadlines_missed_granted"
+secondary = [
+  # The property, twice: a period that was late, and a slot of a reserved core
+  # that somebody else had. They are two findings with two first debugging
+  # steps — a miss with no theft is admission granting more than the core can
+  # supply, and theft with no miss is the placement leaking while the budget
+  # still fits — so they are counted apart.
+  "reserved_slots_stolen",
+  # The over-subscribed arm, both halves. `refused` must be non-zero and
+  # `periods_run_oversubscribed` must be zero, and the second is the one that
+  # says *refused* rather than *admitted and then late*.
+  "oversubscribed_refusals",
+  "periods_run_oversubscribed",
+  # The control that makes the primary mean anything. Both are **minimums**:
+  # a control that stops missing is a load that has gone soft, and every zero
+  # in this claim would survive it.
+  "deadlines_missed_unreserved",
+  "unreserved_slots_stolen",
+  # The four things the adversary must have done, each a minimum for the same
+  # reason `claims/0005`'s `operations_in_flight_at_kill_min` is one: a run in
+  # which the adversary did nothing reports every zero above while testing a
+  # quiescent system.
+  "placements_refused",
+  "stretches_started",
+  "bursts_at_release",
+  "budget_overruns_clamped",
+  # R12, counted rather than described. `cores_held_idle` is what exclusion
+  # costs on this part and `reserved_slots_idle` is what the reservation itself
+  # leaves unused. RFC 0007: *they are meant to be sitting idle*, and these are
+  # how many. A reader who thinks the cost is too high has the numbers.
+  "cores_held_idle",
+  "reserved_slots_idle",
+  # And the frame's own half, on the machine this tree boots. `machine_grants`
+  # is what *this* part can hold and is expected to be zero under QEMU — no
+  # thread level, no cache topology, no RDT, so one contention domain with the
+  # frame in it. `described_grants` is the same arithmetic asked about a part
+  # with siblings and RDT, and its being one is what says the zero beside it is
+  # a refusal rather than a function that only refuses.
+  "machine_grants",
+  "described_grants",
+]
+
+[threshold]
+# Every row here is read out of the run by `xtask::admission_reached`, which
+# takes each number from the report the reproduction command printed and holds
+# it against the bound stated here — and `admission_thresholds_match` requires
+# this key set and `xtask::ADMISSION_METRICS` to be one list, so a row deleted
+# from either side is a red build. Without that pair the table below was read by
+# nothing: `claims/0008` and `claims/0009` each grew this lint after the same
+# finding, and this is the third.
+#
+# Correctness thresholds, so they are zeros and ones rather than numbers to tune
+# when a run goes red.
+deadlines_missed_granted    = { max = 0 }
+reserved_slots_stolen       = { max = 0 }
+oversubscribed_refusals     = { min = 1 }
+periods_run_oversubscribed  = { max = 0 }
+# The load-bearing minimums. Without these five the six zeros above are free,
+# and the first draft of any claim like this is the one where they are.
+deadlines_missed_unreserved = { min = 1 }
+unreserved_slots_stolen     = { min = 1 }
+placements_refused          = { min = 1 }
+stretches_started           = { min = 1 }
+bursts_at_release           = { min = 1 }
+budget_overruns_clamped     = { min = 1 }
+# The exclusion cost. A minimum rather than a maximum, and it is not a target:
+# a run in which the reservation held nothing idle on a part with no cache
+# partitioning is a run in which exclusion was not applied, which is RFC 0007's
+# waived component arriving as a green result.
+cores_held_idle             = { min = 1 }
+reserved_slots_idle         = { min = 1 }
+described_grants            = { min = 1 }
+# **`machine_grants` has no row here, deliberately, and saying so is the point.**
+# It is reported by `cargo xtask admission` and it is not gated, because the two
+# things it could mean are both legitimate: zero is QEMU, which reports no thread
+# level, no cache topology and no RDT allocation leaf, so there is one contention
+# domain with the frame in it and RFC 0007 refuses to waive what the hardware
+# cannot partition; non-zero is the same arithmetic on a part that can deliver
+# all four. A threshold of zero would make the day somebody boots F on RDT
+# silicon a red build, and a threshold of one would make every run in this
+# container red today. `kernel/src/admit.rs`'s verdict says the same thing in
+# code — it requires this machine to have *answered*, and does not require which
+# answer — and `CONTRIBUTING.md` R01 is why the absence is written out rather
+# than left as a row somebody assumes is checked.
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "**This claim does not need that machine and says so rather than pretending.** Every metric is a count produced by a deterministic model with a virtual clock, plus two counts a boot takes from `cpuid`, so each is the same number in a container and on bare metal. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it — and because `machine_grants = 0` is a statement about the part the boot ran on, so the day this claim is taken on `runner-class-A` that row is the first thing to re-read. `claims/0011` is the half that needs the machine now."
+
+[reproduce]
+# It prints every row of [threshold] under the name that row carries — twelve out
+# of `f_sim::reserve::metrics` and two out of the boot's admission stage — and
+# then holds each against the bound stated above. A claim whose reproduction
+# command does not print its own numbers is a claim nobody can check; a claim
+# whose numbers are printed and never compared is one nobody does check.
+command = "cargo xtask claim admission-refusals"
+
+[diagnosis]
+# Written while the system is understood rather than at 2 a.m. when it is not.
+missed_granted = "a reservation the arithmetic granted was not kept. Look at `reserved_slots_stolen` first: theft beside the miss means the placement leaked — something was put on a core `Table::reserved` answers true for, which RFC 0007 forecloses — and a miss with no theft means the budget the demand was admitted for is not the budget it needs, which is a schedulability test that granted more than the core supplies"
+stolen = "work landed on a core a reservation holds or holds idle. `Table::reserved` is the one predicate that refuses it and it is asked at every placement rather than remembered, so a non-zero here is that predicate answering wrongly — most likely a grant whose `excluded` mask was not folded into `taken`, which would leave the idle cores of an exclusion lendable"
+missed_unreserved_zero = "**the control stopped being a control.** The same load, the same seed and no reservation must miss; if it does not, the adversary is no longer reaching the component's core, and every zero in this claim would hold with admission control deleted. Look at `MAX_STRETCH_SLOTS` against the reservation's slack — a stretch bound below the slack makes the arm pass by arithmetic — and at whether the burst is still aimed at the release instant"
+placements_refused_zero = "the adversary never asked for a reserved core, so nothing refused it. Either the grant holds no cores — check `cores_held_idle` — or the placement loop stopped walking the whole machine, in which case the load is running somewhere the reservation is not and the experiment is about two components that never met"
+overruns_zero = "no job asked for more than its budget, so the clamp was never exercised. The draw is from `f_env::Env` and a zero here means the model stopped drawing, not that the component became well behaved. Check `without_the_clamp` next: it runs the granted arm with the clamp removed and must miss, so if it has also stopped failing then the overrun range has been narrowed below the budget and this minimum is counting a draw that changes nothing"
+stretches_flat = "`stretches_started`, `bursts_at_release` and `reserved_slots_idle` identical at two different seeds. That is not a tolerance, it is the model having stopped reading the seed — and it is the failure this claim is most exposed to, because every zero above survives it. `f_sim::reserve::the_adversary_varies_with_the_seed` is the test, `the_mid_period_stretch_is_reachable` is the branch it usually means, and the first thing to check is whether the release-instant burst has been widened back to every free core: at that point the mid-period draw is unreachable and `stretches_started` is `periods x free cores` exactly"
+described_grants_zero = "the arithmetic refuses everything, so its refusal on this machine says nothing. This is the failure mode the described part exists to catch: a `Table::admit` that returned `Err` unconditionally would satisfy every other row in this file"
+machine_grants_nonzero = "this part can hold a hard-class reservation, which no machine this claim has been run on could. Good news, and it invalidates the row rather than the system: record which machine, check that all four of RFC 0007's components report a mechanism rather than `unexercised`, and re-take every number here on it"

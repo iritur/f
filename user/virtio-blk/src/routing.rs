@@ -167,6 +167,62 @@ pub mod at {
     /// choosing its own difficulty.
     /// Unit: bytes.
     pub const BEYOND: u32 = 168;
+
+    // --- what E1-B06 added: the order, and what bounds it ---------------------
+    //
+    // Five slots and every one of them is *told* rather than assumed, for the
+    // reason the module comment already gives about addresses and the sharper
+    // one RFC 0025 gives about ceilings: a component that wrote down its own
+    // admitted class would be a component that could raise it, which is the
+    // whole of bound 2 undone by a constant.
+
+    /// Which order the driver hands work to the device in, as a
+    /// `crate::pending::Order` ordinal — zero is arrival, one is rank.
+    ///
+    /// Zero is the order that claims nothing, so a frame that did not fill this
+    /// in gets a driver that reorders nothing rather than one that reorders by
+    /// a field it was never told to trust. R04.
+    /// Unit: none — an ordinal.
+    pub const ORDERING: u32 = 176;
+    /// The class this component was admitted for, from its manifest's
+    /// `[reservation] class` by way of `f_abi::manifest::class::admitted`.
+    /// A request is never served above it — RFC 0025 bound 1.
+    /// Unit: none — an `f_abi::class` ordinal.
+    pub const ADMITTED: u32 = 184;
+    /// The class the *channel* reports about whoever submits on it. An entry
+    /// claiming anything more urgent is refused `ADMISSION`/`NOT_HELD` — RFC
+    /// 0025 bound 2 — and it is here, in the page the frame writes, precisely
+    /// so that it is never a field of an entry.
+    /// Unit: none — an `f_abi::class` ordinal.
+    pub const CLIENT_ADMITTED: u32 = 192;
+    /// The least time this component needs from arrival to completion for any
+    /// request — RFC 0025 bound 3.
+    /// Unit: nanoseconds.
+    pub const FLOOR: u32 = 200;
+    /// How many requests the driver accumulates before it makes its first
+    /// choice among them. Unit: requests. Zero is a driver that serves whatever
+    /// it has.
+    ///
+    /// **A fixture, and it is the honest name for it.** An overtake is only
+    /// observable when there is something to overtake, and what is queued at
+    /// the moment of a pick otherwise depends on how two cores raced — so a
+    /// boot that submitted a burst and hoped would report a different number
+    /// every run and would sometimes report the right one for the wrong reason.
+    /// This makes the queue's contents at the first pick a fact the frame
+    /// chose, which is what turns *the read overtook some batch work* into *the
+    /// read overtook six*. It is told to the component for the same reason
+    /// [`BEYOND`] is: a component choosing its own would be a demonstration
+    /// choosing its own difficulty.
+    pub const HOLD: u32 = 208;
+    /// How many requests the driver serves normally before [`HOLD`] applies at
+    /// all. Unit: requests.
+    ///
+    /// A client has to register a buffer set and put something on the disk
+    /// before it can read it back, and a hold that caught those would be a
+    /// client waiting for a completion the driver is holding for a burst the
+    /// client has not sent yet — a deadlock arrived at through a fixture. So
+    /// the frame says how long its own prelude is, and the hold arms after it.
+    pub const HOLD_AFTER: u32 = 216;
 }
 
 /// Where the component's own half of the page starts.
@@ -211,6 +267,48 @@ pub mod reported {
     /// What stopped the component, as one of the [`stopped`](super::stopped)
     /// constants. Unit: none — an ordinal.
     pub const OUTCOME: u32 = super::REPORT + 72;
+
+    // --- what E1-B06 added: what the ordering did ----------------------------
+
+    /// `Counters::shortfall`. Unit: completions.
+    pub const SHORTFALL: u32 = super::REPORT + 80;
+    /// `Counters::unadmitted`. Unit: entries.
+    pub const UNADMITTED: u32 = super::REPORT + 88;
+    /// `Pending::overtaken` — waiting requests that something more urgent was
+    /// handed to the device ahead of. Unit: requests.
+    ///
+    /// The component's own reading of what its ordering did. The frame has a
+    /// second and independent one — the order the completions came back in,
+    /// observed in its own address space — and `kernel/src/blk.rs` requires the
+    /// two to agree. A counter a component increments is a counter that
+    /// component could be wrong about, which is the same reason `drained` sits
+    /// beside `served` rather than being derived from it.
+    pub const OVERTAKEN: u32 = super::REPORT + 96;
+    /// `Pending::deepest` — the most requests that were ever waiting at once.
+    /// Unit: requests.
+    ///
+    /// What the overtake above was performed *out of*. An overtake count with
+    /// no queue depth beside it cannot be told from a queue that was never
+    /// deep, which is the same defect `provoked` takes out of the copy counter.
+    pub const QUEUED_MAX: u32 = super::REPORT + 104;
+    /// `crate::pending::IN_FLIGHT` — how many requests were inside the device
+    /// at once, and therefore how coarse every overtake above is.
+    /// Unit: requests.
+    ///
+    /// Published because it is the *cost* of the number beside it and R12 says
+    /// a concession is written as a cost rather than hidden in a metric: a
+    /// request already handed to the device cannot be overtaken by anything.
+    pub const IN_FLIGHT: u32 = super::REPORT + 112;
+    /// The `crate::pending::Order` ordinal the component actually used.
+    /// Unit: none — an ordinal.
+    ///
+    /// Reported rather than assumed equal to what the frame wrote in
+    /// [`super::at::ORDERING`], because they are two different claims: one is
+    /// what the boot asked for and the other is what a component that may have
+    /// read its routing page wrongly did. A control run that silently used the
+    /// ordering it was supposed to be a control for would pass every check that
+    /// compares the two halves.
+    pub const ORDERED: u32 = super::REPORT + 120;
 }
 
 /// Why the component's loop ended.

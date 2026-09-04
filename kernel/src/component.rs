@@ -97,6 +97,7 @@
 use f_abi::cap::{CapType, Handle, rights};
 use f_abi::control::{cause, notice};
 use f_abi::manifest::{ContentId, Need, Record, Refusal, restart, route};
+use f_abi::reserve::{Demand, Grant, Table as Reservations};
 use f_abi::{Cqe, error};
 use f_ring::{Collector, Mapping, Poster, RingError};
 
@@ -554,6 +555,24 @@ struct Place {
     occupant: Option<Instance>,
     /// Whether the budget ran out.
     retired: bool,
+    /// The reservation this **place** holds, once its first occupant has been
+    /// admitted.
+    ///
+    /// On the place and not on the occupant, because that is the lifetime RFC
+    /// 0007 and RFC 0041 give it between them: a reservation's pre-faulted
+    /// pages are never reclaimed for its life, and a place survives its
+    /// occupant, so a restart into this place keeps these cores and these pages
+    /// rather than asking for them again. What ends it is the place being
+    /// destroyed, which nothing in a boot does.
+    ///
+    /// It is what [`admit`] checks a demand against before spending the
+    /// machine: without it a restart re-tests its own place's demand against a
+    /// table that has already been charged for it, and a hard-class place on a
+    /// part that can grant one would be refused `ADMISSION/NO_CORE` against its
+    /// own cores on the first fault. `f_abi::reserve::Grant::answers` is the
+    /// predicate, and it compares what the record asks for rather than trusting
+    /// the field to belong to it.
+    reservation: Option<Grant>,
     /// The restart budget.
     budget: policy::Budget,
     /// Deaths by cause, for the boot log and for the state tree E1-P06 reads
@@ -741,6 +760,18 @@ pub unsafe fn demonstrate(
     // smallest thing that is not a lie, and it is what keeps this file free of
     // kernel-global state entirely.
     let mut supervisor = Table::EMPTY;
+    // The reservations this supervisor has been granted, on its stack beside
+    // its capability table and for the same reason that one is there: a
+    // reservation is part of what a component's account paid for, and a table
+    // in a `static` would be kernel-global mutable state the frame's own rule
+    // forbids. RFC 0050; RFC 0007 is the arithmetic it holds.
+    //
+    // One table for the whole demonstration, and that is the load-bearing part.
+    // A table built per admission would answer every demand as if it were the
+    // first, so a second hard-class component would be admitted onto cores the
+    // first already holds — a schedulability test that passes because it has
+    // forgotten.
+    let mut reservations = crate::admit::table().map_err(|why| Failure::Admission(why.code()))?;
     // The supervisor's own account, and it is granted before anything else in
     // this table on purpose: [`Table::grow`] charges the lowest-indexed
     // `Untyped` that carries `DERIVE`, so this is the slot that pays for every
@@ -831,6 +862,7 @@ pub unsafe fn demonstrate(
         epoch: 0,
         occupant: None,
         retired: false,
+        reservation: None,
         budget: policy::Budget::default(),
         faults: 0,
         exits: 0,
@@ -851,17 +883,45 @@ pub unsafe fn demonstrate(
         &supervisor,
         &account,
         text_pages(record.image(module).map_err(Failure::Manifest)?)?,
+        &reservations,
+        place.reservation,
     )?;
     admitted_line(record, region.bytes());
 
     // ---------------------------------------------------------------- spawn
     let offered = offer(&mut supervisor, &account, &place, record, frames)?;
     // SAFETY: the caller's guarantee, passed down.
-    let spawned =
-        unsafe { spawn(frames, kernel, features, &mut place, &account, &mut supervisor, offered) }?;
+    let spawned = unsafe {
+        spawn(
+            frames,
+            kernel,
+            features,
+            &mut place,
+            &account,
+            &mut supervisor,
+            &reservations,
+            offered,
+        )
+    }?;
     report.spawns += 1;
     report.unbound += unbound_needs(record);
     spawned_line(record, &place, spawned);
+
+    // And the reservation the *place* holds, kept once and not per occupant.
+    // RFC 0007's memory is never reclaimed for the life of the reservation and
+    // RFC 0041's place survives its occupant, so a restart into this place
+    // keeps these cores and these pages rather than asking for them again — and
+    // `admit` above therefore tests without keeping. This is the one line that
+    // spends, and it spends after the spawn rather than before it, so a spawn
+    // refused for a need it was not offered leaves nothing behind.
+    //
+    // The grant goes **onto the place**, which is the half that was missing:
+    // the keeping is only half of *a spawn tests, a place keeps* if the next
+    // spawn into this place can tell that it is the holder rather than a second
+    // claimant. `Place::reservation` is what `admit` reads to tell them apart.
+    place.reservation = Some(
+        reservations.grant(&Demand::of(record)).map_err(|why| Failure::Admission(why.code()))?,
+    );
 
     // The first polling point. Everything the two tables owe goes onto their
     // control rings and comes back off, which is the half of R05 a pending-state
@@ -879,8 +939,9 @@ pub unsafe fn demonstrate(
         let Some(module) = modules.get(index).copied() else { break };
         // SAFETY: the caller's guarantee, passed down; `module` came out of
         // `modules` above and is one of the boot modules the direct map covers.
-        let mut extra =
-            unsafe { fill(frames, kernel, features, &mut supervisor, module, &mut report) }?;
+        let mut extra = unsafe {
+            fill(frames, kernel, features, &mut supervisor, &mut reservations, module, &mut report)
+        }?;
         // This place's own polling point, not the first place's: what a spawn
         // owes is owed to *its* occupant, and pumping the wrong ring would leave
         // a component holding capabilities it was never told about while the
@@ -978,7 +1039,16 @@ pub unsafe fn demonstrate(
     // SAFETY: the caller's guarantee, passed down; the place is empty here, so
     // nothing below can displace an occupant.
     let refusals = unsafe {
-        probe_refusals(frames, kernel, features, &mut place, &account, &mut supervisor, record)
+        probe_refusals(
+            frames,
+            kernel,
+            features,
+            &mut place,
+            &account,
+            &mut supervisor,
+            &reservations,
+            record,
+        )
     }?;
     report.probed += refusals;
     crate::kprintln!(
@@ -1012,8 +1082,18 @@ pub unsafe fn demonstrate(
 
     let offered = offer(&mut supervisor, &account, &place, record, frames)?;
     // SAFETY: as the first spawn.
-    let spawned =
-        unsafe { spawn(frames, kernel, features, &mut place, &account, &mut supervisor, offered) }?;
+    let spawned = unsafe {
+        spawn(
+            frames,
+            kernel,
+            features,
+            &mut place,
+            &account,
+            &mut supervisor,
+            &reservations,
+            offered,
+        )
+    }?;
     report.spawns += 1;
     crate::kprintln!(
         "  spawn         place {} epoch {} — nothing carried over: new table, new memory, \
@@ -1272,9 +1352,12 @@ unsafe fn fill(
     kernel: &paging::AddressSpace,
     features: Features,
     supervisor: &mut Table,
+    reservations: &mut Reservations,
     module: &'static [u8],
     report: &mut Report,
 ) -> Result<Extra, Failure> {
+    // `fill` keeps the table by value below; every call it makes downwards
+    // takes a shared reference, because a spawn tests and does not keep.
     let record = Record::read(module).map_err(Failure::Manifest)?;
     let region = frames
         .alloc_zeroed(account_order(record).ok_or(Failure::Manifest(Refusal::Value))?)
@@ -1299,6 +1382,7 @@ unsafe fn fill(
         epoch: 0,
         occupant: None,
         retired: false,
+        reservation: None,
         budget: policy::Budget::default(),
         faults: 0,
         exits: 0,
@@ -1312,17 +1396,36 @@ unsafe fn fill(
         supervisor,
         &account,
         text_pages(record.image(module).map_err(Failure::Manifest)?)?,
+        reservations,
+        place.reservation,
     )?;
     admitted_line(record, region.bytes());
 
     let offered = offer(supervisor, &account, &place, record, frames)?;
     // SAFETY: the caller's guarantee, passed down. The place was built a few
     // lines ago and is empty.
-    let spawned =
-        unsafe { spawn(frames, kernel, features, &mut place, &account, supervisor, offered) }?;
+    let spawned = unsafe {
+        spawn(frames, kernel, features, &mut place, &account, supervisor, reservations, offered)
+    }?;
     report.spawns += 1;
     report.unbound += unbound_needs(record);
     spawned_line(record, &place, spawned);
+
+    // And the reservation the *place* holds, kept once and not per occupant.
+    // RFC 0007's memory is never reclaimed for the life of the reservation and
+    // RFC 0041's place survives its occupant, so a restart into this place
+    // keeps these cores and these pages rather than asking for them again — and
+    // `admit` above therefore tests without keeping. This is the one line that
+    // spends, and it spends after the spawn rather than before it, so a spawn
+    // refused for a need it was not offered leaves nothing behind.
+    //
+    // The grant goes **onto the place**, which is the half that was missing:
+    // the keeping is only half of *a spawn tests, a place keeps* if the next
+    // spawn into this place can tell that it is the holder rather than a second
+    // claimant. `Place::reservation` is what `admit` reads to tell them apart.
+    place.reservation = Some(
+        reservations.grant(&Demand::of(record)).map_err(|why| Failure::Admission(why.code()))?,
+    );
 
     Ok(Extra { place, account, region })
 }
@@ -1440,6 +1543,15 @@ const PEND_TICKS: u64 = 200;
 /// # Safety
 ///
 /// As [`demonstrate`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every one is a thing a spawn is not allowed to invent: the machine's memory, \
+              its address space, what it agreed to interpret, the place, the account it \
+              spends, the supervisor's table it checks a supply against, the reservations \
+              it tests the demand against, and the supply itself. Bundling them would be a \
+              type that exists so a lint passes, which `runtime::demonstrate` already \
+              declined for this reason"
+)]
 unsafe fn spawn(
     frames: &mut FrameAllocator,
     kernel: &paging::AddressSpace,
@@ -1447,6 +1559,7 @@ unsafe fn spawn(
     place: &mut Place,
     account: &Account,
     supervisor: &mut Table,
+    reservations: &Reservations,
     offered: Supply,
 ) -> Result<(u32, usize, usize), Failure> {
     if place.occupant.is_some() || place.retired {
@@ -1461,7 +1574,7 @@ unsafe fn spawn(
     }
     let image = record.image(place.module).map_err(Failure::Manifest)?;
     let pages = text_pages(image)?;
-    admit(record, supervisor, account, pages)?;
+    admit(record, supervisor, account, pages, reservations, place.reservation)?;
     // Every refusal R04 asks of a spawn, decided here and before anything of
     // the instance's own is charged. The frame checks the supply against the
     // supervisor's table rather than against what the supervisor said about it,
@@ -1842,6 +1955,12 @@ fn carve(
 /// # Safety
 ///
 /// As [`demonstrate`], and the place must be empty.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "it is [`spawn`]'s list, because it calls [`spawn`] five times with five wrong \
+              supplies. A struct holding them would be a struct with one construction site \
+              and one use, named after the lint that asked for it"
+)]
 unsafe fn probe_refusals(
     frames: &mut FrameAllocator,
     kernel: &paging::AddressSpace,
@@ -1849,6 +1968,7 @@ unsafe fn probe_refusals(
     place: &mut Place,
     account: &Account,
     supervisor: &mut Table,
+    reservations: &Reservations,
     record: &Record,
 ) -> Result<u32, Failure> {
     let declared = record.needs().iter().filter(|need| need.route != route::POWERBOX).count();
@@ -1861,8 +1981,9 @@ unsafe fn probe_refusals(
 
     // 1. A need not supplied, and not optional.
     // SAFETY: the caller's guarantee, and the place is empty.
-    let outcome =
-        unsafe { spawn(frames, kernel, features, place, account, supervisor, Supply::EMPTY) };
+    let outcome = unsafe {
+        spawn(frames, kernel, features, place, account, supervisor, reservations, Supply::EMPTY)
+    };
     taken += refused(outcome, error::pack(error::AUTHORITY, error::authority::NO_SUCH_CAP))?;
 
     // 2. A handle supplied for a need the manifest does not declare. Nothing
@@ -1872,7 +1993,8 @@ unsafe fn probe_refusals(
     let mut over = Supply::EMPTY;
     over.count = declared + 1;
     // SAFETY: as above.
-    let outcome = unsafe { spawn(frames, kernel, features, place, account, supervisor, over) };
+    let outcome =
+        unsafe { spawn(frames, kernel, features, place, account, supervisor, reservations, over) };
     taken += refused(outcome, error::pack(error::ARGUMENT, error::argument::RESERVED_NOT_ZERO))?;
 
     // 3. The wrong type. Whichever of the two types that carry an extent the
@@ -1885,7 +2007,8 @@ unsafe fn probe_refusals(
     wrong.handles[0] = held;
     wrong.count = 1;
     // SAFETY: as above.
-    let outcome = unsafe { spawn(frames, kernel, features, place, account, supervisor, wrong) };
+    let outcome =
+        unsafe { spawn(frames, kernel, features, place, account, supervisor, reservations, wrong) };
     taken += refused(outcome, error::pack(error::AUTHORITY, error::authority::WRONG_TYPE))?;
     supervisor.relinquish(held).map_err(Failure::Capability)?;
 
@@ -1904,7 +2027,9 @@ unsafe fn probe_refusals(
         weak.handles[0] = held;
         weak.count = 1;
         // SAFETY: as above.
-        let outcome = unsafe { spawn(frames, kernel, features, place, account, supervisor, weak) };
+        let outcome = unsafe {
+            spawn(frames, kernel, features, place, account, supervisor, reservations, weak)
+        };
         taken += refused(outcome, error::pack(error::AUTHORITY, error::authority::RIGHT_NOT_HELD))?;
         supervisor.relinquish(held).map_err(Failure::Capability)?;
     }
@@ -1917,7 +2042,9 @@ unsafe fn probe_refusals(
         small.handles[0] = held;
         small.count = 1;
         // SAFETY: as above.
-        let outcome = unsafe { spawn(frames, kernel, features, place, account, supervisor, small) };
+        let outcome = unsafe {
+            spawn(frames, kernel, features, place, account, supervisor, reservations, small)
+        };
         taken += refused(outcome, error::pack(error::ADMISSION, error::admission::MEMORY))?;
         supervisor.relinquish(held).map_err(Failure::Capability)?;
     }
@@ -1959,13 +2086,57 @@ fn refused(outcome: Result<(u32, usize, usize), Failure>, want: i32) -> Result<u
 /// [`error::admission::MEMORY`], whose detail is what the account actually
 /// holds.
 ///
-/// **The class.** A hard-class reservation is admitted by RFC 0007's
-/// arithmetic, and there is no such arithmetic in this build — E1-B07 is the
-/// task. So a hard-class manifest is refused
-/// [`error::admission::NOT_SCHEDULABLE`] rather than admitted on the strength
-/// of nobody having checked. Fail closed, R04: the alternative is a component
-/// that believes it holds a deadline it was never promised, which is exactly
-/// the state R08 says the word must not be used for.
+/// **The reservation.** RFC 0007's arithmetic, which E1-B07 landed in
+/// `f_abi::reserve` and `crate::admit` fills the machine description for. What
+/// used to be here was a blanket refusal of the hard class with
+/// [`error::admission::NOT_SCHEDULABLE`], because there was no arithmetic to
+/// run; there is one now, so the demand is *tested* — cores under the
+/// whole-core rule and whatever exclusion the part's missing partitioning
+/// costs, the frame's own tick against the period and the slack, a partition or
+/// a bandwidth allocation where the part offers one, and the pre-faulted pool —
+/// and the refusal names which of the four could not be delivered rather than
+/// naming the class.
+///
+/// The soft class goes through the same call and is refused its memory and
+/// nothing else, which is what `docs/manifest.md` says the class means. One
+/// path, so there is one vocabulary: RFC 0005 rule 2's *a kind is delivered in
+/// full or the spawn is refused `ADMISSION`* is the same `Table::admit` and the
+/// same codes, because a `hostile` component's whole core is RFC 0007's core
+/// mechanism used for confidentiality — one mechanism, two claims.
+///
+/// It **tests and does not keep**, and the difference is the lifetime of a
+/// reservation rather than a shortcut. A reservation is granted to a *place* —
+/// RFC 0041's place survives its occupant, and RFC 0007's pre-faulted pages are
+/// never reclaimed for the life of the reservation, so a restart into the same
+/// place keeps the same cores rather than asking for them again. So the keeping
+/// happens once, where the place is built, and this is the check every spawn
+/// runs against everything the table already holds. A spawn that kept would
+/// spend the machine on a component's restarts, and a probe that was refused
+/// later for a different reason would have taken a reservation on its way past.
+///
+/// The table it is handed lives as long as the supervisor does, which is what
+/// makes the test a test: a per-call table would answer every demand as if it
+/// were the first, and a second hard-class component would be admitted onto
+/// cores the first already holds.
+///
+/// **And a place that already holds a grant is not tested against it.** That is
+/// the other half of the same sentence and it was missing: a spawn is either a
+/// place's first occupant, in which case the demand is new and the table has to
+/// be asked, or a restart, in which case the place is already holding what is
+/// being asked for and `Table::admit` would find those cores in `taken` and
+/// refuse `ADMISSION/NO_CORE` — against the place's own reservation, on the
+/// first fault, for a hard-class manifest on a part that can grant one. What
+/// tells the two apart is `Grant::answers`, which compares what the record
+/// declares against what the place kept rather than trusting the place to be
+/// holding the right thing: a record whose demand has changed is tested again,
+/// which is R04 and is the same refusal the manifest pin makes on other
+/// grounds.
+///
+/// The soft path was wrong in the same way and harmless at today's sizes — a
+/// restart was tested against a pool its own place had already spent — and it
+/// is fixed at the root instead: `f_abi::reserve` no longer charges the soft
+/// class against the hard class's pinned pool at all, because that pool is not
+/// what a soft component's memory comes from.
 ///
 /// **The list.** A fourth, added when accounts stopped being one size: every
 /// frame an instance is made of has a name in [`Instance::charged`], because a
@@ -2005,12 +2176,15 @@ fn admit(
     supervisor: &Table,
     account: &Account,
     text_pages: usize,
+    reservations: &Reservations,
+    kept: Option<Grant>,
 ) -> Result<(), Failure> {
-    if record.class != f_abi::manifest::class::SOFT {
-        return Err(Failure::Admission(error::pack(
-            error::ADMISSION,
-            error::admission::NOT_SCHEDULABLE,
-        )));
+    // A place that already holds the grant this record's demand was admitted
+    // for is not asking for a second one, and testing it would refuse it its
+    // own cores. `Grant::answers` compares what the record declares rather than
+    // trusting the field, so a record whose demand changed is tested again.
+    if !kept.is_some_and(|grant| grant.answers(&Demand::of(record))) {
+        reservations.admit(&Demand::of(record)).map_err(|why| Failure::Admission(why.code()))?;
     }
     let held = supervisor.inspect(account.handle).map_err(Failure::Capability)?.extent;
     if held < record.memory_bytes {

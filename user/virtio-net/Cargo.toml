@@ -1,0 +1,53 @@
+[package]
+name = "f-virtio-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The network driver, outside the frame. Speaks the modern virtio transport and copies nothing."
+
+# A library and not a binary, for the reason `user/init/Cargo.toml` states at
+# length and `user/virtio-blk/Cargo.toml` repeats: a binary needs an entry
+# point, naming one means `#[unsafe(no_mangle)]`, and that is an unsafe
+# attribute a crate forbidding unsafe code cannot write. `user/init/link.ld`
+# finds the entry by the section `component::start` was compiled into, which is
+# why this crate's entry has that path too — one script, one placement rule, one
+# check, now across three component crates rather than two.
+
+[dependencies]
+f-abi.workspace = true
+f-ring.workspace = true
+
+# No override. This crate inherits `unsafe_code = "forbid"` from the workspace,
+# and that inheritance is the subject of RFC 0033: a driver that touches device
+# registers and writes virtqueue descriptors, with no `unsafe` anywhere in it,
+# because `f_ring::device` discharges the obligation once on the frame's side of
+# the boundary. `cargo xtask lint-unsafe` fails the build if this stops being
+# true.
+#
+# That RFC was written with one driver in it. This crate is the second, and it
+# was written without adding a line to `ring/src/device.rs` — which is the
+# strongest evidence available that `Window` and `Region` are a device
+# vocabulary rather than a block device's vocabulary. RFC 0051 records what
+# *did* have to change, which is a shorter list than a reader would guess.
+[lints]
+workspace = true
+
+# The image half, on by default and turned off by the one crate that links this
+# as a library rather than building it into a component file.
+#
+# It exists because a `#[panic_handler]` is a lang item and there may be exactly
+# one in a linked artefact. `component::start` needs one — a component has no
+# serial port and no unwinder, so stopping is the whole handler — and the frame
+# already has its own. The frame links this crate for `routing`'s offsets and
+# `driver::Counters`' shape, so the two would collide; `kernel/Cargo.toml` turns
+# this off and says why.
+#
+# *Reversal:* the day nothing links this as a library, `default-features =
+# false` disappears from the kernel's manifest and this feature stops earning
+# its keep. It is the same reversal `user/virtio-blk/Cargo.toml` records, and
+# the fact that both drivers carry it is the argument for the routing layout
+# moving into `abi/` rather than for either of them changing.
+[features]
+default = ["image"]
+image = []
