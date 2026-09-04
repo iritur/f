@@ -251,14 +251,52 @@ RUN --mount=type=cache,target=/opt/cargo/registry,sharing=locked \
 # invalidates nothing in `claims/` — the checker produces a verdict, not a
 # number, which is RFC 0022's own argument for why a second toolchain is
 # affordable at all.
+# **On AArch64 the checker is not installed, and the reason is glibc rather than
+# a policy.** `cargo kani setup` downloads a prebuilt release bundle, and the
+# `aarch64-unknown-linux-gnu` one is linked against GLIBC_2.39 while this image's
+# base is bookworm, which carries 2.36. Setup *succeeds* and then `kani
+# --version` fails, so the break lands at the end of a two-minute layer and
+# reads as a broken image rather than as an unavailable tool — which is exactly
+# how it arrived: the arm64 half of the pull-request gate went red on a change
+# that had nothing to do with it.
+#
+# Nothing wants it there. `cargo xtask prove` runs on amd64 in
+# `.github/workflows/nightly.yml`, which builds its own `full-...-amd64` tag,
+# and the one pull-request job that needs this image — dependency policy — is
+# amd64 too. What the arm64 `full` image is for is `cargo-deny`,
+# `cargo-llvm-cov` and `cargo-nextest`, all of which build and run there.
+#
+# The asymmetry is stated rather than hidden, because a multi-architecture tag
+# whose two halves quietly differ is the failure the manifest job below exists
+# to prevent: **`full` means the extra tooling on both architectures, plus the
+# checker on the one whose bundle runs.** `kani --version` is still asserted
+# where it is installed, so a bundle that stops working is still a red layer.
+#
+# *What would reverse this:* Kani publishing an aarch64 bundle against an older
+# glibc, or this image's base moving past 2.39. Either makes the condition go
+# away and the `RUN` unconditional again, and neither is worth pre-empting.
+#
+# The default is to install. `TARGETARCH` is set by buildx and empty under a
+# plain `docker build`, so an unlabelled build gets the checker rather than
+# silently losing it: the hazard being guarded against is a missing tool, and a
+# missing tool should never be the quiet outcome.
 ARG KANI_VERSION=0.67.0
+ARG TARGETARCH
 ENV KANI_HOME=/opt/kani
 
 RUN set -eux; \
-    cargo install --locked kani-verifier --version "${KANI_VERSION}"; \
-    cargo kani setup; \
-    chmod -R a+rX /opt/cargo /opt/rustup /opt/kani; \
-    kani --version
+    case "${TARGETARCH:-amd64}" in \
+      arm64|aarch64) \
+        echo "kani: not installed on ${TARGETARCH}; the aarch64 bundle needs GLIBC_2.39 and this base carries 2.36, and nothing on this architecture runs the checker"; \
+        ;; \
+      *) \
+        cargo install --locked kani-verifier --version "${KANI_VERSION}"; \
+        cargo kani setup; \
+        chmod -R a+rX /opt/kani; \
+        kani --version; \
+        ;; \
+    esac; \
+    chmod -R a+rX /opt/cargo /opt/rustup
 
 ENV F_UID=1000 F_GID=1000
 
