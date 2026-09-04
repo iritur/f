@@ -55,6 +55,41 @@ impl Serial {
         }
     }
 
+    /// One byte from COM1, if the port has one waiting.
+    ///
+    /// # Why a kernel that only ever printed now reads
+    ///
+    /// Because `cargo xtask gpu` has to tell the machine when it has looked at
+    /// the screen. That check's whole subject is a picture on a display, which
+    /// is on the far side of the emulator and which nothing inside this machine
+    /// can observe — so the harness captures the framebuffer from outside and
+    /// the boot has to still be running when it does. A byte on this port is how
+    /// the harness says *I have looked*, and `kernel/src/main.rs` bounds the wait
+    /// for it so that a harness that never answers is a count rather than a
+    /// hang. RFC 0054.
+    ///
+    /// It is a **poll and not an interrupt**, which is R05 rather than
+    /// convenience: nothing in this system is delivered asynchronously, and a
+    /// byte on a serial port is not going to be the exception.
+    ///
+    /// What it is not is a console. There is no line discipline, no buffer and
+    /// no reader anywhere else in the tree; the one caller wants to know whether
+    /// *anything* arrived. A build that grows a second caller should ask whether
+    /// it wants a device rather than this function.
+    #[must_use]
+    pub fn received(&self) -> Option<u8> {
+        // Bit zero of the line status register is *data ready*. Reading it has
+        // no side effect; reading the receive buffer below consumes the byte,
+        // which is why the two are in this order.
+        // SAFETY: reading the line status register of COM1 has no side effect.
+        if unsafe { inb(COM1 + 5) } & 0x01 == 0 {
+            return None;
+        }
+        // SAFETY: the line status register says a byte is waiting, so reading
+        // the receive buffer takes that byte and nothing else.
+        Some(unsafe { inb(COM1) })
+    }
+
     fn write_byte(&self, byte: u8) {
         // Spin until the transmit holding register is empty. Bounded in
         // practice by the UART, and this path exists only for M0 and panics.

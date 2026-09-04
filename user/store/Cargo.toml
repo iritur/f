@@ -1,0 +1,44 @@
+[package]
+name = "f-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The component a place holds. Spawned from a manifest, killed, and spawned again."
+
+# A library and not a binary, for the reason `user/init/Cargo.toml` states at
+# length: a binary needs an entry point, naming one means `#[unsafe(no_mangle)]`,
+# and that is an unsafe attribute a crate forbidding unsafe code cannot write.
+# `user/init/link.ld` finds the entry by the section `component::start` was
+# compiled into, which is why this crate's entry has that path too — one script,
+# one placement rule, one check.
+
+[dependencies]
+f-abi.workspace = true
+# The ring, because a runtime drives two of them. `f_ring::adopt` is what makes
+# that expressible in a crate that forbids `unsafe` — RFC 0037 — and it is the
+# whole reason this crate acquired a second dependency.
+f-ring.workspace = true
+
+# No override. This crate inherits `unsafe_code = "forbid"` from the workspace,
+# which is what makes "a component contains no unsafe" a property of the build
+# rather than of the review. `cargo xtask lint-unsafe` fails if that stops being
+# true.
+[lints]
+workspace = true
+
+# The image half, on by default and turned off by the one crate that links this
+# as a library rather than building it into a component file.
+#
+# It exists because a `#[panic_handler]` is a lang item and there may be exactly
+# one in a linked artefact. `component::start` needs one — a component has no
+# serial port and no unwinder, so stopping is the whole handler — and the frame
+# already has its own. The frame links this crate for one thing only: so that
+# `report`'s encoding has one definition rather than two that can drift.
+#
+# *Reversal:* a runtime that publishes a state tree of its own under RFC 0013,
+# at which point the frame reads nodes rather than an exit status, this feature
+# stops earning its keep and the dependency in `kernel/Cargo.toml` goes with it.
+[features]
+default = ["image"]
+image = []

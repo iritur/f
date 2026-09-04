@@ -1,0 +1,544 @@
+name: nightly
+
+# The overnight seed sweep. Gate G1's second sentence in a cron entry: *a bug
+# injected into any component is found by an overnight seed sweep and arrives as
+# a reproduction command rather than as a symptom*.
+#
+# This file adds a schedule and changes no existing job. The pull-request gate in
+# ci.yml stays exactly what it was — its `workload` job runs the corpus, which is
+# seconds, and the million-trial sweep lives here where nobody is waiting for it.
+#
+# ## What it does when it finds something, which is the whole question
+#
+# A nightly job that nobody reads is a job that fails silently for a month, and
+# a red cross on a schedule is the easiest thing in a repository to stop seeing.
+# So a finding produces three things and not one:
+#
+#   1. **The job goes red.** `cargo xtask sweep` exits non-zero when it finds
+#      anything, and every finding in its report carries the one line that
+#      reproduces it.
+#   2. **The report is an artifact**, kept for ninety days, so a failure two
+#      weeks old is still readable after the log has rotated.
+#   3. **An issue is opened**, titled with the smallest reproduction the sweep
+#      found and containing the whole report. That is the part that reaches a
+#      person: an issue arrives in a notification and a scheduled workflow's red
+#      cross does not. It is opened once per finding-set — the title carries the
+#      signature and the scenario, so a sweep that finds the same thing on
+#      thirty consecutive nights adds thirty comments to one issue rather than
+#      opening thirty issues.
+#
+#   4. **The corpus grows.** The job sweeps with `--record`, so every finding is
+#      merged into `sim/corpus.txt` before the verdict comes back, and the file
+#      is uploaded as an artifact. A scheduled job cannot commit to the tree and
+#      should not try; what it can do is hand a person the exact file to merge,
+#      so that a seed which found something outlives the run that found it. The
+#      corpus is append-only, so the diff against the tree is what was added.
+#
+# The exit criterion says *with no human triage*. What arrives is therefore the
+# report itself and not a summary of it: the first finding is the smallest
+# reproduction the sweep has, it is spelled as a `--check` run that exits
+# non-zero and names the property it broke, and reading it is the whole of the
+# work.
+#
+# ## Why the base moves and the grid does not
+#
+# A sweep is a pure function of `(commit, base, seeds, scenarios)`. That is what
+# makes a finding reproducible and it is also what would make a nightly on an
+# unchanged commit reproduce the previous night's bytes exactly — a regression
+# suite with a cron entry rather than a search. So the *base* walks a committed
+# list by run number while everything else stays fixed: successive nights cover
+# new seed space, and any single night is replayable from the base its own
+# report prints. Nothing here reads a clock.
+#
+# ## The two other jobs, and why the sweep is not enough on its own
+#
+# `harness` is the half that says a clean sweep means anything. It arms the
+# deliberate defect, requires the sweep and the corpus to find it, disarms it and
+# requires both to go quiet — the same argument `cargo xtask mutate` makes about
+# the boot suite. Without it, a sweep whose oracle had quietly stopped reading
+# anything would print `clean` every night for a year. RFC 0017, RFC 0040.
+#
+# `join` re-runs the boot-to-workload join on a schedule, because the gap it
+# declares (`JOIN_GAP`) closes by somebody else's work landing rather than by
+# anything in this file changing. RFC 0036.
+
+on:
+  schedule:
+    # 03:11 UTC. Not on the hour: GitHub's scheduler is busiest at exact hours
+    # and delays a job that asks for one, and a nightly that runs at an
+    # unpredictable time is a nightly whose duration nobody can read.
+    - cron: "11 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "How many seeds per scenario"
+        required: false
+        default: "65536"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository_owner }}/f-dev
+  # 65 536 seeds against every shipped scenario. That was eighteen scenarios and
+  # 1 179 648 trials when it was measured, and it took 226 s on the four-core
+  # development container — measured, not estimated. The table grows: this
+  # comment is the one account of the scenario set with nothing keeping it in
+  # line, so read the total as a rate and ask `cargo xtask sweep --help` or
+  # `f-sim --list` for today's count. A GitHub runner has two cores, so the
+  # number to expect here is roughly twice that. It is a nightly: the budget is
+  # the night.
+  #
+  # It is also seven processes rather than one, and that is not a performance
+  # choice. Every trial leaks its clients' buffer regions — `sim/src/client.rs`
+  # grants a component's region for the life of the component, and a simulated
+  # component's life is the run — so one process holds a bounded number of
+  # trials and `f-sim` refuses a grid past that bound instead of being killed
+  # for memory half way through the night. `cargo xtask sweep` shards on the
+  # ceiling `f-sim --ceiling` states, which is 9 658 seeds here — so this is
+  # seven processes and the largest of them peaked at 941 268 kB, which is
+  # 0.90 GiB and fits the 7 GB runner class. Measured, polled through /proc
+  # every two seconds. Unsharded, the same sweep reached 6.06 GiB. RFC 0042.
+  SEEDS: ${{ github.event.inputs.seeds || '65536' }}
+  # The seeds successive nights derive from, committed rather than computed.
+  #
+  # The sweep is a pure function of (commit, base, seeds, scenarios), which is
+  # the property the whole apparatus rests on — so on an unchanged commit every
+  # night would otherwise reproduce the previous night's bytes exactly, and a
+  # nightly that re-runs one fixed grid is a regression suite with a cron entry
+  # rather than a search. Walking a committed list by run number covers new seed
+  # space each night while leaving any single night replayable from the base its
+  # own report prints. The list is here rather than derived from a clock because
+  # a base drawn from the time of day is a finding nobody can reproduce.
+  BASES: >-
+    0xf00dbeefcafe1234
+    0x9e3779b97f4a7c15
+    0x6a09e667f3bcc909
+    0xbb67ae8584caa73b
+    0x3c6ef372fe94f82b
+    0xa54ff53a5f1d36f1
+    0x510e527fade682d1
+    0x1f83d9abfb41bd6b
+
+jobs:
+  # The environment, computed and built exactly as ci.yml does it. Duplicated
+  # rather than shared, and the duplication is deliberate: a nightly that
+  # depended on a pull-request run having happened would be a nightly that fails
+  # at "Initialize containers" on any week nobody opened a pull request, which is
+  # the failure ci.yml's own header describes having had once already.
+  environment:
+    name: environment tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      image: ${{ steps.tag.outputs.image }}
+      image_full: ${{ steps.tag.outputs.image_full }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: tag
+        run: |
+          hash=$(echo "${{ hashFiles('docker/Dockerfile', 'docker/entrypoint.sh', 'rust-toolchain.toml') }}" | cut -c1-16)
+          echo "tag=env-$hash" >> "$GITHUB_OUTPUT"
+          echo "image=${REGISTRY}/${IMAGE}:env-$hash-amd64" >> "$GITHUB_OUTPUT"
+          # The `full` image, which is the only one carrying Kani. It is a
+          # second tag off the same hash rather than a second hash: both are
+          # built from the same three files, so a commit that leaves the
+          # environment alone is a cache hit for both.
+          echo "image_full=${REGISTRY}/${IMAGE}:full-env-$hash-amd64" >> "$GITHUB_OUTPUT"
+          echo "environment tag: env-$hash"
+
+  # x86-64 only. The sweep runs above the frame, in a host crate with no
+  # architecture in it, so the AArch64 runner buys nothing here — what it buys is
+  # in ci.yml's litmus and test jobs, where the memory model is the subject.
+  image:
+    name: environment image
+    needs: environment
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: dev
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ needs.environment.outputs.tag }}-amd64
+          cache-from: type=gha,scope=dev-amd64
+          cache-to: type=gha,mode=max,scope=dev-amd64
+
+  # `full` adds Kani, which the `prove` job needs and which nothing else here
+  # does. It is a separate target for the reason docker/Dockerfile states at the
+  # layer — the checker's toolchain is about 1.4 GB and exactly one job pulls it
+  # — and it is a separate *job* for a reason worth stating, because it was a
+  # second step in `image` first and that was wrong:
+  #
+  # six jobs below carry `needs: [environment, image]`. A Kani layer inside
+  # `image` puts all six behind a `cargo install` from crates.io and a 483 MB
+  # download from GitHub releases, at image-build time, on every commit that
+  # misses the cache — which is precisely the commit that changes
+  # docker/Dockerfile. A network failure in the checker's own toolchain would
+  # then take down the sweep, the fuzzers and the Miri job, none of which have
+  # ever heard of it. docker/README.md records that exact download failing on
+  # one machine already. A check that does not run asserts nothing, so the
+  # blast radius of this layer is one job by construction rather than by luck.
+  image_full:
+    name: environment image, with the checker
+    needs: environment
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: full
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:full-${{ needs.environment.outputs.tag }}-amd64
+          cache-from: type=gha,scope=full-amd64
+          cache-to: type=gha,mode=max,scope=full-amd64
+
+  # The half that says a clean sweep means something. It runs first and the sweep
+  # depends on it, so a night where the harness has broken reports *the harness
+  # is broken* rather than reporting a clean sweep nobody should believe.
+  harness:
+    name: the sweep can fail
+    needs: [environment, image]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo xtask sweep --mutate
+
+  sweep:
+    name: overnight seed sweep
+    needs: [environment, image, harness]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      # `tee` and not a redirect: the log should carry the report as well as the
+      # artifact, because the commonest way to read a nightly failure is to click
+      # the red cross. `pipefail` so the sweep's own exit status survives the
+      # pipe — without it this job would be green on every finding, which is the
+      # exact shape of silently-broken this file's header is about.
+      - name: sweep
+        id: sweep
+        run: |
+          set -o pipefail
+          # The base this night sweeps from, walked by run number over a
+          # committed list. `github.run_number` is monotone and is not a clock:
+          # it selects which committed base is used and reaches nothing else,
+          # and the report prints the base it was given, so any night is
+          # replayable from its own artifact.
+          set -- $BASES
+          shift $(( GITHUB_RUN_NUMBER % $# ))
+          base="$1"
+          echo "base for this night: $base"
+          # `--record` and not `--sweep`: growing the corpus and going red are
+          # both this job's, and a second full pass to do the second of them
+          # would double the night. Entries are merged into sim/corpus.txt
+          # before the verdict is returned, and the file is uploaded below
+          # whether or not anything was found.
+          cargo xtask sweep --base "$base" --record "$SEEDS" 2>&1 | tee sweep-report.txt
+
+      # The corpus as this night left it. A nightly cannot commit to the tree
+      # and should not try: what it can do is hand a person the exact file to
+      # merge, so a seed that found something survives the run that found it.
+      # `sweep --record` is append-only, so the diff against the tree is what
+      # was added and nothing else.
+      - name: keep the corpus this night grew
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus
+          path: sim/corpus.txt
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-report
+          path: sweep-report.txt
+          retention-days: 90
+          if-no-files-found: error
+
+      # The part that reaches a person. A scheduled workflow's red cross is a
+      # notification nobody has subscribed to; an issue is one everybody has.
+      - name: open an issue for it
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The first finding is the smallest reproduction the sweep has —
+          # `f_sim::sweep` sorts by it — so the title names that one and the body
+          # carries the whole report. A title that carried a count instead would
+          # be a title somebody has to open the issue to understand.
+          # `-m1`: a sharded sweep prints one report per shard, so there is a
+          # `finding 1` per shard that found anything. The first is the one from
+          # the earliest seed range, which is the one to look at first — and it
+          # keeps the title stable across nights that find the same thing.
+          headline=$(grep -m1 -E '^finding 1  ' sweep-report.txt || echo "finding 1  (the report's shape moved)")
+          title="nightly sweep: ${headline#finding 1  }"
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number')
+          {
+            echo "The nightly seed sweep found something at commit \`${{ github.sha }}\`."
+            echo
+            echo "Every finding below carries the one line that reproduces it, and that"
+            echo "line judges itself: it runs \`--check\`, which exits non-zero and names"
+            echo "the property that broke. There is nothing to triage: paste the"
+            echo "\`smallest\` line of finding 1, which is the tightest reproduction this"
+            echo "sweep found. The run's \`corpus\` artifact holds sim/corpus.txt with this"
+            echo "night's entries already merged in."
+            echo
+            echo '```'
+            cat sweep-report.txt
+            echo '```'
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > body.md
+          if [ -n "$existing" ]; then
+            # One issue per finding-set. A sweep that finds the same thing for
+            # thirty nights should produce one thread with thirty comments, not
+            # thirty issues nobody closes.
+            gh issue comment "$existing" --body-file body.md
+          else
+            gh issue create --title "$title" --body-file body.md --label nightly || \
+              gh issue create --title "$title" --body-file body.md
+          fi
+
+  # RFC 0036's declared gap closes when somebody else's work lands, so it is
+  # re-checked on a schedule as well as in the gate: `JOIN_GAP` still holding
+  # exactly is a statement about the tree that changes without this file
+  # changing.
+  join:
+    name: boot-to-workload join
+    needs: [environment, image]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo xtask sim --join
+
+  # E1-P04, at the counts the gate cannot afford and at a base that moves.
+  #
+  # The pull-request gate already runs the exit's billion at the tree's own
+  # seed, which is a regression suite: same commit, same bytes, every time. What
+  # this adds is *search* — the base walks the same committed list the sweep
+  # uses, so successive nights cover new seed space, and any night is replayable
+  # from the base its own report prints. Nothing here reads a clock.
+  #
+  # And the Miri half at sixteen times the gate's count. Four thousand
+  # operations a commit is what an interpreter costing six orders of magnitude
+  # buys inside a pull request; sixty-five thousand is what a night buys, and
+  # both numbers are in claims/0008 rather than one of them being in prose.
+  # RFC 0046.
+  hostile:
+    name: the hostile peer, overnight
+    needs: [environment, image]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      # The harness first, for the sweep's reason: a night where the fuzzer has
+      # broken should report that rather than report a clean billion nobody
+      # should believe.
+      - run: cargo xtask hostile --mutate
+      - name: a billion operations at tonight's base
+        run: |
+          set -o pipefail
+          # `github.run_number` is monotone and is not a clock: it selects which
+          # committed base is used and reaches nothing else. The same mechanism
+          # the sweep above uses, and the same list.
+          set -- $BASES
+          shift $(( GITHUB_RUN_NUMBER % $# ))
+          base="$1"
+          echo "base for this night: $base"
+          cargo xtask hostile --base "$base" --exit 2>&1 | tee hostile-report.txt
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hostile-report
+          path: hostile-report.txt
+          retention-days: 90
+          if-no-files-found: error
+
+  # The unsafety property at the count a night can afford. Separate from the job
+  # above because the two differ by six orders of magnitude in cost and by one
+  # in what they can see.
+  miri:
+    name: the ring under Miri, overnight
+    needs: [environment, image]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo xtask hostile --miri --mutate
+      - name: sixty-five thousand operations under Miri
+        run: |
+          set -- $BASES
+          shift $(( GITHUB_RUN_NUMBER % $# ))
+          cargo xtask hostile --miri --base "$1" 65536
+      # And the corpus under the tool, which is the one thing the pull-request
+      # gate does not do: every run that has ever found something, re-run with
+      # the aliasing checker on.
+      - run: cargo xtask hostile --miri --corpus
+
+  # E1-P05 at a base the pull-request gate never uses, and at sixteen times its
+  # count. The gate is a quarter of a million cases at the tree's own seed, which
+  # is a fixed sample: what a night buys is *different* inputs, and the value of
+  # that is the same as the sweep's — the corpus in the tree was found at one
+  # base, and a family that only ever produces refusals at that base produces
+  # something else at another.
+  #
+  # It does not `--record`. Writing a corpus needs a commit and a night has no
+  # branch to put one on; what a red night says is *there is a case the corpus
+  # does not have*, and the reproduction is in the report. RFC 0048.
+  entries:
+    name: the entry fuzzer, overnight
+    needs: [environment, image]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      # The oracles first, for the hostile job's reason.
+      - run: cargo xtask entries --mutate
+      - name: four million cases at tonight's base
+        run: |
+          set -o pipefail
+          set -- $BASES
+          shift $(( GITHUB_RUN_NUMBER % $# ))
+          base="$1"
+          echo "base for this night: $base"
+          cargo xtask entries --base "$base" 4194304 2>&1 | tee entries-report.txt
+      # And the committed corpus, replayed and measured, because a night is also
+      # where a coverage figure that has quietly fallen shows up.
+      - run: cargo xtask entries --corpus
+      - run: cargo xtask entries --coverage
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: entries-report
+          path: entries-report.txt
+          retention-days: 90
+          if-no-files-found: error
+
+  # E1-P07 and E1-P12. The five capability properties and the ring's validation
+  # paths, proved rather than sampled.
+  #
+  # ## Why one job and not two
+  #
+  # Because `lint-proofs` requires that exactly **one** job depend on
+  # `image_full`, and it is right to: that image carries Kani's own rustc, built
+  # by fetching a crate and a 483 MB release at image-build time, so every job
+  # waiting on it is a job the checker's toolchain can take down. E1-P12 wanted
+  # a second `prove` job and got the check firing correctly on the first thing
+  # that tried to do what it was written against. So `cargo xtask prove` runs
+  # both crates, prints how many, and this stays one job. RFC 0057.
+  #
+  # ## Why this is on a schedule and not in the gate
+  #
+  # Two reasons, and the smaller one is the time: `cargo xtask prove` is about
+  # twenty minutes on the four-core development container, which is a nightly's
+  # budget rather than a pull request's. That is context and not a claim — a
+  # container wall clock is the one number this tree refuses to publish, which
+  # is why `bench/src/lib.rs` will not record one and why there is no figure to
+  # the second here.
+  #
+  # The larger reason is what it needs. Kani ships a rustc of its own, so the
+  # image that carries it is 1.48 GB larger than the one every job in `ci.yml`
+  # pulls, and putting the checker in the gate's image would charge every
+  # pull-request job for a verb one of them runs. `E1-P07`'s exit says *on a
+  # schedule*, and this is the schedule it meant. RFC 0022 for the toolchain,
+  # RFC 0053 for the proofs.
+  #
+  # ## What checks that this job is still here
+  #
+  # Nothing in the repository can watch GitHub run it, so `cargo xtask
+  # lint-proofs` checks the half that is local: that this file still holds a
+  # schedule, still runs `cargo xtask prove`, still names the checker's image,
+  # and that exactly one job depends on that image. It is the difference between
+  # a clause somebody verified once and a clause the gate re-verifies.
+  #
+  # ## Why the run is a pair, like every other harness in this file
+  #
+  # `cargo xtask prove` verifies every harness in both crates — the count is on
+  # its own first line, so read it there rather than here — and then arms the
+  # deliberate defects, the same ones `cargo xtask mutate`, `hostile` and
+  # `entries` arm for a boot or a fuzzer, and requires each to *fail* the
+  # harness that states the property it breaks, where it breaks it. Their count
+  # is on the verb's own last line for the same reason the harness count is:
+  # a number written here is one nothing keeps true, and the last one was
+  # already wrong. A proof that
+  # passes on a build with a known defect in the code it is about is not a proof
+  # of anything, and it is the way this job would rot: a `#[path]` that stopped
+  # reaching `kernel/src/cap.rs`, or a `ring/proofs` that started proving a copy
+  # of `f-ring` rather than the crate, would leave green harnesses verifying
+  # code nobody runs. Every half is inside the one verb rather than in separate
+  # steps, because they have to fail together or the pair means nothing.
+  # RFC 0017, RFC 0053, RFC 0057.
+  #
+  # The ring's proofs also carry `kani::cover!` for every answer a harness can
+  # produce, and an unsatisfiable cover is a *failed* verification. That is the
+  # failure mode a proof over arbitrary bytes has and a proof over arbitrary
+  # handles does not: a fixture whose region is never adopted verifies instantly
+  # and proves nothing.
+  #
+  # The checker does not enforce that and this job would be green if it were
+  # left to: Kani prints `1 of 2 cover properties satisfied (1 unreachable)` and
+  # then `VERIFICATION:- SUCCESSFUL`, exit 0. `cargo xtask prove` reads the
+  # count out of every report and refuses on it, which is what makes the
+  # sentence above a property of this job rather than a hope about it. The
+  # satisfied count is printed beside each harness too, so a run that lost a
+  # cover is readable in this job's artifact and not only in its exit status.
+  #
+  # ## What it does *not* do
+  #
+  # It opens no issue. The sweep above does, because a finding there is a seed
+  # nobody can reproduce from the log alone; a failed proof is a counterexample
+  # Kani prints in full, and `--concrete-playback` turns it into a test case. The
+  # report is kept as an artifact for ninety days and the job goes red, which is
+  # what a deterministic failure on a fixed input needs and no more.
+  prove:
+    name: the capability properties and the ring's validation paths, proved
+    needs: [environment, image_full]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image_full }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: both crates, and the deliberate defects that must break them
+        run: |
+          set -o pipefail
+          cargo xtask prove 2>&1 | tee prove-report.txt
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prove-report
+          path: prove-report.txt
+          retention-days: 90
+          if-no-files-found: error

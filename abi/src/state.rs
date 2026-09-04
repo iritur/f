@@ -86,6 +86,11 @@ pub mod unit {
     pub const CORES: u8 = 6;
     /// Capability table slots.
     pub const SLOTS: u8 = 7;
+    /// Things that happened, counted one at a time — a refill, a steal, a
+    /// retry. Distinct from [`CALLS`] because a call is something somebody
+    /// asked for and an event is something a subsystem did to itself, and a
+    /// reader charting the two together would be adding a demand to a cost.
+    pub const EVENTS: u8 = 8;
 }
 
 /// The first cache line of a published region.

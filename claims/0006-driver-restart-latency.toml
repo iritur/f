@@ -1,0 +1,78 @@
+# The half of E1-P06's exit that is a time, split off from claim 0005 rather
+# than folded into it.
+#
+# *No client observes anything except added latency* is only worth saying if the
+# latency is bounded, because "only latency" with an unbounded tail is a hang
+# with better manners. But a bound in nanoseconds is a measurement, and
+# `bench/src/lib.rs` refuses to record one in a container — correctly, and for
+# the reason `claims/runner-class-A.md` states at length. So the sentence splits
+# in two: the counts gate today in claim 0005, and this is the number that waits.
+#
+# Splitting was the alternative to weakening. A single claim carrying both would
+# have had to be `pending`, which would have put a correctness result that this
+# machine *can* take behind a machine it does not need.
+name       = "driver-restart-latency"
+status     = "pending"          # pending | tracked | gating
+milestone  = "E1"
+
+statement  = """
+A client whose driver is killed and restarted under sustained load waits, at
+p99, no longer than the backoff its component's manifest declares for that
+restart plus the same operation's cost with nothing killed. For
+`user/virtio-blk/manifest.toml` — ten milliseconds doubling to a second — a
+client caught by the first restart waits under 11 ms at p99 and under 15 ms at
+p999, and the tail is bounded by the declared ladder rather than by anything the
+implementation chooses.
+
+The number is a *client-observed* latency: from the submission the client made
+to the completion it read, across a peer that died in between, re-registration
+included. It is not the time the frame took to respawn, which is a different
+number owned by a different subsystem.
+"""
+
+[baseline]
+system  = "none"
+notes   = "Claim 0002's argument. This is an absolute bound on the system's own behaviour against a pause the component's own manifest declares, not a ratio against somebody else's system, so a baseline configuration would be a baseline of nothing. What takes its place is the manifest: the ladder is declared before the number is measured, which is what makes the threshold falsifiable rather than fitted."
+
+[owner]
+document = "docs/design/fast-path.html"
+section  = "08"
+notes    = "The same owner as claim 0005 and deliberately so: they are two halves of one sentence, and an owner who was asked about the count and not the tail could answer *no client observed a failure* about a system that had stopped answering at all. The subsystem is the component lifecycle — `kernel/src/component.rs` — and the restart policy is `user/virtio-blk/manifest.toml`'s."
+
+[workload]
+path   = "sim/src/chaos.rs"
+kills  = 3
+notes  = "The workload exists and the measurement does not, and the gap between them is exactly RFC 0041's declared one. `cargo xtask chaos` prints every metric named above — p50, p99, p999, max and restarts observed, per component — under a heading that says VIRTUAL, because a claim whose reproduction command printed somebody else's numbers would reproduce nothing. The figures are **virtual nanoseconds**: the simulator's clock is the model's own, so the figure it prints is a property of the model's parameters rather than of any machine, and it is reported rather than recorded for that reason. What would make it this claim's number is the same workload driven against a *scheduled* driver component on real hardware, which needed the two moves `E1-B08` named as remaining. One of them is now done: RFC 0047 schedules the driver at ring 3 and `kernel/src/blk.rs` calls no part of it, which `cargo xtask lint-datapath` holds. One is not: the restart policy still runs in the frame, and that is `OWED_REVERSALS`' first row in `xtask` rather than a sentence here. After it, a machine meeting claims/runner-class-A.md."
+
+[metrics]
+primary   = "ns_client_wait_p99"
+secondary = ["ns_client_wait_p50", "ns_client_wait_p999", "ns_client_wait_max", "restarts_observed"]
+
+[threshold]
+# Written before there is a number, and derived from a declaration rather than
+# from a measurement: `backoff_first_ms` is ten, so a client caught by the first
+# restart waits that plus its operation, and 11 ms is where "plus its operation"
+# stops being a rounding error. The p999 bound is the second rung of the ladder
+# with room — a client caught twice waits 10 + 20 — and anything past it is a
+# wait the declared policy does not account for, which is the failure this
+# number exists to name.
+ns_client_wait_p99  = { max = 11_000_000 }
+ns_client_wait_p999 = { max = 15_000_000 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "A tail latency needs a machine whose clock and whose interference are both accounted for, which is claims 0001 and 0002's requirement and this one's. It needs one thing more that those do not: a driver component that is *spawned into a place and scheduled there*, so that the pause being measured is a real respawn and not a model's arithmetic. Half of that arrived with RFC 0047 — the driver is scheduled, at ring 3, on its own core — and the half that has not is the one this number depends on, because a component the boot never spawns into a place is a component nothing can restart. `CHAOS_GAP` in `xtask` is where that half is declared and what goes red the day it closes. Under emulation the respawn is QEMU's translation cache as much as it is the frame, which `kernel/src/runtime.rs` already records costing between 18 and 260 timer ticks for one unchanged load — a spread that is a property of the emulator and would swamp a ten-millisecond backoff's tail entirely."
+
+[reproduce]
+# The same command claim 0005 names, and the same run: they are two readings of
+# one workload, which is why splitting them was the honest move rather than a
+# way of getting a green. The command prints this claim's five metrics and then
+# says, in the words `xtask` reserves for a `pending` claim, that what it printed
+# is not a recorded number. That last sentence is the claim: `bench/src/lib.rs`
+# will not record a timing in a container and this does not ask it to.
+command = "cargo xtask claim driver-restart-latency"
+
+[diagnosis]
+p99_at_the_ladder = "expected, and it is the claim holding rather than failing: a client caught by a restart waits the backoff out, so a p99 sitting just above `backoff_first_ms` is the policy being the cost. What would be a finding is a p99 well *below* it, which means the kills are not landing on operations in flight"
+tail_past_the_ladder = "something is waiting that the policy does not account for. The re-registration is the first suspect — a client reconnects through the endpoint it already holds and its registration pends until the refill, so a refill that does not ring the doorbells the shared region is holding adds a whole retry interval"
+bimodal = "two populations, and they are probably `caught by a kill` and `not caught by a kill`. That is the honest shape of this distribution and the reason claims/README.md rule 3 asks for the histogram rather than the summary: a mean over both says nothing about either"

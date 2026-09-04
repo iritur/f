@@ -1,0 +1,118 @@
+# The time half of `E1-B14`'s exit, split off from claim 0014 rather than folded
+# into it.
+#
+# The exit asked for shootdowns, interrupts and a **p99 unmap cost**. The first
+# two are counts and claim 0014 takes them here; the third is a number in
+# nanoseconds, and `bench/src/lib.rs` refuses to record one in a container —
+# correctly, and for the reason `claims/runner-class-A.md` states at length. So
+# the sentence splits, exactly as 0005/0006 and 0012/0013 already do: the counts
+# that decided the task gate today, and this is the number that waits.
+#
+# What waits is the *publication* and not the workload. The distribution is
+# taken on every churn boot, through the shipped path, on a real remapping unit;
+# what the machine gates is whether a percentile of it may be quoted. That
+# distinction is the difference between a claim with a workload nobody has run
+# and a claim with an instrument that has been checked everywhere except the one
+# place its number will come from.
+#
+# Splitting was the alternative to weakening. One claim carrying both would have
+# had to be `pending`, which would have put the measurement that settled a design
+# question behind a machine that question did not need.
+name       = "unmap-churn-cost"
+status     = "pending"          # pending | tracked | gating
+milestone  = "E1"
+
+statement  = """
+One unmap request under datapath churn costs, at p99, no more than the
+registration it undoes — `claims/0004`'s per-set number — and its tail is
+bounded by the remapping unit's invalidation rather than by the registration
+table's arithmetic.
+
+The second clause is the one worth measuring and it is a statement about *where
+the time goes*, not only how much there is. After `E1-B14` an unmap request is
+one page-table walk per page and one global invalidation for the whole request:
+two register writes and two spins on the unit clearing a request bit. If the
+tail is in the walk, the batch bought the wrong thing and the table geometry is
+what to change. If the tail is in the invalidation, the next move is the queued
+invalidation interface, which `kernel/src/arch/x86_64/vtd.rs` refuses today and
+argues for refusing.
+
+The number is measured from the service's side: from the entry being taken to
+the set being retired and the translation gone, with the registration that
+preceded it outside the measurement.
+"""
+
+[baseline]
+system  = "none"
+notes   = "Claim 0002's argument, and 0014's. This is an absolute statement about what one operation costs on this system, not a ratio against another's, so a baseline configuration would be a baseline of nothing. What takes the place of a baseline is claim 0004: the registration is the operation this undoes, it is measured by the same harness on the same machine, and *an unmap costs no more than the registration it undoes* is falsifiable against a number this tree already publishes rather than against a hope."
+
+[owner]
+document = "docs/design/fast-path.html"
+section  = "13"
+notes    = "The same owner as claim 0014 and deliberately so: they are two halves of one sentence, and an owner asked about the count and not the time could answer *one invalidation per request* about a unit taking a millisecond to perform it. The subsystem is the remapping unit — `kernel/src/arch/x86_64/vtd.rs` — reached through `kernel/src/iommu.rs`. RFC 0052 is the decision the number would test."
+
+[workload]
+path         = "kernel/src/churn.rs"
+observations = 1024
+notes  = "The workload is the boot, and the reason is that most of this number is on the far side of a device register. `churn::time` takes 1024 timed unmap requests — thirty-two rounds of thirty-two register-and-retire cycles — through the shipped path on the machine's own remapping unit: `Registrations::unregister`, then `Grant::unmap`, which is the page-table walk over the set's eight pages and the one global invalidation that publishes it, two register writes and two spins on the unit clearing a request bit. The registration that precedes each retirement is outside the measurement, because `claims/0004` is the cost of registering and averaging the two would make both claims unreadable. — 1024 rather than a round hundred because `p999` has to be a position in the distribution rather than a synonym for the maximum; the counting pass takes forty requests, which is a number and not a percentile, and that is why this is a separate pass rather than a column added to `claims/0014`. — **The instrument is checked where it runs, not where it will be quoted.** Every churn boot records the distribution and the verdict fails on two counts: fewer observations than were owed, and a maximum of zero ticks — a clock that did not move. Both are counts, so they mean the same thing here and on the owed machine, and they are the difference between an apparatus that works and one nobody has run. What is gated is the *quotable* number: percentiles are printed only when the command line says this is a measurement environment, and `cargo xtask churn` writes that word from `f_bench::Environment::detect`, so one rule decides what may be published rather than a second one in the kernel that could disagree with it. — `bench/src/bin/unmap_churn.rs` stays beside the other `E1-P10` workloads and is the smaller half, stated as such in its own module documentation: it drives the identical registry churn against a host clock with no hardware under it to invalidate, so what it times is the arithmetic above the unit — the slot lookup, the generation retirement, the in-flight word and one iteration per page. `cargo xtask churn` requires the two to report the same counts, which is what stops them becoming two experiments sharing one claim."
+
+[metrics]
+primary   = "ns_unmap_request_p99"
+secondary = [
+  "ns_unmap_request_p50",
+  "ns_unmap_request_p999",
+  "ns_unmap_request_max",
+  # The split the second clause of the statement is about, and it needs two
+  # numbers rather than one: a p99 that is all invalidation and a p99 that is
+  # all walk are the same scalar and are not the same result. Neither is
+  # available on the host, which is why this claim is `pending` and not merely
+  # unmeasured.
+  "ns_invalidation_round_trip",
+  "ns_page_walk_per_page",
+  # Not a duration, and here because every duration above is worth exactly what
+  # it is worth: the sample this claim's percentiles are taken over, and the
+  # largest tick count seen. Both are counts, so both are checked on every churn
+  # boot including the ones in a container, which is where an instrument that
+  # does not work is cheapest to find.
+  "observations",
+  "worst_ticks",
+]
+
+[threshold]
+# Written before there is a number, and derived from a claim rather than from a
+# measurement: `claims/0004`'s registration is the operation this undoes, and an
+# unmap that costs more than the registration it reverses would mean the batch
+# bought nothing that the map does not already pay twice over. The p999 bound is
+# the same number with the unit's own worst spin in it, and anything past it is
+# a tail the register interface does not account for — which is the finding this
+# number exists to produce, and the argument the queued interface would rest on.
+ns_unmap_request_p99  = { max = 20_000 }
+ns_unmap_request_p999 = { max = 60_000 }
+# Bounded from below as well, and this is the row that stops the two above being
+# free. A run that measured nothing reports zero and passes a maximum. The walk
+# is at least a handful of memory accesses per page and the invalidation is at
+# least a round trip to a device register, so a p50 under a hundred nanoseconds
+# for an eight-page request is a measurement of a loop that was optimised away
+# rather than of an unmap.
+ns_unmap_request_p50  = { min = 100 }
+# And the two rows that are not durations. A percentile is a statement about a
+# sample, so the sample is bounded: a thousand observations is the smallest at
+# which `p999` names a position rather than the maximum. A maximum of zero ticks
+# is a clock that did not move, and it is the failure that would otherwise
+# publish a beautiful p99 of nothing — checked on every churn boot rather than
+# only on the machine this claim waits for.
+observations          = { min = 1_000 }
+worst_ticks           = { min = 1 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "This claim needs that machine and needs one thing beyond it, which is stated here rather than discovered by whoever first tries to take the number: a remapping unit whose invalidation is real. `runner-class-A.md` already requires an IOMMU by name for `E1-B01`, so the machine is the one already owed — but the emulator this tree boots on answers an invalidation instantly and in software, so a number taken there would be a measurement of QEMU's dispatch loop wearing a hardware unit's name. That is the same trap `WHY_CONTAINER` in `bench/src/lib.rs` names for the timer, one device over."
+
+[diagnosis]
+observations_short = "the timed pass stopped early, so the percentiles above are over a sample this claim did not agree to. `churn::timed` returns on the first refused registration, and the reason is almost always the domain or the registration table running out of room rather than anything about time"
+worst_ticks_zero = "every timed unmap took zero ticks, so this is an instrument that does not work and every number beside it is worthless. Either the timestamp counter is not advancing — `apic::calibrate` would have refused the boot — or the measurement is being taken around something the compiler removed. It is checked on every churn boot for exactly this reason: a p99 taken on a machine where the clock is dead looks like a very fast unmap"
+p99_over_bound = "an unmap costs more at p99 than the registration it undoes (`claims/0004`), which is the comparison this threshold is made of. Read the split first — `ns_invalidation_round_trip` against `ns_page_walk_per_page` — because the two answers point at different changes: a tail in the walk is the table geometry, a tail in the round trip is the queued invalidation interface `vtd` refuses today and RFC 0052 names as the next move"
+p50_under_bound = "the measurement is of a loop that was optimised away rather than of an unmap. An eight-page walk plus a register round trip cannot cost under a hundred nanoseconds on the machine this claim is taken on, so the minimum is a check on the apparatus and not on the system"
+
+[reproduce]
+command = "cargo xtask claim unmap-churn-cost"

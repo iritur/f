@@ -53,6 +53,71 @@ mutate-relaxed-completion = []
 # there; a clean pass on the arm runner. RFC 0020.
 mutate-no-doorbell-fence = []
 
+# E1-P04's three, and there are three because there are three properties. A
+# harness with one defect in it exercises one property and decorates the other
+# two — RFC 0042 found that in the sweep's oracle, and this is the same
+# arithmetic applied before it could be rediscovered. Each is named after the
+# property it breaks; `cargo xtask hostile --mutate` arms the first two and
+# `cargo xtask hostile --miri --mutate` arms the third, because the third is
+# invisible to anything but Miri and that is exactly what it is for. RFC 0046.
+
+# `Mapping::adopt` treats a refusal from `Layout::adopt` as impossible. One
+# character of difference, and it breaks the sentence this crate's module
+# comment opens with: never panic on anything a peer wrote.
+mutate-believed-header = []
+
+# `Consumer::pop` drops the bounds check on the slot number in the index ring
+# and reads through raw pointer arithmetic. Deliberately not a slice index: an
+# out-of-range index is a bounds-check panic, which is the defect above wearing
+# a different name. This one returns a plausible entry from past the end of the
+# array and nothing in the process can tell.
+mutate-trusted-slot = []
+
+# `Service::drain` reads its budget and ignores it, so how long the call takes
+# is the peer's choice again. It is what makes the case for asserting the hang
+# property as a count: the loop still returns, and only the count is wrong.
+mutate-unbounded-drain = []
+
+# E1-P05's three, and there are three for the same arithmetic: the entry
+# fuzzer has three oracles — the envelope, the ledger and the reach — and a
+# harness with one defect in it exercises one of them and decorates the other
+# two. Each is named after the oracle it breaks and `cargo xtask entries
+# --mutate` requires each to be found by that oracle and by no other. RFC 0048.
+
+# `execute` masks an unknown flag bit off instead of refusing the entry. The
+# defect R04 exists to name, and it is invisible to every property
+# `ring/tests/hostile.rs` asserts: nothing panics, nothing hangs, nothing reads
+# out of bounds, and two peers now disagree about what happened.
+mutate-ignored-flag = []
+
+# `Table::register` fills a slot whose generations have run out, so its
+# sixty-five thousand five hundred and thirty-fifth registration reissues a name
+# somebody may still hold. The bug the generation field exists to prevent, put
+# back — and the reason `entries` keeps a ledger of every id a table has issued
+# rather than trusting one to be fresh.
+#
+# It is in `register` and not in `retire`, which is where it was first written:
+# `retire` saturates, and a wrapping version of it is indistinguishable, because
+# `register` already refuses a slot at `RETIRED_GENERATION` and so `retire` is
+# never asked to add to it. Two guards, one of them load-bearing, and the defect
+# has to be in the one that is.
+mutate-reusable-slot = []
+
+# `Table::resolve` drops the `index >= slot.buffers` check and relies on the
+# mask alone, so a buffer index past the end of a set resolves to a buffer
+# inside it. A refusal that became a wrong answer rather than a crash, which is
+# what the reach oracle is for.
+mutate-lenient-index = []
+
+# Not a defect, and it is in this file rather than behind a `cfg` for a reason:
+# `ring/tests/entries.rs` reads the LLVM profile runtime's counters per case,
+# and those symbols exist only in a build carrying `-Cinstrument-coverage`.
+# Referring to them without it is a link error rather than a silently absent
+# signal, which is exactly the failure mode a fuzzer claiming coverage feedback
+# must not have. `cargo xtask entries --record` and `--coverage` set both; every
+# other build has no feedback and says so on its own report line.
+coverage-feedback = []
+
 [lints.rust]
 # The frame. Overrides the workspace forbid — see the note in the root Cargo.toml.
 unsafe_code = "allow"
@@ -61,3 +126,33 @@ missing_docs = "deny"
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
+
+# E1-P04. The hostile-peer fuzzer, and it is a target of its own because it is
+# not a `#[test]`: it takes a seed and an operation count on its command line,
+# and a harness that swallowed those would leave the gate and the nightly run
+# unable to differ by anything except which machine they were on.
+#
+# `harness = false` therefore, and `cargo test --workspace` runs it at the
+# default in `ring/tests/hostile.rs` — which is the per-commit gate, in an
+# unoptimised build, for free. `cargo xtask hostile` is the same binary in
+# release with a count and a wall clock around it. RFC 0046.
+[[test]]
+name = "hostile"
+path = "tests/hostile.rs"
+harness = false
+
+# E1-P05. The structure-aware entry fuzzer, and a target of its own for the
+# reason `hostile` is: it takes a seed, a case count and — this is the part a
+# libtest harness could not carry — a whole *case* on its command line, which is
+# what makes `ring/entries-corpus.txt` a file of argvs rather than a second
+# format.
+#
+# `harness = false` therefore, and `cargo test --workspace` runs it at its
+# default with no feedback, which is the per-commit gate. `cargo xtask entries`
+# is the same binary in release; `--record` and `--coverage` add
+# `-Cinstrument-coverage` and the `coverage-feedback` feature, which is where the
+# per-case signal comes from. RFC 0048.
+[[test]]
+name = "entries"
+path = "tests/entries.rs"
+harness = false

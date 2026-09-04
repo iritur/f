@@ -7,13 +7,13 @@ assumed closed.
 | Layer | Status | Where |
 |---|---|---|
 | **L0** Determinism substrate | **Built** | `env/src/lib.rs`, `env/src/contract.rs`, `xtask lint-determinism`, and a boot that runs the contract against the seeded and the hardware `Env` on the same run — `kernel/src/env.rs`, `kernel/src/main.rs` |
-| **L1** Deterministic simulation | **Hook only** | `env/src/sim.rs` — seeded fault injection with protocol-aware site labels. No device models, no seed sweeps, and nothing has yet injected a fault at a named site: E0-P09. Full simulator at phase 01. |
-| **L2** Concurrency and memory model | **Stress tests only** | `ring/tests/litmus.rs` plus an AArch64 CI job. **Not** a model check — RustMC is E0-P16, open, and now blocked on work rather than on a question: it needs its own toolchain (LLVM 21 against this tree's 22.1.8, RFC 0022) and its own small tests, because a checker cannot exhaust a 500 000-round stress test. |
-| **L3** Proof | **Absent** | Verus on the frame at phase 02; Kani on capability properties at M4. The frame must stop moving first. The nearest thing that exists is not proof and should not be mistaken for it: five capability properties checked at every boot against a real table and five broken on purpose, plus one build broken on purpose — evidence that the checks can fail, not that they are exhaustive. |
-| **L4** Fuzzing | **Instrumentation only** | `xtask coverage`. No SQE generator, no snapshot harness, no hostile-peer fuzzer. Phase 01. |
+| **L1** Deterministic simulation | **Built, above the frame** | `sim/` — virtual time, seeded ordering, device models for blk, net and gpu on the real ring types, component substitution, snapshot and restore, and nineteen scenarios that must each reproduce from their seed and move when the seed moves (`xtask sim`). Seven fault classes, each asserting a response rather than printing one (`sim/src/fault.rs`, RFC 0039). Seed sweeps with automatic minimisation to a pasteable reproduction (`xtask sweep`, RFC 0040). **The scope is the thing to read, not the status:** RFC 0032 decided the simulator runs the *components* and not the frame's instructions, so it will never catch a bug inside the frame's own algorithms — the boot half is `xtask trace --hash`, and `xtask sim --join` requires the two halves to be about one component set. |
+| **L2** Concurrency and memory model | **Stress tests, and now bounded proof beside them** | `ring/tests/litmus.rs` plus an AArch64 CI job, unchanged. RustMC is still E0-P16 and still open, for the reason it always was. What is new is not a substitute for it: L3's proofs cover the ring's *validation* paths against arbitrary bytes, which is a different question from what the memory model permits. Two instruments, two questions. |
+| **L3** Proof | **Built, and narrow on purpose** | `kernel/proofs` and `ring/proofs`, run by `cargo xtask prove` — 27 Kani harnesses in about 46 minutes, on a nightly schedule. The five capability properties are proved over the file the kernel ships (compiled a second time through `#[path]` against three stand-ins, RFC 0053), with handles unbounded across all 2³² and rights across the whole 256×256 lattice; table contents are bounded *by construction*, because a harness never writes a slot — it runs the real operations with symbolic operands, so no proof holds for a state the table cannot reach. The ring's peer-facing paths are proved against a region of 640 symbolic bytes handed to the real `adopt`, rather than a struct of fields a harness owns, which `ring/src/mapping.rs` names as the trap (RFC 0057). **Six deliberate defects each fail the harness stating the property they break** — a proof that passes on a build with a known defect proves nothing. Verus on the frame is still phase 02. |
+| **L4** Fuzzing | **Built, with two committed corpora** | `xtask hostile` — a hostile peer generated from a seed, a billion operations in about 49 s with no panic, no memory unsafety and no hang, where a run is episodes derived by identity so a finding at operation 999 999 999 replays in a millisecond (RFC 0046). A hang is a *count*, never a wall-clock timeout. `xtask entries` — a structure-aware submission-entry generator with coverage feedback, 87.5 % structure-aware because an entry's first check is a zero word and random bytes fail it with probability 1 − 2⁻³² (RFC 0048). `ring/corpus.txt` and `sim/corpus.txt` are in the tree and in the release package. Miri covers the memory-unsafety property at a much smaller count, and both numbers are reported rather than one being quoted. |
 | **L5** Performance regression | **Harness only** | `bench/` records distributions with p50/p99/p99.9 and marks the counters it cannot read as absent. No change-point detection — that needs commit history to reason about, phase 02. |
 | **L6** Hardware in the loop | **Absent** | Photodiode rig at phase 03, when there is a compositor to measure. Correctly deferred. |
-| **L7** Claims registry | **Built, three entries, none gating** | `claims/`, `xtask claims`, `xtask claim <name>` — 0001 and 0002 `pending`, 0003 `tracked` on purpose |
+| **L7** Claims registry | **Built, fifteen entries, six gating** | `claims/`, `xtask claims`, `xtask claim <name>`. The split is the honest part and it follows one rule: **a count may gate on this machine and a time may not.** Six gating — blast radius, hostile-peer operations, entry-validation coverage, admission refusals, deadline overtake, unmap churn — are all counts, identical on any machine. Eight `pending` are all times or ratios of times, because `bench/src/lib.rs` refuses to record a measurement in a container and that refusal is the harness working. Where a task produced both, the claim was split rather than weakened: 0005 gates and 0006 waits; 0012 gates and 0013 waits; 0014 gates and 0015 waits. Every `pending` timing waits on the same thing — `E0-D10`'s named machine. |
 
 ## What was deliberately built early
 
@@ -69,22 +69,48 @@ built around simulation, proof and fuzzing has no natural home for "run the real
 thing and try to break it", and that is where most of this project's evidence
 currently comes from.
 
+## What E1 added, and what it did not
+
+Three of the seven layers moved from *absent* or *hook only* to built, and one
+sentence is worth keeping in front of the rest: **none of it makes the frame's
+own instructions observable to anything but QEMU.** RFC 0032 states that as the
+simulator's scope rather than as a limitation discovered later, and the boot
+suite, the mutation harness and L3's proofs are what cover the frame instead.
+
+Five gaps in this tree are *declared quantities* rather than sentences —
+`JOIN_GAP`, `CHAOS_GAP`, `DEADLINE_GAP`, `OWED_REVERSALS` and
+`RECEIVE_SLOTS_STACK_BOUND`. Each is a constant a lint compares against the
+tree, so each goes red both when it grows and when the reason for it stops being
+true. `cargo xtask lint-owed` is the sharpest of them: it lists reversal
+conditions that have fallen due and are unpaid, and it fails the day one is paid
+and nobody updates the list. That is the difference between a debt and a wish,
+and it is the mechanism this page would otherwise have to describe in prose.
+
 ## The honest gaps
 
-- **The state tree publishes twelve nodes and nothing that varies with time.**
-  Frame counts, cores, ring tallies, capability slots. Not the timer's counters,
+- **The state tree publishes thirty-two nodes and nothing that varies with time.**
+  Frame counts, cores, ring tallies, capability slots, and since E1 the
+  datapath's own tallies — copies on the data path, kernel entries per bucket,
+  blast radius, overtakes, invalidations. Not the timer's counters,
   not a stamp, not a hash of anything live — the boot log is what
   `cargo xtask trace` hashes, and a tick count in it would make two runs of one
   commit disagree for a reason with nothing to do with the kernel. The exclusion
   is a decision with a reversal condition, not a gap: it lifts when the boot log
   stops being the reproduction artefact.
-- **This kernel has never run on hardware.** Not once, on anything. Every
-  assertion the boot log makes — the APIC enumeration, the memory map, the
-  UART, the application-processor startup, `M0 ok` itself — is an assertion
-  about QEMU, and the emulator is the only witness any of it has ever had. This
-  is the largest single gap on this page and it is easy to miss, because
-  nothing here is *failing*: the tests pass, the boots are green, and the
-  subject of every one of them is an emulator. `E0-P18` owns closing it and
+- **This kernel has never run on bare metal.** It has run outside QEMU exactly
+  once — a VMware machine on 2026-09-01, recorded in
+  `docs/first-boot-outside-qemu.md`, which says in its own opening that a
+  hypervisor is not the machine `E0-P18` is about. Everything else this page
+  reports is an assertion about an emulator: the APIC enumeration, the memory
+  map, the UART, the application-processor startup, `M0 ok`, and now every
+  datapath result too — the remapping unit, the three drivers, the framebuffer
+  capture. This is still the largest single gap on this page and it is still
+  easy to miss, because nothing here is *failing*: the tests pass, the boots are
+  green, and the subject of nearly every one of them is an emulator.
+  E1 made this sharper rather than softer. Six claims now gate, and they gate
+  because they are counts that do not depend on the machine — but every number
+  about *time* in this project remains unmeasured, and `bench/src/lib.rs`
+  refusing to record one here is the only reason that fact is visible. `E0-P18` owns closing it and
   `docs/booting-on-hardware.md` is the procedure. Two consequences worth
   reading before that boot rather than after: the trace hash **will** differ on
   hardware, because the memory map and core count are in the log by design and

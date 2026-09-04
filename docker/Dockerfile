@@ -137,6 +137,35 @@ RUN cd /tmp/pin \
 # ---------------------------------------------------------------------------
 FROM toolchain AS dev
 
+# Miri, and it is in `dev` rather than in `full` because one of `E1-P04`'s three
+# properties cannot be checked without it. *No memory unsafety* is not
+# observable from inside the program: the ordinary build dies on a signal with
+# no seed attached, or does not die at all and reads whatever was next in the
+# page. `cargo xtask hostile --miri` is the check, RFC 0046 is why it is a
+# separate command at a much smaller count, and a tool that lived only in the
+# opt-in image would be a tool the gate could not run.
+#
+# It is not in `rust-toolchain.toml`'s `components`, deliberately: that file is
+# the pin every contributor's laptop reads, and bumping it invalidates every
+# claim (`claims/README.md`). Miri is an *environment* dependency the way QEMU
+# is — needed to run one command, not to build the system — and the environment
+# is what this image is. It costs about 40 MB and one download at image build.
+#
+# The sysroot is **not** built here, and that is a decision rather than an
+# omission. Miri keys its sysroot on the flags it is run with, so a sysroot
+# built in this image would either bind the image to one particular `MIRIFLAGS`
+# — a second copy of a constant that lives in `xtask` — or be rebuilt on first
+# use anyway, and the failure when the two disagree is the unreadable
+# *detected a concurrent sysroot build with different settings*. It was built
+# here for one commit and produced exactly that. So the minute it costs is paid
+# per job, and `claims/0008`'s timings say so.
+#
+# The `chmod` restores what the toolchain stage established: a component added
+# after it would otherwise be readable only by root.
+RUN rustup component add miri \
+ && chmod -R a+rX /opt/rustup /opt/cargo \
+ && cargo miri --version
+
 # F_ENVIRONMENT is announced so that a build can tell it is in the container,
 # and so that a timing measurement taken here can be refused rather than
 # quietly published as a claim.
@@ -190,6 +219,84 @@ RUN --mount=type=cache,target=/opt/cargo/registry,sharing=locked \
         || cargo install --locked "${pkg%@*}" --version "${pkg#*@}" ; \
     done; \
     chmod -R a+rX /opt/cargo
+
+# Kani, the bounded model checker `cargo xtask prove` runs against the
+# capability table. E1-P07, RFC 0053.
+#
+# **It brings its own toolchain, and that is the reason it is here rather than
+# in `dev`.** RFC 0022 decided that a verification tool's toolchain requirement
+# is the tool's business and gets an image target rather than a move of
+# `rust-toolchain.toml`; Kani goes further than RustMC did — `cargo kani setup`
+# downloads a release bundle and installs a *rustc of its own*, currently
+# nightly-2025-11-21, beside the pin. Nothing this tree builds is compiled by
+# it: `kernel/proofs` is outside the workspace and only `cargo xtask prove`
+# reaches it.
+#
+# What it costs, measured on this image rather than estimated: 483 MB of
+# release bundle under /opt/kani, 573 MB of extra rustup toolchain, and 15 s of
+# compilation for the launcher. `docker images` puts the result at 4.18 GB
+# against 2.70 GB without it, so 1.48 GB. That is the reason this is in `full`
+# — the `dev` image is pulled by every job in the pull-request gate, and paying
+# a gigabyte and a half there for a verb that runs on a schedule would be a cost
+# in the wrong place.
+#
+# `KANI_HOME` rather than the default `$HOME/.kani`: setup runs as root here
+# and the entrypoint drops to uid 1000, so a bundle under /root would be one
+# the user running the checker cannot read. /opt is where this image already
+# keeps the things that outlive a home directory, for the same reason.
+#
+# The version is pinned, like the three tools above it and for the same reason:
+# an unpinned tool is an ambient dependency, and this is the one image whose
+# purpose is to not have any. A bump is a reviewable commit here, and it
+# invalidates nothing in `claims/` — the checker produces a verdict, not a
+# number, which is RFC 0022's own argument for why a second toolchain is
+# affordable at all.
+# **On AArch64 the checker is not installed, and the reason is glibc rather than
+# a policy.** `cargo kani setup` downloads a prebuilt release bundle, and the
+# `aarch64-unknown-linux-gnu` one is linked against GLIBC_2.39 while this image's
+# base is bookworm, which carries 2.36. Setup *succeeds* and then `kani
+# --version` fails, so the break lands at the end of a two-minute layer and
+# reads as a broken image rather than as an unavailable tool — which is exactly
+# how it arrived: the arm64 half of the pull-request gate went red on a change
+# that had nothing to do with it.
+#
+# Nothing wants it there. `cargo xtask prove` runs on amd64 in
+# `.github/workflows/nightly.yml`, which builds its own `full-...-amd64` tag,
+# and the one pull-request job that needs this image — dependency policy — is
+# amd64 too. What the arm64 `full` image is for is `cargo-deny`,
+# `cargo-llvm-cov` and `cargo-nextest`, all of which build and run there.
+#
+# The asymmetry is stated rather than hidden, because a multi-architecture tag
+# whose two halves quietly differ is the failure the manifest job below exists
+# to prevent: **`full` means the extra tooling on both architectures, plus the
+# checker on the one whose bundle runs.** `kani --version` is still asserted
+# where it is installed, so a bundle that stops working is still a red layer.
+#
+# *What would reverse this:* Kani publishing an aarch64 bundle against an older
+# glibc, or this image's base moving past 2.39. Either makes the condition go
+# away and the `RUN` unconditional again, and neither is worth pre-empting.
+#
+# The default is to install. `TARGETARCH` is set by buildx and empty under a
+# plain `docker build`, so an unlabelled build gets the checker rather than
+# silently losing it: the hazard being guarded against is a missing tool, and a
+# missing tool should never be the quiet outcome.
+ARG KANI_VERSION=0.67.0
+ARG TARGETARCH
+ENV KANI_HOME=/opt/kani
+
+RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+      arm64|aarch64) \
+        echo "kani: not installed on ${TARGETARCH}; the aarch64 bundle needs GLIBC_2.39 and this base carries 2.36, and nothing on this architecture runs the checker"; \
+        ;; \
+      *) \
+        cargo install --locked kani-verifier --version "${KANI_VERSION}"; \
+        cargo kani setup; \
+        chmod -R a+rX /opt/kani; \
+        kani --version; \
+        ;; \
+    esac; \
+    chmod -R a+rX /opt/cargo /opt/rustup
 
 ENV F_UID=1000 F_GID=1000
 

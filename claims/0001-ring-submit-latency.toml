@@ -11,7 +11,14 @@ least 5x less than an equivalent system call on a tuned Linux baseline.
 
 [baseline]
 system  = "linux-6.x-tuned"
-notes   = "io_uring enabled, sched_ext policy chosen for the workload, huge pages on, device features enabled. Configured by someone trying to win."
+# The configuration, not a description of it. E1-D06: the sentence in `notes`
+# was the whole baseline until this key existed, and a sentence cannot be
+# re-run — so it could not be found to have stopped being true, which is
+# claims/README.md rule 1's decay with nothing standing in its way.
+# `lint-reproduce` checks the directory is there and carries its three files;
+# `cargo xtask release` puts it in the package.
+path    = "claims/baselines/linux-6.x-tuned"
+notes   = "io_uring enabled and SQPOLL permitted, SCHED_FIFO for the workload rather than sched_ext with the argument written down, transparent huge pages on for the baseline half, mitigations on and stated as a cost. Configured by someone trying to win. Re-tuning produces a new versioned directory beside that one, never an edit to it."
 
 [owner]
 # R09: every headline claim names the subsystem that owns it. A claim with

@@ -33,7 +33,7 @@
 //!
 //! See `docs/design/proving-ground.html` layer 1.
 
-use crate::{Env, Instant, Scheduler, SeededEnv, WallTime};
+use crate::{Env, Instant, Scheduler, SeededEnv, WallTime, split};
 
 /// What a simulated failure looks like to the code under test.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -206,27 +206,38 @@ impl SimEnv {
 
 /// One draw for a site, from the seed and the site's own occurrence count.
 ///
-/// A small integer hash rather than a stream, because the whole point is that
-/// this site's answer does not depend on what any other site did. Splitmix64's
-/// finaliser: cheap, no state, and it decorrelates the low bits of the
-/// concatenated inputs — which matters here because the inputs are a seed, a
-/// short label and a small counter, all of which are highly structured.
+/// # Two splits, not a hash and not a stream
+///
+/// This used to be its own construction — FNV-1a over the label, rotated,
+/// xored into the seed alongside the counter, and finished with Splitmix64's
+/// finaliser. It worked, and its comment admitted it was chosen for
+/// reproducibility rather than for statistical quality. It is now two
+/// applications of [`split::derive`], which is the same derivation
+/// [`SeededEnv`] seeds its generator from: the site's stream seed is the run's
+/// seed keyed by the label, and the draw is that seed keyed by the occurrence.
+///
+/// The three properties this needs, and where each comes from:
+///
+/// - **A site's answer depends on nothing but the seed, the label and this
+///   site's own occurrence count.** It is a pure function of exactly those, so
+///   the independence property the module documentation defends is structural
+///   rather than maintained.
+/// - **Random access, in constant time.** A stateful stream would have to be
+///   stepped `occurrence` times or stored per site, and the table above holds
+///   sixteen sites with no allocator behind it. Keying a counter is what a
+///   counter-based generator does, and it is why this is `derive` twice rather
+///   than [`split::Stream`].
+/// - **No two sites can collide onto one stream, unless their labels collide
+///   first.** `derive` is injective in its identity, so two distinct label
+///   *hashes* give two distinct site seeds for every seed, not for most of them.
+///   The hash itself is FNV-1a over a short string and can collide in principle;
+///   with the handful of compile-time labels this tree has it does not, and
+///   `two_sites_never_draw_the_same_value_at_the_same_occurrence` checks the
+///   concrete set rather than asserting the general claim. If the site table
+///   ever grows to where a birthday collision is plausible, the thing to
+///   strengthen is [`split::label`] and not this function.
 fn draw(seed: u64, site: &str, occurrence: u64) -> u64 {
-    // FNV-1a over the label, so two sites with a similar name do not share a
-    // trajectory. The label is a compile-time constant in every caller, so this
-    // is a handful of instructions on a path that only runs under simulation.
-    let mut label: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in site.as_bytes() {
-        label ^= u64::from(*byte);
-        label = label.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-
-    let mut x = seed ^ label.rotate_left(17) ^ occurrence.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    x ^= x >> 30;
-    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x ^= x >> 27;
-    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
-    x ^ (x >> 31)
+    split::derive(split::derive(seed, split::label(site)), occurrence)
 }
 
 impl Faults for SimEnv {
@@ -374,6 +385,111 @@ mod tests {
     }
 
     #[test]
+    fn adding_a_site_later_perturbs_no_earlier_site() {
+        // The same property as the test above, taken to the shape a real commit
+        // has: not two known sites interleaved, but a growing set of sites that
+        // did not exist when the seed was recorded. A seed is meant to be a
+        // complete bug report, and a bug report that expires the next time
+        // somebody adds a fault check somewhere else is worse than none.
+        const NEW_SITES: [&str; 8] = [
+            "later.a", "later.b", "later.c", "later.d", "later.e", "later.f", "later.g", "later.h",
+        ];
+        const TRAJECTORY: usize = 40;
+
+        let mut baseline = SimEnv::new(0xBEE5, 10, 350);
+        let mut expected = [None; TRAJECTORY];
+        for slot in &mut expected {
+            *slot = baseline.should_fail("ring.publish");
+        }
+
+        // One extra site, then two, and so on: each round is what the tree looks
+        // like one commit later than the last.
+        for added in 1..=NEW_SITES.len() {
+            let mut env = SimEnv::new(0xBEE5, 10, 350);
+            let mut got = [None; TRAJECTORY];
+            for slot in &mut got {
+                for name in &NEW_SITES[..added] {
+                    let _ = env.should_fail(name);
+                }
+                *slot = env.should_fail("ring.publish");
+            }
+            assert_eq!(got, expected, "{added} new site(s) moved an existing site's trajectory");
+        }
+    }
+
+    #[test]
+    fn two_sites_never_draw_the_same_value_at_the_same_occurrence() {
+        // Stronger than "two sites do not share a trajectory": that one says two
+        // sequences differ somewhere, this one says they never coincide at all.
+        // `split::derive` is injective in its identity, so two distinct label
+        // hashes give two distinct site seeds, and injective in its parent, so
+        // two site seeds give two different draws at the same occurrence. What
+        // is checked here rather than argued is the step the argument does not
+        // cover: that these six labels do not collide under FNV-1a.
+        const SITES: [&str; 6] = [
+            "ring.publish",
+            "cap.revoke",
+            "store.zone_reset",
+            "ring.pop",
+            "cap.grant",
+            "mem.alloc",
+        ];
+        for (i, first) in SITES.iter().enumerate() {
+            for second in SITES.iter().skip(i + 1) {
+                for occurrence in 0..256 {
+                    assert_ne!(
+                        draw(0x51DE, first, occurrence),
+                        draw(0x51DE, second, occurrence),
+                        "{first} and {second} collided at occurrence {occurrence}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cross_site_correlation_stays_inside_the_band() {
+        // The streams the simulator actually multiplies are the site streams,
+        // so this is where the cross-stream bound has to hold. Same statistic
+        // and same derived band as `split.rs` — bit agreement over the low 32
+        // bits of paired draws, inside five standard deviations of the binomial
+        // two independent streams would produce. `split::agreement_band` carries
+        // the derivation and says what the statistic does not detect.
+        const SITES: [&str; 8] = [
+            "ring.publish",
+            "ring.pop",
+            "cap.revoke",
+            "cap.grant",
+            "store.zone_reset",
+            "store.write",
+            "mem.alloc",
+            "mem.map",
+        ];
+        const DRAWS: u64 = 1024;
+
+        let mean = split::agreement_mean(DRAWS);
+        let band = split::agreement_band(DRAWS);
+
+        for (i, first) in SITES.iter().enumerate() {
+            for second in SITES.iter().skip(i + 1) {
+                let mut agreed = 0u64;
+                for occurrence in 0..DRAWS {
+                    agreed += u64::from(split::agreeing_bits(
+                        draw(0xC0DE, first, occurrence),
+                        draw(0xC0DE, second, occurrence),
+                    ));
+                }
+                let distance = agreed.abs_diff(mean);
+                let compared = 32 * DRAWS;
+                assert!(
+                    distance <= band,
+                    "{first} and {second} agreed on {agreed} of {compared} bits,                      which is {distance} from {mean} and the band is {band}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn focus_silences_everything_else() {
         let mut env = SimEnv::new(7, 10, 500).focused_on(&["cap.revoke"]);
         let mut struck = 0;
@@ -425,12 +541,25 @@ mod tests {
 
     #[test]
     fn injection_rate_is_roughly_as_configured() {
-        let mut env = SimEnv::new(7, 1, 100); // 10%
-        let n = 10_000;
-        for _ in 0..n {
+        // Per mille rather than a float. `env/` has no floating point in it at
+        // all — `split.rs` gives the two reasons, and a rule with an exception
+        // in the tests is a rule people learn the exception to.
+        //
+        // The band is derived, not fitted: 10 000 draws at one in ten is
+        // Binomial(10 000, 1/10), mean 1000 and a standard deviation of 30, so
+        // this admits about sixteen sigma. Wide on purpose — it is checking that
+        // the rate is the configured one and not, say, the complement or a
+        // factor of ten out, and a tight band here would be a test of the
+        // generator, which `split.rs` already has.
+        const N: u32 = 10_000;
+        let mut env = SimEnv::new(7, 1, 100); // 100 per mille
+        for _ in 0..N {
             let _ = env.should_fail("ring.publish");
         }
-        let rate = f64::from(env.injected()) / f64::from(n);
-        assert!((0.05..0.15).contains(&rate), "expected roughly 10% injection, got {rate:.3}");
+        let per_mille = env.injected() * 1000 / N;
+        assert!(
+            (50..=150).contains(&per_mille),
+            "expected roughly 100 per mille of injection, got {per_mille}"
+        );
     }
 }

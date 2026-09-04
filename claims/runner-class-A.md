@@ -113,7 +113,15 @@ default_hugepagesz=1G hugepagesz=1G hugepages=16
 intel_iommu=on iommu=pt
 audit=0
 skew_tick=1
+mitigations=auto
 ```
+
+This block is prose: it can be read and it cannot be run, so it cannot be found
+to have stopped being true.
+`claims/baselines/linux-6.x-tuned/cmdline.txt` is the same list as data, and it
+is the copy that gets applied and checked — `E1-D06`. `verify.sh` beside it
+compares the two whenever it can reach a checkout, because two copies of one
+list with nothing comparing them is how a machine ends up being neither.
 
 Cores `0-3` are the housekeeping set and take every interrupt, every RCU
 callback and every kernel thread. Cores `4-15` are the measurement set and are
@@ -158,6 +166,15 @@ an overlapping mask is a partition in name only.
 specific — so that no fault, no tier migration and no compaction pass can land
 inside a deadline. `transparent_hugepage=never` so nothing is promoted or
 compacted underneath. No swap.
+
+The tuned-Linux baseline turns transparent huge pages back on at run time, for
+its half of a comparison only, and
+`claims/baselines/linux-6.x-tuned/baseline.conf` argues for the asymmetry
+beside the setting. The short form: F maps its own 1 GiB pages and never uses
+Linux's, so `never` is right here — and a baseline handed 4 KiB pages on that
+account would be a machine nobody configures, so `always` is right there. The
+asymmetry raises the baseline, which is the direction a reader who suspects
+this apparatus of flattering F should check first.
 
 ## Verifying the machine is what it says
 

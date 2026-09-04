@@ -1,0 +1,953 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The machine-readable half of docs/test-taxonomy.md. One [[row]] per class of
+# bug, with the layers that catch it, the concrete check today, how often that
+# check runs, and — where nothing catches it — who is scheduled to, or why the
+# gap is accepted and what would reverse the acceptance.
+#
+# This file exists because the page beside it is the kind of document that is
+# true on the day it is written and quietly false a quarter later, and the
+# failure mode is invisible: nothing goes red when a row stops being true.
+# Nothing reads this yet. `cargo xtask lint-taxonomy` is the follow-up named at
+# the end of the page — every `check` naming a verb that exists, every
+# `scheduled_by` naming a TODO.md id that exists and is still open, every
+# `accepted_because` carrying a `reversal`, and every row in the page present
+# here.
+#
+# Fields, and the vocabulary each is drawn from:
+#
+#   id              stable slug, referenced by the lint rather than by prose
+#   group           A..I, the section of the page this row appears in
+#   class           the bug class, as the page states it
+#   layers          L0..L7 from docs/design/proving-ground.html, plus the two
+#                   this page names because the ladder has no row for them:
+#                   P "provoke the real kernel", X "policy made executable".
+#                   Letters rather than L8 and L9 on purpose — the numbering
+#                   belongs to proving-ground.html and this file does not extend it.
+#   check           the command, job, hook or test that would catch it today
+#   cadence         one or more of: every-edit, every-build, every-verify,
+#                   every-pr, daily, weekly, per-release, on-demand, never
+#   status          catches | partially | gap
+#   scheduled_by    TODO.md task ids, for a gap somebody owns
+#   accepted_because + reversal   for a gap nobody owns, and why that is fine
+#
+# A row with status = "gap" carries exactly one of `scheduled_by` or
+# `accepted_because`. A row with `accepted_because` and no `reversal` is a
+# preference wearing a decision's clothes.
+
+schema = 1
+source = "docs/test-taxonomy.md"
+
+# --- A — the ring and the memory model ---------------------------------------
+
+[[row]]
+id      = "ring-relaxed-submission"
+group   = "A"
+class   = "Submission publishing store weakened to Relaxed"
+layers  = ["L2"]
+check   = "cargo test -p f-ring --test litmus --release, both runners; mutate-relaxed-submission exists as a fixture and gates nothing"
+cadence = ["every-pr"]
+status  = "partially"
+notes   = "The fixture was a gate on the AArch64 runner for one run and the suite passed with it on. The stress tests were given the exact defect on the exact hardware and did not see it."
+scheduled_by = ["E0-P16"]
+
+[[row]]
+id      = "ring-relaxed-completion"
+group   = "A"
+class   = "Completion publishing store weakened to Relaxed"
+layers  = ["L2"]
+check   = "the same litmus job; mutate-relaxed-completion"
+cadence = ["every-pr"]
+status  = "partially"
+scheduled_by = ["E0-P16"]
+
+[[row]]
+id      = "ring-doorbell-fence"
+group   = "A"
+class   = "Suppression fence removed (Store-Load, doorbell)"
+layers  = ["L2"]
+check   = "the litmus job with --features f-ring/mutate-no-doorbell-fence, x86-64 only"
+cadence = ["every-pr"]
+status  = "catches"
+notes   = "The one defect the stress suite does see, and on the runner nobody would guess: 58 971 lost wakeups in 500 000 rounds on x86-64, a clean pass on arm, because stlr/ldar are RCsc."
+
+[[row]]
+id      = "ring-unexplored-interleaving"
+group   = "A"
+class   = "An interleaving the stress tests never produce"
+layers  = ["L2", "L3"]
+check   = "nothing"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E0-P16"]
+
+[[row]]
+id      = "ring-new-ordering-untested"
+group   = "A"
+class   = "A new Release/Acquire pair lands with no litmus test"
+layers  = ["X"]
+check   = "REVIEW.md pass 2, the CLAUDE.md convention"
+cadence = ["every-pr"]
+status  = "partially"
+accepted_because = "A check would have to tell a new ordering from a moved one, which is a question about a diff rather than about a file, and xtask reads files."
+reversal = "A second ordering regression reaches main."
+
+[[row]]
+id      = "ring-cursor-wrap"
+group   = "A"
+class   = "Cursor arithmetic wrong at the wrap"
+layers  = ["L2"]
+check   = "ring/src/lib.rs::cursors_may_wrap, plus the outstanding-across-the-wrap assertion in litmus.rs"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+# --- B — a hostile peer -------------------------------------------------------
+
+[[row]]
+id      = "peer-header-panic"
+group   = "B"
+class   = "A hostile header or cursor panics the consumer"
+layers  = ["L4", "P", "X"]
+check   = "ring/tests/headers.rs; litmus.rs::a_hostile_client_cursor_never_panics; the unwrap_used/panic/unreachable clippy wall over ring; and cargo xtask hostile — ring/tests/hostile.rs draws headers and cursors from a seed through f_env, catches a panic per episode so a failure reproduces from a seed rather than from a backtrace, and cargo xtask hostile --mutate arms mutate-believed-header and requires the panic property to find it"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+notes   = "What exists samples; what is owed proves. The difference is 'no fuzzer found one' against 'there is none', and E1-P04 landing a billion operations did not change which side of it this row is on. RFC 0046, claims/0008."
+scheduled_by = ["E1-P12"]
+
+[[row]]
+id      = "peer-header-accepted"
+group   = "B"
+class   = "A hostile header is accepted rather than refused"
+layers  = ["L4"]
+check   = "headers.rs — every invalid header refused with a structured error, and the region survives the refusal. hostile.rs counts each refusal domain the header can earn and claims/0008 puts a minimum on all four, so a build that stopped producing one of them goes red"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+notes   = "E1-P04 landed and this row stayed partial on purpose: the fuzzer asserts no panic and no hang, not that the particular header it drew was refused. The cases that assert a refusal are still headers.rs's fifteen."
+scheduled_by = ["E1-P12"]
+
+[[row]]
+id      = "peer-entry-mutated"
+group   = "B"
+class   = "An entry mutated between validation and use"
+layers  = ["L1", "L4"]
+check   = "hostile.rs overwrites whole entry slots and forges index-ring slot numbers against a live channel, and Consumer::pop copies an entry out before any field is read"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+notes   = "Was a gap with no check at all. E1-P04 narrowed it and did not close it: the peer's write lands between operations, because the harness is single-threaded. A peer writing during one call needs a second thread, no task owns that, and the row is accepted with a reversal condition — a finding that needs the write to land inside a call, or a Consumer::pop that stops copying the entry out before reading a field."
+
+[[row]]
+id      = "peer-unknown-bits"
+group   = "B"
+class   = "Unknown opcode, flag or reserved bit accepted (R04)"
+layers  = ["L4", "X"]
+check   = "abi unit tests over the reading of Sqe; and E1-P05's envelope oracle — entries.rs computes the refusal R04 owes from the entry's own bytes before the code under test sees them and requires the domain and the code to match, over 262 144 generated cases per verify, on f_ring::execute and on f_abi::buf::Request::read alike"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"   # sampled: total oracle, drawn input set
+notes   = "**catches (sampled)** in the sense docs/test-taxonomy.md's legend now separates: the oracle is total over every entry it sees, and the set of entries is drawn. The one row a sampling fuzzer can move that far, because the property is about a single entry and the oracle is total: every generated case is checked, and the three refusals are required by name rather than counted. mutate-ignored-flag is the evidence it can fail — one character in execute masks an unknown flag off instead of refusing it, nothing panics, nothing hangs, nothing reads out of bounds, and this oracle reports it. What is still sampling rather than proof is the *set of entries*, which is E1-P12's."
+scheduled_by = ["E1-P12"]
+
+[[row]]
+id      = "peer-dies-mid-claim"
+group   = "B"
+class   = "A peer that dies mid-claim, or lies about its epoch"
+layers  = ["L1", "L4"]
+check   = "ring/tests/faults.rs injects at ring.publish, ring.consume and chan.bind; cargo xtask sim runs the peergone scenario, which kills a device model with work outstanding and asserts that every buffer comes home and that no completion arrives after the reset; hostile.rs restarts the peer between operations and again between a batch being staged and published, re-adopts at the moved epoch, and claims/0008 puts a minimum on peer_restarts_mid_batch and channel_epoch_changes_seen"
+cadence = ["every-pr", "every-verify"]
+status  = "partially"
+notes   = "The dying half is asserted at both layers, and after E1-P04 the lying half is driven at a billion operations with no panic and no hang. What is still not asserted is a code rather than an absence: an operation against a stale epoch is refused, and the fuzzer folds PEER/EPOCH_CHANGED in with Corrupt rather than requiring that one by name. A line in headers.rs would close it."
+
+[[row]]
+id      = "abi-layout-drift"
+group   = "B"
+class   = "ABI layout drift — a field reordered inside a fixed-size struct"
+layers  = ["X"]
+check   = "const _: () = assert!(size_of::<Sqe>() == 64) and its four siblings catch a size change; and E1-P05's LAYOUT, twelve offset_of! assertions over every field of an Sqe, checked before any case is drawn"
+cadence = ["every-build", "every-verify"]
+status  = "partially"
+notes   = "Closed for Sqe and open for the rest. E1-P05 needed the offsets for itself — entries.rs writes an entry's wire image byte by byte for its byte-level family, so a field reordered inside a repr(C) struct would have left it flipping bits in a field it had mislabelled while every case it produced stayed legal and every run stayed green. offset_of! is the exact question and the compiler is the exact answer, which is why it is an offset assertion rather than a golden-bytes fixture a reorder would simply be regenerated against. Cqe and ChannelHeader still have only their size checks; that is a smaller gap, it is still a gap, and no task owns it. It costs nothing while both ends of every channel come from one tree, and stops costing nothing at E1-B05."
+
+[[row]]
+id      = "abi-version-mismatch"
+group   = "B"
+class   = "A peer at a different ABI version"
+layers  = ["X"]
+check   = "ChannelHeader::negotiate, RFC 0011, exercised against a real mapping by headers.rs"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+# --- C — capabilities and isolation ------------------------------------------
+
+[[row]]
+id      = "cap-unowned-slot"
+group   = "C"
+class   = "Naming a slot the frame never filled"
+layers  = ["P"]
+check   = "cargo xtask cap unowned"
+cadence = ["every-pr"]
+status  = "catches"
+notes   = "Sampled, not proved. E1-P07 is what exhausts it."
+
+[[row]]
+id      = "cap-forge-handle"
+group   = "C"
+class   = "Forging a handle"
+layers  = ["P"]
+check   = "cargo xtask cap forge — the handle space swept, in range and past it"
+cadence = ["every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "cap-use-after-revoke"
+group   = "C"
+class   = "Use after revoke"
+layers  = ["P"]
+check   = "cargo xtask cap stale"
+cadence = ["every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "cap-derivation-escape"
+group   = "C"
+class   = "Derivation escape — rights that were never granted"
+layers  = ["P"]
+check   = "cargo xtask cap rights, cargo xtask cap type"
+cadence = ["every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "cap-panic-the-kernel"
+group   = "C"
+class   = "A process makes the kernel panic by trying"
+layers  = ["P"]
+check   = "all eleven cap boots must end at 33; cargo xtask mutate is the build that breaks the property and must go red"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "The cap half runs in the CI kernel job only; the mutate half is in cargo xtask verify as well. fn verify is lint, test, run, panic, trace, mutate — it invokes neither cap nor user."
+
+[[row]]
+id      = "cap-mapping-after-revoke"
+group   = "C"
+class   = "Mapping left after revoke (TLB shootdown)"
+layers  = ["P"]
+check   = "cargo xtask cap unmap — one page, one process, one boot"
+cadence = ["every-pr"]
+status  = "partially"
+scheduled_by = ["E1-B14"]
+
+[[row]]
+id      = "cap-table-outgrown"
+group   = "C"
+class   = "The capability table outgrows the slots its holder has paid for"
+layers  = ["P"]
+check   = "cargo xtask cap flood buys a page and stops where the untyped region runs out; cap quota spends the region first and stops at the free size; cap beyond names slots past what was bought"
+cadence = ["every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "cap-inheritance"
+group   = "C"
+class   = "Authority arriving by inheritance (R06)"
+layers  = ["P", "X"]
+check   = "the negative suite covers the part that runs; no lint"
+cadence = ["every-pr"]
+status  = "partially"
+scheduled_by = ["E1-B05"]
+
+[[row]]
+id      = "isolation-ring3"
+group   = "C"
+class   = "A ring-3 process touching what it was not handed"
+layers  = ["P"]
+check   = "cargo xtask user — seven boots, six must fault and one must not"
+cadence = ["every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "cap-readonly-grant"
+group   = "C"
+class   = "Writing to a read-only grant"
+layers  = ["P"]
+check   = "cargo xtask cap state"
+cadence = ["every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "domain-speculation"
+group   = "C"
+class   = "Speculation across a domain boundary (R02)"
+layers  = ["X"]
+check   = "cargo xtask lint-manifests requires the domain field RFC 0005 rule 4 names; the supervisor refusal is not built"
+cadence = ["every-verify"]
+status  = "partially"
+notes   = "lint-manifests appears in no workflow file; it runs inside lint_all and nowhere else."
+scheduled_by = ["E1-B05"]
+
+[[row]]
+id      = "iommu-escape"
+group   = "C"
+class   = "A driver addressing memory outside its grant (IOMMU)"
+layers  = ["L1", "P"]
+check   = "cargo xtask iommu — two boots on a machine with a VT-d unit and a real virtio-blk device, with the frame's own adversary as the requester: one descriptor inside the grant, which must land bytes, and one outside it, which must be refused and recorded in the unit's own fault registers. cargo xtask blk — three boots with the requester's descriptor written by a driver component, user/virtio-blk, out of a Reach the frame answered its client's registration with: one carries a sector out and back through a ring byte for byte, one withdraws the client's page from the driver's domain between the write and the read (RFC 0024's reclaim, which is the frame's property), and one has the driver add a frame to the address it was answered before writing it into a descriptor and requires the unit to fault at the address the driver invented — which is the only one of the five that is a driver reaching outside its grant rather than a grant being taken away under a driver. All five halves also require the frame to refuse a device translation for a capability carrying no GRANT"
+cadence = ["every-pr"]
+status  = "partially"
+notes   = "E1-B02 made the requester a driver component's own descriptor rather than the frame's adversary: user/virtio-blk writes it out of a Reach the frame answered its client's registration with. cargo xtask blk escape is the clause itself — the component's own arithmetic produces an address it was never granted and the unit faults it there, with Report::verdict requiring that the provocation ran; cargo xtask blk outside is the neighbouring property, a translation withdrawn under a correct descriptor. What is still not true is that the driver's code executes at ring 3 — E1-B08 landed the scheduling half and a component does now run at ring 3 with its own polling loop, but nothing routes a device into a spawned component's address space, so the frame calls this one — so these boots establish the descriptor's provenance and the unit's refusal, and not the privilege level of the code that built the descriptor. RFC 0033 records that deferral with a date. Both commands are jobs in ci.yml, beside each other, so all five halves keep the cadence this row claims."
+scheduled_by = ["E1-B08"]
+
+[[row]]
+id      = "device-writes-outside-grant"
+group   = "C"
+class   = "A device writing outside the driver's grant, on the direction the device chooses when"
+layers  = ["L1", "P"]
+check   = "cargo xtask net — three boots on a machine with a VT-d unit and a real virtio-net device, driven by user/virtio-net at ring 3 on a core the frame allocated it: inside forms an ARP request in a registered buffer, posts a receive, and requires the reply to land in that buffer carrying the MAC this boot invented; silent is the identical client with the transmit removed, and requires the buffer to come back untouched as a cancellation, which is what makes inside a reply rather than a link; escape displaces the receive data descriptor by one page and requires the unit to fault at the address the driver invented, on a write, with the client's buffer still holding all 42 poison bytes. All three also require copies = 0 beside a non-zero provoked, and a registration of a capability with no GRANT to be refused"
+cadence = ["every-pr"]
+status  = "catches"
+notes   = "The direction blk cannot reach: a receive is the device writing into a client's memory at a moment nothing in this system chose, with no request outstanding — so escape's verdict rests on the client's own bytes and on the unit's fault record being a *write* at the invented address, and deliberately not on the used ring, which this emulator publishes for a transfer the unit refused. Three bounds on what this row claims. The component is *scheduled* rather than spawned into a place, which is what CHAOS_GAP in xtask carries. Every boot posts exactly one receive buffer, so the multi-slot machinery — the head that says which of four posted buffers filled — is covered by f_virtio_net::driver's unit tests against a memory-backed device and by no boot; both of the formulas that break it turn those tests red. And RECEIVE_MICROS is a wall-clock bound, so a red carrying Trouble::NoFrame is a wedged component or a slow runner and says so on its own line. RFC 0051."
+
+[[row]]
+id      = "device-shows-what-was-not-submitted"
+group   = "C"
+class   = "A device putting bytes somewhere no code in this system can read them back from"
+layers  = ["L1", "P"]
+check   = "cargo xtask gpu — three boots on a machine with a VT-d unit and a real virtio-gpu device, driven by user/virtio-gpu at ring 3 on a core the frame allocated it, with the harness capturing the emulator's framebuffer over its monitor socket while the boot holds still: inside fills one buffer of a registered set with a 16x16 gradient, submits one entry, and requires the capture to be 16x16 and to hash to the number the kernel printed for the client's own pixels; blank is the identical client with the submission removed and requires the capture not to hold them, which is what makes inside a datapath rather than a display; escape displaces the resource's backing entry by one page and requires the unit to fault at the address the driver invented, on a read, with the capture still not holding the client's pixels. All three also require copies = 0 beside a non-zero provoked, the client's buffer to come back unwritten, and a registration of a capability with no GRANT to be refused"
+cadence = ["every-pr"]
+status  = "catches"
+notes   = "The class blk and net cannot reach, and the one row where the kernel does not reach its own verdict. A scanout has no read-back command in the 2D protocol, so nothing inside the machine can observe the screen: every counter the driver publishes is about commands the display accepted, and a display that accepted all six and drew nothing would move all of them. So the boot publishes an FNV-1a of the client's pixels in screen order, holds still, and the harness captures and compares — holding no copy of the pattern or of the pixel layout itself, so a wrong belief on the kernel's side produces a mismatch rather than agreement. Three bounds. The component is scheduled rather than spawned into a place, which is what CHAOS_GAP carries. The escape half's evidence is deliberately not the device's word: this emulator answers OK for a backing the unit refused and flushes a frame of bytes that are not the client's, which is the third time a completion has been found not to be evidence that bytes moved. And CAPTURE_MICROS is a wall-clock hold, so a boot whose harness died says so and carries on rather than hanging. RFC 0054."
+
+# --- D — memory ---------------------------------------------------------------
+
+[[row]]
+id      = "frame-leak-on-death"
+group   = "D"
+class   = "Frame leak on process death"
+layers  = ["P"]
+check   = "process::reap fails the boot if the count does not return; the boot line reports 'user frames N given back, free count unchanged'"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "One process, one death. Churn is a different row."
+
+[[row]]
+id      = "frame-leak-under-churn"
+group   = "D"
+class   = "Frame leak under churn"
+layers  = ["L1", "L5", "P"]
+check   = "cargo xtask churn — the allocator's free count is read before the churn and again after every set is retired, the domain released and the workload's own memory handed back, and the boot fails if they differ. Forty register-and-retire cycles per half over two invalidation policies, each cycle a registration that makes the remapping unit build second-level tables and a retirement that clears them"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+scheduled_by = ["E1-P06", "E1-B10"]
+notes   = "E1-B14 landed and closed the registration path: the churn is the one workload in this tree that maps, retires and releases at a rate where a leak of a single table frame per cycle stops being invisible, and claims/0014's frames_leaked_by_the_churn bounds it at zero. What is still open is the churn the other two tasks name — components dying and being refilled under load, where the frames are a process's rather than a domain's. process::reap covers one death and the frame-leak-on-death row is that; nobody has run a thousand."
+
+[[row]]
+id      = "unmap-invalidates-per-page-under-churn"
+group   = "D"
+class   = "An unmap that invalidates the remapping unit once per page under datapath churn"
+layers  = ["L1", "P"]
+check   = "cargo xtask churn — one boot runs the churn under both invalidation policies over the identical geometry and requires each to mean what it says: the per-page control must invalidate once per page and the batched candidate once per request, so a build where the policy argument stopped being read reports one number twice and goes red. claims/0014 carries both as thresholds, plus the round trips saved per set and a minimum of two pages per set, because at one page the two halves are the same run"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "E1-B14. The control is kept in the tree rather than deleted with the commit that beat it: a ratio whose denominator was removed is a number nobody can re-check when the rate changes again. What this row does not cover is the *mapping* half of the same cycle, which is still one invalidation per page — CHURN_GAP in xtask declares it, claims/0014's map_invalidations_per_page bounds it in both directions, and the three go red together the day it is closed. RFC 0052."
+
+[[row]]
+id      = "mapping-left-after-revoke-under-churn"
+group   = "D"
+class   = "Mapping left after revoke, under churn"
+layers  = ["L1", "P"]
+check   = "cargo xtask churn — every retirement is followed by a walk of the remapping unit's own second-level tables requiring the set's eight pages to be gone, and every registration by the same walk requiring that they are there. Both counted, both bounded by claims/0014 (sets_still_translated_after_unmap = 0 beside sets_reachable_while_registered = 80), and the boot names which of the two failed. A third pass makes the one request shape no client can produce — a set with a page taken out from under it — and requires one batched request over the whole set to leave nothing translated beyond the hole"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+notes   = "E1-B14's batch clears N entries and publishes one global invalidation for the request, so *the entries are gone* is exactly what a reader is entitled to disbelieve — this row is that read back. The positive half is what makes the zero worth anything: a walk that answered no to everything would report a perfect revocation over a domain that never mapped anything. What is still not observed is a **device**: nothing is attached to the churn's domain, and the one boot that watches a device fault after a withdrawal — cargo xtask blk's outside half — registers a single page, where the batched and per-page policies are the same run. REVOKE_GAP in xtask is that residual declared as a checked quantity, and it goes red the day a device is attached to the churn's domain or that boot registers more than a page. RFC 0052."
+
+[[row]]
+id      = "allocator-split-coalesce"
+group   = "D"
+class   = "Allocator split/coalesce corruption"
+layers  = ["L1", "P"]
+check   = "cargo xtask run — mem::self_test phases two to four: an Env-driven mix of orders 0 to 9, a probe upward from order 9, and a 2 MiB block handed back as 512 shuffled frames that must reappear as a 2 MiB block. cargo xtask orders boots a machine with a gibibyte in it and requires order 18, which the 128 MiB fixture has no memory for"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "Every phase requires the free count to be exactly what it was, which is what catches a leak of a fixed number of frames per iteration. What it does not catch is fragmentation between coalescing passes — nothing schedules the pass, so its cost is argued rather than measured until E1-B07's batch class arrives."
+
+[[row]]
+id      = "percpu-global-state"
+group   = "D"
+class   = "Kernel-global mutable state outside PerCpu"
+layers  = ["X"]
+check   = "cargo xtask lint-percpu"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "fifth-cross-core-word"
+group   = "D"
+class   = "A fifth word crossing a core with no named ordering"
+layers  = ["X"]
+check   = "REVIEW.md pass 2, RFC 0016; lint-percpu does not count atomics"
+cadence = ["every-pr"]
+status  = "partially"
+accepted_because = "A lint would have to distinguish an atomic that crosses a core from one that does not, which is a claim about the design rather than about the text. RFC 0016 names four; a fifth needs an argument, and an argument is a review."
+reversal = "A fifth lands without one."
+
+[[row]]
+id      = "kernel-wx-nx"
+group   = "D"
+class   = "W^X or NX broken on the kernel mapping"
+layers  = ["P"]
+check   = "cargo xtask fault nx, cargo xtask fault wx"
+cadence = ["on-demand"]
+status  = "gap"
+accepted_because = "See kernel-fault-path-rot: the fault verb is in no automated loop, and the kernel-mode half changes only when the address space or the IDT changes."
+reversal = "A kernel-mode fault path breaks without `cargo xtask user` noticing, or the kernel job stops being the longest in the gate."
+
+[[row]]
+id      = "onramp-page-table-leak"
+group   = "D"
+class   = "Page tables leaked by the higher-half on-ramp"
+layers  = ["P"]
+check   = "the free count is asserted across the switch — arch/x86_64/paging.rs"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+# --- E — time and scheduling --------------------------------------------------
+
+[[row]]
+id      = "deadline-inversion"
+group   = "E"
+class   = "Deadline inversion in a device queue"
+layers  = ["L1", "L5"]
+check   = "cargo xtask deadline — three boots of one client script against one ring-3 virtio-blk component, and one of them is a control: the ordered half must return the hard-class read at position 0 of 7 having overtaken 6 queued batch reads it was submitted behind, the arrival half must return the identical burst with the read last having overtaken 0, and the unadmitted half must refuse a class the client does not hold rather than serve it. The overtake is read twice — the frame's completion order and the component's own queue counter — and the two are required to agree. claims/0012 gates on the counts"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "Two limits, declared rather than implied. The depth of six is a *fixture*: the frame tells the driver to hold the whole burst before it picks (`f_virtio_blk::routing::at::HOLD`), because without it the queue depth at the first pick is a race between two cores. And the count is what gates; the *time* the overtake saved a client is `claims/0013`, `pending` on the machine E0-D10 owes. What this row does not cover is deadline-within-class ordering at a boot — this driver is admitted for the soft class, so on the boot the class term decides — which is `pending::tests::the_earlier_deadline_goes_first_within_a_class` and the model's `deadline` scenario. RFC 0049."
+
+[[row]]
+id      = "deadline-inheritance-unbounded"
+group   = "E"
+class   = "A component claiming urgency forever"
+layers  = ["L1", "L3"]
+check   = "abi/src/deadline.rs's the_depth_bound_is_enforced, and that is a unit test. E1-B06 landed the ordering and did not close this: RFC 0025's bound 4 decays a caller's urgency over MAX_DEPTH rings, and this tree has no chain for it to decay along — every entry that reaches a scheduler was written at depth zero by whoever originated it, and Inherited::rank does not read the depth"
+cadence = ["every-verify", "every-pr"]
+status  = "gap"
+scheduled_by = ["E1-B05", "E1-B07"]
+notes   = "The absence is now a *checked* quantity rather than an unwritten one: `DEADLINE_DEPTH_GAP` in xtask requires that nothing outside `abi/` calls `Inherited::class_field`, so the day a service forwards an inherited class the build goes red and names the documents — this row among them — that describe a tree that no longer exists. The cadence above is that check and not a test of the bound. The cheap way to close this is a `sim` scenario with two services in a chain, whose clock is the model's own; the honest way is a component that submits downstream on a caller's behalf."
+
+[[row]]
+id      = "admission-starvation"
+group   = "E"
+class   = "A granted reservation misses its deadline under load"
+layers  = ["L1", "L5", "L6"]
+check   = "cargo xtask admission — three arms at one seed, and two of them are controls: the unreserved arm must miss and the over-subscribed one must be refused without running, or the granted arm's zero is about the workload. claims/0010 gates on the counts"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+scheduled_by = ["E1-B07", "E0-D10"]
+notes   = "E1-B07 landed and the row moved to `partially` rather than `catches`, because the number that would close it is a *time*. The model has a virtual clock, so `met its deadline` is a count of slots — the same number on a fast host and a slow one — and that is what gates. What no machine in reach can produce is the margin in nanoseconds on a part that delivers all four of RFC 0007's components; `claims/0011` is that number and it is `pending` on E0-D10's machine. The boot half says so out loud: on QEMU there is no thread level, no cache topology and no RDT, so `cargo xtask admission` reports that this machine hosts no hard-class reservation at all."
+
+
+[[row]]
+id      = "admission-oversubscribed"
+group   = "E"
+class   = "An over-subscribed reservation is admitted"
+layers  = ["L3", "P"]
+check   = "f_abi::reserve's host tests over the arithmetic, and cargo xtask admission over a boot and a model: the machine's capacity is granted, the same demand is made again, and it must be refused in the ADMISSION domain of RFC 0010 naming which of RFC 0007's four components could not be delivered — and must run nothing at all"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+scheduled_by = ["E1-B07"]
+notes   = "The row that closed, and what closes it is two thresholds rather than one: `oversubscribed_refusals` has a minimum and `periods_run_oversubscribed` has a maximum of zero. Without the second, a reservation that was admitted and then missed would satisfy the first — which is the state R08 says the word deadline must not be used for, and is exactly what an admission test that refuses too late looks like. RFC 0050."
+
+
+[[row]]
+id      = "timer-jitter-regression"
+group   = "E"
+class   = "Timer jitter regression"
+layers  = ["L5", "L7"]
+check   = "cargo xtask timer 60; claim 0002 is pending and gates nothing"
+cadence = ["on-demand"]
+status  = "gap"
+scheduled_by = ["E0-P06", "E0-D10", "E0-P18"]
+
+[[row]]
+id      = "ring-latency-regression"
+group   = "E"
+class   = "Ring submit latency regression"
+layers  = ["L5", "L7"]
+check   = "cargo xtask claim ring-submit-latency; claim 0001 is pending; bench refuses to record under F_ENVIRONMENT=container"
+cadence = ["on-demand"]
+status  = "gap"
+scheduled_by = ["E0-P05", "E1-P10"]
+
+[[row]]
+id      = "boot-time-regression"
+group   = "E"
+class   = "Boot-time regression"
+layers  = ["L5", "L7"]
+check   = "claim 0003, tracked, cargo xtask claim boot-to-m0, threshold 50 ms"
+cadence = ["on-demand"]
+status  = "partially"
+accepted_because = "Tracked by design. Nothing in the thesis rests on boot time and a tight threshold would fire the first time a milestone added a page-table walk the design wanted; the loose bound catches a tenfold change nobody intended."
+reversal = "Boot time becomes an argument in any document, at which point it needs an owner and a gate."
+
+[[row]]
+id      = "uncounted-kernel-entry"
+group   = "E"
+class   = "A kernel entry on the hot path that nobody counted"
+layers  = ["L5", "P"]
+check   = "cargo xtask runtime — four boots. load requires zero door calls and zero ring-3 faults across sixteen thousand work items a component scheduled inside its own allocation. provoke runs the same load with one crossing on purpose and requires the frame's count and the component's own count to be non-zero and equal, taken on opposite sides of the boundary, so a build that stopped counting publishes zero twice and fails. reclaim posts RFC 0008's notice from the timer handler under load and requires parking at an allocation boundary within one quantum with the runtime's own queue empty, drained by the frame rather than believed, and rings this core's doorbell as the notice goes out so the non-timer interrupt bucket is a number a boot can move. hostile scribbles the control ring header before entry and requires a structured refusal rather than belief. All five buckets are published as state::node::RUNTIME_HOT, RUNTIME_PROVOKED, RUNTIME_BOUNDARY, RUNTIME_TICKS and RUNTIME_INTERRUPTS"
+cadence = ["every-pr"]
+status  = "catches"
+notes   = "The row exists because the check shipped incomplete, and that is the more useful half of it. Four buckets were counted while interrupt_dispatch handled the shootdown, the doorbell and the spurious vector without reading the saved code selector at all, so each of those taken at ring 3 was a kernel entry in no bucket — neither on the hot path nor excluded from it — while RFC 0038 said nothing else is excluded. Nothing went red: the demonstration's boot processor only waits while the runtime runs and issues none of the three, and the blk, cap and user boots that do issue shootdowns publish no entry counts. Two bounds on what this row claims. The counters are armed on every process this kernel builds, but what is asserted about them is asserted on four boots; entries-per-operation with a baseline is E1-P10's. And the reclaim half's greenness depends on a ring-3 timer tick landing between a quarter of the load and the end of it, which holds under QEMU and may not on hardware — the failure mode is red rather than falsely green, and the bound is written on kernel::runtime::RECLAIM_AFTER_ITEMS."
+
+[[row]]
+id      = "small-regression"
+group   = "E"
+class   = "A regression too small for a threshold"
+layers  = ["L5"]
+check   = "nothing; claims/history.jsonl is accumulating for it"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E2-P09"]
+
+# --- F — determinism ----------------------------------------------------------
+
+[[row]]
+id      = "determinism-known-construct"
+group   = "F"
+class   = "A clock, HashMap or rdtsc outside Env"
+layers  = ["L0", "X"]
+check   = ".claude/hooks/determinism-guard.sh, then cargo xtask lint-determinism"
+cadence = ["every-edit", "every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "determinism-unnamed-source"
+group   = "F"
+class   = "A source of nondeterminism no pattern names"
+layers  = ["L0", "P"]
+check   = "cargo xtask trace locally; the two-runner trace and reproduction jobs in CI"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "mutate-unseeded-time boots green twice with two different answers. Every other check in this tree is green on it."
+
+[[row]]
+id      = "determinism-off-log"
+group   = "F"
+class   = "A determinism leak that never reaches the boot log"
+layers  = ["L0", "L1"]
+check   = "nothing — the trace hashes the boot log, and the state tree deliberately publishes nothing that varies with time"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E1-P01", "E2-P05"]
+
+[[row]]
+id      = "sim-correlated-streams"
+group   = "F"
+class   = "Correlated streams in a seed sweep"
+layers  = ["L1"]
+check   = "per-site streams in env/src/sim.rs, plus the independence test"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+scheduled_by = ["E1-B11"]
+
+[[row]]
+id      = "sim-site-never-exercised"
+group   = "F"
+class   = "A fault-injection site that is never exercised"
+layers  = ["L1"]
+check   = "f_sim::fault requires every class to have a scenario, every armed scenario to strike at three seeds, and every class to be declared by a protocol that reads it — an arming a device would ignore never fires and fails the second check; ring/tests/faults.rs requires each of its three sites to be injected at; env/src/sim.rs counts and reports sites past its fixed table rather than dropping them"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "E1-P02. Three ways a site goes unexercised, all three red rather than quiet: a class with no scenario fails a test, a scenario whose class never fires fails a test, and a class armed against a protocol that never reads it cannot strike at all — Protocol::HONOURS gates the consultation, so the arming fails the second check instead of recording a strike that changed nothing."
+
+[[row]]
+id      = "allowlist-in-same-diff"
+group   = "F"
+class   = "An allow-list entry added in the same diff as the code needing it"
+layers  = ["X"]
+check   = "REVIEW.md pass 1 names it as the commonest way the policy erodes"
+cadence = ["every-pr"]
+status  = "partially"
+accepted_because = "The entry is a reviewable diff by construction, which is the whole mechanism; whether its stated reason survives reading is a judgement no lint makes."
+reversal = "An allow-list entry reaches main whose reason does not survive being read aloud."
+
+# --- G — the policies ---------------------------------------------------------
+
+[[row]]
+id      = "unsafe-outside-frame"
+group   = "G"
+class   = "unsafe outside abi/, ring/, kernel/"
+layers  = ["X"]
+check   = "unsafe_code = \"forbid\" from the workspace at compile time, and cargo xtask lint-unsafe over the text"
+cadence = ["every-build", "every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "safety-comment-hollow"
+group   = "G"
+class   = "A // SAFETY: comment that does not discharge its obligation"
+layers  = ["L3", "X"]
+check   = "REVIEW.md passes 1 and 3; no lint reads the comment"
+cadence = ["every-pr"]
+status  = "partially"
+accepted_because = "A checker for this is a proof checker; there is no cheaper version, and listing it as mechanised would be worse than listing it as review."
+reversal = "E2-P04 puts Verus on the frame."
+
+[[row]]
+id      = "unsafe-share-trigger"
+group   = "G"
+class   = "The unsafe share crossing RFC 0001's trigger"
+layers  = ["X"]
+check   = "cargo xtask unsafe reports both shares; it does not gate"
+cadence = ["on-demand"]
+status  = "partially"
+accepted_because = "RFC 0001's trigger is 'exceeds 10% by phase 02' and the phase is half the condition. A verb that went red at phase 00 would be a gate with no path to green."
+reversal = "Phase 02: lint_all gains a line, as E0-B21 records."
+
+[[row]]
+id      = "licence-boundary-import"
+group   = "G"
+class   = "The permissive tree importing third_party/"
+layers  = ["X"]
+check   = "cargo xtask lint-licensing"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "spdx-missing"
+group   = "G"
+class   = "A missing SPDX header"
+layers  = ["X"]
+check   = "cargo xtask lint-licensing"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "number-without-claim"
+group   = "G"
+class   = "A number in prose with no claim"
+layers  = ["L7", "X"]
+check   = "REVIEW.md pass 4"
+cadence = ["every-pr"]
+status  = "partially"
+accepted_because = "The mechanised direction is the other one — lint-claims catches a cited value that moved, lint-reproduce one that cannot be re-derived, lint-claim-owners one nobody owns. A lint cannot tell a number that needs a claim from a number in an example."
+reversal = "A published number without a claim survives a release."
+
+[[row]]
+id      = "claim-citation-stale"
+group   = "G"
+class   = "A document citing a claim value the claim no longer has"
+layers  = ["L7", "X"]
+check   = "cargo xtask lint-claims; cargo xtask claims --render fixes it"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "claim-no-owner"
+group   = "G"
+class   = "A claim with no owning document (R09)"
+layers  = ["X"]
+check   = "cargo xtask lint-claim-owners"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "claim-reproduction-empty"
+group   = "G"
+class   = "A claim whose published reproduction runs nothing"
+layers  = ["L7", "X"]
+check   = "cargo xtask lint-reproduce"
+cadence = ["every-verify"]
+status  = "catches"
+notes   = "lint-reproduce appears in no workflow file; the CI claims job runs lint-snapshot, claims, lint-claim-owners and lint-claims."
+
+[[row]]
+id      = "claim-snapshot-stale"
+group   = "G"
+class   = "A committed snapshot asserting what the registry does not hold"
+layers  = ["L7", "X"]
+check   = "cargo xtask lint-snapshot, run before anything regenerates it"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "abi-unit-missing"
+group   = "G"
+class   = "A quantity crossing the ABI with no unit (R03)"
+layers  = ["X"]
+check   = "cargo xtask lint-units"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "callback-registered"
+group   = "G"
+class   = "A callback registered across an interface (R05)"
+layers  = ["X"]
+check   = "cargo xtask lint-callbacks"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "defect-on-by-default"
+group   = "G"
+class   = "A deliberate defect left on by default"
+layers  = ["X"]
+check   = "cargo xtask lint-mutations"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "manifest-off-schema"
+group   = "G"
+class   = "A component manifest that does not fit docs/manifest.md"
+layers  = ["X"]
+check   = "cargo xtask lint-manifests"
+cadence = ["every-verify"]
+status  = "catches"
+notes   = "lint-manifests appears in no workflow file; it runs inside lint_all and nowhere else."
+
+[[row]]
+id      = "reversal-without-rfc"
+group   = "G"
+class   = "A reversal with no RFC"
+layers  = ["X"]
+check   = "REVIEW.md pass 4"
+cadence = ["every-pr"]
+status  = "partially"
+accepted_because = "The same shape as number-without-claim: recognising that a change contradicts something already written is a judgement about two documents, not a pattern in one file."
+reversal = "A design document is contradicted by code for more than one release."
+
+[[row]]
+id      = "buffer-ownership"
+group   = "G"
+class   = "Buffer ownership violated — both sides hold it"
+layers  = ["X"]
+check   = "three compile_fail doctests in ring/src/buffers.rs (E0599, E0451, E0382)"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+# --- H — components and drivers ----------------------------------------------
+
+[[row]]
+id      = "driver-death-blast-radius"
+group   = "H"
+class   = "Driver death observed by a client (blast radius)"
+layers  = ["L1", "P"]
+check   = "nothing — there is no driver and no supervisor"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E1-P06", "E1-B05"]
+
+[[row]]
+id      = "supervisor-restart-storm"
+group   = "H"
+class   = "Supervisor restart storm"
+layers  = ["L1"]
+check   = "nothing — RFC 0008 declares a restart policy and nothing runs it"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E1-B05", "E1-P06"]
+
+[[row]]
+id      = "component-outgrows-table"
+group   = "H"
+class   = "A component that legitimately outgrows the capability table"
+layers  = ["P"]
+check   = "cargo xtask cap flood holds 160 capabilities, five times the fixed count, with the growth debited from its untyped region; cap quota holds 32 because it spent that region first"
+cadence = ["every-pr"]
+status  = "catches"
+notes   = "E1-B13 made the table storage the component pays for, so outgrowing the fixed count is an ordinary thing a component does rather than a bound it meets. What is still sampled rather than proved is the size: one page, because the untyped region the frame grants is one frame. A real supervisor holding several is E1-B05."
+
+[[row]]
+id      = "imported-driver-not-over-ring"
+group   = "H"
+class   = "An imported driver reachable other than over a ring"
+layers  = ["X"]
+check   = "cargo xtask lint-licensing; lint-manifests refuses an imported image in shared"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "lint-licensing runs in the CI policy job as well as in lint_all; lint-manifests runs only in lint_all, so that half is every-verify."
+
+[[row]]
+id      = "shim-divergence"
+group   = "H"
+class   = "A shim diverging from the API it imitates"
+layers  = ["L4"]
+check   = "nothing — differential fuzzing against Linux is not built"
+cadence = ["never"]
+status  = "gap"
+accepted_because = "Named in proving-ground.html section 08 and owned by no task, because there is no shim."
+reversal = "The first imported driver is reachable over a ring — the point at which 'what does Linux do here' stops being rhetorical."
+
+# --- I — the apparatus itself -------------------------------------------------
+
+[[row]]
+id      = "weakened-test"
+group   = "I"
+class   = "A weakened test — #[ignore], assert!(true), a shrunk repeat count"
+layers  = ["X"]
+check   = ".claude/hooks/tests-hold.sh, then REVIEW.md pass 2"
+cadence = ["every-edit", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "hook-stopped-firing"
+group   = "I"
+class   = "A hook that stopped firing"
+layers  = ["X"]
+check   = ".claude/hooks/selftest.sh, in the policy job and in agent-evals.yml"
+cadence = ["every-pr", "weekly"]
+status  = "catches"
+
+[[row]]
+id      = "agent-config-regression"
+group   = "I"
+class   = "Agent configuration regression"
+layers  = ["X"]
+check   = "cargo xtask eval, twenty-two tasks, floor 0.95"
+cadence = ["every-pr", "weekly"]
+status  = "partially"
+accepted_because = "The suite measures whether a policy is known, not whether it is followed in hour three of a long session. evals/README.md states it, and the hooks exist because of it."
+reversal = "A policy violation passes the eval suite and no hook catches it."
+
+[[row]]
+id      = "test-on-no-runner"
+group   = "I"
+class   = "A test that exists and runs on no runner"
+layers  = ["X"]
+check   = "cargo xtask test-host — the whole workspace minus the crates PORTABILITY excludes with a reason — run on the x86-64 runner and on the arm runner, and locally inside cargo xtask test; and cargo xtask lint-arch-tests, which is the half test-host cannot see: a crate on both runners with a #[cfg(target_arch)] test inside it leaves both jobs green while one collects fewer tests"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "Was partially, and the entry it carried was itself stale: it named xtask and bench from before f-sim, f-store and f-virtio-blk existed, which is exactly the drift it was describing. E1-P11 removed the drift rather than the symptom — the crate list is derived from Cargo.toml's members and a member with no row in the exception table fails the build. lint-arch-tests reads three gate shapes: an item cfg, a block cfg, and a file-scope #![cfg(target_arch)]. The third was missing and review found the check green over it — which mattered most, because a file-scope attribute is the only gate an integration test under tests/ can carry, and ring/tests/litmus.rs is one of those. RFC 0045."
+
+[[row]]
+id      = "kernel-fault-path-rot"
+group   = "I"
+class   = "A kernel fault path that no longer reports"
+layers  = ["P"]
+check   = "cargo xtask fault pf|ud|df|nx|wx|stack"
+cadence = ["on-demand"]
+status  = "gap"
+accepted_because = "Narrowly. The exception path does run in the gate — cargo xtask user boots six processes that fault and requires the kernel to report each and survive it. What is unscheduled is the kernel-mode half: the double-fault stack, the W^X and NX faults, the guard page under the fault stack, all of which change only when the address space or the IDT changes."
+reversal = "A kernel-mode fault path breaks without `user` noticing, or the kernel job stops being the longest in the gate and six more boots are free. The gate's measured wall clock is 2 m 56 s against a ten-minute budget, so this is the weakest acceptance in this file."
+
+[[row]]
+id      = "panic-vs-hang"
+group   = "I"
+class   = "A panic reaching CI as a hang, or a hang as a pass"
+layers  = ["P"]
+check   = "cargo xtask panic — three endings, three fixtures"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "aarch64-compile"
+group   = "I"
+class   = "AArch64-only compile failure"
+layers  = ["L2", "X"]
+check   = "cargo xtask cross — every workspace member compiled for aarch64-unknown-none, the list derived from Cargo.toml's members rather than written beside it — in the policy job and inside cargo xtask test; the arm job builds and runs the same suite the x86-64 job runs"
+cadence = ["every-verify", "every-pr"]
+status  = "catches"
+notes   = "The every-pr half of this cadence was not true until E1-P11: the cross-compile lived only in cargo xtask test, which no CI job runs, and the arm job built four crates — so f-store and f-virtio-blk were compiled for AArch64 by nothing on a pull request. RFC 0045."
+
+[[row]]
+id      = "aarch64-ordering"
+group   = "I"
+class   = "AArch64-only ordering failure"
+layers  = ["L2"]
+check   = "tests (AArch64, weak memory) and memory-ordering litmus (AArch64, weak memory)"
+cadence = ["every-pr"]
+status  = "partially"
+notes   = "E1-P11 landed and this row moved without changing status, which is the honest outcome: the arm runner now runs the whole host suite rather than four crates, so more code is exposed to weak memory — and the suite is still stress tests rather than a model check. E0-P16 is what changes the status."
+scheduled_by = ["E0-P16"]
+
+[[row]]
+id      = "toolchain-drift"
+group   = "I"
+class   = "Toolchain drift"
+layers  = ["X"]
+check   = "rust-toolchain.toml is a protected path; the container image reads its pin from that file rather than restating it"
+cadence = ["every-edit", "every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "dependency-policy"
+group   = "I"
+class   = "A dependency with a bad licence or a known advisory"
+layers  = ["X"]
+check   = "cargo deny check in the deps job; security-scan.yml against the advisory database"
+cadence = ["every-pr", "weekly"]
+status  = "catches"
+
+[[row]]
+id      = "credential-in-diff"
+group   = "I"
+class   = "A credential in the diff"
+layers  = ["X"]
+check   = ".claude/hooks/no-credentials.sh, REVIEW.md pass 3, security-scan.yml"
+cadence = ["every-edit", "every-pr", "weekly"]
+status  = "catches"
+
+[[row]]
+id      = "release-not-reproducible"
+group   = "I"
+class   = "Release package non-reproducible across two machines"
+layers  = ["X"]
+check   = "the package matrix and the address job; release --twice is the same-machine half"
+cadence = ["every-pr"]
+status  = "catches"
+
+[[row]]
+id      = "release-unnamed-tree"
+group   = "I"
+class   = "A release that cannot name its own tree"
+layers  = ["X"]
+check   = "cargo xtask release --dry-run — version and commit are fatal rather than unknown"
+cadence = ["every-pr", "per-release"]
+status  = "catches"
+
+[[row]]
+id      = "release-unauthorised"
+group   = "I"
+class   = "A release crossing the boundary without authorisation"
+layers  = ["X"]
+check   = ".claude/hooks/release-gate.sh on every Bash"
+cadence = ["every-edit"]
+status  = "catches"
+
+[[row]]
+id      = "coverage-validation-path"
+group   = "I"
+class   = "Coverage falling on the entry-validation path"
+layers  = ["L4"]
+check   = "cargo xtask entries --coverage: the share of a named list of thirty-seven functions that ring/entries-corpus.txt covers, per function, out of llvm-cov. claims/0009 is gating and states the floor; cargo xtask coverage still publishes the per-crate figure beside it and still gates nothing"
+cadence = ["every-pr"]
+status  = "catches"
+notes   = "A coverage threshold rewards tests written to touch lines rather than to catch anything, which is why the per-crate number is still published rather than gated. What makes this one gate instead is that the number is not the only thing checked: the same corpus must replay clean, three oracles each have a deliberate defect behind them, and thirty-seven reach minimums say the generator still produces what it says it does. A corpus grown to touch lines would have to pass all of those. RFC 0048 states that as the standing risk and names it as the reversal condition."
+
+[[row]]
+id      = "hardware-only-bug"
+group   = "I"
+class   = "A hardware-only bug — something QEMU emulates differently"
+layers  = ["L6", "P"]
+check   = "docs/first-boot-outside-qemu.md: one boot, by hand, on a virtual machine rather than metal"
+cadence = ["never"]
+status  = "gap"
+scheduled_by = ["E0-P18", "E0-D10"]
+
+[[row]]
+id      = "counters-unavailable"
+group   = "I"
+class   = "instructions_per_op and joules_per_op absent, narrowing a claim"
+layers  = ["L5", "L6"]
+check   = "the harness carries both fields and marks them Unavailable rather than omitting them, and the value is only as fresh as the last claim run"
+cadence = ["on-demand"]
+status  = "partially"
+scheduled_by = ["E0-P05", "E5-P03"]
+
+[[row]]
+id      = "verify-gate-drift"
+group   = "I"
+class   = "A drift between what verify runs and what the gate runs"
+layers  = ["X"]
+check   = "this table, and the note verify prints on its last line"
+cadence = ["every-verify"]
+status  = "partially"
+accepted_because = "The two are deliberately different — verify cannot run the AArch64 tests, the litmus job or a second runner — so a check that required them to be equal would be asserting something false."
+reversal = "A third check exists in one and not the other without a stated reason, which is what lint-taxonomy would notice."

@@ -87,6 +87,37 @@ static SHOOT_SEQ: PerCpu<u64> = PerCpu::new(0);
 /// whoever asked.
 static SHOOT_ACK: PerCpu<u64> = PerCpu::new(0);
 
+/// How many pages this core has asked the machine to forget, and how many
+/// interrupts that cost.
+///
+/// # Why these are not a fifth word
+///
+/// RFC 0016's rule is about *slots two cores reach*, and there are four of
+/// those. These two are not among them: each is written and read only by the
+/// core whose slot it is — the initiator counts its own shootdowns as it
+/// performs them, and nothing else ever looks at another core's copy except
+/// [`shootdowns`], which runs on the boot processor after every other core has
+/// been idle since its last acknowledgement. So the rule this file bends is not
+/// bent any further, and no argument is owed. Stated here rather than left to a
+/// reader who counts `PerCpu` declarations and gets six.
+///
+/// # Why they exist at all
+///
+/// `E1-B14` asks whether shootdown batching is worth building, and TODO.md's
+/// ordering rule 3 forbids designing the batch before the measurement exists.
+/// A measurement needs a counter, and a counter that only the batching change
+/// would add is a measurement taken after the decision. These are that counter,
+/// and the number they report is what closed the question — see the claim.
+///
+/// Two and not one, because the ratio is the whole point: one page costs one
+/// interrupt *per other running core*, so the cost of a shootdown is a property
+/// of the machine and not of the unmap. A single counter would have made a
+/// two-core boot and a sixteen-core boot report the same number.
+static SHOOT_PAGES: PerCpu<u64> = PerCpu::new(0);
+
+/// Interrupts sent on their behalf. See [`SHOOT_PAGES`].
+static SHOOT_IPIS: PerCpu<u64> = PerCpu::new(0);
+
 /// Everything a core needs to be told before it can find anything out for
 /// itself.
 ///
@@ -474,6 +505,149 @@ pub unsafe fn run_on(cpu: usize, kernel_root: u64, tsc_khz: u64, micros: u64) ->
     }
 }
 
+/// A moment `micros` from now, on this core's timestamp counter.
+///
+/// Exported beside [`join_serviced`] because the two halves of a driver's boot
+/// wait in different places — the frame waits for a *completion* while it is
+/// the client, and for a *core* once it is not — and both waits have to be
+/// bounded by the same thing. A spin bounded by an iteration count is bounded
+/// by how fast the host is, which under an emulator is a number that moves by a
+/// factor of ten between runs; the counter this reads is the one
+/// [`wait_for`] already reads, and it is read here rather than at the caller so
+/// that the one place this kernel reads a timestamp counter stays the place the
+/// determinism allow-list already names.
+///
+/// Unit: the timestamp counter's own ticks. Not a clock a component can see and
+/// not one anything is measured against — it is a bound on a wedge.
+#[must_use]
+pub fn deadline_after(tsc_khz: u64, micros: u64) -> u64 {
+    read_tsc().saturating_add(tsc_khz.saturating_mul(micros) / 1_000)
+}
+
+/// Has that moment gone by?
+#[must_use]
+pub fn past(deadline: u64) -> bool {
+    read_tsc() > deadline
+}
+
+/// Ask a core to run the process prepared for it and **do not wait**.
+///
+/// The other half of [`run_on`], for the one caller that has work of its own to
+/// do while another core is inside a component. Every other caller here is a
+/// frame that has nothing to do until the component is over; a driver's client
+/// is the frame, and a client that could not act while its server ran would be
+/// a client that never submitted anything for the server to answer.
+///
+/// [`join_serviced`] is the other end and must be called: a core left holding
+/// `RUN` is a core that never goes back to waiting.
+///
+/// # Errors
+///
+/// The core, when it is this one — a driver and its client cannot be the same
+/// core, because the client would be inside the driver.
+///
+/// # Safety
+///
+/// As [`run_on`].
+pub unsafe fn start_on(cpu: usize) -> Result<(), usize> {
+    if cpu == current_cpu() {
+        return Err(cpu);
+    }
+    post(cpu, RUN);
+    Ok(())
+}
+
+/// Wait for a core [`start_on`] was called for, **serving it** until it has
+/// finished.
+///
+/// # Why waiting is not the only thing this core can do
+///
+/// [`run_on`] spins. That was the whole of what the boot processor had to do
+/// while another core held a process, because every process this kernel had
+/// ever run was self-contained: it announced itself, made a few calls that the
+/// running core answered out of its own shards, and ended.
+///
+/// A **driver** is not self-contained and cannot be. It owns a device and it
+/// does not own the remapping unit that device is behind — the unit is the
+/// frame's, its page tables are the frame's, and a component that could program
+/// one could point any device at any memory. So the one thing a driver cannot
+/// do for itself is turn a client's capability into an address its device may
+/// use, and it asks, on its control ring. RFC 0047.
+///
+/// `serve` is what answers. It is called between mailbox polls, on the boot
+/// processor, which is where the allocator, the remapping unit and the client's
+/// capability table already are — so the authority stays where it was and
+/// nothing is handed across a core boundary to make this work. **It is a
+/// polling point and not a callback**: R05 says nothing is delivered
+/// asynchronously, and what is here is this core looking, in its own loop, at a
+/// ring.
+///
+/// # Errors
+///
+/// [`NotJoined`], if the core never reported finished — and which of the two
+/// ways that happened, because one of them is a wall-clock bound and must not
+/// be read as a finding. `serve` refusing is not an error here and cannot be: a
+/// request the frame could not answer is answered with a refusal on the ring,
+/// which is the driver's to act on.
+///
+/// # Safety
+///
+/// As [`run_on`], and `serve` must not touch anything the running core is
+/// writing — which for the one caller means the driver's control ring, whose
+/// two ends are single-producer and single-consumer by construction.
+pub unsafe fn join_serviced(
+    cpu: usize,
+    tsc_khz: u64,
+    micros: u64,
+    serve: &mut dyn FnMut(),
+) -> Result<(), NotJoined> {
+    let deadline = read_tsc().saturating_add(tsc_khz.saturating_mul(micros) / 1_000);
+    loop {
+        // Served before the mailbox is read, so that a request outstanding at
+        // the moment the process ends is still answered: the driver's last act
+        // is an `EXIT`, and an unanswered request before it would be a
+        // completion nobody posted rather than one nobody wanted.
+        serve();
+        let state = peek(cpu);
+        if state == DONE {
+            post(cpu, READY);
+            return Ok(());
+        }
+        if state == READY || state == FAILED {
+            return Err(NotJoined::Refused(cpu));
+        }
+        if read_tsc() > deadline {
+            return Err(NotJoined::Overdue(cpu));
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Why a core [`join_serviced`] waited for did not report finished.
+///
+/// # Why these are two variants and not one
+///
+/// Because they are different news and only one of them is a finding. A core
+/// that went back to waiting, or failed, answered the wrong thing: something
+/// about the process is wrong and the boot should be read as having caught it.
+/// A core that is still holding the job when the bound passes has told the
+/// frame nothing at all — the bound is a wall-clock number scaled off this
+/// machine's timestamp counter, so it fires for a component that is wedged and
+/// for a runner slower than the number, and those two cannot be told apart from
+/// here.
+///
+/// Collapsing them into one error is how a red line on a slow CI runner comes
+/// to be read as a protection that fired. The caller renders them apart;
+/// `kernel/src/blk.rs`'s `Trouble::Overdue` is the other end of this.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NotJoined {
+    /// The core went back to waiting, or failed, without reporting done.
+    /// Carries the core.
+    Refused(usize),
+    /// The bound passed with the core still holding the job. Carries the core.
+    Overdue(usize),
+}
+
 /// Tell every other running core to forget one page.
 ///
 /// Returns once each of them has acknowledged, which is what makes the caller
@@ -507,6 +681,13 @@ pub unsafe fn run_on(cpu: usize, kernel_root: u64, tsc_khz: u64, micros: u64) ->
 /// every core being told must have interrupts enabled.
 pub unsafe fn shootdown(page: u64) -> Result<(), usize> {
     let me = current_cpu();
+    // Counted before the loop rather than after it: a shootdown that could not
+    // be acknowledged still happened, and a count that dropped the failures
+    // would report a machine quieter than the one that wedged. The interrupts
+    // are counted inside, one per core actually told, because "told everybody"
+    // is a different number on a one-core machine and on a sixteen-core one and
+    // that difference is the measurement.
+    bump(&SHOOT_PAGES, me, 1);
     // Read here rather than passed in, because this is reached from the
     // system-call path, where the only thing the caller has is a handle. Every
     // core has the same measurement — one core measures and the rest adopt it —
@@ -531,6 +712,12 @@ pub unsafe fn shootdown(page: u64) -> Result<(), usize> {
         // SAFETY: this core's mapped register window, a core that is running,
         // and a vector `idt::init` installs on every core.
         unsafe { ap::send(apic::window(), cpu, apic::SHOOTDOWN_VECTOR) };
+        // Here rather than at the end of the loop, so that a shootdown that
+        // wedges on an acknowledgement still reports the interrupts it sent.
+        // The `return Err` below is fatal at every caller, so the difference is
+        // in what the boot log says about the machine that died — which is the
+        // only thing that reading is for.
+        bump(&SHOOT_IPIS, me, 1);
 
         let deadline = read_tsc().saturating_add(tsc_khz.saturating_mul(SHOOTDOWN_MICROS) / 1_000);
         loop {
@@ -544,6 +731,50 @@ pub unsafe fn shootdown(page: u64) -> Result<(), usize> {
         }
     }
     Ok(())
+}
+
+/// What this machine has spent on translation invalidation between cores.
+///
+/// Answers `(pages, interrupts)`: how many pages a core asked the rest of the
+/// machine to forget, and how many inter-processor interrupts that cost.
+/// Summed across every core's own slot, because a shootdown is counted by
+/// whoever initiated it and this kernel has more than one core that could.
+///
+/// Unit: pages, and interrupts.
+///
+/// # Why a boot prints this even when it is zero
+///
+/// Because zero is the answer `E1-B14` found and a zero nobody printed is
+/// indistinguishable from a counter that does not work. The datapath's churn —
+/// buffer sets cycling, a driver restarting — unmaps *device* translations,
+/// which never reach this function; the capability revocation path does reach
+/// it, and `cargo xtask cap unmap` is the boot where this is not zero. Reading
+/// both is what makes the zero a finding rather than an absence.
+#[must_use]
+pub fn shootdowns() -> (u64, u64) {
+    let mut pages = 0u64;
+    let mut ipis = 0u64;
+    for cpu in 0..MAX_CPUS {
+        pages = pages.saturating_add(load(&SHOOT_PAGES, cpu, Ordering::Relaxed));
+        ipis = ipis.saturating_add(load(&SHOOT_IPIS, cpu, Ordering::Relaxed));
+    }
+    (pages, ipis)
+}
+
+/// Add to one of this core's own counters.
+///
+/// `Relaxed` on both halves, and that is not a shortcut: the slot belongs to
+/// the core doing the arithmetic, nothing is published through it, and the one
+/// reader that crosses a core boundary — [`shootdowns`] — runs on the boot
+/// processor after the work it is counting is over. An ordering here would be
+/// naming a happens-before that nothing depends on, which is worse than none:
+/// this file's whole argument is that every ordering in it is load-bearing.
+fn bump(shard: &'static PerCpu<u64>, cpu: usize, by: u64) {
+    if by == 0 {
+        return;
+    }
+    let value = load(shard, cpu, Ordering::Relaxed).saturating_add(by);
+    store(shard, cpu, value, Ordering::Relaxed);
 }
 
 /// Answer a shootdown: forget the page, then say so.

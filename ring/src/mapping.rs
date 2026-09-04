@@ -162,9 +162,53 @@ impl Mapping {
         let header = unsafe { base.cast::<ChannelHeader>().read_volatile() };
 
         let agreed = header.negotiate(offers, requires)?;
+
+        #[cfg(not(feature = "mutate-believed-header"))]
         let layout = Layout::adopt(&header, len)?;
 
+        // The deliberate defect for the *panic* half of `E1-P04`, and it is one
+        // character of difference from the line above. This crate's whole
+        // contract is that nothing a peer wrote produces a panic; the fastest
+        // way to break it is to treat a refusal as impossible, which is what a
+        // first implementation writes before it has met a hostile peer.
+        //
+        // `cargo xtask hostile --mutate` arms it and requires the fuzzer to
+        // report a panic finding with a seed. A fuzzer that has only ever
+        // printed *findings none* cannot be told from one that cannot print
+        // anything else — RFC 0017's argument, extended here the way RFC 0040
+        // extended it to the simulator. RFC 0046.
+        #[cfg(feature = "mutate-believed-header")]
+        let layout = Layout::adopt(&header, len).expect("the peer described a layout we compute");
+
         Ok(Self { base, layout, agreed, epoch: header.epoch })
+    }
+
+    /// Rebuild a mapping over bytes [`Self::adopt`] has already believed.
+    ///
+    /// # Why this exists, and why it is not a shortcut
+    ///
+    /// `f_ring::adopt` binds a channel *for one call*: it holds the layout it
+    /// was validated at and rebuilds the mapping on every access, so no
+    /// reference into memory a peer writes outlives the call that made it. That
+    /// is what lets a component adopt a channel in safe code — RFC 0037 — and
+    /// re-running [`Self::adopt`] there would be worse than slow: the header is
+    /// the peer's, so a peer that rewrote it between two calls could move the
+    /// entry array under a component midway through a drain. **Believing
+    /// happens once; binding happens per call.**
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::adopt`], and `layout`, `agreed` and `epoch` must be exactly
+    /// what [`Self::adopt`] answered for these bytes at this `base`. Passing a
+    /// layout computed for anything else is passing bounds that bound nothing,
+    /// which is the failure the whole of this module exists to refuse.
+    pub(crate) const unsafe fn bound(
+        base: *mut u8,
+        layout: Layout,
+        agreed: Negotiated,
+        epoch: u32,
+    ) -> Self {
+        Self { base, layout, agreed, epoch }
     }
 
     /// Refuse an address the layout arithmetic cannot even be stated against.

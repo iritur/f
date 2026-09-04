@@ -1,0 +1,172 @@
+# The one claim in this epoch that may gate on the machine that produces it,
+# and the reason is the shape of the number rather than the importance of it:
+# **it is a count**. `bench/src/lib.rs` refuses to record a timing in a
+# container and is right to — a shared cloud instance cannot produce defensible
+# tail latency — but *how many clients observed a failure* is a number this
+# machine may take, because it is the same number on a fast host and a slow one.
+#
+# The latency half of E1-P06's exit is therefore a separate claim, 0006, and it
+# is `pending` on the machine E0-D10 owes. Splitting was the alternative to
+# weakening: a blast-radius claim that carried a nanosecond threshold would have
+# had to be `pending` too, and the count that can gate would have waited on a
+# machine it does not need.
+name       = "driver-restart-blast-radius"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E1"
+
+statement  = """
+A driver component killed at seeded moments under sustained load costs its
+clients nothing except added latency. Across every component the build produces,
+killed three times each while operations are in flight:
+
+  no client observes a failure — zero,
+  no operation is lost — every submission is eventually answered,
+  no operation is answered twice, and no completion arrives for a token its
+    client no longer holds,
+  no answer disagrees with what was written: a value put at a position through
+    one instance of a driver is read back at that position through a later one,
+  no buffer comes back bearing another operation's stamp,
+  and no place is retired: every kill is followed by a refill under the restart
+    policy the component's own manifest declares.
+
+Underneath those, and stated because five zeros are free without it: every run
+interrupts writes. A kill lands with work in flight and discards the writes the
+dead instance had accepted and not yet committed, and the read-back above is
+asked of those positions afterwards. `writes_interrupted_at_kill` is that count,
+its threshold is a minimum rather than a maximum, and a run that reaches zero is
+refused — because a read-back over values nothing ever threatened is a check on
+the harness rather than on the system.
+
+Beside each killed run is the same workload with nothing killed, and it
+completes. A survival with no control run beside it establishes that nothing
+went wrong rather than that anything was under test.
+"""
+
+[baseline]
+# No comparison, and the reason is claim 0002's rather than an omission. This is
+# an absolute statement about the system's own behaviour and not a ratio against
+# somebody else's, so a baseline configuration would be a baseline of nothing.
+# What would make a comparison meaningful is a system that restarts a driver
+# under load and can be asked the same five questions about the same workload;
+# the honest peer for that is Fuchsia's driver framework rather than Linux's,
+# `docs/design/fast-path.html` section 14 says why, and this tree has no
+# baseline directory for it. Adding one is a versioned directory under
+# claims/baselines/ and a diff somebody writes, never an edit here.
+system  = "none"
+notes   = "The tuned-Linux baseline claims 0001 and 0004 compare against has no counterpart operation. A Linux block driver is not a restartable component with an endpoint its clients hold across the restart, so `how many clients noticed` is a question the baseline cannot be asked — and a comparison against a system that answers a different question is worse than none."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/fast-path.html"
+section  = "08"
+notes    = "Section 08 is where the sentence being tested lives — *user-space and restartable, IOMMU-confined; a driver bug becomes a restart, not a panic* — and the subsystem that owns the number is the component lifecycle: `kernel/src/component.rs` for the mechanism, `sim/src/chaos.rs` for the workload that drives it. RFC 0008 is the design and RFC 0041 is what this claim rests on."
+
+[workload]
+path   = "sim/src/chaos.rs"
+# Every component the build produces, killed and calm. The count is the
+# deployment's rather than a number here: a component added to `user/` is a
+# component this workload kills, which is what makes the seam load-bearing.
+kills  = 3
+seed   = "0xf00dbeefcafe1234"
+notes  = "Three kills per component and not more, because `user/store/manifest.toml` declares a budget of three restarts in three seconds and a fourth would retire the place — which is the policy working and a different experiment. The retirement itself is exercised: `cargo xtask component` drives a budget to its far end on every boot, and `sim/src/chaos.rs` has a test that a kill past the budget leaves the place empty and the work unanswered."
+
+[metrics]
+primary   = "clients_observing_failure"
+secondary = [
+  "operations_lost",
+  "operations_answered_twice",
+  "completions_for_stale_tokens",
+  "operations_answered_wrongly",
+  # Beside `operations_answered_wrongly` and deliberately not inside it. A buffer
+  # coming back under another operation's stamp is a different finding with a
+  # different first step, and — said here rather than left for a reader to
+  # discover — **it has no way to fire today**: RFC 0041 records that no device
+  # model in this crate can reach a client's bytes, because `Reach` is an address
+  # and a length and nothing turns one into memory. It is kept because the
+  # milestone that adds a model which *can* is the milestone where it is the only
+  # thing that would notice, and it is counted separately so that
+  # `operations_answered_wrongly` is a number about durability and nothing else.
+  "buffers_returned_torn",
+  "places_retired",
+  "operations_in_flight_at_kill_min",
+  # The second load-bearing minimum, and the one that answers *what input would
+  # make this green while the property was false*. `operations_answered_wrongly`
+  # was, for one draft, a threshold on a number no kill could move: the medium
+  # lived in an object the kill path never touched, so its zero was a property of
+  # the harness's data layout rather than of the system's ordering. The claim is
+  # now the ordering — a write reaches the medium before its completion is handed
+  # on — and this is the count that says the kills landed inside it: writes the
+  # dead instance had accepted and not committed, discarded with it, owed again
+  # by the client, and read back through a later instance.
+  "writes_interrupted_at_kill",
+  # The two that describe the mechanism rather than the failure, and are here
+  # because a claim whose secondary metrics were all zero would be a claim
+  # nobody could tell from a claim nothing ran. `submissions_pended` is how many
+  # times a client met an empty place — RFC 0008's connect-that-pends, which is
+  # what gate G1's sentence rests on — and `pends_resumed` is how many entries
+  # the refills then rang the doorbell for. Both are counted **in submissions**:
+  # each pend leaves exactly one entry sitting in the shared region and a refill
+  # rings once per entry it finds, so the two are comparable. `chaos::verdict`
+  # refuses when the second is short of the first — a pend with no ring is a
+  # client waiting on a doorbell nobody rang, carried by its own retry instead of
+  # by the mechanism. It is `>=` and not `==` on purpose: one refill may ring for
+  # several entries that accumulated, and a client may also ring for its own.
+  "submissions_pended",
+  "pends_resumed",
+  # What the restart cost in work rather than in time: one per buffer the client
+  # took back on peer-gone evidence. It is the difference between a delay and a
+  # loss, counted, and a zero here would mean the kills landed on nothing.
+  "operations_redone",
+]
+
+[threshold]
+# Written before the workload existed and not moved since. Every one of them is
+# zero or one, which is what a correctness claim's thresholds look like: there
+# is no acceptable rate of losing a client's write, so there is no number here
+# to tune when a run goes red.
+clients_observing_failure         = { max = 0 }
+operations_lost                   = { max = 0 }
+operations_answered_twice         = { max = 0 }
+completions_for_stale_tokens      = { max = 0 }
+operations_answered_wrongly       = { max = 0 }
+buffers_returned_torn             = { max = 0 }
+# Zero because no component this tree deploys declares `restart = never`. One
+# that did would be asking for its place to stay empty, and `chaos::verdict` asks
+# that component a different question rather than failing it. The day one is
+# deployed this row needs an exemption written beside it, not a larger number.
+places_retired                    = { max = 0 }
+# The load-bearing minimum, and the one that stops the five zeros above being
+# free. A kill that lands with nothing outstanding is a kill *between*
+# operations, and a suite of those would report every zero above while testing a
+# quiescent system. The harness reschedules such a kill rather than taking it,
+# and writes the outstanding count into the artefact beside every kill it does.
+operations_in_flight_at_kill_min  = { min = 1 }
+# And a kill has to land inside the *durability* path and not merely on the wire.
+# Without this the read-back is a question about values nothing ever put at risk,
+# which is what it was in the first version of this claim and is the reason this
+# row exists.
+writes_interrupted_at_kill        = { min = 1 }
+# Non-zero, and `chaos::verdict` separately requires it to be at least
+# `submissions_pended`. Both are counted in submissions, so the comparison is
+# apples to apples. The earlier draft of this row was a ratio between a count of
+# submissions and a count of doorbells, named a metric that was not in the list
+# above, and would have gone red on a correct run the first time one kill made a
+# client pend twice.
+pends_resumed                     = { min = 1 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "**This claim does not need that machine, and says so rather than pretending.** Every metric above is a count produced by a deterministic simulator with a virtual clock, so it is the same number in a container and on bare metal — `f_bench::Environment` refuses to record a *timing* here and this records none. The runner is named because `lint-reproduce` requires every claim to name one that has a specification file beside it, and because the day this claim's workload moves from the simulator to a boot — RFC 0041's declared gap closing — the machine it runs on stops being irrelevant. Claim 0006 is the half that needs it now."
+
+[reproduce]
+command = "cargo xtask claim driver-restart-blast-radius"
+
+[diagnosis]
+# Recorded while the system is understood rather than at 2 a.m. when it is not.
+operations_lost = "the client's ledger owes work nobody answered. Look at the place first: `pended` says how many submissions met an empty place, and a pend with no matching `resumed` is a refill that did not ring the doorbells the shared region was already holding"
+answered_twice = "a restart served work on both sides of itself. The dying instance's answers are supposed to be discarded with it — `Place::kill` — and the client is supposed to reclaim on `PeerGone` evidence alone. One of those two stopped being true, and RFC 0024's soundness rests on both"
+answered_wrongly = "a write that was answered was not on the medium when a later instance read the position back. Look at the *ordering* and not the storage: `Place::answer` commits before it hands the completion on, and `Chaos::lazy` is that same code with the order reversed. If the real path has grown a write-back cache a restart empties, this is what it looks like"
+writes_interrupted_zero = "the kills are landing on reads, or on nothing, so `operations_answered_wrongly` is a question about values no kill ever threatened. `Chaos::window` and the write/read alternation are what set it; a run that cannot catch a write in flight is a run whose read-back proves nothing"
+buffers_returned_torn = "a device wrote into memory a client had lent to a different operation. Nothing in this crate can do that today — the note beside the metric says why — so a non-zero here means a device model has gained a way to reach client bytes, and RFC 0024's soundness argument is what to re-read"
+in_flight_at_kill_zero = "the kills are landing between operations, so every other zero here is about a quiescent system. Either the load is finishing before the kill is due or the kill is being deferred to a moment the client has nothing out — `Chaos::settle_ns` is what sets the gap and `DEFERRALS_MAX` is what bounds the retries"
+retired = "the budget ran out, which is an outage rather than a restart. Either the kill count is above the manifest's `max_restarts` or the window closed on a run that took longer than the manifest expects — and both are the policy working, so the thing to change is the workload or the manifest, not this threshold"

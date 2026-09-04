@@ -1,0 +1,137 @@
+# The timing half of `E1-B07`'s exit, split from `claims/0010` for the reason
+# `claims/0006` was split from `claims/0005`: one of the two sentences produces
+# a count and the other produces a time, and a machine that cannot defensibly
+# produce the second must not be allowed to hold the first hostage.
+#
+# `claims/0010` gates here, today, on counts a virtual clock produces. This does
+# not, and the reason is not modesty. **A deadline met is a timing**, and there
+# are two ways to get one wrong in this tree and both have already happened
+# once. Under QEMU's translation backend a tick count is a property of the
+# emulator — RFC 0038 recorded the same load measuring between 18 and 260 timer
+# ticks across runs, because each block of guest code is compiled the first time
+# it is reached and the local APIC's deadline is host time. And in the
+# simulator, virtual nanoseconds are exact and true of nothing: a slot is
+# whatever `SLOT_NS` says it is, and multiplying slots by it produces a number
+# that looks like a measurement and is arithmetic over a constant.
+#
+# So the margin below is owed by a machine, and it is `E0-D10`'s.
+name       = "reservation-margin"
+status     = "pending"          # pending | tracked | gating
+milestone  = "E1"
+
+statement  = """
+A granted hard-class reservation, on a part that can deliver all four of RFC
+0007's components, meets its deadline under adversarial load with a margin that
+can be stated in nanoseconds — and the same workload without the reservation
+misses.
+
+Three numbers, on one machine, in one run:
+
+  the worst-case margin between a job completing and its next release, over
+    every period of a sixty-second run under the load `sim/src/reserve.rs`
+    models, expressed as a distribution and not as a summary (claims/README
+    rule 3),
+
+  the same number with the reservation removed and the component left in the
+    soft class, which is the control and must be worse,
+
+  and the record RFC 0007 requires beside both: for each of the whole physical
+    core with its sibling, the memory-bandwidth allocation, the last-level cache
+    partition and the pre-faulted memory, whether it was obtained by partition
+    or by exclusion. A run in which any of the four reads `unexercised` is not a
+    run this claim can record, because RFC 0007 says a number collected under a
+    reservation that cannot show all four is not a number about this system.
+
+The third is why this claim cannot be taken in a container or under an emulator,
+and it is a stronger bar than the runner class alone: `runner-class-A` is
+specified with RDT, and a run still has to *show* that the partitions were taken.
+"""
+
+[baseline]
+# Here a comparison is the whole point, unlike claims/0010. Linux's
+# `SCHED_DEADLINE` admits against a utilisation bound and grants a budget on a
+# core it does not hold exclusively — no sibling exclusion, no cache partition,
+# no bandwidth allocation — which is precisely the CPU-only reservation RFC 0007
+# rejected by name. The interesting number is not whether either refuses; it is
+# what a granted one survives.
+system  = "linux-6.x-tuned"
+# The configuration, not a description of it — E1-D06's key, and the same
+# directory claims 0001 and 0004 compare against, because a second copy of a
+# tuned kernel's configuration is a second thing to keep current. What this
+# claim needs *added* to it is written in `notes`, and adding it is a diff in
+# that directory rather than a sentence here.
+path    = "claims/baselines/linux-6.x-tuned"
+notes   = "The baseline configuration lives in claims/baselines/ and is versioned with this claim (rule 1). What it has to add for this claim is a `SCHED_DEADLINE` task with the same period and budget as the manifest declares, the same adversarial load on the co-resident cores, and the same margin distribution collected the same way. Recording it against a stock kernel would be the decay rule 1 exists to prevent."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "01"
+notes    = "The same sentence claims/0010 owns, and the same subsystem: admission control. What separates the two claims is the shape of the number, not the subsystem — `abi/src/reserve.rs` grants, `sim/src/reserve.rs` builds the load, and the machine E0-D10 owes is what turns a count of slots into a margin in nanoseconds. RFC 0007 is the design and RFC 0050 is the arithmetic."
+
+[workload]
+path    = "sim/src/reserve.rs"
+seconds = 60
+notes   = "The same adversary as claims/0010 — non-preemptible stretches longer than the slack, bursts aimed at the release instants, a job that exceeds its budget, and work competing for every core — driven from the same seed, so the two claims describe one experiment measured two ways. Sixty seconds because that is claim 0002's window and the two are taken on the same machine under the same reservation; a margin distribution and a jitter histogram collected under different reservations would not be comparable, and RFC 0007 says the record travels with the measurement."
+
+[metrics]
+primary   = "margin_p99_ns"
+secondary = [
+  "margin_min_ns",
+  "margin_histogram",
+  # The control, on the same machine and in the same run. Without it the number
+  # above is a statement that a fast machine is fast.
+  "margin_p99_unreserved_ns",
+  "deadlines_missed_unreserved",
+  # RFC 0007's record, and it is a metric rather than a note because a run that
+  # cannot show all four may not publish the number above. Four values, each
+  # `partition`, `exclusion` or `unexercised`.
+  "obtained_sibling",
+  "obtained_cache",
+  "obtained_bandwidth",
+  "obtained_memory",
+  # Instructions and joules per operation, which claims/README rule 4 asks for
+  # because they survive a hardware change and are far less noisy than
+  # nanoseconds. Energy belongs here rather than in a claim of its own: RFC 0006
+  # makes idle depth an output of this table, so the joules a reserved core
+  # spends are the arithmetic's result and not a governor's.
+  "instructions_per_period",
+  "joules_per_period",
+  # And what RFC 0006 selected, beside the energy it is supposed to explain. A
+  # run whose idle selection was `fallback` is a run collected under a different
+  # decision, which that RFC says out loud.
+  "idle_depth_selected",
+  "idle_selection_was_computed",
+]
+
+[threshold]
+# **Deliberately absent, and it is not an oversight.** A margin bound written
+# before any machine can produce one would be a number designed against a
+# measurement nobody has taken, which is the mistake `TODO.md`'s ordering rules
+# exist to prevent and the reason RFC 0007 was written at E0-D04 rather than at
+# the head of the epoch. What can be written now without inventing anything is
+# the shape of the answer: the margin must be positive at every percentile,
+# every one of the four `obtained_*` values must be `partition` or `exclusion`
+# and never `unexercised`, and the unreserved control must be worse. Those are
+# in the statement, and they become rows here on the day the first run happens.
+#
+# `claims/0002`'s 5 µs p99 was written before its machine existed and that was
+# right, because it is a bound the design promises. This claim has no such
+# promise to write down: RFC 0007 says a granted reservation is met *by
+# construction*, not met within N nanoseconds, so the number here is a
+# measurement of what construction bought rather than a bound it has to clear.
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "**This claim needs that machine and cannot be approximated on this one.** It needs RDT cache and bandwidth allocation, so that `obtained_cache` and `obtained_bandwidth` can read `partition`; it needs SMT, so that `obtained_sibling` can read `exclusion` rather than the `unexercised` a virtual CPU with no thread level forces; it needs a pre-faulted huge-page pool, which `mem::FrameAllocator` does not have yet; and it needs F booted on the metal, for E0-P18's reason. Four prerequisites, and `cargo xtask admission` reports today that this build satisfies none of them — which is the honest state and is why this file says `pending` rather than carrying a number taken under an emulator."
+
+[reproduce]
+command = "cargo xtask claim reservation-margin"
+
+[diagnosis]
+# Written now, while the design is understood, so that the first run on real
+# hardware has something to read.
+margin_negative = "a granted reservation missed on a part that could deliver all four components, which is the one outcome RFC 0007 says cannot happen by construction. Check `obtained_*` before anything else: a component reading `unexercised` means the mechanism was never applied and the reservation was not the reservation the design describes. If all four read partition or exclusion, then the frame's floor is wrong — the schedulability test admits on the assumption that the frame reaches the core only at its own tick, and something else is reaching it"
+unexercised_component = "the part did not deliver one of the four, so this run may not publish a margin at all. It is not a smaller result; RFC 0007 says a number collected under such a reservation is not a number about this system. Either the machine is not runner-class-A or `kernel/src/admit.rs` failed to read the leaf that says it is"
+control_not_worse = "the unreserved run matched the reserved one, so the load is not adversarial on this machine. The model's stretches are drawn in slots and the machine's are in nanoseconds; a stretch bound shorter than the reservation's slack makes the control pass by arithmetic, which `sim/src/reserve.rs` already records as the way its own control stops being one"
+idle_selection_fallback = "the run idled on the fallback rather than on a computed depth, so its energy numbers are collected under RFC 0006's honest limit rather than under its decision. That RFC says a claim collected under the fallback is not a claim about it — so the joules row is about a machine idling shallowly, not about admission control knowing the deadline set"

@@ -79,7 +79,7 @@ use f_abi::{door, error};
 
 use crate::arch::x86_64::multiboot::BootInfo;
 use crate::arch::x86_64::{apic, paging, probe, read_tsc, ring3};
-use crate::cap::{TABLE_SLOTS, Table};
+use crate::cap::{Direct, SLOTS_PER_PAGE, TABLE_SLOTS, Table};
 use crate::kprintln;
 use crate::mem::{FRAME_SIZE, Frame, FrameAllocator, Order};
 use crate::percpu::PerCpu;
@@ -128,6 +128,110 @@ pub const GRANT: u64 = STACK_TOP + FRAME_SIZE;
 /// and no allocation, which is what makes RFC 0013's *read, never delivered*
 /// affordable enough to leave on.
 pub const TREE: u64 = GRANT_SECOND + FRAME_SIZE;
+
+/// Where the frame maps a runtime's control ring.
+///
+/// The fourth page in this region, and still inside the two mebibytes one page
+/// table covers — so a runtime's whole world is one table, which is what makes
+/// *no kernel involvement on the hot path* an arithmetic fact rather than an
+/// aspiration: there is no page a runtime can touch that could fault.
+///
+/// It must equal `f_store::runtime`'s `CONTROL_AT`, which is the same
+/// arrangement `user/init` already has for [`GRANT`] and [`TREE`] and has the
+/// same failure mode: a build where the two disagree is a page fault at the
+/// component's first adoption, reported by the frame as an ordinary ring-3
+/// fault rather than as anything mysterious. *Reversal:* `door::Entry` growing
+/// a field for the address, which RFC 0008 says a component is entered with.
+pub const RING: u64 = TREE + FRAME_SIZE;
+
+/// Where the frame maps a runtime's own work ring.
+///
+/// The fifth and last page. This is the region a runtime schedules inside — it
+/// is both ends of the ring described here, which is what an executor is — and
+/// it is the frame's memory only in the sense that the frame charged an account
+/// for it. Nothing in the frame reads it while the runtime runs.
+///
+/// Must equal `f_store::runtime`'s `WORK_AT`. See [`RING`].
+pub const WORK: u64 = RING + FRAME_SIZE;
+
+/// How many pages of text the frame reserves for a component it builds from a
+/// component file.
+///
+/// Sixteen — sixty-four kibibytes — and it is a bound on the layout rather than
+/// on the loader. Every process this kernel ran before RFC 0047 was one page of
+/// text and the build refused an image that was not, which was a bound nobody
+/// had to defend while the only components were an announcement and an
+/// executor. A driver is not: `user/virtio-blk` compiles to about thirteen
+/// kibibytes the moment its own polling loop reaches the transport, the queue
+/// and the registration table.
+///
+/// Sixteen rather than four, because what this constant really buys is that
+/// **the addresses below do not move when a component's code grows.** A layout
+/// derived from an image's own length would make [`BLK_BOARD`] a different
+/// number on every commit, and it is the one address a component holds as a
+/// constant.
+///
+/// It is a *reservation* and not a charge. `component::spawn` charges the
+/// account for the pages an image actually occupies, so a component that fits
+/// in one page pays for one; what the reservation costs is address space, of
+/// which a component has forty-seven bits.
+///
+/// *Reversal:* a loader that reads a component's headers and a component that
+/// is told where its own world is rather than holding one address — E5, and at
+/// that point every constant in this section goes, not just this one.
+/// Unit: pages.
+pub const TEXT_PAGES: usize = 16;
+
+/// One unmapped page between a component's text reservation and its stack.
+///
+/// [`GUARD`]'s argument, for every shape whose text is a reservation rather
+/// than a page — which since RFC 0047 is every component built from a component
+/// file, spawned into a place or scheduled on a core. One layout and not two,
+/// because a place holds *any* component and a layout that depended on which
+/// one would be a place that was not interchangeable.
+pub const SPAWN_GUARD: u64 = TEXT + TEXT_PAGES as u64 * FRAME_SIZE;
+
+/// Where such a component's stack is mapped.
+pub const SPAWN_STACK: u64 = SPAWN_GUARD + FRAME_SIZE;
+
+/// The stack pointer it starts with: one past its stack.
+pub const SPAWN_STACK_TOP: u64 = SPAWN_STACK + FRAME_SIZE;
+
+/// Where the frame maps such a component's control ring.
+///
+/// The ring the frame publishes its notices onto, and — for a driver — the ring
+/// it asks the frame for a device translation on. RFC 0047. A driver reads this
+/// address out of [`BLK_BOARD`] rather than holding it as a constant, which is
+/// why it may move without anything outside this file being edited.
+pub const SPAWN_CONTROL: u64 = SPAWN_STACK_TOP + FRAME_SIZE;
+
+/// Where the frame maps the ring a driver serves its client on.
+pub const BLK_DATA: u64 = SPAWN_CONTROL + FRAME_SIZE;
+
+/// Where the frame maps the page that says where everything else is.
+///
+/// **The one address a driver component holds as a constant**, and it must
+/// equal `f_virtio_blk::routing::AT`. `kernel/src/blk.rs` asserts that at
+/// compile time; a comment would be a claim and the assertion is a check, and
+/// the kernel is the one artefact that links both definitions.
+pub const BLK_BOARD: u64 = BLK_DATA + FRAME_SIZE;
+
+/// Where the frame maps the device's register pages for the driver.
+///
+/// Four of them, which is what `user/virtio-blk/manifest.toml` declares and
+/// what the modern virtio transport lays out in one base-address register.
+/// Mapped [`paging::UserPage::Device`] and not `Data`: see that variant.
+pub const BLK_REGISTERS: u64 = BLK_BOARD + FRAME_SIZE;
+
+/// How many register pages the driver shape maps. Unit: pages.
+pub const BLK_REGISTER_PAGES: usize = 4;
+
+/// Where the frame maps the driver's queue memory.
+///
+/// The untyped need its manifest declares, sixty-four kibibytes of it, whole
+/// and contiguous because a virtqueue is one descriptor table and two rings at
+/// fixed offsets from each other.
+pub const BLK_QUEUES: u64 = BLK_REGISTERS + BLK_REGISTER_PAGES as u64 * FRAME_SIZE;
 
 /// A second address in the same region, used only by provocations whose mapping
 /// is supposed to be refused.
@@ -364,6 +468,167 @@ static STATE: PerCpu<State> = PerCpu::new(State {
 /// interrupted are not both looking at it, and they are.
 static IN_RING3: PerCpu<u64> = PerCpu::new(0);
 
+/// What crossed into the frame while ring 3 held a core.
+///
+/// # Why the five are counted apart rather than summed
+///
+/// Because they are five different events and only two of them are the
+/// architecture's claim. RFC 0038 is the argument in full; the short version is
+/// that a number whose exclusions are not written down is not a measurement.
+///
+/// [`Entries::hot`] and [`Entries::faults`] are **the hot path**: a boundary
+/// crossing the code running at ring 3 caused, deliberately or otherwise, in the
+/// middle of doing its work. [`Entries::boundary`] is the crossing that *is* the
+/// allocation boundary — the one door call that ends the residency —
+/// [`Entries::ticks`] is the frame's own clock reaching a core it gave away,
+/// which is what makes preemption at an allocation boundary possible at all and
+/// is not the runtime's work crossing anything, and [`Entries::interrupts`] is
+/// the rest of what the frame sends a core it gave away.
+///
+/// # Why the fifth exists, which is a scar
+///
+/// It was not here when this landed, and its absence was the exact defect this
+/// type exists to prevent one level down. Four buckets were counted, the
+/// document said *nothing else is excluded*, and
+/// [`interrupt_dispatch`](crate::arch::x86_64::idt::interrupt_dispatch) handled
+/// three further vectors — the shootdown, the doorbell and the spurious one —
+/// by returning without reading the saved code selector at all. Each of those
+/// taken at ring 3 was a kernel entry in no bucket, so `total()` was not a
+/// total. Nothing went red, because the demonstration's boot processor only
+/// waits while the runtime runs and issues none of them; the `blk`, `cap` and
+/// `user` boots do. A count that is complete only on the boot that reports it
+/// is the shape of measurement this repository is written against.
+///
+/// All five are published. A reader who disagrees with where the line is drawn
+/// can move it, which is the only honest way to ship an exclusion.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Entries {
+    /// Door calls other than the one that ended the residency.
+    /// Unit: kernel entries.
+    pub hot: u64,
+    /// Exceptions taken at ring 3. Unit: kernel entries.
+    pub faults: u64,
+    /// The door call that ended the residency, which is the allocation
+    /// boundary. Never more than one, and a zero here on a run that ended by
+    /// `EXIT` would mean the counting stopped.
+    /// Unit: kernel entries.
+    pub boundary: u64,
+    /// Timer interrupts delivered while ring 3 held the core.
+    /// Unit: kernel entries.
+    pub ticks: u64,
+    /// Every other interrupt delivered while ring 3 held the core: a TLB
+    /// shootdown another core asked for, a doorbell, and the spurious vector
+    /// the local APIC withdrew between asserting and acknowledging.
+    ///
+    /// Excluded from the hot path for [`Entries::ticks`]'s reason and not for a
+    /// weaker one — every one of the three is the frame or another core
+    /// reaching this one, and nothing the code at ring 3 does makes one happen.
+    /// The spurious vector is the weakest member of that set and is counted
+    /// with them rather than dropped, because a bucket with a judgement call in
+    /// it is still a number and a vector in no bucket is not.
+    /// Unit: kernel entries.
+    pub interrupts: u64,
+}
+
+impl Entries {
+    /// Nothing crossed. `Default` is not `const`, and every one of these is
+    /// written into a `PerCpu` slot from a `const` context.
+    pub const ZERO: Self = Self { hot: 0, faults: 0, boundary: 0, ticks: 0, interrupts: 0 };
+
+    /// Crossings on the hot path: what the exit criterion requires to be zero.
+    /// Unit: kernel entries.
+    #[must_use]
+    pub const fn on_the_hot_path(&self) -> u64 {
+        self.hot + self.faults
+    }
+
+    /// Every crossing, including the three that are excluded from the hot path.
+    ///
+    /// Here so that the exclusion is subtractable rather than assumed: a reader
+    /// who wants the unexcluded number has it. It is every ring-3 entry this
+    /// kernel's dispatcher can take — which is a claim about
+    /// [`interrupt_dispatch`](crate::arch::x86_64::idt::interrupt_dispatch)
+    /// rather than about this arithmetic, and the day that function grows a
+    /// sixth arm is the day this sentence stops being true unless the arm
+    /// counts.
+    /// Unit: kernel entries.
+    #[must_use]
+    pub const fn total(&self) -> u64 {
+        self.hot + self.faults + self.boundary + self.ticks + self.interrupts
+    }
+}
+
+/// Door calls a process made that were not the one that ended it.
+///
+/// Outside [`State`] and volatile through the raw pointer, for exactly
+/// [`IN_RING3`]'s reason: the fault path writes the shard beside it and the
+/// system-call path writes this one, and a reference here would be a claim that
+/// the handler and the code it interrupted are not both looking at these words.
+static HOT_CALLS: PerCpu<u64> = PerCpu::new(0);
+
+/// Exceptions taken at ring 3 on this core.
+static RING3_FAULTS: PerCpu<u64> = PerCpu::new(0);
+
+/// Door calls that ended a residency. The allocation boundary, counted so that
+/// its exclusion is a number rather than a sentence.
+static BOUNDARY_CALLS: PerCpu<u64> = PerCpu::new(0);
+
+/// Interrupts other than the timer taken while ring 3 held this core.
+///
+/// The shootdown, the doorbell and the spurious vector. Written by the
+/// interrupt dispatcher on this core and by nobody else, which is
+/// [`IN_RING3`]'s arrangement exactly.
+static FRAME_INTERRUPTS: PerCpu<u64> = PerCpu::new(0);
+
+/// Add one to a counting shard of this core's.
+fn count(shard: &'static PerCpu<u64>) {
+    let slot = shard.mine();
+    // SAFETY: this core's slot, read and written volatile through the raw
+    // pointer. The three writers on this core — the system-call path, the fault
+    // path and the interrupt dispatcher — cannot interleave: `syscall` runs with
+    // interrupts masked by `IA32_FMASK`, so no interrupt arrives inside a door
+    // call; every gate in this kernel's IDT is an interrupt gate, so a handler
+    // cannot be interrupted or interrupt itself; and a fault at ring 3 cannot
+    // arrive while ring 0 is inside a call. Volatile because the compiler may
+    // not merge or elide a count that another privilege level's behaviour is
+    // being judged by.
+    let value = unsafe { slot.read_volatile() };
+    // SAFETY: as above.
+    unsafe { slot.write_volatile(value.wrapping_add(1)) };
+}
+
+/// Start counting `cpu`'s crossings from zero.
+///
+/// Called where [`IN_RING3`] is zeroed and for the same reason: a residency's
+/// count is about that residency.
+fn arm_entries(cpu: usize) {
+    for shard in [&HOT_CALLS, &RING3_FAULTS, &BOUNDARY_CALLS, &FRAME_INTERRUPTS] {
+        let slot = shard.at(cpu);
+        // SAFETY: the slot of an idle core with no process on it, so neither
+        // writer over there can be running. Volatile, as every access to these
+        // shards is.
+        unsafe { slot.write_volatile(0) };
+    }
+}
+
+/// Read this core's crossings.
+///
+/// # Safety
+///
+/// Call on the core that ran the process, with the process over — which is what
+/// makes reading these shards free of a writer.
+unsafe fn entries_here(ticks: u64) -> Entries {
+    // SAFETY: the caller's guarantee, and volatile as these shards require.
+    let hot = unsafe { HOT_CALLS.mine().read_volatile() };
+    // SAFETY: as above.
+    let faults = unsafe { RING3_FAULTS.mine().read_volatile() };
+    // SAFETY: as above.
+    let boundary = unsafe { BOUNDARY_CALLS.mine().read_volatile() };
+    // SAFETY: as above.
+    let interrupts = unsafe { FRAME_INTERRUPTS.mine().read_volatile() };
+    Entries { hot, faults, boundary, ticks, interrupts }
+}
+
 /// What a system call produced.
 pub enum Answer {
     /// A value for `rax`, and the process carries on.
@@ -431,6 +696,29 @@ pub enum Provoke {
     /// it, reads it — which the preamble already did, so the fault below cannot
     /// be the page merely being absent — and then writes.
     State,
+
+    // The two E1-B13 added, and both are about the same surface: a table that
+    // can be bought is a table with a second way to be asked for something it
+    // cannot give. `Flood` is now the run that *does* buy — it fills the free
+    // part, pays for a page and fills that — so it is these two that say what
+    // happens at the two edges of paying.
+    /// Spend the untyped region on something else, then derive until the table
+    /// is full and there is nothing left to buy a page with.
+    ///
+    /// The refusal has to be `RESOURCE/QUOTA_EXHAUSTED` and the table has to
+    /// stop at the size it was given: a frame that served this out of anything
+    /// it kept in reserve would pass every other check in this file and would
+    /// have made a component's failure depend on what every other component had
+    /// spent. RFC 0008 and RFC 0029.
+    Quota,
+    /// Buy a page, then name slots past the end of what was bought.
+    ///
+    /// Three handles: one past the bought table, one past the ceiling this
+    /// build will ever grow a table to, and the largest index the packing can
+    /// express. Before growth, "past the end" was a constant; it is now a
+    /// number a component chooses by spending, and a bound that moves is a
+    /// bound worth a boot of its own.
+    Beyond,
 }
 
 /// What a provocation is supposed to produce.
@@ -487,12 +775,32 @@ const SWEEP_LIVE: u32 = GRANTS as u32 + 1;
 /// How many the sweep is refused, which is all of the rest.
 const SWEEP_REFUSED: u32 = TABLE_SLOTS as u32 * SWEEP_GENERATIONS + SWEEP_WILD - SWEEP_LIVE;
 
-/// How many capabilities a flooding process mints before the table is full.
+/// How many capabilities a flooding process mints before it runs out of money.
 ///
-/// Every slot that is not already spoken for. That this is a number at all is
-/// the point: the table has a bound, the bound is reached with an error rather
-/// than a fault, and the error names a resource.
-const FLOOD_MINTS: u32 = TABLE_SLOTS as u32 - SWEEP_LIVE;
+/// Every free slot, then every slot on the one page its untyped region can buy.
+/// That this is a number at all is the point, and since E1-B13 it is a number
+/// about a *quota* rather than about an array: the bound is what the process was
+/// handed to spend, it is reached with an error rather than a fault, and the
+/// error names a resource.
+///
+/// The untyped region the frame grants is one frame, so it buys exactly one
+/// page. A process holding more would flood further, which is the whole claim.
+const FLOOD_MINTS: u32 = (TABLE_SLOTS + SLOTS_PER_PAGE) as u32 - SWEEP_LIVE;
+
+/// How many a process mints when it has already spent its untyped region.
+///
+/// Every free slot and not one more. `cap=quota` derives a frame out of its
+/// untyped region first — which consumes the whole of it, the region being one
+/// frame — so when the table fills there is nothing to buy a page with and the
+/// refusal arrives at the size the frame handed over. The difference between
+/// this and [`FLOOD_MINTS`] is the evidence that growth is paid for rather than
+/// free.
+const QUOTA_MINTS: u32 = TABLE_SLOTS as u32 - SWEEP_LIVE;
+
+/// Handles `cap=beyond` presents that name no slot in a table that has bought
+/// one page: one past the bought end, one past the ceiling any table can reach,
+/// and the largest index the packing expresses.
+const BEYOND_WILD: u32 = 3;
 
 /// The page fault, which is what four of the seven provocations produce.
 const PAGE_FAULT: u64 = 14;
@@ -526,6 +834,13 @@ impl Provoke {
             (&b"cap=type"[..], Self::Mistyped),
             (&b"cap=flood"[..], Self::Flood),
             (&b"cap=unmap"[..], Self::Unmap),
+            // Absent until E1-B13, which is why `cargo xtask cap` had a ninth
+            // boot that ran the default provocation and passed. A boot whose
+            // name selects nothing is worse than a missing boot: the suite
+            // reports it green.
+            (&b"cap=state"[..], Self::State),
+            (&b"cap=quota"[..], Self::Quota),
+            (&b"cap=beyond"[..], Self::Beyond),
         ] {
             if boot.has_parameter(parameter) {
                 return provoke;
@@ -557,6 +872,8 @@ impl Provoke {
             Self::Flood => probe::PROVOKE_CAP_FLOOD as u32,
             Self::Unmap => probe::PROVOKE_CAP_UNMAP as u32,
             Self::State => probe::PROVOKE_CAP_STATE as u32,
+            Self::Quota => probe::PROVOKE_CAP_QUOTA as u32,
+            Self::Beyond => probe::PROVOKE_CAP_BEYOND as u32,
         }
     }
 
@@ -580,6 +897,8 @@ impl Provoke {
             Self::Flood => "deriving until the table is full",
             Self::Unmap => "reading a page after the capability that mapped it was revoked",
             Self::State => "writing to the state tree it was granted read-only",
+            Self::Quota => "filling its table with nothing left to buy more with",
+            Self::Beyond => "naming slots past the end of the table it bought",
         }
     }
 
@@ -608,7 +927,9 @@ impl Provoke {
             | Self::Stale
             | Self::Rights
             | Self::Mistyped
-            | Self::Flood => Expect::Exit(0),
+            | Self::Flood
+            | Self::Quota
+            | Self::Beyond => Expect::Exit(0),
         }
     }
 
@@ -693,8 +1014,18 @@ impl Provoke {
             // A space where a frame belongs, then a frame where a space does.
             Self::Mistyped => tally(base, 0, 0, 0, 2, 0),
 
-            // Every free slot, then the refusal.
+            // Every free slot, then the page its untyped region pays for, then
+            // the refusal. Exactly one refusal: a table that could keep buying
+            // would never reach it, and one that never bought would reach it
+            // [`SLOTS_PER_PAGE`] mints early.
             Self::Flood => tally(base + FLOOD_MINTS, 0, 0, 0, 0, 1),
+
+            // The retype that empties the untyped region, then every free slot,
+            // then the refusal that says the account is empty.
+            Self::Quota => tally(base + QUOTA_MINTS, 0, 0, 0, 0, 1),
+
+            // The flood, and then three handles past the end of what it bought.
+            Self::Beyond => tally(base + FLOOD_MINTS, BEYOND_WILD, 0, 0, 0, 1),
 
             // The preamble's three, and the revoke that withdraws what the
             // third of them mapped. Nothing is refused: the frame answers every
@@ -805,6 +1136,14 @@ pub struct Report {
     /// Capabilities still in its table when it ended, before the table was
     /// cleared. Everything it derived and did not have revoked.
     pub held: usize,
+    /// What crossed into the frame while it held the core, in four buckets.
+    ///
+    /// Counted on every run and not only on a runtime's, because a counter that
+    /// exists on one path is a counter nobody has compared against anything:
+    /// `user/init` makes six door calls and the probe makes more, so a build in
+    /// which this had stopped counting would publish a zero for them too and be
+    /// caught by the same check that requires a runtime's to be zero.
+    pub entries: Entries,
 }
 
 impl Report {
@@ -911,13 +1250,19 @@ struct Outcome {
     ticks: u64,
     /// Capabilities still in its table when it ended, before it was cleared.
     held: usize,
+    /// What crossed into the frame while it held the core.
+    ///
+    /// Here rather than in [`State`] because it has to cross a core boundary,
+    /// and this is the structure that already does — published by the running
+    /// core's `Release` store and read through the `Acquire` that answers it.
+    entries: Entries,
     /// Why the core could not run it, if it could not.
     failed: Option<Error>,
 }
 
 /// Per core, and written only by the core that ran the process.
 static OUTCOME: PerCpu<Outcome> =
-    PerCpu::new(Outcome { ended: 0, ticks: 0, held: 0, failed: None });
+    PerCpu::new(Outcome { ended: 0, ticks: 0, held: 0, entries: Entries::ZERO, failed: None });
 
 /// What the frame is asking of one run of a process.
 ///
@@ -969,9 +1314,19 @@ pub struct Plan {
 /// processor gives it back.
 pub struct Prepared {
     space: paging::UserSpace,
-    /// Text, stack, the frame behind its frame capability, and the region
-    /// behind its untyped one — in that order, and every one of them owed back.
-    pages: [Frame; 4],
+    /// The pages this process is made of, in the order they were taken and
+    /// every one of them owed back.
+    ///
+    /// Four for an ordinary process — text, stack, the frame behind its frame
+    /// capability, and the region behind its untyped one. Four for a runtime
+    /// too, and different ones: text, stack, its control ring and its work
+    /// ring. The array is sized for the larger of the two shapes and
+    /// [`Prepared::parts`] says how much of it is real, because a list whose
+    /// length is a constant is a list that silently frees a frame nobody took
+    /// the day the shapes stop agreeing.
+    pages: [Frame; PARTS_MAX],
+    /// How many of `pages` were taken. Unit: frames.
+    parts: usize,
     /// The free count before any of it was taken.
     before: u64,
     /// How many capabilities the frame put in its table.
@@ -981,6 +1336,17 @@ pub struct Prepared {
     /// Which core is to run it.
     cpu: usize,
 }
+
+/// The most pages any process shape is made of.
+///
+/// Four, in both shapes. It is a maximum rather than the count so that a shape
+/// with five is a change to one constant and a `parts` that is already carried,
+/// rather than a change to every literal in this file — but it is the *real*
+/// maximum and not a round number above it. It was six, with both shapes
+/// padding the list with two null frames to fill it, so the constant, the
+/// sentence beside it and the code disagreed about what was being reserved and
+/// why. A ceiling nobody reaches teaches a reader the wrong number.
+const PARTS_MAX: usize = 4;
 
 /// Build a process on `cpu`'s behalf: an address space, four pages, a table of
 /// capabilities and a job.
@@ -1136,10 +1502,15 @@ pub unsafe fn prepare(
     // SAFETY: volatile through the raw pointer, into the slot of a core whose
     // timer handler — the only other writer — has nothing to count yet.
     unsafe { ticks.write_volatile(0) };
+    // The other three crossings, zeroed beside it and for its reason: a
+    // residency's count is about that residency.
+    arm_entries(cpu);
 
     let outcome = OUTCOME.at(cpu);
     // SAFETY: as above; the core is idle and has not been given the job.
-    unsafe { outcome.write(Outcome { ended: 0, ticks: 0, held: 0, failed: None }) };
+    unsafe {
+        outcome.write(Outcome { ended: 0, ticks: 0, held: 0, entries: Entries::ZERO, failed: None })
+    };
 
     let job = JOB.at(cpu);
     // SAFETY: as above. Written last of the three, and published to the running
@@ -1158,11 +1529,543 @@ pub unsafe fn prepare(
     Ok(Prepared {
         space,
         pages: [text, stack, granted, untyped],
+        parts: 4,
         before,
         granted: granted_count,
         generation: first.generation(),
         cpu,
     })
+}
+
+/// What the frame is asking of one run of a *runtime*.
+///
+/// Separate from [`Plan`] rather than a variant of it, because the two shapes
+/// share almost nothing: a process is entered to be judged by a tally of
+/// refusals, and a runtime is entered to be judged by an absence of crossings.
+/// A single struct would have half its fields ignored on either path, which is
+/// the arrangement that makes a call site passing the wrong one look correct.
+#[derive(Clone, Copy)]
+pub struct RuntimePlan {
+    /// The component's image, out of the component file the loader carried.
+    pub image: &'static [u8],
+    /// Which of the component's lives the frame is asking for. It reaches the
+    /// component in the low half of `f_abi::door::Entry`.
+    /// Unit: none — a selector ordinal.
+    pub selector: u32,
+    /// The physical address of the frame the state tree is published in.
+    /// Unit: bytes, physical.
+    pub tree: u64,
+    /// The rate the core running it arms its own timer at. Unit: hertz.
+    pub hz: u32,
+    /// How many ticks that timer asks for. A bound rather than a schedule: the
+    /// runtime's load is what ends the run. Unit: timer ticks.
+    pub target: u64,
+    /// Which core the runtime is allocated. Unit: none — a core index.
+    pub cpu: usize,
+}
+
+/// The kernel-visible addresses of a runtime's two rings.
+///
+/// Answered by [`prepare_runtime`] because the frame has to reach both before
+/// the runtime does: the notices it already owes go onto the control ring
+/// before the first instruction runs, and the work ring is what the frame reads
+/// afterwards to see whether the runtime parked cleanly or abandoned its queue.
+#[derive(Clone, Copy, Debug)]
+pub struct Rings {
+    /// The control ring, as the frame sees it. Unit: bytes, kernel-virtual.
+    pub control: u64,
+    /// The runtime's own work ring, as the frame sees it.
+    /// Unit: bytes, kernel-virtual.
+    pub work: u64,
+}
+
+/// Build a runtime on `cpu`'s behalf: an address space, four pages, a table
+/// whose grants are notices it is owed, and two described rings.
+///
+/// # What is different from [`prepare`], and why it is a second function
+///
+/// A runtime is given **memory rather than authority**. Its table holds the
+/// three capabilities naming what it was mapped, so that the frame owes it three
+/// *granted* notices and its first polling point has something real to drain —
+/// which is the half `component::demonstrate` could show published and could not
+/// show acted on. What it is not given is anything to derive from, map with or
+/// spend: a runtime that could enlarge its own address space could fault on a
+/// page it made, and the hot-path count would be measuring the wrong thing.
+///
+/// The two rings are described here rather than by the runtime, because the
+/// frame is the grantor: it zeroes the frames, writes the headers, and hands
+/// over two addresses. The runtime adopts them and believes nothing —
+/// `f_ring::adopt`, RFC 0037 — which is exactly what it would do if the peer
+/// were hostile, and is why the same code drives a control ring the frame
+/// produces onto and a work ring nobody else touches.
+///
+/// # Errors
+///
+/// [`Error`], every variant of which fails the boot.
+///
+/// # Safety
+///
+/// As [`prepare`].
+pub unsafe fn prepare_runtime(
+    frames: &mut FrameAllocator,
+    kernel: &paging::AddressSpace,
+    features: paging::Features,
+    plan: RuntimePlan,
+) -> Result<(Prepared, Rings), Error> {
+    let RuntimePlan { image, selector, tree, hz, target, cpu } = plan;
+    if image.is_empty() {
+        return Err(Error::NoProgram);
+    }
+    if image.len() as u64 > FRAME_SIZE {
+        return Err(Error::TooLarge);
+    }
+
+    let before = frames.free_count();
+
+    // SAFETY: the caller's guarantee that the kernel's space is live and that
+    // frames are addressable through its direct map.
+    let mut space = unsafe { paging::user_space(frames, kernel) }.map_err(Error::Space)?;
+
+    let text = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
+    let stack = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
+    // Zeroed, and it is a real obligation rather than tidiness: `Mapping`'s
+    // cursors, index ring and both entry arrays are reinterpreted in place, and
+    // all-zero is the one bit pattern every one of those types is valid at.
+    let control = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
+    let work = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
+
+    let into = frames.virt(text);
+    // SAFETY: `text` was just allocated and nothing else holds it; it is one
+    // frame, addressable through the direct map, and the image is shorter than
+    // one — checked above rather than assumed.
+    unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), into, image.len()) };
+
+    for (virt, frame, kind) in [
+        (TEXT, text, paging::UserPage::Text),
+        (STACK, stack, paging::UserPage::Data),
+        (RING, control, paging::UserPage::Data),
+        (WORK, work, paging::UserPage::Data),
+    ] {
+        // SAFETY: as `user_space`, and `space` is not in `CR3` — it has never
+        // been.
+        unsafe { paging::map_user(frames, &mut space, virt, frame.addr(), kind, features) }
+            .map_err(Error::Space)?;
+    }
+
+    let rings = Rings { control: frames.virt(control) as u64, work: frames.virt(work) as u64 };
+
+    let table = crate::cap::of(cpu);
+    // SAFETY: the table of a core that is idle, with no process running on it,
+    // which is the write `PerCpu::at` exists for.
+    let held = unsafe { &mut *table };
+    held.clear_all();
+    // A runtime has a control ring, so it is owed notices — and the rule that
+    // follows is the one that makes the grants below worth making: a slot whose
+    // notice field is not quiet is not refilled, so a runtime that never drains
+    // runs out of table rather than out of memory. RFC 0008.
+    held.owes_notices();
+    let first = held
+        .grant(CapType::AddressSpace, rights::READ | rights::WRITE, space.root(), 0)
+        .map_err(|_| Error::NoSlot)?;
+    // Read and write and nothing else, on both rings. Not `DERIVE`, because a
+    // runtime that could hand its control ring on would be a runtime whose
+    // supervisor no longer knows who is listening; not `REVOKE`, because a
+    // component that could revoke its own control ring could make itself
+    // unreachable and still be running.
+    for object in [control.addr(), work.addr()] {
+        held.grant(CapType::Frame, rights::READ | rights::WRITE, object, FRAME_SIZE)
+            .map_err(|_| Error::NoSlot)?;
+    }
+    // The frame's published tree, read-only. RFC 0013's *read, never delivered*
+    // is the whole of what a runtime can do with it, and it is observation
+    // rather than authority — which is the only kind of capability a runtime
+    // needs to hold.
+    //
+    // **Four grants, and the count is load-bearing rather than tidy.**
+    // `f_abi::door::Entry::granted(nth)` computes the nth handle as the first
+    // handle's index plus `nth`, *at the first handle's generation* — the frame
+    // tells a component one handle and the rest follow — and that arithmetic is
+    // sound only while every slot the frame filled carries the same generation.
+    // Slots advance a generation each time they are cleared and refilled, so
+    // *the same generation* holds exactly while every process shape this kernel
+    // builds grants the same number. A runtime granted three left slot three a
+    // generation behind slots zero to two on a core that then ran an ordinary
+    // process, and the fourth handle that process was told it held resolved to
+    // nothing. It presented as a component refusing to map the state tree,
+    // which is about as far from the cause as a symptom gets.
+    //
+    // The structural fix is for `Table::clear_all` to raise every slot to the
+    // table's generation floor, which makes the arithmetic a property instead
+    // of an accident. It is not made here because it is not this task's to
+    // make: `kernel/src/arch/x86_64/probe.rs` names `Handle::FIRST_GENERATION`
+    // as a literal in `cap=unowned` and `cap=forge` counts refusals by
+    // generation, so raising the floor moves what E0-P08's negative suite is
+    // asserting. *Reversal:* that change, with those two fixtures moved with
+    // it, at which point this paragraph and this fourth grant both go.
+    held.grant(CapType::Frame, rights::READ, tree, FRAME_SIZE).map_err(|_| Error::NoSlot)?;
+    let granted_count = held.used();
+
+    let state = STATE.at(cpu);
+    // SAFETY: the slot of an idle core, so neither the fault path nor the
+    // system-call path over there can be holding it.
+    unsafe {
+        state.write(State {
+            announced: false,
+            refused: 0,
+            death: Death::Running,
+            // A runtime never asks. `PROGRESS` is the call RFC 0008 replaces
+            // with a blocking wait on a ring, and a runtime that polled the
+            // frame for permission to keep working would be crossing the
+            // boundary once per quantum — which is the measurement, inverted.
+            wanted: 0,
+            giveup: 0,
+            caps: Tally::ZERO,
+            root: space.root(),
+            // Deliberately zero, unlike `prepare`. A runtime holds no capability
+            // it could map with, so a capability call arriving from one is a
+            // refusal rather than a walk through a borrow — and the borrow on
+            // `frames` stays this core's for the whole residency.
+            frames: 0,
+            features,
+        });
+    }
+
+    let ticks = IN_RING3.at(cpu);
+    // SAFETY: volatile through the raw pointer, into the slot of a core whose
+    // timer handler — the only other writer — has nothing to count yet.
+    unsafe { ticks.write_volatile(0) };
+    arm_entries(cpu);
+
+    let outcome = OUTCOME.at(cpu);
+    // SAFETY: as above; the core is idle and has not been given the job.
+    unsafe {
+        outcome.write(Outcome { ended: 0, ticks: 0, held: 0, entries: Entries::ZERO, failed: None })
+    };
+
+    let job = JOB.at(cpu);
+    // SAFETY: as above. Written last of the three, and published to the running
+    // core by the `Release` store `smp::run_on` makes after this returns.
+    unsafe {
+        job.write(Job {
+            root: space.root(),
+            entry: TEXT,
+            stack: STACK_TOP,
+            argument: door::Entry::new(selector, first).bits(),
+            hz,
+            target,
+        })
+    };
+
+    Ok((
+        Prepared {
+            space,
+            pages: [text, stack, control, work],
+            parts: 4,
+            before,
+            granted: granted_count,
+            generation: first.generation(),
+            cpu,
+        },
+        rings,
+    ))
+}
+
+/// What the frame is asking of one run of a *driver*.
+///
+/// A third plan beside [`Plan`] and [`RuntimePlan`], for [`RuntimePlan`]'s own
+/// reason: the three shapes share almost nothing. A process is judged by a
+/// tally of refusals, a runtime by an absence of crossings, and a driver by
+/// what happened in its client's memory and in a remapping unit's fault
+/// registers. The fields below are the ones a driver has and the other two do
+/// not — a device's registers, a device's queue memory, and a ring whose far
+/// end somebody else holds.
+#[derive(Clone, Copy)]
+pub struct DriverPlan {
+    /// The component's image, out of the component file the loader carried.
+    /// May be longer than one page — up to [`TEXT_PAGES`].
+    pub image: &'static [u8],
+    /// Which of the component's lives the frame is asking for. It reaches the
+    /// component in the low half of `f_abi::door::Entry`.
+    /// Unit: none — a selector ordinal.
+    pub selector: u32,
+    /// The physical address of the frame the state tree is published in.
+    /// Unit: bytes, physical.
+    pub tree: u64,
+    /// The rate the core running it arms its own timer at. Unit: hertz.
+    pub hz: u32,
+    /// How many ticks that timer asks for. Unit: timer ticks.
+    pub target: u64,
+    /// Which core the driver is allocated. Unit: none — a core index.
+    pub cpu: usize,
+    /// The first of the device's register pages, physical.
+    ///
+    /// **Not a frame this allocator owns**, which is why it is an address and
+    /// not a [`Frame`]: it is a base-address register the firmware placed, and
+    /// [`reap`] must not hand it back to anybody. A `Frame` here would be a
+    /// type inviting exactly that.
+    /// Unit: bytes, physical.
+    pub registers: u64,
+    /// The driver's queue memory, physical.
+    ///
+    /// The caller's to free, for the reason above inverted: it *is* an
+    /// allocation, and it is the caller's rather than this function's because
+    /// the same region has to be in the device's IOMMU domain before the
+    /// component runs and out of it after — which is the supervisor's act and
+    /// not the loader's.
+    /// Unit: bytes, physical.
+    pub queues: u64,
+    /// How many bytes of it. Unit: bytes.
+    pub queue_bytes: u64,
+    /// The frame holding the ring this driver serves its client on, physical.
+    ///
+    /// The caller's, because the caller holds the other end of it.
+    /// Unit: bytes, physical.
+    pub data: u64,
+}
+
+/// The kernel-visible addresses of a driver's two frame-owned pages.
+///
+/// The data ring is not here: the caller allocated it, holds the client end of
+/// it, and already knows where it is.
+#[derive(Clone, Copy, Debug)]
+pub struct DriverPages {
+    /// The control ring, as the frame sees it. Unit: bytes, kernel-virtual.
+    pub control: u64,
+    /// The page that says where everything else is, as the frame sees it.
+    /// Unit: bytes, kernel-virtual.
+    pub board: u64,
+}
+
+/// Build a driver on `cpu`'s behalf: an address space, a text reservation, a
+/// stack, two rings, a board, its device's registers and its queue memory.
+///
+/// # What is different from [`prepare_runtime`], and why it is a third function
+///
+/// Two things, and both of them are the difference between a component that
+/// computes and a component that drives a device.
+///
+/// **Its text is more than a page.** Every other shape here is one page and the
+/// build refuses an image that is not; a driver with its own polling loop is
+/// three. [`TEXT_PAGES`] is the reservation and the argument for its size.
+///
+/// **It is mapped things the frame does not own.** A device's registers are a
+/// base-address register the firmware placed, and its queue memory is an
+/// allocation the *supervisor* made and put in a remapping domain before this
+/// call and takes out after it. So they arrive as addresses rather than as
+/// frames, and [`reap`] never sees them: [`Prepared`] holds only what this
+/// function allocated, which is the property that makes the free count come
+/// back.
+///
+/// # Errors
+///
+/// [`Error`], every variant of which fails the boot.
+///
+/// # Safety
+///
+/// As [`prepare`], and `plan.registers` must name [`BLK_REGISTER_PAGES`] pages
+/// of a device's register space that nothing else is driving, `plan.queues`
+/// `plan.queue_bytes` of memory the caller allocated and holds, and `plan.data`
+/// one frame the caller allocated and holds the far end of.
+pub unsafe fn prepare_driver(
+    frames: &mut FrameAllocator,
+    kernel: &paging::AddressSpace,
+    features: paging::Features,
+    plan: DriverPlan,
+) -> Result<(Prepared, DriverPages), Error> {
+    let DriverPlan { image, selector, tree, hz, target, cpu, .. } = plan;
+    if image.is_empty() {
+        return Err(Error::NoProgram);
+    }
+    let text_pages = (image.len() as u64).div_ceil(FRAME_SIZE) as usize;
+    if text_pages > TEXT_PAGES {
+        return Err(Error::TooLarge);
+    }
+    if plan.queue_bytes == 0 || !plan.queue_bytes.is_multiple_of(FRAME_SIZE) {
+        return Err(Error::TooLarge);
+    }
+
+    let before = frames.free_count();
+
+    // SAFETY: the caller's guarantee that the kernel's space is live and that
+    // frames are addressable through its direct map.
+    let mut space = unsafe { paging::user_space(frames, kernel) }.map_err(Error::Space)?;
+
+    // One block and not `text_pages` separate frames, because a flat image is
+    // contiguous by definition — the frame copies it in one `memcpy` and the
+    // component's own `call`s are relative. The order rounds up, which is the
+    // allocator's own arithmetic and is why the slack is visible in the free
+    // count rather than hidden in a loop.
+    let order = Order::new(
+        u8::try_from(text_pages.next_power_of_two().trailing_zeros()).unwrap_or(u8::MAX),
+    )
+    .ok_or(Error::NoFrames)?;
+    let text = frames.alloc_zeroed(order).ok_or(Error::NoFrames)?;
+    let stack = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
+    // Zeroed, and it is an obligation rather than tidiness: a channel's cursors
+    // and entry arrays are reinterpreted in place and all-zero is the one bit
+    // pattern every one of those types is valid at.
+    let control = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
+    let board = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
+
+    let into = frames.virt(text);
+    // SAFETY: `text` was just allocated at an order covering `text_pages`,
+    // nothing else holds it, it is addressable through the direct map, and the
+    // image is no longer than the block — `text_pages` is computed from its
+    // length and the order rounds up.
+    unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), into, image.len()) };
+
+    for page in 0..text_pages as u64 {
+        let at = text.addr().wrapping_add(page * FRAME_SIZE);
+        // SAFETY: as `user_space`, and `space` is not in `CR3` — it has never
+        // been.
+        unsafe {
+            paging::map_user(
+                frames,
+                &mut space,
+                TEXT + page * FRAME_SIZE,
+                at,
+                paging::UserPage::Text,
+                features,
+            )
+        }
+        .map_err(Error::Space)?;
+    }
+
+    for (virt, at, kind) in [
+        (SPAWN_STACK, stack.addr(), paging::UserPage::Data),
+        (SPAWN_CONTROL, control.addr(), paging::UserPage::Data),
+        (BLK_DATA, plan.data, paging::UserPage::Data),
+        (BLK_BOARD, board.addr(), paging::UserPage::Data),
+    ] {
+        // SAFETY: as above.
+        unsafe { paging::map_user(frames, &mut space, virt, at, kind, features) }
+            .map_err(Error::Space)?;
+    }
+
+    for page in 0..BLK_REGISTER_PAGES as u64 {
+        // SAFETY: as above, and the caller's guarantee that `registers` names
+        // this many pages of a device's register space.
+        unsafe {
+            paging::map_user(
+                frames,
+                &mut space,
+                BLK_REGISTERS + page * FRAME_SIZE,
+                plan.registers.wrapping_add(page * FRAME_SIZE),
+                paging::UserPage::Device,
+                features,
+            )
+        }
+        .map_err(Error::Space)?;
+    }
+
+    for page in 0..plan.queue_bytes / FRAME_SIZE {
+        // SAFETY: as above, and the caller's guarantee that `queues` names
+        // `queue_bytes` of memory it holds.
+        unsafe {
+            paging::map_user(
+                frames,
+                &mut space,
+                BLK_QUEUES + page * FRAME_SIZE,
+                plan.queues.wrapping_add(page * FRAME_SIZE),
+                paging::UserPage::Data,
+                features,
+            )
+        }
+        .map_err(Error::Space)?;
+    }
+
+    let pages =
+        DriverPages { control: frames.virt(control) as u64, board: frames.virt(board) as u64 };
+
+    let table = crate::cap::of(cpu);
+    // SAFETY: the table of a core that is idle, with no process running on it,
+    // which is the write `PerCpu::at` exists for.
+    let held = unsafe { &mut *table };
+    held.clear_all();
+    // A driver has a control ring, so it is owed notices — and a slot whose
+    // notice field is not quiet is not refilled, so a driver that never drains
+    // runs out of table rather than out of memory. RFC 0008.
+    held.owes_notices();
+    let first = held
+        .grant(CapType::AddressSpace, rights::READ | rights::WRITE, space.root(), 0)
+        .map_err(|_| Error::NoSlot)?;
+    // Four grants, in the same order and at the same count as every other shape
+    // this kernel builds. The count is load-bearing and `prepare_runtime` says
+    // why at length: `door::Entry::granted(nth)` is arithmetic over one
+    // generation, and it is sound only while every shape fills the same number
+    // of slots.
+    for object in [control.addr(), plan.data] {
+        held.grant(CapType::Frame, rights::READ | rights::WRITE, object, FRAME_SIZE)
+            .map_err(|_| Error::NoSlot)?;
+    }
+    held.grant(CapType::Frame, rights::READ, tree, FRAME_SIZE).map_err(|_| Error::NoSlot)?;
+    let granted_count = held.used();
+
+    let state = STATE.at(cpu);
+    // SAFETY: the slot of an idle core, so neither the fault path nor the
+    // system-call path over there can be holding it.
+    unsafe {
+        state.write(State {
+            announced: false,
+            refused: 0,
+            death: Death::Running,
+            // A driver never asks. Its loop ends when the frame tells it to
+            // stop, on the ring, which is the answer RFC 0008 replaces
+            // `PROGRESS` with.
+            wanted: 0,
+            giveup: 0,
+            caps: Tally::ZERO,
+            root: space.root(),
+            // Zero, as a runtime's is: a driver holds no capability it could
+            // map with, so a capability call arriving from one is refused
+            // before it reaches an address space.
+            frames: 0,
+            features,
+        });
+    }
+
+    let ticks = IN_RING3.at(cpu);
+    // SAFETY: volatile through the raw pointer, into the slot of a core whose
+    // timer handler — the only other writer — has nothing to count yet.
+    unsafe { ticks.write_volatile(0) };
+    arm_entries(cpu);
+
+    let outcome = OUTCOME.at(cpu);
+    // SAFETY: as above; the core is idle and has not been given the job.
+    unsafe {
+        outcome.write(Outcome { ended: 0, ticks: 0, held: 0, entries: Entries::ZERO, failed: None })
+    };
+
+    let job = JOB.at(cpu);
+    // SAFETY: as above. Written last, and published to the running core by the
+    // `Release` store `smp::run_on` makes after this returns.
+    unsafe {
+        job.write(Job {
+            root: space.root(),
+            entry: TEXT,
+            stack: SPAWN_STACK_TOP,
+            argument: door::Entry::new(selector, first).bits(),
+            hz,
+            target,
+        })
+    };
+
+    Ok((
+        Prepared {
+            space,
+            // Four, and every one of them allocated here. The register pages,
+            // the queue memory and the data ring are the caller's and are
+            // deliberately absent: a list that held them would free memory this
+            // function never took, which is a corruption rather than a leak.
+            pages: [text, stack, control, board],
+            parts: 4,
+            before,
+            granted: granted_count,
+            generation: first.generation(),
+            cpu,
+        },
+        pages,
+    ))
 }
 
 /// Run the process this core was given, and record what happened.
@@ -1200,7 +2103,13 @@ pub unsafe fn execute(kernel_root: u64) {
         Err(_) => {
             // SAFETY: this core's slot, no process running.
             unsafe {
-                slot.write(Outcome { ended: 0, ticks: 0, held: 0, failed: Some(Error::NoTimer) })
+                slot.write(Outcome {
+                    ended: 0,
+                    ticks: 0,
+                    held: 0,
+                    entries: Entries::ZERO,
+                    failed: Some(Error::NoTimer),
+                })
             };
             return;
         }
@@ -1258,8 +2167,11 @@ pub unsafe fn execute(kernel_root: u64) {
     // and the one it would be most tempting to reset at.
     table.clear_all();
 
+    // SAFETY: on the core that ran it, with the process over, so no writer is
+    // left for these shards.
+    let entries = unsafe { entries_here(ticks) };
     // SAFETY: this core's slot, with the process over.
-    unsafe { slot.write(Outcome { ended, ticks, held, failed: None }) };
+    unsafe { slot.write(Outcome { ended, ticks, held, entries, failed: None }) };
 }
 
 /// Give a finished process's memory back, and say what it did.
@@ -1299,7 +2211,8 @@ pub unsafe fn reap(frames: &mut FrameAllocator, prepared: Prepared) -> Result<Re
     // nothing: a process that could enlarge its own address space would leave
     // tables here that this loop has never heard of, and the free count would
     // not come back.
-    for frame in prepared.space.tables().iter().copied().chain(prepared.pages) {
+    let pages = prepared.pages.get(..prepared.parts).unwrap_or(&[]);
+    for frame in prepared.space.tables().iter().copied().chain(pages.iter().copied()) {
         // SAFETY: every one of these came from this allocator in `prepare`, the
         // address space they described is no longer in `CR3` on any core — the
         // core that ran it switched back before it reported finished — and that
@@ -1325,6 +2238,7 @@ pub unsafe fn reap(frames: &mut FrameAllocator, prepared: Prepared) -> Result<Re
         generation: prepared.generation,
         caps: observed.caps,
         held: outcome.held,
+        entries: outcome.entries,
     })
 }
 
@@ -1343,6 +2257,14 @@ pub fn syscall(number: u64, first: u64, second: u64) -> Answer {
     // this core's process state — cannot interleave with it, and a process
     // cannot make two calls at once.
     let mut state = unsafe { slot.read() };
+
+    // Counted before the call is dispatched and before it is even known to be
+    // one this build implements, because what is being counted is the crossing
+    // rather than the work: a refused call cost exactly as much boundary as an
+    // accepted one. `EXIT` is separated here and nowhere else, because it is the
+    // one call that *is* the allocation boundary rather than a crossing inside
+    // it — RFC 0038.
+    count(if number == SYS_EXIT { &BOUNDARY_CALLS } else { &HOT_CALLS });
 
     let answer = match number {
         SYS_ANNOUNCE => {
@@ -1388,7 +2310,7 @@ pub fn syscall(number: u64, first: u64, second: u64) -> Answer {
 fn capability(number: u64, first: u64, second: u64, state: &State) -> u64 {
     let result = match number {
         SYS_CAP_INSPECT => inspect(Handle::from_bits(first as u32)),
-        SYS_CAP_DERIVE => derive(Handle::from_bits(first as u32), second),
+        SYS_CAP_DERIVE => derive(Handle::from_bits(first as u32), second, state),
         SYS_CAP_REVOKE => revoke(Handle::from_bits(first as u32), state),
         SYS_CAP_MAP => map_frame(first, second, state),
         // Unreachable from `syscall`, which matches on exactly these four. Not
@@ -1441,12 +2363,41 @@ fn inspect(handle: Handle) -> Result<u64, i32> {
 }
 
 /// Mint a weaker capability, or a copy, and answer with its handle.
-fn derive(handle: Handle, asked: u64) -> Result<u64, i32> {
+///
+/// # Why this is the call that can spend money
+///
+/// Because it is the only one a component makes that needs a slot it has not
+/// already got. RFC 0008 makes the capability table an object retyped from the
+/// component's own `Untyped`, and E1-B13 puts the purchase exactly where the
+/// need appears: a derive with nowhere to put its child buys a page and tries
+/// again, and a component with nothing left to spend is refused
+/// `RESOURCE/QUOTA_EXHAUSTED` rather than served from anything the frame keeps
+/// back. `cap=flood` is the run that buys and `cap=quota` the run that cannot.
+fn derive(handle: Handle, asked: u64, state: &State) -> Result<u64, i32> {
     let asked = u8::try_from(asked)
         .map_err(|_| error::pack(error::ARGUMENT, error::argument::UNKNOWN_FLAG))?;
+    if state.frames == 0 {
+        // No process is running, so there is no borrow of the allocator to
+        // reach a bought page through. Unreachable from ring 3 — a call arrives
+        // only while a process is entered — and refused rather than asserted,
+        // for the reason `map_frame` gives at the same check.
+        return Err(error::pack(error::RESOURCE, error::resource::QUOTA_EXHAUSTED));
+    }
+    // SAFETY: `state.frames` is the address of the `&mut FrameAllocator` that
+    // `run` holds, dormant for the whole life of the process — the same
+    // argument `map_frame` makes and for the same duration. Shared, never
+    // mutable: growing a table allocates nothing, it only translates a frame
+    // the process has already paid for.
+    let frames = unsafe { &*(state.frames as *const FrameAllocator) };
+    // SAFETY: every `Untyped` in this table names a frame `prepare` allocated
+    // out of this allocator for this process and gave to nobody else, and the
+    // watermark means no frame inside one is ever handed out twice — so the
+    // frame a growth charges for is owned by this table alone. `frames` is
+    // rebound onto the direct map of the address space in `CR3`.
+    let mut ground = unsafe { Direct::new(frames) };
     // SAFETY: as `inspect`, and no other reference to the table is live: this
     // is the only one taken in this call.
-    let minted = unsafe { table_mut() }.derive(handle, asked)?;
+    let minted = unsafe { table_mut() }.derive(handle, asked, &mut ground)?;
     Ok(u64::from(minted.bits()))
 }
 
@@ -1468,13 +2419,23 @@ fn derive(handle: Handle, asked: u64) -> Result<u64, i32> {
 /// waited: not that one core made it hard, but that one core made it
 /// unfalsifiable — a kernel that skipped the interrupt would have passed every
 /// test it could have been given.
+/// # Why it is three steps here and one call before E1-B13
+///
+/// Because a table is as many slots as its holder has paid for, so the list of
+/// mappings a revocation withdraws is no longer bounded by anything that fits
+/// in a return value. The table condemns, this function drains the addresses
+/// one at a time and unmaps each, and the table sweeps last — which is also the
+/// order that fails safely: authority is withdrawn only after every translation
+/// behind it is gone, and a drain that could not finish leaves a table that
+/// still names what it still maps.
 fn revoke(handle: Handle, state: &State) -> Result<u64, i32> {
     // SAFETY: as `derive`.
-    let withdrawn = unsafe { table_mut() }.revoke(handle)?;
-    for page in withdrawn.pages() {
-        withdraw(state, *page)?;
+    let table = unsafe { table_mut() };
+    let mut condemned = table.condemn(handle)?;
+    while let Some(page) = table.next_mapping(&mut condemned) {
+        withdraw(state, page)?;
     }
-    Ok(u64::from(withdrawn.cleared))
+    Ok(u64::from(table.sweep(&condemned)))
 }
 
 /// Take one mapping out of the running process's address space and tell every
@@ -1658,6 +2619,34 @@ pub unsafe fn tick_from_ring3() {
     let taken = unsafe { ticks.read_volatile() };
     // SAFETY: as above.
     unsafe { ticks.write_volatile(taken + 1) };
+
+    // The frame reaching a core it has given away, and the only way it can.
+    // An interrupt happened here and a preemption did not: nothing below
+    // redirects the interrupted instruction stream or ends anything, it writes
+    // a completion entry into a ring the runtime will read when it next chooses
+    // to look. `kernel/src/runtime.rs` argues why that distinction is the whole
+    // model rather than a detail of it.
+    // SAFETY: the timer handler on the core ring 3 is holding, with the tick
+    // count it has just taken, which is exactly what this asks for.
+    unsafe { crate::runtime::on_ring3_tick(taken + 1) };
+}
+
+/// Count an interrupt other than the timer that was taken out of ring 3.
+///
+/// A shootdown, a doorbell or the spurious vector. None of them is on the hot
+/// path — every one is the frame or another core reaching a core this one gave
+/// away, which is [`Entries::ticks`]'s argument and not a weaker one — and all
+/// of them are kernel entries, so a bucket is what they get. Counting is the
+/// whole of it: nothing here decides anything, and the handler that called it
+/// goes on to do whatever the vector is for.
+///
+/// # Safety
+///
+/// Call from the interrupt dispatcher on the core the interrupt was delivered
+/// to, having established from the saved code selector that the interrupted
+/// code was at ring 3.
+pub unsafe fn frame_interrupt_from_ring3() {
+    count(&FRAME_INTERRUPTS);
 }
 
 /// End the process because of a fault it took.
@@ -1672,6 +2661,13 @@ pub unsafe fn tick_from_ring3() {
 /// from, having established that the fault was taken at ring 3.
 #[must_use]
 pub unsafe fn kill(frame: &mut crate::arch::x86_64::idt::Frame, address: u64) -> bool {
+    // A fault is a crossing the code at ring 3 did not choose, and it is on the
+    // hot path for exactly that reason: the claim is that a runtime's work never
+    // reaches the frame, and a page fault is that claim failing in the way that
+    // is hardest to notice from above. Counted before anything else, so that a
+    // kill which then goes wrong still leaves the count behind.
+    count(&RING3_FAULTS);
+
     let slot = STATE.mine();
     // SAFETY: this core's slot. The gate is an interrupt gate, so this handler
     // cannot interrupt itself, and the system-call path it could otherwise

@@ -1,0 +1,152 @@
+# The count half of E1-B06's exit, and it may gate on this machine for
+# claims/0005's reason: **it is a count**. How many queued batch operations a
+# hard-class read was handed to the device ahead of is the same number on a fast
+# host and a slow one, because it is a property of an ordering rather than of a
+# clock. `bench/src/lib.rs` refuses to record a timing in a container and this
+# records none.
+#
+# The time half — what the overtake actually saved the client — is claim 0013
+# and is `pending` on the machine E0-D10 owes. Splitting was the alternative to
+# weakening: one claim carrying both would have had to be `pending`, which would
+# have put a correctness result this machine can take behind a machine it does
+# not need. Claims 0005 and 0006 are the precedent and the same pair of
+# sentences.
+name       = "deadline-overtake"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E1"
+
+statement  = """
+A hard-class read submitted behind queued batch work is handed to a real device
+before that batch work, and the same burst with the ordering off is not.
+
+Three boots of one client script against one `user/virtio-blk` component
+running at ring 3 on a core of its own, differing only in the ordinals the frame
+writes into the driver's routing page:
+
+  ordered      six batch reads are queued, a hard-class read carrying a deadline
+               arrives last, and the driver hands the device the read first. It
+               comes back at position zero of seven and overtakes six.
+  arrival      the identical burst, ordered by arrival. The read comes back
+               last and overtakes nothing. This is the control, and it fails by
+               succeeding: a run where both halves overtake is a run where the
+               ordering was never off.
+  unadmitted   the identical burst from a channel whose client is admitted for
+               the batch class. The hard-class entry is refused
+               ADMISSION/NOT_HELD, never queued and never served, and the batch
+               work behind it completes.
+
+The overtake is counted twice, on opposite sides of a privilege boundary and
+from different evidence: the frame reads the order its own completion ring
+handed entries back in, and the component counts what its queue put ahead of
+what. `Report::ordering_verdict` requires the two to agree, because a
+demonstration resting on one number a component published is a demonstration
+that component passes by writing a number.
+
+Beside it, and stated as a cost rather than left out of the sentence:
+`in_flight` is how many requests the driver keeps inside the device at once. A
+request already there cannot be overtaken by anything, so this is the
+granularity of every overtake above. It is one.
+
+And the demotion is reported. `user/virtio-blk/manifest.toml` declares the soft
+class, so every hard-class request this driver serves is served as soft — and
+the completion carries `cflags::SHORTFALL`. R08: served differently is a fact a
+caller can handle, served differently silently is the failure the discipline
+exists to exclude.
+"""
+
+[baseline]
+# Claim 0005's argument, and it applies more sharply here. This is an absolute
+# statement about an ordering the system performs, not a ratio against somebody
+# else's. A Linux block layer does reorder — the deadline and BFQ schedulers
+# both do — but it orders by a *request's* age and direction inside one
+# process's I/O, not by a class and a deadline that crossed a component boundary
+# with the request. "How many batch operations did the read overtake" is a
+# question the baseline cannot be asked, and a comparison against a system
+# answering a different question is worse than none.
+system  = "none"
+notes   = "What would make a comparison meaningful is a system where a deadline submitted by one component reaches another component's device queue and orders it. `docs/design/deadline-all-the-way-down.html` section 02 says why that is the thing being claimed; no configuration of a baseline in claims/baselines/ has it, and adding one is a versioned directory and a diff somebody writes, never an edit here."
+
+[owner]
+# R09: every headline claim names the document that owns it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "02"
+notes    = "Section 02's *deadline propagation across the rings* is the sentence being tested — *the deadline travels with the request, through every ring it crosses, and each resource scheduler orders by it* — and the subsystem that owns the number is the block driver: `user/virtio-blk/src/pending.rs` for the ordering, `kernel/src/blk.rs` for the client that observes it. RFC 0025 is the rule and RFC 0049 is where this scheduler applies it. Section 09 of the same document is why the rule is bounded at all."
+
+[workload]
+path   = "kernel/src/blk.rs"
+# Three boots, one client script. The burst is seven reads because the client's
+# registered page is eight sectors and each request in flight holds a buffer of
+# its own — a deeper burst is a bigger page and the same experiment.
+halves = 3
+burst  = 7
+notes  = "The queue's contents at the moment of the first pick are a fixture and are named one: the frame tells the driver to accumulate the whole burst before choosing (`f_virtio_blk::routing::at::HOLD`). Without it that depth is a race between two cores, and the count below would be a different number every run — sometimes the right one for the wrong reason. `queued_max` is the depth the pick was made out of and is required to equal the hold, so a fixture that silently did nothing is a red run rather than a smaller number."
+
+[metrics]
+primary   = "batch_operations_overtaken"
+secondary = [
+  # The client's own reading of the same event: where the hard-class read came
+  # back in the completion order. Zero on `ordered` and six on `arrival`, from
+  # the identical burst.
+  "hard_read_completion_position",
+  # What the pick was made out of. An overtake count with no queue depth beside
+  # it cannot be told from a queue that was never deep — the same defect
+  # `provoked` takes out of the copy counter one property over.
+  "queued_max",
+  # The **cost**, and it is a metric rather than a note because R12 says a
+  # concession is written as a cost. A request already inside the device cannot
+  # be overtaken, so this bounds every number above.
+  "in_flight",
+  # Completions that carried `cflags::SHORTFALL`: a request served below the
+  # class it asked for, and told so. Expected non-zero, not zero — this driver
+  # is admitted for the soft class.
+  "completions_flagged_shortfall",
+  # Entries refused for a class their submitter does not hold. The `unadmitted`
+  # half's number, and zero on the other two.
+  "entries_refused_unadmitted",
+  # Both readings of the overtake, required equal. Counted separately so that a
+  # disagreement is a finding with a first step rather than a failed assertion.
+  "overtaken_reported_by_driver",
+]
+
+[threshold]
+# Written as the exit criterion reads rather than tuned to what the boot
+# produced: the read overtakes the whole burst except itself, or it did not
+# overtake queued batch work. There is no acceptable rate of a hard-class read
+# waiting behind batch work it arrived after, so there is no number here to
+# adjust when a run goes red.
+batch_operations_overtaken    = { min = 6 }
+hard_read_completion_position = { max = 0 }
+# Seven, which is the burst, because the pick has to be made out of the whole of
+# it. A smaller depth is a hold that did not hold and an ordering measured over
+# whatever had arrived.
+queued_max                    = { min = 7 }
+# **Exactly one, and this is the row that moves when the driver changes.**
+# `f_virtio_blk::pending::IN_FLIGHT` is one because `Driver::execute` offers a
+# chain and polls the used ring until it comes back. E1-B09 makes the driver
+# wait on its interrupt instead, at which point more than one chain is
+# outstanding, the overtake gets coarser by that factor, and this number and the
+# minimum above are re-derived together. Raising it without re-deriving them is
+# the change this row exists to make visible.
+in_flight                     = { max = 1 }
+# A minimum and not a maximum, and it is the load-bearing one: this driver is
+# admitted for the soft class, so a hard-class request it served and *did not*
+# flag is the silent demotion R08 forbids. A zero here would mean the ordering
+# worked and the completion lied about what it was ordered as.
+completions_flagged_shortfall = { min = 1 }
+entries_refused_unadmitted    = { min = 1 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "**This claim does not need that machine, and says so rather than pretending.** Every metric is a count produced by one boot of a deterministic kernel against an emulated device, so it is the same number in a container and on bare metal; `f_bench::Environment` refuses to record a *timing* here and this records none. The runner is named because `lint-reproduce` requires every claim to name one with a specification beside it, and because the day this suite runs against a real disk the machine stops being irrelevant. Claim 0013 is the half that needs it now."
+
+[reproduce]
+command = "cargo xtask claim deadline-overtake"
+
+[diagnosis]
+# Written while the system is understood rather than at 2 a.m. when it is not.
+overtook_nothing_on_ordered = "the driver served in arrival order on the half that asked for rank. Check `ordering asked` against `used` in the boot log first: they are two numbers on purpose, and a control run that quietly used the ordering — or an ordered run that quietly did not — makes every comparison between the halves meaningless. If they agree, the pick is `pending::Pending::take` and the key is `Inherited::rank`"
+overtook_something_on_arrival = "the control overtook, which means the two halves are not two configurations. The likely cause is the routing page: `at::ORDERING` is written by `kernel/src/blk.rs` from `Half::ordering`, and a half added to that enum without a row there reads as zero, which is the arrival order — so the failure would point the other way. An arrival run that reorders is a `Pending::take` that ignores its argument"
+readings_disagree = "the frame and the component counted different events. The frame counts batch completions arriving after the hard-class one; the component counts, at each pick, what was still waiting and had arrived first. They coincide only while every request in the burst reaches the queue — so the first suspect is an entry refused on the way in, which never joins the queue and therefore overtakes nothing. `entries_refused_unadmitted` is what says whether that happened"
+queue_never_deep = "the hold did not hold. Either `HOLD_AFTER` is short of the client's prelude, so the hold armed on a request the client was still waiting for and the run wedged instead, or the burst is shorter than the hold and the driver is waiting for a request that is never coming. Both present as an unanswered completion five seconds later, which is an anti-wedge bound and not a check of the ordering"
+shortfall_zero = "a hard-class request was served at the soft class and the completion did not say so, which is the silent demotion RFC 0025 forecloses. `Driver::answer` sets the flag for every completion this service produces, refusals included, so a zero means either `inherit` stopped reporting the demotion — check `Inherited::shortfall` — or this driver's manifest stopped declaring the soft class, in which case there was no demotion and the claim is asking the wrong question"
+in_flight_above_one = "the driver keeps more than one chain in the device, which is E1-B09 landing. That is progress and a red build on purpose: the overtake is now coarser by exactly that factor, and `batch_operations_overtaken`'s minimum has to be re-derived from the new depth in the same diff"

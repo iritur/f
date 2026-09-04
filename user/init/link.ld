@@ -53,13 +53,24 @@ SECTIONS {
      * what a real loader does — E5. */
     .rodata : { *(.rodata .rodata.*) }
 
+    /* The global offset table. It used to be expected to be empty, and that
+     * expectation ended when a component started linking against `f_ring`: an
+     * eight-byte table appears, holding addresses the linker resolved and which
+     * nothing writes at run time.
+     *
+     * `lld` gives it a writable output section whatever this script says, so
+     * the two boundary markers are what `cargo xtask component`'s
+     * writable-data check has to know about rather than this placement — and
+     * the check says so where it excludes them. What must still be empty, and
+     * is, is `.data` and `.bss`. */
+    .got  : { *(.got) *(.got.plt) }
+
     /* Kept rather than discarded, and empty rather than absent. A component
      * with writable data would have it mapped read-only and would fault on the
      * first write; `cargo xtask init` refuses to build an image where either of
      * these has any content, so the failure is a sentence at build time instead
      * of a page fault at boot. */
     .data : { *(.data .data.*) *(.data.rel.ro .data.rel.ro*) }
-    .got  : { *(.got) *(.got.plt) }
     .bss (NOLOAD) : { *(.bss .bss.*) *(COMMON) }
 
     __image_end = .;

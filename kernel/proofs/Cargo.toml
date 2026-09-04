@@ -1,0 +1,62 @@
+[package]
+name = "f-cap-proofs"
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+description = "The five capability properties, as bounded proofs over kernel/src/cap.rs."
+
+# Deliberately outside the workspace — see `Cargo.toml`'s `exclude` and this
+# crate's `lib.rs`. The toolchain that builds it is Kani's, not the tree's.
+
+# Its own workspace root, and the root above names it in `exclude` as well.
+# Both are needed and they say different things: the `exclude` there is the
+# statement that this directory is not part of the system being built, and this
+# is what lets `cargo kani` run inside it without cargo walking up and finding
+# a workspace it is not a member of. RFC 0053.
+[workspace]
+
+[lib]
+# Nothing here is a test and nothing here is a doctest. The harnesses are
+# `#[kani::proof]` functions, reachable only by a checker; under an ordinary
+# `cargo build` this crate is `cap.rs` and three stand-ins, and building it is
+# the cheapest way to find out that the stand-ins still match.
+test = false
+bench = false
+doctest = false
+
+[dependencies]
+f-abi = { path = "../../abi" }
+
+[lints.rust]
+# The frame's file is compiled here, and it is `unsafe` where it always was.
+# The three stand-ins carry one `unsafe impl` between them — `pages::Pages` —
+# and its obligation is discharged where it is written. This crate is not in
+# the workspace, so it inherits nothing and states its own.
+unsafe_code = "allow"
+missing_docs = "deny"
+
+# `cfg(kani)` is set by the checker and by nothing else, which is exactly what
+# the shipped build should be told: without this the pinned compiler warns
+# about a condition it has never heard of, and in this tree a `warning:` line
+# is a failure.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+[features]
+# The deliberate defect, off by default and armed by `cargo xtask prove` for
+# exactly one run. `cap.rs`'s `#[cfg(feature = "mutate-unchecked-index")]`
+# reads *this* manifest when `cap.rs` is compiled here, which is what lets one
+# feature name arm the same defect in two builds — the boot and the proof.
+# `cargo xtask lint-mutations` walks every manifest in the tree, this one
+# included, and refuses any of them that turns a defect on by default.
+mutate-unchecked-index = []
+
+# Run the harnesses at the page size the kernel actually buys. See
+# `mem::FRAME_SIZE`: the reduced page is what makes the walking proofs finish,
+# and the proofs that never walk cost the same either way, so those are run at
+# both sizes and the reduction is not load-bearing for them.
+wide-page = []

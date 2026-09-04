@@ -1,0 +1,301 @@
+# The second gating claim in this project, and it may gate for `claims/0005`'s
+# reason rather than for a new one: **every number here is a count**. Operations
+# performed, paths reached, findings reported. `bench/src/lib.rs` refuses to
+# record a *timing* in a container and is right to — a shared cloud instance
+# cannot produce defensible tail latency — and this records none. A count is the
+# same number on a fast host and a slow one.
+#
+# The wall-clock figures below are in `[workload] notes` and in no threshold,
+# which is the same split `cargo xtask sweep` makes between its report and its
+# elapsed line. They are here because a run nobody can afford is a run nobody
+# performs, and a claim that hid its cost would be a claim somebody quietly
+# stopped running.
+name       = "hostile-peer-operations"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E1"
+
+statement  = """
+A peer that writes arbitrary values into the shared header and the reserved
+words, drives cursors backwards and past the ring and around the `u32` wrap,
+forges slot numbers in the index ring, scribbles whole entries and arena bytes,
+restarts in the middle of a batch, and lies about its epoch — drawn from a seed
+rather than written down — costs the honest end **no panic, no memory unsafety
+and no hang**.
+
+The exit says *kernel*, and this is a host test against `f_ring`. That is the
+same code: `Mapping::adopt`, `Consumer::pop` and `execute` are what the frame
+calls on the peer-facing path, and running them on the host is what makes a
+billion operations cost a minute and makes Miri possible at all. The frame
+*calling* them against a hostile peer is one boot rather than a billion
+operations — `cargo xtask runtime`'s fourth, E1-B08 — and the two are
+complementary. RFC 0046 argues it.
+
+The three are separate because they fail differently and are caught by different
+things, and the counts differ because the tools do:
+
+  **No panic.** Caught in-process, per episode, so a failure is a seed and an
+    episode rather than a backtrace. One billion operations: 44 to 60 s here,
+    and the spread is the point — see `[workload] notes`.
+  **No memory unsafety.** Not observable from inside the program at all. It is
+    Miri's verdict over the same generator, at 4 096 operations per commit and
+    65 536 nightly — six orders of magnitude of cost, stated rather than folded
+    into the billion. **This conjunct of the exit is not met at a billion and no
+    tool can meet it**: Miri interprets about 29 operations a second here, so a
+    billion is of the order of a year. The shortfall is a threshold rather than
+    a paragraph — `unsafety_gap`, below, is `exit_operations / miri_operations`
+    — so raising the exit's count without raising Miri's is a red run and a
+    decision somebody has to write down.
+  **No hang.** A *count* and not a timeout. `f_ring` has exactly three loops on
+    the peer-facing path, each with a ceiling that is a function of the
+    channel's geometry and never of anything the peer wrote; the fuzzer counts
+    the work each operation does and refuses it against that ceiling. A timeout
+    in a test is a flake generator and would have caught none of it.
+
+Underneath those, and stated because three absences are free without it: the run
+counts every path it reached, and each of the counts in `[threshold]` is a
+**minimum stated per 100 000 000 operations** and scaled by `xtask` to the run
+that actually happened. A billion operations that all bounced off a malformed
+header would report *no panic, no hang* truthfully and would have tested one
+branch. A run that stops producing unknown opcodes, stops reaching `execute`,
+stops noticing an epoch change, or spends every episode refused, fails exactly as
+a panic does.
+
+The minimums are about two orders of magnitude below what a healthy run produces,
+and that is deliberate in both directions. A minimum of **one** — which is what
+these rows were at first — catches only a path that has stopped entirely, so a
+generator drawing an unknown opcode once a run instead of sixty-seven thousand
+times would pass it unchanged while this paragraph claims the opposite. A minimum
+at the observed value would fire on ordinary drift. Reach is the only thing
+standing between a clean billion and a vacuous one, so the bound has to be able
+to bind.
+
+Two gaps are declared rather than left to be found. **`MIRI_GAP`**: `f_ring`'s
+`Adopted` path carries a channel base as a `u64` — RFC 0037's design — so Miri's
+aliasing discipline there is weakened to permissive provenance, while the
+`Mapping::adopt` path, which is where the reads a hostile peer aims at actually
+happen, is checked in full. **`PEER_GAP`**: the harness is single-threaded, so a
+hostile write lands between calls and inside the one multi-call operation a batch
+is, never *during* a single call. Both are RFC 0046's, and neither is a number
+here.
+
+Beside the gating run is the harness that says a clean run means anything: three
+deliberate defects in `ring/`, one per property, each required to be found by
+the property it breaks and by no other. The third is required to be **invisible**
+to the cheap half — it kills the process with no seed attached — which is the
+whole argument for the Miri run existing.
+"""
+
+[baseline]
+# No comparison, for `claims/0005`'s reason. This is an absolute statement about
+# this system's own behaviour under adversarial input, not a ratio against
+# somebody else's. What would make a comparison meaningful is a system with one
+# shared-memory interface whose peer may be hostile and which can be asked the
+# same three questions; io_uring is the honest peer for the *shape* and not for
+# the threat model — its ring is between a process and its own kernel, so a
+# hostile producer is a process attacking itself. This tree has no baseline
+# directory for it, and adding one is a versioned directory under
+# claims/baselines/ and a diff somebody writes, never an edit here.
+system  = "none"
+notes   = "The tuned-Linux baseline claims 0001 and 0004 compare against has no counterpart question. `how many of a billion hostile operations produced a panic` is not a question a system without a hostile-peer threat model can be asked, and a comparison against a system answering a different question is worse than none."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/proving-ground.html"
+section  = "08"
+notes    = "Section 08 is layer 4, and its third bullet is the sentence being tested — *drive the ring from a deliberately malicious peer: impossible cursor values, entries mutated between validation and use, epochs that jump backwards, a producer that dies mid-claim*, which that section calls the highest-value target in the system and load-bearing for the whole imported-driver safety argument. The subsystem that owns the number is `ring/`: `ring/src/mapping.rs` and `f_abi::layout::Layout::adopt` for the header, `ring/src/lib.rs` for the cursors and the entries, `ring/src/adopt.rs` for the believed-once binding. RFC 0046 is the design and RFC 0037 is what `MIRI_GAP` rests on."
+
+[workload]
+path     = "ring/tests/hostile.rs"
+seed     = "0xf00dbeefcafe1234"
+# The four counts, all of them, because the failure this claim is most exposed
+# to is somebody gating the small one and publishing the large one.
+gate     = 100000000
+exit     = 1000000000
+miri     = 4096
+miri_nightly = 65536
+notes    = "Measured on the four-core development container, and none of these is in a threshold. Release: 1 000 000 512 operations in **44.3 s to 60.3 s** over five runs — 22.6, 20.7, 20.3, 19.8 and 16.6 M operations a second. The spread is other work on a shared host, and it is reported as a range rather than as its best number because a cost quoted at its minimum is the shape of a claim somebody quietly stops being able to reproduce. Nothing above depends on it: every threshold in this file is a count. The gate is 100 000 000 at **4.4 s to 7.3 s** over four runs, which is what makes it affordable inside `cargo xtask verify`; the exit's billion runs in the CI workload job and again nightly at a base that walks a committed list, so successive nights cover new seed space. Unoptimised — which is what `cargo test --workspace` builds — the rate is about 0.9 M a second, so the default the test target runs with no arguments is 2 097 152 operations at about 2.4 s. Miri costs roughly six orders of magnitude: 4 096 operations is **119 s to 137 s** end to end over three runs — about 30 operations a second, with roughly a minute of that being the sysroot rather than the run — and 65 536 is about eleven minutes. A GitHub runner has two cores and no meaningful parallelism to lose here, so the numbers to expect there are roughly twice these."
+
+[metrics]
+primary   = "operations"
+secondary = [
+  # The two the fuzzer can report itself. Both are zero on a healthy tree, and
+  # `cargo xtask hostile --mutate` is what shows each can be non-zero.
+  "panics",
+  "stuck",
+  # Miri's, and it is a separate row rather than a third value of the same
+  # metric because it comes from a different run at a different count. Folding
+  # it in would make one number stand for a property that was checked over four
+  # thousand operations and a property that was checked over a billion.
+  "miri_undefined_behaviour",
+  # And the distance between those two counts, which is the exit's one conjunct
+  # this claim cannot carry at the exit's own scale. It is a metric rather than a
+  # sentence so that it moves in a diff: `xtask` recomputes it from the constants
+  # it runs and requires the registry to agree, the way `JOIN_GAP` is a set that
+  # must match exactly rather than a paragraph about a component.
+  "unsafety_gap",
+
+  # And the reach. Every row below is a **minimum**, and each was zero at some
+  # point while this was being built — which is the argument for having them.
+  # `refused_flag` and `refused_opcode` sat at zero through the first working
+  # version because the envelope is checked in order and the generator always
+  # drew a reserved word, so every malformed entry was refused by the first
+  # check and the other two were never reached. The run reported a clean billion
+  # and two of `execute`'s four refusal paths had never run.
+  "peer_header_bytes",
+  "peer_header_fields",
+  "peer_cursors",
+  "peer_index_slots",
+  "peer_entry_slots",
+  "peer_arena_bytes",
+  "peer_flag_words",
+  "peer_restarts",
+  "peer_restarts_mid_batch",
+  "channel_adopted",
+  "channel_refused_malformed",
+  "channel_refused_address",
+  "channel_refused_version",
+  "channel_refused_feature",
+  "channel_epoch_changes_seen",
+  "ring_submitted",
+  "ring_full",
+  "ring_corrupt_reported",
+  "ring_popped",
+  "ring_reaped",
+  "entries_executed",
+  "entries_refused_reserved",
+  "entries_refused_flag",
+  "entries_refused_opcode",
+  "entries_refused_bad_address",
+  "entries_arena_bytes_copied",
+]
+
+[threshold]
+# The count the gate performs — `cargo xtask claim hostile-peer-operations`, and
+# `cargo xtask verify`. A minimum rather than an equality because a larger run is
+# still a run that met this claim.
+operations                    = { min = 100000000 }
+
+# And E1-P04's own number, which is a threshold here rather than a line of prose
+# and a job in a workflow file. `cargo xtask hostile --exit` is the command that
+# moves it, `[reproduce]` names it beside the published one, and the run refuses
+# to call itself the exit if it performed fewer. Before this row the registry
+# gated a tenth of the exit and published the whole of it.
+exit_operations               = { min = 1000000000 }
+
+# The count the *memory unsafety* property is checked at per commit. Miri's, and
+# six orders of magnitude more expensive per operation.
+miri_operations               = { min = 4096 }
+
+# The exit's one conjunct that is not met at the exit's count, as a number.
+#
+# `exit_operations / miri_operations`: the panic and hang properties are checked
+# over a sample this many times larger than the sample memory unsafety is checked
+# over. No tool closes it — Miri interprets about 29 operations a second here, so
+# a billion is of the order of a year — and the point of the row is not that the
+# number is small but that it cannot move without somebody moving it. `xtask`
+# recomputes it from HOSTILE_EXIT and HOSTILE_MIRI on every ordinary run and goes
+# red if this file disagrees. RFC 0046 declares it as `MIRI_GAP`'s scale half;
+# JOIN_GAP and CHAOS_GAP are the discipline it copies.
+#
+# **The task that owns it is `E1-P12`** — Kani over `Layout::adopt`,
+# `Consumer::pop`, `take` and `execute`. A bounded proof over arbitrary bytes
+# does not sample, so it does not have a count, so it deletes this row rather
+# than narrowing it. Naming the owner is what stops a declared gap from becoming
+# a permanent one.
+unsafety_gap                  = { max = 244140 }
+
+# The three properties. Zero, and there is no acceptable rate of panicking on
+# bytes a peer wrote, so there is nothing here to tune when a run goes red.
+panics                        = { max = 0 }
+stuck                         = { max = 0 }
+miri_undefined_behaviour      = { max = 0 }
+
+# The reach, and the reason the three zeros above are not free. Each of these is
+# a path a hostile peer has to have driven for those zeros to be a statement
+# about the ring rather than about a region that spent the whole run refused.
+# `cargo xtask hostile` checks all twenty-six on every run and names the ones
+# that fell short.
+#
+# **Each is stated per `operations` — per 100 000 000 — and scaled to the run.**
+# So the gate enforces the number written here, the exit's billion enforces ten
+# times it, and a short diagnostic run still enforces *reached at all* rather
+# than being held to a count it cannot make. The values are about a hundredth of
+# what a healthy run produces, measured on the four-core development container at
+# the gate's own count: a floor that fires on a collapse and not on drift. They
+# were `min = 1` for one commit, which caught a path that had stopped and nothing
+# else — and a path that has fallen by five orders of magnitude is the regression
+# this list is actually exposed to.
+#
+# And the rows below are read from *this file*: `hostile_thresholds_match` in
+# `xtask/src/main.rs` requires the set of keys here to equal the set in
+# `HOSTILE_REACHED`, so a row deleted from either side fails the run rather than
+# becoming a published minimum nothing checks. The two were one list written
+# twice for a commit, which is long enough — a threshold that lives only in
+# prose is the same false green the list itself exists to prevent.
+peer_header_bytes             = { min = 30000 }   # observed 3847364
+peer_header_fields            = { min = 30000 }   # observed 3848611
+peer_cursors                  = { min = 70000 }   # observed 7695363
+peer_index_slots              = { min = 30000 }   # observed 3847057
+peer_entry_slots              = { min = 30000 }   # observed 3847337
+peer_arena_bytes              = { min = 30000 }   # observed 3847845
+peer_flag_words               = { min = 30000 }   # observed 3847873
+peer_restarts                 = { min = 40000 }   # observed 4401988
+# The exit's own words — *restarts mid-operation*. It is a separate row from
+# `peer_restarts` because a restart between two operations is a different and
+# far easier thing than a restart between a batch being staged and published,
+# and a claim that counted only the first would be a claim about the easy half.
+peer_restarts_mid_batch       = { min = 5000 }   # observed 558374
+channel_adopted               = { min = 40000 }   # observed 4465323
+channel_refused_malformed     = { min = 20000 }   # observed 2503735
+channel_refused_address       = { min = 30000 }   # observed 3846537
+channel_refused_version       = { min = 3000 }   # observed 365150
+channel_refused_feature       = { min = 3000 }   # observed 357942
+# The exit's *lies about its epoch*, noticed. A restart the honest end never
+# re-adopted after is a restart nothing observed.
+channel_epoch_changes_seen    = { min = 10000 }   # observed 1206788
+ring_submitted                = { min = 50000 }   # observed 5078109
+ring_full                     = { min = 1000 }   # observed 168897
+# The one that says a hostile cursor or a forged slot number was *caught* rather
+# than followed. A run where this stayed zero is a run in which every cursor the
+# peer wrote happened to be legal.
+ring_corrupt_reported         = { min = 150000 }   # observed 15800545
+ring_popped                   = { min = 20000 }   # observed 2229409
+ring_reaped                   = { min = 7000 }   # observed 782598
+# And the four refusal codes `f_ring::execute` can produce, one row each, plus
+# the success path and the bytes it actually moved. Without `entries_executed`
+# and `entries_arena_bytes_copied` every refusal row could be met by a run in
+# which nothing ever succeeded, which is a different system.
+entries_executed              = { min = 4000 }   # observed 415686
+entries_refused_reserved      = { min = 900 }   # observed 92075
+entries_refused_flag          = { min = 600 }   # observed 60068
+entries_refused_opcode        = { min = 600 }   # observed 67382
+entries_refused_bad_address   = { min = 600 }   # observed 63783
+entries_arena_bytes_copied    = { min = 2000000 }   # observed 298507655
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "**This claim does not need that machine, and says so rather than pretending.** Every metric above is a count produced by a generator driven from a seed, so it is the same number in a container and on bare metal, and `f_bench::Environment` refuses to record a timing here and this records none. The wall-clock figures in `[workload] notes` are costs rather than claims and are in no threshold. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it, and because the day this claim's numbers become a *rate* — operations a second, which is what would make the billion a per-commit gate everywhere rather than a CI job — the machine stops being irrelevant."
+
+[reproduce]
+# The registry publishes one command per claim — `lint-reproduce` requires this
+# line to be exactly `cargo xtask claim <name>` — and that command performs the
+# **gate**: `operations`, a hundred million. It is not the exit's billion, and
+# which is which is stated here rather than left to be worked out from a workflow
+# file. The run itself prints both counts and both commands, so a person reading
+# the output is told the same thing as a person reading this file.
+command = "cargo xtask claim hostile-peer-operations"
+# The other two counts and the commands that perform them. Not `command`,
+# because a registry with two published commands per claim is a registry where a
+# stranger has to choose; these are named so that the choice is informed.
+exit    = "cargo xtask hostile --exit          # exit_operations, 1 000 000 000"
+miri    = "cargo xtask hostile --miri          # miri_operations, 4 096"
+
+[diagnosis]
+# Written now, while the mechanism is understood, rather than at 2 a.m. when it
+# is not.
+panic = "the ring panicked on bytes a peer wrote, which is the sentence `ring/src/lib.rs` opens with. The `repro` line beside the finding is one episode and reproduces in about a millisecond — paste it. Start at whatever `Result` stopped being propagated: `mutate-believed-header` is the shape of the defect, an `expect` or an `unwrap` on a value that came out of the header, and the commonest real version is an index computed from a peer-supplied number rather than from the adopted `Layout`"
+stuck = "an operation did more work than the channel's geometry permits. Read the finding's own numbers first — `did` against `bound` — because the two loops it can be are told apart by which: a drain over its budget is `Service::drain`'s ceiling stopping being the budget, and a sink over `arena_len` is `write_serial` copying a range the arena bound should have refused. Neither is a duration, so nothing here is a slow machine"
+miri_undefined_behaviour = "Miri's own output names the file and the line, and it is the tool's verdict rather than an exit status this harness reads. If it points at `ring/src/lib.rs`'s `Consumer::pop`, the bounds check on the index-ring slot has stopped covering something — that is `mutate-trusted-slot`'s exact shape, and it is the one defect the ordinary build cannot see. If it points inside `ring/tests/hostile.rs`, the harness is what broke and the ring is not implicated"
+reach_zero = "the run was clean and a path was never reached, which is the failure this claim exists to make visible. Two causes and they need opposite fixes. The generator stopped producing that input — `Peer::step`'s weights, or `Peer::entry`'s six cases, which is where `refused_flag` and `refused_opcode` were lost once already because the envelope is checked in order and every drawn entry carried a reserved word. Or the code stopped having that path, which is a finding about the ring rather than about the fuzzer"
+refused_address_zero = "the only path here that no *peer* can reach: it is `Peer::adopt_askew` handing over an unaligned base or a region too short for a header, because a header cannot describe an address the header itself has to be read from. If it is zero, that operation stopped being drawn — and the row is in this list precisely so a counter that is structurally zero cannot be mistaken for one that is merely quiet"
+miri_slow = "an episode under Miri costs about ten seconds and the whole cost is *aliasing events* rather than operations. If it has grown by an order of magnitude, look for a reference or a raw pointer being re-derived per access over a large allocation: taking the region's base pointer once instead of per poke moved one episode from three minutes to ten seconds, and RFC 0046 records why that is a design constraint on the harness and not a micro-optimisation"

@@ -1,0 +1,135 @@
+# The number `E1-P08`'s exit is a claim about time, and this is the entry that
+# stops it being a claim about a laptop.
+#
+# *Bisects in seconds rather than hours* is the sentence in TODO.md, and a
+# sentence like that has exactly two failure modes. It can be false, and it can
+# be true on the machine that wrote it and nowhere else. What is recorded here
+# is therefore a **ratio** — what a re-entry costs against what a replay costs —
+# because a ratio survives a machine that is twice as fast, and because the
+# absolute number this container produces is not a number this project is
+# allowed to publish: `bench/src/lib.rs` refuses to record a timing in a shared
+# container and `claims/runner-class-A.md` says at length why.
+#
+# So the status is `pending`, the threshold is a floor rather than the
+# measurement, and the measurement is printed by the command below every time it
+# runs.
+name       = "snapshot-re-entry-saving"
+status     = "pending"          # pending | tracked | gating
+milestone  = "E1"
+
+statement  = """
+The ten-fold floor below is measured on the **terse** mark — the one the oracle
+refuses to judge — and that has to be the first sentence rather than a footnote,
+because it is the sentence somebody would otherwise have to discover.
+
+A run that goes wrong in simulated minute forty is re-entered at simulated
+minute thirty-nine, from a snapshot written while the run was passing that
+minute, and finishing it from there costs at least ten times less wall clock
+than replaying the whole run.
+
+What that fast re-entry can be used for is bounded and is stated rather than
+implied. It answers the whole run's digest and it prints the tail from the cut
+onward (`f-sim --resume <mark> --trace`), which is what makes it a bisect tool
+somebody can read a failure out of; `cargo xtask snapshot` requires the buffer
+the run failed on to be *in* that tail, so the ratio is a ratio about the run's
+failure and not about an arbitrary suffix. What it does not answer is a verdict:
+`check::examine` refuses a partial artefact by name.
+
+The re-entered run is the run that replayed: same digest over the artefact, same
+finishing instant, same step count. Re-entered from a *whole* mark it is also
+the same verdict from the same oracle, with the same evidence — which is the
+half of the property a digest alone cannot state, because two runs that both end
+badly can end badly for different reasons.
+
+Two kinds of mark are measured because they buy different things. A **terse**
+mark carries the artefact's running hash and the live state, is constant in the
+length of the run, and cannot be judged. A **whole** mark carries the artefact,
+grows with the run, and can. RFC 0043 is where the pair is argued and where the
+measurement that forced it is written down.
+"""
+
+[baseline]
+# No comparison, for claim 0005's reason. This is a statement about this
+# system's own tooling against its own alternative — re-entering against
+# replaying — and the alternative *is* the baseline, measured in the same
+# command on the same machine in the same minute. A cross-system comparison
+# would need another deterministic simulator with snapshots, and the honest peer
+# for that is TigerBeetle's; this tree has no baseline directory for it and a
+# number copied out of somebody's blog post is not a baseline.
+system  = "none"
+notes   = "The baseline is the replay, and it is measured beside the re-entry rather than remembered from a previous run. That is what makes the ratio a property of the commit rather than of two afternoons."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/proving-ground.html"
+section  = "05"
+notes    = "Layer 1 is where the simulator's claims live, and its section names the technique this measures — a failing seed reproduces byte-identically, which is what makes a point inside a run re-enterable at all. The subsystem that owns the number is `sim/src/snap.rs`, with `sim/src/trace.rs` for the running fold that made the terse mark cheap and `sim/src/scenario.rs`'s `LONG` table for the run being measured."
+
+[workload]
+path   = "sim/src/snap.rs"
+# The scenario, the seed and the strike, so that the three numbers this claim
+# reports are three numbers about one run.
+scenario = "soak"
+seed     = "0xf00dbeefcafe1234"
+strike   = "peergone:110000:1"
+notes    = "`soak` is a hundred and twenty thousand operations against one disk at sixty milliseconds each — forty-four simulated minutes, about half a million steps. The strike is a peer death placed so the run goes wrong in simulated minute forty, and the binary is built with `mutate-silent-reset` so that the death is *not* handled: a fault class in this tree states its response and gets it (RFC 0039), so injecting one alone produces a correct run and nothing to re-enter. The harness refuses if the failure lands in any minute but the fortieth."
+
+[metrics]
+primary   = "replay_over_re_entry"
+secondary = [
+  # The two the ratio is made of, recorded so that a ratio which moved can be
+  # attributed to the half that moved. A re-entry that got slower and a replay
+  # that got faster are the same ratio and different news.
+  "replay_ms",
+  "re_entry_ms",
+  # What marking the run costs, which is the number somebody deciding whether to
+  # turn scanning on actually wants. It is paid once, on a pass that was
+  # happening anyway.
+  "scan_ms",
+  # The two mark sizes, in bytes. They are here because the ratio above is only
+  # half the trade: a terse mark is constant in the run's length and a whole one
+  # is linear in it, and a claim that reported only time would let somebody
+  # discover the disk cost on a night when it mattered.
+  "terse_mark_bytes",
+  "whole_mark_bytes",
+  # And the whole mark's re-entry, which is the honest counterweight to the
+  # headline: it buys the oracle and it costs the same order as the replay. RFC
+  # 0043 is the record of why both exist rather than one.
+  "whole_re_entry_ms",
+  # And that re-entry as a multiple of the replay, which is the second gated
+  # number. It is a *ceiling* because the whole mark is not a saving and is not
+  # expected to become one; what it rules out is the whole mark quietly becoming
+  # several replays, which would retire the judgeable half of this claim without
+  # anything going red.
+  "whole_re_entry_over_replay",
+]
+
+[threshold]
+# A floor and not the measurement. The four-core development container reports
+# well above it; the number here is what rules out the failure worth ruling out,
+# which is a re-entry costing the same order as the replay it exists to avoid.
+# That is not hypothetical — it is what the *whole* mark does, and it is why this
+# threshold is checked against the terse one.
+replay_over_re_entry = { min = 10 }
+# The counterweight, and the reason it points the other way. Measured on the
+# four-core container the whole mark's re-entry costs about what the replay costs
+# — 508 ms against 537 ms in one run, 1252 ms against 515 ms in another — so a
+# floor here would be a floor at roughly one and would go red on noise. Four is
+# the ceiling, chosen against an observed spread that already reaches 2.4x, and
+# it is the guard that makes a regression in the judgeable half visible.
+whole_re_entry_over_replay = { max = 4 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "**This claim needs that machine and does not have it, which is why it is `pending`.** Both halves of the ratio are wall clock, and `bench/src/lib.rs` refuses to record a timing in a container — a shared instance cannot produce a defensible number and a ratio of two undefensible numbers is not defensible either. What makes the ratio *less* fragile than a bare timing is that both halves are measured in the same command on the same machine within a few seconds, so the noise is common to both; what it does not do is make it a number to publish. `cargo xtask snapshot` prints it and gates on the floor above, and this row goes to `gating` the day E0-D10's runner exists."
+
+[reproduce]
+command = "cargo xtask claim snapshot-re-entry-saving"
+
+[diagnosis]
+# Written now, while the mechanism is understood.
+ratio_fell = "look at `re_entry_ms` before `replay_ms`. A re-entry that got slower is usually a field that started travelling with the snapshot and grows with the run — the terse mark is supposed to be constant in the run's length, and `snap::tests::a_terse_mark_is_smaller_than_a_whole_one_and_stays_the_same_size` is the test that says so. `terse_mark_bytes` growing beside the ratio falling is that failure exactly"
+replay_got_faster = "not a regression, and worth checking before anything is changed. The running fold in `sim/src/trace.rs` halved a replay's cost when it landed, because a digest over half a million records used to rebuild the whole artefact as a string. A further optimisation of the run would shrink this ratio while making everything better"
+digest_disagreed = "the harness refuses before it reports a ratio, and this is the failure that matters more than the number. A re-entered run that ends with a different digest is a plausible run that diverged, which is worse than no snapshot: it sends somebody looking for a bug at a point the system never reached. Start at whatever field was added to a model without being added to its `save` and `load` — `snap::tests::a_restored_run_is_the_run_that_replayed` cuts every scenario at seven points and is what should have caught it"
+whole_ceiling_hit = "the whole mark's re-entry is now more than four replays. It was never a saving — reading half a million records back costs the same order as producing them, which RFC 0043 measured and is why there are two kinds of mark — but it was the same order, and it no longer is. Look for a load that became super-linear in the record count before looking at anything else; `snap::Trace::load` reads the artefact record by record and is the only part of a restore that grows with the run"
+minute_moved = "the failure no longer lands in simulated minute forty, so the exit's own sentence is no longer what is being demonstrated. Either `soak`'s numbers moved or the strike's `after` no longer names the same consultation. `SNAPSHOT_STRIKE` in xtask is the knob and the harness prints the minute it found"

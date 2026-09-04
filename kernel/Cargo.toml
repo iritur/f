@@ -11,6 +11,67 @@ f-abi.workspace = true
 f-env.workspace = true
 f-ring.workspace = true
 
+# The block driver, which is a component and not part of the frame — it inherits
+# `unsafe_code = "forbid"` like every other `user/` crate and `cargo xtask
+# lint-unsafe` holds it to that.
+#
+# This line used to say the frame linked it because nothing scheduled a
+# component, and that stopped being true at RFC 0047: the driver runs at ring 3
+# on a core of its own and `kernel/src/blk.rs` calls no part of it, which
+# `cargo xtask lint-datapath` now holds rather than leaving to a reader. What
+# the frame links it for is three *shared vocabularies* and no code:
+# `routing`'s offsets, which are the layout of a page the frame writes and the
+# component reads; `driver::Counters`, which is the shape the frame reads that
+# page back into; and `transport::SECTOR_BYTES`. One definition the compiler
+# checks is worth more than two that agree today — the same argument the
+# `f-store` line below makes.
+#
+# *Reversal:* those three moving into `abi/`, which is where a wire layout two
+# crates agree on belongs and where this would have gone had the layout existed
+# before the driver did. Then this line goes, and `lint-unsafe`'s frame list
+# gets one crate shorter to justify.
+f-virtio-blk.workspace = true
+
+# The network driver, on exactly the same terms and for exactly the same three
+# shared vocabularies: `routing`'s offsets, `driver::Counters`' shape, and the
+# constants `kernel/src/net.rs` checks a manifest against. The frame calls none
+# of its code and `cargo xtask lint-datapath` holds that rather than leaving it
+# to a reader.
+#
+# That this line is a copy of the one above with a name changed is the finding
+# E1-B03 exists to produce, not an oversight: the arrangement a component crate
+# needs in order to be linkable by the frame turned out to be a property of
+# being a component. The *reversal* is the same one and it is now twice as
+# well argued — those three vocabularies belong in `abi/`, where a wire layout
+# two crates agree on belongs, and the day they move both of these lines go and
+# `lint-unsafe`'s frame list gets two crates shorter to justify. RFC 0051.
+f-virtio-net.workspace = true
+
+# The display driver, on exactly the same terms and for exactly the same three
+# shared vocabularies: `routing`'s offsets, `driver::Counters`' shape, and the
+# constants `kernel/src/gpu.rs` checks a manifest against. The frame calls none
+# of its code and `cargo xtask lint-datapath` holds that rather than leaving it
+# to a reader.
+#
+# Three copies of one paragraph. RFC 0051 said at two that the reversal was
+# those vocabularies moving into `abi/`; RFC 0054 says at three that the
+# argument has not improved by being made again, records who owes the move, and
+# declines to make it in a task whose evidence is a picture on a screen. Reading
+# this comment and the two above it in one sitting is the argument.
+f-virtio-gpu.workspace = true
+
+# The component a place holds, and — from E1-B08 — the runtime that holds a
+# core. The frame links it for one thing: `f_store::report` is the encoding a
+# runtime's exit status carries, and one definition the compiler checks is worth
+# more than two that agree today. Its `image` feature is off for the reason
+# `f-virtio-blk`'s is: a `#[panic_handler]` is a lang item and there may be one
+# per linked artefact.
+#
+# *Reversal:* a runtime that publishes a state tree of its own under RFC 0013,
+# at which point the frame reads nodes rather than a packed word and this line
+# goes.
+f-store.workspace = true
+
 [lints.rust]
 # The frame. This is the crate the < 5% unsafe-of-TCB metric measures.
 # Adding another crate to this list is a visible, reviewable diff.

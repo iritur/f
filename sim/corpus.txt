@@ -1,0 +1,128 @@
+# The seed corpus and the scenario set.
+#
+# Every line below that is not a comment is an argument list for `f-sim`, and
+# every one of them is a trial that found something once. `cargo xtask sweep
+# --corpus` replays all of them and requires each to be clean now, which is what
+# makes this a regression suite rather than a list of numbers.
+#
+# There is no format here beyond *a line is an argv*: `f-sim`'s own command-line
+# parser reads an entry, so an entry this binary cannot run is an entry that
+# fails to load, and a stranger reproduces one by pasting it after
+# `cargo run -q -p f-sim -- --trace`.
+#
+# Append-only. An entry removed because somebody believed the bug was gone is
+# the entry that would have caught it coming back.
+#
+# The scenario set, as the table ships it:
+#   handshake    two clients, a service that never refuses and never varies — ordering alone
+#   contention   four clients against a queue too shallow for them — the refusal path
+#   pipeline     three clients keeping a deep queue busy — completion order under load
+#   blk          a disk behind a virtqueue — reordered completions and coalesced notifications
+#   blkfull      a disk too shallow for its client — both refusals and the back-off between them
+#   blkloss      a disk that loses a completion, resets, and leaves its client buffers to reclaim
+#   net          a link that carries every frame — the delivery path, which is not the quiet one
+#   netdrop      a link every frame is too long for, dropping them where nothing can say so
+#   gpu          a display with two resources, fenced creations, and transfers that may overtake
+#   deployment   every compiled component the build produced, one client each — the seam's half
+#   native       the same client against a component with no device — the substitution's other half
+#   alloc        allocation failure — the frame refuses a component the memory it registered for
+#   mapfault     translation fault — a descriptor the device's domain declines to translate
+#   faultin      device page-fault latency — a translation that was there and took far longer
+#   peergone     peer death mid-operation — a device that stops with work still outstanding
+#   doorbell     torn doorbell — a bell rung with no entry behind it, half the pair of stores
+#   partial      partial write — the payload landed and the device's status byte did not
+#   latecqe      delayed completion — the device finished and the driver was told late
+#   deadline     batch reads queued behind a hard-class one — a device queue ordered by deadline
+#
+# ---- entries ----
+
+# ----------------------------------------------------------------------
+# found     held — a client is never told about a token it does not hold
+# commit    2eebc9b447101e9384c849a1b26c2ec6c469f8fc
+# under     mutate-crossed-completion
+# evidence  at 539 ns client 1 was told about token 0x0000000000000002, which it did not hold
+--seed 0xd8901edeb3f44762 --window 3 --ops 3 blkloss
+
+# ----------------------------------------------------------------------
+# found     held — a client is never told about a token it does not hold
+# commit    2eebc9b447101e9384c849a1b26c2ec6c469f8fc
+# under     mutate-crossed-completion
+# evidence  at 669 ns client 1 was told about token 0x0000000000000002, which it did not hold
+--seed 0xd8901edeb3f44762 --window 3 --ops 3 --no-inject peergone
+
+# ----------------------------------------------------------------------
+# found     held — a client is never told about a token it does not hold
+# commit    2eebc9b447101e9384c849a1b26c2ec6c469f8fc
+# under     mutate-crossed-completion
+# evidence  at 673 ns client 1 was told about token 0x0000000000000003, which it did not hold
+--seed 0xf00dbeefcafe1234 --window 3 --ops 4 gpu
+
+# ----------------------------------------------------------------------
+# found     held — a client is never told about a token it does not hold
+# commit    2eebc9b447101e9384c849a1b26c2ec6c469f8fc
+# under     mutate-crossed-completion
+# evidence  at 354 ns client 3 was told about token 0x0000000100000002, which it did not hold
+--seed 0xf00dbeefcafe1234 --ops 4 net
+
+# ----------------------------------------------------------------------
+# found     held — a client is never told about a token it does not hold
+# commit    2eebc9b447101e9384c849a1b26c2ec6c469f8fc
+# under     mutate-crossed-completion
+# evidence  at 354 ns client 3 was told about token 0x0000000100000002, which it did not hold
+--seed 0xf00dbeefcafe1234 --ops 4 netdrop
+
+# ----------------------------------------------------------------------
+# found     held — a client is never told about a token it does not hold
+# commit    2eebc9b447101e9384c849a1b26c2ec6c469f8fc
+# under     mutate-crossed-completion
+# evidence  at 1166 ns client 3 was told about token 0x0000000100000004, which it did not hold
+--seed 0xf00dbeefcafe1234 --window 3 --ops 5 blk
+
+# ----------------------------------------------------------------------
+# found     held — a client is never told about a token it does not hold
+# commit    2eebc9b447101e9384c849a1b26c2ec6c469f8fc
+# under     mutate-crossed-completion
+# evidence  at 1884 ns client 3 was told about token 0x0000000100000007, which it did not hold
+--seed 0xf00dbeefcafe1234 --window 3 --ops 5 --no-inject alloc
+
+# ----------------------------------------------------------------------
+# found     held — a client is never told about a token it does not hold
+# commit    2eebc9b447101e9384c849a1b26c2ec6c469f8fc
+# under     mutate-crossed-completion
+# evidence  at 1842 ns client 3 was told about token 0x0000000100000007, which it did not hold
+--seed 0xf00dbeefcafe1234 --window 3 --ops 8 deployment
+
+# ----------------------------------------------------------------------
+# found     held — a client is never told about a token it does not hold
+# commit    2eebc9b447101e9384c849a1b26c2ec6c469f8fc
+# under     mutate-crossed-completion
+# evidence  at 1884 ns client 1 was told about token 0x0000000000000007, which it did not hold
+--seed 0xf00dbeefcafe1234 --window 3 --ops 8 --no-inject mapfault
+
+# ----------------------------------------------------------------------
+# found     held — a client is never told about a token it does not hold
+# commit    2eebc9b447101e9384c849a1b26c2ec6c469f8fc
+# under     mutate-crossed-completion
+# evidence  at 50415 ns client 1 was told about token 0x0000000000000007, which it did not hold
+--seed 0xf00dbeefcafe1234 --window 3 --ops 8 --no-inject faultin
+
+# ----------------------------------------------------------------------
+# found     held — a client is never told about a token it does not hold
+# commit    2eebc9b447101e9384c849a1b26c2ec6c469f8fc
+# under     mutate-crossed-completion
+# evidence  at 1884 ns client 1 was told about token 0x0000000000000007, which it did not hold
+--seed 0xf00dbeefcafe1234 --window 3 --ops 8 --no-inject doorbell
+
+# ----------------------------------------------------------------------
+# found     held — a client is never told about a token it does not hold
+# commit    2eebc9b447101e9384c849a1b26c2ec6c469f8fc
+# under     mutate-crossed-completion
+# evidence  at 1884 ns client 1 was told about token 0x0000000000000007, which it did not hold
+--seed 0xf00dbeefcafe1234 --window 3 --ops 8 --no-inject partial
+
+# ----------------------------------------------------------------------
+# found     held — a client is never told about a token it does not hold
+# commit    2eebc9b447101e9384c849a1b26c2ec6c469f8fc
+# under     mutate-crossed-completion
+# evidence  at 4821 ns client 1 was told about token 0x0000000000000003, which it did not hold
+--seed 0xf00dbeefcafe1234 --window 3 --ops 8 --no-inject latecqe

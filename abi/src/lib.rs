@@ -12,9 +12,14 @@
 
 #![no_std]
 
+pub mod buf;
 pub mod cap;
+pub mod control;
+pub mod deadline;
 pub mod door;
 pub mod layout;
+pub mod manifest;
+pub mod reserve;
 pub mod state;
 
 /// The frame's opcode space.
@@ -100,9 +105,18 @@ pub struct Sqe {
     /// See the `flags` module. Unit: none — a bitmask of the `flags`
     /// constants. Zero is no flags, which is always a valid submission.
     pub flags: u8,
-    /// Scheduling class and priority. See `docs/design/deadline-all-the-way-down.html`.
-    /// Unit: none — a class identifier in the high bits and a priority
-    /// ordinal in the low bits. Zero is the default class.
+    /// Scheduling class, and how many rings this request's urgency has already
+    /// crossed. Low byte: one of the [`class`] constants, read whole and
+    /// refused when it is none of them. High byte: inheritance depth, at most
+    /// [`deadline::MAX_DEPTH`]. [`deadline`] is the reading and
+    /// `docs/rfc/0025-a-deadline-inherits-downward-and-decays.md` the argument;
+    /// the resource document is where the class comes from. There is no
+    /// priority ordinal in this field, on purpose — within a class, the
+    /// deadline is the order.
+    /// Unit: none — a class ordinal in the low byte, smaller is more urgent,
+    /// and a count of rings in the high byte. Zero is `class::HARD` at depth
+    /// zero, which is why [`Sqe::ZERO`] writes `class::BATCH` explicitly: a
+    /// zeroed entry must not claim the one class that is admission-controlled.
     pub class: u16,
     /// Index into the caller's capability table. A forged value fails the
     /// bounds check and kills the channel.
@@ -129,12 +143,19 @@ pub struct Sqe {
     /// Unit: per-opcode, and the opcode owns saying which — bytes for a
     /// transfer, entries for an enumeration. Zero is the beginning.
     pub offset: u64,
-    /// Registered buffer set. On hardware with shared virtual memory this and
-    /// `buf_index` collapse to a plain address in the submitter's own space.
-    /// Unit: registered-set identifiers. Zero is a valid set.
+    /// Registered buffer set, packed as [`buf::SetId`], when
+    /// [`flags::FIXED_BUF`] is set. On a channel that negotiated
+    /// [`feature::SHARED_VIRTUAL_MEMORY`] and an entry with the flag clear,
+    /// this and `buf_index` are instead the low and high halves of a virtual
+    /// address in the submitter's own space — [`buf::Name`] is the reading, and
+    /// `docs/rfc/0024-a-buffer-is-owned-by-one-side.md` the argument.
+    /// Unit: registered-set identifiers on the registered path, the low 32
+    /// bits of a byte address on the other. Zero is slot zero at generation
+    /// zero, which was never issued, so a zeroed entry names no set.
     pub buf_set: u32,
-    /// Index within the buffer set.
-    /// Unit: buffers within `buf_set`, zero-based.
+    /// Index within the buffer set, or the high half of the address.
+    /// Unit: buffers within `buf_set`, zero-based, on the registered path; the
+    /// high 32 bits of a byte address on the other. Zero is the first buffer.
     pub buf_index: u32,
     /// Length in bytes. Unit: bytes. Zero is a zero-length operation, which
     /// is valid and distinct from an absent one.
@@ -158,8 +179,24 @@ pub const NO_DEADLINE: u64 = 0;
 #[repr(C, align(32))]
 #[derive(Clone, Copy, Debug)]
 pub struct Cqe {
-    /// Echoed from the submission.
-    /// Unit: none — the submitter's own value, returned unchanged.
+    /// Echoed from the submission, except on a notice.
+    ///
+    /// Unit: none — the submitter's own value, returned unchanged, **except on
+    /// an entry carrying [`cflags::NOTICE`], where it is the thing the notice
+    /// concerns: a capability handle for the five notices about a slot, a
+    /// deadline or a peer, and a core index for
+    /// [`control::notice::RECLAIM`], which is about neither**. The second
+    /// reading is RFC 0008's and the third is RFC 0038's; both are stated here
+    /// rather than deduced, because R03 makes this sentence normative and
+    /// `cargo xtask lint-units` reads it: a notice answers no submission, so
+    /// there is no submitter's value for it to carry, and a reader that
+    /// believed there was would match a notice against an outstanding token.
+    ///
+    /// A reclaim is the one notice whose subject is not in a capability table,
+    /// which is why it needs a reading of its own rather than a handle that
+    /// names a core: a core is not an object a component holds, it is capacity
+    /// a component was allocated, and RFC 0008 puts the pending state for it
+    /// beside the allocation for exactly that reason.
     pub user_data: u64,
     /// Non-negative values are success, and their meaning is per-opcode — for a
     /// transfer it is the count actually transferred, which is how partial
@@ -209,6 +246,19 @@ pub mod flags {
     /// The same rule io_uring reached, under the name `CQE_SKIP_SUCCESS`, and
     /// for the same reason.
     pub const NO_CQE: u8 = 1 << 3;
+
+    /// Every submission flag this build defines.
+    ///
+    /// R04 refuses an unknown flag rather than ignoring it, and that check
+    /// needs something to compare against. It lives *here*, beside the bits it
+    /// names, rather than in each reader of an entry: there are two such
+    /// readers already — `f_ring::execute`'s envelope check and
+    /// [`buf::Request::read`](crate::buf::Request::read) — and a build where
+    /// one of them had been taught about a new flag and the other had not is a
+    /// build in which the same entry is malformed on one path and legal on the
+    /// other. One list makes adding a flag without teaching both a diff the
+    /// compiler shows.
+    pub const KNOWN: u8 = LINK | DRAIN | FIXED_BUF | NO_CQE;
 }
 
 /// Completion flags.
@@ -217,6 +267,29 @@ pub mod cflags {
     pub const MORE: u32 = 1 << 0;
     /// The operation was cancelled rather than executed.
     pub const CANCELLED: u32 = 1 << 1;
+    /// The operation ran, and ran below what the entry asked: at a less urgent
+    /// class than it carried, against a later deadline than it carried, or
+    /// past the depth its urgency was allowed to reach. Which of the three is
+    /// [`deadline::Inherited::shortfall`](crate::deadline::Inherited::shortfall),
+    /// kept by the service and counted in its state tree; the flag is what
+    /// makes the demotion visible to the caller at all. Not an error, because
+    /// the request completed — but never silent, because a request served
+    /// below its class without a word is how a deadline becomes decorative.
+    /// RFC 0025.
+    pub const SHORTFALL: u32 = 1 << 2;
+    /// This completion answers no submission: it is a **notice** from the frame.
+    ///
+    /// The whole of RFC 0008's ABI change, and it costs [`Cqe::user_data`] its
+    /// first reading — which is why that field's doc comment now states two.
+    /// On an entry carrying this bit, `result` is the notice kind
+    /// ([`control::notice`](crate::control::notice)), `user_data` is the handle
+    /// the notice concerns, and `ext` carries the rest.
+    ///
+    /// Why a flag on a completion rather than a subscription entry to complete:
+    /// the initial *granted* notices must be in the ring before the component's
+    /// first instruction, and there is no submission yet for them to answer.
+    /// RFC 0008 rejected the `io_uring` multishot shape on exactly that.
+    pub const NOTICE: u32 = 1 << 3;
 }
 
 /// The error space.
@@ -275,6 +348,45 @@ pub mod error {
         pub const NO_CORE: u16 = 2;
         /// Memory bandwidth or a cache partition could not be reserved.
         pub const NO_BANDWIDTH: u16 = 3;
+        /// The entry claims a class more urgent than its submitter's own
+        /// ceiling — what admission granted that component, which this channel
+        /// reports to the service. Refused rather than served at the
+        /// ceiling with a flag, because a caller that lost nothing by writing
+        /// `HARD` would write it on every entry. In [`super::ADMISSION`]
+        /// rather than [`super::ARGUMENT`] because the entry is well-formed;
+        /// what it asks for is a promise nobody made to its author (R08).
+        /// Detail: the `class` field as written. RFC 0025.
+        pub const NOT_HELD: u16 = 4;
+        /// The `Untyped` account a spawn supplied holds less than the manifest
+        /// declares its whole footprint needs.
+        ///
+        /// In [`super::ADMISSION`] rather than [`super::RESOURCE`], and the
+        /// distinction is the one R08 is about. `RESOURCE/QUOTA_EXHAUSTED` is
+        /// an account that ran out *while it was being spent*, which a
+        /// component recovers from by spending less. This is a demand refused
+        /// before anything was spent, because the manifest states what the
+        /// component is made of and the supervisor offered less than that — a
+        /// component does not start and then discover it cannot run. Detail:
+        /// the bytes the account actually holds.
+        ///
+        /// Added by E1-B05, which is the task `CONTRIBUTING.md`'s R02 row names
+        /// as the one that lands the supervisor's `ADMISSION` refusals.
+        pub const MEMORY: u16 = 5;
+        /// The core named is held by a hard-class reservation, and a hard-class
+        /// reservation holds its cores for its life.
+        ///
+        /// RFC 0007 grants a reservation a whole physical core, its sibling,
+        /// a bandwidth allocation and a cache partition, and forecloses
+        /// work-conserving scheduling of reserved capacity: *reserved and idle
+        /// stays idle, and no later optimisation may quietly lend it out.* So a
+        /// reclaim naming such a core is refused rather than served, and it is
+        /// refused in [`super::ADMISSION`] because what was asked for is the
+        /// withdrawal of a promise admission already made — R08. Detail: the
+        /// core index.
+        ///
+        /// Added by E1-B08 (RFC 0038), which is where a core first belongs to
+        /// anything that could be asked to give it back.
+        pub const RESERVED: u16 = 6;
     }
 
     /// Codes within [`RESOURCE`].
@@ -298,6 +410,18 @@ pub mod error {
         pub const FEATURE_REQUIRED: u16 = 3;
         /// The peer is gone and is not coming back.
         pub const GONE: u16 = 4;
+        /// The place a connect named is still empty at the connect's deadline.
+        ///
+        /// Deliberately **not** [`GONE`], and RFC 0008 is emphatic about the
+        /// difference: a place may yet be refilled by a respawn, so a client
+        /// that can wait longer may submit again, while a client told `GONE`
+        /// would be right to give up. Detail carries the epoch of the last
+        /// occupant, or zero for a place that has never had one.
+        ///
+        /// The third of the three outcomes a pending connect has, added here by
+        /// E1-B05 because RFC 0008 says two outcomes and a silence is how the
+        /// builder and its test each invent the third.
+        pub const EMPTY: u16 = 5;
     }
 
     /// Codes within [`ARGUMENT`].
@@ -323,6 +447,19 @@ pub mod error {
         /// object it names can be used for either, and no single mapping of it
         /// may have both.
         pub const RIGHTS_CONFLICT: u16 = 6;
+        /// The entry uses a feature this channel did not negotiate — an
+        /// address where [`crate::feature::SHARED_VIRTUAL_MEMORY`] was not
+        /// agreed is the case that exists. In [`super::ARGUMENT`] rather than
+        /// [`super::PEER`] because the channel is healthy and the peer is
+        /// present; what is wrong is one entry, and RFC 0011 says a feature
+        /// outside the agreed set must not be used, not that using it ends the
+        /// channel. Detail: the feature bit.
+        pub const FEATURE_NOT_NEGOTIATED: u16 = 7;
+        /// The `class` field's low byte names no class, or its high byte is a
+        /// depth past [`crate::deadline::MAX_DEPTH`], which no conforming
+        /// service writes. Refused, not clamped: a depth that is clamped is a
+        /// depth a peer can reset. Detail: the field as written. RFC 0025.
+        pub const BAD_CLASS: u16 = 8;
     }
 
     /// Pack a domain and a code into a [`Cqe::result`].

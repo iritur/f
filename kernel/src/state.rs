@@ -65,6 +65,133 @@ pub mod node {
     pub const CAPS: u32 = 10;
     /// Slots in it.
     pub const CAPS_SLOTS: u32 = 11;
+    /// Allocations the calling core's own free lists answered.
+    pub const MEMORY_SERVED: u32 = 12;
+    /// Allocations that had to reach the machine-wide frontier.
+    pub const MEMORY_REFILL: u32 = 13;
+    /// Allocations that had to reach another core's free lists.
+    pub const MEMORY_REMOTE: u32 = 14;
+    /// How much of `MEMORY_REMOTE` the boot's own self-test provoked.
+    ///
+    /// Published beside the total rather than subtracted from it, because a
+    /// reader who maps this tree under load is asking a different question
+    /// from the boot log's, and the boot log's answer is a difference it has
+    /// already taken. `mem::provoke_remote` withholds the frontier and asks an
+    /// empty shard for a frame on every boot, so that a zero on the hot path
+    /// is a zero a working counter produced rather than one nothing could ever
+    /// move; this node is what lets a reader take that provocation back out.
+    pub const MEMORY_FORCED: u32 = 15;
+    /// The remapping unit.
+    pub const IOMMU: u32 = 16;
+    /// Domain ids the unit has.
+    pub const IOMMU_DOMAINS: u32 = 17;
+    /// Domain ids handed out.
+    pub const IOMMU_USED: u32 = 18;
+    /// Transactions the unit refused and recorded.
+    ///
+    /// A counter and not a gauge, and that is the whole point of publishing it:
+    /// a reader watching this rise is watching a device try to address memory
+    /// nobody gave it. Zero on a healthy machine, and a number nothing else in
+    /// the tree can produce.
+    pub const IOMMU_FAULTS: u32 = 19;
+    /// The block datapath.
+    pub const BLK: u32 = 20;
+    /// Entries the driver answered without a refusal.
+    pub const BLK_SERVED: u32 = 21;
+    /// Bytes the device transferred on behalf of clients.
+    ///
+    /// Published beside the two below and never alone: *no bytes were copied*
+    /// is a claim about a datapath, and a datapath that moved nothing is one
+    /// nobody has tested. A reader checking `BLK_COPIES` should read this
+    /// first.
+    pub const BLK_BYTES: u32 = 22;
+    /// Bytes the driver copied on the data path.
+    ///
+    /// **Required to be zero**, and read it as what it is: a *structural*
+    /// property published as a number, not a tally of copies some code path
+    /// made and this boot found at zero. Nothing on the data path can move it,
+    /// which is exactly the claim — a request resolves to a `Reach`, which is
+    /// an address and a length and not a slice, so the address goes into a
+    /// descriptor and the bytes never reach the component.
+    ///
+    /// Two things make that worth publishing rather than asserting. The node
+    /// below says the counting mechanism works. `cargo xtask lint-datapath`
+    /// says the structure holds: the driver crate defines exactly one function
+    /// that moves bytes, calls it exactly once, calls it from its own
+    /// self-check and not from the data path, and mints no accessor out of an
+    /// address it invented. Without that lint this number would be a comment
+    /// with a `u64` around it, and it was for one review.
+    pub const BLK_COPIES: u32 = 23;
+    /// Bytes the boot moved through the driver's own copy function on purpose.
+    ///
+    /// The same argument [`MEMORY_FORCED`] makes beside [`MEMORY_REMOTE`], one
+    /// subsystem over: a counter nothing in a boot can move is
+    /// indistinguishable from a counter that does not work. The driver's
+    /// copying function takes the tally it moves as an argument, the data path
+    /// never passes it the one above, and this boot passes it this one — so a
+    /// build in which the function had been deleted or had stopped counting
+    /// would publish a zero here and fail the boot.
+    pub const BLK_PROVOKED: u32 = 24;
+    /// The runtime a core was allocated to.
+    pub const RUNTIME: u32 = 25;
+    /// Kernel entries a runtime caused on the hot path.
+    ///
+    /// **Required to be zero**, and the whole of E1-B08's exit. It is a
+    /// *counted* zero rather than a structural one, which is the difference
+    /// from [`BLK_COPIES`] beside it and is worth stating: the driver's zero is
+    /// true because no type in that crate can express a copy, and this one is
+    /// true because nothing the runtime executed between the `iretq` that
+    /// entered it and the `EXIT` that left it crossed a privilege boundary. The
+    /// second is a fact about a run and the first is a fact about a source
+    /// tree, and only one of them needs a counter.
+    ///
+    /// The sum of door calls that were not the boundary and exceptions taken at
+    /// ring 3. What it excludes is [`RUNTIME_BOUNDARY`] and [`RUNTIME_TICKS`],
+    /// both published beside it so a reader who disagrees with the line can
+    /// move it. RFC 0038 argues where it is.
+    pub const RUNTIME_HOT: u32 = 26;
+    /// Crossings a runtime made on purpose, on the boot that asks for them.
+    ///
+    /// The same argument [`MEMORY_FORCED`] makes beside [`MEMORY_REMOTE`] and
+    /// [`BLK_PROVOKED`] makes beside [`BLK_COPIES`], a third time: a counter
+    /// nothing in a boot can move is indistinguishable from a counter that does
+    /// not work. `cargo xtask runtime provoke` requires this to be non-zero and
+    /// to equal what the frame counted, so a build that had stopped counting
+    /// publishes zero in both nodes and fails rather than looking clean.
+    pub const RUNTIME_PROVOKED: u32 = 27;
+    /// Crossings at the allocation boundary: the one door call that ends a
+    /// residency.
+    ///
+    /// Excluded from [`RUNTIME_HOT`] and published rather than dropped, because
+    /// an exclusion nobody can see is an exclusion nobody can check. Exactly one
+    /// on a run that ended by `EXIT`.
+    pub const RUNTIME_BOUNDARY: u32 = 28;
+    /// Timer interrupts delivered while a runtime held its core.
+    ///
+    /// The other exclusion, and the more arguable one. It is the frame's own
+    /// clock reaching a core it gave away — nothing the runtime does makes one
+    /// happen or not — and on the reclaim boot it is the mechanism that
+    /// *delivers* the notice. An interrupt happened and a preemption did not,
+    /// which is the distinction the whole allocation model rests on and the
+    /// reason this is a separate node rather than a term in the one above.
+    pub const RUNTIME_TICKS: u32 = 29;
+    /// Work items a runtime's own executor completed.
+    ///
+    /// Published beside [`RUNTIME_HOT`] and never alone, for [`BLK_BYTES`]'s
+    /// reason one subsystem over: *no boundary was crossed* is a claim about a
+    /// workload, and a workload that did nothing is one nobody has tested.
+    pub const RUNTIME_WORK: u32 = 30;
+    /// Interrupts other than the clock delivered while a runtime held its core.
+    ///
+    /// The third exclusion, and it is here because it was missing. A TLB
+    /// shootdown another core asked for, a doorbell, and the spurious vector
+    /// the local APIC withdrew: each of them is a kernel entry, each of them
+    /// used to land in no bucket at all, and [`RUNTIME_TICKS`]'s argument
+    /// covers all three without being weakened — the frame or another core
+    /// reaching a core this one gave away, which nothing the runtime does makes
+    /// happen. What was wrong was not where the line was drawn; it was that
+    /// three vectors were on neither side of it. RFC 0038.
+    pub const RUNTIME_INTERRUPTS: u32 = 31;
     /// A node of a kind this build does not name, published on purpose.
     ///
     /// RFC 0013's one deliberate exception to R04 is that a reader skips and
@@ -76,7 +203,7 @@ pub mod node {
 }
 
 /// How many nodes this build publishes.
-pub const NODES: usize = 12;
+pub const NODES: usize = 32;
 
 /// The schema, written once and never again for a generation.
 ///
@@ -124,8 +251,132 @@ const SCHEMA: [SchemaEntry; NODES] = [
     ),
     SchemaEntry::new(node::CAPS, node::ROOT, 9 * WORD, kind::SUBTREE, unit::NONE, b"caps"),
     SchemaEntry::new(node::CAPS_SLOTS, node::CAPS, 10 * WORD, kind::GAUGE, unit::SLOTS, b"slots"),
+    // Memory's three allocation paths, and they sit here rather than beside
+    // `free` for a reason worth stating: `validate` requires ids to ascend in
+    // schema order, ids are permanent, and these were minted after `topology`
+    // and `caps` already held 5 through 11. The tree's *shape* is the parent
+    // field, which still puts them under `memory`; the array's order is a
+    // detail, exactly as `node` says.
+    SchemaEntry::new(
+        node::MEMORY_SERVED,
+        node::MEMORY,
+        11 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"served",
+    ),
+    SchemaEntry::new(
+        node::MEMORY_REFILL,
+        node::MEMORY,
+        12 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"refill",
+    ),
+    SchemaEntry::new(
+        node::MEMORY_REMOTE,
+        node::MEMORY,
+        13 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"remote",
+    ),
+    SchemaEntry::new(
+        node::MEMORY_FORCED,
+        node::MEMORY,
+        14 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"forced",
+    ),
+    SchemaEntry::new(node::IOMMU, node::ROOT, 15 * WORD, kind::SUBTREE, unit::NONE, b"iommu"),
+    SchemaEntry::new(
+        node::IOMMU_DOMAINS,
+        node::IOMMU,
+        16 * WORD,
+        kind::GAUGE,
+        unit::SLOTS,
+        b"domains",
+    ),
+    SchemaEntry::new(node::IOMMU_USED, node::IOMMU, 17 * WORD, kind::GAUGE, unit::SLOTS, b"used"),
+    SchemaEntry::new(
+        node::IOMMU_FAULTS,
+        node::IOMMU,
+        18 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"faults",
+    ),
+    SchemaEntry::new(node::BLK, node::ROOT, 19 * WORD, kind::SUBTREE, unit::NONE, b"blk"),
+    SchemaEntry::new(
+        node::BLK_SERVED,
+        node::BLK,
+        20 * WORD,
+        kind::COUNTER,
+        unit::ENTRIES,
+        b"served",
+    ),
+    SchemaEntry::new(node::BLK_BYTES, node::BLK, 21 * WORD, kind::COUNTER, unit::BYTES, b"bytes"),
+    SchemaEntry::new(node::BLK_COPIES, node::BLK, 22 * WORD, kind::COUNTER, unit::BYTES, b"copies"),
+    SchemaEntry::new(
+        node::BLK_PROVOKED,
+        node::BLK,
+        23 * WORD,
+        kind::COUNTER,
+        unit::BYTES,
+        b"provoked",
+    ),
+    SchemaEntry::new(node::RUNTIME, node::ROOT, 24 * WORD, kind::SUBTREE, unit::NONE, b"runtime"),
+    SchemaEntry::new(
+        node::RUNTIME_HOT,
+        node::RUNTIME,
+        25 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"hot",
+    ),
+    SchemaEntry::new(
+        node::RUNTIME_PROVOKED,
+        node::RUNTIME,
+        26 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"provoked",
+    ),
+    SchemaEntry::new(
+        node::RUNTIME_BOUNDARY,
+        node::RUNTIME,
+        27 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"boundary",
+    ),
+    SchemaEntry::new(
+        node::RUNTIME_TICKS,
+        node::RUNTIME,
+        28 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"ticks",
+    ),
+    SchemaEntry::new(
+        node::RUNTIME_WORK,
+        node::RUNTIME,
+        29 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"work",
+    ),
+    SchemaEntry::new(
+        node::RUNTIME_INTERRUPTS,
+        node::RUNTIME,
+        30 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"interrupts",
+    ),
     // Deliberately a kind nothing names. See `node::RESERVED_KIND`.
-    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 11 * WORD, 0xEE, unit::NONE, b"reserved"),
+    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 31 * WORD, 0xEE, unit::NONE, b"reserved"),
 ];
 
 /// Where the schema block starts: immediately after the header, on the
