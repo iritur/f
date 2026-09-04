@@ -184,8 +184,15 @@ jobs:
       - run: cargo xtask lint-units
       - run: cargo xtask lint-callbacks
       - run: cargo xtask lint-claim-owners
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Formatting and clippy, by calling the definition rather than restating
+      # it. This was `cargo fmt --all -- --check` and
+      # `cargo clippy --workspace --all-targets` written out here, which is one
+      # invocation over one graph — so `f-kernel` was checked for the host, in a
+      # feature unification that turned on `image` for three driver crates
+      # declared `default-features = false` to keep it off, and the gate went red
+      # on a duplicate `panic_impl` while the local loop stayed green. `lint_all`
+      # had the two-world split all along; this copy of it did not.
+      - run: cargo xtask lint-style
       # The hooks in .claude/ are policy too, and they are the only policy that
       # applies without being read. A hook that has stopped firing is
       # indistinguishable from a hook with nothing to complain about, so it is

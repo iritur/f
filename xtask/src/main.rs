@@ -596,6 +596,7 @@ fn main() -> ExitCode {
         "lint-snapshot" => lint_snapshot(),
         "lint-reproduce" => lint_reproduce(),
         "lint-proofs" => lint_proofs(),
+        "lint-style" => lint_style(),
         "unsafe" => unsafe_report(args.get(1).map(String::as_str) == Some("--by-file")),
         "release" => release(args.get(1).map(String::as_str)),
         "history" => match args.get(1).map(String::as_str) {
@@ -9555,15 +9556,41 @@ fn lint_all() -> Result<(), String> {
     // outside the workspace, so the two invocations below reach it and neither
     // does the `fmt --all` above. Under fifteen seconds, and no checker.
     lint_proofs()?;
-    // The same check the CI policy job runs. It lives here because a local
-    // `lint` that is a subset of the gate teaches people the gate is passing
-    // when it is not — which is how a formatting failure reached CI on a tree
-    // whose three policy lints were all green.
+    // The same check the CI policy job runs — and it runs it by *calling this*,
+    // which is the half that was missing. It lives here because a local `lint`
+    // that is a subset of the gate teaches people the gate is passing when it is
+    // not, which is how a formatting failure once reached CI on a tree whose
+    // three policy lints were all green.
+    lint_style()
+}
+
+/// Formatting, and clippy over both of the workspace's worlds.
+///
+/// # Why this is a verb rather than four lines in two places
+///
+/// It was four lines in two places, and the two drifted the moment the frame
+/// gained a dependency on a component crate. `.github/workflows/ci.yml` carried
+/// its own `cargo clippy --workspace --all-targets`, which is one invocation
+/// over one graph — so `f-kernel` was checked for the *host*, in a feature
+/// unification that turned on `image` for three driver crates that are declared
+/// `default-features = false` precisely to keep it off. Each of those carries a
+/// `#[panic_handler]`, a `panic_impl` is a lang item, and there may be one per
+/// linked artefact: `duplicate lang item in crate f_virtio_gpu (which f_kernel
+/// depends on)`. The local loop was green throughout, because the local loop had
+/// the split and the copy of it did not.
+///
+/// So there is one definition now and both callers use it. That is the same
+/// argument `kernel/Cargo.toml` makes about linking `f_store::report` — one
+/// definition the compiler checks is worth more than two that agree today.
+///
+/// # The two worlds
+///
+/// Everything except the kernel is checked for the host. The kernel is checked
+/// for the bare-metal target it actually runs on, which is the only
+/// configuration in which checking it means anything — and, since the frame
+/// began linking component crates, the only one in which it links at all.
+fn lint_style() -> Result<(), String> {
     sh("cargo", &["fmt", "--all", "--", "--check"])?;
-    // Two invocations, because the workspace has two worlds in it. Everything
-    // except the kernel is checked for the host; the kernel is checked for the
-    // bare-metal target it actually runs on, which is the only configuration in
-    // which checking it means anything.
     sh(
         "cargo",
         &[
