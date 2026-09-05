@@ -4,8 +4,11 @@
 # Install F as a second boot entry on a minimal Arch Linux machine.
 #
 # The procedure this automates is docs/booting-on-hardware.md, and the task it
-# serves is E0-P18: nothing in this repository has ever run on hardware, so the
-# first boot on a real machine is an experiment rather than a deployment.
+# serves is E0-P18: this kernel has run outside QEMU exactly once, on a VMware
+# machine on 2026-09-01 (docs/first-boot-outside-qemu.md), and never on bare
+# metal. So the first boot on a real machine is still an experiment rather than
+# a deployment, and that page's own opening says why a hypervisor is not the
+# machine E0-P18 is about.
 #
 # It is written for that: `check` reports what would go wrong and changes
 # nothing you did not agree to, `deploy-grub` fixes the one blocker it can,
@@ -23,11 +26,17 @@
 # `install` takes the two artefacts from ./target by default, or from
 # --kernel <path> --init <path> if they were built elsewhere and copied over.
 #
-# A third module is optional: a *component file* (a compiled manifest followed
-# by an image, RFC 0030). With one, the kernel runs the component lifecycle
-# demonstration and says so; without one it prints a line saying there was no
-# component file and carries on. Neither is a failure, which is why this is not
-# a required artefact.
+# Further modules are optional: *component files* (each a compiled manifest
+# followed by an image, RFC 0030). The frame fills one place per component file
+# it is given (RFC 0044), so what they decide is the size of the topology this
+# boot has — with none, the kernel prints a line saying so and carries on.
+# Neither is a failure, which is why they are not required artefacts.
+#
+# `cargo xtask component` builds four of them today: the store runtime and the
+# three drivers. `install` carries every one it finds, sorted, because the boot
+# under QEMU carries all of them and a hardware log is compared against that
+# one — E0-P18's exit asks for every difference to be accounted for, and a
+# topology that is smaller for no stated reason is a difference nobody meant.
 
 set -euo pipefail
 
@@ -50,15 +59,38 @@ if [ -f "$REPO/kernel/Cargo.toml" ] && [ -f "$REPO/rust-toolchain.toml" ]; then
     # travelled one, and the first time it was ever booted it did not work.
     KERNEL_DEFAULT="$REPO/target/x86_64-unknown-none/release/f-kernel.elf32"
     INIT_DEFAULT="$REPO/target/init/init.bin"
-    # Optional. `cargo xtask component` writes it; a checkout that has not run
-    # one has no file here and the entry is generated without the module line.
-    COMPONENT_DEFAULT="$REPO/target/component/store.fc"
+    # Optional, and a directory rather than a file: `cargo xtask component`
+    # writes one `.fc` per component and the frame takes a place per file. A
+    # checkout that has not run one has an empty directory here and the entries
+    # are generated with no module lines past `init.bin`.
+    COMPONENT_DIR_DEFAULT="$REPO/target/component"
 else
     IN_REPO=0
     KERNEL_DEFAULT="./f-kernel.elf32"
     INIT_DEFAULT="./init.bin"
-    COMPONENT_DEFAULT="./store.fc"
+    COMPONENT_DIR_DEFAULT="."
 fi
+
+# Every component file in a directory, sorted, newline separated.
+#
+# Sorted because the frame fills a place per module in the order the loader
+# hands them over (kernel/src/component.rs walks `boot.modules()`), so the order
+# decides which place each component lands in — and an order taken from the
+# filesystem is one that can differ between two machines carrying the same
+# files. That is the same reasoning `artefacts` in xtask/src/main.rs carries
+# about link order, and it was learned there the expensive way.
+#
+# It is deliberately *not* the order the QEMU boot uses. That one is `COMPONENTS`
+# in xtask/src/main.rs, a hand-written list, and this script cannot read it from
+# a machine with no checkout. So place indices here will differ from the ones in
+# the QEMU log, and that is one of the differences E0-P18's exit asks to be
+# accounted for rather than a fault: a component is found by the magic in its
+# record and not by its position, so what moves is which place it occupies and
+# never which bytes it is built from.
+component_files() {
+    [ -d "$1" ] || return 0
+    find "$1" -maxdepth 1 -name '*.fc' -type f 2>/dev/null | LC_ALL=C sort
+}
 
 # Where the artefacts land, and the file that generates the menu entries.
 # A dedicated 45_f rather than a block inside 40_custom, because a whole file is
@@ -553,24 +585,26 @@ cmd_install() {
     need_root
 
     local kernel="$KERNEL_DEFAULT" init="$INIT_DEFAULT" serial=0
-    local component="$COMPONENT_DEFAULT" want_component=0
+    local components="$COMPONENT_DIR_DEFAULT" want_components=0
     while [ $# -gt 0 ]; do
         case "$1" in
-            --kernel)    kernel="$2"; shift 2 ;;
-            --init)      init="$2";   shift 2 ;;
-            --component) component="$2"; want_component=1; shift 2 ;;
-            --serial)    serial=1;    shift ;;
+            --kernel)     kernel="$2"; shift 2 ;;
+            --init)       init="$2";   shift 2 ;;
+            --components) components="$2"; want_components=1; shift 2 ;;
+            --serial)     serial=1;    shift ;;
             *) die "unknown option for install: $1" ;;
         esac
     done
 
     [ -f "$kernel" ] || die "kernel not found: $kernel"
     [ -f "$init" ]   || die "init module not found: $init"
-    # Named explicitly and missing is an error; defaulted and missing is not.
-    # The kernel boots either way and says which it got, so a machine without a
-    # component file is a smaller topology rather than a failure.
-    if [ "$want_component" -eq 1 ] && [ ! -f "$component" ]; then
-        die "component file not found: $component"
+    # Named explicitly and holding nothing is an error; defaulted and empty is
+    # not. The kernel boots either way and says what it got, so a machine with
+    # no component files is a smaller topology rather than a failure.
+    if [ "$want_components" -eq 1 ]; then
+        [ -d "$components" ] || die "component directory not found: $components"
+        [ -n "$(component_files "$components")" ] \
+            || die "no *.fc component files in: $components"
     fi
 
     # Validate before touching the bootloader. An entry that points at the wrong
@@ -590,16 +624,24 @@ cmd_install() {
     install -d -m 0755 "$DEST"
     install -m 0644 "$kernel" "$DEST/f-kernel.elf32"
     install -m 0644 "$init"   "$DEST/init.bin"
-    # The second module line, or nothing at all. Built as a string so the two
-    # menu entries below cannot disagree about whether it is there.
-    local module_component=""
-    if [ -f "$component" ]; then
-        install -m 0644 "$component" "$DEST/store.fc"
-        module_component="
-    module ${gp}/store.fc"
-        echo "component       $DEST/store.fc  (the lifecycle demonstration will run)"
-    else
+    # One module line per component file, or nothing at all. Built as a single
+    # string so the two menu entries below cannot disagree about what is there.
+    local module_component="" count=0 f base
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        base=$(basename "$f")
+        install -m 0644 "$f" "$DEST/$base"
+        module_component="${module_component}
+    module ${gp}/${base}"
+        count=$((count + 1))
+        echo "component       $DEST/$base"
+    done <<EOC
+$(component_files "$components")
+EOC
+    if [ "$count" -eq 0 ]; then
         echo "component       none  (the kernel will say so and carry on)"
+    else
+        echo "component       $count file(s) — the frame fills one place per file, RFC 0044"
     fi
     echo "artefacts       $DEST/  (GRUB sees them at $gp/)"
 
@@ -690,9 +732,11 @@ EOF
     echo "  3. success is the log ending in 'M0 ok' and the machine then sitting still —"
     echo "     there is no reboot and no exit code on hardware, only the log"
     echo
-    echo "Keep that log. E0-P18's exit asks for it in docs/postmortem/, beside the"
-    echo "QEMU one, with the differences accounted for. The trace hash WILL differ:"
-    echo "the memory map and core count are in the boot log by design."
+    echo "Keep that log. E0-P18's exit asks for it in docs/ beside the QEMU one."
+    echo "docs/first-boot-outside-qemu.md is the shape, and it is the record of a"
+    echo "run rather than a page edited afterwards. Every difference has to be"
+    echo "accounted for: memory map, core count, cores versus present, and the"
+    echo "trace hash, which MUST differ and is not a determinism failure here."
 }
 
 # ----------------------------------------------------------------------------
@@ -743,9 +787,10 @@ deploy-grub options:
 install options:
   --kernel <path>   default $KERNEL_DEFAULT
   --init   <path>   default $INIT_DEFAULT
-  --component <p>   default $COMPONENT_DEFAULT, and optional: with a component
-                    file the kernel runs the lifecycle demonstration, without
-                    one it says so and carries on
+  --components <d>  directory of component files, default $COMPONENT_DIR_DEFAULT.
+                    Every *.fc in it is carried, sorted, and the frame fills one
+                    place per file (RFC 0044); with none the kernel says so and
+                    carries on
   --serial          also send GRUB's own menu to serial at $BAUD
 
 The procedure is docs/booting-on-hardware.md. Read the two facts that cost an
