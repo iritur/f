@@ -88,6 +88,19 @@ and it is the mechanism this page would otherwise have to describe in prose.
 
 ## The honest gaps
 
+- **The IOMMU stage has never met real firmware, and under UEFI it cannot.**
+  `E1-B01`'s confinement is the newest thing on this page and its coverage
+  outside QEMU is zero — not low, zero. The second boot printed
+  `acpi none: no checksummed root pointer in either window` and left every
+  IOMMU state node at zero, because multiboot 1 has no field for the root
+  system description pointer and UEFI does not leave one in the two legacy
+  windows this kernel is able to scan. That is structural: it will happen on
+  every UEFI machine, including the one `E0-P18` is waiting for. The kernel
+  fails closed and says so, which is R04 working rather than a defect, so
+  nothing goes red — which is exactly why it belongs on this page. `E5-D03`
+  owns it; `docs/second-boot-outside-qemu.md` has the reasoning and the three
+  candidate protocols.
+
 - **The state tree publishes thirty-two nodes and nothing that varies with time.**
   Frame counts, cores, ring tallies, capability slots, and since E1 the
   datapath's own tallies — copies on the data path, kernel entries per bucket,
@@ -98,15 +111,23 @@ and it is the mechanism this page would otherwise have to describe in prose.
   is a decision with a reversal condition, not a gap: it lifts when the boot log
   stops being the reproduction artefact.
 - **This kernel has never run on bare metal.** It has run outside QEMU exactly
-  once — a VMware machine on 2026-09-01, recorded in
-  `docs/first-boot-outside-qemu.md`, which says in its own opening that a
-  hypervisor is not the machine `E0-P18` is about. Everything else this page
+  twice, both on VMware machines: 2026-09-01, recorded in
+  `docs/first-boot-outside-qemu.md`, and 2026-09-05 carrying all of E1, in
+  `docs/second-boot-outside-qemu.md`. The first says in its own opening that a
+  hypervisor is not the machine `E0-P18` is about, and the second says it again.
+  Everything else this page
   reports is an assertion about an emulator: the APIC enumeration, the memory
   map, the UART, the application-processor startup, `M0 ok`, and now every
   datapath result too — the remapping unit, the three drivers, the framebuffer
   capture. This is still the largest single gap on this page and it is still
   easy to miss, because nothing here is *failing*: the tests pass, the boots are
   green, and the subject of nearly every one of them is an emulator.
+  The second boot moved part of it and sharpened the rest. The component
+  supervisor is no longer emulator-only evidence — four places, five spawns, a
+  fault, a restart, a connect resuming across the gap, a retirement, and zero
+  cross-core allocations on the hot path, all against real page tables at
+  32 GiB. The datapath itself did not move an inch: `state 20..31` were zero,
+  because the machine presented no virtio device to drive.
   E1 made this sharper rather than softer. Six claims now gate, and they gate
   because they are counts that do not depend on the machine — but every number
   about *time* in this project remains unmeasured, and `bench/src/lib.rs`

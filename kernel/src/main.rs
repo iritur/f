@@ -822,10 +822,10 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             report.unbound,
         ),
         // A machine that carried no component file is not a broken machine.
-        // `docs/booting-on-hardware.md` installs one module and E0-P18 landed a
-        // kernel that boots on metal from exactly that, so a demonstration the
-        // milestone does not require must not be the thing that stops it. The
-        // same shape `discover` uses for a machine with no DMAR, and for the
+        // `docs/booting-on-hardware.md` makes every component file optional and
+        // the first boot outside QEMU carried none at all, so a demonstration
+        // the milestone does not require must not be the thing that stops it.
+        // The same shape `discover` uses for a machine with no DMAR, and for the
         // same reason: a boot log line is what a machine missing something
         // optional earns, and an exit is what a machine that has it and got it
         // wrong earns. Every other `Failure` below is the second case.
