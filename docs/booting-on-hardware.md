@@ -160,7 +160,7 @@ in the menu.
 ```sh
 sudo mkdir -p /boot/f
 sudo cp f-kernel.elf32 init.bin /boot/f/
-sudo cp store.fc /boot/f/          # optional, see above
+sudo cp *.fc /boot/f/              # optional, see above — one place per file
 ```
 
 Add to `/etc/grub.d/40_custom`:
@@ -169,7 +169,10 @@ Add to `/etc/grub.d/40_custom`:
 menuentry "F — M0" {
     multiboot /boot/f/f-kernel.elf32
     module    /boot/f/init.bin
-    module    /boot/f/store.fc     # optional; omit the line if you did not copy it
+    module    /boot/f/store.fc       # one `module` line per component file you
+    module    /boot/f/virtio-blk.fc  # copied, in whatever order you want the
+    module    /boot/f/virtio-gpu.fc  # places filled. Omit them all and the
+    module    /boot/f/virtio-net.fc  # kernel says so and carries on.
     boot
 }
 ```
@@ -205,7 +208,7 @@ sudo mount /dev/sdX1 /mnt
 sudo grub-install --target=i386-pc --boot-directory=/mnt/boot /dev/sdX
 sudo mkdir -p /mnt/boot/f
 sudo cp f-kernel.elf32 init.bin /mnt/boot/f/
-sudo cp store.fc /mnt/boot/f/      # optional, see above
+sudo cp *.fc /mnt/boot/f/          # optional, see above — one place per file
 ```
 
 `/mnt/boot/grub/grub.cfg`:
@@ -219,10 +222,41 @@ set timeout=5
 menuentry "F — M0" {
     multiboot /boot/f/f-kernel.elf32
     module    /boot/f/init.bin
-    module    /boot/f/store.fc     # optional; omit the line if you did not copy it
+    module    /boot/f/store.fc       # one `module` line per component file you
+    module    /boot/f/virtio-blk.fc  # copied, in whatever order you want the
+    module    /boot/f/virtio-gpu.fc  # places filled. Omit them all and the
+    module    /boot/f/virtio-net.fc  # kernel says so and carries on.
     boot
 }
 ```
+
+### On UEFI, the kernel finds no ACPI, and therefore no IOMMU
+
+**Read this before choosing the firmware mode, because it decides what the boot
+can prove.** Under UEFI this kernel prints
+
+```
+  acpi          none: no checksummed root pointer in either window
+```
+
+and every IOMMU line is absent. It is not a fault of your firmware and not
+something a setting fixes. Multiboot 1 has no field for the root system
+description pointer, so `kernel/src/arch/x86_64/acpi.rs` scans the two windows
+the ACPI specification names — the extended BIOS data area, and
+`0xE0000..0x100000`. UEFI publishes the pointer in its own configuration table
+and leaves both windows empty. No root pointer means no `MCFG` and no `DMAR`,
+so there is no PCIe configuration space and no remapping unit to find.
+
+The kernel fails closed, says why, and boots on to `M0 ok` — a machine with no
+`DMAR` is a machine with less protection, not a broken one. But the whole of
+`E1-B01`'s confinement goes unexercised, which on a hardware boot is most of
+what there was to learn.
+
+**If the IOMMU is what you came for, boot through CSM/legacy BIOS**, where the
+legacy windows exist and multiboot 1 is enough. `E5-D03` owns the real fix —
+naming a boot protocol that carries the pointer — and
+`docs/second-boot-outside-qemu.md` is where this was found and what each
+candidate costs.
 
 ### On UEFI, `grub-install` changes what boots by default
 
