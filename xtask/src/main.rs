@@ -12572,6 +12572,29 @@ enum Route {
     /// reason. `claims/0015` is the time half and waits on a machine.
     /// E1-B14, RFC 0052.
     Churn,
+    /// The chunker's five properties over eight recorded seeds and four content
+    /// mixtures — `cargo test -p f-blob --test chunker`. Not a program under
+    /// `bench/src/bin/` and not a boot: the workload is the property test
+    /// `E2-P02` already runs, and what it produces is a **count** — bytes
+    /// between an edit and the first boundary the two streams agree on again,
+    /// and interior chunk sizes — which is why `claims/0018` may gate on this
+    /// machine the way `claims/0005` does, and why `claims/0017` will when it
+    /// has a denominator.
+    ///
+    /// The argument is a test-name filter, and it exists because the two claims
+    /// this route serves are in different states inside one test binary: the
+    /// size distribution passes while the resynchronisation bound is red under
+    /// RFC 0061's open reversal. A claim whose reproduction ran the whole binary
+    /// would report the wrong red for one of them, which is how a check gets
+    /// muted. An empty filter runs everything.
+    ///
+    /// It is a test rather than a benchmark because the store this number will
+    /// finally be taken against does not exist. `bench/src/bin/rechunk.rs` is
+    /// `intent/0006-state/plan.md` step 8 and `E2-B09`'s, and the day it lands
+    /// `bytes-rechunked-per-byte` moves to `Route::Bench("rechunk")` — the
+    /// claim's `[workload] path` says so too, in the file a stranger reads.
+    /// E2-B01, E2-P02, RFC 0061.
+    Chunker(&'static str),
 }
 
 const ROUTES: &[(&str, Route)] = &[
@@ -12613,6 +12636,18 @@ const ROUTES: &[(&str, Route)] = &[
     // `bench/src/lib.rs`'s rule holding rather than failing — the fourth pair
     // in this table with that shape.
     ("unmap-churn-cost", Route::Churn),
+    // Intent 0006's two chunker claims, sharing one workload the way the four
+    // pairs above share theirs — but split by property rather than by count and
+    // time. `chunk-size-distribution` names the one property that holds, so its
+    // reproduction is green and its threshold gates; `bytes-rechunked-per-byte`
+    // runs all five, because its subject is the bound and the bound's own test
+    // is currently red. Both of those are the honest report of where the tree
+    // is, and neither is arranged to look better than it is.
+    ("bytes-rechunked-per-byte", Route::Chunker("")),
+    (
+        "chunk-size-distribution",
+        Route::Chunker("the_mean_chunk_is_within_a_factor_of_two_of_the_target"),
+    ),
 ];
 
 /// The registry file one claim name resolves to.
@@ -12707,6 +12742,19 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         Route::Admission => admission_gate()?,
         Route::Deadline => deadline(None)?,
         Route::Churn => churn()?,
+        Route::Chunker(filter) => {
+            // `--nocapture`, because every number these two claims publish is
+            // *printed* by the test rather than asserted by it — the assertions
+            // are the thresholds, and the distribution behind them is what a
+            // reader has to see to disagree with it. A claim run that swallowed
+            // its own output would publish a verdict and no evidence.
+            let mut args = vec!["test", "-p", "f-blob", "--test", "chunker"];
+            if !filter.is_empty() {
+                args.push(filter);
+            }
+            args.extend(["--", "--nocapture"]);
+            sh("cargo", &args)?;
+        }
     }
 
     // The harness itself refuses in a non-measurement environment and says so

@@ -1,0 +1,154 @@
+# The shape of what the chunker produces, as distinct from the cost of an edit,
+# which is `claims/0017`. Two claims and not one, for the reason this registry
+# splits a count from a time and `claims/0005` from `claims/0006`: they are
+# different questions with different failure modes. A chunker can hold its size
+# distribution perfectly and never resynchronise after an edit — that is exactly
+# what the chunker in this tree did on periodic content before RFC 0061 — and it
+# can resynchronise immediately while producing chunks a sixth of the target
+# size, which is the option RFC 0061 refused on these numbers. One claim would
+# have averaged the two into a single verdict and lost the trade.
+#
+# **It may gate here for `claims/0005`'s reason rather than a new one: it is a
+# count.** A chunk size is the same number of bytes on a fast host and a slow
+# one, `f_bench::Environment` refuses to record a timing and this records none,
+# and the gate is not notional — `cargo test -p f-blob --test chunker` runs
+# inside `cargo xtask test`, which `cargo xtask verify` runs, and property 2 is
+# where these thresholds are asserted. A gating claim that nothing in the local
+# loop runs is a claim that gates nothing; this one is run twice per verify.
+name       = "chunk-size-distribution"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E2"
+
+statement  = """
+The chunker's mean interior chunk stays within a factor of two of
+`CHUNK_TARGET_BYTES` = 65 536 bytes across every content mixture it is drawn
+against, and content with no candidates at all is cut only by the maximum.
+
+Measured over eight recorded seeds and four content mixtures, 859 interior
+chunks. The final chunk of an object is where the object ended rather than where
+the content said to cut, so it is not evidence about the target and is excluded:
+
+  uniform       mean 78 396 over 300 chunks,   5 forced at the maximum
+  zero-filled   mean 262 144 over 87 chunks,  87 forced at the maximum
+  periodic      mean 90 230 over 256 chunks,  55 forced at the maximum
+  concatenated  mean 108 344 over 216 chunks, 48 forced at the maximum
+  aggregate     mean 108 063 over 859 chunks
+
+Two of those lines are assertions rather than averages, and that is the point of
+recording per mixture. The zero-filled mixture is **exactly** `CHUNK_MAX_BYTES`
+on 87 of 87 interior chunks, because the register's fixed point on a zero run —
+`0x127ee44bae552daa`, reached after sixty-four zero bytes — hits no mask, so
+that content has no candidates and every cut is forced. That assertion pins the
+gear table and the mask together: if it goes red, the fixed point has started
+hitting a mask, zero-filled content has acquired boundaries decided by
+arithmetic rather than by content, and every object hash ever written has
+changed. A mixture whose mean drifted to the maximum *without* being
+candidate-free would pass the aggregate and fail that row.
+
+The forced-cut fraction is the cost of RFC 0061 retiring normalised chunking,
+and nothing recorded it before this claim. Per ten thousand interior chunks:
+uniform 166, periodic 2148, concatenated 2222, zero-filled 10 000. The entry
+predicted "a few per cent" on uniform content and set its reversal condition at
+one interior chunk in ten; 1.66% is inside it with an order of magnitude to
+spare.
+
+The one number RFC 0061 got wrong here it got wrong in the safe direction: it
+predicted an expected accepted spacing of `2^16 · e^(16384/65536)` = 84 152
+bytes on uniform content, against 78 396 measured, so the arithmetic was 7.3%
+high — the maximum truncates the tail, which the entry said it would.
+"""
+
+[baseline]
+# No comparison, and it would be a comparison of parameter choices rather than
+# of systems. Every content-defined chunker in the literature can be set to any
+# mean by moving one mask width; what is being claimed here is that *this* set
+# of compiled-in constants produces the distribution the design says it does,
+# on content this project draws. A peer tuned to a different target would
+# answer a different question, which is worse than none.
+system  = "none"
+notes   = "The threshold is a factor-of-two band around a constant in `blob/src/chunk.rs`, so this claim is falsifiable against the tree rather than against a competitor. What a baseline would be worth is the forced-cut fraction — normalised chunking's own literature reports under one per cent, which is what RFC 0061 gave up — and that comparison is against a design this tree deliberately retired, so it is recorded in the entry rather than as a baseline directory."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "04"
+notes    = "Section 04 is where content-defined chunking and its target size are argued, and where the per-chunk record overhead this distribution multiplies is paid. The subsystem that owns the number is `blob/src/chunk.rs` and the mask in `blob/src/gear.rs`; RFC 0061 is the decision that replaced the acceptance rule and gave up the mechanism that used to control this distribution, and RFC 0026 is the single generator the gear table and the mask are derived under."
+
+[workload]
+path      = "blob/tests/chunker.rs"
+seeds     = 8
+mixtures  = 4
+notes     = "The same draw `claims/0017` measures the other half of, and one run of the test produces both — which is the argument for it being one workload and two claims rather than two workloads. Objects of 2 to 4 MB, drawn from a `Stream` child so that a seed reproduces the bytes; four content mixtures iterated rather than drawn, so every seed exercises every mixture. — What stands in, said here rather than left for a reader to find: the content is generated and not a corpus. Real content is not a mixture of four generators, and the aggregate mean is therefore a statement about what the chunker does to *this* draw. What the draw is chosen to do is contain the two extremes a real corpus contains at unknown proportions — content with candidates everywhere and content with none at all — so that the candidate-free case is a recorded row rather than a number averaged away. The proportions are the honest gap; the extremes are not."
+
+[metrics]
+# The per-mixture rows are kept rather than folded into the aggregate, which is
+# `claims/README.md` rule 3 applied to a distribution that has four modes: a
+# mean over all four hides the one mixture that is pinned to the maximum, and
+# that mixture is the one the whole second object kind exists for.
+primary   = "chunk_bytes_mean_aggregate"
+secondary = [
+  "chunk_bytes_mean_uniform",
+  "chunk_bytes_mean_zero_filled",
+  "chunk_bytes_mean_periodic",
+  "chunk_bytes_mean_concatenated",
+  # The cost of retiring normalised chunking, which nothing recorded before.
+  "forced_cuts_per_ten_thousand_uniform",
+  "forced_cuts_per_ten_thousand_periodic",
+  "forced_cuts_per_ten_thousand_concatenated",
+  # The row that is an assertion rather than an average, and the positive
+  # control that makes it worth something: every interior chunk of the
+  # zero-filled mixture forced, out of a count that is not zero.
+  "zero_filled_chunks_forced_at_the_maximum",
+  "zero_filled_interior_chunks",
+  # The geometry. A run that quietly drew smaller objects would report a mean
+  # over a handful of chunks and call it a distribution.
+  "interior_chunks_measured",
+]
+
+[threshold]
+# Every one of these is either a compiled-in constant or a number RFC 0061 wrote
+# down as a reversal condition before this measurement was taken. There is
+# nothing here fitted to the run.
+#
+# The primary: within a factor of two of `CHUNK_TARGET_BYTES` = 65 536, which is
+# what property 2 asserts. Measured 108 063.
+chunk_bytes_mean_aggregate                = { min = 32768, max = 131072 }
+# RFC 0061's second reversal condition, per mixture: the periodic and
+# concatenated means falling below twice `CHUNK_MIN_BYTES` means `MASK_BITS` = 16
+# is the wrong width. Measured 90 230 and 108 344.
+chunk_bytes_mean_periodic                 = { min = 32768 }
+chunk_bytes_mean_concatenated             = { min = 32768 }
+chunk_bytes_mean_uniform                  = { min = 32768, max = 131072 }
+# Exactly `CHUNK_MAX_BYTES`, both bounds, because this row is an assertion about
+# candidate-free content and not an average over it.
+chunk_bytes_mean_zero_filled              = { min = 262144, max = 262144 }
+zero_filled_chunks_forced_at_the_maximum  = { min = 87 }
+# The positive control for the row above. Without it, a draw that produced no
+# zero-filled interior chunk at all would satisfy "every one of them is forced"
+# vacuously.
+zero_filled_interior_chunks               = { min = 87 }
+# RFC 0061's third reversal condition, verbatim as a number: more than one
+# interior chunk in ten forced at the maximum on uniform content means retiring
+# normalisation cost more than the bound bought. Measured 166 per ten thousand.
+# The two mixtures that cut on content less often get the same ceiling rather
+# than a looser one, because a ceiling per mixture chosen after seeing the run
+# is a description; measured 2148 and 2222, which is inside it.
+forced_cuts_per_ten_thousand_uniform      = { max = 1000 }
+forced_cuts_per_ten_thousand_periodic     = { max = 5000 }
+forced_cuts_per_ten_thousand_concatenated = { max = 5000 }
+# The geometry, and the row that stops every mean above being free.
+interior_chunks_measured                  = { min = 500 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "**This claim does not need that machine.** Every metric is a count of bytes between two boundaries, computed from content drawn from a seed, and it is byte-identical on any machine that runs the test at all — it has no clock in it, and `f_bench::Environment` has nothing to refuse. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it. What this claim genuinely depends on is the toolchain, for the reason every claim here does: the gear table and the mask are `const fn` evaluations, and a compiler that evaluated them differently would move every number above."
+
+[reproduce]
+command = "cargo xtask claim chunk-size-distribution"
+
+[diagnosis]
+# Recorded while the system is understood rather than at 2 a.m. when it is not.
+zero_filled_not_exactly_the_maximum = "the register's fixed point on a zero run has started hitting the mask, so zero-filled content now acquires boundaries decided by arithmetic rather than by content — every zero region in every object in the system would cut at the same offset. RFC 0061 states this as a derivation constraint on the mask draw, not as something to fix afterwards: the repair is to increment `MASK_LABEL` until a mask is drawn that the fixed point misses. Note that this also means every object hash ever written has changed, so the mask label is a superblock field and a mount must refuse rather than re-chunk"
+aggregate_mean_outside_the_band = "RFC 0061's second reversal condition. `MASK_BITS` = 16 is the wrong width, the repair is the width and not the rule — but a width chosen after seeing the test is a fitted constant, so it needs its own entry saying so and its own re-derivation of the expected spacing `2^MASK_BITS · e^(CHUNK_MIN_BYTES / 2^MASK_BITS)`"
+forced_cuts_above_one_in_ten = "RFC 0061's third reversal condition. Retiring normalised chunking cost more than the bound bought. The repair named there is **not** bringing back a mask selected by distance from the last cut — that is the entry reversed — but a content-only normalisation: nested masks, with a loose hit accepted only when no loose hit occurred in the preceding `CHUNK_TARGET_BYTES`. That is a bounded-lookback predicate too, and it is a further RFC because it is a second guess at a distribution"
+interior_chunks_below_500 = "the workload drew smaller objects or fewer seeds, so the means above are over a sample too small to be a distribution. The system is fine and the measurement has stopped measuring, which is the failure mode `claims/0014` names in its own geometry row"
