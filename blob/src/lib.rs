@@ -94,10 +94,30 @@
 //! thing in this workspace — and a fixed table would either bound object size
 //! or waste the bound. Spec decision 4. The chunker itself allocates nothing:
 //! [`chunk::Chunker`] is three words and streams.
+//!
+//! # The format, and where its types are
+//!
+//! [`store::Store`] writes blobs to a [`device::Device`] and reads them back,
+//! and it owns none of the record types it writes: the superblock, the blob
+//! header, the object head and the root record are `f_abi::store`'s, decoded
+//! field by field by validating constructors. They are there and not here
+//! because the only use anybody has for `#[repr(C)]` over them is to view
+//! device bytes as a struct, that view is a pointer cast, and RFC 0001 puts a
+//! pointer cast inside the frame — which this crate is not in. So nothing here
+//! casts, and no byte a device wrote is read as a field until one of those
+//! constructors returned `Ok`.
+//!
+//! What is *not* here is a mount and a zone. A publish is *write the blobs,
+//! `FLUSH`, append the root record, `FLUSH`* (RFC 0060), and only the first
+//! half of that sentence is expressible without knowing what a zone is:
+//! [`store::Store::barrier`] is where this crate's half ends and `E2-B02`'s
+//! `f-zone` begins.
 
 #![no_std]
 
 extern crate alloc;
 
 pub mod chunk;
+pub mod device;
 pub mod gear;
+pub mod store;

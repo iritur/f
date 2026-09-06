@@ -8,6 +8,16 @@ publish.workspace = true
 description = "Content-defined chunking, and the store built on it. A blob is named by what it contains."
 
 [dependencies]
+# The record types and their codecs: the superblock, the blob header, the object
+# head and the root record, with the four blob kinds and the refusals a caller
+# compares against. They are in `abi/` and not here for the reason that crate's
+# `store` module states in its first paragraph — the only use for `#[repr(C)]`
+# over them is to view device bytes as a struct, and a library above the frame
+# may not write the cast that view is. So this crate consumes them, and the
+# dependency is what makes "one definition of the format" true rather than
+# stated.
+f-abi.workspace = true
+
 # The one SHA-256 in the tree. A chunk's name is this function over its bytes
 # and nothing else, which is what makes two objects that share content share
 # storage without either of them knowing about the other.
@@ -26,3 +36,15 @@ f-env.workspace = true
 
 [lints]
 workspace = true
+
+# `E2-B01`'s first exit, and a target of its own for the reason
+# `ring/tests/hostile.rs` gives: the exit and the per-commit gate differ by a
+# *number* — a million blobs against ten thousand — and a libtest harness would
+# swallow the argument that carries it, leaving the two to differ by a build
+# instead. `harness = false` therefore, and `cargo test --workspace` runs it at
+# the default in the file, which is the gate. `--blobs 1000000` in release is
+# the exit. RFC 0046 argued this shape for a fuzzer; it is the same shape.
+[[test]]
+name = "million"
+path = "tests/million.rs"
+harness = false
