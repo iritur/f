@@ -112,6 +112,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "f-zone"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-blob",
+ "f-env",
+ "f-hash",
+]
+
+[[package]]
 name = "xtask"
 version = "0.0.1"
 dependencies = [
