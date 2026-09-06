@@ -8367,6 +8367,7 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-env", host: None, bare: None },
     Portability { krate: "f-ring", host: None, bare: None },
     Portability { krate: "f-hash", host: None, bare: None },
+    Portability { krate: "f-blob", host: None, bare: None },
     Portability {
         krate: "f-kernel",
         host: Some(
