@@ -21,5 +21,14 @@ f-bench.workspace = true
 # binary may depend on it freely.
 f-hash.workspace = true
 
+# The node kinds and their codecs, and the checker and fold over them, so that
+# `cargo xtask generation` encodes a record tree with the same codec the machine
+# decodes it with. That is the whole of "one implementation": an encoder written
+# here against a format described elsewhere is the second reader of the format
+# the spec spends a page refusing to have. Both are `no_std` libraries that build
+# for the host, on the same argument `f-hash`'s comment above makes.
+f-abi.workspace = true
+f-generation.workspace = true
+
 [lints]
 workspace = true
