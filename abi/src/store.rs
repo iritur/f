@@ -417,6 +417,672 @@ const _: () = assert!(Generation::FOLDED_BYTES == HEADER_BYTES + 32 + 32);
 // makes the cast in `put_header` a fact rather than a hope.
 const _: () = assert!(Topology::HEAD_BYTES + ROUTES_MAX * Route::BYTES <= u16::MAX as usize);
 
+// ---------------------------------------------------------------------------
+// The on-disk records: the superblock, the blob header and the root record.
+//
+// The generation nodes above are what a *tree* is made of; these three are what
+// a *device* is made of. They are in one file because they share the rule that
+// puts both here — a peer wrote these bytes, the peer is the device, and a
+// reader that trusts them before it has refused them is the defect this whole
+// file is shaped around.
+// ---------------------------------------------------------------------------
+
+/// The superblock's magic. `F_SB`, little-endian.
+///
+/// A magic per record kind rather than one for the store, because these three
+/// records are found at addresses a *caller* computed — block zero, an index
+/// entry, a zone's write pointer — and a wrong address lands on a plausible
+/// record far more often than it lands on nothing. Three magics make that
+/// arithmetic error a refusal instead of a misreading.
+/// Unit: none — a fixed byte pattern.
+pub const SUPERBLOCK_MAGIC: u32 = 0x4253_5f46;
+
+/// The blob header's magic. `F_BH`, little-endian.
+/// Unit: none — a fixed byte pattern.
+pub const BLOB_MAGIC: u32 = 0x4842_5f46;
+
+/// The root record's magic. `F_RR`, little-endian.
+/// Unit: none — a fixed byte pattern.
+pub const ROOT_MAGIC: u32 = 0x5252_5f46;
+
+/// The version of the on-disk format this build writes and believes.
+///
+/// One, and a mount refuses anything else rather than guessing which fields
+/// moved. Nothing has ever formatted a device with this format, so there is
+/// exactly one version in the world and the first migration is still free.
+/// Unit: none — a version.
+pub const SCHEMA: u32 = 1;
+
+/// The codes the store adds to the domains RFC 0010 fixes.
+///
+/// # Why they are here and not in `error`'s own modules
+///
+/// RFC 0010 says a service may add codes freely and may not add domains, and
+/// the store is a service — `E2-B08`'s `user/objects` is the component that
+/// will answer over a ring. `error::argument`'s eight codes are all about a
+/// *ring entry*: an opcode, a flag bit, a reserved word, a class. A store's
+/// codes are about a record and a device, so they are defined beside the
+/// records rather than in the middle of the ring's vocabulary.
+///
+/// What that costs, said out loud because it is the objection: there are now
+/// two files where an [`error::ARGUMENT`] code is defined, and two files can
+/// come to disagree about a number. The mitigation is that this module
+/// *continues* `error::argument`'s numbering rather than starting again at one,
+/// so a collision would be a duplicate integer a reader finds by searching for
+/// it, rather than two meanings wearing one number.
+pub mod code {
+    /// The caller's buffer cannot hold what it asked for. Continues
+    /// [`crate::error::argument`], whose last code is 8.
+    /// Unit: none — a code within [`crate::error::ARGUMENT`].
+    pub const SHORT_BUFFER: u16 = 9;
+
+    /// The content read back does not hash to the name it was stored under.
+    ///
+    /// The first code in [`crate::error::DEVICE`], which had none: every
+    /// failure that domain described so far was reported by hardware, and this
+    /// one is a disagreement the store detects about what the hardware
+    /// returned.
+    /// Unit: none — a code within [`crate::error::DEVICE`].
+    pub const CONTENT_MISMATCH: u16 = 1;
+}
+
+/// The refusals the store's records return, named once.
+///
+/// # Why these are constants and not `error::pack` calls at each site
+///
+/// Because a caller compares against them. `blob/tests/million.rs` requires
+/// that a flipped byte is refused as [`refusal::CONTENT`] and not as something
+/// else that also happens to be an error, and a test that spelled the packed
+/// integer out itself would pass on a store that had started returning the
+/// right refusal for the wrong reason.
+pub mod refusal {
+    use crate::error;
+
+    /// The magic, the declared length, or a record torn across a power cut: the
+    /// bytes are not this record. Also a root record whose `check` does not
+    /// verify, which is the same statement — the bytes are not a record anybody
+    /// finished writing.
+    /// Unit: none — a packed [`error`] value.
+    pub const MALFORMED: i32 = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
+
+    /// A kind, a schema, a flag or a count this build does not know. Refused
+    /// and never skipped, R04: a fifth blob kind arriving without its RFC reads
+    /// as a record this reader cannot describe, and describing it anyway is how
+    /// two readers come to disagree about one device.
+    /// Unit: none — a packed [`error`] value.
+    pub const UNKNOWN: i32 = error::pack(error::ARGUMENT, error::argument::UNKNOWN_FLAG);
+
+    /// The address is not one this operation can act on — which is
+    /// [`error::argument::BAD_ADDRESS`]'s own words, and it covers both places
+    /// the store means it: a hash this store holds nothing under, and a block
+    /// outside the device. One name rather than two, because the two are the
+    /// same statement at two granularities and a caller does the same thing
+    /// with either.
+    /// Unit: none — a packed [`error`] value.
+    pub const ADDRESS: i32 = error::pack(error::ARGUMENT, error::argument::BAD_ADDRESS);
+
+    /// The device has no room left for the record being written.
+    /// Unit: none — a packed [`error`] value.
+    pub const FULL: i32 = error::pack(error::RESOURCE, error::resource::DEVICE_FULL);
+
+    /// The caller's buffer is shorter than the content it asked for.
+    /// Unit: none — a packed [`error`] value.
+    pub const SHORT_BUFFER: i32 = error::pack(error::ARGUMENT, super::code::SHORT_BUFFER);
+
+    /// The bytes read back do not hash to the name they were stored under.
+    ///
+    /// The one refusal in this list that is not about a field: every other
+    /// entry says the record is not what it claims to be, and this one says the
+    /// record is exactly what it claims and the device did not return what was
+    /// written. `blob/src/store.rs` raises it and `blob/tests/million.rs` is
+    /// what makes it reachable, because a verifier nothing can fail is
+    /// indistinguishable from one that cannot fail.
+    /// Unit: none — a packed [`error`] value.
+    pub const CONTENT: i32 = error::pack(error::DEVICE, super::code::CONTENT_MISMATCH);
+}
+
+/// What a blob holds. The four kinds, and a fifth is an RFC.
+///
+/// A module of constants rather than an `enum`, which is this crate's shape
+/// wherever a value arrives from a peer: an `enum` makes the *known* values a
+/// type and leaves each decoder to invent what an unknown one is, and every
+/// decoder that invents something invents something slightly different.
+/// [`kind::known`] is the one answer, and it is `false` for zero — a zeroed
+/// block must never decode as a blob.
+pub mod kind {
+    /// A run of bytes the chunker cut. Named by SHA-256 over exactly those
+    /// bytes and by nothing else, which is what makes two objects sharing a run
+    /// share its storage.
+    pub const CHUNK: u16 = 1;
+    /// An [`super::ObjectHead`] and its ordered chunk hashes: what makes an
+    /// object one hash rather than a list somebody has to keep together.
+    pub const OBJECT: u16 = 2;
+    /// `E2-B09`'s second object kind — `EXTENT_BYTES` pieces, replaced one at a
+    /// time rather than re-chunked. The number is fixed now so that the kind
+    /// space is decided in one commit rather than extended by whichever commit
+    /// first needs it. Nothing writes one yet. RFC 0058.
+    pub const EXTENT: u16 = 3;
+    /// A stored generation tree: the bytes `f-generation` folded, kept as a
+    /// blob so that a root's children resolve through the same read path as
+    /// everything else.
+    pub const GENERATION: u16 = 4;
+
+    /// Is this a kind this build knows?
+    #[must_use]
+    pub const fn known(value: u16) -> bool {
+        matches!(value, CHUNK | OBJECT | EXTENT | GENERATION)
+    }
+
+    /// A word for a log or a rendering.
+    #[must_use]
+    pub const fn label(value: u16) -> &'static str {
+        match value {
+            CHUNK => "chunk",
+            OBJECT => "object",
+            EXTENT => "extent",
+            GENERATION => "generation",
+            _ => "unknown",
+        }
+    }
+}
+
+/// The device's own description of itself, written once into a conventional
+/// zone.
+///
+/// # Why the chunker's parameters are on the device
+///
+/// Because a chunker that changed under a mount decides every object hash and
+/// nothing else on the device would say so. The failure is not a crash: it is a
+/// store that keeps working, writes chunks the old boundaries would never have
+/// produced, and silently stops deduplicating against everything written before
+/// it. So the parameters are here, and a mount whose compiled-in values
+/// disagree with these refuses. `blob::store::refuse_a_chunker_that_moved` is
+/// that check, and it is in `blob/` because `abi/` does not know what any
+/// build's chunker is — which is the right way round: this crate states the
+/// question and the crate that has an answer answers it.
+///
+/// # Why there is no current-root field
+///
+/// There is nothing mutable on the device at all. A pointer to the current root
+/// would be a field that can be stale, torn, or written in the wrong order
+/// against the thing it points at; mount instead reads both root zones' write
+/// pointers from the device with `ZONE_REPORT` and takes the highest
+/// `generation` that verifies. RFC 0060.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Superblock {
+    /// The format version these fields are laid out in.
+    /// Unit: none — a version. [`SCHEMA`] is what this build writes, and a
+    /// different one is refused rather than guessed at.
+    pub schema: u32,
+    /// The device's logical block. Every record starts at a block boundary and
+    /// is padded to a whole number of them.
+    /// Unit: bytes.
+    pub block_bytes: u32,
+    /// How many zones the device has.
+    /// Unit: count of zones.
+    pub zones: u32,
+    /// The first root zone.
+    /// Unit: zone index, zero-based.
+    pub root_zone_a: u32,
+    /// The second root zone. Two of them, with `ROOT_CARRY` records carried
+    /// between them before a reset, so that there is never a moment with no
+    /// durable root — a single root zone could only be emptied by destroying
+    /// the record that was current. `f-zone` owns the carry; the superblock
+    /// owns these two numbers, because they are geometry.
+    /// Unit: zone index, zero-based.
+    pub root_zone_b: u32,
+    /// The smallest chunk the chunker will cut.
+    /// Unit: bytes.
+    pub chunk_min_bytes: u32,
+    /// The size the mask width was chosen around.
+    /// Unit: bytes.
+    pub chunk_target_bytes: u32,
+    /// The size at which a boundary is forced whatever the content says.
+    /// Unit: bytes.
+    pub chunk_max_bytes: u32,
+    /// How many bits of the mask a candidate is tested against. One width and
+    /// not two: RFC 0061 retired normalised chunking.
+    /// Unit: bits.
+    pub mask_bits: u32,
+    /// A zone's capacity.
+    /// Unit: bytes.
+    pub zone_bytes: u64,
+    /// The identity the gear table was derived from.
+    ///
+    /// The number `f_env::split::label` gives the label text, and not the text
+    /// itself: the number is what the derivation consumes, so a label that was
+    /// edited and a derivation that moved under an unchanged label are the same
+    /// refusal. What it costs is that a hex dump of the superblock shows a word
+    /// rather than `f-blob gear v1`, and the text is in `blob/src/gear.rs`
+    /// beside the derivation that spends it.
+    /// Unit: none — an identity, not a quantity.
+    pub gear_label: u64,
+    /// The identity the mask was derived from, separately from the gear table
+    /// so that a width can move without disturbing a table every object hash
+    /// depends on.
+    /// Unit: none — an identity, not a quantity.
+    pub mask_label: u64,
+}
+
+impl Superblock {
+    /// The encoded width of a superblock.
+    /// Unit: bytes.
+    pub const BYTES: usize = 68;
+
+    /// Encode. Little-endian, field by field, nothing skipped.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; Superblock::BYTES] {
+        let mut out = [0u8; Superblock::BYTES];
+        out[0..4].copy_from_slice(&SUPERBLOCK_MAGIC.to_le_bytes());
+        out[4..8].copy_from_slice(&(Superblock::BYTES as u32).to_le_bytes());
+        out[8..12].copy_from_slice(&self.schema.to_le_bytes());
+        out[12..16].copy_from_slice(&self.block_bytes.to_le_bytes());
+        out[16..20].copy_from_slice(&self.zones.to_le_bytes());
+        out[20..24].copy_from_slice(&self.root_zone_a.to_le_bytes());
+        out[24..28].copy_from_slice(&self.root_zone_b.to_le_bytes());
+        out[28..32].copy_from_slice(&self.chunk_min_bytes.to_le_bytes());
+        out[32..36].copy_from_slice(&self.chunk_target_bytes.to_le_bytes());
+        out[36..40].copy_from_slice(&self.chunk_max_bytes.to_le_bytes());
+        out[40..44].copy_from_slice(&self.mask_bits.to_le_bytes());
+        out[44..52].copy_from_slice(&self.zone_bytes.to_le_bytes());
+        out[52..60].copy_from_slice(&self.gear_label.to_le_bytes());
+        out[60..68].copy_from_slice(&self.mask_label.to_le_bytes());
+        out
+    }
+
+    /// Decode, refusing before any field is handed back.
+    ///
+    /// The magic, then the declared length, then the schema — the same order
+    /// every record in this file refuses in, and the schema is where *kind*
+    /// sits for a record there is only one of. A schema this build does not
+    /// know is refused rather than read with the fields it recognises, because
+    /// a field that moved between versions reads perfectly and means something
+    /// else.
+    ///
+    /// A zero `block_bytes` is refused too, and it is the one bound checked
+    /// here rather than by a caller: every address in the store is a multiple
+    /// of it, so a zero would surface as a division by zero several files away
+    /// from the record that caused it.
+    ///
+    /// # Errors
+    ///
+    /// [`refusal::MALFORMED`] for the magic, the length or a zero
+    /// `block_bytes`; [`refusal::UNKNOWN`] for a schema this build does not
+    /// write.
+    pub fn from_bytes(raw: &[u8; Superblock::BYTES]) -> Result<Self, i32> {
+        prologue(raw, SUPERBLOCK_MAGIC, Superblock::BYTES)?;
+        let schema = word(raw, 8);
+        if schema != SCHEMA {
+            return Err(refusal::UNKNOWN);
+        }
+        let block_bytes = word(raw, 12);
+        if block_bytes == 0 {
+            return Err(refusal::MALFORMED);
+        }
+        Ok(Self {
+            schema,
+            block_bytes,
+            zones: word(raw, 16),
+            root_zone_a: word(raw, 20),
+            root_zone_b: word(raw, 24),
+            chunk_min_bytes: word(raw, 28),
+            chunk_target_bytes: word(raw, 32),
+            chunk_max_bytes: word(raw, 36),
+            mask_bits: word(raw, 40),
+            zone_bytes: long(raw, 44),
+            gear_label: long(raw, 52),
+            mask_label: long(raw, 60),
+        })
+    }
+}
+
+/// The header at every block-aligned position a blob starts.
+///
+/// The content follows it immediately and is padded with zeros to a whole
+/// number of blocks. The padding is not covered by [`Header::hash`] and is not
+/// covered by anything else either: it is addressing rather than content, and
+/// the record means `content_bytes` bytes however many blocks it occupies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Header {
+    /// What the content is.
+    /// Unit: none — a [`kind`] constant. Zero is not a kind.
+    pub kind: u16,
+    /// Zero until something is named.
+    ///
+    /// Reserved here rather than added later, because adding a field to a
+    /// record that has been written to a device is a migration and reserving
+    /// two bytes now is not. A non-zero value is refused rather than ignored —
+    /// R04, and the rule `error::argument::RESERVED_NOT_ZERO` already states
+    /// for a ring entry: a bit that is silently dropped is two peers with
+    /// different beliefs about what just happened.
+    /// Unit: none — a bit set, currently empty.
+    pub flags: u16,
+    /// The content that follows, before the padding to the device's block.
+    /// Unit: bytes.
+    pub content_bytes: u64,
+    /// The SHA-256 of that content.
+    ///
+    /// It is *also* the name the blob is stored under, and this is the one
+    /// place the format writes a fact twice. The second copy is what makes a
+    /// read checkable: `get` hashes the content it read and compares, so a
+    /// device that returned the wrong block — or the right block with a byte
+    /// flipped in it — is caught by the record rather than by whoever asked
+    /// for it.
+    /// Unit: bytes, exactly 32 of them — a content address.
+    pub hash: [u8; 32],
+}
+
+impl Header {
+    /// The encoded width of a blob header.
+    /// Unit: bytes.
+    pub const BYTES: usize = 52;
+
+    /// Encode.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; Header::BYTES] {
+        let mut out = [0u8; Header::BYTES];
+        out[0..4].copy_from_slice(&BLOB_MAGIC.to_le_bytes());
+        out[4..8].copy_from_slice(&(Header::BYTES as u32).to_le_bytes());
+        out[8..10].copy_from_slice(&self.kind.to_le_bytes());
+        out[10..12].copy_from_slice(&self.flags.to_le_bytes());
+        out[12..20].copy_from_slice(&self.content_bytes.to_le_bytes());
+        out[20..52].copy_from_slice(&self.hash);
+        out
+    }
+
+    /// Decode, refusing before any field is handed back.
+    ///
+    /// The declared length is the *header's* own width and never the record's.
+    /// The record's width is `content_bytes` rounded up to the device's block,
+    /// which is derivable from two numbers that are already here — and a second
+    /// statement of a derivable length is a second place two writers can
+    /// disagree while both pass their own tests.
+    ///
+    /// # Errors
+    ///
+    /// [`refusal::MALFORMED`] for the magic or the length; [`refusal::UNKNOWN`]
+    /// for a kind this build does not know or a flag bit it does not define.
+    pub fn from_bytes(raw: &[u8; Header::BYTES]) -> Result<Self, i32> {
+        prologue(raw, BLOB_MAGIC, Header::BYTES)?;
+        let kind = short(raw, 8);
+        if !kind::known(kind) {
+            return Err(refusal::UNKNOWN);
+        }
+        let flags = short(raw, 10);
+        if flags != 0 {
+            return Err(refusal::UNKNOWN);
+        }
+        Ok(Self { kind, flags, content_bytes: long(raw, 12), hash: digest(raw, 20) })
+    }
+}
+
+/// How many chunk hashes one object may name.
+///
+/// A bound, because the count is a length field a peer wrote and a decoder with
+/// no bound is a decoder that allocates whatever the device asks it to. A
+/// million chunks at `CHUNK_TARGET_BYTES` is an object of about 64 GiB, which
+/// is far past anything this system stores in one object and far below what
+/// would make the list itself the cost. An object larger than that wants a
+/// second level of indirection rather than a wider bound, and that is a design
+/// change with an RFC rather than a constant edited here.
+/// Unit: count of chunk hashes.
+pub const CHUNKS_MAX: usize = 1 << 20;
+
+/// The head of an object blob: how long the object is, and how many chunks
+/// follow.
+///
+/// # Why an object stores its own length
+///
+/// Because the sum of the chunk lengths is not available without reading every
+/// chunk, and a reader that has to fetch a hundred blobs to answer *how big is
+/// this* is a reader nobody will use. It is also what catches a truncated chunk
+/// list: the bytes the chunks deliver must add up to this number, and
+/// `blob/src/store.rs` refuses when they do not.
+///
+/// It carries no magic of its own, for [`Route`]'s reason: it is never found on
+/// its own. It lies inside a blob whose content hash has already been verified
+/// against the name the caller asked for, so by the time these twelve bytes are
+/// read, they are known to be the bytes that were written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObjectHead {
+    /// The object's logical size — the bytes its chunks reconstruct.
+    /// Unit: bytes.
+    pub object_bytes: u64,
+    /// How many chunk hashes follow this head, in order.
+    /// Unit: count of chunk hashes, at most [`CHUNKS_MAX`].
+    pub chunks: u32,
+}
+
+impl ObjectHead {
+    /// The encoded width of an object's head, before the hashes that follow.
+    /// Unit: bytes.
+    pub const HEAD_BYTES: usize = 12;
+
+    /// The encoded width of the whole object blob's content: the head and the
+    /// hashes after it.
+    /// Unit: bytes.
+    #[must_use]
+    pub const fn bytes(&self) -> usize {
+        Self::HEAD_BYTES + self.chunks as usize * 32
+    }
+
+    /// Encode the head. The hashes are appended by the caller, which is what
+    /// lets a writer stream a chunk list it never holds twice.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; ObjectHead::HEAD_BYTES] {
+        let mut out = [0u8; ObjectHead::HEAD_BYTES];
+        out[0..8].copy_from_slice(&self.object_bytes.to_le_bytes());
+        out[8..12].copy_from_slice(&self.chunks.to_le_bytes());
+        out
+    }
+
+    /// Decode the head, refusing before either number is handed back.
+    ///
+    /// Two refusals, and the second is the interesting one: an object of no
+    /// bytes made of some chunks, or an object of some bytes made of no chunks,
+    /// is a contradiction readable without knowing anything about the chunker.
+    /// Refusing it here is what keeps the arithmetic that walks a chunk list
+    /// free of a case that cannot arise.
+    ///
+    /// # Errors
+    ///
+    /// [`refusal::UNKNOWN`] for a count past [`CHUNKS_MAX`];
+    /// [`refusal::MALFORMED`] for a head whose two numbers contradict.
+    pub fn from_bytes(raw: &[u8; ObjectHead::HEAD_BYTES]) -> Result<Self, i32> {
+        let object_bytes = long(raw, 0);
+        let chunks = word(raw, 8);
+        if chunks as usize > CHUNKS_MAX {
+            return Err(refusal::UNKNOWN);
+        }
+        if (object_bytes == 0) != (chunks == 0) {
+            return Err(refusal::MALFORMED);
+        }
+        Ok(Self { object_bytes, chunks })
+    }
+}
+
+/// One publish, appended to a root zone.
+///
+/// # Why the check field is not decoration
+///
+/// Without it a record torn across a power cut — the magic landed, `root` is
+/// half written — names a hash that never existed, and *not found* is
+/// indistinguishable from *collected*. With it, a torn record is refused and
+/// the mount falls to the previous generation, which is a rollback rather than
+/// a machine naming a state it cannot produce. Verify before accept, RFC 0060;
+/// the second half of that rule — every child of the generation node resolves —
+/// is the mount's rather than this record's.
+///
+/// # Why there is no timestamp
+///
+/// [`RootRecord::generation`] is the order. A clock in a record would make the
+/// identity of a publish a function of when it happened, which is exactly what
+/// `E2-P06` compares two machines on. RFC 0004.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RootRecord {
+    /// Which publish this is, counting from the superblock.
+    /// Unit: count of publishes since the superblock; the first publish is 1,
+    /// and 0 is reserved so that a zeroed block is never a generation.
+    pub generation: u64,
+    /// The generation hash — what the fold produced, and what identifies this
+    /// state of the machine.
+    /// Unit: bytes, exactly 32 of them — a content address.
+    pub root: [u8; 32],
+    /// The frame image's hash, carried separately so that a swap can tell
+    /// whether the frame moved without unpacking anything. RFC 0012: a rollback
+    /// is one generation swap, and a reboot only when this field changed.
+    /// Unit: bytes, exactly 32 of them — a content address.
+    pub frame: [u8; 32],
+    /// The hash of the boot module packed for this root when its generation was
+    /// compiled — not the module this root was booted from. A root that arrives
+    /// by swap is never booted, and a root with no module is a root no reboot
+    /// can reach, so `f.root=<hex>` would have nothing to select. RFC 0012.
+    /// Unit: bytes, exactly 32 of them — a content address.
+    pub module: [u8; 32],
+    /// The previous root, or zero at the first publish.
+    /// Unit: bytes, exactly 32 of them — a content address.
+    pub previous: [u8; 32],
+    /// The SHA-256 over every preceding field of this record.
+    /// Unit: bytes, exactly 32 of them — a digest over this record's first
+    /// [`RootRecord::CHECKED_BYTES`] bytes.
+    pub check: [u8; 32],
+}
+
+impl RootRecord {
+    /// The encoded width of a root record.
+    /// Unit: bytes.
+    pub const BYTES: usize = 176;
+
+    /// How much of the record [`RootRecord::check`] covers: everything before
+    /// it.
+    /// Unit: bytes.
+    pub const CHECKED_BYTES: usize = 144;
+
+    /// The bytes the check is taken over — the whole record except the check.
+    ///
+    /// A writer hashes this, puts the digest in [`RootRecord::check`], and
+    /// encodes. Splitting it out rather than computing the digest here is what
+    /// keeps this crate free of a hash implementation: `abi/` is the wire and
+    /// has no dependencies at all, and giving it one so that one constructor
+    /// could be a line shorter would be paying an architectural price for a
+    /// convenience. The cost is that a caller can encode a record whose check
+    /// is wrong — which [`RootRecord::from_bytes`] refuses, so the mistake
+    /// cannot survive a round trip.
+    #[must_use]
+    pub fn checked(&self) -> [u8; RootRecord::CHECKED_BYTES] {
+        let mut out = [0u8; RootRecord::CHECKED_BYTES];
+        out[0..4].copy_from_slice(&ROOT_MAGIC.to_le_bytes());
+        out[4..8].copy_from_slice(&(RootRecord::BYTES as u32).to_le_bytes());
+        out[8..16].copy_from_slice(&self.generation.to_le_bytes());
+        out[16..48].copy_from_slice(&self.root);
+        out[48..80].copy_from_slice(&self.frame);
+        out[80..112].copy_from_slice(&self.module);
+        out[112..144].copy_from_slice(&self.previous);
+        out
+    }
+
+    /// Encode.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; RootRecord::BYTES] {
+        let mut out = [0u8; RootRecord::BYTES];
+        out[0..RootRecord::CHECKED_BYTES].copy_from_slice(&self.checked());
+        out[RootRecord::CHECKED_BYTES..RootRecord::BYTES].copy_from_slice(&self.check);
+        out
+    }
+
+    /// Decode, refusing before any field is handed back — the check included.
+    ///
+    /// `computed` is the SHA-256 the caller took over the record's first
+    /// [`RootRecord::CHECKED_BYTES`] bytes. It is an argument rather than
+    /// something this function works out for itself, for the reason
+    /// [`RootRecord::checked`] gives: this crate has no hash, and acquiring one
+    /// would be an architectural change made for a convenience. What the
+    /// signature buys is that verify-before-accept stays *inside the
+    /// constructor* — a caller cannot obtain a `RootRecord` without having
+    /// hashed the bytes, so there is no order of operations in which a field is
+    /// believed first.
+    ///
+    /// # Errors
+    ///
+    /// [`refusal::MALFORMED`] for the magic, the declared length, a zero
+    /// generation, or a check that does not verify.
+    pub fn from_bytes(raw: &[u8; RootRecord::BYTES], computed: &[u8; 32]) -> Result<Self, i32> {
+        prologue(raw, ROOT_MAGIC, RootRecord::BYTES)?;
+        if raw[RootRecord::CHECKED_BYTES..RootRecord::BYTES] != computed[..] {
+            return Err(refusal::MALFORMED);
+        }
+        // Zero is reserved so that a zeroed block is never a generation. A
+        // freshly reset zone reads as zeros, and a reader that accepted
+        // generation zero would find one in every unwritten block of it.
+        let generation = long(raw, 8);
+        if generation == 0 {
+            return Err(refusal::MALFORMED);
+        }
+        Ok(Self {
+            generation,
+            root: digest(raw, 16),
+            frame: digest(raw, 48),
+            module: digest(raw, 80),
+            previous: digest(raw, 112),
+            check: digest(raw, 144),
+        })
+    }
+}
+
+/// Believe a record's prologue: the magic it must carry, then the length it
+/// must declare.
+///
+/// The order is [`header`]'s, on a record rather than a node and for the same
+/// reason: the magic says *these bytes are a record of this kind at all*, and
+/// until that holds the length field is not a length, it is four bytes of
+/// something else.
+fn prologue(raw: &[u8], magic: u32, bytes: usize) -> Result<(), i32> {
+    if raw.len() < 8 || word(raw, 0) != magic || word(raw, 4) as usize != bytes {
+        return Err(refusal::MALFORMED);
+    }
+    Ok(())
+}
+
+/// Two little-endian bytes at `at`.
+fn short(raw: &[u8], at: usize) -> u16 {
+    u16::from_le_bytes([raw[at], raw[at + 1]])
+}
+
+/// Four little-endian bytes at `at`.
+fn word(raw: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]])
+}
+
+/// Eight little-endian bytes at `at`.
+fn long(raw: &[u8], at: usize) -> u64 {
+    let mut eight = [0u8; 8];
+    eight.copy_from_slice(&raw[at..at + 8]);
+    u64::from_le_bytes(eight)
+}
+
+/// Thirty-two bytes at `at`.
+fn digest(raw: &[u8], at: usize) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&raw[at..at + 32]);
+    out
+}
+
+// Every record's encoded width is the sum of its field widths, asserted at
+// compile time, for the reason the node assertions above exist: an unhashed
+// byte inside a hashed structure is a place two writers can differ while naming
+// the same thing, and a field added without its width is how one appears.
+const _: () = assert!(Superblock::BYTES == 4 + 4 + 4 * 9 + 8 * 3);
+const _: () = assert!(Header::BYTES == 4 + 4 + 2 + 2 + 8 + 32);
+const _: () = assert!(ObjectHead::HEAD_BYTES == 8 + 4);
+const _: () = assert!(RootRecord::CHECKED_BYTES == 4 + 4 + 8 + 32 * 4);
+const _: () = assert!(RootRecord::BYTES == RootRecord::CHECKED_BYTES + 32);
+// And no record is wider than the smallest block a device is likely to offer,
+// because a record spanning two blocks could not have its magic believed until
+// both had been read. Five hundred and twelve is the floor this store formats
+// against, and a record that outgrew it would need a reader that reads twice.
+const _: () = assert!(Superblock::BYTES <= 512);
+const _: () = assert!(Header::BYTES <= 512);
+const _: () = assert!(RootRecord::BYTES <= 512);
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,5 +1177,257 @@ mod tests {
         let mut past_bound = Topology { members: 4, routes: 2 }.to_bytes();
         past_bound[8..10].copy_from_slice(&(MEMBERS_MAX as u16 + 1).to_le_bytes());
         assert_eq!(Topology::from_bytes(&past_bound), Err(unknown));
+    }
+
+    /// A superblock this build wrote, byte by byte.
+    ///
+    /// Written out rather than compared against the encoder, for the reason the
+    /// leaf's golden test gives: a test that encodes and decodes with the same
+    /// code survives any layout change at all, and this layout is what every
+    /// device ever formatted will be read with.
+    fn a_superblock() -> Superblock {
+        Superblock {
+            schema: SCHEMA,
+            block_bytes: 512,
+            zones: 64,
+            root_zone_a: 1,
+            root_zone_b: 2,
+            chunk_min_bytes: 16 * 1024,
+            chunk_target_bytes: 64 * 1024,
+            chunk_max_bytes: 256 * 1024,
+            mask_bits: 16,
+            zone_bytes: 1 << 20,
+            gear_label: 0x0102_0304_0506_0708,
+            mask_label: 0x1112_1314_1516_1718,
+        }
+    }
+
+    #[test]
+    fn a_superblock_encodes_to_the_bytes_the_format_says() {
+        let raw = a_superblock().to_bytes();
+
+        assert_eq!(&raw[0..4], b"F_SB", "magic, little-endian");
+        assert_eq!(&raw[4..8], &[68, 0, 0, 0], "the record's own declared length");
+        assert_eq!(&raw[8..12], &[1, 0, 0, 0], "schema");
+        assert_eq!(&raw[12..16], &[0, 2, 0, 0], "block_bytes = 512");
+        assert_eq!(&raw[16..20], &[64, 0, 0, 0], "zones");
+        assert_eq!(&raw[20..24], &[1, 0, 0, 0], "root_zone_a");
+        assert_eq!(&raw[24..28], &[2, 0, 0, 0], "root_zone_b");
+        assert_eq!(&raw[28..32], &[0, 0x40, 0, 0], "chunk_min_bytes = 16 KiB");
+        assert_eq!(&raw[32..36], &[0, 0, 1, 0], "chunk_target_bytes = 64 KiB");
+        assert_eq!(&raw[36..40], &[0, 0, 4, 0], "chunk_max_bytes = 256 KiB");
+        assert_eq!(&raw[40..44], &[16, 0, 0, 0], "mask_bits");
+        assert_eq!(&raw[44..52], &[0, 0, 0x10, 0, 0, 0, 0, 0], "zone_bytes = 1 MiB");
+        assert_eq!(&raw[52..60], &[8, 7, 6, 5, 4, 3, 2, 1], "gear_label");
+        assert_eq!(&raw[60..68], &[0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11], "mask_label");
+        assert_eq!(Superblock::from_bytes(&raw), Ok(a_superblock()));
+    }
+
+    /// Fail closed, R04, on the record a mount reads first and trusts most.
+    #[test]
+    fn a_superblock_this_build_cannot_read_is_refused() {
+        let good = a_superblock().to_bytes();
+
+        let mut bad_magic = good;
+        bad_magic[1] ^= 0xFF;
+        assert_eq!(Superblock::from_bytes(&bad_magic), Err(refusal::MALFORMED));
+
+        let mut bad_length = good;
+        bad_length[4] = 67;
+        assert_eq!(Superblock::from_bytes(&bad_length), Err(refusal::MALFORMED));
+
+        // A zeroed block, which is what an unformatted device offers.
+        assert_eq!(Superblock::from_bytes(&[0u8; Superblock::BYTES]), Err(refusal::MALFORMED));
+
+        // A format from the future, read with this build's field offsets: the
+        // fields would decode perfectly and mean something else.
+        let mut next_schema = good;
+        next_schema[8] = 2;
+        assert_eq!(Superblock::from_bytes(&next_schema), Err(refusal::UNKNOWN));
+
+        // Every address in the store is a multiple of this number.
+        let mut no_blocks = a_superblock();
+        no_blocks.block_bytes = 0;
+        assert_eq!(Superblock::from_bytes(&no_blocks.to_bytes()), Err(refusal::MALFORMED));
+    }
+
+    #[test]
+    fn a_blob_header_encodes_to_the_bytes_the_format_says() {
+        let header = Header { kind: kind::CHUNK, flags: 0, content_bytes: 4096, hash: [0xCD; 32] };
+        let raw = header.to_bytes();
+
+        assert_eq!(&raw[0..4], b"F_BH", "magic, little-endian");
+        assert_eq!(&raw[4..8], &[52, 0, 0, 0], "the header's own width, never the record's");
+        assert_eq!(&raw[8..10], &[1, 0], "kind");
+        assert_eq!(&raw[10..12], &[0, 0], "flags, and there are none yet");
+        assert_eq!(&raw[12..20], &[0, 0x10, 0, 0, 0, 0, 0, 0], "content_bytes = 4096");
+        assert_eq!(&raw[20..52], &[0xCD; 32], "hash");
+        assert_eq!(Header::from_bytes(&raw), Ok(header));
+    }
+
+    /// Fail closed, R04. Every one of these is a block a device could return.
+    #[test]
+    fn a_blob_header_this_build_does_not_understand_is_refused() {
+        let good =
+            Header { kind: kind::OBJECT, flags: 0, content_bytes: 1, hash: [0; 32] }.to_bytes();
+
+        let mut bad_magic = good;
+        bad_magic[0] ^= 0xFF;
+        assert_eq!(Header::from_bytes(&bad_magic), Err(refusal::MALFORMED));
+
+        let mut bad_length = good;
+        bad_length[4] = 51;
+        assert_eq!(Header::from_bytes(&bad_length), Err(refusal::MALFORMED));
+
+        // A zeroed block. The whole reason zero is not a kind and not a magic.
+        assert_eq!(Header::from_bytes(&[0u8; Header::BYTES]), Err(refusal::MALFORMED));
+
+        // A fifth kind, arriving without the RFC that would have added it.
+        let mut fifth = good;
+        fifth[8] = 5;
+        assert_eq!(Header::from_bytes(&fifth), Err(refusal::UNKNOWN));
+
+        // A flag bit this build does not define: refused, never dropped.
+        let mut flagged = good;
+        flagged[10] = 1;
+        assert_eq!(Header::from_bytes(&flagged), Err(refusal::UNKNOWN));
+
+        // A magic from the record one file over, at a blob's offset. The whole
+        // argument for three magics rather than one.
+        let mut wrong_record = good;
+        wrong_record[0..4].copy_from_slice(&ROOT_MAGIC.to_le_bytes());
+        assert_eq!(Header::from_bytes(&wrong_record), Err(refusal::MALFORMED));
+    }
+
+    #[test]
+    fn an_object_head_round_trips_and_refuses_a_contradiction() {
+        let head = ObjectHead { object_bytes: 1_048_576, chunks: 17 };
+        let raw = head.to_bytes();
+        assert_eq!(&raw[0..8], &[0, 0, 0x10, 0, 0, 0, 0, 0], "object_bytes = 1 MiB");
+        assert_eq!(&raw[8..12], &[17, 0, 0, 0], "chunks");
+        assert_eq!(ObjectHead::from_bytes(&raw), Ok(head));
+        assert_eq!(head.bytes(), ObjectHead::HEAD_BYTES + 17 * 32);
+
+        // The empty object: no bytes and no chunks, which is not a
+        // contradiction and folds to a hash like anything else.
+        let empty = ObjectHead { object_bytes: 0, chunks: 0 };
+        assert_eq!(ObjectHead::from_bytes(&empty.to_bytes()), Ok(empty));
+
+        let bytes_without_chunks = ObjectHead { object_bytes: 4096, chunks: 0 }.to_bytes();
+        assert_eq!(ObjectHead::from_bytes(&bytes_without_chunks), Err(refusal::MALFORMED));
+
+        let chunks_without_bytes = ObjectHead { object_bytes: 0, chunks: 3 }.to_bytes();
+        assert_eq!(ObjectHead::from_bytes(&chunks_without_bytes), Err(refusal::MALFORMED));
+
+        let past_bound = ObjectHead { object_bytes: 1, chunks: CHUNKS_MAX as u32 + 1 }.to_bytes();
+        assert_eq!(ObjectHead::from_bytes(&past_bound), Err(refusal::UNKNOWN));
+    }
+
+    /// The check is a digest this crate cannot compute, so the tests here
+    /// stand a fixed array in for one.
+    ///
+    /// That is not a weaker test than hashing would be: what this file owns is
+    /// the *rule* — the record is not believed unless the bytes at the check's
+    /// offset equal the digest the caller took — and the rule is exercised in
+    /// both directions below. That the digest is a real SHA-256 over
+    /// [`RootRecord::CHECKED_BYTES`] bytes is `blob/src/store.rs`'s to
+    /// demonstrate, because that is the crate with a hash in it.
+    fn a_root(check: [u8; 32]) -> RootRecord {
+        RootRecord {
+            generation: 7,
+            root: [0x11; 32],
+            frame: [0x22; 32],
+            module: [0x33; 32],
+            previous: [0x44; 32],
+            check,
+        }
+    }
+
+    #[test]
+    fn a_root_record_encodes_to_the_bytes_the_format_says() {
+        let record = a_root([0x55; 32]);
+        let raw = record.to_bytes();
+
+        assert_eq!(&raw[0..4], b"F_RR", "magic, little-endian");
+        assert_eq!(&raw[4..8], &[176, 0, 0, 0], "the record's own declared length");
+        assert_eq!(&raw[8..16], &[7, 0, 0, 0, 0, 0, 0, 0], "generation");
+        assert_eq!(&raw[16..48], &[0x11; 32], "root");
+        assert_eq!(&raw[48..80], &[0x22; 32], "frame");
+        assert_eq!(&raw[80..112], &[0x33; 32], "module");
+        assert_eq!(&raw[112..144], &[0x44; 32], "previous");
+        assert_eq!(&raw[144..176], &[0x55; 32], "check");
+
+        // What the check covers is every preceding field and nothing else.
+        assert_eq!(&record.checked()[..], &raw[..RootRecord::CHECKED_BYTES]);
+        assert_eq!(RootRecord::from_bytes(&raw, &[0x55; 32]), Ok(record));
+    }
+
+    /// Verify before accept, in the smallest form the rule has: no field of
+    /// this record is returned until the check the caller computed is the check
+    /// the record carries.
+    #[test]
+    fn a_root_record_is_not_believed_before_its_check_verifies() {
+        let raw = a_root([0x55; 32]).to_bytes();
+
+        // The digest the caller computed is not the one the record carries:
+        // either the record is torn or the bytes it covers moved. Both are the
+        // same refusal, because both mean nobody finished writing this.
+        assert_eq!(RootRecord::from_bytes(&raw, &[0x56; 32]), Err(refusal::MALFORMED));
+
+        // A record torn mid-`root`: the magic landed, the rest did not follow,
+        // so the check field is whatever the zone held — zeros here — while the
+        // digest a caller takes over the surviving prefix is not that. This is
+        // the case the field exists for, and *not found* is what a reader
+        // without it would report for the hash this record half names.
+        let mut torn = raw;
+        torn[20..176].fill(0);
+        assert_eq!(RootRecord::from_bytes(&torn, &[0xEE; 32]), Err(refusal::MALFORMED));
+
+        // A zeroed block in a freshly reset zone is not generation zero.
+        let zeroed = a_root([0x55; 32]);
+        let mut ungenerated = zeroed;
+        ungenerated.generation = 0;
+        let raw = ungenerated.to_bytes();
+        assert_eq!(RootRecord::from_bytes(&raw, &[0x55; 32]), Err(refusal::MALFORMED));
+
+        let mut bad_magic = zeroed.to_bytes();
+        bad_magic[2] ^= 0xFF;
+        assert_eq!(RootRecord::from_bytes(&bad_magic, &[0x55; 32]), Err(refusal::MALFORMED));
+    }
+
+    /// The four blob kinds are the vocabulary, and zero is not one of them.
+    #[test]
+    fn zero_is_not_a_blob_kind_and_a_fifth_is_not_either() {
+        assert!(kind::known(kind::CHUNK));
+        assert!(kind::known(kind::OBJECT));
+        assert!(kind::known(kind::EXTENT));
+        assert!(kind::known(kind::GENERATION));
+        assert!(!kind::known(0), "a zeroed block must not decode as a blob");
+        assert!(!kind::known(5), "a fifth kind arrives with an RFC, not with a device");
+        assert_eq!(kind::label(5), "unknown");
+    }
+
+    /// The refusals are distinct values, which is the whole of naming them.
+    ///
+    /// A caller distinguishes *this device returned the wrong bytes* from *this
+    /// record is not a record*, and if two of these packed to one integer the
+    /// distinction would exist only in the doc comments.
+    #[test]
+    fn the_store_refusals_are_six_distinct_values() {
+        let all = [
+            refusal::MALFORMED,
+            refusal::UNKNOWN,
+            refusal::ADDRESS,
+            refusal::FULL,
+            refusal::SHORT_BUFFER,
+            refusal::CONTENT,
+        ];
+        for (index, one) in all.iter().enumerate() {
+            for other in &all[index + 1..] {
+                assert_ne!(one, other, "two store refusals pack to one integer");
+            }
+            assert!(*one < 0, "a refusal is a negative result, RFC 0010");
+        }
+        assert_eq!(error::unpack(refusal::CONTENT), Some((error::DEVICE, 1)));
     }
 }
