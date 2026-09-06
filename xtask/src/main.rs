@@ -9814,13 +9814,23 @@ fn claim_owner_findings(rel: &str, text: &str) -> Vec<String> {
     findings
 }
 
-/// R03, over the one crate whose layout is load-bearing against code we do not
-/// control.
+/// The trees whose public quantities must state what they are measured in.
+///
+/// `abi/` because its layout is load-bearing against code we do not control,
+/// which is the case R03 was written for. `blob/` because intent 0006 put a
+/// second kind of quantity into the tree — a chunk size, a mask width, a
+/// resynchronisation bound — every one of which is *also* a superblock field,
+/// so a number here that says nothing about its unit is a number a mount will
+/// later compare against a device and refuse over. The set is a list rather
+/// than a prefix test so that adding a tree is a diff naming the tree.
+const UNIT_SCOPE: &[&str] = &["abi/", "blob/"];
+
+/// R03, over the trees whose public quantities cross something.
 fn lint_units() -> Result<(), String> {
     let mut findings = Vec::new();
     for path in rust_sources()? {
         let rel = relative(&path);
-        if !rel.starts_with("abi/") {
+        if !UNIT_SCOPE.iter().any(|scope| rel.starts_with(scope)) {
             continue;
         }
         let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
@@ -9828,11 +9838,11 @@ fn lint_units() -> Result<(), String> {
     }
 
     if findings.is_empty() {
-        println!("lint-units: ok  (every public abi field states a unit)");
+        println!("lint-units: ok  (every public field in {} states a unit)", UNIT_SCOPE.join(" "));
         return Ok(());
     }
     Err(format!(
-        "{} public field(s) in abi/ state no unit:\n{}\n\n\
+        "{} public field(s) in {} state no unit:\n{}\n\n\
          R03: every quantity crossing the ABI states its unit, its epoch and its\n\
          zero. `deadline: u64` shipped with none of the three, in the one crate\n\
          whose whole purpose is to be correct against somebody else's code.\n\n\
@@ -9840,6 +9850,7 @@ fn lint_units() -> Result<(), String> {
          rather than a quantity says `Unit: none` and why — that is a claim\n\
          worth making out loud rather than a hole worth leaving.",
         findings.len(),
+        UNIT_SCOPE.join(" "),
         findings.join("\n")
     ))
 }
