@@ -8386,6 +8386,7 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-ring", host: None, bare: None },
     Portability { krate: "f-hash", host: None, bare: None },
     Portability { krate: "f-blob", host: None, bare: None },
+    Portability { krate: "f-index", host: None, bare: None },
     Portability { krate: "f-generation", host: None, bare: None },
     Portability {
         krate: "f-kernel",
@@ -9855,7 +9856,11 @@ fn claim_owner_findings(rel: &str, text: &str) -> Vec<String> {
 /// The set is a constant rather than a condition written twice: the two crates
 /// arrived from two directions on the same afternoon and each had widened its
 /// own copy of the condition, which is how the two disagree a year later.
-const UNIT_SCOPE: &[&str] = &["abi/", "blob/", "generation/"];
+/// `index/` joined on the same grounds as `blob/`: its log entry is a record on
+/// a device, its region is a block index and a block count, and its mount cost
+/// is a number the design is argued about with — every one of which is a
+/// quantity whose unit is obvious only to whoever wrote it down.
+const UNIT_SCOPE: &[&str] = &["abi/", "blob/", "index/", "generation/"];
 
 /// R03, over the trees whose public quantities cross something.
 fn lint_units() -> Result<(), String> {

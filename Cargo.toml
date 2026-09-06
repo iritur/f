@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["abi", "env", "ring", "hash", "blob", "generation", "kernel", "user/init", "user/store", "user/virtio-blk", "user/virtio-net", "user/virtio-gpu", "bench", "sim", "xtask"]
+members = ["abi", "env", "ring", "hash", "blob", "index", "generation", "kernel", "user/init", "user/store", "user/virtio-blk", "user/virtio-net", "user/virtio-gpu", "bench", "sim", "xtask"]
 
 # The checker's crate, and it is excluded rather than absent for the reason RFC
 # 0022 gave the last one: a verification tool's toolchain is the tool's
@@ -48,6 +48,14 @@ f-hash = { path = "hash" }
 # `f-env` already had a row and gains nothing from this; what changed is who
 # takes it, and `blob/Cargo.toml` is where that is argued.
 f-blob = { path = "blob" }
+# The index, on the same terms as the two rows above and taking the one above it:
+# it needs `f_blob::device::Device` and nothing else from that crate, because a
+# second block-device trait would be a second thing to keep agreeing about what a
+# block is. The row is here before anything outside the workspace root takes it,
+# for the reason the three driver rows below give — a workspace row fixes the
+# path for everybody who inherits it, and `E2-B08`'s `user/objects` is the
+# consumer this was written for.
+f-index = { path = "index" }
 f-generation = { path = "generation" }
 # `default-features = false` here rather than at the one consumer, because a
 # workspace dependency fixes it for everybody who inherits it and cargo refuses
