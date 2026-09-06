@@ -8385,6 +8385,7 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-env", host: None, bare: None },
     Portability { krate: "f-ring", host: None, bare: None },
     Portability { krate: "f-hash", host: None, bare: None },
+    Portability { krate: "f-blob", host: None, bare: None },
     Portability { krate: "f-generation", host: None, bare: None },
     Portability {
         krate: "f-kernel",
@@ -9839,18 +9840,29 @@ fn claim_owner_findings(rel: &str, text: &str) -> Vec<String> {
     findings
 }
 
-/// R03, over the one crate whose layout is load-bearing against code we do not
-/// control.
+/// The trees whose public quantities must state what they are measured in.
+///
+/// `abi/` because its layout is load-bearing against code we do not control,
+/// which is the case R03 was written for. `blob/` because intent 0006 put a
+/// second kind of quantity into the tree — a chunk size, a mask width, a
+/// resynchronisation bound — every one of which is *also* a superblock field,
+/// so a number here that says nothing about its unit is a number a mount will
+/// later compare against a device and refuse over. The set is a list rather
+/// than a prefix test so that adding a tree is a diff naming the tree.
+/// `abi/` was always here. `blob/` and `generation/` joined it when intent 0006
+/// put record types, hashes, counts and indices beside one another — which is
+/// exactly where a number's unit is obvious only to the person who wrote it.
+/// The set is a constant rather than a condition written twice: the two crates
+/// arrived from two directions on the same afternoon and each had widened its
+/// own copy of the condition, which is how the two disagree a year later.
+const UNIT_SCOPE: &[&str] = &["abi/", "blob/", "generation/"];
+
+/// R03, over the trees whose public quantities cross something.
 fn lint_units() -> Result<(), String> {
     let mut findings = Vec::new();
     for path in rust_sources()? {
         let rel = relative(&path);
-        // `abi/` was always here; `generation/` joined it when the store's record
-        // types landed in `abi/`, which is the second reason they landed there —
-        // the crates that carry hashes, counts and indices beside one another are
-        // exactly the crates where a number's unit is only obvious to the person
-        // who wrote it. `blob/` joins the set with intent 0006's later step.
-        if !(rel.starts_with("abi/") || rel.starts_with("generation/")) {
+        if !UNIT_SCOPE.iter().any(|scope| rel.starts_with(scope)) {
             continue;
         }
         let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
@@ -9858,11 +9870,11 @@ fn lint_units() -> Result<(), String> {
     }
 
     if findings.is_empty() {
-        println!("lint-units: ok  (every public wire field states a unit)");
+        println!("lint-units: ok  (every public field in {} states a unit)", UNIT_SCOPE.join(" "));
         return Ok(());
     }
     Err(format!(
-        "{} public field(s) state no unit:\n{}\n\n\
+        "{} public field(s) in {} state no unit:\n{}\n\n\
          R03: every quantity crossing the ABI states its unit, its epoch and its\n\
          zero. `deadline: u64` shipped with none of the three, in the one crate\n\
          whose whole purpose is to be correct against somebody else's code.\n\n\
@@ -9870,6 +9882,7 @@ fn lint_units() -> Result<(), String> {
          rather than a quantity says `Unit: none` and why — that is a claim\n\
          worth making out loud rather than a hole worth leaving.",
         findings.len(),
+        UNIT_SCOPE.join(" "),
         findings.join("\n")
     ))
 }

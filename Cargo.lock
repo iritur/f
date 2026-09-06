@@ -16,6 +16,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "f-blob"
+version = "0.0.1"
+dependencies = [
+ "f-env",
+ "f-hash",
+]
+
+[[package]]
 name = "f-env"
 version = "0.0.1"
 

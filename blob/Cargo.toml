@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "f-blob"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Content-defined chunking, and the store built on it. A blob is named by what it contains."
+
+[dependencies]
+# The one SHA-256 in the tree. A chunk's name is this function over its bytes
+# and nothing else, which is what makes two objects that share content share
+# storage without either of them knowing about the other.
+f-hash.workspace = true
+
+# A real dependency and not a dev one, and the reason is worth stating because
+# a reader who knows RFC 0004 will expect the opposite. `gear.rs` derives its
+# table and its two masks from `f_env::split`'s `const fn`s *at compile time*:
+# the names appear in a `const` initialiser and on no run-time path. RFC 0026's
+# argument is that there is one derivation in this tree, and a local SplitMix64
+# here would be the third transcription of it. The crate doc says the store
+# draws nothing from an `Env` when it runs; the tests draw their objects and
+# their edits from one, which is a different thing and is why this row is not
+# under `[dev-dependencies]`.
+f-env.workspace = true
+
+[lints]
+workspace = true
