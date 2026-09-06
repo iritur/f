@@ -8386,6 +8386,7 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-ring", host: None, bare: None },
     Portability { krate: "f-hash", host: None, bare: None },
     Portability { krate: "f-blob", host: None, bare: None },
+    Portability { krate: "f-zone", host: None, bare: None },
     Portability { krate: "f-generation", host: None, bare: None },
     Portability {
         krate: "f-kernel",
@@ -9855,7 +9856,14 @@ fn claim_owner_findings(rel: &str, text: &str) -> Vec<String> {
 /// The set is a constant rather than a condition written twice: the two crates
 /// arrived from two directions on the same afternoon and each had widened its
 /// own copy of the condition, which is how the two disagree a year later.
-const UNIT_SCOPE: &[&str] = &["abi/", "blob/", "generation/"];
+///
+/// `zone/` joined at `E2-B02` under the rule the spec states for a new crate
+/// carrying wire quantities, and it is the clearest case yet: a block index is
+/// logical in one struct and device-absolute in the next, a byte count is a
+/// zone's capacity in one field and its reachable bytes in another, and a count
+/// of device operations is the whole of one invariant. Every one of those is a
+/// number somebody will compare against a number from the other side of a ring.
+const UNIT_SCOPE: &[&str] = &["abi/", "blob/", "generation/", "zone/"];
 
 /// R03, over the trees whose public quantities cross something.
 fn lint_units() -> Result<(), String> {
