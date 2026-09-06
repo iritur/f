@@ -13,7 +13,7 @@
 # whose payload never passes through the ring; restarted on a fault and not on
 # an exit; in the soft class, with two mebibytes for everything it is made of.
 
-schema = 1
+schema = 2
 name   = "virtio-blk"
 image  = "user/virtio-blk"
 
@@ -152,3 +152,56 @@ budget_window_ms = 60_000
 [reservation]
 class        = "soft"
 memory_bytes = 2_097_152
+
+# --- Transfer: what this component declares about being updated in place ------
+
+# `in_place`, and this is the declaration `E2-D04` exists for. RFC 0063.
+#
+# What a client would lose to a restart is the reason. A registration is an
+# operation (RFC 0028) and a `SetId` names a slot in *this instance's* table; a
+# fresh instance's table has never been filled, so every id a client still holds
+# is answered `NO_SUCH_CAP` and every buffer set has to be registered again
+# before a single read can be submitted. Nothing is corrupted by that and no
+# operation is lost — but a driver that can be updated without its clients
+# noticing is the whole of what RFC 0012 changed the rollback metric to claim,
+# and re-registration is the cost that claim would otherwise be hiding.
+#
+# **Why this driver can declare it without being rewritten**, which is the
+# question `E2-D04` had to answer before the word was worth writing. Quiescence
+# is asserted by the occupant and not read off RFC 0018's cursors — the cursors
+# say the rings are empty and cannot say the driver is — so the driver needs a
+# point in its own loop where it holds nothing. It has one already:
+# `component::serve` takes the control ring, drains the data ring into
+# `Pending`, and picks; at the top of that loop `Pending::is_empty()` is the
+# whole of what this component has accepted and not answered, because
+# `pending::IN_FLIGHT` is one and `Driver::execute` polls its chain back out of
+# the device before it returns. No new state machine, no second flag.
+#
+# *Reversal, and it has an owner:* `E1-B09` waits on the interrupt instead of
+# spinning and raises `IN_FLIGHT` above one. On that day an empty `Pending` is
+# no longer an empty driver — chains are outstanding inside the device — and the
+# assertion grows a second term over the used ring. The declaration here does
+# not change; what changes is what the component asserts before it writes a
+# record, and `claims/0012`'s `in_flight` row is the number that moves with it.
+#
+# The two quantities are the registration table and nothing else.
+# `record_bytes = 32` is one registration slot as `f_ring::registry` holds one —
+# a generation, a live bit, the memory capability, the device address, the
+# stride and the buffer count, with the lent bitmap — rounded up to the
+# eight-byte alignment RFC 0063 requires so that records lie end to end and are
+# read in place. `records_max = 16` is `driver::SETS`, which is this component's
+# whole table: eight clients and a client with two geometries. The window is
+# therefore 512 bytes, bought out of the incoming instance's own `Untyped`
+# account, which is the two mebibytes declared above.
+#
+# *What is not settled here, deliberately:* the byte layout of one record. It is
+# `E2-B06`'s, because a layout with no reader is a format nobody has disagreed
+# with yet, and `schema = 1` is the ordinal that makes the two builds agree when
+# it exists. If that layout does not fit thirty-two bytes, the width here moves
+# and the schema does not — a wider record is a different reading of the same
+# bytes and `E2-B06` refuses the swap on the mismatch rather than guessing.
+[transfer]
+mode         = "in_place"
+schema       = 1
+record_bytes = 32
+records_max  = 16

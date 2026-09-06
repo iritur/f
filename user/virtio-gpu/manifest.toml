@@ -21,7 +21,7 @@
 # and not on an exit; in the soft class, with two mebibytes for everything it is
 # made of.
 
-schema = 1
+schema = 2
 name   = "virtio-gpu"
 image  = "user/virtio-gpu"
 
@@ -214,3 +214,17 @@ budget_window_ms = 60_000
 [reservation]
 class        = "soft"
 memory_bytes = 2_097_152
+
+# --- Transfer: what this component declares about being updated in place ------
+
+# `restart_only`, and it is a decision rather than a gap. RFC 0063 requires this
+# table for the reason `[restart]` is required: a manifest that says nothing has
+# not chosen, it has left the choice to whoever reads it next, and a place
+# refilled from a newer manifest is where two readers disagreeing costs a
+# client. This driver holds registrations exactly as the block driver does
+# and could declare the same thing; it does not, because `E2-P08` swaps one
+# driver and a declaration nothing exercises is a promise nothing can refuse
+# — R08. The second driver is what says the shape is a shape (RFC 0051), and
+# it declares `in_place` when there is a swap that runs against it.
+[transfer]
+mode = "restart_only"

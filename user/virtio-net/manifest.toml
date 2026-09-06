@@ -17,7 +17,7 @@
 # on an exit; in the soft class, with two mebibytes for everything it is made
 # of.
 
-schema = 1
+schema = 2
 name   = "virtio-net"
 image  = "user/virtio-net"
 
@@ -191,3 +191,15 @@ budget_window_ms = 60_000
 [reservation]
 class        = "soft"
 memory_bytes = 2_097_152
+
+# --- Transfer: what this component declares about being updated in place ------
+
+# `restart_only`, and it is a decision rather than a gap. RFC 0063 requires this
+# table for the reason `[restart]` is required: a manifest that says nothing has
+# not chosen, it has left the choice to whoever reads it next, and a place
+# refilled from a newer manifest is where two readers disagreeing costs a
+# client. The same answer virtio-gpu gives, for the same reason: the
+# registration table is here, the swap that would exercise it is not, and a
+# declaration with nothing behind it is worth less than an honest restart.
+[transfer]
+mode = "restart_only"
