@@ -371,6 +371,48 @@ fn every_chunk_but_the_last_lies_between_the_minimum_and_the_maximum() {
     }
 }
 
+/// The fewest interior chunks the whole draw must produce.
+///
+/// `claims/0018`'s geometry row `interior_chunks_measured = { min = 500 }`, and
+/// the reason every mean below is a distribution rather than an anecdote: a
+/// draw that quietly shrank its objects would report a mean over a handful of
+/// chunks and call it a distribution, which is the failure `claims/0014` names
+/// in its own geometry row. Measured 859.
+const INTERIOR_CHUNKS_MIN: usize = 500;
+
+/// The fewest interior chunks the zero-filled mixture must produce on its own.
+///
+/// `claims/0018`'s `zero_filled_interior_chunks = { min = 87 }`, and the
+/// positive control the assertion beside it needs: *every interior chunk of
+/// candidate-free content is forced at the maximum* is satisfied vacuously by a
+/// draw that produced none. Measured 87, which is what eight objects of two to
+/// four megabytes cut at a fixed [`CHUNK_MAX_BYTES`] produce, so the number is
+/// the draw's geometry rather than a description of the run.
+const ZERO_FILLED_INTERIOR_CHUNKS_MIN: usize = 87;
+
+/// The most interior chunks that may be forced at the maximum on uniform
+/// content, per ten thousand.
+///
+/// RFC 0061's third reversal condition as the number `claims/0018` registers
+/// it: *"the forced-cut fraction on uniform content exceeding one interior
+/// chunk in ten"* means retiring normalised chunking cost more than the bound
+/// bought, and the repair named there is content-only normalisation in a
+/// further RFC — never this ceiling moved. The entry declined to invent the
+/// threshold before the first measurement and said it gets one when it is
+/// measured; it is measured at 166 per ten thousand, and this constant is
+/// where the condition can fire.
+const FORCED_PER_TEN_THOUSAND_UNIFORM_MAX: usize = 1000;
+
+/// The same ceiling for the two mixtures that cut on content less often.
+///
+/// `claims/0018`: *"the two mixtures that cut on content less often get the
+/// same ceiling rather than a looser one, because a ceiling per mixture chosen
+/// after seeing the run is a description."* Measured 2148 periodic and 2222
+/// concatenated. Zero-filled content is not in this class and gets no ceiling
+/// here: it is asserted at exactly ten thousand per ten thousand below, which
+/// is the stronger statement and a different one.
+const FORCED_PER_TEN_THOUSAND_STARVING_MAX: usize = 5000;
+
 /// Property 2. The mean chunk is within a factor of two of the target.
 ///
 /// Asserted over the whole draw, which is what the target is a statement about.
@@ -379,6 +421,26 @@ fn every_chunk_but_the_last_lies_between_the_minimum_and_the_maximum() {
 /// forced, and that is asserted here as the specific fact it is rather than
 /// left to be averaged away. A mixture whose mean drifted to the maximum
 /// *without* being candidate-free would pass the aggregate and fail this.
+///
+/// # Every threshold `claims/0018` gates is asserted here, and until 2026-09-06
+/// most were not
+///
+/// That claim is `status = "gating"` and its own header says this property is
+/// where its thresholds are asserted. Counted exactly, one of its eleven rows
+/// was: the aggregate band. A second, the zero-filled mixture's forced count,
+/// was asserted as a *ratio* — forced equals that mixture's own chunk count —
+/// which is not the row's `min = 87` and which implied the zero-filled mean
+/// without writing it down. The other eight rows — the three per-mixture means,
+/// the three forced-cut ceilings, the zero-filled positive control and the
+/// geometry row — were *printed* and compared by whoever read the output.
+/// `CONTRIBUTING.md`'s rule is that a check listed as mechanised and not
+/// mechanised is worse than one honestly listed as review, *"because it is a
+/// check somebody believes is happening"*: RFC 0061's third reversal condition
+/// — one interior chunk in ten forced at the maximum on uniform content — could
+/// have fired in a green run and nothing would have said so.
+/// Every row is asserted below against a named constant, and each constant's
+/// doc comment carries the sentence it was derived from rather than the
+/// measurement it sits above.
 #[test]
 fn the_mean_chunk_is_within_a_factor_of_two_of_the_target() {
     let mut total_bytes = 0usize;
@@ -408,39 +470,114 @@ fn the_mean_chunk_is_within_a_factor_of_two_of_the_target() {
         }
 
         assert!(chunks > 0, "the {} mixture produced no interior chunk to measure", kind.name());
-        if kind == Mixture::Zero {
-            assert_eq!(
-                forced_at_the_maximum, chunks,
-                "zero-filled content has no candidates, so every one of its {chunks} interior \
-                 chunks must be forced at {CHUNK_MAX_BYTES} bytes; {forced_at_the_maximum} were. \
-                 A cut that is not forced here means the register's fixed point on a zero run \
-                 hits a mask, which changes what the bound's second clause is about"
-            );
-        }
-        // Reported and not asserted, on purpose. RFC 0061: retiring normalised
-        // chunking gave up the mechanism that kept forced cuts rare, *"the
-        // fraction of interior chunks forced at the maximum, per mixture ...
-        // has no threshold in this entry, because inventing one before the
-        // first measurement is how a threshold becomes a description; it gets
-        // one when it is measured"*. One interior chunk in ten on uniform
-        // content is the entry's reversal condition, and this line is where the
-        // number to compare against it comes from. Per ten thousand, because
-        // integer arithmetic and a percentage would round the interesting cases
-        // to zero.
+        // Per ten thousand, because integer arithmetic and a percentage would
+        // round the interesting cases to zero. RFC 0061 left this number
+        // without a threshold — *"inventing one before the first measurement is
+        // how a threshold becomes a description; it gets one when it is
+        // measured"* — and it is now measured, so the ceilings below are the
+        // ones `claims/0018` registered from that run rather than new numbers.
         let forced_per_ten_thousand = forced_at_the_maximum * 10_000 / chunks;
+        let mean = bytes / chunks;
         println!(
-            "P2 {:>12} mean {} over {chunks} interior chunks, {forced_at_the_maximum} forced at \
-             {CHUNK_MAX_BYTES} ({forced_per_ten_thousand} per ten thousand)",
-            kind.name(),
-            bytes / chunks
+            "P2 {:>12} mean {mean} over {chunks} interior chunks, {forced_at_the_maximum} forced \
+             at {CHUNK_MAX_BYTES} ({forced_per_ten_thousand} per ten thousand)",
+            kind.name()
         );
-        per_mixture.push((kind, bytes / chunks, chunks));
+
+        match kind {
+            // The mixture that is an assertion rather than an average, in three
+            // parts: every interior chunk forced, the mean that follows from
+            // that, and the count that stops both from being vacuous.
+            Mixture::Zero => {
+                assert_eq!(
+                    forced_at_the_maximum, chunks,
+                    "zero-filled content has no candidates, so every one of its {chunks} interior \
+                     chunks must be forced at {CHUNK_MAX_BYTES} bytes; {forced_at_the_maximum} \
+                     were. A cut that is not forced here means the register's fixed point on a \
+                     zero run hits a mask, which changes what the bound's second clause is about"
+                );
+                assert_eq!(
+                    mean, CHUNK_MAX_BYTES,
+                    "the zero-filled mixture's mean interior chunk is {mean} bytes and \
+                     `claims/0018` states it as exactly {CHUNK_MAX_BYTES}, both bounds, because \
+                     that row is an assertion about candidate-free content and not an average \
+                     over it"
+                );
+                assert!(
+                    chunks >= ZERO_FILLED_INTERIOR_CHUNKS_MIN,
+                    "the zero-filled mixture produced {chunks} interior chunks, below the \
+                     {ZERO_FILLED_INTERIOR_CHUNKS_MIN} `claims/0018` requires as the positive \
+                     control for the two assertions above. Without it a draw that produced no \
+                     zero-filled interior chunk at all would satisfy *every one of them is \
+                     forced* by having none"
+                );
+            }
+            // The mixture the target size is a statement about, and the one
+            // RFC 0061's forced-cut reversal condition is stated over.
+            Mixture::Uniform => {
+                assert!(
+                    (CHUNK_TARGET_BYTES / 2..=CHUNK_TARGET_BYTES * 2).contains(&mean),
+                    "the uniform mixture's mean interior chunk is {mean} bytes, outside the \
+                     factor-of-two band [{}, {}] `claims/0018` gates it in. This is the mixture \
+                     the target is a statement about, so the aggregate band holding while this \
+                     one does not means the aggregate is being carried by content the chunker \
+                     cannot cut",
+                    CHUNK_TARGET_BYTES / 2,
+                    CHUNK_TARGET_BYTES * 2
+                );
+                assert!(
+                    forced_per_ten_thousand <= FORCED_PER_TEN_THOUSAND_UNIFORM_MAX,
+                    "{forced_per_ten_thousand} interior chunks per ten thousand are forced at \
+                     {CHUNK_MAX_BYTES} on uniform content, above the \
+                     {FORCED_PER_TEN_THOUSAND_UNIFORM_MAX} that is RFC 0061's third reversal \
+                     condition — one interior chunk in ten. Retiring normalised chunking cost \
+                     more than the bound bought, and the repair the entry names is a content-only \
+                     normalisation in a further RFC: nested masks, a loose hit accepted only when \
+                     none occurred in the preceding {CHUNK_TARGET_BYTES} bytes. It is not this \
+                     ceiling"
+                );
+            }
+            // The two mixtures whose means RFC 0061's second reversal condition
+            // is stated over: below twice `CHUNK_MIN_BYTES` and `MASK_BITS` is
+            // the wrong width. They have no upper bound in `claims/0018`,
+            // because content the chunker cannot cut is *expected* to sit above
+            // the target and the aggregate band is where that is priced.
+            Mixture::Periodic | Mixture::Concatenated => {
+                assert!(
+                    mean >= 2 * CHUNK_MIN_BYTES,
+                    "the {} mixture's mean interior chunk is {mean} bytes, below the {} \
+                     `claims/0018` gates it above. That is RFC 0061's second reversal condition: \
+                     `MASK_BITS` = 16 is the wrong width, the repair is the width and not the \
+                     rule, and a width chosen after seeing this test is a fitted constant that \
+                     needs its own entry saying so",
+                    kind.name(),
+                    2 * CHUNK_MIN_BYTES
+                );
+                assert!(
+                    forced_per_ten_thousand <= FORCED_PER_TEN_THOUSAND_STARVING_MAX,
+                    "{forced_per_ten_thousand} interior chunks per ten thousand are forced at \
+                     {CHUNK_MAX_BYTES} on the {} mixture, above the \
+                     {FORCED_PER_TEN_THOUSAND_STARVING_MAX} `claims/0018` gates it under. The \
+                     ceiling is the same one uniform content gets a tenth of, because a ceiling \
+                     per mixture chosen after seeing the run is a description",
+                    kind.name()
+                );
+            }
+        }
+
+        per_mixture.push((kind, mean, chunks));
         total_bytes += bytes;
         total_chunks += chunks;
     }
 
     let mean = total_bytes / total_chunks;
     println!("P2 aggregate mean {mean} over {total_chunks} interior chunks");
+    assert!(
+        total_chunks >= INTERIOR_CHUNKS_MIN,
+        "the draw produced {total_chunks} interior chunks, below the {INTERIOR_CHUNKS_MIN} \
+         `claims/0018` requires for a mean over them to be a distribution. The system is fine and \
+         the measurement has stopped measuring: the objects got smaller or the seeds got fewer"
+    );
     assert!(
         (CHUNK_TARGET_BYTES / 2..=CHUNK_TARGET_BYTES * 2).contains(&mean),
         "mean chunk {mean} bytes over {total_chunks} chunks is not within a factor of two of \
@@ -519,6 +656,31 @@ const STARVED_PERIODIC_MAX: usize = 7;
 /// Measured 13. RFC 0062.
 const UNSTARVED_MIN: usize = 4;
 
+/// The number of (seed, mixture) pairs the properties are asserted over.
+const PAIRS: usize = SEEDS.len() * Mixture::ALL.len();
+
+/// The fewest pairs whose allowance must reach past the edited object's own
+/// end, where the published bound is unfalsifiable.
+///
+/// Eight, exactly, and derived from the same fixed point as the zero-filled row
+/// below: zero-filled content has no candidate anywhere, so the starved run
+/// containing the edit reaches the object's end, the allowance is that end plus
+/// [`CHUNK_MAX_BYTES`], and `agreed <= allowed` cannot fail because `agreed` is
+/// at most the end. A count below eight is the same event `gear`'s fixed-point
+/// test guards from the other side.
+const ALLOWANCE_PAST_THE_OBJECT_MIN: usize = SEEDS.len();
+
+/// The most pairs whose allowance may reach past the edited object's own end.
+///
+/// Derived from [`UNSTARVED_MIN`] and not measured — measured is 14. A pair
+/// whose edit is outside a starved run has `starved_end <= from`, so its
+/// starved clause lands at most [`CHUNK_MAX_BYTES`] past the edit and the flat
+/// clause carries the allowance; the edit is in the object's first half and the
+/// insertion is under 128 KiB, so that allowance is below `len / 2 + 640 KiB`
+/// and an object of at least two megabytes ends after it. Every unstarved pair
+/// is therefore falsifiable, and at most `PAIRS − UNSTARVED_MIN` are not.
+const ALLOWANCE_PAST_THE_OBJECT_MAX: usize = PAIRS - UNSTARVED_MIN;
+
 /// Property 4. The sequences resynchronise inside the two-clause bound.
 ///
 /// [`RESYNC_BOUND_BYTES`] past `X + L`, or the end of the enclosing *starved*
@@ -530,7 +692,9 @@ const UNSTARVED_MIN: usize = 4;
 /// # Four assertions, and which sentence bought each
 ///
 /// **The published bound.** `agreed <= allowed`, on every pair. Nothing about
-/// it moved under RFC 0061 or RFC 0062, and it holds 32 of 32.
+/// it moved under RFC 0061 or RFC 0062, and it holds 32 of 32 — of which 18 are
+/// pairs where it could have failed. See the section below before quoting the
+/// 32 anywhere.
 ///
 /// **The tighter clause where it applies.** RFC 0061: *"the flat clause gets
 /// stronger where it applies: outside a starved run the sequences agree from
@@ -570,6 +734,27 @@ const UNSTARVED_MIN: usize = 4;
 /// and not the content's, because a period below 65 536 in an object above two
 /// megabytes puts at least 32 candidates in it the moment one residue hits.
 ///
+/// # The effective sample, and why *32 of 32* on its own overstates the run
+///
+/// On 14 of the 32 pairs the allowance reaches past the edited object's own end
+/// — 8 zero-filled, 5 periodic, 1 concatenated — so `agreed > allowed` is
+/// unsatisfiable there, `agreed` is at most the object's end by construction,
+/// and on every one of those 14 it *is* the object's end: nothing after the
+/// edit was preserved. The starved clause producing that allowance is RFC
+/// 0062's decision and is not in question here. What is in question is the
+/// arithmetic a reviewer needs in order to weigh it, and until 2026-09-06 the
+/// count existed nowhere while *32 of 32, zero violations* was in this file, in
+/// `claims/0017`, in RFC 0061's and 0062's confirming runs and in `TODO.md`.
+/// The published bound is therefore exercised on 18 pairs and vacuous on 14;
+/// the count is printed, thresholded against
+/// [`ALLOWANCE_PAST_THE_OBJECT_MIN`] and [`ALLOWANCE_PAST_THE_OBJECT_MAX`], and
+/// the effective sample is stated beside the 32 wherever the 32 is published.
+/// `draw_object`'s own doc comment names this failure mode — *"the sequences
+/// agree by running out of bytes, which is a vacuous pass and the failure this
+/// apparatus is least able to see"* — and drawing bigger objects does not
+/// remove it, because on candidate-free content the starved run grows with the
+/// object.
+///
 /// # The split as counted data, with three thresholds
 ///
 /// Which pairs are starved is recorded per mixture and asserted against
@@ -596,6 +781,10 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
     // makes these counts the rows `claims/0017` registers.
     let mut starved_pairs: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut unstarved_pairs = 0usize;
+    // The pairs on which the headline assertion cannot fail, counted rather
+    // than left for a reader to derive from the printed lines. See the doc
+    // comment's section on the effective sample.
+    let mut allowance_past_the_object = 0usize;
     for &seed in SEEDS {
         for kind in Mixture::ALL {
             let mut sites = Sites::new(seed);
@@ -637,13 +826,24 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
             // be checked against the run by hand rather than taken on trust.
             let drawn_period =
                 period.map_or_else(|| "none".to_string(), |period| format!("{period}"));
+            // `agreed` is at most the object's end — `resynchronised_at`
+            // returns the last boundary of the edited stream when nothing after
+            // the edit survives — so an allowance at or past that end makes
+            // `agreed > allowed` unsatisfiable and this pair contributes
+            // nothing to the published bound. Printed per pair and counted, so
+            // that the run reports the sample it actually tested.
+            let vacuous = allowed >= edited.len();
+            if vacuous {
+                allowance_past_the_object += 1;
+            }
             println!(
                 "P4 seed {seed} {:>12} object {} drawn-period {drawn_period} edit {length}@{at} \
                  candidates {} agreed {agreed} flat {flat} starved-run-end {starved} allowed \
-                 {allowed} tight {tight} carried-by {carried}",
+                 {allowed} tight {tight} carried-by {carried} bound-falsifiable {}",
                 kind.name(),
                 object.len(),
-                candidates.len()
+                candidates.len(),
+                !vacuous
             );
 
             let pair = format!(
@@ -738,10 +938,11 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
 
     assert!(
         failures.is_empty(),
-        "{} of {} (seed, mixture) pairs fail the re-chunking bound as RFC 0061 states it and RFC \
-         0062 restates what it covers:\n{}",
+        "{} recorded failures over {PAIRS} (seed, mixture) pairs against the re-chunking bound as \
+         RFC 0061 states it and RFC 0062 restates what it covers, of which {} pairs could fail its \
+         headline clause at all:\n{}",
         failures.len(),
-        SEEDS.len() * Mixture::ALL.len(),
+        PAIRS - allowance_past_the_object,
         failures.join("\n")
     );
 
@@ -753,8 +954,38 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
     let starved_periodic = starved_pairs.get(Mixture::Periodic.name()).copied().unwrap_or(0);
     let starved_zero = starved_pairs.get(Mixture::Zero.name()).copied().unwrap_or(0);
     println!(
-        "P4 split: {unstarved_pairs} of {} pairs unstarved, starved per mixture: {split}",
-        SEEDS.len() * Mixture::ALL.len()
+        "P4 split: {unstarved_pairs} of {PAIRS} pairs unstarved, starved per mixture: {split}"
+    );
+    println!(
+        "P4 effective sample: the published bound could have failed on {} of {PAIRS} pairs; on \
+         {allowance_past_the_object} the allowance reaches past the edited object's end and \
+         `agreed <= allowed` is unsatisfiable",
+        PAIRS - allowance_past_the_object
+    );
+
+    // The effective sample, thresholded from both sides. Neither number is the
+    // measured 14: the floor is the exact count of zero-filled pairs, which are
+    // candidate-free by the constraint on the mask's draw, and the ceiling is
+    // what `UNSTARVED_MIN` leaves once every unstarved pair is falsifiable.
+    assert!(
+        allowance_past_the_object >= ALLOWANCE_PAST_THE_OBJECT_MIN,
+        "the allowance reaches past the object's end on only {allowance_past_the_object} of \
+         {PAIRS} pairs, below the {ALLOWANCE_PAST_THE_OBJECT_MIN} that is the exact count of \
+         zero-filled pairs. Zero-filled content has no candidate anywhere, so its starved run \
+         reaches the end and its allowance is that end plus {CHUNK_MAX_BYTES}; a count below \
+         eight means that content has acquired a candidate, which is the same event the \
+         zero-filled assertion above and `gear`'s fixed-point test both guard, and every object \
+         hash ever written has changed. Split: {split}"
+    );
+    assert!(
+        allowance_past_the_object <= ALLOWANCE_PAST_THE_OBJECT_MAX,
+        "the allowance reaches past the object's end on {allowance_past_the_object} of {PAIRS} \
+         pairs, above the {ALLOWANCE_PAST_THE_OBJECT_MAX} left by the {UNSTARVED_MIN} pairs that \
+         must be unstarved — an unstarved pair's allowance is the flat clause and an object of \
+         two megabytes and up ends after it, so it is falsifiable by construction. The published \
+         bound is being asserted on a sample this small because the draw has stopped producing \
+         content the chunker can cut, and reporting it as {PAIRS} of {PAIRS} would be reporting \
+         more than the run measured. Split: {split}"
     );
 
     assert!(
@@ -780,13 +1011,26 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
     );
     assert!(
         unstarved_pairs >= UNSTARVED_MIN,
-        "only {unstarved_pairs} of {} pairs have their edit outside a starved run, below the \
+        "only {unstarved_pairs} of {PAIRS} pairs have their edit outside a starved run, below the \
          {UNSTARVED_MIN} RFC 0062 requires as the positive control. The tight clause and the \
          carriage check above are both conditioned on that, so a run in which everything is \
-         starved asserts nothing about the bound it claims to measure. Split: {split}",
-        SEEDS.len() * Mixture::ALL.len()
+         starved asserts nothing about the bound it claims to measure. Split: {split}"
     );
 }
+
+/// The fewest deduplication pairs whose requirement must be non-zero.
+///
+/// Four, and derived the way [`UNSTARVED_MIN`] is rather than measured —
+/// measured is 19. The requirement is zeroed exactly when the allowance covers
+/// the whole two-megabyte shared run, which needs a starved run reaching from
+/// the pad to within [`CHUNK_MAX_BYTES`] of the object's end; the eight uniform
+/// pairs are drawn from content whose candidates arrive about every
+/// [`CHUNK_TARGET_BYTES`], so a single [`STARVED_GAP_BYTES`] gap there has
+/// probability `e^(−3.75)` = 2.4% and a chain of them spanning the object has
+/// none worth writing down. Four of those eight is therefore a threshold
+/// nothing but a broken generator reaches, and it is the positive control that
+/// stops this property from passing on a draw it asserts nothing about.
+const DEDUP_REQUIRING_MIN: usize = 4;
 
 /// Property 5. Identical content in two objects yields identical chunk hashes.
 ///
@@ -803,8 +1047,35 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
 /// that makes every boundary after an edit wrong can cost this average under
 /// one per cent. This property and property 4 are not checks on each other,
 /// which is why `E2-P02` asserts both.
+///
+/// # What this property owes on a starved pair, and why it is a count
+///
+/// `owed` is `shared.len()` less the allowance, so on a pair whose allowance
+/// reaches two megabytes it is zero and `agreed >= owed` holds for `agreed = 0`.
+/// That is 13 of the 32 pairs — 8 zero-filled and 5 periodic — and on 5 of them
+/// the measured deduplication *is* zero: two placements of the same periodic run
+/// at different offsets share no chunk at all, because every cut in both is
+/// forced at [`CHUNK_MAX_BYTES`] and the two forced orbits differ in phase.
+/// Reporting that as a pass, on the workload the deduplication half of `E2-B01`
+/// is worst at, is the shape this file was audited for.
+///
+/// The repair is a count with a threshold and **not** a floor, and the reason is
+/// RFC 0062's theorem rather than convenience: on content whose period is below
+/// [`CHUNK_MIN_BYTES`] no boundary rule of this design produces a content
+/// boundary, so zero really is what the design deduplicates there and any floor
+/// above it would be a number the chunker cannot meet — invented to give a
+/// vacuous pass the look of an assertion. What can be asserted is that the
+/// vacuous pairs stay a minority of a known size: [`DEDUP_REQUIRING_MIN`] pairs
+/// must carry a non-zero requirement, the per-pair line says which are which,
+/// and the summary states the effective sample beside the 32. Measured 19 of 32
+/// with a non-zero requirement, 5 deduplicating nothing.
 #[test]
 fn identical_content_in_two_objects_yields_identical_chunk_hashes() {
+    // The effective sample, and the count of pairs on which the design's worst
+    // case is visible rather than averaged. Both are printed at the end; the
+    // first is thresholded.
+    let mut requiring_pairs = 0usize;
+    let mut deduplicating_nothing = 0usize;
     for &seed in SEEDS {
         for kind in Mixture::ALL {
             let mut sites = Sites::new(seed);
@@ -832,11 +1103,18 @@ fn identical_content_in_two_objects_yields_identical_chunk_hashes() {
                 .expect("two objects");
             let owed = shared.len().saturating_sub(allowance);
 
+            if owed > 0 {
+                requiring_pairs += 1;
+            }
+            if agreed == 0 {
+                deduplicating_nothing += 1;
+            }
             println!(
                 "P5 seed {seed} {:>12} shared {} at {first_pad} and {second_pad} deduplicated \
-                 {agreed} owed {owed} allowance {allowance}",
+                 {agreed} owed {owed} allowance {allowance} requires-something {}",
                 kind.name(),
-                shared.len()
+                shared.len(),
+                owed > 0
             );
 
             assert!(
@@ -849,4 +1127,20 @@ fn identical_content_in_two_objects_yields_identical_chunk_hashes() {
             );
         }
     }
+
+    println!(
+        "P5 effective sample: {requiring_pairs} of {PAIRS} pairs carry a non-zero requirement; on \
+         {} the allowance covers the whole shared run and `agreed >= owed` holds at zero, \
+         {deduplicating_nothing} of which deduplicated nothing at all",
+        PAIRS - requiring_pairs
+    );
+    assert!(
+        requiring_pairs >= DEDUP_REQUIRING_MIN,
+        "only {requiring_pairs} of {PAIRS} pairs place a non-zero requirement on deduplication, \
+         below the {DEDUP_REQUIRING_MIN} that the eight uniform pairs alone put out of reach of \
+         anything but a broken generator. Below it this property asserts nothing on most of its \
+         draw while reporting a pass on all of it, which is what it did until 2026-09-06 on 13 \
+         pairs. Look at the generator before the chunker: a draw that stopped producing content \
+         with candidates in it would do this, and so would an allowance that grew"
+    );
 }

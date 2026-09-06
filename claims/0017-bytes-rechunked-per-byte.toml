@@ -45,7 +45,15 @@ mixtures:
 
   the published bound holds on **32 of 32** (seed, mixture) pairs — no pair
     re-agrees later than `max(X + L + RESYNC_BOUND_BYTES, starved_end +
-    CHUNK_MAX_BYTES)`, which is zero violations;
+    CHUNK_MAX_BYTES)`, which is zero violations — **on an effective sample of
+    18**. On the other 14 pairs — 8 zero-filled, 5 periodic, 1 concatenated —
+    the allowance reaches past the edited object's own end, so `agreed >
+    allowed` cannot be true whatever the chunker does, and on every one of those
+    14 `agreed` *is* the object's end: nothing after the edit was preserved. The
+    starved clause that produces that allowance is RFC 0062's decision and is
+    not in question here. The count is, because *32 of 32, zero violations*
+    without it reports more than the run measured, and the number a reader needs
+    in order to weigh the loosening is the 18;
   the tighter flat clause — agreement by the first accepted boundary at or after
     `X + L + CHUNK_MIN_BYTES + 64` — applies on 13 pairs, holds on all 13, and
     is met *exactly* on 12 of them;
@@ -70,8 +78,16 @@ drawn periods of 63 201, 56 522, 5783, 33 219, 48 380, 29 558, 57 751 and
 candidates the *edited* objects carry are the insertion's uniform bytes.
 
 Deduplication, measured on the same pairs and recorded because a reader will
-reach for it as a check on the above and it is not one: 32 of 32 pass. Uniform
-content deduplicates 1 885 867 to 2 080 094 bytes of the 1 572 864 owed. A
+reach for it as a check on the above and it is not one: 32 of 32 pass, **on an
+effective sample of 19**. Uniform content deduplicates 1 885 867 to 2 080 094
+bytes of the 1 572 864 owed. On the other 13 pairs — 8 zero-filled and 5
+periodic — the allowance covers the whole two-megabyte shared run, the
+requirement is zero and the assertion holds at `agreed = 0`; **5 of those, all
+periodic, deduplicated nothing at all**. That last number is the design's worst
+case rather than a defect and RFC 0062's theorem predicts it: two placements of
+the same period-below-`CHUNK_MIN_BYTES` run differ in the phase of their forced
+cuts and share no chunk. It is recorded rather than asserted against a floor,
+because a floor above zero there would be a number this chunker cannot meet. A
 defect that makes every boundary after an edit wrong costs a byte-weighted
 average only in the region where the boundaries actually disagree, so a
 respectable deduplication ratio beside a destroyed resynchronisation bound is
@@ -130,6 +146,13 @@ secondary = [
   # now rather than with the bench.
   "resync_bytes_max",
   "resync_pairs_within_the_published_bound",
+  # The effective sample behind the row above, and the row without which that
+  # row is a count of pairs rather than a count of tests. Added 2026-09-06 with
+  # the assertions that take it.
+  "resync_pairs_where_the_allowance_exceeds_the_object",
+  # The same question asked of the deduplication half, which has its own
+  # vacuity and a different one.
+  "dedup_pairs_with_a_non_zero_requirement",
   # The split between the bound's two clauses, as four counts rather than as one
   # distribution the design cannot promise. RFC 0062 replaced
   # `resync_pairs_carried_by_the_flat_clause` with these: three of them sit at
@@ -167,8 +190,22 @@ bytes_rehashed_per_edit_chunked_small   = { max = 786432 }
 # bound and the row a starved object is allowed to exceed.
 resync_bytes_max                        = { max = 524288 }
 # Property 4 as RFC 0061 states it: every pair inside the published bound.
-# Measured 32 of 32.
+# Measured 32 of 32, and the row below says on how many of them that could have
+# come out otherwise.
 resync_pairs_within_the_published_bound = { min = 32 }
+# **The effective sample, and the row the audit of this slice bought.** The
+# allowance is `max(flat, starved_end + CHUNK_MAX_BYTES)`, so on a pair whose
+# starved run reaches the object's end the allowance is past the end, `agreed`
+# is at most the end, and the row above cannot fail there. Measured 14 of 32,
+# leaving 18 the bound was exercised on. Neither bound here is the measurement.
+# The floor is exact: zero-filled content has no candidate anywhere, so all
+# eight of its pairs are in this count by the same fixed-point argument that
+# gives `resync_pairs_starved_zero_filled` its exact 8, and a count below eight
+# is that fixed point having drifted. The ceiling is `32 − 4`, derived from
+# `resync_pairs_unstarved`'s positive control: an unstarved pair's allowance is
+# the flat clause, which on an object of two megabytes and up lands well before
+# the end, so every unstarved pair is falsifiable and at most 28 pairs are not.
+resync_pairs_where_the_allowance_exceeds_the_object = { min = 8, max = 28 }
 # **The four rows RFC 0062 put where `resync_pairs_carried_by_the_flat_clause`
 # was.** That row required the flat clause to carry 24 of 32 pairs and measured
 # 16. It is replaced and not widened: 16 is the measurement, and a threshold set
@@ -198,6 +235,18 @@ resync_pairs_starved_periodic           = { max = 7 }
 # `claims/0018` guards from the other side: zero-filled content has no candidate
 # anywhere, so every edit in it is inside a starved run. Measured 8.
 resync_pairs_starved_zero_filled        = { min = 8, max = 8 }
+# The deduplication half's own effective sample. `owed` is the shared run less
+# the allowance, so a pair whose allowance covers the whole two-megabyte run
+# requires nothing and passes at zero deduplicated bytes; measured 19 of 32 with
+# something to prove, and 5 of the other 13 deduplicated nothing. The threshold
+# is the eight uniform pairs' positive control and is derived the way
+# `resync_pairs_unstarved` is — a `STARVED_GAP_BYTES` gap in uniform content has
+# probability `e^(−3.75)` = 2.4% and this needs a chain of them spanning the
+# object — so four is out of reach of anything but a broken generator. There is
+# deliberately no floor on the deduplicated bytes of a starved pair: RFC 0062's
+# theorem says two placements of a period-below-16-KiB run share no chunk, so a
+# floor there would be a number the design cannot meet.
+dedup_pairs_with_a_non_zero_requirement = { min = 4 }
 # The geometry `bench/src/bin/rechunk.rs` owes, as minimums, so that the two
 # object rows above are a bound and not a description of a small draw.
 object_bytes_small                      = { min = 8388608 }
@@ -218,4 +267,6 @@ resync_pairs_starved_periodic_above_7 = "the mask has drifted and nobody noticed
 resync_pairs_unstarved_below_4 = "the positive control has gone, and with it the meaning of the two rows above it: the tight clause and the carriage check are both conditioned on the edit being outside a starved run, so a run in which everything is starved asserts nothing while reporting green on both. Look first at the generator — a draw that stopped producing uniform content would do this — and only then at the chunker"
 bytes_rechunked_per_edit_above_786432 = "the bound is failing as a bound, and RFC 0061 says this is the observation it most wants somebody to go looking for. Check first whether the mixture reporting it is starved: a run of `CHUNK_MAX_BYTES − CHUNK_MIN_BYTES` = 240 KiB with no candidate is the class the second clause covers, and a number above the threshold there is the design admitting what it admits. Above it on a mixture that is *not* starved is the acceptance rule reading something outside its window, and `blob/src/chunk.rs`'s three words are where to look"
 large_and_small_disagree = "the number scales with the object, which is the failure the two rows exist to separate. That is phase-lock: two cut orbits with identical spacing and different phase, which the chunker was rewritten to remove. Reproduce with `cargo test -p f-blob --test chunker` and read which clause carried each pair before concluding anything about the store"
+resync_pairs_where_the_allowance_exceeds_the_object_above_28 = "the bound is being asserted on a sample smaller than the positive control allows, so `resync_pairs_within_the_published_bound` has become a count of pairs that could not fail rather than a count of tests. Read it with `resync_pairs_unstarved`, which fails at the same time and for the same reason: the draw has stopped producing content the chunker can cut. Look at the generator before the chunker. Below 8 is the opposite event and a worse one — zero-filled content has acquired a candidate, which is the register's fixed point hitting the mask, and every object hash ever written has changed"
+dedup_pairs_with_a_non_zero_requirement_below_4 = "property 5 is passing on a draw it asserts nothing about, which is exactly the state this row was added to make visible: `owed` is the shared run less the allowance, and an allowance that has grown to cover two megabytes on most pairs makes `agreed >= owed` true at zero deduplicated bytes. It is the same event as the row above and has the same first suspect, the generator. What it is *not* evidence of is a deduplication regression: a starved pair deduplicating nothing is RFC 0062's theorem holding, and the number that would say deduplication had regressed is a shortfall on a pair whose requirement is not zero"
 zero_filled_row_missing = "the workload stopped drawing the zero-filled mixture, and the starved case has gone back to being a number averaged into an aggregate. That is the shape `intent/0006-state/spec.md` names as the thing not to do to it"

@@ -66,4 +66,10 @@ marked *superseded in part* rather than superseded: two sentences and one
 requirement go, and the acceptance rule, the mask, the bound and
 `RESYNC_BOUND_BYTES` all stand and are confirmed. A row is the only place that
 distinction is visible without reading both files, which is the same argument
-0012 and 0060 make one row up.
+0012 and 0060 make one row up. An audit of that slice has since put the
+effective sample beside the first of the three numbers 0062 confirms: the
+published bound could have failed on 18 of the 32 pairs, the other 14 being
+pairs whose starved allowance reaches past the edited object's own end, so
+`agreed <= allowed` cannot be false there. Neither entry is edited for it —
+entries here are append-only and what they reported is what they reported — and
+the count lives in `claims/0017` as a thresholded row instead.

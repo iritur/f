@@ -363,7 +363,9 @@ below the target size would *leave* the starved class and be served by the flat
 clause, and required its confirming run to show exactly that. The run showed the
 opposite on 8 of 16 periodic and concatenated pairs — objects carrying 0, 1, 1,
 1 and 3 candidates across two to four megabytes — while confirming everything
-else the entry decided: the published bound on 32 of 32 pairs, the tight clause
+else the entry decided: the published bound on 32 of 32 pairs — an effective
+sample of 18, the other 14 being pairs whose starved allowance reaches past the
+object's own end, which `claims/0017` now carries as a row — the tight clause
 on all 13 it applies to, property 2's aggregate mean 108 063 bytes, and a
 forced-cut fraction of 1.66% on uniform content against a reversal condition of
 one in ten. RFC 0062 is that reversal, it withdraws the forecast rather than the
@@ -1088,12 +1090,13 @@ that is still `E2-D02`'s workload and still RFC 0058's reason to exist.
 
 **The first of those three fired, in the one form the entry had not imagined,
 and RFC 0062 is what it bought.** Property 4 did not fail: the published bound
-holds on 32 of 32 pairs, the tight clause on all 13 that it applies to, the mean
-at 108 063 bytes inside the band, and the forced-cut fraction at 1.66% on
-uniform content against a ceiling of ten. What failed is RFC 0061's own
-requirement that the flat clause carry every periodic and concatenated pair: it
-carries 8 of 16, and the eight that pass on the starved allowance carry between
-zero and three candidates across two to four megabytes. The cause is the
+holds on 32 of 32 pairs and could have failed on 18 of them, the tight clause on
+all 13 that it applies to, the mean at 108 063 bytes inside the band, and the
+forced-cut fraction at 1.66% on uniform content against a ceiling of ten. What
+failed is RFC 0061's own requirement that the flat clause carry every periodic
+and concatenated pair: it carries 8 of 16, and the eight that pass on the
+starved allowance carry between zero and three candidates across two to four
+megabytes. The cause is the
 arithmetic in the chunker paragraph above — a `p`-periodic object's candidate
 set is `+p`-invariant, so a minimum chunk size of `m` makes every period below
 `m` uncuttable, whatever the candidate rule — and its consequence is that the
