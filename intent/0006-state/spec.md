@@ -111,6 +111,20 @@ candidate-free to candidate-starved content. It rests on a size-distribution
 measurement not yet taken and says so in its own *Decision*. No task line names
 it either.
 
+**A seventh is owed by RFC 0061's own confirming run, which is the shortest
+possible argument for taking a measurement before believing an entry: RFC 0062,
+a period below the minimum starves every rule.** That run confirmed the rule, the
+bound, the mask constraint and the size distribution, and falsified the one
+sentence in the entry that was arithmetic nobody had done — that periodic content
+below the target size would leave the starved class. It does not leave it and
+cannot: a minimum chunk size of `m` makes every exactly-periodic object with a
+period below `m` uncuttable by any content-window rule at all. RFC 0062 withdraws
+the forecast, keeps the rule, moves what `E2-P02` asserts about the clause split
+onto the structure that produces it, and gives RFC 0058 back the full width of the
+class its second object kind exists for. It is filed against `E2-P02` beside RFC
+0061, for the same reason that entry was: the evidence came from a measurement,
+not from a decision meeting.
+
 **Build.** The hash first, because everything else is named by it. `hash/`
 (package `f-hash`) is SHA-256 as FIPS 180-4 states it, `no_std`, no allocator,
 with a streaming state so a chunk is hashed as it is scanned rather than
@@ -304,6 +318,25 @@ by definition relative to the previous boundary, and two streams offset by `L`
 do not resynchronise until the run ends. Zero runs are the extreme case and are
 `E2-D02`'s named bad workload.
 
+**What lands in the starved clause is decided by the content's period against
+`CHUNK_MIN_BYTES`, and RFC 0062 is where that stopped being a guess.** Any rule
+that reads only a bounded window of content and guarantees a minimum chunk size
+of `m` produces *no* content boundary on exactly `p`-periodic content with
+`p < m`: the register at a position is a function of the last 64 bytes and so of
+`i mod p`, the boundary set is therefore invariant under `+p`, and a non-empty
+one would hold two boundaries `p < m` apart. So every exactly-periodic object
+with a period below `CHUNK_MIN_BYTES` = 16 KiB is starved — under one mask or
+two, under local maxima, under anything — and 4 KiB and 8 KiB database pages are
+inside that class by arithmetic rather than by luck. Above 16 KiB the mask
+decides, all-or-nothing: a periodic object's candidate set is empty with
+probability `e^(−p / 2^16)`, which is 0.632 over the drawn periods and measured
+5 of 8. That makes the starved clause **load-bearing for periodic content**, not
+just for zero runs, and the design says so here rather than leaving it to be
+found. The knob is `CHUNK_MIN_BYTES` and not `MASK_BITS`, which is why RFC 0062
+refuses both a narrower mask and the local-maximum rule: MAXP's minimum is its
+own 32 KiB window, so it starves strictly more periods than this rule does while
+costing a lookahead buffer, a doubled minimum and every object hash.
+
 **What an earlier draft of this spec said here, and why it was wrong.** It said
 that the second clause covered content with *no candidates at all*, that "the
 minimum is not the cause, the maximum-size forcing is", and that the reversal a
@@ -323,6 +356,19 @@ sentences: a forced cut is still relative to the previous boundary, so a
 genuinely starved run is still where the design is bad, and the zero-filled
 workload is still its own row in the re-chunking claim so that the number the
 design is bad at is recorded rather than averaged away.
+
+**And one sentence of RFC 0061's own went the same way, which is why the
+paragraph before this one exists.** That entry forecast that periodic content
+below the target size would *leave* the starved class and be served by the flat
+clause, and required its confirming run to show exactly that. The run showed the
+opposite on 8 of 16 periodic and concatenated pairs — objects carrying 0, 1, 1,
+1 and 3 candidates across two to four megabytes — while confirming everything
+else the entry decided: the published bound on 32 of 32 pairs, the tight clause
+on all 13 it applies to, property 2's aggregate mean 108 063 bytes, and a
+forced-cut fraction of 1.66% on uniform content against a reversal condition of
+one in ten. RFC 0062 is that reversal, it withdraws the forecast rather than the
+rule, and the periodic workload joins the zero-filled one as its own row in the
+re-chunking claim for the same reason the zero-filled one is there.
 
 `zone/` (package `f-zone`) is `E2-B02`: sequential fill with `ZONE_APPEND`,
 seal with `ZONE_FINISH`, copy-forward, reset with `ZONE_RESET`, and the
@@ -526,11 +572,23 @@ uniform bytes a candidate appears every 64 KiB on average, so the bound passes
 on data the design is good at while the workload the design is bad at fails it
 unobserved. The assertion is the two-sided bound as restated above, including
 the starved-run clause — and the mixture is what earns that clause its keep:
-the periodic mixture is what falsified the draft bound on 2026-09-06, and under
-RFC 0061 it must pass under the **flat** clause rather than under the starved
-one, so the test prints which clause carried each (seed, mixture) pair. A pair
-that passes only because its starved run swallowed the object is a pass this
-design does not claim.
+the periodic mixture is what falsified the draft bound on 2026-09-06, and it
+falsified RFC 0061's forecast about itself on the same day. The test prints
+which clause carried each (seed, mixture) pair, and under **RFC 0062** what it
+asserts about the split is keyed to the object's candidate sequence rather than
+to the mixture's name: a pair whose edit is *not* inside a starved run must be
+carried by the flat clause and must meet the tight one; the periodic mixture's
+candidate count at positions past the sixty-fourth must be **either zero or at
+least one per period**, which is the all-or-nothing structure that produces the
+split and goes red the day the register stops being a function of the last 64
+bytes; and the split itself is recorded with three derived thresholds — at most
+seven of eight periodic pairs starved (`0.632^8` = 2.6% under a correct mask),
+all eight zero-filled pairs starved (exact, from the fixed-point constraint),
+and at least four pairs unstarved as the positive control that stops the first
+two assertions passing vacuously. A pair that passes only because its starved
+run swallowed the object is still a pass this design does not claim on content
+the rule can cut; on content it provably cannot cut, the starved clause is the
+claim.
 
 `E2-P03` runs the collector concurrently with adversarial allocation and a
 hard-class reader in the simulator and asserts RFC 0059's three invariants,
@@ -778,12 +836,15 @@ is the evidence that the base move is not a measurement change. `E2-P06` is the
 job that names a non-reproducible input and the image must not be the first one
 it names.
 
-**5. Decisions.** Five RFCs, four owed at the time this was written and numbered
-**0012**, **0058**, **0059** and **0060**, and a fifth — **0061** — that no
-draft anticipated because it was owed by a measurement rather than by a plan:
-`E2-P02` falsified this spec's own re-chunking bound on 2026-09-06 and RFC 0061
-is the reversal, so its *What would reverse this* rests on a size-distribution
-measurement not yet taken. Each of the five contradicts or extends
+**5. Decisions.** Six RFCs, four owed at the time this was written and numbered
+**0012**, **0058**, **0059** and **0060**, and two — **0061** and **0062** —
+that no draft anticipated because they were owed by measurements rather than by
+a plan: `E2-P02` falsified this spec's own re-chunking bound on 2026-09-06 and
+RFC 0061 is the reversal; RFC 0061's own confirming run, the same day,
+falsified its forecast that periodic content would leave the starved class, and
+RFC 0062 is that reversal. The order is the point — an entry that rested on a
+measurement not yet taken was corrected by taking it, which is the cheapest
+possible way for a design to be wrong. Each of the six contradicts or extends
 `docs/design/`: RFC 0012 changes
 the rollback metric `the-long-plan` states, RFC 0058 makes section 04's *real
 complication* a design with a granularity in it, RFC 0059 makes the collector's
@@ -792,8 +853,10 @@ RFC 0060 reverses section 04's *atomicity is free because a root is a single
 write*, and RFC 0061 reverses line 204's *an edit near the start of a large file
 does not re-chunk everything after it*, which was measured false on periodic
 content and which RFC 0061 makes true again for content that produces
-candidates. The fourth and the fifth are the two no task line names, and that is
-reported rather than fixed by editing `TODO.md`. Two more may become owed and
+candidates — and RFC 0062 says which content that is, which is less than RFC
+0061 believed and exactly what section 04 said before it. The fourth, the fifth
+and the sixth are the three no task line names, and that is reported rather than
+fixed by editing `TODO.md`. Two more may become owed and
 are named so that
 they are noticed: a decision about the quiescent point if the ring's cursors
 turn out not to be enough and `f_abi::transfer` grows a state machine; and a
@@ -962,7 +1025,14 @@ the names are the stable handle.
   RFC 0058, with `pieces_touched_max` (`max = 2`) beside it), at two object
   sizes so that a number scaling with the object fails, and with the zero-filled
   workload and the straddling write each its own row so that the starved case
-  and the two-piece case are recorded rather than averaged away.
+  and the two-piece case are recorded rather than averaged away. **RFC 0062 adds
+  a third such row and it is the one a bench would otherwise miss**: periodic
+  content with a period below `CHUNK_MIN_BYTES`, recorded with the period beside
+  it and *outside* the 786 432-byte threshold, because on content the theorem
+  says is uncuttable the number scales with the object and a threshold there
+  would be either false or vacuous. A run that drew 48 KiB periods would report
+  a bounded number and hide the whole class, so the period is geometry and not
+  a detail.
 - **0018 `copies-per-read`** (`E2-B08`): `copies_per_read`, `max = 0`, counted
   on both sides of the boundary and required to agree; `pending` until `E1-B10`
   and `gating` the day it lands.
@@ -1015,6 +1085,26 @@ leaving `[32 768, 131 072]` under one mask, or the forced-cut fraction on
 uniform content exceeding one interior chunk in ten. The residual risk moved
 rather than closing: the design is still bad on genuinely starved content, and
 that is still `E2-D02`'s workload and still RFC 0058's reason to exist.
+
+**The first of those three fired, in the one form the entry had not imagined,
+and RFC 0062 is what it bought.** Property 4 did not fail: the published bound
+holds on 32 of 32 pairs, the tight clause on all 13 that it applies to, the mean
+at 108 063 bytes inside the band, and the forced-cut fraction at 1.66% on
+uniform content against a ceiling of ten. What failed is RFC 0061's own
+requirement that the flat clause carry every periodic and concatenated pair: it
+carries 8 of 16, and the eight that pass on the starved allowance carry between
+zero and three candidates across two to four megabytes. The cause is the
+arithmetic in the chunker paragraph above — a `p`-periodic object's candidate
+set is `+p`-invariant, so a minimum chunk size of `m` makes every period below
+`m` uncuttable, whatever the candidate rule — and its consequence is that the
+starved class is bigger than RFC 0061 thought and exactly what RFC 0058 said it
+was before that entry narrowed it. So this risk does not close and its *residual*
+grows: RFC 0058's second object kind is now justified by a theorem rather than
+by a hope about how much content is periodic. *What would reverse this now:*
+RFC 0062's list, of which the one worth taking first is the period spectrum of
+a real virtual machine image and a real preallocated database file — if their
+dominant periods come back **above** `CHUNK_MIN_BYTES`, the theorem stops
+covering the workloads the argument rests on and the mask is at fault after all.
 
 **The two-root-zone wrap bounds how far back a rollback reaches, and the bound
 is small immediately after a wrap.** Sixteen generations, by `ROOT_CARRY`, and
