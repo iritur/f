@@ -14,8 +14,8 @@ otherwise only implicit in the current text.
 
 ## Reserved numbers
 
-Not an index, and deliberately not. Sixty-one entries have file names that are
-already their titles, and a table of all of them would be a change to sixty-one
+Not an index, and deliberately not. Sixty-two entries have file names that are
+already their titles, and a table of all of them would be a change to sixty-two
 closed decisions' evidence with nothing gained — the same answer E1's plan gave
 about a fourth crate. What a table *is* worth is the rows a reader trips over:
 a number that was a gap for two epochs, and a decision whose task line is not
@@ -30,6 +30,7 @@ row per entry that needs one, and an entry that needs none does not get a row.
 | 0060 | `E2-D05` | A publish is a barrier sequence, and atomicity is not free | accepted |
 | 0061 | `E2-P02` | A boundary is a predicate over a window of content, and not a distance from the last cut | accepted; superseded in part by 0062 |
 | 0062 | `E2-P02` | A period below the minimum starves every rule, so the starved clause carries periodic content and is measured | accepted |
+| 0063 | `E2-D04` | A transfer is declared in the manifest, and quiescence is asserted by its occupant | accepted |
 
 **0012 is why this directory runs 0011, 0013.** `TODO.md` reserved the number
 for the generation swap when the E2 line was written, and then E0 and E1 wrote
@@ -38,6 +39,20 @@ tell a reserved number from a withdrawn one, and the difference matters: a
 withdrawn entry is a decision somebody unmade, and this was a decision nobody
 had made yet. RFC 0012 says so in its own *Context*; this row is where it is
 visible without opening the file.
+
+**0019 was never allocated, and this sentence is the whole of that fact.** The
+directory runs 0018, 0020, and unlike the hole one row up there is nothing
+behind this one: no commit in this repository's history has ever touched a path
+matching `docs/rfc/0019-*`, no entry's *Affects* or *Supersedes* names an RFC
+0019, and no task line reserves it. The number was skipped once and nobody
+noticed. It is written down because the only thing that distinguishes this hole
+from 0012's is a search a reader should not have to run, and because one
+coincidence makes the search likely: `claims/0019` *is* reserved —
+`resident-bytes-per-unit-of-work`, by `intent/0006-state/spec.md` against
+`E2-B08`, and RFC 0059 cites it by that number — and this tree runs two
+registries that number their entries the same way. The number stays empty rather
+than being reissued: entries here are read by number, and a 0019 written after
+0063 would be a decision filed two epochs before it was taken.
 
 **0060 had no task line at all, and that is why this section exists rather than
 an index.** It landed inside `E2-B01`'s diff — the five blk opcodes a barrier
@@ -73,3 +88,18 @@ pairs whose starved allowance reaches past the edited object's own end, so
 `agreed <= allowed` cannot be false there. Neither entry is edited for it —
 entries here are append-only and what they reported is what they reported — and
 the count lives in `claims/0017` as a thresholded row instead.
+
+**0063 arrived with its task line already written, and needs a row for the
+other half of what this section is for.** `E2-D04` named the decision when the
+E2 line was written, so the column reads a task rather than the *none* 0060 was
+about. What a reader trips over is the state of that task: the exit is three
+clauses, the entry pays two — the schema is merged, `user/virtio-blk` declares
+`in_place` — and the third, *and `E2-P08` swaps it*, waits on `E2-B06`, which
+waits on `E2-B05`, which waits on `E1-B05`. So `E2-D04` stays open for two
+builds after the decision inside it is closed, and a reader who follows this row
+into `TODO.md` finds `[>]` with no way to tell a question nobody has answered
+from one answered and waiting for a swap. `E2-D06` is the line that says the
+decision itself is closed, and it exists for the *second* reversal in this entry
+rather than the first: the manifest schema goes 1 to 2, which RFC 0030 priced as
+a rebuild of every component file and `docs/manifest.md` refused outright, and
+no task line in that file named it.

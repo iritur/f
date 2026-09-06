@@ -1035,9 +1035,16 @@ the names are the stable handle.
   would be either false or vacuous. A run that drew 48 KiB periods would report
   a bounded number and hide the whole class, so the period is geometry and not
   a detail.
-- **0018 `copies-per-read`** (`E2-B08`): `copies_per_read`, `max = 0`, counted
+- **0022 `copies-per-read`** (`E2-B08`): `copies_per_read`, `max = 0`, counted
   on both sides of the boundary and required to agree; `pending` until `E1-B10`
-  and `gating` the day it lands.
+  and `gating` the day it lands. **This bullet said 0018 until 2026-09-07**, and
+  the number moved rather than the name: `claims/0018` landed as
+  `chunk-size-distribution` while this was still a reservation, and
+  `intent/0006-state/plan.md` states the rule that decides which of the two
+  moves — a number taken in a plan is a number a concurrent landing takes first.
+  The correction is here rather than only in the plan because a spec bullet
+  naming a number another claim holds is how two files come to disagree about
+  which claim `E2-B08` owes.
 - **0019 `resident-bytes-per-unit-of-work`** (`E2-B08`):
   `resident_bytes_per_read_byte`, a count, `gating`, `max = 1.0`, read as
   resident pages of `user/objects` per N reads from the frame's state tree.

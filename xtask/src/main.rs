@@ -12582,11 +12582,13 @@ enum Route {
     /// has a denominator.
     ///
     /// The argument is a test-name filter, and it exists because the two claims
-    /// this route serves are in different states inside one test binary: the
-    /// size distribution passes while the resynchronisation bound is red under
-    /// RFC 0061's open reversal. A claim whose reproduction ran the whole binary
-    /// would report the wrong red for one of them, which is how a check gets
-    /// muted. An empty filter runs everything.
+    /// this route serves were in different states inside one test binary: the
+    /// size distribution passed while the resynchronisation bound was red under
+    /// RFC 0061's open reversal, which RFC 0062 has since closed. A claim whose
+    /// reproduction ran the whole binary would report the wrong red for one of
+    /// them, which is how a check gets muted — and that is a reason to keep the
+    /// filter now that both are green rather than a reason it was added. An
+    /// empty filter runs everything.
     ///
     /// It is a test rather than a benchmark because the store this number will
     /// finally be taken against does not exist. `bench/src/bin/rechunk.rs` is
@@ -12595,6 +12597,25 @@ enum Route {
     /// claim's `[workload] path` says so too, in the file a stranger reads.
     /// E2-B01, E2-P02, RFC 0061.
     Chunker(&'static str),
+    /// `E2-B01`'s exit run: a million blobs into a modelled device, every one
+    /// read back and verified, then one bit flipped inside one stored blob's
+    /// content and all million read again — exactly one refusal, and no blob
+    /// returning bytes that are not its own without one.
+    ///
+    /// `--release` and `--blobs 1000000` are both part of the claim rather than
+    /// conveniences. The blob count is where the published numbers come from:
+    /// `blob/tests/million.rs` asserts everything *relative to the count it was
+    /// given*, so `cargo xtask test` running the same binary at ten thousand
+    /// asserts the same shape and none of the scale, and the scale lives here.
+    /// Release, because a debug build hashes 217 MB slowly enough that a claim
+    /// nobody wants to wait for is a claim nobody runs.
+    ///
+    /// Output is not captured: `harness = false` means the binary is the test
+    /// and its report — blobs, records, blocks, refusals before and after the
+    /// flip — is printed rather than asserted row by row, which is what a reader
+    /// has to see to disagree with `claims/0023`.
+    /// E2-B01, RFC 0060.
+    Million,
 }
 
 const ROUTES: &[(&str, Route)] = &[
@@ -12638,16 +12659,24 @@ const ROUTES: &[(&str, Route)] = &[
     ("unmap-churn-cost", Route::Churn),
     // Intent 0006's two chunker claims, sharing one workload the way the four
     // pairs above share theirs — but split by property rather than by count and
-    // time. `chunk-size-distribution` names the one property that holds, so its
-    // reproduction is green and its threshold gates; `bytes-rechunked-per-byte`
-    // runs all five, because its subject is the bound and the bound's own test
-    // is currently red. Both of those are the honest report of where the tree
-    // is, and neither is arranged to look better than it is.
+    // time. `chunk-size-distribution` is one property and runs one, so a red
+    // result names the distribution and nothing else; `bytes-rechunked-per-byte`
+    // runs all five, because its subject is the bound and the bound is a
+    // statement about how the five fit together. Both have held since `18da1e2`
+    // — the split was made while property 4 was red under RFC 0061's open
+    // reversal, and it is kept because a claim whose reproduction runs a whole
+    // binary reports the wrong red the next time one of them goes.
     ("bytes-rechunked-per-byte", Route::Chunker("")),
     (
         "chunk-size-distribution",
         Route::Chunker("the_mean_chunk_is_within_a_factor_of_two_of_the_target"),
     ),
+    // `E2-B01`'s first exit clause, and the third claim in this table whose
+    // workload is a test rather than a benchmark. It is separated from the two
+    // above by scale rather than by property: the same binary is the per-commit
+    // gate at ten thousand blobs and this claim at a million, which is the whole
+    // reason `blob/tests/million.rs` is `harness = false`.
+    ("blob-verification-refusals", Route::Million),
 ];
 
 /// The registry file one claim name resolves to.
@@ -12755,6 +12784,10 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
             args.extend(["--", "--nocapture"]);
             sh("cargo", &args)?;
         }
+        Route::Million => sh(
+            "cargo",
+            &["test", "--release", "-p", "f-blob", "--test", "million", "--", "--blobs", "1000000"],
+        )?,
     }
 
     // The harness itself refuses in a non-measurement environment and says so
