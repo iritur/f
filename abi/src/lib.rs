@@ -12,6 +12,7 @@
 
 #![no_std]
 
+pub mod boot;
 pub mod buf;
 pub mod cap;
 pub mod control;
@@ -21,6 +22,7 @@ pub mod layout;
 pub mod manifest;
 pub mod reserve;
 pub mod state;
+pub mod store;
 
 /// The frame's opcode space.
 ///

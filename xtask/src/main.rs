@@ -23,6 +23,12 @@ mod pack;
 /// because `docs/manifest.md` names it as the place the schema is code.
 mod manifest;
 
+/// The configuration evaluator: `user/generation.toml` to one root hash, and
+/// back again. Split out for the reason `manifest` is — it is a compiler with a
+/// grammar behind it — and it reads its source through `manifest`'s reader
+/// rather than a second one of its own. E2-B04.
+mod generation;
+
 /// The target the kernel is built for.
 ///
 /// A built-in target and not a JSON file in `targets/`, which is a decision
@@ -503,6 +509,10 @@ fn main() -> ExitCode {
         "runtime" => runtime(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
         "component" => components().map(|_| ()),
+        // E2-B04. One expression to one root hash, with every leaf printed
+        // beside its name so that two runners that disagree name the input that
+        // moved rather than reporting that two roots differed. RFC 0012.
+        "generation" => generation::generation(args.get(1).map(String::as_str)),
         // E1-P06. Every component the build produced, killed under sustained
         // load and again with nothing killed. The verdict is `f-sim`'s and this
         // is the driver: the component directory, the two processes the
@@ -694,6 +704,14 @@ cargo xtask <command>
                      and check it is one
   component          Build every component file: a manifest compiled to its
                      record, its image linked, and one content hash over both
+  generation         Compile user/generation.toml to a record tree, fold it to
+                     one root hash, print the root and every leaf beside its
+                     name, and pack the tree and the component files into one
+                     boot module named by the root. Source that is not in
+                     canonical form is refused with the canonical form printed
+                     as a diff, never silently reordered. --decompile renders
+                     the record tree back to canonical source, which is the half
+                     `cargo xtask lint` checks is a fixpoint
   admission          Refuse an over-subscribed reservation and put a granted
                      one under adversarial load, with two controls beside it:
                      the same load without a reservation, which must miss, and
@@ -3925,7 +3943,7 @@ fn manifest_names_this_tree(text: &str) -> Result<(), String> {
         }
         rows += 1;
         let Ok(bytes) = std::fs::read(root().join(name)) else { continue };
-        if pack::hex(&pack::sha256(&bytes)) == hash {
+        if pack::hex(&f_hash::sha256(&bytes)) == hash {
             return Ok(());
         }
     }
@@ -8366,6 +8384,9 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-abi", host: None, bare: None },
     Portability { krate: "f-env", host: None, bare: None },
     Portability { krate: "f-ring", host: None, bare: None },
+    Portability { krate: "f-hash", host: None, bare: None },
+    Portability { krate: "f-blob", host: None, bare: None },
+    Portability { krate: "f-generation", host: None, bare: None },
     Portability {
         krate: "f-kernel",
         host: Some(
@@ -9544,6 +9565,13 @@ fn lint_all() -> Result<(), String> {
     // imported image in `shared`. It runs here so a boot is not the first
     // place a missing field is found.
     lint_manifests()?;
+    // The same question one level up. A generation is a manifest of manifests,
+    // and the check that matters there is not the schema but the round trip:
+    // compile the source to records, decompile the records back to source, and
+    // require the result to be the source. A source feature no record kind
+    // carries — an `import`, an interpolation, a conditional — does not survive
+    // it, which is the only place that re-entry is visible. E2-B04.
+    generation::fixpoint()?;
     // And the list that decides which of those manifests is built. It runs
     // beside the schema check because the two answer halves of one question —
     // *is this a component* and *does anything build it* — and the second was
@@ -9812,13 +9840,29 @@ fn claim_owner_findings(rel: &str, text: &str) -> Vec<String> {
     findings
 }
 
-/// R03, over the one crate whose layout is load-bearing against code we do not
-/// control.
+/// The trees whose public quantities must state what they are measured in.
+///
+/// `abi/` because its layout is load-bearing against code we do not control,
+/// which is the case R03 was written for. `blob/` because intent 0006 put a
+/// second kind of quantity into the tree — a chunk size, a mask width, a
+/// resynchronisation bound — every one of which is *also* a superblock field,
+/// so a number here that says nothing about its unit is a number a mount will
+/// later compare against a device and refuse over. The set is a list rather
+/// than a prefix test so that adding a tree is a diff naming the tree.
+/// `abi/` was always here. `blob/` and `generation/` joined it when intent 0006
+/// put record types, hashes, counts and indices beside one another — which is
+/// exactly where a number's unit is obvious only to the person who wrote it.
+/// The set is a constant rather than a condition written twice: the two crates
+/// arrived from two directions on the same afternoon and each had widened its
+/// own copy of the condition, which is how the two disagree a year later.
+const UNIT_SCOPE: &[&str] = &["abi/", "blob/", "generation/"];
+
+/// R03, over the trees whose public quantities cross something.
 fn lint_units() -> Result<(), String> {
     let mut findings = Vec::new();
     for path in rust_sources()? {
         let rel = relative(&path);
-        if !rel.starts_with("abi/") {
+        if !UNIT_SCOPE.iter().any(|scope| rel.starts_with(scope)) {
             continue;
         }
         let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
@@ -9826,11 +9870,11 @@ fn lint_units() -> Result<(), String> {
     }
 
     if findings.is_empty() {
-        println!("lint-units: ok  (every public abi field states a unit)");
+        println!("lint-units: ok  (every public field in {} states a unit)", UNIT_SCOPE.join(" "));
         return Ok(());
     }
     Err(format!(
-        "{} public field(s) in abi/ state no unit:\n{}\n\n\
+        "{} public field(s) in {} state no unit:\n{}\n\n\
          R03: every quantity crossing the ABI states its unit, its epoch and its\n\
          zero. `deadline: u64` shipped with none of the three, in the one crate\n\
          whose whole purpose is to be correct against somebody else's code.\n\n\
@@ -9838,6 +9882,7 @@ fn lint_units() -> Result<(), String> {
          rather than a quantity says `Unit: none` and why — that is a claim\n\
          worth making out loud rather than a hole worth leaving.",
         findings.len(),
+        UNIT_SCOPE.join(" "),
         findings.join("\n")
     ))
 }
@@ -11456,9 +11501,10 @@ fn content_files(content: &Content) -> Result<Vec<(String, Vec<u8>)>, String> {
 ///
 /// One `.tar`, and the contract's eight contents inside it, plus a `MANIFEST`
 /// naming every file and its SHA-256. The archive is built by `pack::Tar`,
-/// which has no clock and no user in it; the hashes are `pack::sha256`, which
-/// has no dependency. Both of those are the same requirement stated twice: a
-/// content address that depends on which machine computed it is not one.
+/// which has no clock and no user in it; the hashes are `f_hash::sha256`, which
+/// has no dependency and is the same function the store names a blob with.
+/// Those are the same requirement stated twice: a content address that depends
+/// on which machine — or which crate — computed it is not one.
 ///
 /// Not compressed, deliberately. A deflate stream carries its encoder's version
 /// and level in the output, so compressing here would put a dependency's
@@ -11583,7 +11629,7 @@ fn release(mode: Option<&str>) -> Result<(), String> {
                 let full = root().join(path);
                 if full.exists() {
                     let bytes = std::fs::read(&full).map_err(|e| e.to_string())?;
-                    let hash = pack::hex(&pack::sha256(&bytes));
+                    let hash = pack::hex(&f_hash::sha256(&bytes));
                     println!("  [ok]  {:<36} {path}", content.name);
                     println!("        {} bytes  sha256 {}", bytes.len(), &hash[..16]);
                 } else {
@@ -11711,7 +11757,7 @@ fn build_package(describe: &str, commit: &str) -> Result<(String, PathBuf, usize
         }
 
         for (name, bytes) in gathered {
-            let hash = pack::hex(&pack::sha256(&bytes));
+            let hash = pack::hex(&f_hash::sha256(&bytes));
             manifest.push_str(&format!("{hash}  {name}\n"));
             files.push((name, false, bytes));
         }
@@ -11722,7 +11768,7 @@ fn build_package(describe: &str, commit: &str) -> Result<(String, PathBuf, usize
     // mtimes from the commit, so it cannot pick up an untracked file and cannot
     // vary with when the checkout happened.
     let source = capture_bytes("git", &["archive", "--format=tar", commit])?;
-    let source_hash = pack::hex(&pack::sha256(&source));
+    let source_hash = pack::hex(&f_hash::sha256(&source));
     manifest.push_str(&format!("{source_hash}  source.tar\n"));
     files.push(("source.tar".to_string(), false, source));
 
@@ -11731,7 +11777,7 @@ fn build_package(describe: &str, commit: &str) -> Result<(String, PathBuf, usize
     build()?;
     let image = kernel_elf32();
     let bytes = std::fs::read(&image).map_err(|e| format!("reading {}: {e}", relative(&image)))?;
-    let hash = pack::hex(&pack::sha256(&bytes));
+    let hash = pack::hex(&f_hash::sha256(&bytes));
     let name = "image/f-kernel.elf32".to_string();
     manifest.push_str(&format!("{hash}  {name}\n"));
     files.push((name, true, bytes));
@@ -11748,7 +11794,7 @@ fn build_package(describe: &str, commit: &str) -> Result<(String, PathBuf, usize
     }
     let archive = tar.finish();
 
-    let address = pack::hex(&pack::sha256(&archive));
+    let address = pack::hex(&f_hash::sha256(&archive));
     // `target/package/` and not `target/release/`: that second one is cargo's
     // release *profile* directory, and putting an artefact of ours in it means
     // one `cargo build --release` away from a collision nobody expected.
@@ -12526,6 +12572,29 @@ enum Route {
     /// reason. `claims/0015` is the time half and waits on a machine.
     /// E1-B14, RFC 0052.
     Churn,
+    /// The chunker's five properties over eight recorded seeds and four content
+    /// mixtures — `cargo test -p f-blob --test chunker`. Not a program under
+    /// `bench/src/bin/` and not a boot: the workload is the property test
+    /// `E2-P02` already runs, and what it produces is a **count** — bytes
+    /// between an edit and the first boundary the two streams agree on again,
+    /// and interior chunk sizes — which is why `claims/0018` may gate on this
+    /// machine the way `claims/0005` does, and why `claims/0017` will when it
+    /// has a denominator.
+    ///
+    /// The argument is a test-name filter, and it exists because the two claims
+    /// this route serves are in different states inside one test binary: the
+    /// size distribution passes while the resynchronisation bound is red under
+    /// RFC 0061's open reversal. A claim whose reproduction ran the whole binary
+    /// would report the wrong red for one of them, which is how a check gets
+    /// muted. An empty filter runs everything.
+    ///
+    /// It is a test rather than a benchmark because the store this number will
+    /// finally be taken against does not exist. `bench/src/bin/rechunk.rs` is
+    /// `intent/0006-state/plan.md` step 8 and `E2-B09`'s, and the day it lands
+    /// `bytes-rechunked-per-byte` moves to `Route::Bench("rechunk")` — the
+    /// claim's `[workload] path` says so too, in the file a stranger reads.
+    /// E2-B01, E2-P02, RFC 0061.
+    Chunker(&'static str),
 }
 
 const ROUTES: &[(&str, Route)] = &[
@@ -12567,6 +12636,18 @@ const ROUTES: &[(&str, Route)] = &[
     // `bench/src/lib.rs`'s rule holding rather than failing — the fourth pair
     // in this table with that shape.
     ("unmap-churn-cost", Route::Churn),
+    // Intent 0006's two chunker claims, sharing one workload the way the four
+    // pairs above share theirs — but split by property rather than by count and
+    // time. `chunk-size-distribution` names the one property that holds, so its
+    // reproduction is green and its threshold gates; `bytes-rechunked-per-byte`
+    // runs all five, because its subject is the bound and the bound's own test
+    // is currently red. Both of those are the honest report of where the tree
+    // is, and neither is arranged to look better than it is.
+    ("bytes-rechunked-per-byte", Route::Chunker("")),
+    (
+        "chunk-size-distribution",
+        Route::Chunker("the_mean_chunk_is_within_a_factor_of_two_of_the_target"),
+    ),
 ];
 
 /// The registry file one claim name resolves to.
@@ -12661,6 +12742,19 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         Route::Admission => admission_gate()?,
         Route::Deadline => deadline(None)?,
         Route::Churn => churn()?,
+        Route::Chunker(filter) => {
+            // `--nocapture`, because every number these two claims publish is
+            // *printed* by the test rather than asserted by it — the assertions
+            // are the thresholds, and the distribution behind them is what a
+            // reader has to see to disagree with it. A claim run that swallowed
+            // its own output would publish a verdict and no evidence.
+            let mut args = vec!["test", "-p", "f-blob", "--test", "chunker"];
+            if !filter.is_empty() {
+                args.push(filter);
+            }
+            args.extend(["--", "--nocapture"]);
+            sh("cargo", &args)?;
+        }
     }
 
     // The harness itself refuses in a non-measurement environment and says so

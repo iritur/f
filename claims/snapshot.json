@@ -14,6 +14,8 @@
     { "name": "deadline-overtake", "status": "gating", "milestone": "E1", "file": "claims/0012-deadline-overtake.toml" },
     { "name": "deadline-overtake-latency", "status": "pending", "milestone": "E1", "file": "claims/0013-deadline-overtake-latency.toml" },
     { "name": "unmap-churn", "status": "gating", "milestone": "E1", "file": "claims/0014-unmap-churn.toml" },
-    { "name": "unmap-churn-cost", "status": "pending", "milestone": "E1", "file": "claims/0015-unmap-churn-cost.toml" }
+    { "name": "unmap-churn-cost", "status": "pending", "milestone": "E1", "file": "claims/0015-unmap-churn-cost.toml" },
+    { "name": "bytes-rechunked-per-byte", "status": "pending", "milestone": "E2", "file": "claims/0017-bytes-rechunked-per-byte.toml" },
+    { "name": "chunk-size-distribution", "status": "gating", "milestone": "E2", "file": "claims/0018-chunk-size-distribution.toml" }
   ]
 }

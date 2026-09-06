@@ -16,7 +16,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "f-blob"
+version = "0.0.1"
+dependencies = [
+ "f-env",
+ "f-hash",
+]
+
+[[package]]
 name = "f-env"
+version = "0.0.1"
+
+[[package]]
+name = "f-generation"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-hash",
+]
+
+[[package]]
+name = "f-hash"
 version = "0.0.1"
 
 [[package]]
@@ -94,5 +114,8 @@ dependencies = [
 name = "xtask"
 version = "0.0.1"
 dependencies = [
+ "f-abi",
  "f-bench",
+ "f-generation",
+ "f-hash",
 ]

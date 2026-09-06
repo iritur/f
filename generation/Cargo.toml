@@ -1,0 +1,24 @@
+[package]
+name = "f-generation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The configuration evaluator: one expression, checked and folded to one root hash."
+
+# `f-hash` for the fold and `f-abi` for the node kinds and their codecs. The
+# second dependency is the load-bearing one and it points the way it does on
+# purpose: this crate holds no codec at all, so a fifth node kind is a diff to
+# `abi/` — the crate whose every change is reviewed as an ABI change — and
+# therefore an RFC by rule rather than by anybody remembering the convention.
+# `abi::manifest::NAME_MAX` comes through the same door, so a name's bound is
+# stated once in this tree and not twice.
+#
+# No `alloc`. `generation/src/fold.rs` says why the fold needs no heap and why
+# that argument is the same argument as the one against a fifth nesting kind.
+[dependencies]
+f-abi.workspace = true
+f-hash.workspace = true
+
+[lints]
+workspace = true

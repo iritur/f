@@ -80,7 +80,7 @@ use crate::pending::Admission;
 use crate::queue::{DESC_NEXT, DESC_WRITE, QUEUE_BYTES, QUEUE_SIZE, Queue};
 use crate::transport::{SECTOR_BYTES, Transport, Windows};
 
-/// The opcodes this service answers on.
+/// The opcodes this service's ring defines, and the two it answers on today.
 ///
 /// Numbered from one and not from zero, and the reason is R04 rather than
 /// taste: `f_abi::op::NOP` is zero in the frame's own vocabulary, and an entry
@@ -93,6 +93,32 @@ use crate::transport::{SECTOR_BYTES, Transport, Windows};
 /// registration opcodes at the top of the byte are the exception RFC 0028
 /// argues for, and `f_abi::buf::opcode::is_registration` is what keeps them out
 /// of this list.
+///
+/// # Why five of them are defined and none of the five is answered
+///
+/// RFC 0060 decided that a publish is *write the blobs, `FLUSH`, append the
+/// root record, `FLUSH`* — four device operations, not one — and that a zone is
+/// filled, sealed, reset and reported over this same ring, because this ring is
+/// the only path to a device there is. That makes `FLUSH`, `ZONE_APPEND`,
+/// `ZONE_FINISH`, `ZONE_RESET` and `ZONE_REPORT` **new wire**, and `TODO.md`
+/// ordering rule 1 puts wire first whatever else is ready: a number two peers
+/// read is free to change while one peer reads it and expensive afterwards, and
+/// `kernel/src/blk.rs` imports this module rather than keeping a second copy
+/// precisely so that there is one place where these numbers live.
+///
+/// So the numbers land here and the behaviour does not. [`known`] is
+/// deliberately not widened, all five are refused with
+/// `ARGUMENT/UNKNOWN_OPCODE` like any opcode this build does not implement, and
+/// `cargo xtask blk` staying green — all three halves, including the two that
+/// must fail — is what says this diff moved no behaviour. `E2-B02` answers them
+/// and widens [`known`] in the same change.
+///
+/// These are **ring** opcodes and not virtio request types. Each doc comment
+/// below names the virtio number beside it so a reader can check the mapping
+/// against the specification's block device section, and the two spaces
+/// deliberately do not coincide — `FLUSH` is 3 here and 4 there — so a build
+/// that had started handing a ring opcode straight to the device would be
+/// caught by arithmetic rather than by luck.
 pub mod op {
     /// Read `len` bytes from `offset` into the named buffer. The device writes.
     pub const READ: u8 = 1;
@@ -100,12 +126,93 @@ pub mod op {
     /// Write `len` bytes from the named buffer to `offset`. The device reads.
     pub const WRITE: u8 = 2;
 
+    /// Persist what this driver has already completed. `VIRTIO_BLK_T_FLUSH` = 4,
+    /// under `VIRTIO_BLK_F_FLUSH` (feature bit 9).
+    ///
+    /// Promises exactly one thing: when its completion is reported, every
+    /// operation this driver had *already reported a completion for before this
+    /// entry was submitted* is on stable media. It promises nothing about
+    /// operations still in flight, nothing about operations submitted after it,
+    /// and — the part RFC 0060 rests the format on rather than the barrier —
+    /// nothing about whether the device told the truth.
+    ///
+    /// Carries no buffer and no length: virtio has no ranged flush, so an entry
+    /// naming a range would be a client believing in one.
+    /// Unit: none — an opcode in this service's space, not a virtio request
+    /// type.
+    pub const FLUSH: u8 = 3;
+
+    /// Append the named buffer at a zone's write pointer.
+    /// `VIRTIO_BLK_T_ZONE_APPEND` = 15.
+    ///
+    /// The `offset` names the zone's *start*, never the destination: the device
+    /// assigns the position and returns it on the completion. That is the whole
+    /// reason this is not a positioned write — two appenders would otherwise
+    /// race a pointer the device also holds, and a cut would leave two pointers
+    /// to reconcile with no record of which was ahead. An index therefore
+    /// records the position the completion returned and never one a submitter
+    /// derived.
+    ///
+    /// Says nothing about durability. That is [`FLUSH`]'s, and keeping the two
+    /// apart is what lets a publish pay for one barrier over many appends.
+    /// Unit: none — an opcode in this service's space, not a virtio request
+    /// type.
+    pub const ZONE_APPEND: u8 = 4;
+
+    /// Seal a zone: it becomes full and accepts no further append.
+    /// `VIRTIO_BLK_T_ZONE_FINISH` = 22.
+    ///
+    /// A seal is not a barrier and not a verdict. It says the write pointer is
+    /// at the zone's end; it does not say the zone's contents are durable, and
+    /// it does not say the zone may be collected — the live fraction is the
+    /// collector's own tally under RFC 0059, which the device has no way to
+    /// know.
+    /// Unit: none — an opcode in this service's space, not a virtio request
+    /// type.
+    pub const ZONE_FINISH: u8 = 5;
+
+    /// Reset one zone: its write pointer returns to the zone's start and every
+    /// byte previously in it becomes unreadable. `VIRTIO_BLK_T_ZONE_RESET` = 24.
+    ///
+    /// Destructive, with no undo, which is why RFC 0060 has the root-zone wrap
+    /// carry `ROOT_CARRY` = 16 records to the other zone and flush *before* it
+    /// resets the full one: there is never a moment with no durable root.
+    ///
+    /// It is not an erase. `VIRTIO_BLK_T_SECURE_ERASE` is a different operation
+    /// with a different promise and this space does not carry it, so nothing
+    /// above may read a reset as one. And there is deliberately no reset-all:
+    /// `VIRTIO_BLK_T_ZONE_RESET_ALL` = 26 would destroy both root zones and the
+    /// superblock in one operation, no correct caller of this store ever wants
+    /// that, and being unable to *say* it is the protection.
+    /// Unit: none — an opcode in this service's space, not a virtio request
+    /// type.
+    pub const ZONE_RESET: u8 = 6;
+
+    /// Report the device's own view of a range of zones into the named buffer:
+    /// each zone's start, type, state and write pointer.
+    /// `VIRTIO_BLK_T_ZONE_REPORT` = 16.
+    ///
+    /// A snapshot, and stale the moment it is read, so the only consumer
+    /// permitted to act on one is mount — before anything else is writing.
+    /// That is what makes *mount takes no mutable pointer* affordable: the
+    /// pointer it needs belongs to the device and is asked for rather than
+    /// maintained, so there is no in-format current-root field that can tear.
+    /// Unit: none — an opcode in this service's space, not a virtio request
+    /// type.
+    pub const ZONE_REPORT: u8 = 7;
+
     /// Is this an opcode this service implements?
     ///
     /// The negative answer is the one that matters: everything else is refused
     /// with `ARGUMENT/UNKNOWN_OPCODE` rather than being read as the nearest
     /// thing, which is R04 at the one place a client's mistake would otherwise
     /// become a transfer.
+    ///
+    /// The five RFC 0060 fixed are *not* in this list yet, and that is the
+    /// point of them landing before their behaviour: a client that asks for a
+    /// barrier this build cannot honour is told so, rather than being answered
+    /// by whatever an unimplemented arm would have done. `E2-B02` adds them
+    /// here in the same change that answers them.
     #[must_use]
     pub const fn known(value: u8) -> bool {
         matches!(value, READ | WRITE)
@@ -860,6 +967,41 @@ mod tests {
             envelope(&Sqe::ZERO),
             Err((error::pack(error::ARGUMENT, error::argument::UNKNOWN_OPCODE), 0))
         );
+    }
+
+    #[test]
+    fn the_five_rfc_0060_fixed_are_numbered_and_not_yet_answered() {
+        // The step this test exists for: RFC 0060 fixed five numbers before the
+        // behaviour, because a number two peers read is cheap to change while
+        // one peer reads it. Until `E2-B02` answers them, a client asking for a
+        // barrier this build cannot honour must be *told* so — the alternative
+        // is a publish that believes it was made durable by a driver that
+        // dropped the request.
+        //
+        // This assertion goes red the day `known` is widened, which is the
+        // intent: widening it is a decision, and it should cost a line here
+        // rather than happening as a side effect.
+        let fixed = [op::FLUSH, op::ZONE_APPEND, op::ZONE_FINISH, op::ZONE_RESET, op::ZONE_REPORT];
+        for asked in fixed {
+            assert!(!op::known(asked), "{asked} is fixed as a number and answered by nothing yet");
+            let mut entry = Sqe::ZERO;
+            entry.opcode = asked;
+            assert_eq!(
+                envelope(&entry),
+                Err((
+                    error::pack(error::ARGUMENT, error::argument::UNKNOWN_OPCODE),
+                    u64::from(asked)
+                ))
+            );
+        }
+
+        // And they are this service's numbers, not virtio's. `FLUSH` is 3 here
+        // and `VIRTIO_BLK_T_FLUSH` is 4; a build that had started handing a ring
+        // opcode straight to the device is caught by arithmetic rather than by
+        // luck, and this is where the arithmetic is written down.
+        assert_eq!((op::READ, op::WRITE), (1, 2), "the two answered opcodes are unmoved");
+        assert_eq!(op::FLUSH, op::WRITE + 1, "the space stays dense: zero still names nothing");
+        assert!(!opcode::is_registration(op::ZONE_REPORT), "and none of them is a registration");
     }
 
     #[test]
