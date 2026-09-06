@@ -11,5 +11,18 @@ f-abi.workspace = true
 f-env.workspace = true
 f-ring.workspace = true
 
+# Claim 0017's workload, `bench/src/bin/rechunk.rs`, drives the two object kinds
+# through the code that ships rather than through a model of it. A benchmark
+# that reimplemented the chunker or the copy-on-write unit would be a second
+# implementation nobody checks against the first, and the number it published
+# would be about that one.
+f-blob.workspace = true
+
+# And the same rule one level down: the chunked kind's re-hash cost is bytes fed
+# to the hash the store actually uses, so the workload feeds them to that hash.
+# Counting them without hashing them would report an arithmetic rather than a
+# measurement.
+f-hash.workspace = true
+
 [lints]
 workspace = true

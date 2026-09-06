@@ -550,17 +550,30 @@ pub mod refusal {
 /// [`kind::known`] is the one answer, and it is `false` for zero — a zeroed
 /// block must never decode as a blob.
 pub mod kind {
-    /// A run of bytes the chunker cut. Named by SHA-256 over exactly those
-    /// bytes and by nothing else, which is what makes two objects sharing a run
-    /// share its storage.
+    /// A run of bytes named by SHA-256 over exactly those bytes and by nothing
+    /// else, which is what makes two objects sharing a run share its storage.
+    ///
+    /// **Two producers cut these, and that is deliberate.** The chunker cuts
+    /// them at boundaries the content chose; `f_blob::extent` cuts them at
+    /// fixed `EXTENT_BYTES` offsets, and RFC 0058 forecloses a fifth kind for
+    /// the second — *adding a fifth blob kind is a diff to `abi/` and an RFC by
+    /// rule*. Nothing downstream needs to tell them apart: a chunk is its bytes,
+    /// the parent record says how the bytes are arranged, and a piece that
+    /// happens to be byte-identical to a chunk is one record rather than two,
+    /// which is deduplication rather than a collision. What a *piece* has that
+    /// a chunk does not is its position in [`super::ExtentHead`]'s list, and
+    /// that is the parent's fact, not this one's.
     pub const CHUNK: u16 = 1;
     /// An [`super::ObjectHead`] and its ordered chunk hashes: what makes an
     /// object one hash rather than a list somebody has to keep together.
     pub const OBJECT: u16 = 2;
-    /// `E2-B09`'s second object kind — `EXTENT_BYTES` pieces, replaced one at a
-    /// time rather than re-chunked. The number is fixed now so that the kind
-    /// space is decided in one commit rather than extended by whichever commit
-    /// first needs it. Nothing writes one yet. RFC 0058.
+    /// The second object kind — a [`super::ExtentHead`] and its ordered piece
+    /// hashes, where a piece is a fixed `EXTENT_BYTES` offset rather than a
+    /// boundary the content chose, and a write replaces whole pieces rather
+    /// than re-chunking a region. The number was fixed before anything wrote
+    /// one, so that the kind space was decided in one commit rather than
+    /// extended by whichever commit first needed it; `f_blob::extent` is the
+    /// writer, and `E2-B09` is where it arrived. RFC 0058.
     pub const EXTENT: u16 = 3;
     /// A stored generation tree: the bytes `f-generation` folded, kept as a
     /// blob so that a root's children resolve through the same read path as
@@ -901,6 +914,116 @@ impl ObjectHead {
     }
 }
 
+/// How many piece hashes one extent may name.
+///
+/// A bound for [`CHUNKS_MAX`]'s reason, with different arithmetic behind it:
+/// the count is a length field a peer wrote, and a decoder with no bound
+/// allocates whatever the device asks it to. A million pieces at RFC 0058's
+/// `EXTENT_BYTES` = 1 MiB is an extent of one tebibyte, far past anything this
+/// system keeps in one mutable object, and the piece list at that size is
+/// 32 MiB — well past the one block RFC 0058's granularity argument was drawn
+/// around. An extent larger than that wants a coarser piece or a second level
+/// of indirection, and RFC 0058's third reversal condition is where that is
+/// decided; it is not a constant edited here.
+/// Unit: count of piece hashes.
+pub const PIECES_MAX: usize = 1 << 20;
+
+/// The head of an extent blob: how long the extent is, and how many
+/// fixed-offset pieces follow.
+///
+/// # Why this is a second head and not [`ObjectHead`] under a different kind
+///
+/// Because the two counts mean different things and a reader has to be able to
+/// tell which one it is holding. An object's children are boundaries the
+/// *content* chose, so `chunks` is a fact about the bytes; an extent's children
+/// are fixed-offset pieces, so `pieces` is `ceil(extent_bytes / EXTENT_BYTES)`
+/// and is a fact about the writer's granularity. One type would make those
+/// indistinguishable at the point a decoder has the least else to go on, and
+/// RFC 0058's decision is precisely that these are two kinds rather than one
+/// shape covering both badly. The two encodings are the same width on purpose:
+/// nothing is bought by making them differ, and a reader comparing them should
+/// find that what differs is the meaning.
+///
+/// # Why `EXTENT_BYTES` is not a field here
+///
+/// RFC 0058: the piece size is recoverable from the data. Every piece but the
+/// last is exactly `EXTENT_BYTES`, and a piece is a blob whose [`Header`]
+/// carries `content_bytes`, so a reader recovers the granularity from piece 0
+/// rather than from a record field or a compiled-in constant. That is what lets
+/// extents written at two granularities coexist and stay readable, which is
+/// what makes RFC 0058's granularity reversal cheap. The constant is a
+/// *writer's* constant and lives in `f_blob::extent`: not in this crate, and
+/// not on the device beside the chunker's parameters, which are there because
+/// they decide every object hash and a mount must refuse a device that
+/// disagrees.
+///
+/// It carries no magic of its own, for [`ObjectHead`]'s reason: it is never
+/// found on its own, and by the time these twelve bytes are read the blob's
+/// content hash has been verified against the name the caller asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExtentHead {
+    /// The extent's logical size — the bytes its pieces reconstruct.
+    /// Unit: bytes.
+    pub extent_bytes: u64,
+    /// How many piece hashes follow this head, in order.
+    /// Unit: count of piece hashes, at most [`PIECES_MAX`].
+    pub pieces: u32,
+}
+
+impl ExtentHead {
+    /// The encoded width of an extent's head, before the hashes that follow.
+    /// Unit: bytes.
+    pub const HEAD_BYTES: usize = 12;
+
+    /// The encoded width of the whole extent blob's content: the head and the
+    /// hashes after it.
+    ///
+    /// This is the number RFC 0058's granularity argument turns on — 128 pieces
+    /// of 1 MiB is a 128 MiB extent whose list is 4096 bytes, exactly one 4 KiB
+    /// block — so it is a method rather than a paragraph, and the arithmetic is
+    /// checkable against the encoder that produces it.
+    /// Unit: bytes.
+    #[must_use]
+    pub const fn bytes(&self) -> usize {
+        Self::HEAD_BYTES + self.pieces as usize * 32
+    }
+
+    /// Encode the head. The hashes are appended by the caller.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; ExtentHead::HEAD_BYTES] {
+        let mut out = [0u8; ExtentHead::HEAD_BYTES];
+        out[0..8].copy_from_slice(&self.extent_bytes.to_le_bytes());
+        out[8..12].copy_from_slice(&self.pieces.to_le_bytes());
+        out
+    }
+
+    /// Decode the head, refusing before either number is handed back.
+    ///
+    /// The contradiction refused is [`ObjectHead`]'s: an extent of no bytes
+    /// made of some pieces, or an extent of some bytes made of none. What is
+    /// deliberately *not* refused is a count that disagrees with a granularity,
+    /// because this crate does not know the granularity and RFC 0058 says it
+    /// must not — a decoder with `EXTENT_BYTES` compiled into it would refuse
+    /// every extent written at a different one, which is exactly the
+    /// coexistence that decision bought.
+    ///
+    /// # Errors
+    ///
+    /// [`refusal::UNKNOWN`] for a count past [`PIECES_MAX`];
+    /// [`refusal::MALFORMED`] for a head whose two numbers contradict.
+    pub fn from_bytes(raw: &[u8; ExtentHead::HEAD_BYTES]) -> Result<Self, i32> {
+        let extent_bytes = long(raw, 0);
+        let pieces = word(raw, 8);
+        if pieces as usize > PIECES_MAX {
+            return Err(refusal::UNKNOWN);
+        }
+        if (extent_bytes == 0) != (pieces == 0) {
+            return Err(refusal::MALFORMED);
+        }
+        Ok(Self { extent_bytes, pieces })
+    }
+}
+
 /// One publish, appended to a root zone.
 ///
 /// # Why the check field is not decoration
@@ -1074,6 +1197,19 @@ fn digest(raw: &[u8], at: usize) -> [u8; 32] {
 const _: () = assert!(Superblock::BYTES == 4 + 4 + 4 * 9 + 8 * 3);
 const _: () = assert!(Header::BYTES == 4 + 4 + 2 + 2 + 8 + 32);
 const _: () = assert!(ObjectHead::HEAD_BYTES == 8 + 4);
+const _: () = assert!(ExtentHead::HEAD_BYTES == 8 + 4);
+// RFC 0058's granularity argument, asserted against the encoder rather than
+// left in the entry's prose: the *hash list* of a 128 MiB extent at
+// `EXTENT_BYTES` = 1 MiB is 128 x 32 = 4096 bytes, exactly one 4 KiB block, and
+// that coincidence is the whole reason the granularity is 1 MiB and not 256 KiB
+// or 4 MiB. The record is the head on top of that, so 4108 — the entry's number
+// is the list and not the record, and the twelve bytes push the record over a
+// block boundary. That is stated here rather than rounded away: it costs one
+// extra block per snapshot at that size and it does not move the argument,
+// which is about how the list scales against the copy. These lines go red if
+// the head widens or a hash stops being 32 bytes, which are the two ways the
+// argument could quietly stop holding.
+const _: () = assert!(ExtentHead { extent_bytes: 128 << 20, pieces: 128 }.bytes() == 12 + 4096);
 const _: () = assert!(RootRecord::CHECKED_BYTES == 4 + 4 + 8 + 32 * 4);
 const _: () = assert!(RootRecord::BYTES == RootRecord::CHECKED_BYTES + 32);
 // And no record is wider than the smallest block a device is likely to offer,
@@ -1321,6 +1457,44 @@ mod tests {
 
         let past_bound = ObjectHead { object_bytes: 1, chunks: CHUNKS_MAX as u32 + 1 }.to_bytes();
         assert_eq!(ObjectHead::from_bytes(&past_bound), Err(refusal::UNKNOWN));
+    }
+
+    /// The extent head's twin of the test above, and the two are kept side by
+    /// side rather than folded into one parameterised test for the reason the
+    /// types are two types: what a reader has to be able to check is that a
+    /// twelve-byte head decoded as the wrong one of these would be a different
+    /// *meaning* with the same bytes, and a shared test would be the place that
+    /// stopped being visible.
+    #[test]
+    fn an_extent_head_round_trips_and_refuses_a_contradiction() {
+        let head = ExtentHead { extent_bytes: 8 * 1_048_576, pieces: 8 };
+        let raw = head.to_bytes();
+        assert_eq!(&raw[0..8], &[0, 0, 0x80, 0, 0, 0, 0, 0], "extent_bytes = 8 MiB");
+        assert_eq!(&raw[8..12], &[8, 0, 0, 0], "pieces");
+        assert_eq!(ExtentHead::from_bytes(&raw), Ok(head));
+        assert_eq!(head.bytes(), ExtentHead::HEAD_BYTES + 8 * 32);
+
+        let empty = ExtentHead { extent_bytes: 0, pieces: 0 };
+        assert_eq!(ExtentHead::from_bytes(&empty.to_bytes()), Ok(empty));
+
+        let bytes_without_pieces = ExtentHead { extent_bytes: 4096, pieces: 0 }.to_bytes();
+        assert_eq!(ExtentHead::from_bytes(&bytes_without_pieces), Err(refusal::MALFORMED));
+
+        let pieces_without_bytes = ExtentHead { extent_bytes: 0, pieces: 3 }.to_bytes();
+        assert_eq!(ExtentHead::from_bytes(&pieces_without_bytes), Err(refusal::MALFORMED));
+
+        let past_bound = ExtentHead { extent_bytes: 1, pieces: PIECES_MAX as u32 + 1 }.to_bytes();
+        assert_eq!(ExtentHead::from_bytes(&past_bound), Err(refusal::UNKNOWN));
+
+        // A count that disagrees with *a* granularity is accepted, and this is
+        // the assertion that says so rather than a comment claiming it: one
+        // piece for eight megabytes is what an extent written at
+        // `EXTENT_BYTES` = 8 MiB looks like, and RFC 0058 requires this crate to
+        // read it. A decoder that refused here would refuse every extent
+        // written at a granularity other than the one it was compiled with,
+        // which is exactly the coexistence that entry bought.
+        let coarser = ExtentHead { extent_bytes: 8 * 1_048_576, pieces: 1 };
+        assert_eq!(ExtentHead::from_bytes(&coarser.to_bytes()), Ok(coarser));
     }
 
     /// The check is a digest this crate cannot compute, so the tests here
