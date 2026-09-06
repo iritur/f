@@ -72,7 +72,7 @@ imported driver's manifest lives in `user/` and its `image` points into
 
 | field | type | required | what it is |
 | --- | --- | --- | --- |
-| `schema` | integer | yes | The schema this file is written to. Must be `1`. A later value is refused: a reader that guesses at fields it was not written for is two readers. |
+| `schema` | integer | yes | The schema this file is written to. Must be `2`. A later value is refused: a reader that guesses at fields it was not written for is two readers. |
 | `name` | string | yes | The component's name in the topology: `[a-z0-9-]`, at most 32 bytes, no edge hyphen. Unique across the tree — `lint-manifests` refuses two manifests with one name, because `sibling:` references and the topology name a component by it. |
 | `image` | string | yes | Where the image comes from. Either a tree-relative path to the crate that builds it — forward slashes, no `.`/`..`/empty segment, not under `target/` — or `sha256:` and sixty-four lower-case hex digits for bytes the tree does not build. |
 | `domain` | string | yes | RFC 0005's kind: `shared`, `private` or `hostile`. No default, and none of the working names other documents used (`trusted`, `confined`) is accepted — the RFC's spelling is the only spelling. |
@@ -241,6 +241,45 @@ and admission records which; a manifest that stated a bandwidth demand would be
 stating it in units no two machines share. When a workload arrives that needs to
 declare one, that is schema 2 and the field name will carry its unit.
 
+## `[transfer]` — what a component declares about being updated in place
+
+Required. RFC 0063, and it is required for the reason `[restart]` is: a manifest
+that says nothing has not chosen `restart_only`, it has left the choice to
+whoever reads it next, and a place refilled from a newer manifest is exactly
+where two readers disagreeing costs a client.
+
+| field | type | required | what it is |
+| --- | --- | --- | --- |
+| `mode` | string | yes | `restart_only` or `in_place`. |
+| `schema` | integer | iff `in_place` | The state-record schema this build writes and reads, at least 1. The *component's* ordinal, not this file's: it is compared only against another build of the same component, and two components that both write `1` have said nothing to each other. Unit: none — a state-record schema ordinal. |
+| `record_bytes` | integer | iff `in_place` | The fixed width of one state record, a positive multiple of 8 — the window is records laid end to end and read in place, so a width that is not puts every other record on an odd boundary. Unit: bytes. |
+| `records_max` | integer | iff `in_place` | The most records this component will hand over. A bound and not a count: what crosses is however many the outgoing instance writes, up to this. Unit: count of records. |
+
+Under `restart_only` the three quantities are refused rather than ignored, for
+the same reason a backoff under `policy = "never"` is: a reader who sees a record
+width will believe there is one.
+
+`record_bytes * records_max` is the transfer window, and it may not exceed
+`[reservation] memory_bytes`. RFC 0063 buys the window out of the **incoming**
+instance's own `Untyped` account — so that a transfer is paid for by something
+revocable and never by the frame, which is what RFC 0008 rests a component's
+whole footprint on — and a window larger than the account is a swap admission
+could never grant. Refused here rather than at the swap, where a client's
+submissions are already being held.
+
+What the frame does **not** know is what a record means. It knows how wide one
+is and how many there can be, because those two size the window somebody has to
+pay for; the only reader of a state record is another build of the same
+component, and `schema` is what makes those two builds agree.
+
+There is no third mode meaning *transferable only from a named quiescent point*,
+and its absence is a decision. RFC 0018's cursors say the rings are empty; they
+cannot say the occupant is empty, because a driver holds work it has accepted
+and not answered and a request inside a device is behind both cursors. So every
+in-place transfer waits for a point the occupant asserts, which is what
+`in_place` already means — and the mode a third value would leave behind, a
+cursors-only transfer, is one no component in this tree can correctly use.
+
 ## What is refused, collected
 
 For a reviewer, in one place:
@@ -249,8 +288,9 @@ For a reviewer, in one place:
 - Any syntax outside the subset: escapes, multi-line strings, inline tables,
   dotted or quoted keys, signed numbers, a list that does not close on its line.
 - A key or table appearing twice.
-- A `schema` other than 1.
-- A missing `name`, `image`, `domain`, `[restart]` or `[reservation]`.
+- A `schema` other than 2.
+- A missing `name`, `image`, `domain`, `[restart]`, `[reservation]` or
+  `[transfer]`.
 - A field this document does not list, anywhere.
 - A `domain`, `type`, right, feature, `from`, `role`, `payload`, `policy` or
   `class` outside its table.
@@ -269,6 +309,9 @@ For a reviewer, in one place:
   zero restarts; a zero window, or one below the longest backoff.
 - CPU fields in the soft class; memory not in the class's grain; a budget above
   the period; zero cores.
+- Transfer quantities under `restart_only`; a zero state-record schema; a
+  `record_bytes` that is not a positive multiple of 8; zero `records_max`; a
+  window larger than the account that buys it.
 - Two manifests with one `name`; an image path that names a file.
 
 Two things are stated as *not* refused, because a reader will otherwise assume
@@ -311,6 +354,12 @@ Named so the tasks that own them are not surprised.
   than sixteen routed capabilities, or a variable-length field the record cannot
   carry, the bound moves *with* E1-B13's growable table and a stated cost, not
   quietly.
+- **The unused transfer mode.** The mirror of the row below. If by the end of
+  E2 every manifest says `restart_only` except the one `E2-P08` swaps, the
+  two-way enum is a field with one user, and the question to ask is whether
+  `in_place` is a property of components or a property of one driver. RFC 0051's
+  argument — a second driver is what says the shape is a shape — is the one that
+  answers it, and `user/virtio-gpu` is the second driver.
 - **The unused policy.** If by gate G1 every manifest in the tree says
   `on_fault` and none says `always` or `never`, the three-way enum is a
   preference wearing a decision's clothes and should collapse to two — the same

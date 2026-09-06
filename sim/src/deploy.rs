@@ -61,7 +61,7 @@ pub const EXTENSION: &str = "fc";
 
 /// The largest component file this reader will hold. Unit: bytes.
 ///
-/// A record is 2 216 bytes and the frame reserves
+/// A record is 2 232 bytes and the frame reserves
 /// `kernel::process::TEXT_PAGES` — sixteen — for a component's text, so a
 /// component file is at most 67 752 and this is the next power of two above it.
 /// It is a bound on a *buffer whose alignment is part of its type*, which is the
@@ -531,6 +531,7 @@ pub(crate) mod fixture {
         FRAME_BYTES, NO_CAPABILITY, Need, Record, Ring, class, domain, encode, name_bytes, payload,
         protocol_bytes, restart, role, route,
     };
+    use f_abi::transfer::Declaration;
 
     /// A well-formed record: one untyped need, one server ring, soft class,
     /// restarted on a fault.
@@ -542,6 +543,10 @@ pub(crate) mod fixture {
         record.restart = restart::ON_FAULT;
         record.class = class::SOFT;
         record.memory_bytes = 16 * FRAME_BYTES;
+        // The honest declaration, which is what a fixture not testing RFC
+        // 0063's field should carry: this fixture holds no state a second
+        // instance would be poorer without.
+        record.transfer = Declaration::RESTART_ONLY;
         record.backoff_first_ticks = 8;
         record.backoff_max_ticks = 64;
         record.max_restarts = 3;

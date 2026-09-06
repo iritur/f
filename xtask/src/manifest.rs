@@ -52,7 +52,12 @@ use std::path::{Path, PathBuf};
 /// carry. A manifest written to a later schema is refused rather than read
 /// approximately; a reader that guesses at fields it was not written for is
 /// two readers with different beliefs about one file.
-pub const SCHEMA: u64 = 1;
+///
+/// Two since RFC 0063, which added the required `[transfer]` table. A schema-1
+/// manifest is silent about whether its component can be updated in place, and
+/// reading that silence as `restart_only` would be a component acquiring a
+/// property nobody chose — so it is refused and edited, not defaulted.
+pub const SCHEMA: u64 = 2;
 
 /// The longest component, capability or ring name, in bytes. Names are
 /// `[a-z0-9-]`, so bytes are characters. Thirty-two is what a fixed-layout
@@ -127,6 +132,21 @@ pub const RESTART_POLICIES: &[&str] = &["never", "on_fault", "always"];
 
 /// RFC 0007's two classes.
 pub const CLASSES: &[&str] = &["soft", "hard"];
+
+/// What a component declares about being updated in place. `abi::transfer::
+/// mode`, one word per wire value, in wire order.
+///
+/// Two and not three. RFC 0063 refuses a third value meaning *transferable only
+/// from a named quiescent point*, because that is what `in_place` already
+/// means: RFC 0018's cursors show the rings empty and cannot show the occupant
+/// empty, so every in-place transfer waits for a point the occupant asserts.
+pub const TRANSFER_MODES: &[&str] = &["restart_only", "in_place"];
+
+/// The alignment one state record is required to have, in bytes. The window is
+/// records laid end to end and read in place, so a width that is not a multiple
+/// of this puts every other record on an odd boundary. `abi::transfer::
+/// RECORD_ALIGN`.
+pub const RECORD_ALIGN: u64 = 8;
 
 /// How a data ring's payload reaches the peer. `inline` is in the entry;
 /// `registered` is a registered buffer set (`ring-scene-boot` section 04, the
@@ -293,13 +313,18 @@ pub fn check(rel: &str, text: &str) -> Result<Manifest, Vec<String>> {
 /// boot that goes red naming the field, not a component carrying a wrong number.
 mod record {
     /// Bytes in a whole record.
-    pub const BYTES: usize = 2216;
+    pub const BYTES: usize = 2232;
     /// Bytes in one `[[capability]]` slot.
     pub const NEED: usize = 80;
     /// Bytes in one `[[ring]]` slot.
     pub const RING: usize = 104;
+    /// Bytes in the `[transfer]` declaration — `abi::transfer::Declaration`.
+    pub const TRANSFER: usize = 16;
+    /// The first byte of the transfer declaration, which is where the fixed
+    /// head of the record ends.
+    pub const TRANSFER_AT: usize = 104;
     /// The first byte of the capability array.
-    pub const CAPS_AT: usize = 104;
+    pub const CAPS_AT: usize = TRANSFER_AT + TRANSFER;
     /// The first byte of the ring array.
     pub const RINGS_AT: usize = CAPS_AT + super::CAPABILITIES_MAX * NEED;
     /// `abi::manifest::MAGIC`.
@@ -387,6 +412,26 @@ pub fn compile(rel: &str, text: &str, image: &[u8]) -> Result<Vec<u8>, Vec<Strin
         put32(&mut out, 60, narrow(reservation.map_or(0, |table| int(table, "cores"))));
         put64(&mut out, 16, reservation.map_or(0, |table| int(table, "cpu_period_ns")));
         put64(&mut out, 24, reservation.map_or(0, |table| int(table, "cpu_budget_ns")));
+    }
+
+    // `[transfer]`. RFC 0063. Under `restart_only` the three quantities are
+    // absent and the record carries zero for each, which is the same refusal
+    // seen from the other side: `Record::read` refuses a non-zero one there.
+    let transfer = doc.tables.get("transfer").map(|(_, table)| table);
+    let mode = transfer.map_or_else(String::new, |table| string(table, "mode"));
+    put8(&mut out, record::TRANSFER_AT + 12, index_of(TRANSFER_MODES, &mode));
+    if mode == "in_place" {
+        put32(&mut out, record::TRANSFER_AT, narrow(transfer.map_or(0, |t| int(t, "schema"))));
+        put32(
+            &mut out,
+            record::TRANSFER_AT + 4,
+            narrow(transfer.map_or(0, |t| int(t, "record_bytes"))),
+        );
+        put32(
+            &mut out,
+            record::TRANSFER_AT + 8,
+            narrow(transfer.map_or(0, |t| int(t, "records_max"))),
+        );
     }
 
     // `[[capability]]`, in file order — which is the order the supervisor's
@@ -1297,15 +1342,22 @@ impl Checker<'_> {
             }
         };
 
-        // Reservation.
-        match tables.remove("reservation") {
-            None => self.note(1, "no `[reservation]` table; admission control refuses what was not declared — RFC 0007, E1-B07"),
+        // Reservation. The account it declares is carried past this block
+        // because `[transfer]` is arithmetic against it: RFC 0063 buys the
+        // transfer window out of the component's own `Untyped`, so a window
+        // larger than the account is a swap admission could never grant.
+        let declared_memory = match tables.remove("reservation") {
+            None => {
+                self.note(1, "no `[reservation]` table; admission control refuses what was not declared — RFC 0007, E1-B07");
+                None
+            }
             Some((line, table)) => {
                 let mut f = self.fields("[reservation]".into(), line, table);
                 let class = f.one_of("class", CLASSES).map(|(_, c)| c);
                 let memory = f.int("memory_bytes", true);
                 if let Some((line, bytes)) = memory {
-                    let grain = if class.as_deref() == Some("hard") { HUGE_BYTES } else { FRAME_BYTES };
+                    let grain =
+                        if class.as_deref() == Some("hard") { HUGE_BYTES } else { FRAME_BYTES };
                     if bytes == 0 || bytes % grain != 0 {
                         f.refuse(line, &format!("`memory_bytes = {bytes}` is not a positive multiple of {grain}; the {} class is granted in that grain", class.as_deref().unwrap_or("declared")));
                     }
@@ -1315,19 +1367,27 @@ impl Checker<'_> {
                         if let Some((line, cores)) = f.int("cores", true)
                             && cores == 0
                         {
-                                f.refuse(line, "`cores = 0` reserves no core, and the hard class holds whole physical cores — RFC 0007");
+                            f.refuse(line, "`cores = 0` reserves no core, and the hard class holds whole physical cores — RFC 0007");
                         }
                         let period = f.int("cpu_period_ns", true);
                         let budget = f.int("cpu_budget_ns", true);
                         if let Some((line, p)) = period
                             && p == 0
                         {
-                                f.refuse(line, "`cpu_period_ns = 0`; a period is what admission tests against");
+                            f.refuse(
+                                line,
+                                "`cpu_period_ns = 0`; a period is what admission tests against",
+                            );
                         }
                         if let (Some((_, p)), Some((line, b))) = (period, budget)
                             && (b == 0 || b > p)
                         {
-                                f.refuse(line, &format!("`cpu_budget_ns = {b}` is not between 1 and the period {p}"));
+                            f.refuse(
+                                line,
+                                &format!(
+                                    "`cpu_budget_ns = {b}` is not between 1 and the period {p}"
+                                ),
+                            );
                         }
                     }
                     Some(_) => {
@@ -1335,6 +1395,71 @@ impl Checker<'_> {
                         f.forbid("cores", why);
                         f.forbid("cpu_period_ns", why);
                         f.forbid("cpu_budget_ns", why);
+                    }
+                    None => {}
+                }
+                f.finish();
+                memory.map(|(_, bytes)| bytes)
+            }
+        };
+
+        // Transfer. RFC 0063: what this component declares about being updated
+        // in place, and what it declares when it cannot.
+        //
+        // Required, for the reason `[restart]` is required one table up: a
+        // manifest that says nothing has not chosen `restart_only`, it has left
+        // the decision to whoever reads it next, and a place refilled from a
+        // newer manifest is exactly where two readers disagreeing is expensive.
+        match tables.remove("transfer") {
+            None => self.note(1, "no `[transfer]` table; whether a component can be updated in place is declared, never assumed — RFC 0063. `mode = \"restart_only\"` is the honest answer and costs one line"),
+            Some((line, table)) => {
+                let mut f = self.fields("[transfer]".into(), line, table);
+                let mode = f.one_of("mode", TRANSFER_MODES).map(|(_, m)| m);
+                match mode.as_deref() {
+                    Some("in_place") => {
+                        // The state-record schema is the component's own
+                        // ordinal, compared only against another build of the
+                        // same component. Zero would be a build that declares
+                        // it can be transferred and names no agreement to
+                        // transfer under.
+                        if let Some((line, schema)) = f.int("schema", true)
+                            && schema == 0
+                        {
+                            f.refuse(line, "`schema = 0` names no agreement between two builds of this component; a state-record schema counts from one");
+                        }
+                        let width = f.int("record_bytes", true);
+                        if let Some((line, bytes)) = width
+                            && (bytes == 0 || !bytes.is_multiple_of(RECORD_ALIGN))
+                        {
+                            f.refuse(line, &format!("`record_bytes = {bytes}` is not a positive multiple of {RECORD_ALIGN}; the window is records laid end to end and read in place"));
+                        }
+                        let count = f.int("records_max", true);
+                        if let Some((line, records)) = count
+                            && records == 0
+                        {
+                            f.refuse(line, "`records_max = 0` hands nothing over, which is `mode = \"restart_only\"` under another name; say that instead");
+                        }
+                        // The window is bought out of this component's own
+                        // `Untyped` account — RFC 0063, so that a transfer is
+                        // paid for by something revocable and never by the
+                        // frame. A window larger than the account is a swap no
+                        // admission can grant, and it is refused here rather
+                        // than at the swap, where a client's submissions are
+                        // already held.
+                        if let (Some((_, bytes)), Some((line, records))) = (width, count) {
+                            let window = bytes.saturating_mul(records);
+                            if let Some(account) = declared_memory
+                                && window > account
+                            {
+                                f.refuse(line, &format!("`record_bytes * records_max = {window}` is more than `[reservation] memory_bytes = {account}`; the transfer window is bought out of this component's own account, so a swap this large can never be admitted"));
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        let why = "`mode = \"restart_only\"` hands nothing over, so a schema, a width or a bound would be read and never applied";
+                        f.forbid("schema", why);
+                        f.forbid("record_bytes", why);
+                        f.forbid("records_max", why);
                     }
                     None => {}
                 }
@@ -1413,7 +1538,7 @@ mod tests {
     /// test can break a single line of it.
     const SOUND: &str = "\
 # SPDX-License-Identifier: Apache-2.0 OR MIT
-schema = 1
+schema = 2
 name   = \"example\"
 image  = \"user/example\"
 domain = \"shared\"
@@ -1447,6 +1572,9 @@ policy = \"never\"
 [reservation]
 class        = \"soft\"
 memory_bytes = 65536
+
+[transfer]
+mode = \"restart_only\"
 ";
 
     fn findings(text: &str) -> Vec<String> {
@@ -1515,7 +1643,7 @@ memory_bytes = 65536
 
     #[test]
     fn a_later_schema_is_refused() {
-        refused_for(&edit("schema = 1", "schema = 2"), "knows schema 1");
+        refused_for(&edit("schema = 2", "schema = 3"), "knows schema 2");
     }
 
     #[test]
@@ -1813,12 +1941,61 @@ memory_bytes = 65536
         check("user/example/manifest.toml", &hard).unwrap_or_else(|f| panic!("{}", f.join("\n")));
     }
 
+    /// RFC 0063's table, refused the way `[restart]` is: the mode is closed,
+    /// the three quantities belong to one mode only, and the window is
+    /// arithmetic against the account that buys it.
+    #[test]
+    fn a_transfer_is_declared_and_its_fields_match_its_mode() {
+        refused_for(&edit("\n[transfer]\nmode = \"restart_only\"\n", ""), "no `[transfer]`");
+        refused_for(&edit("mode = \"restart_only\"", "mode = \"in_place_sometimes\""), "one of");
+        // The three quantities mean nothing when nothing is handed over.
+        refused_for(
+            &edit("mode = \"restart_only\"", "mode = \"restart_only\"\nrecord_bytes = 32"),
+            "read and never applied",
+        );
+        // And they are required when something is.
+        for missing in ["schema = 1\n", "record_bytes = 32\n", "records_max = 16\n"] {
+            let full = in_place("schema = 1\nrecord_bytes = 32\nrecords_max = 16\n");
+            refused_for(&full.replacen(missing, "", 1), "is required");
+        }
+        refused_for(
+            &in_place("schema = 0\nrecord_bytes = 32\nrecords_max = 16\n"),
+            "names no agreement",
+        );
+        refused_for(
+            &in_place("schema = 1\nrecord_bytes = 12\nrecords_max = 16\n"),
+            "not a positive multiple of 8",
+        );
+        refused_for(
+            &in_place("schema = 1\nrecord_bytes = 32\nrecords_max = 0\n"),
+            "under another name",
+        );
+        // `SOUND` declares a 65 536-byte account, so 4096 records of 32 bytes
+        // is a window it cannot hold — refused here rather than at the swap,
+        // where a client's submissions are already being held.
+        refused_for(
+            &in_place("schema = 1\nrecord_bytes = 32\nrecords_max = 4096\n"),
+            "bought out of this component's own account",
+        );
+        check(
+            "user/example/manifest.toml",
+            &in_place("schema = 1\nrecord_bytes = 32\nrecords_max = 16\n"),
+        )
+        .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+    }
+
+    /// [`SOUND`] with its `[transfer]` table replaced by an `in_place` one
+    /// carrying `fields`.
+    fn in_place(fields: &str) -> String {
+        edit("mode = \"restart_only\"\n", &format!("mode = \"in_place\"\n{fields}"))
+    }
+
     #[test]
     fn the_syntax_is_the_subset_and_nothing_else() {
         refused_for(&edit("name   = \"example\"", "name   = \"\"\"example\"\"\""), "no quote");
         refused_for(&edit("name   = \"example\"", "name   = \"ex\\nample\""), "backslash");
-        refused_for(&edit("schema = 1", "schema = -1"), "signed");
-        refused_for(&edit("schema = 1", "schema = 1\nschema = 1"), "appears twice");
+        refused_for(&edit("schema = 2", "schema = -1"), "signed");
+        refused_for(&edit("schema = 2", "schema = 2\nschema = 2"), "appears twice");
         refused_for(&edit("[restart]", "[restart]\n[restart]"), "appears twice");
         refused_for(
             &edit("memory_bytes = 65536", "memory_bytes = { min = 65536 }"),
@@ -1830,7 +2007,7 @@ memory_bytes = 65536
             "same line",
         );
         refused_for(&edit("memory_bytes = 65536", "memory_bytes = 65_536_"), "between digits");
-        refused_for(&edit("schema = 1", "just some words"), "`key = value`");
+        refused_for(&edit("schema = 2", "just some words"), "`key = value`");
         // Underscores between digits are TOML and are read.
         let m = check(
             "user/example/manifest.toml",
@@ -1849,7 +2026,7 @@ memory_bytes = 65536
     fn a_syntax_error_stops_before_the_fields_are_judged() {
         // Otherwise a file with one broken line reports every field after it
         // as missing, which is noise wearing a finding's clothes.
-        let f = findings(&edit("schema = 1", "schema = 1\n[[capability"));
+        let f = findings(&edit("schema = 2", "schema = 2\n[[capability"));
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].contains("array header"));
     }
@@ -1860,7 +2037,7 @@ memory_bytes = 65536
         // it has empty lists and is complete.
         let text = "\
 # SPDX-License-Identifier: Apache-2.0 OR MIT
-schema = 1
+schema = 2
 name   = \"init\"
 image  = \"user/init\"
 domain = \"shared\"
@@ -1871,6 +2048,9 @@ policy = \"never\"
 [reservation]
 class        = \"soft\"
 memory_bytes = 8192
+
+[transfer]
+mode = \"restart_only\"
 ";
         let m =
             check("user/init/manifest.toml", text).unwrap_or_else(|f| panic!("{}", f.join("\n")));
@@ -1995,6 +2175,59 @@ memory_bytes = 8192
             konst("RINGS_MAX", "usize").parse::<usize>().unwrap(),
             RINGS_MAX,
             "abi::manifest::RINGS_MAX has drifted from this checker's"
+        );
+
+        // The transfer declaration is a second file's assertion, because the
+        // type is `abi/src/transfer.rs`'s and only the field sits in the
+        // record. Its width is what moves `CAPS_AT` and therefore every
+        // capability and every ring the writer stamps, so it is mirrored here
+        // rather than trusted.
+        let transfer =
+            std::fs::read_to_string(root.join("abi/src/transfer.rs")).expect("abi/src/transfer.rs");
+        let declaration = transfer
+            .lines()
+            .find_map(|line| line.split_once("core::mem::size_of::<Declaration>() == "))
+            .and_then(|(_, rest)| rest.trim().trim_end_matches([';', ')']).parse::<usize>().ok())
+            .expect("no size assertion for Declaration in abi/src/transfer.rs");
+        assert_eq!(
+            declaration,
+            record::TRANSFER,
+            "abi::transfer::Declaration has changed size, which moves every offset after it"
+        );
+        // The offsets themselves, not only the sizes. A field inserted before
+        // the arrays can keep the total and move every slot, which is a
+        // component file this writer and the frame's reader disagree about in
+        // a way summing sizes cannot see.
+        let offset = |field: &str| -> usize {
+            let needle = format!("core::mem::offset_of!(Record, {field}) == ");
+            abi.lines()
+                .find_map(|line| line.split_once(&needle))
+                .and_then(|(_, rest)| rest.trim().trim_end_matches([';', ')']).parse().ok())
+                .unwrap_or_else(|| panic!("no offset assertion for {field} in abi/src/manifest.rs"))
+        };
+        assert_eq!(offset("transfer"), record::TRANSFER_AT, "the transfer field has moved");
+        assert_eq!(offset("capability"), record::CAPS_AT, "the capability array has moved");
+        assert_eq!(offset("ring"), record::RINGS_AT, "the ring array has moved");
+        let modes: Vec<&str> = transfer
+            .lines()
+            .filter_map(|line| line.split_once("    pub const "))
+            .filter_map(|(_, rest)| rest.split_once(": u8 = "))
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            modes,
+            TRANSFER_MODES.iter().map(|m| m.to_uppercase()).collect::<Vec<_>>(),
+            "abi::transfer::mode has drifted from this checker's spelling or wire order"
+        );
+        let align = transfer
+            .lines()
+            .find_map(|line| line.split_once("pub const RECORD_ALIGN: u32 = "))
+            .map(|(_, rest)| rest.trim().trim_end_matches(';').replace('_', ""))
+            .expect("no RECORD_ALIGN in abi/src/transfer.rs");
+        assert_eq!(
+            align.parse::<u64>().unwrap(),
+            RECORD_ALIGN,
+            "abi::transfer::RECORD_ALIGN has drifted from this checker's"
         );
     }
 

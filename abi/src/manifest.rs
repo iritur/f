@@ -44,6 +44,7 @@
 
 use crate::cap::{CapType, rights};
 use crate::error;
+use crate::transfer::{Declaration, mode};
 
 /// The first eight bytes of a component file.
 ///
@@ -61,7 +62,16 @@ pub const MAGIC: u64 = 0x465f_4d41_4e00_0001;
 /// a test in `xtask` requires the three to agree. A later schema is refused
 /// rather than read approximately: a reader that guesses at fields it was not
 /// written for is two readers with different beliefs about one component.
-pub const SCHEMA: u32 = 1;
+///
+/// **Two since RFC 0063.** Schema 1 had no [`Record::transfer`], so a schema-1
+/// record says nothing about whether its component can be updated in place —
+/// and reading silence as `restart_only` would be a component acquiring a
+/// property nobody chose, which is the one thing this format refuses. So a
+/// schema-1 component file is refused rather than read approximately, and every
+/// component file in the tree is rebuilt. RFC 0030 priced that cost when it
+/// made a manifest compiled rather than parsed; this is the first change to
+/// pay it.
+pub const SCHEMA: u32 = 2;
 
 /// The longest name, in bytes.
 ///
@@ -496,6 +506,15 @@ pub struct Record {
     /// Unit: none; this is not a quantity and is not expected to become one
     /// without a schema bump.
     pub _reserved: [u8; 3],
+    /// What this component declares about being updated in place, and what it
+    /// declares when it cannot.
+    ///
+    /// Here rather than in a second record, because a swap decides whether it
+    /// is possible by comparing two *manifests* and a manifest that carried
+    /// this somewhere else would be two files naming one component. RFC 0063.
+    /// Unit: none — a [`crate::transfer::Declaration`], every field of which
+    /// states its own.
+    pub transfer: Declaration,
     /// The declared capabilities, in the order the supervisor supplies them and
     /// the order the `granted` notices arrive.
     /// Unit: entries; the first [`Record::capabilities`] are real and the rest
@@ -514,16 +533,26 @@ pub struct Record {
 // cost rather than hiding it.
 const _: () = assert!(core::mem::size_of::<Need>() == 80);
 const _: () = assert!(core::mem::size_of::<Ring>() == 104);
-const _: () = assert!(core::mem::size_of::<Record>() == 2216);
+const _: () = assert!(core::mem::size_of::<Record>() == 2232);
 // No padding anywhere: the sum of the parts is the whole. A padded record has
 // bytes the reader never judges, and an unjudged byte inside a hashed structure
 // is a place two files can differ while claiming to name one component.
 const _: () = assert!(
     core::mem::size_of::<Record>()
         == 104
+            + core::mem::size_of::<Declaration>()
             + CAPABILITIES_MAX * core::mem::size_of::<Need>()
             + RINGS_MAX * core::mem::size_of::<Ring>()
 );
+// And the three offsets `xtask::manifest::record` mirrors, pinned here rather
+// than derived there. The writer stamps fields at literal offsets because
+// `xtask` deliberately does not depend on `f-abi`; a size assertion alone would
+// let a field inserted *before* the arrays keep the total and move every slot,
+// which is a component file the writer and the reader disagree about in a way
+// no test that only sums sizes can see.
+const _: () = assert!(core::mem::offset_of!(Record, transfer) == 104);
+const _: () = assert!(core::mem::offset_of!(Record, capability) == 120);
+const _: () = assert!(core::mem::offset_of!(Record, ring) == 1400);
 
 /// Why a component file was refused.
 ///
@@ -637,6 +666,7 @@ impl Record {
         capabilities: 0,
         rings: 0,
         _reserved: [0; 3],
+        transfer: Declaration::EMPTY,
         capability: [Need::EMPTY; CAPABILITIES_MAX],
         ring: [Ring::EMPTY; RINGS_MAX],
     };
@@ -707,6 +737,7 @@ impl Record {
 
         record.check_restart()?;
         record.check_reservation()?;
+        record.check_transfer()?;
         record.check_capabilities()?;
         record.check_rings()?;
         Ok(record)
@@ -830,6 +861,52 @@ impl Record {
             return Err(Refusal::Quantity);
         }
         if self.cpu_budget_ns > self.cpu_period_ns {
+            return Err(Refusal::Quantity);
+        }
+        Ok(())
+    }
+
+    /// RFC 0063's declaration, judged the way every other closed field is.
+    ///
+    /// Three rules and one piece of arithmetic. The mode is closed and zero is
+    /// not a value, so a zeroed record declares nothing rather than declaring
+    /// `restart_only` by accident. Under `restart_only` the other three fields
+    /// are refused when non-zero rather than ignored, because a reader who sees
+    /// a record width under a component that hands nothing over will believe
+    /// there is one — the same refusal [`Refusal::NotUnderThisPolicy`] makes of
+    /// a backoff under `never`.
+    ///
+    /// The arithmetic is the one rule that ties this table to another: the
+    /// window is bought out of the incoming component's own `Untyped` account
+    /// (RFC 0063), so a declaration whose window is larger than
+    /// [`Record::memory_bytes`] has declared a swap that can never be admitted.
+    /// Refused here rather than discovered at the swap, where the client's
+    /// submissions are already held.
+    fn check_transfer(&self) -> Result<(), Refusal> {
+        let declared = &self.transfer;
+        if declared._reserved != [0; 3] {
+            return Err(Refusal::Reserved);
+        }
+        if !mode::known(declared.mode) {
+            return Err(Refusal::Value);
+        }
+        if !declared.in_place() {
+            return if declared.schema == 0
+                && declared.record_bytes == 0
+                && declared.records_max == 0
+            {
+                Ok(())
+            } else {
+                Err(Refusal::NotUnderThisPolicy)
+            };
+        }
+        if declared.schema == 0 || declared.records_max == 0 || declared.record_bytes == 0 {
+            return Err(Refusal::Quantity);
+        }
+        if !declared.record_bytes.is_multiple_of(crate::transfer::RECORD_ALIGN) {
+            return Err(Refusal::Quantity);
+        }
+        if declared.window_bytes() > self.memory_bytes {
             return Err(Refusal::Quantity);
         }
         Ok(())
@@ -1186,6 +1263,9 @@ mod tests {
         record.max_restarts = 3;
         record.budget_window_ticks = 3_000;
         record.image_bytes = 4;
+        // The honest declaration, which is what a fixture that is not testing
+        // this field should carry: RFC 0063 and `crate::transfer`.
+        record.transfer = Declaration::RESTART_ONLY;
 
         record.capability[0] = Need {
             name: name_bytes("account").unwrap(),
@@ -1480,5 +1560,73 @@ mod tests {
             let ordinal = class::admitted(value).expect("a known class");
             assert!(crate::deadline::Admitted::new(ordinal).is_some());
         }
+    }
+
+    /// A record that declares nothing about being updated in place is refused,
+    /// which is what makes `restart_only` a declaration rather than a silence.
+    /// RFC 0063.
+    #[test]
+    fn a_record_with_no_transfer_mode_is_refused() {
+        let mut record = well_formed();
+        record.transfer = Declaration::EMPTY;
+        let bytes = module(&record);
+        assert_eq!(read(&bytes.0).err(), Some(Refusal::Value));
+    }
+
+    /// The three quantities mean nothing under `restart_only`, so a non-zero
+    /// one is refused rather than ignored — the same rule a backoff under
+    /// `never` is held to, and for the same reason: a reader who sees a record
+    /// width will believe there is one.
+    #[test]
+    fn a_quantity_under_restart_only_is_refused() {
+        for mutate in [
+            (|d: &mut Declaration| d.schema = 1) as fn(&mut Declaration),
+            |d: &mut Declaration| d.record_bytes = 8,
+            |d: &mut Declaration| d.records_max = 1,
+        ] {
+            let mut record = well_formed();
+            mutate(&mut record.transfer);
+            let bytes = module(&record);
+            assert_eq!(read(&bytes.0).err(), Some(Refusal::NotUnderThisPolicy));
+        }
+    }
+
+    /// `in_place` is the mode with arithmetic behind it: a schema, a width that
+    /// records can be laid end to end at, a bound, and a window the component's
+    /// own account can hold.
+    #[test]
+    fn an_in_place_declaration_is_judged_field_by_field() {
+        let sound = Declaration {
+            schema: 1,
+            record_bytes: 32,
+            records_max: 16,
+            mode: mode::IN_PLACE,
+            _reserved: [0; 3],
+        };
+        let mut record = well_formed();
+        record.transfer = sound;
+        assert!(read(&module(&record).0).is_ok(), "a sound declaration was refused");
+
+        for (broken, why) in [
+            (Declaration { schema: 0, ..sound }, "a state-record schema of zero"),
+            (Declaration { record_bytes: 0, ..sound }, "a record of no width"),
+            (Declaration { records_max: 0, ..sound }, "a bound of no records"),
+            (Declaration { record_bytes: 12, ..sound }, "a width records cannot be aligned at"),
+            // The window is bought out of this component's own account, and
+            // `well_formed` declares sixteen pages of it.
+            (Declaration { records_max: 4096, ..sound }, "a window larger than the account"),
+        ] {
+            let mut record = well_formed();
+            record.transfer = broken;
+            assert_eq!(read(&module(&record).0).err(), Some(Refusal::Quantity), "{why}");
+        }
+    }
+
+    /// R04 reaches inside the declaration too.
+    #[test]
+    fn a_reserved_byte_in_the_declaration_is_refused() {
+        let mut record = well_formed();
+        record.transfer._reserved = [0, 1, 0];
+        assert_eq!(read(&module(&record).0).err(), Some(Refusal::Reserved));
     }
 }
