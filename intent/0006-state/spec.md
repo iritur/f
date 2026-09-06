@@ -99,6 +99,18 @@ the format correct on a device that lies about the barrier. It lands with
 `TODO.md` names it; that is reported to the originator rather than fixed by
 editing the file.
 
+**A sixth is owed by a measurement rather than by this spec's foresight: RFC
+0061, a boundary is a predicate over a window of content and not a distance
+from the last cut.** `E2-P02` was written before the chunker as its
+specification and it did its job: on 2026-09-06 it falsified the re-chunking
+bound written below, on the periodic mixture, for a reason the bound's own
+diagnosis had ruled out. RFC 0061 is the reversal — the minimum stops being a
+distance since the last cut, normalised chunking goes with the mask selection
+that read the same thing, and the second clause of the bound narrows from
+candidate-free to candidate-starved content. It rests on a size-distribution
+measurement not yet taken and says so in its own *Decision*. No task line names
+it either.
+
 **Build.** The hash first, because everything else is named by it. `hash/`
 (package `f-hash`) is SHA-256 as FIPS 180-4 states it, `no_std`, no allocator,
 with a streaming state so a chunk is hashed as it is scanned rather than
@@ -179,10 +191,13 @@ logical block), `zone_bytes` (`Unit: bytes`), `zones` (`Unit: count of zones`),
 `root_zone_a` and `root_zone_b` (`Unit: zone index, zero-based`), and the
 chunker's parameters, because a chunker that changed under a mount decides
 every object hash and nothing on disk would say so: `chunk_min_bytes`,
-`chunk_target_bytes`, `chunk_max_bytes` (`Unit: bytes`), `mask_strict_bits`,
-`mask_loose_bits` (`Unit: bits`), `gear_label` (`Unit: none`, the label the
-gear table is derived from). A mount whose compiled-in parameters disagree with
-the superblock's refuses rather than re-chunking.
+`chunk_target_bytes`, `chunk_max_bytes` (`Unit: bytes`), `mask_bits`
+(`Unit: bits` — one width and not two, RFC 0061), `gear_label` (`Unit: none`,
+the label the gear table is derived from) and `mask_label` (`Unit: none`, the
+label the mask is derived from, separately from the gear table so that a width
+can move without disturbing a table every object hash depends on). A mount whose
+compiled-in parameters disagree with the superblock's refuses rather than
+re-chunking.
 
 The **blob header** — at every block-aligned position a blob starts: `magic`,
 `kind` (`Unit: none`; `chunk`, `object`, `extent`, `generation`), `flags`
@@ -200,8 +215,14 @@ The **root record**, appended to a root zone: `magic`, `generation` (`Unit:
 count of publishes since the superblock; the first publish is 1, and 0 is
 reserved so that a zeroed block is never a generation`), `root` (`Unit: none`,
 the generation hash), `frame` (`Unit: none`, the frame image's hash), `module`
-(`Unit: none`, the hash of the boot module this root was booted from),
-`previous` (`Unit: none`, the previous root, or zero at the first publish), and
+(`Unit: none`, the hash of the boot module **packed for this root when its
+generation was compiled**, and not the module this root was booted from — RFC
+0012, because a root that arrives by swap is never booted, and a root with no
+module is a root no reboot can reach, so `f.root=<hex>` would have nothing to
+select and a rollback across a frame change would be unreachable; the packing
+therefore happens at compile time for every generation whether or not any boot
+uses it), `previous` (`Unit: none`, the previous root, or zero at the first
+publish), and
 **`check` (`Unit: none`, the SHA-256 over every preceding field of this
 record)**. The check field is not decoration: without it a torn record whose
 magic landed and whose `root` field is half-written names a hash that does not
@@ -238,39 +259,69 @@ the window is stated as the arithmetic actually gives it. With
 window and not the 64 an earlier draft of this spec claimed — a number that
 would have been false by a factor of four in the crate doc, in `E2-P02`'s
 specification and in the claim's workload description, and a 16-byte window is
-exactly what phase-locks boundaries on data with short periods. So the masks
-are FastCDC's shape: set bits spread through the register with **the highest at
-bit 63**, so a candidate depends on the last 64 bytes and every byte of the
-window contributes to the decision. `MASK_STRICT_BITS` = 18 below the target
-size and `MASK_LOOSE_BITS` = 14 above it — FastCDC's normalised chunking,
-adopted because it is what reduces cuts forced at the maximum, and the crate
-says that is the reason. Target `CHUNK_TARGET_BYTES` = 64 KiB,
-`CHUNK_MIN_BYTES` = 16 KiB below which candidates are ignored,
-`CHUNK_MAX_BYTES` = 256 KiB at which a boundary is forced. The gear table is
+exactly what phase-locks boundaries on data with short periods. So the mask's
+set bits are spread through the register with **the highest at bit 63**, so a
+candidate depends on the last 64 bytes and every byte of the window contributes
+to the decision. **One mask, `MASK_BITS` = 16** — sixteen bits *spread* and not
+the low sixteen, which is the distinction the sentence above turns on, and the
+width at which a candidate appears once per `CHUNK_TARGET_BYTES` on uniform
+content. An earlier draft of
+this spec had two, `MASK_STRICT_BITS` = 18 below the target and
+`MASK_LOOSE_BITS` = 14 above it, FastCDC's normalised chunking; **RFC 0061
+retires it**, because which mask applied was decided by the distance since the
+previous boundary and that is a dependence on the previous boundary, which is
+the thing `E2-P02` measured to be the defect. Target `CHUNK_TARGET_BYTES` =
+64 KiB, `CHUNK_MIN_BYTES` = 16 KiB — and under RFC 0061 that is *no candidate in
+the preceding 16 KiB* rather than *16 KiB since the last cut*, which guarantees
+the same minimum and forgets — `CHUNK_MAX_BYTES` = 256 KiB at which a boundary
+is forced, and the forced cut is the only rule left that reads the previous
+boundary. The gear table is
 `const GEAR: [u64; 256]`, filled by
 `f_env::split::Stream::from_seed(f_env::split::label("f-blob gear v1"))`
 iterated 256 times: `env/src/split.rs` already carries a `const fn` SplitMix64
 and RFC 0026's whole argument is one derivation, so a third transcription
 (`kernel/src/env.rs` is the second) would be a second generator for a reviewer
 to check against the paper. The mask positions come from the same stream under
-the label `"f-blob mask v1"`, with bit 63 forced set. Changing either label
-changes every object hash, which is why `gear_label` is a superblock field.
+the label `"f-blob mask v2"`, with bit 63 forced set — v2 and not v1 because RFC
+0061 changed the derivation, and a derivation that moved under an unchanged
+label is the silent hash change these labels exist to prevent. The draw must
+also satisfy one constraint stated before it is drawn: the register's fixed
+point on a zero run, `0x127ee44bae552daa`, must not hit the mask, or zero-filled
+content would cut at a spacing decided by arithmetic rather than by content.
+Changing either label changes every object hash, which is why `gear_label` and
+`mask_label` are both superblock fields.
 
 The bound the design promises is two-sided and stated in the strength it has.
 Nothing before the last boundary preceding `X − 64` bytes changes, by
-construction. After the edit, the two boundary sequences resynchronise **within
-`RESYNC_BOUND_BYTES` = 512 KiB of `X + L`, or at the end of the enclosing
-candidate-free run plus one chunk, whichever is later** — and the second clause
-is not a hedge, it is the honest half. In content with no candidates at all —
-zero runs, periods below the target size, which is exactly `E2-D02`'s named bad
-workload of VM images and sparse database files — every boundary is forced at
-the maximum, a forced cut is by definition relative to the previous boundary,
-and two streams offset by `L` do not resynchronise until the run ends. An
-earlier draft blamed the minimum size for this; the minimum is not the cause,
-the maximum-size forcing is, and the reversal that draft stated — acceptance
-independent of the previous boundary — does not fix a forced cut. That is
-written in the crate rather than found by a user, and it is measured: the
-zero-filled workload is its own row in the re-chunking claim, so the number the
+construction. After the edit, the two boundary sequences resynchronise **from
+the first accepted boundary at or after `X + L + CHUNK_MIN_BYTES + 64`, and in
+no case later than `RESYNC_BOUND_BYTES` = 512 KiB past `X + L`, except across a
+starved run — a maximal run in which no two consecutive candidates are closer
+than `CHUNK_MAX_BYTES − CHUNK_MIN_BYTES` = 240 KiB — where they agree only at
+the end of that run plus one chunk.** The second clause is not a hedge, it is
+the honest half: inside a starved run every boundary is forced, a forced cut is
+by definition relative to the previous boundary, and two streams offset by `L`
+do not resynchronise until the run ends. Zero runs are the extreme case and are
+`E2-D02`'s named bad workload.
+
+**What an earlier draft of this spec said here, and why it was wrong.** It said
+that the second clause covered content with *no candidates at all*, that "the
+minimum is not the cause, the maximum-size forcing is", and that the reversal a
+still earlier draft stated — acceptance independent of the previous boundary —
+"does not fix a forced cut". `E2-P02` measured all three false for periodic
+content, on 2026-09-06. The minimum **is** the cause there, and acceptance
+independent of the previous boundary **is** the fix: seven of thirty-two (seed,
+mixture) pairs never resynchronised at all, on content whose candidates were
+2570 bytes past the edit, and with the minimum's dependence on the previous
+boundary removed the same failing object resynchronised at the first candidate
+after the edit. The mechanism is phase and not density — a periodic candidate
+sequence makes "the first candidate 16 KiB past the last cut" a rotation, which
+carries a phase difference forever, while the same map on uniform content
+contracts. RFC 0061 is the reversal, and what is true now is the paragraph
+above. What survives from the draft is the shape of the argument and one of its
+sentences: a forced cut is still relative to the previous boundary, so a
+genuinely starved run is still where the design is bad, and the zero-filled
+workload is still its own row in the re-chunking claim so that the number the
 design is bad at is recorded rather than averaged away.
 
 `zone/` (package `f-zone`) is `E2-B02`: sequential fill with `ZONE_APPEND`,
@@ -279,7 +330,18 @@ collector RFC 0059 specifies — mark from pinned roots and open publishes, swee
 below `SWEEP_LIVE_FRACTION`, run as a batch-class consumer. `index/` (package
 `f-index`) is `E2-B03`: paths, metadata and declared attributes to hashes, a
 log-structured store on the device with a `BTreeMap` in memory, a local call
-and not a service. **`E2-B03`'s exit is *measured against a tree walk over the
+and not a service. It also carries **a reserved pin namespace**, because RFC
+0059 decided that a durable pin is an entry there — a name for a root hash,
+which is what the index is already for — and that decision orders these two
+tasks: **until `E2-B03` lands, the pinned set holds exactly the mounted root
+plus the transient roots open publishes register, `f-zone`'s host tests use an
+in-memory pin set, and `PIN` is not available in `E2-B02`.** The ordering is
+written here rather than implied, because a collector built against an
+available `PIN` would have to be rebuilt against an unavailable one. The
+namespace is also what makes retention beyond the root-zone wrap work: a pin is
+a name and not a record in a zone that wraps, so a pinned generation survives
+the wrap while its root record ages out of both root zones.
+**`E2-B03`'s exit is *measured against a tree walk over the
 same data*, and the measurement has to be a count that can differ.** Ring
 crossings cannot be: inside one component a tree walk crosses zero boundaries
 too, so zero against zero would make the exit vacuous. The count is **device
@@ -463,7 +525,12 @@ size, and concatenations of those, each a named site under RFC 0026. With
 uniform bytes a candidate appears every 64 KiB on average, so the bound passes
 on data the design is good at while the workload the design is bad at fails it
 unobserved. The assertion is the two-sided bound as restated above, including
-the candidate-free clause.
+the starved-run clause — and the mixture is what earns that clause its keep:
+the periodic mixture is what falsified the draft bound on 2026-09-06, and under
+RFC 0061 it must pass under the **flat** clause rather than under the starved
+one, so the test prints which clause carried each (seed, mixture) pair. A pair
+that passes only because its starved run swallowed the object is a pass this
+design does not claim.
 
 `E2-P03` runs the collector concurrently with adversarial allocation and a
 hard-class reader in the simulator and asserts RFC 0059's three invariants,
@@ -554,8 +621,11 @@ Walked in the order `spec-from-intent` gives.
 of the hard one. A content-defined chunker's rolling hash is a function of the
 bytes it has seen and nothing else — the gear table is a constant derived at
 compile time from one label under RFC 0026's single derivation, the window is
-the last sixty-four bytes because the highest mask bit is 63, the masks are
-constants — so it is deterministic by construction and reaches for no `Env` at
+the last sixty-four bytes because the highest mask bit is 63, the mask is a
+constant, and under RFC 0061 the acceptance decision reads a window of content
+and not a distance since the last cut — so it is deterministic by construction,
+its boundaries are a function of the content alone outside a starved run, and it
+reaches for no `Env` at
 run time; `lint-determinism` should find nothing in `blob/` and that absence is
 the design rather than an oversight. The same holds for the fold in
 `generation/`, whose canonical form is now stated rather than left to a TOML
@@ -666,10 +736,26 @@ rather than invents:
   point of measuring it.
 - `bytes_rechunked_per_edit`, chunked kind ≤ **786 432 bytes**
   (`CHUNK_MAX_BYTES` 256 KiB + `RESYNC_BOUND_BYTES` 512 KiB).
-- `bytes_rechunked_per_edit`, extent kind ≤ **1 048 576 bytes** — exactly
-  `EXTENT_BYTES`, which is the exit's *bounded by the copy-on-write granularity
-  and not by the object's size*, and which is also 256× for a 4 KiB write: the
-  number the skeptic reaches for, recorded rather than argued.
+- `bytes_rechunked_per_edit`, extent kind ≤ **2 097 152 bytes** —
+  `2 × EXTENT_BYTES`, with **`pieces_touched_max` ≤ 2** beside it as the row
+  that says why the primary is two megabytes and not one. An earlier draft of
+  this spec wrote 1 048 576, "exactly `EXTENT_BYTES`"; RFC 0058 falsified that
+  from the design's own arithmetic before anything was built. A write of `W`
+  bytes at offset `O` rewrites `ceil((O mod EXTENT_BYTES + W) / EXTENT_BYTES)`
+  pieces, which is 2 whenever the write straddles a piece boundary — about
+  0.39% of 4 KiB writes at uniformly drawn offsets — so a one-piece threshold
+  would go red on a legal workload as soon as `bench/src/bin/rechunk.rs` ran
+  long enough, and the repair would have been an aligned-offset workload, which
+  is fitting the measurement to the threshold. The straddling edit is its own
+  recorded row, the way the zero-filled mixture already is. The exit is not
+  weakened: the bound is still a stated multiple of the copy-on-write
+  granularity and still independent of the object's size, and it is still 256×
+  for an aligned 4 KiB write — the number the skeptic reaches for, recorded
+  rather than argued. The extent workload is deliberately **not** in claim
+  0016's workload set: at 256× it would fail `device_bytes_per_app_byte` ≤ 1.5
+  by two orders of magnitude on the first write. And `EXTENT_BYTES` is a
+  writer's constant rather than a superblock field, because piece 0's own blob
+  header carries `content_bytes` and so recovers the granularity from the data.
 - `copies_per_read` = **0**, and `resident_bytes_per_read_byte` ≤ **1.0**: a
   page cache holding a second copy would make it at least 2, which is the
   sentence being tested.
@@ -692,14 +778,23 @@ is the evidence that the base move is not a measurement change. `E2-P06` is the
 job that names a non-reproducible input and the image must not be the first one
 it names.
 
-**5. Decisions.** Four RFCs are owed and numbered — **0012**, **0058**, **0059**
-and **0060** — and each contradicts or extends `docs/design/`: RFC 0012 changes
+**5. Decisions.** Five RFCs, four owed at the time this was written and numbered
+**0012**, **0058**, **0059** and **0060**, and a fifth — **0061** — that no
+draft anticipated because it was owed by a measurement rather than by a plan:
+`E2-P02` falsified this spec's own re-chunking bound on 2026-09-06 and RFC 0061
+is the reversal, so its *What would reverse this* rests on a size-distribution
+measurement not yet taken. Each of the five contradicts or extends
+`docs/design/`: RFC 0012 changes
 the rollback metric `the-long-plan` states, RFC 0058 makes section 04's *real
 complication* a design with a granularity in it, RFC 0059 makes the collector's
 three sentences invariants a test can assert with a number in the third, and
 RFC 0060 reverses section 04's *atomicity is free because a root is a single
-write*. The fourth is the one no task line names, and that is reported rather
-than fixed by editing `TODO.md`. Two more may become owed and are named so that
+write*, and RFC 0061 reverses line 204's *an edit near the start of a large file
+does not re-chunk everything after it*, which was measured false on periodic
+content and which RFC 0061 makes true again for content that produces
+candidates. The fourth and the fifth are the two no task line names, and that is
+reported rather than fixed by editing `TODO.md`. Two more may become owed and
+are named so that
 they are noticed: a decision about the quiescent point if the ring's cursors
 turn out not to be enough and `f_abi::transfer` grows a state machine; and a
 decision about the assembler's home if `E1-B05`'s policy has not left the frame
@@ -861,10 +956,13 @@ the names are the stable handle.
   artefact header. Two workloads: the phased sequential fill-and-collect, and
   `E2-D02`'s random write on both object kinds.
 - **0017 `bytes-rechunked-per-byte`** (`E2-B09`): `bytes_rechunked_per_edit`,
-  counts, `gating`, on the chunked kind (`max = 786 432`) and the extent kind
-  (`max = 1 048 576`), at two object sizes so that a number scaling with the
-  object fails, and with the zero-filled workload as its own row so that the
-  candidate-free case is recorded rather than averaged away.
+  counts, `gating`, on the chunked kind (`max = 786 432`, unmoved by RFC 0061 —
+  a bound whose repair moved its own threshold would be a bound fitted to its
+  measurement) and the extent kind (`max = 2 097 152`, `2 × EXTENT_BYTES` under
+  RFC 0058, with `pieces_touched_max` (`max = 2`) beside it), at two object
+  sizes so that a number scaling with the object fails, and with the zero-filled
+  workload and the straddling write each its own row so that the starved case
+  and the two-piece case are recorded rather than averaged away.
 - **0018 `copies-per-read`** (`E2-B08`): `copies_per_read`, `max = 0`, counted
   on both sides of the boundary and required to agree; `pending` until `E1-B10`
   and `gating` the day it lands.
@@ -890,17 +988,33 @@ closed from inside it.
 
 ## Risks and reversal
 
-**The most likely thing to be wrong is the re-chunking bound on candidate-free
-content.** The two-sided bound is hard before the edit and resynchronising
-after it, and the second clause — the enclosing candidate-free run — is where
-the design is bad, on precisely the workload `E2-D02` names. *What would
-reverse this:* `E2-P02` failing on the periodic or zero-filled mixture even
-with the run clause, or claim 0017's chunked-kind row scaling with the object.
-The answer is a chunker whose acceptance does not depend on the previous
-boundary at all, which is a change to `f-blob` and to nothing on disk, because
-the format stores boundaries as hashes and not as a rule — and because
-`gear_label` and the mask widths are superblock fields, a mount can tell that
-it happened.
+**This trigger fired on 2026-09-06, and the answer it named was the right one.**
+The risk as written was *the re-chunking bound on candidate-free content*, and
+its reversal condition was "`E2-P02` failing on the periodic or zero-filled
+mixture even with the run clause, or claim 0017's chunked-kind row scaling with
+the object. The answer is a chunker whose acceptance does not depend on the
+previous boundary at all". `E2-P02` failed on the periodic mixture — 7 of 32
+(seed, mixture) pairs, periodic on seeds 2, 4, 5 and 6 and concatenated on
+seeds 4, 5 and 7, with uniform and zero-filled passing 8 of 8 — and it failed
+for a reason the risk had not anticipated: not the run clause but the minimum,
+and not candidate-*free* content but candidate-*sparse* content, on which the
+run clause was inert (the enclosing candidate-free run ended 2570 bytes past
+the edit while the sequences agreed again only at the object's end). The named
+answer was nevertheless correct, and **RFC 0061** is it: acceptance is now a
+predicate over a bounded window of content, `CHUNK_MIN_BYTES` is *no candidate
+in the preceding 16 KiB*, normalised chunking is retired with the mask
+selection that read the previous boundary, and the forced cut is the only rule
+left that reads it. Property 5 failed with it, on 1 of 32 pairs and by 14 156
+bytes of 1 572 864 — 0.90% — and RFC 0061 says at length why the small number
+is not evidence against the large one. Nothing on disk changed, exactly as this
+risk predicted: the format stores boundaries as hashes and not as a rule, and
+because `gear_label`, `mask_label` and `mask_bits` are superblock fields a
+mount can tell that it happened. *What would reverse this now:* RFC 0061's own
+list — property 4 still failing once the rule is implemented, property 2's mean
+leaving `[32 768, 131 072]` under one mask, or the forced-cut fraction on
+uniform content exceeding one interior chunk in ten. The residual risk moved
+rather than closing: the design is still bad on genuinely starved content, and
+that is still `E2-D02`'s workload and still RFC 0058's reason to exist.
 
 **The two-root-zone wrap bounds how far back a rollback reaches, and the bound
 is small immediately after a wrap.** Sixteen generations, by `ROOT_CARRY`, and
@@ -1036,3 +1150,16 @@ that is why it is in the list below.
     is not edited here.
 12. **`E2-B09`'s slip is not decided here.** Carried forward; the graph says
     the release waits, and the originator may prefer the weaker honest shape.
+13. **A fifth RFC, 0061, was owed by a measurement and is taken here rather
+    than escalated.** `E2-P02` falsified this spec's re-chunking bound on the
+    periodic mixture, and the two options the failure left were a trade: drop
+    `CHUNK_MIN_BYTES` and turn one red property into two (233 of 233 interior
+    chunks below the minimum, mean 10 186 against a 65 536 target), or keep it
+    and restate the bound in candidate density — which cannot be done, because
+    the passing and failing mixtures' chunk means are 70 819 and 74 643 bytes
+    and no density threshold separates them. The third option, acceptance as a
+    bounded-window predicate, is chosen on the argument in RFC 0061 and on a
+    size distribution that is arithmetic rather than measured. That last part
+    is the reason this is in this list: the entry is accepted, the confirming
+    run is named in it, and an originator who would rather wait for the number
+    before the rule changes should say so.
