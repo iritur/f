@@ -591,8 +591,13 @@ fn narrow8(value: usize) -> u8 {
 // ---------------------------------------------------------------------------
 
 /// A value the subset admits.
+///
+/// `pub(crate)` from here down to [`parse`], and no wider. `generation.rs`
+/// compiles a second kind of source file with this reader rather than a second
+/// one of its own — one parser, not two, which is the same argument
+/// [`compile`] makes about the checker. Nothing outside `xtask` sees any of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Value {
+pub(crate) enum Value {
     Str(String),
     Int(u64),
     Bool(bool),
@@ -612,25 +617,25 @@ impl Value {
 
 /// One `key = value`, with the line it came from so a finding can point at it.
 #[derive(Debug, Clone)]
-struct Entry {
-    line: usize,
-    value: Value,
+pub(crate) struct Entry {
+    pub(crate) line: usize,
+    pub(crate) value: Value,
 }
 
 /// The keys of one table. A `BTreeMap` and not a `Vec`, because a duplicate key
 /// is refused at insertion and because the iteration order of leftover keys in
 /// a finding is then the same on every run — RFC 0004 applies to the checker
 /// too, and `xtask` is linted by the rule it implements.
-type Table = BTreeMap<String, Entry>;
+pub(crate) type Table = BTreeMap<String, Entry>;
 
 /// A whole file, in the three shapes the subset knows.
 #[derive(Debug, Default)]
-struct Doc {
-    top: Table,
+pub(crate) struct Doc {
+    pub(crate) top: Table,
     /// `[name]`, with the header's line.
-    tables: BTreeMap<String, (usize, Table)>,
+    pub(crate) tables: BTreeMap<String, (usize, Table)>,
     /// `[[name]]`, in file order, each with its header's line.
-    arrays: BTreeMap<String, Vec<(usize, Table)>>,
+    pub(crate) arrays: BTreeMap<String, Vec<(usize, Table)>>,
 }
 
 /// Which table the next `key = value` lands in.
@@ -660,7 +665,7 @@ fn is_bare(key: &str) -> bool {
 }
 
 /// A name a manifest gives something: `[a-z0-9-]`, no edge hyphen, bounded.
-fn is_name(name: &str) -> bool {
+pub(crate) fn is_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= NAME_MAX
         && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
@@ -735,7 +740,7 @@ fn parse_value(raw: &str) -> Result<Value, String> {
 }
 
 /// Read the subset. Every syntax error is collected; none is repaired.
-fn parse(rel: &str, text: &str) -> Result<Doc, Vec<String>> {
+pub(crate) fn parse(rel: &str, text: &str) -> Result<Doc, Vec<String>> {
     let mut doc = Doc::default();
     let mut errors = Vec::new();
     let mut cursor = Cursor::Top;

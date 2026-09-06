@@ -23,6 +23,12 @@ mod pack;
 /// because `docs/manifest.md` names it as the place the schema is code.
 mod manifest;
 
+/// The configuration evaluator: `user/generation.toml` to one root hash, and
+/// back again. Split out for the reason `manifest` is — it is a compiler with a
+/// grammar behind it — and it reads its source through `manifest`'s reader
+/// rather than a second one of its own. E2-B04.
+mod generation;
+
 /// The target the kernel is built for.
 ///
 /// A built-in target and not a JSON file in `targets/`, which is a decision
@@ -503,6 +509,10 @@ fn main() -> ExitCode {
         "runtime" => runtime(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
         "component" => components().map(|_| ()),
+        // E2-B04. One expression to one root hash, with every leaf printed
+        // beside its name so that two runners that disagree name the input that
+        // moved rather than reporting that two roots differed. RFC 0012.
+        "generation" => generation::generation(args.get(1).map(String::as_str)),
         // E1-P06. Every component the build produced, killed under sustained
         // load and again with nothing killed. The verdict is `f-sim`'s and this
         // is the driver: the component directory, the two processes the
@@ -694,6 +704,14 @@ cargo xtask <command>
                      and check it is one
   component          Build every component file: a manifest compiled to its
                      record, its image linked, and one content hash over both
+  generation         Compile user/generation.toml to a record tree, fold it to
+                     one root hash, print the root and every leaf beside its
+                     name, and pack the tree and the component files into one
+                     boot module named by the root. Source that is not in
+                     canonical form is refused with the canonical form printed
+                     as a diff, never silently reordered. --decompile renders
+                     the record tree back to canonical source, which is the half
+                     `cargo xtask lint` checks is a fixpoint
   admission          Refuse an over-subscribed reservation and put a granted
                      one under adversarial load, with two controls beside it:
                      the same load without a reservation, which must miss, and
@@ -8367,6 +8385,7 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-env", host: None, bare: None },
     Portability { krate: "f-ring", host: None, bare: None },
     Portability { krate: "f-hash", host: None, bare: None },
+    Portability { krate: "f-generation", host: None, bare: None },
     Portability {
         krate: "f-kernel",
         host: Some(
@@ -9545,6 +9564,13 @@ fn lint_all() -> Result<(), String> {
     // imported image in `shared`. It runs here so a boot is not the first
     // place a missing field is found.
     lint_manifests()?;
+    // The same question one level up. A generation is a manifest of manifests,
+    // and the check that matters there is not the schema but the round trip:
+    // compile the source to records, decompile the records back to source, and
+    // require the result to be the source. A source feature no record kind
+    // carries — an `import`, an interpolation, a conditional — does not survive
+    // it, which is the only place that re-entry is visible. E2-B04.
+    generation::fixpoint()?;
     // And the list that decides which of those manifests is built. It runs
     // beside the schema check because the two answer halves of one question —
     // *is this a component* and *does anything build it* — and the second was
@@ -9819,7 +9845,12 @@ fn lint_units() -> Result<(), String> {
     let mut findings = Vec::new();
     for path in rust_sources()? {
         let rel = relative(&path);
-        if !rel.starts_with("abi/") {
+        // `abi/` was always here; `generation/` joined it when the store's record
+        // types landed in `abi/`, which is the second reason they landed there —
+        // the crates that carry hashes, counts and indices beside one another are
+        // exactly the crates where a number's unit is only obvious to the person
+        // who wrote it. `blob/` joins the set with intent 0006's later step.
+        if !(rel.starts_with("abi/") || rel.starts_with("generation/")) {
             continue;
         }
         let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
@@ -9827,11 +9858,11 @@ fn lint_units() -> Result<(), String> {
     }
 
     if findings.is_empty() {
-        println!("lint-units: ok  (every public abi field states a unit)");
+        println!("lint-units: ok  (every public wire field states a unit)");
         return Ok(());
     }
     Err(format!(
-        "{} public field(s) in abi/ state no unit:\n{}\n\n\
+        "{} public field(s) state no unit:\n{}\n\n\
          R03: every quantity crossing the ABI states its unit, its epoch and its\n\
          zero. `deadline: u64` shipped with none of the three, in the one crate\n\
          whose whole purpose is to be correct against somebody else's code.\n\n\

@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The generation: what this machine is, as an expression.
+#
+# This file is *source*. `cargo xtask generation` compiles it to a record tree,
+# folds the tree to one root hash, and packs the tree and the component files
+# into one boot module named by that hash. The machine never reads this file and
+# never evaluates anything: it receives a root, and the assembler recomputes the
+# fold over the records it was handed.
+#
+# It lives beside the manifests it composes rather than at the repository root,
+# because it is a description of the tree under `user/` and of nothing else.
+#
+# **The canonical form is checked, not applied.** Components are sorted bytewise
+# on the zero-padded 32-byte name; routes are sorted on (component, capability);
+# duplicates are refused. A file that is out of order is refused with the
+# canonical form printed as a diff, and never quietly rewritten — two authors
+# with the same set must not be able to produce two roots, and no author should
+# learn their file was reordered by reading a hash.
+#
+# **What is not here, and why.** No store parameters. A root that embedded
+# `block_bytes` or `zone_bytes` would be a different root on two machines with
+# different disks, so `E2-P06` would fail on its first run and name a leaf that
+# is not a leaf; a disk replacement would change *what are you running* without
+# anything running having changed. Geometry lives in the superblock, and what a
+# generation may say about a device is a requirement checked at mount rather
+# than a value the hash depends on. No `import`, no interpolation, no
+# conditional, no path and no clock either — `generation/src/lib.rs` says at
+# length what the expression deliberately is not, and `cargo xtask lint` checks
+# the round trip through the record tree is a fixpoint, which is the tripwire
+# that catches any of them coming back under the name of convenience.
+
+schema = 1
+
+# The frame, named the way a `bytes` leaf names anything: by what it is called
+# here. Its content address is computed by the compiler from the image this tree
+# builds, so the hash is never written down in source — a source file carrying a
+# hash of something it does not contain is a source file that is wrong between
+# the moment the code changes and the moment somebody remembers.
+frame = "kernel"
+
+# The four components, in canonical order. This is exactly `COMPONENTS` in
+# `xtask/src/main.rs`, and the compiler refuses a name that list does not build
+# rather than emitting a leaf for a component file nothing produces.
+component = ["store", "virtio-blk", "virtio-gpu", "virtio-net"]
+
+# The routes. Two of them, and they are the two the datapath already boots:
+# `cargo xtask blk` moves a sector from a client through `virtio-blk`, and
+# `cargo xtask net` puts a frame on a link through `virtio-net`. `store` is the
+# client in both, because `store` is the component a place holds and the only
+# one in this tree with clients of its own.
+#
+# They are declared here and checked against the manifests by `E2-B05`, which is
+# the task that instantiates a topology and routes capabilities as it declares.
+# Until then a route is a statement about intent that changes the root — which is
+# the useful half now: two machines that disagree about the routing disagree
+# about what they are running, and say so in one hash.
+
+[[route]]
+component = "store"
+capability = "block"
+source = "virtio-blk"
+
+[[route]]
+component = "store"
+capability = "net"
+source = "virtio-net"
