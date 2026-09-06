@@ -13,5 +13,13 @@ publish = false
 [dependencies]
 f-bench.workspace = true
 
+# The content address, so that the release package and the store name bytes with
+# one function rather than two that agree until they do not. xtask is `std` and
+# `f-hash` is a `no_std` library that builds for the host, which is the same
+# arrangement `ring/proofs` uses in the other direction — a `no_std` library is
+# not a smaller crate, it is one that names nothing outside `core`, and a `std`
+# binary may depend on it freely.
+f-hash.workspace = true
+
 [lints]
 workspace = true

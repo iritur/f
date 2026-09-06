@@ -20,6 +20,10 @@ name = "f-env"
 version = "0.0.1"
 
 [[package]]
+name = "f-hash"
+version = "0.0.1"
+
+[[package]]
 name = "f-init"
 version = "0.0.1"
 dependencies = [
@@ -95,4 +99,5 @@ name = "xtask"
 version = "0.0.1"
 dependencies = [
  "f-bench",
+ "f-hash",
 ]

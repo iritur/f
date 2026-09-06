@@ -3925,7 +3925,7 @@ fn manifest_names_this_tree(text: &str) -> Result<(), String> {
         }
         rows += 1;
         let Ok(bytes) = std::fs::read(root().join(name)) else { continue };
-        if pack::hex(&pack::sha256(&bytes)) == hash {
+        if pack::hex(&f_hash::sha256(&bytes)) == hash {
             return Ok(());
         }
     }
@@ -8366,6 +8366,7 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-abi", host: None, bare: None },
     Portability { krate: "f-env", host: None, bare: None },
     Portability { krate: "f-ring", host: None, bare: None },
+    Portability { krate: "f-hash", host: None, bare: None },
     Portability {
         krate: "f-kernel",
         host: Some(
@@ -11456,9 +11457,10 @@ fn content_files(content: &Content) -> Result<Vec<(String, Vec<u8>)>, String> {
 ///
 /// One `.tar`, and the contract's eight contents inside it, plus a `MANIFEST`
 /// naming every file and its SHA-256. The archive is built by `pack::Tar`,
-/// which has no clock and no user in it; the hashes are `pack::sha256`, which
-/// has no dependency. Both of those are the same requirement stated twice: a
-/// content address that depends on which machine computed it is not one.
+/// which has no clock and no user in it; the hashes are `f_hash::sha256`, which
+/// has no dependency and is the same function the store names a blob with.
+/// Those are the same requirement stated twice: a content address that depends
+/// on which machine — or which crate — computed it is not one.
 ///
 /// Not compressed, deliberately. A deflate stream carries its encoder's version
 /// and level in the output, so compressing here would put a dependency's
@@ -11583,7 +11585,7 @@ fn release(mode: Option<&str>) -> Result<(), String> {
                 let full = root().join(path);
                 if full.exists() {
                     let bytes = std::fs::read(&full).map_err(|e| e.to_string())?;
-                    let hash = pack::hex(&pack::sha256(&bytes));
+                    let hash = pack::hex(&f_hash::sha256(&bytes));
                     println!("  [ok]  {:<36} {path}", content.name);
                     println!("        {} bytes  sha256 {}", bytes.len(), &hash[..16]);
                 } else {
@@ -11711,7 +11713,7 @@ fn build_package(describe: &str, commit: &str) -> Result<(String, PathBuf, usize
         }
 
         for (name, bytes) in gathered {
-            let hash = pack::hex(&pack::sha256(&bytes));
+            let hash = pack::hex(&f_hash::sha256(&bytes));
             manifest.push_str(&format!("{hash}  {name}\n"));
             files.push((name, false, bytes));
         }
@@ -11722,7 +11724,7 @@ fn build_package(describe: &str, commit: &str) -> Result<(String, PathBuf, usize
     // mtimes from the commit, so it cannot pick up an untracked file and cannot
     // vary with when the checkout happened.
     let source = capture_bytes("git", &["archive", "--format=tar", commit])?;
-    let source_hash = pack::hex(&pack::sha256(&source));
+    let source_hash = pack::hex(&f_hash::sha256(&source));
     manifest.push_str(&format!("{source_hash}  source.tar\n"));
     files.push(("source.tar".to_string(), false, source));
 
@@ -11731,7 +11733,7 @@ fn build_package(describe: &str, commit: &str) -> Result<(String, PathBuf, usize
     build()?;
     let image = kernel_elf32();
     let bytes = std::fs::read(&image).map_err(|e| format!("reading {}: {e}", relative(&image)))?;
-    let hash = pack::hex(&pack::sha256(&bytes));
+    let hash = pack::hex(&f_hash::sha256(&bytes));
     let name = "image/f-kernel.elf32".to_string();
     manifest.push_str(&format!("{hash}  {name}\n"));
     files.push((name, true, bytes));
@@ -11748,7 +11750,7 @@ fn build_package(describe: &str, commit: &str) -> Result<(String, PathBuf, usize
     }
     let archive = tar.finish();
 
-    let address = pack::hex(&pack::sha256(&archive));
+    let address = pack::hex(&f_hash::sha256(&archive));
     // `target/package/` and not `target/release/`: that second one is cargo's
     // release *profile* directory, and putting an artefact of ours in it means
     // one `cargo build --release` away from a collision nobody expected.

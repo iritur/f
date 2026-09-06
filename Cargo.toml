@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["abi", "env", "ring", "kernel", "user/init", "user/store", "user/virtio-blk", "user/virtio-net", "user/virtio-gpu", "bench", "sim", "xtask"]
+members = ["abi", "env", "ring", "hash", "kernel", "user/init", "user/store", "user/virtio-blk", "user/virtio-net", "user/virtio-gpu", "bench", "sim", "xtask"]
 
 # The checker's crate, and it is excluded rather than absent for the reason RFC
 # 0022 gave the last one: a verification tool's toolchain is the tool's
@@ -34,6 +34,14 @@ repository = "https://example.invalid/f"
 f-abi = { path = "abi" }
 f-env = { path = "env" }
 f-ring = { path = "ring" }
+# The one SHA-256 in the tree, and a plain path dependency with no
+# `default-features` line: this is a library and not a component, so it carries
+# no `image` feature and no `#[panic_handler]`, and RFC 0054's shape — the three
+# driver rows below that differ only in a name — does not apply to it. Saying so
+# here is the whole comment, because the next reader's question is why this row
+# is shorter than those. `f-blob` and `f-generation` join it on the same terms
+# when intent 0006's later steps land them.
+f-hash = { path = "hash" }
 # `default-features = false` here rather than at the one consumer, because a
 # workspace dependency fixes it for everybody who inherits it and cargo refuses
 # to let a member override it. The feature turned off is `image`, which carries
