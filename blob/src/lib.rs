@@ -40,6 +40,31 @@
 //! the extreme case of it, and [`chunk::CHUNK_MAX_BYTES`] is the only thing
 //! bounding a chunk there.
 //!
+//! **What else is in that class, which is the part a reader has to be told —
+//! RFC 0062.** It is not only zero runs. It contains **every exactly-periodic
+//! object whose period is below [`chunk::CHUNK_MIN_BYTES`] = 16 KiB**, for
+//! every acceptance rule this design permits, and the reason is arithmetic
+//! rather than a measurement. Past the first sixty-four bytes the register at
+//! position `i` is a function of `i mod p`, so the candidate set `B` of any
+//! predicate over a bounded window of content satisfies `B + p = B` away from
+//! the object's ends; if `B` holds a position it holds one `p` bytes behind it,
+//! and `p < CHUNK_MIN_BYTES` means that candidate can never be accepted. So the
+//! object has no content boundary at all, whatever the mask is — narrower,
+//! wider, nested, or local maxima, whose minimum is its own window and
+//! therefore starves *more* periods, not fewer. The workloads RFC 0058 names
+//! have periods of 4096 and 8192 bytes and are inside the class by that
+//! arithmetic.
+//!
+//! A zero run is the extreme case and not the representative one, and the
+//! difference is which of the two a future draw could take away: a zero run is
+//! starved because one register fixed point misses one drawn mask, while
+//! periodic content below the minimum is starved by a statement about minimum
+//! chunk sizes that no draw and no rule reaches. RFC 0061 forecast that
+//! periodic content below the *target* size had left this class; RFC 0062
+//! withdraws that sentence, on RFC 0061's own confirming run, and leaves the
+//! rule, the bound and [`chunk::RESYNC_BOUND_BYTES`] exactly where RFC 0061 put
+//! them.
+//!
 //! *What an earlier draft of this paragraph said, and why it was wrong.* It
 //! said the second clause covered content with **no candidates at all**, and
 //! that the cause was maximum-size forcing and not the minimum — so that

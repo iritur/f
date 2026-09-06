@@ -28,7 +28,8 @@ row per entry that needs one, and an entry that needs none does not get a row.
 | 0058 | `E2-D02` | A mutable extent is a second object kind, and not a unification | accepted |
 | 0059 | `E2-D03` | A collector is three invariants and a batch-class consumer | accepted |
 | 0060 | `E2-D05` | A publish is a barrier sequence, and atomicity is not free | accepted |
-| 0061 | `E2-P02` | A boundary is a predicate over a window of content, and not a distance from the last cut | accepted |
+| 0061 | `E2-P02` | A boundary is a predicate over a window of content, and not a distance from the last cut | accepted; superseded in part by 0062 |
+| 0062 | `E2-P02` | A period below the minimum starves every rule, so the starved clause carries periodic content and is measured | accepted |
 
 **0012 is why this directory runs 0011, 0013.** `TODO.md` reserved the number
 for the generation swap when the E2 line was written, and then E0 and E1 wrote
@@ -50,7 +51,19 @@ task line it was missing. A row that had to say *none* would still have been
 worth more than an index.
 
 **0061 is filed against a prove task, which is unusual and correct.** It is the
-only entry here produced by a measurement rather than by a decision meeting:
+first entry here produced by a measurement rather than by a decision meeting:
 `E2-P02` ran, the published re-chunking bound failed on 7 of 32 (seed, mixture)
 pairs, and the RFC is the reversal that failure forced. Filing it under the
 build task that will implement it would hide where the evidence came from.
+
+**0062 is the second entry produced by a measurement, and the first produced by
+another entry's own confirming run.** 0061 was accepted with a run owed against
+it; that run confirmed the rule — the published bound on 32 of 32 pairs, the
+tight clause on all 13 it applies to, the forced-cut fraction at 1.66% against a
+reversal condition of one in ten — and falsified a sentence 0061 had written
+about which of the bound's two clauses carries periodic content. So 0061 is
+marked *superseded in part* rather than superseded: two sentences and one
+requirement go, and the acceptance rule, the mask, the bound and
+`RESYNC_BOUND_BYTES` all stand and are confirmed. A row is the only place that
+distinction is visible without reading both files, which is the same argument
+0012 and 0060 make one row up.

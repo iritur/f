@@ -115,6 +115,30 @@ fn uniform_bytes(stream: &mut Stream, len: usize) -> Vec<u8> {
     out
 }
 
+/// Drawn content, and the period it repeats at when it has one.
+///
+/// # Why the period leaves the generator
+///
+/// RFC 0062 asserts a property of the *content* rather than of a mixture name,
+/// and the property is stated in the period: on a `p`-periodic object the
+/// candidate count at or after [`WINDOW_BYTES`] is either zero or at least
+/// `len / p − 1`. A generator that kept `p` to itself would leave that
+/// assertion with nothing to compare against, and the mixture label — which is
+/// what the assertion this replaces was keyed to — is exactly the thing RFC
+/// 0062 says decides nothing.
+struct Drawn {
+    /// The content.
+    bytes: Vec<u8>,
+    /// The period the content repeats at, in bytes, or `None` when it has no
+    /// single one.
+    ///
+    /// Only [`Mixture::Periodic`] has one. A concatenation has a period per run
+    /// and none of its own; uniform and zero-filled content have none to have —
+    /// a zero run repeats at every period, which is a different fact and is the
+    /// one `gear`'s fixed-point test carries.
+    period: Option<usize>,
+}
+
 /// `len` bytes of the named mixture.
 ///
 /// Two streams, and which draw goes to which is the point: `content` answers
@@ -122,11 +146,11 @@ fn uniform_bytes(stream: &mut Stream, len: usize) -> Vec<u8> {
 /// concatenation. Splitting them means a longer object does not shift the
 /// sequence of run kinds, and a fifth kind added later does not shift the
 /// bytes.
-fn draw(kind: Mixture, content: &mut Stream, mixture: &mut Stream, len: usize) -> Vec<u8> {
+fn draw(kind: Mixture, content: &mut Stream, mixture: &mut Stream, len: usize) -> Drawn {
     let stream = &mut *content;
     match kind {
-        Mixture::Uniform => uniform_bytes(stream, len),
-        Mixture::Zero => vec![0u8; len],
+        Mixture::Uniform => Drawn { bytes: uniform_bytes(stream, len), period: None },
+        Mixture::Zero => Drawn { bytes: vec![0u8; len], period: None },
         Mixture::Periodic => {
             // Below the target size, which is the case that matters: a period
             // above it would put a candidate in most periods and behave like
@@ -138,7 +162,7 @@ fn draw(kind: Mixture, content: &mut Stream, mixture: &mut Stream, len: usize) -
                 let take = (len - out.len()).min(period);
                 out.extend_from_slice(&block[..take]);
             }
-            out
+            Drawn { bytes: out, period: Some(period) }
         }
         Mixture::Concatenated => {
             let mut out = Vec::with_capacity(len);
@@ -146,9 +170,9 @@ fn draw(kind: Mixture, content: &mut Stream, mixture: &mut Stream, len: usize) -
                 let run = (CHUNK_TARGET_BYTES + below(mixture, 8 * CHUNK_TARGET_BYTES))
                     .min(len - out.len());
                 let inner = Mixture::ALL[below(mixture, 3)];
-                out.extend_from_slice(&draw(inner, content, mixture, run));
+                out.extend_from_slice(&draw(inner, content, mixture, run).bytes);
             }
-            out
+            Drawn { bytes: out, period: None }
         }
     }
 }
@@ -309,7 +333,7 @@ fn chunk_census(bytes: &[u8], boundaries: &[usize]) -> BTreeMap<[u8; 32], (usize
 /// Two megabytes and up. An object shorter than `RESYNC_BOUND_BYTES` past the
 /// edit would let the sequences "agree" by running out of bytes, which is a
 /// vacuous pass and the failure this apparatus is least able to see.
-fn draw_object(sites: &mut Sites, kind: Mixture) -> Vec<u8> {
+fn draw_object(sites: &mut Sites, kind: Mixture) -> Drawn {
     let length = 2 * 1024 * 1024 + below(&mut sites.length, 2 * 1024 * 1024);
     draw(kind, &mut sites.object, &mut sites.mixture, length)
 }
@@ -327,7 +351,7 @@ fn every_chunk_but_the_last_lies_between_the_minimum_and_the_maximum() {
     for &seed in SEEDS {
         for kind in Mixture::ALL {
             let mut sites = Sites::new(seed);
-            let object = draw_object(&mut sites, kind);
+            let object = draw_object(&mut sites, kind).bytes;
             let cuts = boundaries(&object);
 
             let mut start = 0;
@@ -368,7 +392,7 @@ fn the_mean_chunk_is_within_a_factor_of_two_of_the_target() {
 
         for &seed in SEEDS {
             let mut sites = Sites::new(seed);
-            let object = draw_object(&mut sites, kind);
+            let object = draw_object(&mut sites, kind).bytes;
             let cuts = boundaries(&object);
             let mut start = 0;
             // The final chunk is where the object ended, not where the content
@@ -439,7 +463,7 @@ fn nothing_before_the_last_boundary_preceding_the_window_changes() {
     for &seed in SEEDS {
         for kind in Mixture::ALL {
             let mut sites = Sites::new(seed);
-            let object = draw_object(&mut sites, kind);
+            let object = draw_object(&mut sites, kind).bytes;
             // In the first half, so that the object always has a tail longer
             // than the resynchronisation bound.
             let at = below(&mut sites.edit, object.len() / 2);
@@ -469,6 +493,32 @@ fn nothing_before_the_last_boundary_preceding_the_window_changes() {
     }
 }
 
+/// The most of the eight periodic pairs that may have their edit inside a
+/// starved run.
+///
+/// Seven, and it is derived rather than measured — measured is five. On
+/// `p`-periodic content the candidate set is all-or-nothing with
+/// `P(empty) = e^(−p / 2^MASK_BITS)`, which averages 0.632 over a period drawn
+/// uniformly from `[64, CHUNK_TARGET_BYTES)`, so a *correct* mask starves all
+/// eight with probability `0.632^8` = 2.6%. Seven is therefore the largest
+/// threshold eight seeds can carry without becoming a description of the run.
+/// RFC 0062, and its failure mode is the regression that entry documents: a
+/// mask widened without anybody noticing what it does to short periods —
+/// `MASK_BITS` 14 to 16 moved `P(empty)` from 0.245 to 0.632. Raising this
+/// number needs more seeds, not a bigger number.
+const STARVED_PERIODIC_MAX: usize = 7;
+
+/// The fewest pairs of the thirty-two whose edit must fall *outside* a starved
+/// run.
+///
+/// Four, as the positive control that stops the tight clause and the carriage
+/// check above from passing vacuously — a suite in which everything is starved
+/// asserts nothing. Derived: a uniform edit sits in a [`STARVED_GAP_BYTES`]
+/// candidate gap with probability `e^(−3.75)` = 2.4%, so the eight uniform
+/// seeds alone put four out of reach of anything but a broken generator.
+/// Measured 13. RFC 0062.
+const UNSTARVED_MIN: usize = 4;
+
 /// Property 4. The sequences resynchronise inside the two-clause bound.
 ///
 /// [`RESYNC_BOUND_BYTES`] past `X + L`, or the end of the enclosing *starved*
@@ -477,41 +527,79 @@ fn nothing_before_the_last_boundary_preceding_the_window_changes() {
 /// candidate sequence, so on content whose candidates are closer together than
 /// [`STARVED_GAP_BYTES`] it collapses to the flat bound.
 ///
-/// # Three assertions, and why the second and third exist
+/// # Four assertions, and which sentence bought each
 ///
-/// **Which clause carried the pair is printed and then asserted.** RFC 0061:
-/// *"a pair that passes only because its starved run swallowed the object is a
-/// pass this entry does not claim, so the test prints which clause carried each
-/// pair."* The periodic mixture is the one that falsified the draft bound, and
-/// a green suite in which it passes by being excused is the failure this whole
-/// exercise is about — so every periodic and concatenated pair must land inside
-/// the flat clause, and the zero-filled mixture is the one that is allowed the
-/// starved clause because it *is* the starved case.
+/// **The published bound.** `agreed <= allowed`, on every pair. Nothing about
+/// it moved under RFC 0061 or RFC 0062, and it holds 32 of 32.
 ///
-/// **The tighter clause is asserted where it applies.** RFC 0061 again: *"the
-/// flat clause gets stronger where it applies: outside a starved run the
-/// sequences agree from the first accepted boundary at or after
-/// `X + L + CHUNK_MIN_BYTES + 64` — 16 448 bytes past the edit — rather than
-/// merely inside `RESYNC_BOUND_BYTES`, because every acceptance decision from
-/// that point on reads only content the edit did not touch."* That is the
-/// number the entry's whole argument produces, and asserting only the 512 KiB
-/// outer allowance would leave it unmeasured.
+/// **The tighter clause where it applies.** RFC 0061: *"the flat clause gets
+/// stronger where it applies: outside a starved run the sequences agree from
+/// the first accepted boundary at or after `X + L + CHUNK_MIN_BYTES + 64` —
+/// 16 448 bytes past the edit — rather than merely inside
+/// `RESYNC_BOUND_BYTES`, because every acceptance decision from that point on
+/// reads only content the edit did not touch."* That is the number the entry's
+/// whole argument produces, and asserting only the 512 KiB outer allowance
+/// would leave it unmeasured. It applies on 13 pairs and is violated on none.
+///
+/// **Carriage, keyed to the candidate gap and not to a mixture name.** What
+/// stood here until 2026-09-06 was RFC 0061's requirement that *every* periodic
+/// and concatenated pair land inside the flat clause. That requirement is
+/// withdrawn — not weakened, withdrawn, by an entry that explains why it was
+/// never satisfiable — and RFC 0062 is the sentence that replaces it: *"a pair
+/// whose edit is not inside a starved run must be carried by the flat clause.
+/// The mixture name decides nothing; the candidate gap the edit sits in decides
+/// everything."* A reader should know what this check is and is not: outside a
+/// starved run the allowance *is* the flat clause, so on those pairs this and
+/// the published bound above coincide, and the value of stating it separately
+/// is the message — a pair excused by a starved run it is not in would be
+/// reported as the excuse it is rather than as a bound that held. The teeth
+/// RFC 0062 adds are the two below.
+///
+/// **The structure that produces the split.** RFC 0062: *"On the drawn periodic
+/// object — not the edited one, whose inserted uniform bytes contribute their
+/// own candidates — count the candidates at positions at or after 64, where the
+/// register is a pure function of `i mod p`, and assert that the count is
+/// either zero or at least `len / p − 1`."* This is the all-or-nothing property
+/// the whole starved class rests on, and it can fail: the day the register
+/// stops being a function of the last sixty-four bytes, a periodic object
+/// acquires a candidate count that is neither — and that is the same day the
+/// *prefix* half of the published bound stops being true, which is why this
+/// assertion is worth more than the distribution it replaced. The eight *edited*
+/// periodic objects measure 41, 1, 1, 0, 77, 3, 83 and 1 candidates; the
+/// assertion is what says the middle counts are the insertion's uniform bytes
+/// and not the content's, because a period below 65 536 in an object above two
+/// megabytes puts at least 32 candidates in it the moment one residue hits.
+///
+/// # The split as counted data, with three thresholds
+///
+/// Which pairs are starved is recorded per mixture and asserted against
+/// [`STARVED_PERIODIC_MAX`], the exact count of zero-filled pairs, and
+/// [`UNSTARVED_MIN`]. None of the three is the measured value, each is derived
+/// in its own doc comment, and together they are what `claims/0017` registers in
+/// place of `resync_pairs_carried_by_the_flat_clause`.
 ///
 /// # Why the failures are collected rather than panicked on
 ///
-/// All three checks below record and none of them stop the loop, and the test
-/// fails at the end on the collected list. A bound that fails is a fact about
-/// the design and the useful form of that fact is *which (seed, mixture) pairs*
-/// — the first panic tells a reader one pair and hides the other thirty-one,
-/// which is how the draft bound survived as long as it did. Nothing is excused
-/// by this: one entry in the list fails the test.
+/// The per-pair checks record and none of them stop the loop, and the test fails
+/// at the end on the collected list. A bound that fails is a fact about the
+/// design and the useful form of that fact is *which (seed, mixture) pairs* —
+/// the first panic tells a reader one pair and hides the other thirty-one, which
+/// is how the draft bound survived as long as it did. Nothing is excused by
+/// this: one entry in the list fails the test. The three thresholds are asserted
+/// after that list, because the split is a statement about the content and is
+/// only interpretable once the bound itself has held.
 #[test]
 fn the_boundary_sequences_resynchronise_within_the_bound() {
     let mut failures: Vec<String> = Vec::new();
+    // The split, counted rather than described, and keyed by mixture so that
+    // the three thresholds below are statements about named content. RFC 0062
+    // makes these counts the rows `claims/0017` registers.
+    let mut starved_pairs: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut unstarved_pairs = 0usize;
     for &seed in SEEDS {
         for kind in Mixture::ALL {
             let mut sites = Sites::new(seed);
-            let object = draw_object(&mut sites, kind);
+            let Drawn { bytes: object, period } = draw_object(&mut sites, kind);
             let at = below(&mut sites.edit, object.len() / 2);
             let length = 1 + below(&mut sites.length, 128 * 1024);
             let inserted = uniform_bytes(&mut sites.edit, length);
@@ -524,6 +612,12 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
             let before = boundaries(&object);
             let after = boundaries(&edited);
             let agreed = resynchronised_at(&before, &after, length);
+            // The **drawn** object's candidate set, taken here because the next
+            // line turns `candidates` from a function into a binding, and only
+            // for content that has a period — the structural clause below is a
+            // statement about `i mod p` and there is nothing to say without a
+            // `p`.
+            let drawn_candidates = period.map(|_| candidates(&object));
             let candidates = candidates(&edited);
             let from = at + length;
             let flat = from + RESYNC_BOUND_BYTES;
@@ -537,10 +631,16 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
             let window_clear = from + CHUNK_MIN_BYTES + WINDOW_BYTES;
             let tight = after.iter().copied().find(|&b| b >= window_clear).unwrap_or(edited.len());
 
+            // The drawn period is printed beside the candidate count, and RFC
+            // 0062 asks for it by name so that `e^(−p / 2^MASK_BITS)` — the
+            // probability that a periodic object has no candidate at all — can
+            // be checked against the run by hand rather than taken on trust.
+            let drawn_period =
+                period.map_or_else(|| "none".to_string(), |period| format!("{period}"));
             println!(
-                "P4 seed {seed} {:>12} object {} edit {length}@{at} candidates {} agreed \
-                 {agreed} flat {flat} starved-run-end {starved} allowed {allowed} tight {tight} \
-                 carried-by {carried}",
+                "P4 seed {seed} {:>12} object {} drawn-period {drawn_period} edit {length}@{at} \
+                 candidates {} agreed {agreed} flat {flat} starved-run-end {starved} allowed \
+                 {allowed} tight {tight} carried-by {carried}",
                 kind.name(),
                 object.len(),
                 candidates.len()
@@ -565,12 +665,20 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
                 ));
             }
 
-            if kind != Mixture::Zero && carried != "flat" {
+            // Carriage, restated over content instead of over labels. RFC 0062:
+            // *"a pair whose edit is not inside a starved run must be carried by
+            // the flat clause. The mixture name decides nothing; the candidate
+            // gap the edit sits in decides everything."* This sits where the
+            // withdrawn requirement sat — every periodic and concatenated pair
+            // carried by the flat clause — so that a reader who comes looking
+            // for it finds what is true rather than nothing.
+            if starved <= from && carried != "flat" {
                 failures.push(format!(
-                    "{pair}: the sequences agreed at {agreed}, past the flat clause's {flat}, so \
-                     this pair passed only on the starved clause's allowance of {allowed} \
-                     (starved run to {starved}, {} candidates in the whole edited object). RFC \
-                     0061 does not claim that pass for content that produces candidates",
+                    "{pair}: the edit is not inside a starved run — the run containing it ends at \
+                     {starved}, at or before {from} — so the starved clause excuses nothing here \
+                     and the flat clause's {flat} is the whole allowance. The sequences agreed at \
+                     {agreed}, on an allowance of {allowed} ({} candidates in the whole edited \
+                     object)",
                     candidates.len()
                 ));
             }
@@ -587,15 +695,96 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
                      {agreed}"
                 ));
             }
+
+            if starved > from {
+                *starved_pairs.entry(kind.name()).or_default() += 1;
+            } else {
+                unstarved_pairs += 1;
+            }
+
+            // The structure that produces the split, asserted on the **drawn**
+            // object rather than on the edited one. RFC 0062: *"count the
+            // candidates at positions at or after 64, where the register is a
+            // pure function of `i mod p`, and assert that the count is either
+            // zero or at least `len / p − 1`."* The lower bound is exact rather
+            // than generous: one residue hitting the mask puts a candidate at
+            // every position congruent to it, `floor((len − r) / p) + 1` of
+            // them in the object, and dropping the at most one that falls
+            // inside the first sixty-four bytes leaves `floor(len / p) − 1` in
+            // the worst case.
+            if let (Some(period), Some(drawn)) = (period, drawn_candidates) {
+                let settled = drawn.iter().filter(|&&c| c >= WINDOW_BYTES).count();
+                let owed = (object.len() / period).saturating_sub(1);
+                println!(
+                    "P4 seed {seed} {:>12} drawn object {} period {period} candidates at or \
+                     after {WINDOW_BYTES}: {settled}, all-or-nothing owes 0 or at least {owed}",
+                    kind.name(),
+                    object.len()
+                );
+                if settled > 0 && settled < owed {
+                    failures.push(format!(
+                        "{pair}: the drawn object repeats with period {period}, so past the \
+                         first {WINDOW_BYTES} bytes the register is a function of the position \
+                         modulo {period} and its candidate set is closed under adding {period}. \
+                         That set must then be empty or hold at least {owed} positions; it holds \
+                         {settled}. The register has stopped being a function of the last \
+                         {WINDOW_BYTES} bytes, which puts the prefix half of the bound in \
+                         question before anything about the starved clause is"
+                    ));
+                }
+            }
         }
     }
 
     assert!(
         failures.is_empty(),
-        "{} of {} (seed, mixture) pairs fail the re-chunking bound as RFC 0061 states it:\n{}",
+        "{} of {} (seed, mixture) pairs fail the re-chunking bound as RFC 0061 states it and RFC \
+         0062 restates what it covers:\n{}",
         failures.len(),
         SEEDS.len() * Mixture::ALL.len(),
         failures.join("\n")
+    );
+
+    let split = starved_pairs
+        .iter()
+        .map(|(name, count)| format!("{name} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let starved_periodic = starved_pairs.get(Mixture::Periodic.name()).copied().unwrap_or(0);
+    let starved_zero = starved_pairs.get(Mixture::Zero.name()).copied().unwrap_or(0);
+    println!(
+        "P4 split: {unstarved_pairs} of {} pairs unstarved, starved per mixture: {split}",
+        SEEDS.len() * Mixture::ALL.len()
+    );
+
+    assert!(
+        starved_periodic <= STARVED_PERIODIC_MAX,
+        "{starved_periodic} of the {} periodic pairs are starved, above the \
+         {STARVED_PERIODIC_MAX} RFC 0062 allows. At eight, `MASK_BITS` or the gear table has \
+         drifted and the chunked kind has stopped serving periodic content altogether rather \
+         than serving a third of it — a correct mask reaches eight with probability 0.632^8 = \
+         2.6%. The threshold is derived; raising it needs more seeds. Split: {split}",
+        SEEDS.len()
+    );
+    assert_eq!(
+        starved_zero,
+        SEEDS.len(),
+        "{starved_zero} of the {} zero-filled pairs are starved, and the count owed is exact \
+         rather than statistical: a zero run reaches the register's fixed point after \
+         {WINDOW_BYTES} bytes, that fixed point hits no mask by the constraint RFC 0061 put on \
+         the mask's draw, so zero-filled content has no candidate anywhere and every edit in it \
+         is inside a starved run. A count below this is the same event `gear`'s fixed-point test \
+         guards from the other side, and it has changed every object hash ever written. Split: \
+         {split}",
+        SEEDS.len()
+    );
+    assert!(
+        unstarved_pairs >= UNSTARVED_MIN,
+        "only {unstarved_pairs} of {} pairs have their edit outside a starved run, below the \
+         {UNSTARVED_MIN} RFC 0062 requires as the positive control. The tight clause and the \
+         carriage check above are both conditioned on that, so a run in which everything is \
+         starved asserts nothing about the bound it claims to measure. Split: {split}",
+        SEEDS.len() * Mixture::ALL.len()
     );
 }
 
@@ -619,7 +808,7 @@ fn identical_content_in_two_objects_yields_identical_chunk_hashes() {
     for &seed in SEEDS {
         for kind in Mixture::ALL {
             let mut sites = Sites::new(seed);
-            let shared = draw(kind, &mut sites.object, &mut sites.mixture, 2 * 1024 * 1024);
+            let shared = draw(kind, &mut sites.object, &mut sites.mixture, 2 * 1024 * 1024).bytes;
             let first_pad = 1 + below(&mut sites.length, 256 * 1024);
             let second_pad = 1 + below(&mut sites.length, 256 * 1024);
             let mut first = uniform_bytes(&mut sites.edit, first_pad);

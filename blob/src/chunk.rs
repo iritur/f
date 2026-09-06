@@ -48,6 +48,25 @@
 //! nested masks with the loose hit accepted only when no loose hit occurred in
 //! the preceding [`CHUNK_TARGET_BYTES`], which is a window too.
 //!
+//! **What this rule repairs, and what it cannot — RFC 0062.** It repairs
+//! *phase-lock*: acceptance no longer carries an offset forward from the
+//! previous boundary, so two streams displaced by an insertion take the same
+//! decision at every position 16 448 bytes past the edit, which is what
+//! `E2-P02` measured on 32 of 32 pairs. It does **not** repair *starvation*,
+//! and no rule of this shape can. Past the first sixty-four bytes the register
+//! on exactly `p`-periodic content is a function of `i mod p`, so the candidate
+//! set `B` of any predicate over a bounded window of content satisfies
+//! `B + p = B` away from the object's ends: if `B` holds a position it holds
+//! one `p` bytes behind it, and with `p < CHUNK_MIN_BYTES` that candidate is
+//! never accepted. The object gets no content boundary at all, every cut is
+//! forced at [`CHUNK_MAX_BYTES`], and an edit re-chunks everything after it.
+//! The knob is therefore [`CHUNK_MIN_BYTES`] and not [`MASK_BITS`]: a mask
+//! width moves how often a period *has* a candidate and cannot move whether one
+//! is ever accepted, and a rule with a larger minimum — local-maximum chunking,
+//! whose minimum is its own window — starves strictly more periods rather than
+//! fewer. RFC 0062, argued from the run that confirmed RFC 0061's bound and
+//! falsified its forecast about which clause carries periodic content.
+//!
 //! # What still reads the previous boundary, and why exactly one thing does
 //!
 //! The forced cut at [`CHUNK_MAX_BYTES`], and its companion: an accepted
@@ -74,6 +93,17 @@ use crate::gear::{GEAR, MASK};
 /// candidate is accepted when no candidate occurred in the preceding
 /// `CHUNK_MIN_BYTES`. Candidates inside that window are ignored — not deferred,
 /// ignored: the register keeps running and the position is simply not a cut.
+///
+/// **This constant, and not [`MASK_BITS`], is what sets the starved class.**
+/// Every exactly-periodic object whose period is below it is starved — no
+/// candidate in it is ever accepted, every cut is forced at
+/// [`CHUNK_MAX_BYTES`], and an edit re-chunks everything after it — and that
+/// holds for every acceptance rule this design permits rather than for this
+/// mask, because it is a statement about minimum chunk sizes and `+p`-invariant
+/// candidate sets. RFC 0062. So the only way to shrink the class is to shrink
+/// this number, which is a superblock field and decides every object hash ever
+/// written; the periods RFC 0058 names — a 4096-byte database page, an
+/// 8192-byte one — are inside the class by arithmetic rather than by luck.
 pub const CHUNK_MIN_BYTES: usize = 16 * 1024;
 
 /// The size the mask width is chosen around.
