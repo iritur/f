@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! The gear table and the two masks, derived rather than transcribed.
+//! The gear table and the mask, derived rather than transcribed.
 //!
 //! # Why there is no SplitMix64 in this file
 //!
@@ -26,7 +26,7 @@
 
 use f_env::split::{Stream, label};
 
-use crate::chunk::{MASK_LOOSE_BITS, MASK_STRICT_BITS};
+use crate::chunk::MASK_BITS;
 
 /// The label the gear table is derived from.
 ///
@@ -34,31 +34,46 @@ use crate::chunk::{MASK_LOOSE_BITS, MASK_STRICT_BITS};
 /// field: see this module's header for what changing it costs.
 pub const GEAR_LABEL: &str = "f-blob gear v1";
 
-/// The label the two masks are derived from.
+/// The label the mask is derived from.
 ///
 /// Unit: none — a stable text identity, not a quantity. Separate from
 /// [`GEAR_LABEL`] so that a future mask width can be chosen without disturbing
 /// a table that every object hash on every device depends on.
-pub const MASK_LABEL: &str = "f-blob mask v1";
+///
+/// **`v2` and not `v1`, and the version is the point.** RFC 0061 replaced two
+/// masks selected by distance from the previous boundary with one, so the
+/// derivation off this label changed: a different number of bits, drawn from a
+/// different position in the stream. A derivation that moved under an unchanged
+/// label is precisely the silent hash change this field is a superblock field
+/// to prevent, so the label moved with it. `GEAR_LABEL` did not move, because
+/// the table did not.
+pub const MASK_LABEL: &str = "f-blob mask v2";
 
 /// One 64-bit word per byte value, added into the rolling register.
 ///
 /// Unit: none — an entry is a mixing constant, not a quantity.
 pub const GEAR: [u64; 256] = gear_table();
 
-/// The mask consulted below [`crate::chunk::CHUNK_TARGET_BYTES`].
+/// The one mask a candidate is tested against.
 ///
-/// Unit: none — a bit set. [`MASK_STRICT_BITS`] bits, the highest at bit 63.
-pub const MASK_STRICT: u64 = MASKS.0;
-
-/// The mask consulted at and above [`crate::chunk::CHUNK_TARGET_BYTES`].
+/// Unit: none — a bit set. [`MASK_BITS`] bits, the highest at bit 63.
 ///
-/// Unit: none — a bit set. [`MASK_LOOSE_BITS`] bits, the highest at bit 63.
-pub const MASK_LOOSE: u64 = MASKS.1;
+/// One and not two: RFC 0061 retired normalised chunking, because which of the
+/// two masks applied was decided by the distance since the previous boundary,
+/// and that dependence is the phase-lock `E2-P02` measured.
+pub const MASK: u64 = mask();
 
-/// Both masks from one stream, in this order, so that the strict one does not
-/// move when the loose one's width changes.
-const MASKS: (u64, u64) = masks();
+/// The register's fixed point on a run of zero bytes.
+///
+/// Unit: none — a register value, not a quantity. `h = 2h + gear[0]` reaches
+/// this after sixty-four bytes and stays there, so it is the value every long
+/// zero run in every object presents to the mask.
+///
+/// It is a constant here because the mask's draw has an obligation towards it
+/// — RFC 0061's constraint that the fixed point must not hit the mask — and an
+/// obligation stated in prose beside a value nothing names is an obligation
+/// nobody can check. The test at the foot of this module discharges it.
+pub const ZERO_RUN_FIXED_POINT: u64 = 0x127e_e44b_ae55_2daa;
 
 const fn gear_table() -> [u64; 256] {
     let mut stream = Stream::from_seed(label(GEAR_LABEL));
@@ -71,11 +86,24 @@ const fn gear_table() -> [u64; 256] {
     table
 }
 
-const fn masks() -> (u64, u64) {
+/// The mask, from the first draw off [`MASK_LABEL`].
+///
+/// # The constraint the draw had to satisfy, stated before it was drawn
+///
+/// RFC 0061 states it: [`ZERO_RUN_FIXED_POINT`] must **not** hit the mask, and
+/// if the first draw under `"f-blob mask v2"` had hit it, the label would have
+/// incremented until one did not. That makes it a derivation constraint and not
+/// a constant fitted to a test, which is why it is written here and in the RFC
+/// rather than discovered by a red assertion. The reason it matters: a mask the
+/// fixed point hits would cut every zero region in every object in the system
+/// at the same arithmetic offset — boundaries decided by the register's
+/// arithmetic rather than by content, which is a worse property than a zero run
+/// having no candidates at all.
+///
+/// The first draw does not hit it, so the label is `v2` and stays there.
+const fn mask() -> u64 {
     let mut stream = Stream::from_seed(label(MASK_LABEL));
-    let strict = spread(&mut stream, MASK_STRICT_BITS);
-    let loose = spread(&mut stream, MASK_LOOSE_BITS);
-    (strict, loose)
+    spread(&mut stream, MASK_BITS)
 }
 
 /// `bits` set bits scattered through a word, the highest of them bit 63.
@@ -110,7 +138,7 @@ const fn spread(stream: &mut Stream, bits: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{GEAR, MASK_LOOSE, MASK_LOOSE_BITS, MASK_STRICT, MASK_STRICT_BITS};
+    use super::{GEAR, MASK, MASK_BITS, ZERO_RUN_FIXED_POINT};
     use alloc::collections::BTreeSet;
 
     /// A zero entry makes a byte value invisible to the register.
@@ -147,10 +175,39 @@ mod tests {
     /// crate doc, in E2-P02's specification and in a claim's workload
     /// description. A test is cheaper than a fourth reader.
     #[test]
-    fn the_highest_bit_of_each_mask_is_bit_sixty_three() {
-        assert_eq!(MASK_STRICT.leading_zeros(), 0, "the strict mask does not reach bit 63");
-        assert_eq!(MASK_LOOSE.leading_zeros(), 0, "the loose mask does not reach bit 63");
-        assert_eq!(MASK_STRICT.count_ones(), MASK_STRICT_BITS);
-        assert_eq!(MASK_LOOSE.count_ones(), MASK_LOOSE_BITS);
+    fn the_highest_bit_of_the_mask_is_bit_sixty_three() {
+        assert_eq!(MASK.leading_zeros(), 0, "the mask does not reach bit 63");
+        assert_eq!(MASK.count_ones(), MASK_BITS);
+    }
+
+    /// The register's fixed point on a zero run is where the mask is not.
+    ///
+    /// RFC 0061 states this as a constraint on the draw rather than as a hope
+    /// about it: if `"f-blob mask v2"`'s first draw had hit the fixed point,
+    /// the label would have incremented. It did not, and this test is what says
+    /// so to anyone who moves `MASK_BITS`, the mask label or the gear table —
+    /// all three of which move the two sides of this comparison independently.
+    ///
+    /// What goes wrong if it ever goes red: every zero region in every object
+    /// in the system acquires boundaries at an offset decided by the register's
+    /// arithmetic, identical across all of them and unrelated to content. RFC
+    /// 0061 lists that as a reversal condition and says the label increments
+    /// before anything else is concluded.
+    #[test]
+    fn the_mask_does_not_hit_the_zero_run_fixed_point() {
+        let mut register: u64 = 0;
+        for _ in 0..128 {
+            register = (register << 1).wrapping_add(GEAR[0]);
+        }
+        assert_eq!(
+            register, ZERO_RUN_FIXED_POINT,
+            "the gear table moved, so the fixed point RFC 0061 drew the mask against moved too"
+        );
+        assert_ne!(
+            register & MASK,
+            0,
+            "the zero-run fixed point {register:#018x} hits the mask {MASK:#018x}, so zero-filled \
+             content would cut at an arithmetic offset rather than not at all"
+        );
     }
 }

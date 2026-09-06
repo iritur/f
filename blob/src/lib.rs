@@ -22,41 +22,53 @@
 //! decision taken before that window can see the edit is the same decision.
 //!
 //! **After the edit it is a bound with two clauses, and the second one is the
-//! honest half.** The two boundary sequences resynchronise within
-//! [`chunk::RESYNC_BOUND_BYTES`] of `X + L`, *or* at the end of the enclosing
-//! candidate-free run plus one chunk, whichever is later.
+//! honest half.** The two boundary sequences agree from the first accepted
+//! boundary at or after `X + L + CHUNK_MIN_BYTES + 64`, and in no case later
+//! than [`chunk::RESYNC_BOUND_BYTES`] past `X + L`, *except* across a **starved**
+//! run — a maximal run in which no two consecutive candidates are closer than
+//! `CHUNK_MAX_BYTES − CHUNK_MIN_BYTES` = 240 KiB — where they agree only at the
+//! end of that run plus one chunk.
 //!
-//! The second clause is written here rather than found by a user. In content
-//! with no candidates at all — a zero run, a period below the target size,
-//! which is a VM image and a sparse database file and not a corner case — every
-//! boundary is forced at [`chunk::CHUNK_MAX_BYTES`]. A forced cut is by
-//! definition relative to the previous boundary, so two streams offset by `L`
-//! do not resynchronise until the run ends, and the design is bad on exactly
-//! that workload.
+//! The first clause has a proof rather than a hope behind it, and RFC 0061 is
+//! where it was bought: acceptance is a predicate over a window of
+//! `CHUNK_MIN_BYTES + 64` bytes of content, so every decision taken past that
+//! point reads only bytes the edit did not touch. The second is written here
+//! rather than found by a user. Inside a starved run every boundary is forced
+//! at [`chunk::CHUNK_MAX_BYTES`], a forced cut is by definition relative to the
+//! previous boundary, so two streams offset by `L` do not resynchronise until
+//! the run ends, and the design is bad on exactly that workload. A zero run is
+//! the extreme case of it, and [`chunk::CHUNK_MAX_BYTES`] is the only thing
+//! bounding a chunk there.
 //!
-//! *The cause is maximum-size forcing and not the minimum.* An earlier draft
-//! blamed the minimum, and the reversal it wrote down — acceptance that does
-//! not depend on the previous boundary — does not fix a forced cut, because a
-//! forced cut has no acceptance in it at all. The paragraph is here so that
-//! nobody reaches for that fix expecting this clause to go away.
+//! *What an earlier draft of this paragraph said, and why it was wrong.* It
+//! said the second clause covered content with **no candidates at all**, and
+//! that the cause was maximum-size forcing and not the minimum — so that
+//! acceptance independent of the previous boundary "does not fix a forced cut".
+//! `E2-P02` measured that false on 2026-09-06: seven of thirty-two (seed,
+//! mixture) pairs never resynchronised at all on content whose next candidate
+//! was 2570 bytes past the edit, so the run clause was inert and the minimum
+//! was the cause. RFC 0061 is the reversal. What survives from the draft is one
+//! sentence — a forced cut is still relative to the previous boundary — and it
+//! is why the second clause still exists, over the strictly smaller class of
+//! *starved* rather than candidate-free content.
 //!
 //! # Determinism
 //!
 //! This crate names [`f_env::split`] at compile time and never at run time.
-//! [`gear::GEAR`] and the two masks are `const`, derived by `const fn` from one
-//! label under RFC 0026's single derivation; a boundary is a function of the
-//! bytes scanned and of those constants. Nothing here reads a clock, draws a
-//! value or asks an `Env` for anything while it runs, and `lint-determinism`
-//! finding nothing under `blob/` is the design rather than an oversight. The
-//! tests draw their objects and their edits from a seeded `Env`, which is the
-//! opposite obligation and is met in `blob/tests/`.
+//! [`gear::GEAR`] and [`gear::MASK`] are `const`, derived by `const fn` from
+//! one label each under RFC 0026's single derivation; a boundary is a function
+//! of the bytes scanned and of those constants. Nothing here reads a clock,
+//! draws a value or asks an `Env` for anything while it runs, and
+//! `lint-determinism` finding nothing under `blob/` is the design rather than
+//! an oversight. The tests draw their objects and their edits from a seeded
+//! `Env`, which is the opposite obligation and is met in `blob/tests/`.
 //!
 //! # Why `alloc`
 //!
 //! An object's chunk list is variable-length — it is the first variable-length
 //! thing in this workspace — and a fixed table would either bound object size
 //! or waste the bound. Spec decision 4. The chunker itself allocates nothing:
-//! [`chunk::Chunker`] is two words and streams.
+//! [`chunk::Chunker`] is three words and streams.
 
 #![no_std]
 

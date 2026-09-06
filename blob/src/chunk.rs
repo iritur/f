@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Content-defined chunking: FastCDC's shape on a gear register, normalised.
+//! Content-defined chunking: FastCDC's shape on a gear register, with
+//! acceptance stated as a predicate over a window of content.
 //!
 //! # The register, and what a boundary can see
 //!
@@ -16,20 +17,47 @@
 //! window is exactly what phase-locks boundaries on data with short periods.
 //! `gear::spread` forces bit 63 and `gear`'s tests assert it.
 //!
-//! # Why normalised chunking
+//! # Why acceptance is a window and not a recurrence — RFC 0061
 //!
-//! Two masks rather than one: [`MASK_STRICT_BITS`] bits below
-//! [`CHUNK_TARGET_BYTES`], so a cut before the target is unlikely, and
-//! [`MASK_LOOSE_BITS`] bits at and above it, so a cut after the target is
-//! likely. FastCDC's normalised chunking, and it is adopted here for one
-//! reason: **it reduces the number of cuts forced at [`CHUNK_MAX_BYTES`]**.
+//! A *candidate* is `register & MASK == 0` and nothing else: one mask, no
+//! second one selected by how far the scan has run. A candidate is *accepted*
+//! when **no candidate occurred in the preceding [`CHUNK_MIN_BYTES`]**, which is
+//! not the same rule as *at least [`CHUNK_MIN_BYTES`] since the last cut* even
+//! though it delivers the same minimum chunk size. The difference is the whole
+//! of RFC 0061 and it is one sentence: **a predicate over a window of `w` bytes
+//! forgets everything more than `w` bytes back, and a recurrence over the
+//! previous boundary need never forget anything.**
 //!
-//! That is not a throughput argument, it is the bound's argument. A forced cut
-//! is measured from the previous boundary rather than from the content, so two
-//! streams offset by an insertion cannot resynchronise across a run of them —
-//! which is the whole of the second clause of the re-chunking bound in
-//! `crate`'s header. Fewer forced cuts is a smaller region where the bound is
-//! weak.
+//! The minimum still holds, in two lines. If `c` and `c'` are consecutive
+//! accepted positions then `c'` has no candidate in `[c' − CHUNK_MIN_BYTES,
+//! c')`, and `c` is a candidate at or before `c'`, so `c' − c` is at least
+//! `CHUNK_MIN_BYTES`. And the whole acceptance decision at `p` reads the content
+//! in `[p − CHUNK_MIN_BYTES − 64, p]` and nothing else, so two streams offset
+//! by an insertion take the same decision at every position 16 448 bytes past
+//! the edit.
+//!
+//! **What this replaced, and why it is not coming back.** Normalised chunking:
+//! two masks, a strict one below [`CHUNK_TARGET_BYTES`] and a loose one at and
+//! above it, adopted to make cuts forced at [`CHUNK_MAX_BYTES`] rarer. Which
+//! mask applied was decided by *the distance since the previous boundary*, so
+//! it was the same dependence RFC 0061 removes from acceptance; keeping it
+//! would have left the phase-lock in the mask choice after removing it from the
+//! acceptance test. `E2-P02` measured that phase-lock: on periodic content four
+//! of eight seeds never resynchronised at all. If the forced-cut fraction turns
+//! out to be the price, RFC 0061 names the repair and it is *not* this — it is
+//! nested masks with the loose hit accepted only when no loose hit occurred in
+//! the preceding [`CHUNK_TARGET_BYTES`], which is a window too.
+//!
+//! # What still reads the previous boundary, and why exactly one thing does
+//!
+//! The forced cut at [`CHUNK_MAX_BYTES`], and its companion: an accepted
+//! candidate within [`CHUNK_MIN_BYTES`] of a boundary is suppressed, so the
+//! minimum survives beside a forced cut. That suppression can only ever bite
+//! after a *forced* boundary — after a content boundary the window rule has
+//! already guaranteed the gap — so it reaches no further than the region where
+//! every cut is forced anyway. It is granted because the alternative is an
+//! unbounded chunk, and RFC 0061 forecloses every other rule that would like to
+//! know where the last cut was.
 //!
 //! # What the parameters are, and where they are also written down
 //!
@@ -38,19 +66,22 @@
 //! whose compiled-in parameters disagree with the device's refuses rather than
 //! re-chunking.
 
-use crate::gear::{GEAR, MASK_LOOSE, MASK_STRICT};
+use crate::gear::{GEAR, MASK};
 
 /// The smallest chunk the content may choose.
 ///
-/// Unit: bytes. Candidates below this are ignored — not deferred, ignored: the
-/// register keeps running and the position is simply not a cut.
+/// Unit: bytes. Also the width of the window acceptance is a predicate over: a
+/// candidate is accepted when no candidate occurred in the preceding
+/// `CHUNK_MIN_BYTES`. Candidates inside that window are ignored — not deferred,
+/// ignored: the register keeps running and the position is simply not a cut.
 pub const CHUNK_MIN_BYTES: usize = 16 * 1024;
 
-/// The size the mask widths are chosen around.
+/// The size the mask width is chosen around.
 ///
-/// Unit: bytes. Below it the strict mask applies and above it the loose one, so
-/// this is the point the distribution is normalised about rather than a size
-/// any particular chunk has.
+/// Unit: bytes. [`MASK_BITS`] is the width at which a candidate appears once
+/// per this many bytes on uniform content, so this is the raw candidate
+/// spacing rather than a size any particular chunk has — the minimum thins the
+/// candidates and pushes the accepted spacing above it.
 pub const CHUNK_TARGET_BYTES: usize = 64 * 1024;
 
 /// The size at which a boundary is forced whatever the content says.
@@ -60,35 +91,45 @@ pub const CHUNK_TARGET_BYTES: usize = 64 * 1024;
 /// whole zero-filled disk image as one chunk.
 pub const CHUNK_MAX_BYTES: usize = 256 * 1024;
 
-/// Bits in the mask consulted below [`CHUNK_TARGET_BYTES`].
+/// Bits in the mask a candidate is tested against.
 ///
-/// Unit: bits. Two above the target's own width, so a cut in the first quarter
-/// of the target is four times less likely than a uniform chunker would make
-/// it.
-pub const MASK_STRICT_BITS: u32 = 18;
-
-/// Bits in the mask consulted at and above [`CHUNK_TARGET_BYTES`].
-///
-/// Unit: bits. Two below the target's width, so a chunk that has run past the
-/// target is cut four times sooner than a uniform chunker would cut it — which
-/// is where the forced cuts are saved.
-pub const MASK_LOOSE_BITS: u32 = 14;
+/// Unit: bits. Sixteen, the width at which the raw candidate spacing on uniform
+/// content is [`CHUNK_TARGET_BYTES`] = 2^16 bytes. One width and not two: RFC
+/// 0061 retired normalised chunking, whose two widths were selected by distance
+/// from the previous boundary.
+pub const MASK_BITS: u32 = 16;
 
 /// How far past an edit the two boundary sequences are allowed to disagree.
 ///
-/// Unit: bytes. The flat half of the two-clause bound `crate`'s header states;
-/// the other half is the enclosing candidate-free run plus one chunk, and on
-/// content with no candidates that half is the one that applies.
+/// Unit: bytes. The published outer allowance of the bound `crate`'s header
+/// states. Outside a starved run the sequences in fact agree far sooner — from
+/// `CHUNK_MIN_BYTES + 64` past the edit, which is 16 448 bytes — but this is the
+/// number the claim is registered against, and RFC 0061 left it where it was on
+/// purpose: a bound whose repair moved its own threshold would be a bound
+/// fitted to its measurement.
 pub const RESYNC_BOUND_BYTES: usize = 512 * 1024;
 
-/// The rolling register and the distance to the last boundary.
+/// The rolling register, the distance to the last candidate and the distance to
+/// the last boundary.
 ///
-/// Two words. It holds no bytes and copies none: a chunk is hashed as it is
-/// scanned, so nothing here ever has a chunk in hand.
+/// Three words. It holds no bytes and copies none: a chunk is hashed as it is
+/// scanned, so nothing here ever has a chunk in hand. The third word is what
+/// RFC 0061 cost — the window rule needs to know how long ago the last
+/// *candidate* was, which the old rule never asked.
 #[derive(Clone, Debug, Default)]
 pub struct Chunker {
     /// The gear register.
     register: u64,
+    /// Bytes since the last candidate or the start of the object, whichever is
+    /// later, in bytes — saturating at [`CHUNK_MIN_BYTES`], because the rule
+    /// only ever asks whether it has reached that and a saturating counter
+    /// cannot wrap on a long object.
+    ///
+    /// The object's start counts as a candidate for this purpose. Not for
+    /// tidiness: without it the first candidate in an object would be accepted
+    /// wherever it fell and the object's first chunk could be a hundred bytes,
+    /// which property 1 would catch and which no reader would expect.
+    since_candidate: usize,
     /// Bytes since the last boundary, in bytes.
     since_cut: usize,
 }
@@ -97,7 +138,7 @@ impl Chunker {
     /// A chunker at the start of an object.
     #[must_use]
     pub const fn new() -> Self {
-        Self { register: 0, since_cut: 0 }
+        Self { register: 0, since_candidate: 0, since_cut: 0 }
     }
 
     /// Scan `bytes`, answering the offsets at which a chunk ends.
@@ -130,17 +171,33 @@ impl Chunker {
     fn step(&mut self, byte: u8) -> bool {
         self.register = (self.register << 1).wrapping_add(GEAR[byte as usize]);
         self.since_cut += 1;
+        if self.since_candidate < CHUNK_MIN_BYTES {
+            self.since_candidate += 1;
+        }
 
-        if self.since_cut >= CHUNK_MIN_BYTES {
-            let mask = if self.since_cut < CHUNK_TARGET_BYTES { MASK_STRICT } else { MASK_LOOSE };
-            if self.register & mask == 0 {
+        if self.register & MASK == 0 {
+            // A candidate, and that is the whole of what the content says. The
+            // two questions below are asked of the window and of the forced
+            // cut; neither of them makes this position more or less a
+            // candidate, which is why the counter is reset either way.
+            let far_enough_from_the_last_candidate = self.since_candidate >= CHUNK_MIN_BYTES;
+            // Only ever false after a *forced* boundary: after a content
+            // boundary the line above has already guaranteed the gap. This is
+            // the suppression RFC 0061 grants and the only surviving reference
+            // to where the last cut was.
+            let far_enough_from_the_last_boundary = self.since_cut >= CHUNK_MIN_BYTES;
+            self.since_candidate = 0;
+            if far_enough_from_the_last_candidate && far_enough_from_the_last_boundary {
                 self.since_cut = 0;
                 return true;
             }
         }
         // The forced cut, and the only place a boundary is not a statement
         // about content. Everything the bound is weak about is downstream of
-        // this line.
+        // this line, and RFC 0061 named the class exactly: a run in which no
+        // two consecutive candidates are closer than
+        // `CHUNK_MAX_BYTES - CHUNK_MIN_BYTES`, which is the only condition
+        // under which this line can be reached at all.
         if self.since_cut == CHUNK_MAX_BYTES {
             self.since_cut = 0;
             return true;
@@ -200,10 +257,12 @@ mod tests {
     /// Zero-filled content has no candidates, so every cut is the forced one.
     ///
     /// `h = 2h + gear[0]` reaches a fixed point after sixty-four bytes, and
-    /// that fixed point either hits a mask or it does not. It does not, so a
-    /// zero run cuts at exactly [`CHUNK_MAX_BYTES`] and this is the workload
-    /// the second clause of the bound is about. If this test ever goes red the
-    /// gear table changed, and so did every object hash ever written.
+    /// that fixed point either hits the mask or it does not. It does not — RFC
+    /// 0061 made that a constraint on the mask's draw and `gear`'s tests assert
+    /// it — so a zero run cuts at exactly [`CHUNK_MAX_BYTES`] and this is the
+    /// workload the second clause of the bound is about. If this test ever goes
+    /// red the gear table or the mask changed, and so did every object hash
+    /// ever written.
     #[test]
     fn a_zero_run_is_cut_only_by_the_maximum() {
         let mut chunker = Chunker::new();

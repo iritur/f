@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 use f_blob::chunk::{
     CHUNK_MAX_BYTES, CHUNK_MIN_BYTES, CHUNK_TARGET_BYTES, Chunker, RESYNC_BOUND_BYTES,
 };
-use f_blob::gear::{GEAR, MASK_LOOSE, MASK_STRICT};
+use f_blob::gear::{GEAR, MASK};
 use f_env::split::{Stream, label};
 
 /// The seeds every property below is asserted across.
@@ -43,10 +43,11 @@ const SEEDS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8];
 
 /// The window the register sees, in bytes.
 ///
-/// Bit 63 of the register is the highest bit either mask tests, and bit *k*
+/// Bit 63 of the register is the highest bit the mask tests, and bit *k*
 /// depends on the last *k+1* bytes, so a boundary decision is a function of the
 /// last sixty-four bytes. This is the number the prefix half of the bound is
-/// stated in.
+/// stated in, and — added to [`CHUNK_MIN_BYTES`] — the width of the window RFC
+/// 0061 makes acceptance a predicate over.
 const WINDOW_BYTES: usize = 64;
 
 /// The four content mixtures.
@@ -171,7 +172,7 @@ fn boundaries(bytes: &[u8]) -> Vec<usize> {
     out
 }
 
-/// Every position at which the register hits *either* mask.
+/// Every position at which the register hits the mask.
 ///
 /// A candidate is a property of the content and of the two constants, and of
 /// nothing the chunker is doing at the time: the register is never reset at a
@@ -179,42 +180,93 @@ fn boundaries(bytes: &[u8]) -> Vec<usize> {
 /// That is what lets the bound's second clause be stated over the object rather
 /// than over a run of the algorithm.
 ///
-/// Either mask, not the one the chunker would have consulted at that distance
-/// from its last cut. The union is the generous reading — it makes
-/// candidate-free runs as short as they can honestly be — and the clause it
-/// feeds is about content with *no candidates at all*.
+/// **One mask and not the union of two.** RFC 0061: *"position `p` is a
+/// candidate when `register(p) & MASK == 0` and for no other reason"*, because
+/// normalised chunking's two masks were selected by the distance since the
+/// previous boundary and that is the dependence the entry removes. There is
+/// nothing generous left to read here — the chunker's own candidate test is
+/// this line.
 fn candidates(bytes: &[u8]) -> Vec<usize> {
     let mut register: u64 = 0;
     let mut out = Vec::new();
     for (index, byte) in bytes.iter().enumerate() {
         register = (register << 1).wrapping_add(GEAR[*byte as usize]);
-        if register & MASK_STRICT == 0 || register & MASK_LOOSE == 0 {
+        if register & MASK == 0 {
             out.push(index + 1);
         }
     }
     out
 }
 
-/// The end of the maximal candidate-free run containing `at`.
+/// The candidate spacing at or above which a cut can be forced, in bytes.
 ///
-/// The first candidate at or after `at`, or the end of the object if there is
-/// none. `at` inside a run of candidates answers `at` itself, which makes the
-/// clause below collapse to the flat bound exactly where it should.
-fn candidate_free_run_end(candidates: &[usize], length: usize, at: usize) -> usize {
-    candidates.iter().copied().find(|&c| c >= at).unwrap_or(length)
+/// RFC 0061 names the class the bound's second clause is about: *"a maximal run
+/// in which no two consecutive candidates are closer than
+/// `CHUNK_MAX_BYTES − CHUNK_MIN_BYTES` = 240 KiB"*. It is not an arbitrary
+/// number and it is not tunable: a boundary is forced only after
+/// [`CHUNK_MAX_BYTES`] with no accepted candidate, an accepted candidate needs
+/// only [`CHUNK_MIN_BYTES`] of clearance behind it, so a gap this wide is
+/// exactly the condition under which the forced cut can be reached at all.
+const STARVED_GAP_BYTES: usize = CHUNK_MAX_BYTES - CHUNK_MIN_BYTES;
+
+/// The end of the maximal *starved* run containing `at`.
+///
+/// Walk the candidates forward from the last one at or before `at`; while the
+/// next is at least [`STARVED_GAP_BYTES`] beyond the previous, the run
+/// continues; the first pair closer than that ends it, and the run ends at the
+/// earlier member of that pair. If the candidates run out the run reaches the
+/// end of the object. An answer **at or before `at`** means there is no starved
+/// run at `at` at all, and the clause below collapses to the flat bound.
+///
+/// **This replaces `candidate_free_run_end`, and RFC 0061 is the sentence that
+/// authorises the replacement**: *"the second clause covered content with no
+/// candidates at all; it now covers content in which consecutive candidates are
+/// never closer than `CHUNK_MAX_BYTES − CHUNK_MIN_BYTES` = 240 KiB, which is
+/// exactly the condition under which a cut is forced."* That is a **narrowing**
+/// of what the clause excuses on ordinary content — a candidate 2570 bytes past
+/// the edit used to end the run and now does not even start one, so the clause
+/// collapses to the flat bound and stops hiding a failure — while widening it
+/// over genuinely sparse content, where the forced cut really does defeat
+/// resynchronisation and the old wording did not say so.
+///
+/// # Why the walk starts behind `at` and not at it
+///
+/// RFC 0061's word is **maximal**, and a maximal run is a property of the
+/// object's candidate sequence rather than of where the edit landed in it. A
+/// walk seeded at `at` would ask *is the next candidate 240 KiB ahead of the
+/// edit*, and the honest question is *is the gap the edit sits in 240 KiB
+/// wide*: the same object edited ten kilobytes earlier would answer the first
+/// question differently and the second identically, and it is the second that
+/// decides whether a cut is forced. `candidate_free_run_end` had the same
+/// semantics — its doc said *the run containing `at`* — so this is the reading
+/// carried over, not a new one. Measured, on seed 7 uniform: the edit at
+/// 846 791 sits in a 359 549-byte candidate gap running 656 108 → 1 015 657,
+/// both streams force a cut inside it at different offsets, and a walk seeded
+/// at `at` calls that content unstarved because the *next* candidate is only
+/// 168 866 bytes ahead.
+fn starved_end(candidates: &[usize], length: usize, at: usize) -> usize {
+    let mut previous = candidates.iter().copied().take_while(|&c| c <= at).last().unwrap_or(0);
+    for &candidate in candidates.iter().filter(|&&c| c > at) {
+        if candidate - previous < STARVED_GAP_BYTES {
+            return previous;
+        }
+        previous = candidate;
+    }
+    length
 }
 
 /// How far past `from` the sequences are allowed to take to agree again.
 ///
-/// The bound as the spec states it: [`RESYNC_BOUND_BYTES`] past `from`, **or**
-/// the end of the enclosing candidate-free run plus one chunk, whichever is
+/// The bound as RFC 0061 restates it: [`RESYNC_BOUND_BYTES`] past `from`,
+/// **or** the end of the enclosing starved run plus one chunk, whichever is
 /// later. One chunk is [`CHUNK_MAX_BYTES`], because that is the largest a chunk
 /// can be and the clause is about a region where every cut is forced at exactly
-/// that.
+/// that. `RESYNC_BOUND_BYTES` did not move under RFC 0061 and neither did claim
+/// 0017's threshold; what moved is which content the second clause excuses.
 fn resync_allowance(candidates: &[usize], length: usize, from: usize) -> usize {
     let flat = from + RESYNC_BOUND_BYTES;
-    let run = candidate_free_run_end(candidates, length, from) + CHUNK_MAX_BYTES;
-    flat.max(run)
+    let starved = starved_end(candidates, length, from) + CHUNK_MAX_BYTES;
+    flat.max(starved)
 }
 
 /// The earliest position from which two boundary sequences agree under a shift.
@@ -263,6 +315,13 @@ fn draw_object(sites: &mut Sites, kind: Mixture) -> Vec<u8> {
 }
 
 /// Property 1. Every chunk but the last is inside the size bounds.
+///
+/// The minimum half now holds by construction and is asserted anyway. RFC
+/// 0061's two lines: consecutive accepted positions `c` and `c'` have no
+/// candidate in `[c' − CHUNK_MIN_BYTES, c')` and `c` is a candidate at or
+/// before `c'`, so `c' − c ≥ CHUNK_MIN_BYTES`. A proof is a statement about the
+/// rule and this is a statement about the code, and the two have been known to
+/// differ — the suppression beside a forced cut is exactly where they would.
 #[test]
 fn every_chunk_but_the_last_lies_between_the_minimum_and_the_maximum() {
     for &seed in SEEDS {
@@ -334,12 +393,30 @@ fn the_mean_chunk_is_within_a_factor_of_two_of_the_target() {
                  hits a mask, which changes what the bound's second clause is about"
             );
         }
+        // Reported and not asserted, on purpose. RFC 0061: retiring normalised
+        // chunking gave up the mechanism that kept forced cuts rare, *"the
+        // fraction of interior chunks forced at the maximum, per mixture ...
+        // has no threshold in this entry, because inventing one before the
+        // first measurement is how a threshold becomes a description; it gets
+        // one when it is measured"*. One interior chunk in ten on uniform
+        // content is the entry's reversal condition, and this line is where the
+        // number to compare against it comes from. Per ten thousand, because
+        // integer arithmetic and a percentage would round the interesting cases
+        // to zero.
+        let forced_per_ten_thousand = forced_at_the_maximum * 10_000 / chunks;
+        println!(
+            "P2 {:>12} mean {} over {chunks} interior chunks, {forced_at_the_maximum} forced at \
+             {CHUNK_MAX_BYTES} ({forced_per_ten_thousand} per ten thousand)",
+            kind.name(),
+            bytes / chunks
+        );
         per_mixture.push((kind, bytes / chunks, chunks));
         total_bytes += bytes;
         total_chunks += chunks;
     }
 
     let mean = total_bytes / total_chunks;
+    println!("P2 aggregate mean {mean} over {total_chunks} interior chunks");
     assert!(
         (CHUNK_TARGET_BYTES / 2..=CHUNK_TARGET_BYTES * 2).contains(&mean),
         "mean chunk {mean} bytes over {total_chunks} chunks is not within a factor of two of \
@@ -394,13 +471,43 @@ fn nothing_before_the_last_boundary_preceding_the_window_changes() {
 
 /// Property 4. The sequences resynchronise inside the two-clause bound.
 ///
-/// `RESYNC_BOUND_BYTES` past `X + L`, or the end of the enclosing
-/// candidate-free run plus one chunk, whichever is later. The second clause is
-/// not a hedge for this test to be generous with: it is computed from the
-/// edited object's own candidate sequence, so on content that has candidates it
-/// collapses to the flat bound.
+/// [`RESYNC_BOUND_BYTES`] past `X + L`, or the end of the enclosing *starved*
+/// run plus one chunk, whichever is later. The second clause is not a hedge for
+/// this test to be generous with: it is computed from the edited object's own
+/// candidate sequence, so on content whose candidates are closer together than
+/// [`STARVED_GAP_BYTES`] it collapses to the flat bound.
+///
+/// # Three assertions, and why the second and third exist
+///
+/// **Which clause carried the pair is printed and then asserted.** RFC 0061:
+/// *"a pair that passes only because its starved run swallowed the object is a
+/// pass this entry does not claim, so the test prints which clause carried each
+/// pair."* The periodic mixture is the one that falsified the draft bound, and
+/// a green suite in which it passes by being excused is the failure this whole
+/// exercise is about — so every periodic and concatenated pair must land inside
+/// the flat clause, and the zero-filled mixture is the one that is allowed the
+/// starved clause because it *is* the starved case.
+///
+/// **The tighter clause is asserted where it applies.** RFC 0061 again: *"the
+/// flat clause gets stronger where it applies: outside a starved run the
+/// sequences agree from the first accepted boundary at or after
+/// `X + L + CHUNK_MIN_BYTES + 64` — 16 448 bytes past the edit — rather than
+/// merely inside `RESYNC_BOUND_BYTES`, because every acceptance decision from
+/// that point on reads only content the edit did not touch."* That is the
+/// number the entry's whole argument produces, and asserting only the 512 KiB
+/// outer allowance would leave it unmeasured.
+///
+/// # Why the failures are collected rather than panicked on
+///
+/// All three checks below record and none of them stop the loop, and the test
+/// fails at the end on the collected list. A bound that fails is a fact about
+/// the design and the useful form of that fact is *which (seed, mixture) pairs*
+/// — the first panic tells a reader one pair and hides the other thirty-one,
+/// which is how the draft bound survived as long as it did. Nothing is excused
+/// by this: one entry in the list fails the test.
 #[test]
 fn the_boundary_sequences_resynchronise_within_the_bound() {
+    let mut failures: Vec<String> = Vec::new();
     for &seed in SEEDS {
         for kind in Mixture::ALL {
             let mut sites = Sites::new(seed);
@@ -418,25 +525,78 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
             let after = boundaries(&edited);
             let agreed = resynchronised_at(&before, &after, length);
             let candidates = candidates(&edited);
-            let allowed = resync_allowance(&candidates, edited.len(), at + length);
+            let from = at + length;
+            let flat = from + RESYNC_BOUND_BYTES;
+            let starved = starved_end(&candidates, edited.len(), from);
+            let allowed = resync_allowance(&candidates, edited.len(), from);
+            let carried = if agreed <= flat { "flat" } else { "starved" };
 
-            assert!(
-                agreed <= allowed,
-                "seed {seed}, {} mixture, object {} bytes, insertion of {length} bytes at {at}: \
-                 the boundary sequences agree again only at {agreed}, past the {allowed} the \
-                 bound allows ({} flat, run to {} plus one chunk){}",
+            // The window the acceptance decision reads, placed past the edit:
+            // from here on every decision in the edited stream sees only bytes
+            // the edit did not touch, in both streams.
+            let window_clear = from + CHUNK_MIN_BYTES + WINDOW_BYTES;
+            let tight = after.iter().copied().find(|&b| b >= window_clear).unwrap_or(edited.len());
+
+            println!(
+                "P4 seed {seed} {:>12} object {} edit {length}@{at} candidates {} agreed \
+                 {agreed} flat {flat} starved-run-end {starved} allowed {allowed} tight {tight} \
+                 carried-by {carried}",
                 kind.name(),
                 object.len(),
-                at + length + RESYNC_BOUND_BYTES,
-                candidate_free_run_end(&candidates, edited.len(), at + length),
-                if agreed == edited.len() {
-                    " — and that is the object's end, so nothing after the edit was preserved"
-                } else {
-                    ""
-                }
+                candidates.len()
             );
+
+            let pair = format!(
+                "seed {seed}, {} mixture, object {} bytes, insertion of {length} bytes at {at}",
+                kind.name(),
+                object.len()
+            );
+
+            if agreed > allowed {
+                failures.push(format!(
+                    "{pair}: the boundary sequences agree again only at {agreed}, past the \
+                     {allowed} the bound allows ({flat} flat, starved run to {starved} plus one \
+                     chunk){}",
+                    if agreed == edited.len() {
+                        " — and that is the object's end, so nothing after the edit was preserved"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+
+            if kind != Mixture::Zero && carried != "flat" {
+                failures.push(format!(
+                    "{pair}: the sequences agreed at {agreed}, past the flat clause's {flat}, so \
+                     this pair passed only on the starved clause's allowance of {allowed} \
+                     (starved run to {starved}, {} candidates in the whole edited object). RFC \
+                     0061 does not claim that pass for content that produces candidates",
+                    candidates.len()
+                ));
+            }
+
+            // `starved <= from` is the whole of "outside a starved run": the
+            // run containing the edit ends at or before it, so no forced cut
+            // can separate the two streams past this point and the window
+            // argument applies unaided.
+            if starved <= from && agreed > tight {
+                failures.push(format!(
+                    "{pair}: the edit is not inside a starved run, so every acceptance decision \
+                     at or after {window_clear} reads only untouched content and the sequences \
+                     owe agreement by the first boundary there, which is {tight}. They agreed at \
+                     {agreed}"
+                ));
+            }
         }
     }
+
+    assert!(
+        failures.is_empty(),
+        "{} of {} (seed, mixture) pairs fail the re-chunking bound as RFC 0061 states it:\n{}",
+        failures.len(),
+        SEEDS.len() * Mixture::ALL.len(),
+        failures.join("\n")
+    );
 }
 
 /// Property 5. Identical content in two objects yields identical chunk hashes.
@@ -444,8 +604,16 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
 /// The deduplication half. A run of content is placed at two different offsets
 /// in two objects, and the bytes it covers must end up in chunks with the same
 /// names — up to the same two-clause allowance, because the run has to
-/// resynchronise before its chunks can agree, and on candidate-free content it
-/// never does.
+/// resynchronise before its chunks can agree, and inside a starved run it never
+/// does. The allowance is [`resync_allowance`] and therefore RFC 0061's starved
+/// clause, not the candidate-free one it replaced.
+///
+/// A reader should also know what a small shortfall here is *not* evidence of.
+/// RFC 0061: deduplication is a byte-weighted average over a two-megabyte run
+/// and resynchronisation is a statement about a single position, so a defect
+/// that makes every boundary after an edit wrong can cost this average under
+/// one per cent. This property and property 4 are not checks on each other,
+/// which is why `E2-P02` asserts both.
 #[test]
 fn identical_content_in_two_objects_yields_identical_chunk_hashes() {
     for &seed in SEEDS {
@@ -474,6 +642,13 @@ fn identical_content_in_two_objects_yields_identical_chunk_hashes() {
                 .max()
                 .expect("two objects");
             let owed = shared.len().saturating_sub(allowance);
+
+            println!(
+                "P5 seed {seed} {:>12} shared {} at {first_pad} and {second_pad} deduplicated \
+                 {agreed} owed {owed} allowance {allowance}",
+                kind.name(),
+                shared.len()
+            );
 
             assert!(
                 agreed >= owed,
