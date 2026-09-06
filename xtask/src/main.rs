@@ -8387,6 +8387,7 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-hash", host: None, bare: None },
     Portability { krate: "f-blob", host: None, bare: None },
     Portability { krate: "f-zone", host: None, bare: None },
+    Portability { krate: "f-index", host: None, bare: None },
     Portability { krate: "f-generation", host: None, bare: None },
     Portability {
         krate: "f-kernel",
@@ -9863,7 +9864,12 @@ fn claim_owner_findings(rel: &str, text: &str) -> Vec<String> {
 /// zone's capacity in one field and its reachable bytes in another, and a count
 /// of device operations is the whole of one invariant. Every one of those is a
 /// number somebody will compare against a number from the other side of a ring.
-const UNIT_SCOPE: &[&str] = &["abi/", "blob/", "generation/", "zone/"];
+///
+/// `index/` joined on the same grounds as `blob/`: its log entry is a record on
+/// a device, its region is a block index and a block count, and its mount cost
+/// is a number the design is argued about with — every one of which is a
+/// quantity whose unit is obvious only to whoever wrote it down.
+const UNIT_SCOPE: &[&str] = &["abi/", "blob/", "index/", "generation/", "zone/"];
 
 /// R03, over the trees whose public quantities cross something.
 fn lint_units() -> Result<(), String> {

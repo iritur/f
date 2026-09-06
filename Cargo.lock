@@ -41,6 +41,15 @@ name = "f-hash"
 version = "0.0.1"
 
 [[package]]
+name = "f-index"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-blob",
+ "f-hash",
+]
+
+[[package]]
 name = "f-init"
 version = "0.0.1"
 dependencies = [
