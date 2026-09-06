@@ -107,6 +107,28 @@
 //! casts, and no byte a device wrote is read as a field until one of those
 //! constructors returned `Ok`.
 //!
+//! # The second object kind, and why this crate carries two shapes
+//!
+//! [`extent`] is the other half of what a blob can be, and it exists because of
+//! the paragraph above rather than beside it. On starved content the chunked
+//! kind's cost per edit scales with the object, and RFC 0062 showed that class
+//! is not a corner: every exactly-periodic object with a period below
+//! [`chunk::CHUNK_MIN_BYTES`] is in it, for every rule this design permits, and
+//! 4096- and 8192-byte database pages are two of them. So an **extent** is an
+//! object whose children are fixed [`extent::EXTENT_BYTES`] pieces rather than
+//! content-defined chunks, whose copy-on-write unit is one whole piece, and
+//! which is published only at an explicit snapshot. An edit costs
+//! `2 x EXTENT_BYTES` and that number does not move with the object.
+//!
+//! It is a second kind and not a generalisation of the first, which is RFC
+//! 0058's decision and the thing this crate is carrying the cost of: the same
+//! bytes stored both ways have two different hashes, a consumer picks a kind
+//! when it creates the object, and changing its mind is a full rewrite. What is
+//! bought is a bound on the workload content addressing is worst at; what is
+//! given up is deduplication between objects that were not cloned from one
+//! another. Neither shape covers the other, and a later design that finds the
+//! one that does reverses RFC 0058 rather than widening a kind.
+//!
 //! What is *not* here is a mount and a zone. A publish is *write the blobs,
 //! `FLUSH`, append the root record, `FLUSH`* (RFC 0060), and only the first
 //! half of that sentence is expressible without knowing what a zone is:
@@ -119,5 +141,6 @@ extern crate alloc;
 
 pub mod chunk;
 pub mod device;
+pub mod extent;
 pub mod gear;
 pub mod store;
