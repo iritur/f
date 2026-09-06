@@ -833,6 +833,10 @@ everything after this cheap to debug.*
   Both policies stay in the tree and both run in one boot, so undoing the batching goes red rather than going quiet.
   *exit:* met, in the second of the two forms the exit allows — and on a different axis from the one it predicted, which is the outcome ordering rule 3 exists to make possible. The p99 half is `pending` on `E0-D10`'s machine, and its `[hardware]` block states the extra reason: an emulator answers an invalidation instantly in software, so a time taken here would measure QEMU's dispatch loop wearing a hardware unit's name.
   *needs:* E1-B02
+- [ ] **E1-B15** `M` The state tree in every component, not only the frame.
+  `docs/the-long-plan.html` has had layer L8 at "E0 v0, E1 everywhere" since the layer was added, and `E0-B14` delivered the v0 — the frame's nodes in a read-only mapping. E1 put more *into* that tree without changing who owns it: the three drivers and the runtime each hand the frame a tally and the frame publishes it under its own root. Two places in the tree already record that as the debt it is. `user/store/src/report.rs` explains why a runtime reports an exit status instead of a tree and writes its reversal as *a runtime that publishes a tree of its own*; RFC 0038 reads a component's ring cursor from the frame and says the honest version is *a state tree the component publishes under RFC 0013*. No task owned either reversal, which is the promised-layer-with-no-owner decay this file polices. It matters here because RFC 0013 names its own test of worth — *whether E1's fault sweeps and E2's state comparison actually consume it* — and `E2-P05` cannot compare two whole-system states while only the frame publishes one. Found on 2026-09-06 while checking E2's readiness rather than E1's.
+  *exit:* every component the supervisor starts publishes a tree of its own under RFC 0013's rules, mounted under one root; the two reversals above are paid and the words that state them are gone; at least one scenario in the `E1-P02` sweep asserts its system response by reading a component's subtree rather than the serial log; a component that publishes nothing is refused at spawn rather than tolerated.
+  *needs:* E0-B14, E1-B05
 
 ### Prove — this is the epoch where the testing environment becomes real
 
@@ -921,6 +925,8 @@ everything after this cheap to debug.*
   The package is assembled and named — eight contents, one address — and the seed-sweep half runs from a tree with no repository in it, failing closed when the manifest is absent or does not name a commit.
   **What 0.2 does not contain is named in the release rather than left silent.** The four datapath claims are `E1-P10`, which needs `E1-B09`, which needs `E0-B15`'s user-interrupt path, which needs hardware QEMU does not emulate — no processor model advertises the bit and the emulator implements no part of it. Every timing claim in the registry is `pending` for a second, independent reason: the harness refuses to record a measurement in a container. So the four datapath claims **cannot be produced on any machine this project currently has**, and saying so is the whole function of a claims registry.
   *exit:* **not met, and the chain that blocks it is named.** `E1-P10` ← `E1-B09` ← `E0-B15` ← hardware; and separately `E0-D10`'s machine for every number about time. Nothing was tagged, pushed or published: the release gate blocks those unless a variable names an authorisation, and an agent cannot set that for itself — a gate the gated party can open is a log entry.
+  The chain above is now also the graph's: this line carried no `needs:` until 2026-09-06, so `cargo xtask todo` could not see the release waiting on anything. `E0-R04` names its blockers; this names the contents and gate G1.
+  *needs:* E1-R01, E1-P10, E1-P05, E1-P06
 
 > ### Gate G1
 > A driver is killed under sustained load and the system does not notice.
@@ -936,6 +942,28 @@ that follow from them: rollback that works and update that does not reboot.*
 
 **Effort:** 1.5–3 person-years · **Risk:** medium · **Ends at:** gate G2, release 0.3
 
+*Where the tree stands against this epoch, checked 2026-09-06.* Gate G0 is
+unpassed with eight E0 tasks `[>]`, and E1 is built but not proved: all six
+decisions and eleven of fifteen builds are `[x]`, the simulator and its sweeps
+are `[x]`, and the release is `[>]` with its blocking chain named on the line.
+What E2 leans on and has: virtio-blk in user space (`E1-B02`), the simulator
+with device models and snapshot (`E1-P01`, `E1-P08`), the frame's state tree
+(`E0-B14`), fifteen registered claims with the first gating one a count rather
+than a time (`claims/0005`), the measurement history (`E0-P11`), and a SHA-256
+and deterministic archive writer in `xtask/src/pack.rs` (`E0-R01`). What it
+leans on and does not have: a supervisor whose restart policy has left the frame
+(`E1-B05`, still `[>]` with the reversal owed under `lint-owed`), registered
+buffers measured (`E1-B10`), a tree each component owns (`E1-B15`), and
+zoned-device emulation — the development image's QEMU is bookworm's 7.2, and
+`docker/README.md` names the one-line base change to trixie that `E2-B02` and
+`E2-P10` will need. Two things that decide how E2's numbers get taken: every
+timing claim in the registry is `pending` until `E0-D10`'s machine exists,
+while `claims/0005` shows a count can gate on the machines this project has —
+so the write-amplification and re-chunking numbers (`E2-P10`, `E2-B09`) are
+countable here and the read-path latencies are not. Several tasks below
+carried no `needs:` and so ranked as ready to start; the graph now says what
+they wait for.
+
 ### Decide
 
 - [ ] **E2-D01** `M` Write RFC 0012 — an update is a generation swap, and the root hash is the attestation.
@@ -943,18 +971,21 @@ that follow from them: rollback that works and update that does not reboot.*
 - [ ] **E2-D02** `M` Mutable extents: the design for the workload content addressing is worst at, written as a second object kind rather than as a unification.
   *exit:* design merged, naming the granularity, the snapshot boundary, and the workload it is bad at.
 - [ ] **E2-D03** `S` Garbage collection policy: mark from live roots, sweep by live fraction, batch class, roots pinned explicitly.
+  Sits immediately before `E2-B02` by ordering rule 3: a collector built without its policy is the work that is expensive to redo, and the three invariants are cheaper to state before the code exists than to reverse-engineer from it.
   *exit:* written, with the three invariants E2-P03 will assert stated as invariants rather than as behaviour.
 - [ ] **E2-D04** `M` The state-transfer protocol a component implements to be updated in place, and what it declares when it cannot.
   *exit:* schema merged; the virtio-blk driver from E1 declares one, and E2-P08 swaps it.
-  *needs:* E2-D01
+  *needs:* E2-D01, E1-B02 (the exit names the driver that declares the first one)
 
 ### Build
 
 - [ ] **E2-B01** `L` Blob store: content addressing, content-defined chunking, the on-disk format.
+  The hash is already chosen once: `xtask/src/pack.rs` carries SHA-256 for the release address, host-side. The store needs the same function under `no_std`, and it should be the same function — a release address and a blob address computed by two algorithms is two notions of identity where RFC 0012 will want one.
   *exit:* write, read back and verify a million blobs; an edit near the start of a large object re-chunks only a bounded region.
 - [ ] **E2-B02** `L` The zoned mapping: sequential fill, seal, copy-forward, reset — the collector and the device agreeing for once.
+  The device is reached the only way anything is: over the blk driver's ring, from user space. Its emulation is QEMU's zoned virtio-blk, which is materially better from QEMU 8 — the development image is on bookworm's 7.2, and moving the base is the one-line change `docker/README.md` already names. Do that as its own commit, because the image digest is in every reproduction.
   *exit:* a full fill-and-collect cycle on a zoned device or its emulation, with write amplification recorded.
-  *needs:* E2-B01
+  *needs:* E2-B01, E2-D03, E1-B02
 - [ ] **E2-B03** `L` The index: paths, metadata and semantic attributes to hashes, embedded rather than a service.
   *exit:* a query returns a hash without crossing a component boundary, measured against a tree walk over the same data.
   *needs:* E2-B01
@@ -971,7 +1002,11 @@ that follow from them: rollback that works and update that does not reboot.*
   *needs:* E2-B05
 - [ ] **E2-B08** `M` The read path: hash to zone and offset, direct memory access into the caller's buffer, no page cache second copy.
   *exit:* copies per read is zero, counted rather than asserted; resident bytes per unit of work recorded.
-  *needs:* E2-B02
+  *needs:* E2-B02, E1-B10 (the caller's buffer is a registered one, or the zero-copy count is a copy nobody counted)
+- [ ] **E2-B09** `M` Mutable extents, built: the second object kind, and the number the skeptic reaches for first.
+  `E2-D02` designs it and until 2026-09-06 nothing built it, so the design was headed for the shelf. `lineage-and-debts` says the storage design "has a workload it is bad at, and mutable extents are a patch rather than a resolution — measure that case early and honestly". Early means this epoch, and honestly means the number is registered under `claims/` beside the write-amplification claim rather than mentioned in prose.
+  *exit:* the random-write workload `E2-D02` names runs against both object kinds; bytes re-chunked and re-hashed per application byte written are recorded for each, as a claim; on the extent path that number is bounded by the copy-on-write granularity and not by the object's size.
+  *needs:* E2-D02, E2-B01
 
 ### Prove
 
@@ -980,16 +1015,21 @@ that follow from them: rollback that works and update that does not reboot.*
   *needs:* E1-P01, E2-B01
 - [ ] **E2-P02** `M` Property tests for chunking and deduplication.
   *exit:* an edit at offset X re-chunks a bounded region around X and nothing after it, for randomly generated edits and object sizes.
+  *needs:* E2-B01 (the property is over the chunker; written first it is a specification, and it closes only when the chunker exists to fail it)
 - [ ] **E2-P03** `M` Collector invariants as properties: nothing reachable is swept, a reset zone holds no live blob, collection never starves a deadline-class read.
   *exit:* all three hold while collection runs concurrently with adversarial allocation and a hard-class reader.
-  *needs:* E2-B02
+  *needs:* E2-B02, E2-D03
 - [ ] **E2-P04** `L` Verus on the frame's invariants, now that the frame has stopped moving.
+  "Stopped moving" was the title and not a blocker, so until 2026-09-06 this ranked as ready to start. The six E1 builds that reshaped the frame — IOMMU, admission, runtime, buddy allocator, the bought table, batched shootdown — have landed, and what still moves it is smaller and named: the ring and doorbell are `[>]` in E0, registered buffers are `[>]`, and `cargo xtask lint-owed` reports five reversals fallen due and unpaid, four of them in the frame: the restart policy `E1-B05` left there against RFC 0008, RFC 0014's and 0015's door retirements, and RFC 0051's three driver supervisors that were to have merged in `kernel/src/blk.rs`. Proof against a moving target is wasted work — `the-long-plan` layer L3 says so in as many words — so those are the blockers, and the owed reversals are the ones to check by hand because a lint that goes red when a debt is paid is not a lint that says the frame is still. The toolchain question `E0-P16` answered for RustMC is this task's question too: Verus pins its own rustc, the development image refuses a second toolchain at run time on purpose, and RFC 0022's answer — the checker's toolchain built into an image target only the checking job uses — is the shape this reuses rather than re-argues; `E1-P07` and `E1-P12` have since run Kani through that same shape, so the image pattern is proven rather than proposed.
   *exit:* the chosen invariants are proved, the proofs run on a schedule, and a mutation to the frame fails them.
+  *needs:* E0-B12, E0-B15, E1-B05, E1-B10, E1-B14 (the last so the batching landed with a number stays landed, and none of the four still `[>]` re-shapes what the proof states)
 - [ ] **E2-P05** `M` Whole-system state comparison: two runs, two hashes, and a diff that descends to the divergent subtree.
   *exit:* an injected divergence is localised to a named subtree automatically, with no human reading a log.
-  *needs:* E0-B14, E1-P01
+  *needs:* E0-B14, E1-P01, E1-B15 (a whole-system state is one only when every component publishes into it)
 - [ ] **E2-P06** `M` Reproducible builds verified across two machines and two dates.
+  Not from nothing. `E0-R01` already measured that a from-scratch kernel build at one path reproduces its content address, and its `package` and `address` jobs compare two runners at one commit. What this adds is the second date, the generation root as the thing compared, and a job that names the non-reproducible input rather than reporting a mismatch. `docker/README.md` records the gap that stays open: the image is repeatable but not reproducible in this task's sense, and the root hash is produced by the build rather than the image, which is why the gap is smaller than it looks and still a gap.
   *exit:* identical generation root hash, checked weekly; a non-reproducible input fails the job and names itself.
+  *needs:* E2-B04 (there is no generation root to compare before the evaluator produces one)
 - [ ] **E2-P07** `M` Rollback test.
   *exit:* break the system deliberately, roll back from the boot menu, and verify the restored generation is bit-identical to what it was.
   *needs:* E2-B05
@@ -997,16 +1037,20 @@ that follow from them: rollback that works and update that does not reboot.*
   *exit:* replace a running component under sustained load; no client observes a dropped operation, and the state transfer is verified rather than assumed.
   *needs:* E2-B06
 - [ ] **E2-P09** `M` Change-point detection over the stored measurement history, replacing thresholds.
+  The one E2 task startable before gate G1, and worth knowing what it would read. `E0-P11` stores a record per run with a schema version, and on every machine this project can reach the harness refuses to record timings — `F_ENVIRONMENT` is `container` or unset — so the in-tree history holds coverage counts and stated gaps, not distributions. The first half of the exit is satisfiable on synthetic history. The second half is not: "ordinary run-to-run noise over the same period" needs a gating claim that has run repeatedly on the named machine, and that begins at `E0-P06`.
   *exit:* a 3% regression injected into the history is detected; ordinary run-to-run noise over the same period is not.
-  *needs:* E0-P11
+  *needs:* E0-P11, E0-P06
 - [ ] **E2-P10** `M` The write-amplification claim, on zoned hardware if available and on an emulated device clearly marked if not.
+  "Against a tuned Linux filesystem" is a baseline, and a baseline is configuration in the tree or it is prose that decays — `E1-D06` is where that rule became a task, and this claim is the second one it has to configure a baseline for. The emulated device, if that is what runs, is QEMU's zoned virtio-blk from version 8; see `E2-B02` for the image base change.
   *exit:* bytes written to the device per byte written by the application, against a tuned Linux filesystem on the same device.
-  *needs:* E2-B02
+  *needs:* E2-B02, E1-D06
 
 ### Release
 
 - [ ] **E2-R01** `S` **Release 0.3.** Storage and generation claims; the rollback and live-swap demonstrations; the attestation story.
+  Carried no `needs:` and so ranked as ready to start before the epoch had a single task done. The blockers are its own contents and gate G2: the two storage claims, the two demonstrations, the attestation, and the power-cut sweep the gate names.
   *exit:* the package reproduces, and the rollback demonstration runs from the release image on a stranger's machine.
+  *needs:* E2-P10, E2-B09, E2-P07, E2-P08, E2-B07, E2-P01
 
 > ### Gate G2
 > Break the system deliberately and roll it back. Replace a running component
