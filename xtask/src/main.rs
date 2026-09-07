@@ -10105,7 +10105,25 @@ fn rust_sources() -> Result<Vec<PathBuf>, String> {
                 // something inside the tree, the output directory is not
                 // called `target` and every lint in this file would otherwise
                 // read generated sources and report findings against them.
-                if !matches!(name, "target" | ".git" | "third_party" | "docs") && path != build {
+                //
+                // `.claude` is here for the same reason and was found the
+                // expensive way: an agent harness puts git worktrees under
+                // `.claude/worktrees/`, so a second and third checkout of this
+                // repository sat inside it. The walker read them as if they
+                // were this tree — 51 determinism findings against files that
+                // are copies of files it had already passed, and a manifest
+                // test failing against a schema the other checkout had not
+                // caught up to. The failures name paths in this tree and are
+                // about a different one, which is the worst shape a lint
+                // finding can have.
+                //
+                // *Reversal:* something under `.claude` that is genuinely this
+                // tree's source and wants linting. Today it is configuration,
+                // prose and other people's checkouts, none of which this
+                // walker has any business compiling.
+                if !matches!(name, "target" | ".git" | ".claude" | "third_party" | "docs")
+                    && path != build
+                {
                     walk(&path, build, out)?;
                 }
             } else if path.extension().is_some_and(|e| e == "rs") {
