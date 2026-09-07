@@ -1030,6 +1030,33 @@ fn run(asked: &Asked) -> i32 {
     println!("  roots refused unresolved         {:>10}  (lying mode)", counted.lying_unresolved);
     println!();
 
+    // ---- the rows `cargo xtask claim cut-outcomes` reads --------------------
+    //
+    // The same counters again, in the one-name-one-count shape `claims/0025`'s
+    // `[threshold]` table is compared against. Two copies of a number is
+    // ordinarily one number and one rumour, and the reason this is not that:
+    // both are printed from `counted` in the same breath, so they cannot drift,
+    // and the human block above is aligned prose while a claim route needs a
+    // token it can parse. `bench/src/bin/rechunk.rs` prints its rows the same
+    // way for the same reason.
+    //
+    // Printed **before** the findings are judged, not after. A sweep that found
+    // a third state is exactly the run whose rows a reader needs — the claim
+    // route can then name the row that is red instead of reporting only that the
+    // workload exited non-zero — and `cuts_leaving_a_third_state` is the finding
+    // count itself, which is the exit's own sentence as a number.
+    let distinct = u64::from(counted.old > 0) + u64::from(counted.new > 0);
+    println!("  cuts_swept                             {:>10}", counted.cuts);
+    println!("  device_operations_replayed             {:>10}", counted.landed);
+    println!("  cuts_leaving_the_old_root              {:>10}", counted.old);
+    println!("  cuts_leaving_the_new_root              {:>10}", counted.new);
+    println!("  cuts_leaving_a_third_state             {:>10}", findings.len());
+    println!("  cuts_inside_a_wrapping_publish         {:>10}", counted.across_a_wrap);
+    println!("  torn_root_records_refused              {:>10}", counted.torn);
+    println!("  roots_refused_unresolved_lying         {:>10}", counted.lying_unresolved);
+    println!("  distinct_mount_outcomes                {:>10}", distinct);
+    println!();
+
     if !findings.is_empty() {
         for finding in findings.iter().take(8) {
             println!("finding: {finding}\n");
@@ -1052,7 +1079,6 @@ fn run(asked: &Asked) -> i32 {
         );
         return 0;
     }
-    let distinct = u64::from(counted.old > 0) + u64::from(counted.new > 0);
     for (seen, what) in [
         (counted.torn > 0, "a torn root record refused by its `check` field, at byte granularity"),
         (

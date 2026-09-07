@@ -408,6 +408,34 @@ fn main() {
     println!("    resident_bytes_per_read_byte (system)            {}", micro(system));
     println!("    mount_bytes_per_read_byte                        {}", micro(mounted));
 
+    // ---- the rows the two claims read -----------------------------------
+    //
+    // `claims/0022 copies-per-read` and `claims/0019
+    // resident-bytes-per-unit-of-work` are two claims over this one run — the
+    // shape four pairs in `xtask`'s `ROUTES` table already have — and each
+    // compares its own `[threshold]` table against these rows. One name,
+    // whitespace, one count, which is what a claim route parses.
+    //
+    // The three ratios are printed here as **millionths** and not as the decimal
+    // rendering above them, because a threshold table holds integers: `micro`
+    // exists for a human and this exists for the comparison, and both are
+    // rendered from the same `u64` so that they cannot say different things.
+    // Printed before the thresholds below are judged, so that a run about to go
+    // red still says which row it went red on.
+    println!("\n  the rows claims/0019 and claims/0022 are compared against");
+    println!("    reads_completed                                  {}", counters.reads);
+    println!("    copies_per_read                                  {copies_per_read}");
+    println!("    driver_bytes_to_an_unregistered_destination      {}", counters.staged_bytes);
+    println!("    device_bytes_through_an_unregistered_buffer      {}", landed.unregistered_bytes);
+    println!("    device_bytes_into_the_callers_buffer            {}", landed.registered_bytes);
+    println!("    device_transfers_into_the_callers_buffer        {}", landed.transfers);
+    println!("    application_bytes_delivered                     {}", counters.content_bytes);
+    println!("    zones_the_records_landed_in                     {zones_touched}");
+    println!("    held_bytes_per_read_byte_micro                  {held}");
+    println!("    resident_bytes_per_read_byte_micro              {system}");
+    println!("    mount_bytes_per_read_byte_micro                 {mounted}");
+    println!("    mount_payload_bytes                             {}", resident.mount_bytes());
+
     // ---- the thresholds -------------------------------------------------
     if counters.reads != reads as u64 {
         fail(&format!("{} reads completed, not {reads}", counters.reads));
@@ -511,6 +539,14 @@ fn main() {
         micro(provoked),
         micro(system)
     );
+
+    // The two controls as rows, for the same reason the zeros above are rows:
+    // a claim whose primary is a zero has to publish the number that says the
+    // tally could have been something else. `claims/0022` thresholds
+    // `provoked_unregistered_bytes` with a floor, which is the row that fails
+    // the day the counting is deleted and every zero above stays green.
+    println!("    provoked_unregistered_bytes                     {after_driver}");
+    println!("    resident_bytes_per_read_byte_micro_provoked     {provoked}");
 
     // The record the provocation moved is the record it read, so the caller
     // ends up with the same bytes by the expensive route. A control that had

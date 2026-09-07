@@ -25,6 +25,7 @@ row per entry that needs one, and an entry that needs none does not get a row.
 | RFC | Task | Title | Status |
 |---|---|---|---|
 | 0012 | `E2-D01` | An update is a generation swap, and the root is the attestation | accepted |
+| 0013 | `E0-B14` | Every component publishes a state tree | accepted; reversal condition read against `E2-P01`'s sweep on 2026-09-07 and not met |
 | 0058 | `E2-D02` | A mutable extent is a second object kind, and not a unification | accepted |
 | 0059 | `E2-D03` | A collector is three invariants and a batch-class consumer | accepted |
 | 0060 | `E2-D05` | A publish is a barrier sequence, and atomicity is not free | accepted |
@@ -120,3 +121,21 @@ edit rather than under it — and its theorem, its arithmetic and its four
 thresholds stand. The column reads `E2-B09` because that is the build whose
 measurement produced it; `E2-P02` is where the strict reading still lives, and
 0064 says in as many words that it must stay strict.
+
+**0013 gets a row because its reversal condition fell due and somebody had to
+say what reading it.** That entry's *what would reverse this* names E1's seeded
+fault sweeps and **E2's crash-consistency work** as the evidence that could
+reverse per-node atomicity, and `intent/0006-state/spec.md` says in as many
+words that the section is read again when `E2-P01`'s sweep has run. It has run —
+108 280 cuts, `claims/0025` — and the condition is **not** met. The evidence 0013
+asks for is a class of bug whose signature was present in the tree but only in
+the relationship between two nodes read at the same instant, and this sweep
+produces the opposite: it cuts a machine, rebuilds the device, and mounts a
+*quiesced* one, which is precisely the case 0013 says per-node atomicity covers.
+Nothing in 108 280 cuts was missed for want of a consistent cut of a live
+machine, because no cut was taken of a live machine at all. So the entry stands
+unedited — entries here are append-only — and what the row records is that the
+question was asked rather than left to lapse. What could still fire it is
+`E2-P05`, which compares two whole-system trees under load and is the task that
+would read two nodes at one instant; that reading is owed there and not here,
+and `E2-P05` waits on `E1-B15`.

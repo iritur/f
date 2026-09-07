@@ -619,6 +619,37 @@ impl Counts {
         println!("    application bytes submitted       {:>12}", self.app_bytes);
         println!("    pinned generations verified       {:>12}", self.verified);
     }
+
+    /// The same table again, as rows `cargo xtask claim collector-invariants`
+    /// can parse.
+    ///
+    /// One name, whitespace, one count — which is the contract `xtask`'s claim
+    /// routes read, and the reason it is a second rendering rather than a
+    /// reformatting of the first: the block above is aligned for a person and
+    /// this is tokenised for a comparison, and both are printed out of the same
+    /// `self` in the same breath so that neither can drift from the other.
+    ///
+    /// Printed before this run's vacuity checks rather than after, for
+    /// `zone/tests/cut.rs`'s reason: a run that is about to fail one of them is
+    /// exactly the run whose rows say *which* — `claims/0026`'s thresholds are
+    /// the same vacuity checks written as numbers, and a claim route that saw no
+    /// rows could only report that the workload exited non-zero.
+    fn rows(&self) {
+        println!("  collector_operations_ahead_of_hard_read {:>10}", self.ops_ahead);
+        println!("  i1_evaluations_at_a_reset               {:>10}", self.i1_checks);
+        println!("  i2_evaluations                          {:>10}", self.i2_checks);
+        println!("  i3_evaluations                          {:>10}", self.i3_checks);
+        println!("  zone_resets                             {:>10}", self.resets);
+        println!("  zone_resets_with_a_publish_open         {:>10}", self.resets_while_open);
+        println!("  resets_held_by_the_third_conjunct       {:>10}", self.waits);
+        println!("  hard_reads_submitted                    {:>10}", self.hard_reads);
+        println!("  hard_reads_verified                     {:>10}", self.hard_reads_verified);
+        println!("  hard_reads_overtaking                   {:>10}", self.hard_reads_overtaking);
+        println!("  collector_backlog_entries               {:>10}", self.backlog_entries);
+        println!("  multi_zone_publish_zones_spanned        {:>10}", self.open_publish_zones);
+        println!("  collector_cycles                        {:>10}", self.cycles);
+        println!("  collector_steps                         {:>10}", self.steps);
+    }
 }
 
 /// One pinned generation, as the reader and the retention policy need it.
@@ -1473,6 +1504,8 @@ fn run(asked: &Asked) -> i32 {
 
     println!();
     total.report("totals across every seed");
+    println!();
+    total.rows();
     println!();
 
     // The vacuity checks. Each of these is a way for a green run to have

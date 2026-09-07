@@ -12916,6 +12916,46 @@ enum Route {
     /// a test rather than a benchmark.
     /// E2-B03.
     IndexQuery,
+    /// `E2-P01`'s full sweep — `zone/tests/cut.rs` at 64 seeds and every
+    /// publish — compared against `claims/0025`'s own `[threshold]` table.
+    ///
+    /// The wide run and not `--quick`, because the four required observations
+    /// are what the claim publishes and the gate's four seeds reach three of
+    /// them by luck rather than by design. It is 120 s in release on the
+    /// development container, which is why this is a claim's command and the
+    /// gate is the same binary with a smaller number.
+    ///
+    /// The control is not here and is named in `claims/0025`'s `[baseline]`:
+    /// `cargo xtask cut --mutate` arms `mutate-root-before-blobs`, requires the
+    /// sweep to find it, and requires the reproduction line it printed to go
+    /// quiet without it. Two commands rather than one because the second builds
+    /// the tree with a defect in it, and a claim's reproduction that silently
+    /// rebuilt the workspace under a feature is a reproduction a reader cannot
+    /// trust to be measuring the tree they checked out.
+    /// E2-P01, RFC 0060.
+    Cut,
+    /// `E2-P03`'s interleaved run — `zone/tests/invariants.rs` — compared
+    /// against `claims/0026`'s `[threshold]` table.
+    ///
+    /// Every row in that table is one of the run's own vacuity checks written as
+    /// a number, which is the point: the run fails on the first invariant that
+    /// breaks and would then print no rows at all, so what the comparison adds
+    /// is the *other* failure — a green run that asserted nothing, because no
+    /// zone was reset or no hard-class entry ever had anything to overtake.
+    /// E2-P03, RFC 0059.
+    Invariants,
+    /// `E2-B08`'s read path — `user/objects/tests/reads.rs` — compared against
+    /// the `[threshold]` table of whichever of the two claims over it asked.
+    ///
+    /// Two claims and one workload, the shape four pairs in [`ROUTES`] already
+    /// have: `copies-per-read` is the count at the boundary and
+    /// `resident-bytes-per-unit-of-work` is what the component holds while it
+    /// takes it. They are separate claims rather than two rows of one because
+    /// they fail for different reasons and are reversed by different evidence —
+    /// a second copy on the datapath, against a component that started holding
+    /// what it read.
+    /// E2-B08.
+    Reads,
 }
 
 const ROUTES: &[(&str, Route)] = &[
@@ -12990,6 +13030,23 @@ const ROUTES: &[(&str, Route)] = &[
     // somewhere else and called the same thing.
     ("write-amplification", Route::ZoneCycle),
     ("index-blocks-per-query", Route::IndexQuery),
+    // Wave 3's four, registered with the capability each measures — R11 — and
+    // every one of them routed to a command that *compares*, because this
+    // branch has twice now published a threshold nothing could reach:
+    // `claims/0018` was audited for it and `claims/0017` spent a whole task
+    // green over a bench its own route did not run.
+    //
+    // `cut-outcomes` is gate G2's headline property and the only claim in this
+    // table whose primary is a count of states the system may not enter.
+    ("cut-outcomes", Route::Cut),
+    ("collector-invariants", Route::Invariants),
+    // The fifth pair sharing one workload, and the first split by *what is
+    // held* rather than by count against time: `copies-per-read` counts bytes
+    // that crossed into memory the caller did not register, and
+    // `resident-bytes-per-unit-of-work` counts what is resident while that
+    // number is being taken. Both are `pending` and say why at length.
+    ("copies-per-read", Route::Reads),
+    ("resident-bytes-per-unit-of-work", Route::Reads),
 ];
 
 /// The registry file one claim name resolves to.
@@ -13101,9 +13158,12 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
             "cargo",
             &["test", "--release", "-p", "f-blob", "--test", "million", "--", "--blobs", "1000000"],
         )?,
-        Route::Rechunk => claim_rechunk(&text)?,
+        Route::Rechunk => claim_rechunk(&text, &relative(&file))?,
         Route::ZoneCycle => sh("cargo", &["test", "-p", "f-zone", "--test", "cycle"])?,
         Route::IndexQuery => sh("cargo", &["test", "-p", "f-index", "--test", "query"])?,
+        Route::Cut => claim_cut(&text, &relative(&file))?,
+        Route::Invariants => claim_invariants(&text, &relative(&file))?,
+        Route::Reads => claim_reads(&text, &relative(&file))?,
     }
 
     // The harness itself refuses in a non-measurement environment and says so
@@ -13247,50 +13307,66 @@ fn capture_echoing(program: &str, args: &[&str]) -> Result<(String, bool), Strin
     Ok((collected, status.success()))
 }
 
-/// `claims/0017`'s two workloads, and its `[threshold]` table applied to what
-/// they printed.
+/// One workload, named for the report it heads.
+///
+/// A description a reader sees above the run, the program, and its arguments.
+/// It is a tuple rather than a struct because it is used at four call sites in
+/// one file and never crosses one.
+type Workload<'a> = (&'a str, &'a str, &'a [&'a str]);
+
+/// One claim's `[threshold]` table against every row its workloads printed.
+///
+/// # Why every claim registered since `E2-B09` routes through this
+///
+/// Because a threshold nobody compares against is not a threshold, and this
+/// branch has been caught by that twice. `claims/0017` published a bound its own
+/// reproduction command could not reach — the route ran the property test and
+/// the number that breached it came out of a bench — so a 1 138 541-byte
+/// measurement against a published 786 432 sat inside a green `verify` with
+/// nothing in the tree saying a word; RFC 0064 is the entry that came of it, and
+/// `claims/0018` had been audited for the same shape one wave earlier. What ends
+/// that is not care, it is arithmetic: the claim's own table is read out of the
+/// claim, the workload's rows are read out of its output, and **a row the
+/// workload did not print is a finding rather than a silence.**
+///
+/// Every workload runs even when an earlier one is red, because one command
+/// reporting every red row is worth more than one reporting the first.
 ///
 /// # Errors
 ///
-/// A list naming every row that is red, every row neither workload printed, and
-/// either workload's own failure. All of them at once: a claim run that stopped
-/// at the first red row would make the second one somebody's next afternoon.
-fn claim_rechunk(claim: &str) -> Result<(), String> {
+/// A list naming every row that is red, every row no workload printed, and every
+/// workload that failed. All of them at once: a claim run that stopped at the
+/// first red row would make the second one somebody's next afternoon.
+fn claim_compare(
+    claim: &str,
+    file: &str,
+    workloads: &[Workload],
+    closing: &str,
+) -> Result<(), String> {
     let thresholds = thresholds_in(claim);
     if thresholds.is_empty() {
-        return Err("claims/0017 has no `[threshold]` table, so this route compares nothing".into());
+        return Err(format!("{file} has no `[threshold]` table, so this route compares nothing"));
     }
 
     let mut measured = std::collections::BTreeMap::new();
     let mut findings = Vec::new();
 
-    // The property test first and the bench second, because the test is seconds
-    // and the bench is minutes: a run that is going to be red on the cheap
-    // workload says so before the expensive one starts, and still runs it.
-    println!("--- blob/tests/chunker.rs: the rows measured over 32 (seed, mixture) pairs ---\n");
-    let (chunker, chunker_ok) = capture_echoing(
-        "cargo",
-        &["test", "-p", "f-blob", "--test", "chunker", "--", "--nocapture"],
-    )?;
-    measured_rows(&chunker, &thresholds, &mut measured, &mut findings);
-    if !chunker_ok {
-        findings.push("  blob/tests/chunker.rs failed; see its output above".into());
+    for (what, program, args) in workloads {
+        println!("--- {what} ---\n");
+        let (output, ok) = capture_echoing(program, args)?;
+        measured_rows(&output, &thresholds, &mut measured, &mut findings);
+        if !ok {
+            findings.push(format!("  {what}: the workload failed; see its output above"));
+        }
+        println!();
     }
 
-    println!("\n--- bench/src/bin/rechunk.rs: the rows measured through the write path ---\n");
-    let (rechunk, rechunk_ok) =
-        capture_echoing("cargo", &["run", "--release", "-p", "f-bench", "--bin", "rechunk"])?;
-    measured_rows(&rechunk, &thresholds, &mut measured, &mut findings);
-    if !rechunk_ok {
-        findings.push("  bench/src/bin/rechunk.rs failed; see its output above".into());
-    }
-
-    println!("\n=== claims/0017's [threshold] table against what the two workloads printed ===\n");
+    println!("=== {file}'s [threshold] table against what the workload(s) printed ===\n");
     for (name, bound) in &thresholds {
         let Some(&value) = measured.get(name) else {
             println!("    ?  {name}: no workload printed this row");
             findings.push(format!(
-                "  {name}: a threshold neither workload printed. A published bound whose number \
+                "  {name}: a threshold no workload printed. A published bound whose number \
                  nothing emits is a bound nothing checks, which is the state this route exists \
                  to end — print the row or retire the threshold, and do not do the second to \
                  make this green"
@@ -13313,18 +13389,117 @@ fn claim_rechunk(claim: &str) -> Result<(), String> {
     }
 
     if findings.is_empty() {
-        println!("\nevery row in claims/0017's [threshold] table was printed and holds");
+        println!("\nevery row in {file}'s [threshold] table was printed and holds");
         return Ok(());
     }
     Err(format!(
-        "{} finding(s) against claims/0017:\n{}\n\n\
-         A bound moves only by an RFC carrying the measurement that moved it —\n\
-         RFC 0061, RFC 0062 and RFC 0064 are the three that have looked, and every\n\
-         one of them left the 786 432 where it was. The `[diagnosis]` table in the\n\
-         claim says what each of these rows means before it says what to do.",
+        "{} finding(s) against {file}:\n{}\n\n{closing}",
         findings.len(),
         findings.join("\n")
     ))
+}
+
+/// `claims/0017`'s two workloads, and its `[threshold]` table applied to what
+/// they printed.
+///
+/// The property test first and the bench second, because the test is seconds and
+/// the bench is minutes: a run that is going to be red on the cheap workload says
+/// so before the expensive one starts, and still runs it.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_rechunk(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[
+            (
+                "blob/tests/chunker.rs: the rows measured over 32 (seed, mixture) pairs",
+                "cargo",
+                &["test", "-p", "f-blob", "--test", "chunker", "--", "--nocapture"],
+            ),
+            (
+                "bench/src/bin/rechunk.rs: the rows measured through the write path",
+                "cargo",
+                &["run", "--release", "-p", "f-bench", "--bin", "rechunk"],
+            ),
+        ],
+        "A bound moves only by an RFC carrying the measurement that moved it —\n\
+         RFC 0061, RFC 0062 and RFC 0064 are the three that have looked, and every\n\
+         one of them left the 786 432 where it was. The `[diagnosis]` table in the\n\
+         claim says what each of these rows means before it says what to do.",
+    )
+}
+
+/// `claims/0025`'s sweep: every cut point of every publish, 64 seeds, both
+/// granularities and both modes, against the claim's own table.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_cut(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "zone/tests/cut.rs: every cut point of every publish, 64 seeds",
+            "cargo",
+            &["test", "--release", "-p", "f-zone", "--test", "cut", "--", "--seeds", "64", "--all"],
+        )],
+        "This is gate G2's headline property. `cuts_leaving_a_third_state` above 0 is\n\
+         the exit's own sentence failing, and every finding the sweep printed carries\n\
+         the one line that reproduces it; the observation rows going to 0 is the\n\
+         other failure, a sweep that has stopped reaching the cases it exists for.\n\
+         Neither is repaired by moving a number here: `cargo xtask cut --mutate` is\n\
+         the control that says the sweep can still fail, and it is the first thing to\n\
+         run when this goes green for a reason nobody expected.",
+    )
+}
+
+/// `claims/0026`'s interleaved run, against the claim's own table.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_invariants(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "zone/tests/invariants.rs: I1, I2 and I3 over four interleavings",
+            "cargo",
+            &["test", "--release", "-p", "f-zone", "--test", "invariants"],
+        )],
+        "RFC 0059's three invariants are predicates over named state, so a red row\n\
+         here is one of two things and the claim's `[diagnosis]` table says which:\n\
+         an invariant that no longer holds, or a run that stopped reaching the case\n\
+         it was asserted at. The second is the likelier and the more dangerous —\n\
+         every floor in that table is a way for a green run to have asserted nothing.",
+    )
+}
+
+/// `claims/0019` and `claims/0022`'s one workload, against whichever of the two
+/// asked.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_reads(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "user/objects/tests/reads.rs: 256 reads into the caller's registered buffers",
+            "cargo",
+            &["test", "--release", "-p", "f-objects", "--test", "reads"],
+        )],
+        "Both zeros in this run are counted twice, on opposite sides of the boundary,\n\
+         and neither reading derives from the other — so a red row is a real second\n\
+         copy or a real residency, not an accounting change. Read the two provocation\n\
+         rows first: if they are zero the tallies have stopped moving at all, and\n\
+         every zero above them is a default rather than a count.",
+    )
 }
 
 fn bench(name: Option<&str>) -> Result<(), String> {
