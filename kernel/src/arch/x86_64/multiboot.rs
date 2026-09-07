@@ -33,7 +33,12 @@ const FLAG_MODS: u32 = 1 << 3;
 /// care about, and a ninth is *reported* as dropped rather than silently
 /// ignored — because a module nobody reserved is a module the frame allocator
 /// hands out from underneath its owner.
-const MAX_MODULES: usize = 8;
+///
+/// Public because `crate::generation` sizes an array by it and asserts the two
+/// are one number: a second array sized by a copy of this bound is a place a
+/// change to it goes unnoticed.
+/// Unit: count of modules.
+pub const MAX_MODULES: usize = 8;
 
 /// How much of a command line this kernel will read.
 ///

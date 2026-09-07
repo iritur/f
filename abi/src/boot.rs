@@ -90,6 +90,35 @@ impl Selection {
         out
     }
 
+    /// Find this token on a whole command line, if it is there.
+    ///
+    /// `None` when the line carries no word beginning with [`KEY`]; otherwise
+    /// whatever [`Selection::parse`] made of that word, so that *absent* and
+    /// *present and wrong* stay two different answers all the way up to the
+    /// caller. A boot with no `f.root=` is an ordinary boot; a boot with a
+    /// malformed one is a boot that was asked for a generation and cannot say
+    /// which, and those must not both come back as `None`.
+    ///
+    /// Words are separated by ASCII whitespace, which is what a multiboot
+    /// command line is: `timer=60 f.root=<64 hex>` is two words and the frame
+    /// reads each with the grammar that owns it. The **first** matching word
+    /// wins and the rest are not examined — a line naming two roots is a line
+    /// whose author has two beliefs about one machine, and quietly taking the
+    /// last would make which one runs a property of how the loader concatenates
+    /// its arguments.
+    ///
+    /// It lives here rather than beside the parser in `kernel/` for the reason
+    /// the module header gives about the grammar: separating a word from a line
+    /// *is* part of how the sixty-four characters are spelled, and a second hand
+    /// writing that later is the second reader this arrangement refuses to have.
+    #[must_use]
+    pub fn find(cmdline: &[u8]) -> Option<Result<Self, i32>> {
+        cmdline
+            .split(|byte| byte.is_ascii_whitespace())
+            .find(|word| word.starts_with(KEY.as_bytes()))
+            .map(Self::parse)
+    }
+
     /// Parse one command-line word.
     ///
     /// # Errors
@@ -394,6 +423,47 @@ mod tests {
         assert_eq!(Selection::parse(b"timer=60"), Err(unknown));
         assert_eq!(Selection::parse(b"root=00"), Err(unknown));
         assert_eq!(Selection::parse(b"f.root="), Err(bad));
+    }
+
+    #[test]
+    fn a_command_line_with_no_token_is_told_apart_from_one_with_a_bad_token() {
+        let good = Selection { root: ROOT }.render();
+        let bad = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
+
+        // Absent. An ordinary boot, and not a boot that asked for something.
+        assert_eq!(Selection::find(b"timer=60"), None);
+        assert_eq!(Selection::find(b""), None);
+
+        // Present, among other words, with something on each side of it.
+        let mut line = [b' '; SCRATCH];
+        line[..9].copy_from_slice(b"timer=60 ");
+        line[9..9 + TOKEN_BYTES].copy_from_slice(&good);
+        line[9 + TOKEN_BYTES + 1..9 + TOKEN_BYTES + 9].copy_from_slice(b"boottime");
+        assert_eq!(Selection::find(&line), Some(Ok(Selection { root: ROOT })));
+
+        // Present and wrong. This is the case that must not come back as
+        // `None`: the machine was asked for a generation and cannot say which.
+        assert_eq!(Selection::find(b"timer=60 f.root=00 boottime"), Some(Err(bad)));
+
+        // A word that merely contains the key is not the key: the separator is
+        // whitespace, so `xf.root=...` is one word and not this one.
+        let mut glued = [b'x'; TOKEN_BYTES + 1];
+        glued[1..].copy_from_slice(&good);
+        assert_eq!(Selection::find(&glued), None);
+    }
+
+    #[test]
+    fn the_first_of_two_roots_wins_rather_than_the_last() {
+        // A line naming two roots has an author with two beliefs about one
+        // machine. Taking the last would make which one runs a property of how
+        // the loader concatenated its arguments, which is not a property of
+        // anything anybody wrote down.
+        let first = Selection { root: ROOT }.render();
+        let second = Selection { root: [0x5A; ROOT_BYTES] }.render();
+        let mut line = [b' '; 2 * TOKEN_BYTES + 1];
+        line[..TOKEN_BYTES].copy_from_slice(&first);
+        line[TOKEN_BYTES + 1..].copy_from_slice(&second);
+        assert_eq!(Selection::find(&line), Some(Ok(Selection { root: ROOT })));
     }
 
     /// How wide the scratch buffer a test module is written into is.

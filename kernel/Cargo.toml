@@ -15,9 +15,10 @@ f-ring.workspace = true
 # the thing a swap compares to decide whether it needs a reboot, and a frame that
 # could not recompute its own would be carrying a field nothing checks.
 #
-# The one dependency in this list the frame calls *code* from rather than sharing
-# a vocabulary with, and it is worth saying why that is acceptable here and is
-# refused three lines down for the drivers. `f-hash` is `no_std`, has no
+# One of the two dependencies in this list the frame calls *code* from rather
+# than sharing a vocabulary with — `f-generation` below is the other, and it
+# links this one — and it is worth saying why that is acceptable for a library
+# and is refused further down for the drivers. `f-hash` is `no_std`, has no
 # allocator, no arch-specific path and no dependencies of its own, and it forbids
 # `unsafe` — so linking it adds nothing to the surface `lint-unsafe` measures.
 # The alternative was a second SHA-256 inside `kernel/`, which is the one shape
@@ -28,6 +29,24 @@ f-ring.workspace = true
 # point the frame is handed a digest rather than computing one, and this line
 # goes with the self-hash it exists for.
 f-hash.workspace = true
+
+# `E2-P07`. The frame reads `f.root=` and has to be able to say which of the
+# modules the loader offered folds to it, which is the fold used as an identity
+# — the *same* function `cargo xtask generation` produced the root with, in the
+# same crate, which is what makes the check at boot arithmetic rather than a
+# second opinion about the format. `f-generation` is `no_std`, has no allocator
+# and pulls in only `f-abi` and `f-hash`, so this costs the frame two leaf
+# crates and no capability it did not have.
+#
+# It is a *library* dependency and not a component crate: unlike the three
+# driver lines below, the frame calls this code, and there is no `image`
+# feature and no `#[panic_handler]` in it to keep off.
+#
+# *Reversal:* the frame gaining a supervisor that calls `f-assembler`, at which
+# point selection and instantiation are one reader above the frame and this line
+# goes with the rest of the boot path's knowledge of the format. RFC 0066 is
+# where that day is described.
+f-generation.workspace = true
 
 # The block driver, which is a component and not part of the frame — it inherits
 # `unsafe_code = "forbid"` like every other `user/` crate and `cargo xtask
