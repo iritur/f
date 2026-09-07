@@ -826,13 +826,14 @@ cargo xtask <command>
                      across a set of seeds — and require every cut to leave
                      either the old root or the new one, with the generation
                      tree it names resolving. Gate G2's headline property.
-                     16 seeds and every publish by default
+                     64 seeds and every publish by default: 108 280 cuts
   cut --mutate       Arm the deliberate defect that appends a root record
                      without waiting for the blobs it names, require the sweep
                      to find it and to print the cut point, then disarm it and
                      require the same point to go quiet
-  cut --quick        The gate's own settings — four seeds and four publishes —
-                     which is what `cargo test --workspace` already runs
+  cut --quick        The gate's own settings — four seeds, and the four
+                     publishes that matter rather than all of them — which is
+                     what `cargo test --workspace` already runs
 
   hostile [n]        A peer that writes arbitrary values to the shared header
                      and cursors, restarts mid-operation and lies about its
