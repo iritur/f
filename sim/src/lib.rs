@@ -135,6 +135,7 @@ pub mod reserve;
 pub mod scenario;
 pub mod service;
 pub mod snap;
+pub mod state;
 pub mod sweep;
 pub mod time;
 pub mod trace;
@@ -254,6 +255,26 @@ pub trait Actor {
     fn save(&self, out: &mut Writer) -> Result<(), Broken> {
         let _ = out;
         Err(Broken::Unsaveable(self.name()))
+    }
+
+    /// This actor's published state tree, in `f_abi::state` bytes, or `None`
+    /// for an actor that is not a component.
+    ///
+    /// RFC 0013 puts a tree in every *component*; not everything that
+    /// implements this trait is one. A wrapper `chaos.rs` puts a place in, a
+    /// stub a test installs, and the timeline itself are machinery, and giving
+    /// them a tree would say a component is running where none is. So the
+    /// default is `None` and the answer is honest either way — which is why
+    /// [`Outcome::trees`] is a map that names who published rather than a list
+    /// somebody has to line up against the actor table.
+    ///
+    /// The bytes are the region a scenario asserts against, opened with
+    /// `f_abi::state::Region` — the same decoder checked against the frame's
+    /// own `Reader` in `abi/src/state.rs`. A test that reads one is therefore
+    /// reading what a reader of a real component's mapping would read, which is
+    /// RFC 0013's test of worth being taken rather than restated.
+    fn published(&self) -> Option<&[u8]> {
+        None
     }
 }
 
@@ -628,6 +649,28 @@ pub struct Outcome {
     /// the other side of the tree. Zero for every scenario that arms nothing,
     /// which is most of them.
     pub injected: u32,
+    /// What every component published about itself, by actor name.
+    ///
+    /// RFC 0013's own test of worth is *whether E1's fault sweeps and E2's
+    /// state comparison actually consume it*, and this is the field a sweep
+    /// consumes: a scenario asserts its system response by opening one of these
+    /// with `f_abi::state::Region` and reading nodes, rather than by counting
+    /// records in the artefact. `fault.rs`'s `alloc` test is the one that does
+    /// it and the one to read first.
+    ///
+    /// Taken at the end of the run, when virtual time has stopped and nothing
+    /// is in flight — which is the configuration RFC 0013 says a cross-node
+    /// reading is meaningful in, and the reason a simulator can compare whole
+    /// trees where a live machine may only compare nodes.
+    ///
+    /// A `BTreeMap` because RFC 0004 has no other kind, and keyed
+    /// `"<name>/<index>"` — the actor's label and its position in the table.
+    /// The index is there because two actors of one name is ordinary: `alloc`
+    /// installs two clients and a map keyed by name alone would silently keep
+    /// one of them, which is the shape of quiet loss this whole field exists to
+    /// end. The label is there because a bare index is a number a scenario
+    /// would have to look up.
+    pub trees: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 impl Outcome {
@@ -838,6 +881,16 @@ impl Simulation {
     /// What this run leaves behind.
     fn finished(self) -> Outcome {
         let log = self.world.decisions.log().to_vec();
+        // Every component's tree, read out at the quiesced end of the run:
+        // virtual time has stopped and nothing is in flight, which is the one
+        // configuration RFC 0013 says a reading across a whole tree is
+        // meaningful in.
+        let mut trees = std::collections::BTreeMap::new();
+        for (index, actor) in self.actors.iter().enumerate() {
+            if let Some(bytes) = actor.published() {
+                trees.insert(format!("{}/{index}", actor.name()), bytes.to_vec());
+            }
+        }
         Outcome {
             seed: self.world.seed,
             steps: self.steps,
@@ -846,6 +899,7 @@ impl Simulation {
             trace: self.world.trace,
             log,
             injected: self.world.faults.struck(),
+            trees,
         }
     }
 }

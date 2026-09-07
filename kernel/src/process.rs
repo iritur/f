@@ -233,6 +233,44 @@ pub const BLK_REGISTER_PAGES: usize = 4;
 /// fixed offsets from each other.
 pub const BLK_QUEUES: u64 = BLK_REGISTERS + BLK_REGISTER_PAGES as u64 * FRAME_SIZE;
 
+/// Where the frame maps a spawned component's *own* state tree.
+///
+/// One page, the component's to write and everybody else's to read. RFC 0013
+/// puts a tree in every component and RFC 0065 is what makes the frame build
+/// one at every spawn: the header and the schema block are written here out of
+/// the manifest's `[[state]]` declaration before the component's first
+/// instruction, and what the component adds is the words.
+///
+/// **At the top of the region and not beside [`SPAWN_CONTROL`]**, which is
+/// where a reader would look for it, and the reason is the one
+/// [`TEXT_PAGES`] gives about its own size: the four addresses between them are
+/// constants a driver component holds, `f_virtio_blk::routing::AT` among them,
+/// and a page inserted in the middle of that list would move every one of them
+/// for a reason that has nothing to do with any of them. Sixty-four kibibytes
+/// of queue memory is a lot of address space to step over and it is address
+/// space, of which a component has forty-seven bits.
+///
+/// Still inside the two mebibytes one page table covers — `BLK_QUEUES` ends
+/// well short of it — so a component reading its own tree costs no page table
+/// and no allocation, which is what makes RFC 0013's *read, never delivered*
+/// affordable enough to leave on.
+///
+/// *Reversal:* a component whose declaration does not fit one page, at which
+/// point this becomes a base and a count, and `abi::manifest::STATE_NODES_MAX`
+/// is the constant that says so first.
+pub const SPAWN_TREE: u64 = BLK_QUEUES + 16 * FRAME_SIZE;
+
+// One page table covers two mebibytes, and every address above has to be inside
+// the one that covers `TEXT` — otherwise a component mapping its own tree costs
+// the frame a page table it did not budget for, which is the sentence
+// `SPAWN_TREE` above claims. A build that pushed past it would fail here rather
+// than at a spawn that ran out of frames for a reason nothing named.
+const _: () = assert!(SPAWN_TREE + FRAME_SIZE <= TEXT + 2 * 1024 * 1024);
+// And the tree is above the queue window rather than inside it, which is the
+// half of that argument an arithmetic mistake would break silently: a tree
+// mapped over a virtqueue is a driver whose descriptors a reader overwrites.
+const _: () = assert!(SPAWN_TREE >= BLK_QUEUES + 64 * 1024);
+
 /// A second address in the same region, used only by provocations whose mapping
 /// is supposed to be refused.
 ///

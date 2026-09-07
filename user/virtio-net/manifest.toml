@@ -17,7 +17,7 @@
 # on an exit; in the soft class, with two mebibytes for everything it is made
 # of.
 
-schema = 2
+schema = 3
 name   = "virtio-net"
 image  = "user/virtio-net"
 
@@ -203,3 +203,68 @@ memory_bytes = 2_097_152
 # declaration with nothing behind it is worth less than an honest restart.
 [transfer]
 mode = "restart_only"
+
+# --- State: what this component publishes about itself ------------------------
+
+# RFC 0013 puts a state tree in every component and RFC 0065 is what makes
+# "every" mean every: this array is the declaration, the frame writes the schema
+# block out of it before this component's first instruction, and a manifest that
+# declared nothing would be refused `ADMISSION/NO_STATE_TREE` at the spawn.
+#
+# The nodes are this driver's own `Counters`, one for one, and that is the whole
+# of what makes the declaration honest rather than decorative: every word here
+# is a number the crate already keeps, so publishing it is the store the driver
+# was already going to make and there is no collect step, no sampling interval
+# and no second copy that can disagree with the first. A node with no counter
+# behind it would be a serialisation with extra steps wearing RFC 0013's name.
+#
+# Ids are permanent and are never reused, for the reason `TODO.md` never reuses
+# a task id: the id is the only thing that makes two readings of this component
+# across time comparable at all.
+
+[[state]]
+id   = 1
+name = "net"
+kind = "subtree"
+unit = "none"
+
+# Entries answered without a refusal.
+[[state]]
+id     = 2
+parent = "net"
+name   = "served"
+kind   = "counter"
+unit   = "entries"
+
+# Entries refused. Published beside the one above and never alone: *nothing was
+# refused* is a claim about a driver, and a driver that answered nothing refused
+# nothing either.
+[[state]]
+id     = 3
+parent = "net"
+name   = "refused"
+kind   = "counter"
+unit   = "entries"
+
+# Bytes the device moved on behalf of clients. The number the one below is zero
+# beside — and a zero beside a zero says nothing, which is why this node is not
+# optional and is why the two are declared together.
+[[state]]
+id     = 4
+parent = "net"
+name   = "bytes"
+kind   = "counter"
+unit   = "bytes"
+
+# Bytes this component copied on the data path. **Required to be zero**, and it
+# is a structural property published as a number: nothing on the data path can
+# move it, which is the claim `cargo xtask lint-datapath` turns from prose into
+# a check. Publishing it under one root with the frame's own `blk copies` node
+# is what lets a reader compare the two counts of one event that RFC 0013 says
+# a claim and a live reading should be.
+[[state]]
+id     = 5
+parent = "net"
+name   = "copies"
+kind   = "counter"
+unit   = "bytes"

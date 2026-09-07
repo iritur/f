@@ -16,7 +16,7 @@
 # compiles it into the record the frame actually reads. RFC 0030 is why those
 # are three different things.
 
-schema = 2
+schema = 3
 name   = "store"
 image  = "user/store"
 
@@ -140,3 +140,70 @@ memory_bytes = 65_536
 # doing it now is one restart at a swap.
 [transfer]
 mode = "restart_only"
+
+# --- State: what this component publishes about itself ------------------------
+
+# RFC 0013 puts a state tree in every component and RFC 0065 is what makes
+# "every" mean every: this array is the declaration, the frame writes the schema
+# block out of it before this component's first instruction, and a manifest that
+# declared nothing would be refused `ADMISSION/NO_STATE_TREE` at the spawn.
+#
+# The nodes are `f_store::report::Tally`, which is the reversal that module's
+# own comment names — *a runtime that publishes a tree of its own, at which
+# point the tallies are nodes and this module is one `code` field*. Declaring
+# them here is the half of that reversal a manifest can pay: the shape the
+# tallies take as nodes exists now and is checked on every boot. What is still
+# owed is the runtime writing into them instead of packing a word out through
+# the door, and `user/store/src/report.rs` still says so.
+#
+# Ids are permanent and are never reused, for the reason `TODO.md` never reuses
+# a task id: the id is the only thing that makes two readings of this component
+# across time comparable at all. A retired node takes its id with it.
+
+[[state]]
+id   = 1
+name = "store"
+kind = "subtree"
+unit = "none"
+
+# Work items this component's own executor completed. A counter and not a gauge
+# because it only goes up, and `events` and not `calls` because nobody asked for
+# them: a work item is something the runtime did to itself.
+[[state]]
+id     = 2
+parent = "store"
+name   = "work"
+kind   = "counter"
+unit   = "events"
+
+# Notices drained off the control ring at a polling point. R05's other half,
+# published: a component that received nothing and a component that never
+# drained are two different states, and a count of what was posted cannot tell
+# them apart.
+[[state]]
+id     = 3
+parent = "store"
+name   = "notices"
+kind   = "counter"
+unit   = "events"
+
+# Work items still on its own queue. A gauge, because it goes both ways, and it
+# is the node that says whether this component is quiescent — which is the
+# question `[transfer]` above will have to answer the day this component holds
+# anything worth carrying across a swap.
+[[state]]
+id     = 4
+parent = "store"
+name   = "queued"
+kind   = "gauge"
+unit   = "events"
+
+# How this component last ended, as `f_store::report`'s status ordinal. `none`
+# is the unit because a status is not a quantity: a reader that averaged two of
+# these would be averaging two sentences.
+[[state]]
+id     = 5
+parent = "store"
+name   = "status"
+kind   = "gauge"
+unit   = "none"

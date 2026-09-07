@@ -72,7 +72,7 @@ imported driver's manifest lives in `user/` and its `image` points into
 
 | field | type | required | what it is |
 | --- | --- | --- | --- |
-| `schema` | integer | yes | The schema this file is written to. Must be `2`. A later value is refused: a reader that guesses at fields it was not written for is two readers. |
+| `schema` | integer | yes | The schema this file is written to. Must be `3`. A later value is refused: a reader that guesses at fields it was not written for is two readers. |
 | `name` | string | yes | The component's name in the topology: `[a-z0-9-]`, at most 32 bytes, no edge hyphen. Unique across the tree — `lint-manifests` refuses two manifests with one name, because `sibling:` references and the topology name a component by it. |
 | `image` | string | yes | Where the image comes from. Either a tree-relative path to the crate that builds it — forward slashes, no `.`/`..`/empty segment, not under `target/` — or `sha256:` and sixty-four lower-case hex digits for bytes the tree does not build. |
 | `domain` | string | yes | RFC 0005's kind: `shared`, `private` or `hostile`. No default, and none of the working names other documents used (`trusted`, `confined`) is accepted — the RFC's spelling is the only spelling. |
@@ -280,6 +280,58 @@ in-place transfer waits for a point the occupant asserts, which is what
 `in_place` already means — and the mode a third value would leave behind, a
 cursors-only transfer, is one no component in this tree can correctly use.
 
+## `[[state]]` — what the component publishes about itself
+
+Required, and required non-empty. RFC 0013 puts a hierarchical, typed state tree
+in **every** component and RFC 0065 is what makes *every* mean every: this array
+is the declaration, the frame writes the schema block out of it into the
+component's own page before the component's first instruction, and a manifest
+that declares nothing is refused `ADMISSION/NO_STATE_TREE` at the spawn.
+
+| field | type | required | what it is |
+| --- | --- | --- | --- |
+| `id` | integer | yes | This node's permanent identifier inside this component's tree, at least 1, strictly ascending down the array. **Never reused**, for the reason `TODO.md` never reuses a task id: the id is the only thing that makes two readings of this component across time comparable at all. A retired node takes its id with it. Unit: none — an identifier, not a quantity. |
+| `name` | string | yes | `[a-z0-9-]`, at most **16** bytes, no edge hyphen. Sixteen and not 32, because this goes on the wire as `abi::state::SchemaEntry::name`: RFC 0013 says a longer label is a description, and a description belongs in the document that owns the node. Unit: none. |
+| `kind` | string | yes | `subtree`, `counter`, `gauge` or `mount`. A subtree's word is reserved and reads zero; a counter only goes up; a gauge goes both ways; a mount names another published region by physical address. Unit: none. |
+| `unit` | string | yes | What the word is counted in: `none`, `nanoseconds`, `bytes`, `frames`, `entries`, `calls`, `cores`, `slots`, `events`, `address`, `trees` or `nodes`. `none` is a real answer and not a missing one — an identifier is not a quantity. Unit: none — it *is* the unit. |
+| `parent` | string | iff not the first | The `name` of a node declared **above** this one. Refused on the first node and required on every other. Unit: none. |
+
+At most 16 nodes. The bound is the frame's page rather than a taste: a
+component's published region is one frame, and header, schema block and data
+block share it. There is room for four times as many; what there is no room for
+is a component that publishes its heap one node at a time.
+
+**One root, and it is the first node.** The wire format does not require it and
+a component's tree does: the frame reaches a component's tree at one mount
+address, so a declaration with two parentless nodes would be two trees at that
+address with the second reachable only by whoever went looking. Because ids
+ascend and a parent must be named before its child, no node except the first
+*can* be the root.
+
+**The frame writes the description; the component writes the numbers.** The word
+a node names lives at its index in the data block — offsets tile it in
+declaration order, so a declared offset would be a second opinion the reader
+could contradict. That split is what buys three things a constant inside the
+component's image could not:
+
+- A supervisor can refuse a component that publishes nothing *before it spends a
+  frame on it*. A declaration inside the image is one the frame would have to
+  run the component to find out about, and a component that has already run has
+  already escaped the refusal.
+- The schema block exists before the component's first instruction, so a
+  component that is spawned and never scheduled still has a readable tree with
+  zeros in it. That is the difference between *this component has done nothing*
+  and *this component cannot be read*.
+- The declaration is inside the content hash a spawn names, so a component whose
+  account of itself changed is a different component — the same rule that
+  already applies to its code.
+
+What the frame does **not** know is what a node means. It knows the id, the
+shape and the unit, because those are what a reader needs to not do the wrong
+arithmetic to a number; what the word counts is the component's business, and
+the only thing that keeps a node's name honest is the same thing that keeps a
+claim's honest — somebody reading both.
+
 ## What is refused, collected
 
 For a reviewer, in one place:
@@ -288,14 +340,18 @@ For a reviewer, in one place:
 - Any syntax outside the subset: escapes, multi-line strings, inline tables,
   dotted or quoted keys, signed numbers, a list that does not close on its line.
 - A key or table appearing twice.
-- A `schema` other than 2.
-- A missing `name`, `image`, `domain`, `[restart]`, `[reservation]` or
-  `[transfer]`.
+- A `schema` other than 3.
+- A missing `name`, `image`, `domain`, `[restart]`, `[reservation]`,
+  `[transfer]` or `[[state]]`.
 - A field this document does not list, anywhere.
 - A `domain`, `type`, right, feature, `from`, `role`, `payload`, `policy` or
   `class` outside its table.
 - A `third_party/` image in `shared`; a hash-named image outside `hostile`; an
   image path that leaves the tree or points at build output.
+- No `[[state]]` node at all; more than 16; an `id` of zero, repeated, or not
+  ascending; a `name` outside `[a-z0-9-]` or longer than 16 bytes; a `kind` or
+  `unit` outside its table; a `parent` on the first node, or one naming a node
+  not declared above.
 - `execute` on an endpoint; a right or feature named twice; `control_events` on
   a data ring; `features_required` beyond `features`; `shared_virtual` without
   its feature bit.

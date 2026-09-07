@@ -1319,6 +1319,19 @@ mod tests {
                         (replayed.steps, replayed.finished_ns, replayed.injected),
                         "the run's shape moved — {where_}"
                     );
+                    // And what every component published about itself, byte for
+                    // byte. A seventh thing to compare, and it is here because
+                    // RFC 0065 made a component's counters live *in* its
+                    // published region rather than in fields beside it: those
+                    // words are state, so they have to travel, and a tree that
+                    // came back with different numbers in it is the exact shape
+                    // of quiet loss this test's own documentation warns about —
+                    // a plausible run whose components disagree with the run
+                    // that produced them.
+                    assert_eq!(
+                        restored.trees, replayed.trees,
+                        "a component's published state moved — {where_}"
+                    );
 
                     // A terse mark: the artefact does not travel, so what is
                     // comparable is the digest, the decisions, the shape — and

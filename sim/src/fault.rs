@@ -387,6 +387,7 @@ impl Injector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::node;
     use crate::dev::Protocol;
     use crate::proto::wrote;
     use crate::scenario::{Peer, find};
@@ -882,6 +883,105 @@ mod tests {
                 "seed {seed:#018x}: a completion arrived after the peer was gone"
             );
         }
+    }
+
+    #[test]
+    fn a_peer_that_dies_is_answered_out_of_the_clients_own_state_tree() {
+        // **The same response as the test above, asserted from the component's
+        // own published state rather than from the artefact.**
+        //
+        // This is `E1-B15`'s third clause and RFC 0013's own test of worth
+        // being taken: that document says the measurement of whether the tree
+        // was worth building is *whether E1's fault sweeps and E2's state
+        // comparison actually consume it*, and a sweep that read a struct of
+        // counters would be consuming a struct of counters. So every assertion
+        // below opens the client's published region with
+        // `f_abi::state::Region` — the decoder `abi/src/state.rs` holds against
+        // the frame's own `Reader` over identical bytes — and reads nodes by
+        // permanent id. Not one of them reads a record.
+        //
+        // **What a tree can say that the trace cannot.** `flight` is a gauge:
+        // *how many buffers are out at this instant* is a level, and a trace
+        // reader has to difference two labels and hope it has them all. On a
+        // run that ended because its peer died, that level being zero is the
+        // whole of *every buffer came home* — stated once, rather than
+        // reconstructed.
+        //
+        // **What it cannot say, and which test says it instead.** A tree has no
+        // time in it. *No completion arrived after the reset* is a claim about
+        // an order, and `a_peer_that_dies_mid_operation_gives_every_buffer_back`
+        // above is where it is made, out of record instants. The two tests are
+        // the two halves and neither is a weaker copy of the other.
+        for seed in SEEDS {
+            let outcome = run("peergone", seed);
+            let published = trees(&outcome, crate::client::App::NAME);
+            assert_eq!(published.len(), 1, "seed {seed:#018x}: not one client tree");
+
+            for bytes in &published {
+                let tree = f_abi::state::Region::open(bytes)
+                    .expect("a client published bytes that are not a tree");
+                let value = |id: u32| tree.value(id).expect("a node this build declares");
+
+                // The peer died with work outstanding, so this proves something:
+                // a client that had nothing out would satisfy every line below
+                // without the mechanism having run.
+                assert!(
+                    value(node::RECLAIMED) > 0,
+                    "seed {seed:#018x}: the peer died with nothing outstanding"
+                );
+                // Every buffer came home. RFC 0024 gives a component no other
+                // way to take one back, so a non-zero here is memory this
+                // client can never touch and never free — a hang with a clean
+                // trace, which is exactly what a log would not show.
+                assert_eq!(
+                    value(node::FLIGHT),
+                    0,
+                    "seed {seed:#018x}: a buffer was still out when the run stopped"
+                );
+                assert_eq!(
+                    value(node::ENDED),
+                    1,
+                    "seed {seed:#018x}: the client did not stop after its peer died"
+                );
+                // And the arithmetic between the nodes holds: nothing was
+                // reclaimed that was never issued, and nothing completed twice.
+                let accounted = value(node::COMPLETED) + value(node::RECLAIMED);
+                assert!(
+                    accounted <= value(node::ISSUED),
+                    "seed {seed:#018x}: {accounted} operation(s) accounted for out of {} issued",
+                    value(node::ISSUED)
+                );
+            }
+        }
+
+        // The tree is a *reading* and not a constant: the same client under no
+        // fault at all publishes a different one. Without this the four
+        // assertions above would pass against a tree nothing ever wrote into,
+        // which is the defect `state::Tree::self_test` exists to catch one
+        // layer down and the reason `cargo xtask trace` builds a kernel that is
+        // meant to disagree.
+        let injured = trees(&run("peergone", DEFAULT_SEED), crate::client::App::NAME);
+        let clean = trees(&run("blk", DEFAULT_SEED), crate::client::App::NAME);
+        let hash = |bytes: &Vec<u8>| f_abi::state::Region::open(bytes).expect("a tree").snapshot();
+        assert_ne!(
+            injured.first().map(hash),
+            clean.first().map(hash),
+            "a client that lost its peer published the same state as one that did not"
+        );
+    }
+
+    /// Every tree an actor of this name published, in table order.
+    ///
+    /// The key is `"<name>/<index>"` — see `Outcome::trees` — so a scenario
+    /// with two clients has two entries and this returns both rather than
+    /// whichever the map kept.
+    fn trees(outcome: &Outcome, name: &str) -> Vec<Vec<u8>> {
+        outcome
+            .trees
+            .iter()
+            .filter(|(key, _)| key.split('/').next() == Some(name))
+            .map(|(_, bytes)| bytes.clone())
+            .collect()
     }
 
     #[test]
