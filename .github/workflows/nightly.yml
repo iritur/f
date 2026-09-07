@@ -579,3 +579,55 @@ jobs:
           path: prove-report.txt
           retention-days: 90
           if-no-files-found: error
+
+  # `claims/0030` is `gating`, and until this job existed nothing ran it.
+  #
+  # ## Why it is here rather than in `verify` or in `ci`
+  #
+  # Cost, and only cost. `cargo xtask rollback` is three generation builds and
+  # six boots — about five minutes in the development container — which is the
+  # reason the claim's own `[workload]` gives for keeping it out of the local
+  # loop, and the reason it is out of the pull-request gate too: neither is a
+  # place to spend five minutes on a property that changes when a *format*
+  # changes rather than when a line of code does. A schedule is where an
+  # expensive gating claim belongs, and `xtask/src/main.rs` states the rule this
+  # job answers: *a gating claim that nothing in the local loop runs is a claim
+  # that gates nothing*. Half of gate G2 rested on a command nobody ran.
+  #
+  # ## Why it runs the claim's command and not the workload
+  #
+  # `cargo xtask claim rollback-comparisons` is the reproduction line in the
+  # claim file, and it runs the workload *and compares every row against the
+  # `[threshold]` table*. `cargo xtask rollback` alone would go green on a run
+  # that made two comparisons instead of three, because the harness's own
+  # refusals and the claim's thresholds are two different checks — RFC 0064 is
+  # the entry that decides a threshold nobody compares against is not a
+  # threshold.
+  #
+  # ## What a red night here means
+  #
+  # Read `claims/0030`'s `[diagnosis]` before anything else: it names what each
+  # row going red implies, written while the system was understood. The report
+  # is kept as an artifact rather than opened as an issue, for the `cut` job's
+  # reason — a failure here is deterministic on a fixed input and reproduces
+  # from the command in the claim, so there is nothing a notification would
+  # carry that the report does not.
+  rollback:
+    name: a generation broken, rolled back, and compared three ways
+    needs: [environment, image]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: three generation builds, six boots, and every threshold compared
+        run: |
+          set -o pipefail
+          cargo xtask claim rollback-comparisons 2>&1 | tee rollback-report.txt
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollback-report
+          path: rollback-report.txt
+          retention-days: 90
+          if-no-files-found: error
