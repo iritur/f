@@ -57,7 +57,7 @@ use std::path::{Path, PathBuf};
 /// manifest is silent about whether its component can be updated in place, and
 /// reading that silence as `restart_only` would be a component acquiring a
 /// property nobody chose — so it is refused and edited, not defaulted.
-pub const SCHEMA: u64 = 2;
+pub const SCHEMA: u64 = 3;
 
 /// The longest component, capability or ring name, in bytes. Names are
 /// `[a-z0-9-]`, so bytes are characters. Thirty-two is what a fixed-layout
@@ -77,6 +77,14 @@ pub const CAPABILITIES_MAX: usize = 16;
 /// The most data rings a manifest may declare. The control ring is not one of
 /// them: it is implicit, exactly one, and refused if declared (RFC 0008).
 pub const RINGS_MAX: usize = 8;
+
+/// The most `[[device]]` entries a manifest may declare.
+/// `abi::manifest::DEVICES_MAX`, mirrored here for [`CAP_TYPES`]'s reason.
+pub const DEVICES_MAX: usize = 4;
+
+/// The vendor identifier a bus returns when nothing answered at an address.
+/// `abi::manifest::Binding::NO_VENDOR`, mirrored here for the same reason.
+pub const NO_VENDOR: u64 = 0xFFFF;
 
 /// Bounds on a data ring's `entries`. A power of two, as `ChannelHeader::
 /// ring_size` requires; at least two because a ring with one slot cannot have a
@@ -183,6 +191,14 @@ pub struct Manifest {
     pub rings: usize,
     /// `[restart] policy`.
     pub restart: String,
+    /// The `[[device]]` entries, as `(vendor, device)` in canonical order.
+    ///
+    /// Carried out of the check rather than counted, because the thing the lint
+    /// has to decide is a question *between* manifests — whether two drivers
+    /// claim one part — and a count cannot answer it. RFC 0065.
+    /// Unit: entries; each pair is two PCI identifiers and neither is a
+    /// quantity.
+    pub devices: Vec<(u64, u64)>,
 }
 
 impl Manifest {
@@ -313,18 +329,22 @@ pub fn check(rel: &str, text: &str) -> Result<Manifest, Vec<String>> {
 /// boot that goes red naming the field, not a component carrying a wrong number.
 mod record {
     /// Bytes in a whole record.
-    pub const BYTES: usize = 2232;
+    pub const BYTES: usize = 2248;
     /// Bytes in one `[[capability]]` slot.
     pub const NEED: usize = 80;
     /// Bytes in one `[[ring]]` slot.
     pub const RING: usize = 104;
     /// Bytes in the `[transfer]` declaration — `abi::transfer::Declaration`.
     pub const TRANSFER: usize = 16;
+    /// Bytes in one `[[device]]` slot — `abi::manifest::Binding`.
+    pub const BINDING: usize = 4;
     /// The first byte of the transfer declaration, which is where the fixed
     /// head of the record ends.
     pub const TRANSFER_AT: usize = 104;
+    /// The first byte of the binding array.
+    pub const BINDINGS_AT: usize = TRANSFER_AT + TRANSFER;
     /// The first byte of the capability array.
-    pub const CAPS_AT: usize = TRANSFER_AT + TRANSFER;
+    pub const CAPS_AT: usize = BINDINGS_AT + super::DEVICES_MAX * BINDING;
     /// The first byte of the ring array.
     pub const RINGS_AT: usize = CAPS_AT + super::CAPABILITIES_MAX * NEED;
     /// `abi::manifest::MAGIC`.
@@ -432,6 +452,17 @@ pub fn compile(rel: &str, text: &str, image: &[u8]) -> Result<Vec<u8>, Vec<Strin
             record::TRANSFER_AT + 8,
             narrow(transfer.map_or(0, |t| int(t, "records_max"))),
         );
+    }
+
+    // `[[device]]`, in file order — which the checker has already required to
+    // be canonical order, so this writes what it read rather than sorting.
+    // RFC 0065.
+    let devices: &[(usize, Table)] = doc.arrays.get("device").map_or(&[], Vec::as_slice);
+    put8(&mut out, 101, narrow8(devices.len()));
+    for (index, (_, table)) in devices.iter().enumerate() {
+        let at = record::BINDINGS_AT + index * record::BINDING;
+        put16(&mut out, at, narrow16(int(table, "vendor")));
+        put16(&mut out, at + 2, narrow16(int(table, "device")));
     }
 
     // `[[capability]]`, in file order — which is the order the supervisor's
@@ -600,6 +631,13 @@ fn put8(out: &mut [u8], at: usize, value: u8) {
     }
 }
 
+/// A little-endian `u16` at an offset.
+fn put16(out: &mut [u8], at: usize, value: u16) {
+    if let Some(slot) = out.get_mut(at..at + 2) {
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
+}
+
 /// A little-endian `u32` at an offset. Little-endian because the record is read
 /// by the frame through a pointer cast, and both ends of that are this machine.
 fn put32(out: &mut [u8], at: usize, value: u32) {
@@ -629,6 +667,16 @@ fn narrow(value: u64) -> u32 {
 /// As [`narrow`], one byte wide.
 fn narrow8(value: usize) -> u8 {
     u8::try_from(value).unwrap_or(u8::MAX)
+}
+
+/// As [`narrow`], two bytes wide.
+///
+/// The saturation is unreachable for the same reason: a `vendor` or a `device`
+/// above sixteen bits is refused by the checker, so `u16::MAX` reaching a record
+/// is the checker having stopped bounding it — and `u16::MAX` is exactly the
+/// value `Record::read` refuses as a vendor, which is the direction to fail in.
+fn narrow16(value: u64) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
 }
 
 // ---------------------------------------------------------------------------
@@ -764,6 +812,34 @@ fn parse_value(raw: &str) -> Result<Value, String> {
         "true" => return Ok(Value::Bool(true)),
         "false" => return Ok(Value::Bool(false)),
         _ => {}
+    }
+    // Hexadecimal, and it is TOML's own spelling so the subset is still a
+    // subset. It is here for `[[device]]`: a PCI identifier is a bit pattern a
+    // bus reports and every datasheet, every specification and every constant in
+    // `kernel::arch::x86_64::virtio` writes it in hex, so `vendor = 6900` would
+    // be a number a reviewer has to convert before they can check it against the
+    // thing it names. Lower case only, for `f_abi::boot::Selection`'s reason:
+    // two spellings of one identifier are two things a person compares by eye
+    // and gets wrong, and a canonical form is only canonical if there is one.
+    if let Some(body) = raw.strip_prefix("0x") {
+        if body.is_empty() {
+            return Err("`0x` with no digits after it is not a number".into());
+        }
+        if !body.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || b == b'_') {
+            return Err(
+                "a hexadecimal integer is `0x` and lower-case digits; upper case is refused \
+                 rather than accepted, because two spellings of one identifier are two things a \
+                 reader compares by eye"
+                    .into(),
+            );
+        }
+        if body.starts_with('_') || body.ends_with('_') || body.contains("__") {
+            return Err("an integer's underscores sit between digits".into());
+        }
+        let digits: String = body.chars().filter(|c| *c != '_').collect();
+        return u64::from_str_radix(&digits, 16)
+            .map(Value::Int)
+            .map_err(|_| "an integer fits in sixty-four unsigned bits".to_string());
     }
     if raw.bytes().all(|b| b.is_ascii_digit() || b == b'_') {
         if raw.starts_with('_') || raw.ends_with('_') || raw.contains("__") {
@@ -1467,6 +1543,53 @@ impl Checker<'_> {
             }
         }
 
+        // `[[device]]`. RFC 0065: what part this component drives, declared as
+        // a property and never as an address — `docs/manifest.md` has refused
+        // an address since schema 1 and still does.
+        //
+        // Zero entries is the common and correct answer and is not a finding: a
+        // component that drives no device declares none, and `Record::devices`
+        // carries the zero. What is refused is a *wrong* entry, and the order,
+        // because two entries swapped are two component files with different
+        // content hashes naming one driver.
+        let mut devices: Vec<(u64, u64)> = Vec::new();
+        let device_items = arrays.remove("device").unwrap_or_default();
+        if device_items.len() > DEVICES_MAX {
+            self.note(
+                device_items[DEVICES_MAX].0,
+                &format!(
+                    "more than {DEVICES_MAX} `[[device]]` entries; a driver declares the parts it \
+                     drives and a manifest that needs more than {DEVICES_MAX} is binding a bus"
+                ),
+            );
+        }
+        for (index, (line, table)) in device_items.into_iter().enumerate() {
+            let place = format!("[[device]] #{}", index + 1);
+            let mut f = self.fields(place, line, table);
+            let vendor = f.int("vendor", true);
+            let device = f.int("device", true);
+            if let Some((line, vendor)) = vendor
+                && (vendor == 0 || vendor > 0xFFFF || vendor == NO_VENDOR)
+            {
+                f.refuse(line, &format!("`vendor = {vendor:#x}` is not a PCI vendor identifier: zero is not one, {NO_VENDOR:#x} is how a bus says nothing answered and would match every empty slot on the machine, and neither is anything above sixteen bits"));
+            }
+            if let Some((line, device)) = device
+                && (device == 0 || device > 0xFFFF)
+            {
+                f.refuse(line, &format!("`device = {device:#x}` is not a PCI device identifier; zero is not one and neither is anything above sixteen bits. There is no wildcard here — a driver that binds a class rather than a part is RFC 0065's stated reversal and needs a wider record"));
+            }
+            f.finish();
+            if let (Some((_, vendor)), Some((line, device))) = (vendor, device) {
+                if devices.contains(&(vendor, device)) {
+                    self.note(line, &format!("`vendor = {vendor:#x}, device = {device:#x}` is declared twice; that is an author with two beliefs about one part, not a list to be de-duplicated"));
+                } else if devices.last().is_some_and(|last| *last > (vendor, device)) {
+                    self.note(line, &format!("`[[device]]` entries are out of order: {vendor:#x}:{device:#x} sorts before the entry above it. They are checked and never sorted, for `f_generation::record`'s reason one level up — a reader that reordered would let two different files carry one meaning, and then a content address names two things"));
+                } else {
+                    devices.push((vendor, device));
+                }
+            }
+        }
+
         // Anything else at the top of the file is unknown.
         for (table, (line, _)) in tables {
             self.note(
@@ -1492,6 +1615,7 @@ impl Checker<'_> {
             capabilities: caps.len(),
             rings: ring_count,
             restart: restart?,
+            devices,
         })
     }
 }
@@ -1538,7 +1662,7 @@ mod tests {
     /// test can break a single line of it.
     const SOUND: &str = "\
 # SPDX-License-Identifier: Apache-2.0 OR MIT
-schema = 2
+schema = 3
 name   = \"example\"
 image  = \"user/example\"
 domain = \"shared\"
@@ -1643,7 +1767,7 @@ mode = \"restart_only\"
 
     #[test]
     fn a_later_schema_is_refused() {
-        refused_for(&edit("schema = 2", "schema = 3"), "knows schema 2");
+        refused_for(&edit("schema = 3", "schema = 4"), "knows schema 3");
     }
 
     #[test]
@@ -1990,12 +2114,80 @@ mode = \"restart_only\"
         edit("mode = \"restart_only\"\n", &format!("mode = \"in_place\"\n{fields}"))
     }
 
+    /// [`SOUND`] with `entries` appended as `[[device]]` tables.
+    fn with_devices(entries: &[(&str, &str)]) -> String {
+        let mut text = SOUND.to_string();
+        for (vendor, device) in entries {
+            text.push_str(&format!("\n[[device]]\nvendor = {vendor}\ndevice = {device}\n"));
+        }
+        text
+    }
+
+    #[test]
+    fn a_declared_device_is_a_part_and_the_list_is_canonical() {
+        // None is the common answer and is not a finding: `SOUND` declares no
+        // device and passes, which `the_sound_fixture_passes` already says.
+        let checked = check("user/example/manifest.toml", SOUND)
+            .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+        assert!(checked.devices.is_empty());
+
+        // Two parts, in order, is the accepting case — the shape a virtio
+        // driver with a modern and a transitional id would have.
+        let text = with_devices(&[("0x1af4", "0x1041"), ("0x1af4", "0x1042")]);
+        let checked = check("user/example/manifest.toml", &text)
+            .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+        assert_eq!(checked.devices, vec![(0x1af4, 0x1041), (0x1af4, 0x1042)]);
+
+        // Out of order is refused and never sorted, and a part twice is an
+        // author with two beliefs about one thing.
+        refused_for(&with_devices(&[("0x1af4", "0x1042"), ("0x1af4", "0x1041")]), "out of order");
+        refused_for(&with_devices(&[("0x1af4", "0x1041"), ("0x1af4", "0x1041")]), "declared twice");
+
+        // Neither zero nor the value a bus returns when nothing answered.
+        refused_for(&with_devices(&[("0", "0x1041")]), "not a PCI vendor identifier");
+        refused_for(&with_devices(&[("0xffff", "0x1041")]), "not a PCI vendor identifier");
+        refused_for(&with_devices(&[("0x1af4", "0")]), "not a PCI device identifier");
+        refused_for(&with_devices(&[("0x1af4", "0x10000")]), "not a PCI device identifier");
+
+        // A field this table does not have, and one it needs and lacks.
+        refused_for(
+            &with_devices(&[("0x1af4", "0x1041")]).replace("device = 0x1041", "class = 1"),
+            "is required and missing",
+        );
+
+        // Five is more than a driver binding parts and is a manifest binding a
+        // bus.
+        let five: Vec<(&str, &str)> = vec![
+            ("0x1af4", "0x1041"),
+            ("0x1af4", "0x1042"),
+            ("0x1af4", "0x1043"),
+            ("0x1af4", "0x1044"),
+            ("0x1af4", "0x1045"),
+        ];
+        refused_for(&with_devices(&five), "binding a bus");
+    }
+
+    #[test]
+    fn a_hexadecimal_integer_is_read_and_only_in_its_canonical_spelling() {
+        // In the subset because a PCI identifier is a bit pattern, and refused
+        // in upper case because a canonical form is only canonical if there is
+        // one of it.
+        let text = with_devices(&[("0x1_af4", "0x1041")]);
+        let checked = check("user/example/manifest.toml", &text)
+            .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+        assert_eq!(checked.devices, vec![(0x1af4, 0x1041)]);
+
+        refused_for(&with_devices(&[("0x1AF4", "0x1041")]), "upper case is refused");
+        refused_for(&with_devices(&[("0x", "0x1041")]), "no digits after it");
+        refused_for(&with_devices(&[("0x_1af4", "0x1041")]), "underscores sit between digits");
+    }
+
     #[test]
     fn the_syntax_is_the_subset_and_nothing_else() {
         refused_for(&edit("name   = \"example\"", "name   = \"\"\"example\"\"\""), "no quote");
         refused_for(&edit("name   = \"example\"", "name   = \"ex\\nample\""), "backslash");
-        refused_for(&edit("schema = 2", "schema = -1"), "signed");
-        refused_for(&edit("schema = 2", "schema = 2\nschema = 2"), "appears twice");
+        refused_for(&edit("schema = 3", "schema = -1"), "signed");
+        refused_for(&edit("schema = 3", "schema = 3\nschema = 3"), "appears twice");
         refused_for(&edit("[restart]", "[restart]\n[restart]"), "appears twice");
         refused_for(
             &edit("memory_bytes = 65536", "memory_bytes = { min = 65536 }"),
@@ -2007,7 +2199,7 @@ mode = \"restart_only\"
             "same line",
         );
         refused_for(&edit("memory_bytes = 65536", "memory_bytes = 65_536_"), "between digits");
-        refused_for(&edit("schema = 2", "just some words"), "`key = value`");
+        refused_for(&edit("schema = 3", "just some words"), "`key = value`");
         // Underscores between digits are TOML and are read.
         let m = check(
             "user/example/manifest.toml",
@@ -2026,7 +2218,7 @@ mode = \"restart_only\"
     fn a_syntax_error_stops_before_the_fields_are_judged() {
         // Otherwise a file with one broken line reports every field after it
         // as missing, which is noise wearing a finding's clothes.
-        let f = findings(&edit("schema = 2", "schema = 2\n[[capability"));
+        let f = findings(&edit("schema = 3", "schema = 3\n[[capability"));
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].contains("array header"));
     }
@@ -2037,7 +2229,7 @@ mode = \"restart_only\"
         // it has empty lists and is complete.
         let text = "\
 # SPDX-License-Identifier: Apache-2.0 OR MIT
-schema = 2
+schema = 3
 name   = \"init\"
 image  = \"user/init\"
 domain = \"shared\"

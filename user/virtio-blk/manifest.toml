@@ -13,7 +13,7 @@
 # whose payload never passes through the ring; restarted on a fault and not on
 # an exit; in the soft class, with two mebibytes for everything it is made of.
 
-schema = 2
+schema = 3
 name   = "virtio-blk"
 image  = "user/virtio-blk"
 
@@ -29,6 +29,24 @@ image  = "user/virtio-blk"
 # the peer; if it dominates the datapath claims, the remedy is in that RFC and
 # not a quiet edit here.
 domain = "private"
+
+# --- Device: what part this driver binds, as a property -----------------------
+
+# RFC 0065. A *property* and never an address: which slot the card is in is the
+# machine's business and the assembler's to discover, and a manifest that named
+# a slot would be a manifest bound to one machine — the sentence
+# `docs/manifest.md` has carried since schema 1, unchanged by this table.
+#
+# One entry, and the absence of a second is a decision. `kernel::arch::x86_64::
+# virtio` also knows `VIRTIO_BLK_TRANSITIONAL` = 0x1001, and it knows it *in
+# order to refuse it*: a transitional device is one this build cannot isolate,
+# and recognising the id is what turns "no device found" into a log line
+# somebody can act on. Declaring it here would say the opposite — that this
+# driver binds it — and the assembler would then hand the driver a device the
+# frame is about to refuse. A refusal is not a binding.
+[[device]]
+vendor = 0x1af4
+device = 0x1042
 
 # --- Needs: routed at spawn, in this order, one handle each -------------------
 

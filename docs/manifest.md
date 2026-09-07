@@ -39,9 +39,16 @@ and no error.
 Every valid manifest is valid TOML, so any TOML reader accepts it. The lint
 accepts less: comments, `[table]` and `[[array]]` headers, and `key = value`
 where the value is a `"string"` with no escapes and no inner quote, an unsigned
-integer (underscores between digits allowed), `true`/`false`, or a one-line list
-of strings. Multi-line strings, inline tables, dotted keys, signed numbers and
-floats are refused with a line number. The reason is in `xtask/src/manifest.rs`:
+integer — decimal, or `0x` and lower-case hexadecimal, with underscores between
+digits allowed in either — `true`/`false`, or a one-line list of strings.
+Multi-line strings, inline tables, dotted keys, signed numbers and floats are
+refused with a line number. Upper-case hexadecimal is refused rather than
+accepted, for the reason a root hash is printed one way: two spellings of one
+identifier are two things a reader compares by eye and gets wrong. Hexadecimal
+is in the subset for `[[device]]`, whose two fields are bit patterns a bus
+reports and which every datasheet and every constant in
+`kernel::arch::x86_64::virtio` writes in hex — `vendor = 6900` would be a number
+a reviewer has to convert before they can check it. The reason is in `xtask/src/manifest.rs`:
 the tree parses its own formats and buys no dependency for one, and the
 supervisor does not read TOML at all — it reads a fixed-layout record that
 E1-B05 defines in `abi/` and that this file compiles to. Every bound below
@@ -72,7 +79,7 @@ imported driver's manifest lives in `user/` and its `image` points into
 
 | field | type | required | what it is |
 | --- | --- | --- | --- |
-| `schema` | integer | yes | The schema this file is written to. Must be `2`. A later value is refused: a reader that guesses at fields it was not written for is two readers. |
+| `schema` | integer | yes | The schema this file is written to. Must be `3`. A later value is refused: a reader that guesses at fields it was not written for is two readers. |
 | `name` | string | yes | The component's name in the topology: `[a-z0-9-]`, at most 32 bytes, no edge hyphen. Unique across the tree — `lint-manifests` refuses two manifests with one name, because `sibling:` references and the topology name a component by it. |
 | `image` | string | yes | Where the image comes from. Either a tree-relative path to the crate that builds it — forward slashes, no `.`/`..`/empty segment, not under `target/` — or `sha256:` and sixty-four lower-case hex digits for bytes the tree does not build. |
 | `domain` | string | yes | RFC 0005's kind: `shared`, `private` or `hostile`. No default, and none of the working names other documents used (`trusted`, `confined`) is accepted — the RFC's spelling is the only spelling. |
@@ -280,6 +287,53 @@ in-place transfer waits for a point the occupant asserts, which is what
 `in_place` already means — and the mode a third value would leave behind, a
 cursors-only transfer, is one no component in this tree can correctly use.
 
+## `[[device]]` — what part a driver binds
+
+Zero to four entries. RFC 0065. Most components have none, and none is the
+honest answer for anything that is not a driver: the array is absent, the
+compiled record carries `devices = 0`, and nothing was left undecided by the
+absence. That is the one place this table differs from `[transfer]`, which is
+required because silence there would pick one of two answers; a device list has
+a natural empty, and an empty list is the list rather than a default.
+
+| field | type | required | what it is |
+| --- | --- | --- | --- |
+| `vendor` | integer | yes | The PCI vendor identifier the bus reports, 1 to 0xFFFE. Zero is not a vendor and `0xFFFF` is how a bus says nothing answered — a manifest declaring it would match every empty slot on the machine. Unit: none — a device identifier, not a quantity. |
+| `device` | integer | yes | The PCI device identifier the bus reports, 1 to 0xFFFF. Unit: none — a device identifier, not a quantity. |
+
+**A property, and never an address.** The paragraph under `[[capability]]` still
+holds without amendment: nothing here names a vector, a device address or a
+peer's identity, because *which slot the card is in* is the machine's business
+and a manifest that named one would be bound to one machine. What is declared
+here is *what the part is*; where it is, is discovered. The assembler matches
+the first against the second, which is the whole of `E2-B05`'s **bind drivers by
+declared properties** — and it is what lets two spawns of one hash still be the
+same component on two machines whose buses are wired differently.
+
+**The entries are canonical and are checked, never sorted.** Sorted ascending on
+`(vendor, device)`, and a file out of order is refused with the offending entry
+named, for `f-generation`'s reason one level up: two entries swapped would be
+two component files with two content hashes naming one driver, and a content
+address that names two things names nothing. One part declared twice is refused
+for the neighbouring reason — that is an author with two beliefs about one part,
+not a list to be de-duplicated.
+
+**Two manifests may not declare one part.** This is the only rule in this
+document that no single file can satisfy on its own, and it is a
+`lint-manifests` refusal across the whole set rather than a run-time choice: two
+drivers matching one device at boot would be resolved by *something*, and the
+only things available at that moment are the order a bus scan reported and the
+order the topology happens to list — a topology decided by either is not a
+function of the generation root, which is exactly what `E2-B05` claims it is. So
+the ambiguity is refused where an author can see it.
+
+There is no wildcard and no class-code match, deliberately. A driver defined by
+its class rather than by a part number — AHCI, xHCI — is RFC 0065's stated
+reversal: a wider record, a wider overlap test, and a schema bump. It is not a
+sentinel added to these two fields, because a sentinel would make two property
+sets overlap without being equal and the refusal above would quietly become a
+subsumption test nobody wrote.
+
 ## What is refused, collected
 
 For a reviewer, in one place:
@@ -288,7 +342,7 @@ For a reviewer, in one place:
 - Any syntax outside the subset: escapes, multi-line strings, inline tables,
   dotted or quoted keys, signed numbers, a list that does not close on its line.
 - A key or table appearing twice.
-- A `schema` other than 2.
+- A `schema` other than 3.
 - A missing `name`, `image`, `domain`, `[restart]`, `[reservation]` or
   `[transfer]`.
 - A field this document does not list, anywhere.

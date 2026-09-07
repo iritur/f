@@ -21,7 +21,7 @@
 # and not on an exit; in the soft class, with two mebibytes for everything it is
 # made of.
 
-schema = 2
+schema = 3
 name   = "virtio-gpu"
 image  = "user/virtio-gpu"
 
@@ -55,6 +55,20 @@ image  = "user/virtio-gpu"
 # three orders of magnitude more work. If it dominates here it dominates
 # everywhere, and RFC 0005 is where that is argued rather than this file.
 domain = "private"
+
+# --- Device: what part this driver binds, as a property -----------------------
+
+# RFC 0065. One entry, and here the single entry is the *whole* truth rather
+# than a choice: the transitional ids are the sixteen numbers from 0x1000 the
+# original specification assigned, every device defined after the modern
+# transport has a modern id and nothing else, and there is no legacy
+# virtio-gpu to bind or to refuse. `kernel::arch::x86_64::virtio::
+# VIRTIO_GPU_MODERN` carries that paragraph at length and this is the one place
+# the manifest set differs between the three drivers for a reason about the
+# specification rather than about this tree.
+[[device]]
+vendor = 0x1af4
+device = 0x1050
 
 # --- Needs: routed at spawn, in this order, one handle each -------------------
 

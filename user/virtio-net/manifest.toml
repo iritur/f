@@ -17,7 +17,7 @@
 # on an exit; in the soft class, with two mebibytes for everything it is made
 # of.
 
-schema = 2
+schema = 3
 name   = "virtio-net"
 image  = "user/virtio-net"
 
@@ -44,6 +44,19 @@ image  = "user/virtio-net"
 # coincidence, because a frame is smaller than a sector and the crossing is
 # amortised over fewer bytes.
 domain = "private"
+
+# --- Device: what part this driver binds, as a property -----------------------
+
+# RFC 0065, and the same shape virtio-blk declares one file over: a property,
+# never an address. The transitional id — `VIRTIO_NET_TRANSITIONAL` = 0x1000 —
+# is deliberately absent here for the reason it is absent there, and the reason
+# is sharper for this device: a transitional network card is a bus master that
+# writes into memory whenever a packet arrives, addressing physical memory by
+# specification, and this build refuses it. Naming it as a binding would be
+# declaring that this driver takes a device the frame will not let it isolate.
+[[device]]
+vendor = 0x1af4
+device = 0x1041
 
 # --- Needs: routed at spawn, in this order, one handle each -------------------
 

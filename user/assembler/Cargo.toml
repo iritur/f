@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "f-assembler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "A topology from a root: refold the boot module, route what it declares, bind drivers by property, and leave a failed driver's subtree unstarted."
+
+[dependencies]
+# The boot module's layout, the component-file record and the node kinds the
+# record tree is written in. All three are in `abi/` for that crate's own
+# reason — the only use anybody has for `#[repr(C)]` over a record is a pointer
+# cast, and RFC 0001 puts a pointer cast inside the frame — and this crate is
+# not in the frame, so it decodes through those types and never past them.
+f-abi.workspace = true
+
+# The checker and the fold. **The same crate the compiler used**, which is the
+# whole of "the assembler is not a second reader of the format": `cargo xtask
+# generation` encodes a tree with `f_abi::store`, checks it with
+# `f_generation::record` and folds it with `f_generation::fold`, and what
+# happens here is the same three calls in the same order over the bytes that
+# arrived. An assembler with a fold of its own would be the second
+# implementation the spec spends a page refusing to have.
+f-generation.workspace = true
+
+# Content addresses. A leaf names a component file by SHA-256 and this crate
+# recomputes it over the bytes the module carried, because a leaf believed
+# without being checked is a leaf that names whatever the module happened to
+# hold — and then the root is a hash of a claim rather than of a system.
+f-hash.workspace = true
+
+[dev-dependencies]
+# The workload's device discovery order is drawn from a seeded `Env` through a
+# `Stream` split at a named identity, RFC 0026. Shuffling a bus by hand would be
+# one arrangement; a seeded permutation is the class of arrangement, and the
+# property under test is precisely that the class does not reach the topology.
+f-env.workspace = true
+
+[lints]
+workspace = true
+
+# `E2-B05`'s exit is two demonstrations rather than a measurement, and both are
+# things the log has to contain: the digest of a topology built twice, and the
+# state of every component after one driver was failed on purpose. A libtest
+# harness captures output, so the run that demonstrates them prints them and
+# fails on the assertions beneath them — `index/tests/query.rs`'s arrangement
+# under RFC 0046, one crate over.
+[[test]]
+name = "assemble"
+path = "tests/assemble.rs"
+harness = false

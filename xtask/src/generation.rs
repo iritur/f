@@ -141,6 +141,58 @@ pub fn generation(option: Option<&str>) -> Result<(), String> {
     let module = pack_module(&root, &tree, &source.components)?;
     let size = std::fs::metadata(&module).map(|m| m.len()).unwrap_or(0);
     println!("\n  module     {}  ({size} bytes)", crate::relative(&module));
+    assemble(&root, &module)?;
+    Ok(())
+}
+
+/// Instantiate the module this command just wrote, twice, through the reader
+/// that will read it at boot.
+///
+/// # Why the command that writes a generation also assembles one
+///
+/// Because `E2-B05`'s exit — *the same root produces a byte-identical topology*
+/// — is a property of **this** module and not only of a test's fixture, and the
+/// cheapest honest place to demonstrate it on the real one is the command that
+/// produces it. `user/assembler/tests/assemble.rs` builds a six-component
+/// workload to reach the cases a four-component tree does not have; this reaches
+/// the case that matters most, which is the tree somebody is about to boot.
+///
+/// The bus is empty here, deliberately, and the printed line says so. A build
+/// machine is not the machine the generation runs on: what devices are present
+/// is discovered at boot and is not in the root, so an assembly taken here can
+/// say *this topology, these routes, this order* and must not pretend to say
+/// which card was bound. That is the same line `f-assembler` draws between a
+/// declared property and a discovered address.
+fn assemble(root: &[u8; 32], module: &Path) -> Result<(), String> {
+    let bytes =
+        std::fs::read(module).map_err(|e| format!("reading {}: {e}", crate::relative(module)))?;
+    let mut digests = Vec::new();
+    let mut renderings = Vec::new();
+    for _ in 0..2 {
+        let assembly = f_assembler::Assembly::instantiate(root, &bytes).map_err(|why| {
+            format!(
+                "the boot module this command packed is not a topology f-assembler will \
+                 instantiate: {} ({why:?})",
+                why.message()
+            )
+        })?;
+        digests.push(hex(&f_assembler::render::digest(&assembly)));
+        renderings.push(f_assembler::render::topology(&assembly));
+    }
+
+    if renderings[0] != renderings[1] {
+        return Err(
+            "two instantiations of one root rendered to different bytes, which is E2-B05's exit \
+             failing on this tree's own generation rather than on a fixture"
+                .into(),
+        );
+    }
+    println!(
+        "  topology   {}  (instantiated twice, byte-identical over {} bytes; no bus, so nothing \
+         is bound here)",
+        digests[0],
+        renderings[0].len()
+    );
     Ok(())
 }
 
@@ -499,44 +551,20 @@ fn component_hash(name: &str) -> Result<[u8; 32], String> {
     Ok(f_hash::sha256(&bytes))
 }
 
-/// The magic a boot module begins with. `F_MOD`, and a schema in the low half.
-/// Unit: none — a fixed byte pattern.
-const MODULE_MAGIC: u64 = 0x465f_4d4f_4400_0001;
-
 /// Pack the record tree and the component files into one boot module.
 ///
-/// # Why a module at all
+/// # Why the layout is not written here any more
 ///
-/// At boot the store is not running, so an assembler holding a root hash has
-/// nothing to read. The answer is not a loader that understands the on-disk
-/// format — that is a second implementation of the format, outside the tree and
-/// outside the claim, and on hardware it would be GRUB, which is GPLv3 and would
-/// cross the licence boundary this epoch does not cross. So the tree and the
-/// files it names travel together as one multiboot module, RFC 0030's
-/// component-file shape one level up, and the assembler recomputes the fold over
-/// what it was handed.
+/// It was, with a comment naming the condition that should move it: the day
+/// something read it. `E2-B05`'s assembler is that reader, so the layout is
+/// `f_abi::boot::Module` now and this function writes what that type reads —
+/// one definition rather than two that agree until they do not. Everything the
+/// old comment argued about *why a module at all* is in that type's own
+/// documentation, which is where a reader who has just decoded one will look.
 ///
-/// # The layout, and what it deliberately is not
-///
-/// ```text
-/// 0   u64  MODULE_MAGIC
-/// 8   u32  the record tree's length in bytes
-/// 12  u32  how many component files follow
-/// 16  u32 x files   each file's length in bytes
-///     the record tree
-///     each component file, in the tree's canonical member order
-/// ```
-///
-/// Little-endian, fixed-width, no offsets and no names: the names are in the
-/// tree and a second copy of a name is a second thing to disagree about. The
-/// order is the tree's own canonical order, which is why the module needs no
-/// index — the *n*th file is the *n*th member.
-///
-/// *What would reverse this:* this layout has no home in `abi/` yet, because
-/// nothing decodes it yet. `E2-P07` is the first reader, and the day it is
-/// written this belongs beside `abi::boot` rather than here — a format with a
-/// writer in `xtask` and a reader in the frame is the two-readers problem this
-/// module's own doc comment is about.
+/// The one thing that stays here is the file's *name*: `<root>.fcm` in the
+/// build directory. A module is named by the fold over what is inside it, which
+/// is the whole of how `f.root=` selects one.
 fn pack_module(root: &[u8; 32], tree: &Tree<'_>, names: &[String]) -> Result<PathBuf, String> {
     let mut files = Vec::new();
     for name in names {
@@ -546,8 +574,16 @@ fn pack_module(root: &[u8; 32], tree: &Tree<'_>, names: &[String]) -> Result<Pat
         );
     }
 
+    if files.len() > f_abi::boot::MODULE_FILES_MAX {
+        return Err(format!(
+            "{} component files is more than the {} f_abi::boot::Module will decode",
+            files.len(),
+            f_abi::boot::MODULE_FILES_MAX
+        ));
+    }
+
     let mut out = Vec::new();
-    out.extend_from_slice(&MODULE_MAGIC.to_le_bytes());
+    out.extend_from_slice(&f_abi::boot::MODULE_MAGIC.to_le_bytes());
     out.extend_from_slice(
         &u32::try_from(tree.bytes().len()).map_err(|_| "a vast tree")?.to_le_bytes(),
     );
@@ -561,6 +597,18 @@ fn pack_module(root: &[u8; 32], tree: &Tree<'_>, names: &[String]) -> Result<Pat
     for file in &files {
         out.extend_from_slice(file);
     }
+
+    // The writer believing its own output, through the reader that will believe
+    // it at boot. Cheap, and it is the check that keeps `xtask` from shipping a
+    // module the assembler refuses — which is a failure that would otherwise be
+    // found by a boot rather than by the command that produced the bytes.
+    f_abi::boot::Module::read(&out).map_err(|why| {
+        format!(
+            "the boot module this command packed is not one f_abi::boot::Module believes \
+             ({why:#x}). That is a defect in xtask/src/generation.rs and not in {SOURCE}: the \
+             writer here and the reader there share one layout and have disagreed about it."
+        )
+    })?;
 
     let dir = crate::target_dir().join("generation");
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;

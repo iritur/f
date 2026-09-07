@@ -7,6 +7,16 @@ name = "f-abi"
 version = "0.0.1"
 
 [[package]]
+name = "f-assembler"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-env",
+ "f-generation",
+ "f-hash",
+]
+
+[[package]]
 name = "f-bench"
 version = "0.0.1"
 dependencies = [
@@ -150,6 +160,7 @@ name = "xtask"
 version = "0.0.1"
 dependencies = [
  "f-abi",
+ "f-assembler",
  "f-bench",
  "f-generation",
  "f-hash",
