@@ -52,6 +52,7 @@ use std::fs;
 use std::path::Path;
 
 use f_abi::manifest::{ContentId, Record, Refusal as Malformed, restart};
+use f_abi::transfer::Declaration;
 
 use crate::scenario::Peer;
 
@@ -325,6 +326,17 @@ pub struct Component {
     pub budget_window_ticks: u32,
     /// Bytes of image after the record. Unit: bytes.
     pub image_bytes: u32,
+    /// What the manifest declares about being updated in place.
+    ///
+    /// Here for the same reason the four policy numbers above are: a manifest is
+    /// the reviewable statement of what a component is, and a swap harness that
+    /// chose a transfer mode of its own would leave
+    /// `user/virtio-blk/manifest.toml`'s `[transfer]` table as decoration.
+    /// `crate::swap` is what reads it; nothing else does yet, and saying so is
+    /// cheaper than a reader wondering. RFC 0063.
+    /// Unit: none — an `f_abi::transfer::Declaration`, every field of which
+    /// states its own.
+    pub transfer: Declaration,
     /// What the simulator puts under it, from [`MODELS`].
     pub peer: Peer,
 }
@@ -371,6 +383,7 @@ impl Component {
             max_restarts: record.max_restarts,
             budget_window_ticks: record.budget_window_ticks,
             image_bytes: record.image_bytes,
+            transfer: record.transfer,
             peer,
         })
     }

@@ -136,6 +136,7 @@ pub mod scenario;
 pub mod service;
 pub mod snap;
 pub mod state;
+pub mod swap;
 pub mod sweep;
 pub mod time;
 pub mod trace;

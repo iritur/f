@@ -719,3 +719,154 @@ fn a_sleeping_consumer_is_never_left_holding_work() {
     producing.join().expect("producer thread");
     consuming.join().expect("consumer thread");
 }
+
+/// **The fifth cross-core word, and the pair `E2-B06` owes.**
+///
+/// `f_abi::swap::Routing` is where a place records which occupant a delivery
+/// goes to, and phase B of a generation swap is exactly one store to it. Before
+/// that store the incoming instance has rebuilt everything it inherited — its
+/// registration table above all, replayed out of the transfer window — and after
+/// it, any core may deliver a client's submission to that instance.
+///
+/// So the invariant is the same shape as [`published_entry_is_fully_visible`]'s,
+/// one layer up: **a reader that observes the new generation must observe every
+/// byte the incoming instance wrote before the commit.** With `Release`/`Acquire`
+/// that holds. With `Relaxed` the reader may see the generation and a table that
+/// is not yet filled, and the client is answered `NO_SUCH_CAP` for a buffer set
+/// it holds — a dropped operation produced by an ordering, which is the first
+/// clause of `E2-P08`'s exit failing for a reason no functional test on x86-64
+/// can reach.
+///
+/// The state is a redundant payload for [`published_entry_is_fully_visible`]'s
+/// reason: four words carrying one derived value, so a torn commit is a mismatch
+/// between fields rather than something needing an oracle. `Routing::pause`
+/// between rounds is what makes each round a fresh publication rather than a
+/// re-read of the last one, and it is the value a real place holds through phase
+/// A.
+///
+/// **It is not asserted to fail under `mutate-relaxed-routing`, and that is a
+/// result rather than a gap** — the same result `mutate-relaxed-submission` and
+/// `mutate-relaxed-completion` produced in this file. A weakened `Release` is a
+/// real defect only on a machine entitled to reorder the store, this suite
+/// samples what one machine happened to do, and the arm runner is where the
+/// sampling means anything. What the feature buys is the fixture: the defect is
+/// in shipped source, one `cfg` away, so the day `E0-P16`'s model checker exists
+/// it has a harness and a defect to point it at rather than a paragraph.
+#[test]
+fn a_committed_generation_carries_the_state_that_preceded_it() {
+    use f_abi::swap::{PAUSED, Routing};
+    use std::sync::atomic::Ordering;
+
+    /// Generations committed, and it is this test's sensitivity: each is one
+    /// publication of four words behind one `Release` store, and a reordering
+    /// that shows up once in a hundred thousand is exactly the kind that reaches
+    /// production. The same order of magnitude as the two publishing-store tests
+    /// above, because it is the same question one layer up.
+    const COMMITS: u32 = 200_000;
+
+    /// The routing word and the state an incoming occupant publishes under it.
+    struct Handover {
+        routing: Routing,
+        table: [AtomicU32; 4],
+    }
+
+    // SAFETY: `Routing` and `AtomicU32` are both `Sync` already, so this impl
+    // adds nothing the compiler could not derive; it is written out because the
+    // fixture above does the same for the property *it* is about, and a reader
+    // comparing the two should find the same sentence. What makes the concurrent
+    // access meaningful rather than merely sound is the protocol: the writer
+    // fills `table` only while the word reads `PAUSED`, and the reader reads
+    // `table` only after an `Acquire` load has answered a generation.
+    unsafe impl Sync for Handover {}
+
+    let shared = Arc::new(Handover {
+        routing: Routing::new(PAUSED),
+        table: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
+    });
+    let barrier = Arc::new(Barrier::new(2));
+
+    let committing = {
+        let shared = Arc::clone(&shared);
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            barrier.wait();
+            for generation in 1..=COMMITS {
+                // Phase A: the place holds its pends and the incoming instance
+                // builds what it inherited. Every store here is `Relaxed` on
+                // purpose — the ordering under test is the one the *commit*
+                // provides, and a fence hidden in the payload would be this test
+                // passing for a reason the system does not have.
+                shared.routing.pause();
+                for (nth, word) in shared.table.iter().enumerate() {
+                    let mixed = generation.wrapping_mul(0x9E37_79B9).wrapping_add(nth as u32);
+                    word.store(mixed, Ordering::Relaxed);
+                }
+                // Phase B, and the whole of it.
+                shared.routing.commit(generation);
+                while shared.routing.delivering() == generation {
+                    std::hint::spin_loop();
+                }
+            }
+            shared.routing.commit(u32::MAX);
+        })
+    };
+
+    let delivering = {
+        let shared = Arc::clone(&shared);
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            barrier.wait();
+            let mut seen = 0u32;
+            let mut torn = 0u32;
+            let mut first = 0u32;
+            loop {
+                let generation = shared.routing.delivering();
+                if generation == u32::MAX {
+                    break;
+                }
+                if generation == PAUSED {
+                    // A paused place delivers to nobody. Nothing is read here,
+                    // and that is the mechanism rather than a nicety: a reader
+                    // that looked at the table while the word said `PAUSED`
+                    // would be a place delivering during phase A.
+                    std::hint::spin_loop();
+                    continue;
+                }
+                for (nth, word) in shared.table.iter().enumerate() {
+                    let want = generation.wrapping_mul(0x9E37_79B9).wrapping_add(nth as u32);
+                    if word.load(Ordering::Relaxed) != want {
+                        if torn == 0 {
+                            first = generation;
+                        }
+                        torn += 1;
+                    }
+                }
+                seen += 1;
+                // Let the writer move on. On the real path this is the place
+                // observing that the generation it was delivering to has been
+                // superseded, which is the next `Acquire` load rather than a
+                // handshake; here it has to be explicit because there is no
+                // supervisor to do it.
+                shared.routing.pause();
+            }
+            assert!(seen > 0, "the reader never observed a committed generation at all");
+            // Counted rather than panicked on sight, for the reason the lost
+            // wakeup above is counted: the rate is the useful number, and it
+            // says how many swaps a real system would survive before a client
+            // saw one.
+            assert_eq!(
+                torn, 0,
+                "TORN COMMIT in {torn} observation(s), first at generation {first}. A place \
+                 observed a generation through `Routing::delivering` and then read state the \
+                 incoming occupant had not finished publishing — which on the real path is a \
+                 client's submission delivered to an instance whose registration table is not \
+                 yet filled, and a `NO_SUCH_CAP` for a buffer set the client still holds. The \
+                 `Release` in `f_abi::swap::Routing::commit` has been weakened, or state was \
+                 written after the routing word was stored. RFC 0063, RFC 0016."
+            );
+        })
+    };
+
+    committing.join().expect("committing thread");
+    delivering.join().expect("delivering thread");
+}

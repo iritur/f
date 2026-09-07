@@ -111,6 +111,7 @@ dependencies = [
  "f-abi",
  "f-env",
  "f-ring",
+ "f-virtio-blk",
 ]
 
 [[package]]

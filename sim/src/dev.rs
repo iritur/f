@@ -507,6 +507,39 @@ impl<P: Protocol> Device<P> {
         })
     }
 
+    /// Whether this instance holds no work it has accepted and not answered.
+    ///
+    /// **The assertion RFC 0063 puts on the occupant rather than on the frame.**
+    /// The cursors say the rings are empty; they cannot say the *device* is. A
+    /// request taken off the wire and put in the virtqueue is behind both
+    /// cursors and behind this model, and a swap that trusted the cursors there
+    /// would retire an occupant with a write outstanding. Three terms and each
+    /// is a set this type already keeps: jobs in the device, entries taken and
+    /// not yet offered to it, and a reset — which is not emptiness but a peer
+    /// that has nothing true to say and must not be believed when it claims to
+    /// be quiet.
+    ///
+    /// A `lent` bitmap is deliberately not a fourth term. Every buffer this
+    /// model holds is held *by a job*, so an empty job list is an empty bitmap;
+    /// a fourth count would be a second thing to keep in step with the first.
+    pub(crate) fn quiescent(&self) -> bool {
+        self.jobs.is_empty() && self.pending.is_empty() && !self.reset
+    }
+
+    /// This instance's registration state, for the occupant replacing it.
+    pub(crate) const fn registrations(&self) -> &Service {
+        &self.service
+    }
+
+    /// The registration state this instance was handed, replayed into its own
+    /// table.
+    ///
+    /// Answers `false` for a window that did not cross intact, which the caller
+    /// turns into an abandonment. See [`Service::adopt`].
+    pub(crate) fn adopt(&mut self, records: &[f_virtio_blk::state::Record]) -> bool {
+        self.service.adopt(records)
+    }
+
     /// Answer one entry with a refusal, and tell the client.
     fn deny(&self, world: &mut World, me: ActorId, token: u64, packed: i32, detail: u64) {
         let Some(client) = self.client else {
