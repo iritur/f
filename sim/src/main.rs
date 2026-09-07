@@ -1174,6 +1174,11 @@ fn swap(asked: &Asked, hash_only: bool) -> Result<bool, String> {
     // *state crossed* are two claims and a reader should be able to see the
     // second without reading the first's columns. A `restart_only` row printing
     // zeros here is the declaration working rather than a gap.
+    //
+    // The read-back is on its own line under each of them: it is the comparison
+    // of what crossed against what should have crossed, and it answers a
+    // different question from every count beside it — not *how much moved* but
+    // *is what arrived the thing that was sent*.
     for pair in &pairs {
         println!(
             "  {:<20} {} record(s) written into a window and {} replayed out of one; {} \
@@ -1184,6 +1189,11 @@ fn swap(asked: &Asked, hash_only: bool) -> Result<bool, String> {
             pair.moved.pended,
             pair.moved.resumed,
             pair.moved.voided,
+        );
+        println!(
+            "  {:<20} {} record(s) read back through the incoming instance and compared \
+             against what the outgoing one handed over; {} differed",
+            "", pair.moved.read_back, pair.moved.differed,
         );
     }
 
@@ -1256,7 +1266,9 @@ fn swap(asked: &Asked, hash_only: bool) -> Result<bool, String> {
          clients_observing_anything_but_latency   {blast}\n  \
          operations_redone_in_place               {redone}\n  \
          operations_redone_by_restart             {redone_by_restart}\n  \
-         registration_sets_replayed               {}",
+         registration_sets_replayed               {}\n  \
+         state_records_read_back                  {}\n  \
+         state_records_that_differed              {}",
         pairs.len(),
         sum(|report| report.swapped),
         sum(|report| report.restarted),
@@ -1266,6 +1278,13 @@ fn swap(asked: &Asked, hash_only: bool) -> Result<bool, String> {
         sum(|report| report.wrong),
         sum(|report| report.failed),
         sum(|report| report.sets_in),
+        // Two rows `claims/0029` does not carry a threshold for, printed because
+        // a number the harness now decides on has to be visible to whoever reads
+        // the run rather than only to the verdict. The first is the coverage of
+        // the comparison — at zero the transfer was verified by nothing that
+        // looked at what arrived — and the second is its finding.
+        sum(|report| report.read_back),
+        sum(|report| report.differed),
     );
     Ok(true)
 }

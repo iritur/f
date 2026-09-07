@@ -3269,7 +3269,9 @@ fn swap_gate() -> Result<(), String> {
              than assumed.* The report above says which clause failed and at which\n\
              component — an operation never answered, one answered twice, an answer\n\
              that disagreed with what was written, a refusal the client could not\n\
-             retry, or the two live-registration counts disagreeing across the window."
+             retry, the two live-registration counts disagreeing across the window, or\n\
+             the state read back through the incoming instance not being the state the\n\
+             outgoing one handed over."
             .into());
     }
 
