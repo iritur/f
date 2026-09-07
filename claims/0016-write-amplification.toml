@@ -22,6 +22,35 @@
 #     one-line base change to trixie, and the image digest is in every
 #     reproduction, so that change is its own commit.
 #
+# **`E2-P10` paid the third thing and measured the other two rather than
+# repeating them.** The baseline is no longer prose: `[baseline] path` below
+# names `claims/baselines/linux-6.x-tuned-zoned/`, which exists, holds the device
+# geometry and the workload as data beside the tuning, and is checked by
+# `lint-reproduce` like any other. What that task found when it went to run the
+# comparison is worse than the sentences above, and both halves are now
+# measurements rather than expectations:
+#
+#   the device is not merely *worse* in QEMU 7.2, it is absent. `-device
+#     virtio-blk-pci,help` lists no `zone` property and `file.zoned` is rejected
+#     as an unexpected parameter. The same 7.2 does emulate zoned *NVMe* — the
+#     whole `zoned.*` family on `nvme-ns` — which is the tempting wrong answer
+#     and is named here so nobody reaches for it: F has no NVMe driver, so a
+#     baseline on ZNS and an F on virtio-blk would be two systems on two devices
+#     and this claim's sentence is *on the identical device*. The trixie base
+#     change could not be attempted either, because the development container has
+#     no network egress: `curl http://deb.debian.org/debian/` does not connect,
+#     and `cargo` could not reach `static.crates.io` until the registry volume was
+#     seeded from an already-warm one;
+#   the boot is still absent after `E2-B08` landed. `user/objects` now exists and
+#     its read path is measured, but `user/objects/tests/reads.rs` says in its own
+#     header that it is the host over a modelled zoned device and that no QEMU
+#     boot has run; `grep -rn zoned xtask/src` finds one doc comment and no verb.
+#     So a trixie image would buy a device with nothing on it, which is why the
+#     image change is the cheap half and is still not the half that unblocks this.
+#
+# The baseline README's last section carries the ordered cost of the four things
+# that remain, and it is the file to read before anybody plans this again.
+#
 # What exists is `zone/tests/cycle.rs`: a full fill-seal-copy-forward-reset
 # cycle against a modelled zoned device in the host, with every device byte
 # counted at the `ZonedDevice` boundary. **A count taken at a different boundary
@@ -80,23 +109,41 @@ report the writes a real device does that nobody asked for. That number is owed
 by the boot, and the boot is owed by `E2-B08` and by QEMU 8.
 
 The baseline half — `ratio_vs_baseline` against a tuned Linux filesystem — has
-no number at all and no directory yet. It is `E1-D06`'s work and it is stated
-here rather than left implied: a comparison against a system answering a
-different question is worse than none, and a baseline that is prose rather than
-configuration in the tree decays without anybody noticing.
+a directory and still has no number, and the gap between those two facts is
+`E2-P10`'s whole result. `claims/baselines/linux-6.x-tuned-zoned/` is f2fs in
+zoned mode with its victim policy, its overprovision ratio, its writeback and
+its forbidden mount options as data; the device it runs on as data; and — the
+part with no sibling in `claims/baselines/linux-6.x-tuned/` — the workload as
+data, because this claim compares two mappings under a load and a load has more
+dials than any tuning knob in the directory. Its `verify.sh` checks four of those
+dials against `zone/tests/cycle.rs`'s own constants, so the two copies of the
+workload cannot drift apart silently.
+
+**No number was taken against it and none may be invented for it.** A ratio
+needs a numerator this tree cannot produce and a denominator this environment
+cannot run, and the four things standing between here and both are listed in
+that directory's README with what each costs. A comparison against an untuned or
+an imagined Linux would be worse than this empty row: an empty row is a debt, and
+a wrong row is evidence.
 """
 
 [baseline]
-# `none` **today**, and it is a lie by omission unless the sentence beside it
-# says what is owed. The baseline this claim finally needs is
-# `claims/baselines/linux-6.x-tuned-zoned/` — f2fs in zoned mode, applied by a
-# script inside a guest that the script builds, on the identical emulated
-# device — and it does not exist. Naming it in the `path` row before it exists
-# would make `lint-reproduce` red for the right reason, so the debt is recorded
-# in prose and paid by `E1-D06`, which is where "a baseline is configuration in
-# the tree or it is prose that decays" became a task.
-system  = "none"
-notes   = "Owed: `claims/baselines/linux-6.x-tuned-zoned/`, with the README, apply.sh and verify.sh `lint-reproduce` requires of a baseline directory. Until it exists, `ratio_vs_baseline` has no number and this claim cannot be more than `pending` however good the absolute figure looks. The absolute row is falsifiable without a peer — 1.5 is derived from `SWEEP_LIVE_FRACTION` = 0.25 as 1.0 for the data plus `f/(1 − f)` = 0.33 of copy-forward plus padding and root records, totalling 1.39 with the rest as margin — and the ratio row is not falsifiable at all without one."
+# It was `none` until `E2-P10`, with the debt recorded in prose beside it because
+# naming a directory that did not exist would have made `lint-reproduce` red for
+# the right reason. The directory exists now, so the name moves out of the
+# sentence and into the row, where a lint reads it: `lint-reproduce` requires the
+# README, the apply and the verify, `cargo xtask release` packages the whole of
+# `claims/baselines/`, and the directory's own `verify.sh` reads this row back
+# and fails when the claim stops naming it.
+#
+# **A named baseline is not a measured one, and this row is the first half
+# only.** `system` says which configuration the comparison is against;
+# `ratio_vs_baseline` under `[threshold]` says what the comparison must show; and
+# nothing anywhere in this file says what it did show, because it has not been
+# run. `status` is still `pending` and that is the field to read.
+system  = "linux-6.x-tuned-zoned"
+path    = "claims/baselines/linux-6.x-tuned-zoned"
+notes   = "f2fs in zoned mode, cost-benefit victim selection, 20 percent overprovision, writeback held as long as the kernel will hold it, and `fsync_mode=strict`, barriers on and compression off as fairness constraints that cost the baseline rather than tuning that helps it. The device is configuration in the same directory — 48 zones of 64 MiB, four of them conventional, a 4096-byte logical block that costs F more than it costs the baseline — because *on the identical device* is the whole of what this claim compares and a device described in prose is one the two halves can quietly disagree about. Nothing in that directory has been run: the ratio row has no number and this claim cannot be more than `pending` however good the absolute figure looks. The absolute row is falsifiable without a peer — 1.5 is derived from `SWEEP_LIVE_FRACTION` = 0.25 as 1.0 for the data plus `f/(1 − f)` = 0.33 of copy-forward plus padding and root records, totalling 1.39 with the rest as margin — and the ratio row is not falsifiable at all without one. Re-tuning produces a new versioned directory beside that one, never an edit to it — with the one exception that directory's reversal condition states, which is that a configuration no number has ever been taken against may still be corrected in place."
 
 [owner]
 # R09: every headline claim names the subsystem that owns it.
@@ -175,4 +222,6 @@ command = "cargo xtask claim write-amplification"
 modelled_ratio_above_1_5 = "the copy-forward term has moved, and the first place to look is the sweep's ranking rather than `SWEEP_LIVE_FRACTION`. The ceiling admits a live fraction of 0.25, which is `f/(1 − f)` = 0.33 of copy-forward per application byte; the measured 0.1225 says the ranking picks zones well under that. A ratio at the ceiling with the constant unchanged means the sweep is taking zones it should not have — read `zones reset by the collector` beside it, because a run that reset many more zones for the same application bytes is a run whose retention policy changed, not whose collector did"
 fill_term_above_1_05 = "record padding, and it is arithmetic rather than a defect: a record is padded to the logical block, so the term is `1 + (padding per record / bytes per record)`. Above 1.05 either the block grew or the records shrank, and the second is the interesting one — a fill of many small objects pays padding per object. Check the object size draw in `zone/tests/cycle.rs` before concluding anything about the mapping"
 zones_reset_at_zero = "the run collected nothing and proved nothing, which the workload already refuses — it fails rather than reporting a green cycle. If it is ever seen green with a zero here, the refusal itself has been removed, and that is the finding"
+ratio_vs_baseline_above_1_0 = "the store wrote more than a tuned f2fs did on the same device, and the first move is **not** to read `zone/`. Read `claims/baselines/linux-6.x-tuned-zoned/comparison.conf` and ask which of its dials the two halves were run with differently, because every one of them moves this ratio further than any mapping decision does: `overprovision_percent` is the same number on both sides or the ratio measures the gift rather than the mapping; `durability` is per object on both sides or the baseline is being measured making a weaker promise; `counter_read_after` is after `sync` on both sides or whichever side had the larger page cache is being flattered; and `counted_nodes` is every writable node or the baseline is getting free metadata. Only when all four are confirmed identical is this a finding about `zone/` — and then it is the same finding as `modelled_ratio_above_1_5`, read against the fill and copy-forward terms separately, because a store losing on the fill term has a padding problem and one losing on the copy-forward term has a ranking problem"
+ratio_vs_baseline_far_below_1_0 = "not a pass, and this is the row that will be reported as one. A ratio of, say, 0.3 against a log-structured filesystem doing the same work with the same spare room is more likely to mean the two halves did not do the same work: check that the baseline's collector ran at all — `background_gc=on`, and `device_fills` of 3 rather than a run that never reused a zone — and that both sides' bytes were read from the same counter at the same moment. `zones_reset` has a floor for this reason on the modelled side; the baseline needs the same question asked of it, and f2fs's own GC counters under `/sys/fs/f2fs/<dev>/` are where it is asked"
 collector_operations_ahead_above_1 = "RFC 0059's third invariant is broken and a deadline-class read is queued behind more than one collector operation. `zone/src/queue.rs` holds the bound and `claims/0012`'s `in_flight` is where the number comes from; the two move together or the invariant is asserting a number nothing else believes. Below 1 is the opposite event and is not a pass: it means the urgent read never arrived while a collector operation was in flight, so the invariant was not asked anything"
