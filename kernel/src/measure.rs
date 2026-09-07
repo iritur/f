@@ -231,15 +231,30 @@ pub fn identity(cmdline: &[u8]) -> Result<Identity, Refusal> {
     self_test()?;
     let (measured, covered) = frame();
 
-    let mut root = None;
-    let mut declared = None;
-    for word in cmdline.split(|byte| *byte == b' ') {
-        if word.starts_with(f_abi::boot::KEY.as_bytes()) {
-            root = Some(Selection::parse(word).map_err(|_| Refusal::Malformed)?.root);
-        } else if word.starts_with(f_abi::boot::FRAME_KEY.as_bytes()) {
-            declared = Some(Declaration::parse(word).map_err(|_| Refusal::Malformed)?.frame);
-        }
-    }
+    // Both halves through the grammar's own reader, and neither through a loop
+    // written here. This function used to carry that loop: it split on `b' '`
+    // alone and assigned unconditionally, so the *last* match won — while
+    // `generation::selected`, one file away, called `Selection::find`, which
+    // splits on ASCII whitespace and takes the *first*. A command line carrying
+    // a tab, or two `f.root=` words, therefore made the frame attest to one root
+    // and validate a different one, silently, on a machine where both readers
+    // were green. Nothing emits such a line today, which is why it was cheap to
+    // fix and would not have been later.
+    //
+    // The rule lives in `abi/` rather than here for `generation.rs`'s reason:
+    // `kernel/` is `test = false`, so a grammar written in the frame can only be
+    // exercised by booting QEMU, and `abi/src/boot.rs` asserts first-wins and
+    // the separator as tests that run on a host.
+    let root = match Selection::find(cmdline) {
+        Some(Ok(selection)) => Some(selection.root),
+        Some(Err(_)) => return Err(Refusal::Malformed),
+        None => None,
+    };
+    let declared = match Declaration::find(cmdline) {
+        Some(Ok(declaration)) => Some(declaration.frame),
+        Some(Err(_)) => return Err(Refusal::Malformed),
+        None => None,
+    };
     if root.is_some() != declared.is_some() {
         return Err(Refusal::HalfADeclaration);
     }

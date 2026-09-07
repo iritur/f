@@ -111,12 +111,12 @@ impl Selection {
     /// the module header gives about the grammar: separating a word from a line
     /// *is* part of how the sixty-four characters are spelled, and a second hand
     /// writing that later is the second reader this arrangement refuses to have.
+    /// The scan is [`token`], shared with [`Declaration::find`] so that the two
+    /// halves of one statement cannot come to disagree about where a word ends
+    /// or which of two wins.
     #[must_use]
     pub fn find(cmdline: &[u8]) -> Option<Result<Self, i32>> {
-        cmdline
-            .split(|byte| byte.is_ascii_whitespace())
-            .find(|word| word.starts_with(KEY.as_bytes()))
-            .map(Self::parse)
+        token(cmdline, KEY).map(Self::parse)
     }
 
     /// Parse one command-line word.
@@ -137,6 +137,28 @@ impl Selection {
         };
         Ok(Self { root: digest(digits)? })
     }
+}
+
+/// The first word of a command line that begins with `key`, or nothing.
+///
+/// Shared by both tokens for [`digest`]'s reason one level up: separating a word
+/// from a line is part of how a token is spelled, and two scans are two chances
+/// to disagree about it. There *were* two. `kernel/src/measure.rs` carried its
+/// own — it split on `b' '` alone and assigned unconditionally, so the last
+/// match won — while `kernel/src/generation.rs` called [`Selection::find`],
+/// which splits on whitespace and takes the first. On a line carrying a tab or a
+/// second `f.root=` the frame therefore attested to one root and validated
+/// another. The loop was deleted rather than corrected beside this one: a
+/// grammar with two implementations is the arrangement this module exists not to
+/// have, and correcting the copy would have left the second reader in place.
+///
+/// Words are separated by ASCII whitespace, which is what a multiboot command
+/// line is. The **first** matching word wins and the rest are not examined — a
+/// line naming two roots is a line whose author has two beliefs about one
+/// machine, and quietly taking the last would make which one runs a property of
+/// how the loader concatenated its arguments.
+fn token<'a>(cmdline: &'a [u8], key: &str) -> Option<&'a [u8]> {
+    cmdline.split(|byte| byte.is_ascii_whitespace()).find(|word| word.starts_with(key.as_bytes()))
 }
 
 /// Sixty-four lower-case hexadecimal characters, or a refusal.
@@ -216,6 +238,26 @@ impl Declaration {
             out[FRAME_KEY.len() + 2 * n + 1] = HEX[(byte & 0xF) as usize];
         }
         out
+    }
+
+    /// Find this token on a whole command line, if it is there.
+    ///
+    /// [`Selection::find`]'s answers and [`Selection::find`]'s rules, over
+    /// [`FRAME_KEY`]: absent and present-and-wrong stay two different answers,
+    /// words are separated by ASCII whitespace, and the first match wins.
+    ///
+    /// It exists because the frame reads *both* halves of one statement — RFC
+    /// 0012 puts `f.frame=` beside `f.root=` and `kernel/src/measure.rs`
+    /// refuses half of it — and a frame holding the shared scan for one half and
+    /// a loop of its own for the other would tie-break the two halves
+    /// differently. That is what it did: it split on `b' '` alone and let the
+    /// *last* match win, so one tab, or one line naming two roots, made the
+    /// frame attest to one root and validate another.
+    ///
+    /// *Reversal:* a command line that is no longer whitespace-separated words.
+    #[must_use]
+    pub fn find(cmdline: &[u8]) -> Option<Result<Self, i32>> {
+        token(cmdline, FRAME_KEY).map(Self::parse)
     }
 
     /// Parse one command-line word.
@@ -401,6 +443,9 @@ const fn nibble(c: u8) -> Option<u8> {
 mod tests {
     use super::*;
 
+    /// A frame hash a test can tell apart from [`ROOT`] at a glance.
+    const FRAME: [u8; ROOT_BYTES] = [0x5A; ROOT_BYTES];
+
     const ROOT: [u8; ROOT_BYTES] = [
         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
         0xFF, 0x0F, 0x1E, 0x2D, 0x3C, 0x4B, 0x5A, 0x69, 0x78, 0x87, 0x96, 0xA5, 0xB4, 0xC3, 0xD2,
@@ -464,6 +509,55 @@ mod tests {
         line[..TOKEN_BYTES].copy_from_slice(&first);
         line[TOKEN_BYTES + 1..].copy_from_slice(&second);
         assert_eq!(Selection::find(&line), Some(Ok(Selection { root: ROOT })));
+    }
+
+    #[test]
+    fn a_declaration_is_found_by_the_same_scan_and_not_by_a_second_one() {
+        let bad = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
+        let declared = Declaration { frame: FRAME }.render();
+
+        // Absent, and absent from a line that carries the *other* token: the two
+        // keys are read apart, so a line naming only a generation must not
+        // answer the question about the frame it was compiled against.
+        assert_eq!(Declaration::find(b"timer=60"), None);
+        assert_eq!(Declaration::find(&Selection { root: ROOT }.render()), None);
+
+        let mut line = [b' '; 9 + FRAME_TOKEN_BYTES];
+        line[..9].copy_from_slice(b"timer=60 ");
+        line[9..].copy_from_slice(&declared);
+        assert_eq!(Declaration::find(&line), Some(Ok(Declaration { frame: FRAME })));
+
+        // Present and wrong, which must not come back as `None` for
+        // `Selection::find`'s reason: half a statement is a different statement
+        // and not a weaker one.
+        assert_eq!(Declaration::find(b"f.frame=00 timer=60"), Some(Err(bad)));
+    }
+
+    #[test]
+    fn the_first_of_two_frame_hashes_wins_rather_than_the_last() {
+        // The selection's rule, asserted of the other half of the statement:
+        // one reader that took the first and one that took the last would make
+        // the frame attest to one thing and validate another.
+        let first = Declaration { frame: FRAME }.render();
+        let second = Declaration { frame: [0x11; ROOT_BYTES] }.render();
+        let mut line = [b' '; 2 * FRAME_TOKEN_BYTES + 1];
+        line[..FRAME_TOKEN_BYTES].copy_from_slice(&first);
+        line[FRAME_TOKEN_BYTES + 1..].copy_from_slice(&second);
+        assert_eq!(Declaration::find(&line), Some(Ok(Declaration { frame: FRAME })));
+    }
+
+    #[test]
+    fn a_tab_separates_two_words_the_way_a_space_does() {
+        // The case the frame's own scan got wrong before it was deleted: it
+        // split on `b' '` alone, so a tab glued the two tokens into one word and
+        // neither was found — on a command line where `Selection::find`, one
+        // file away, found both. A multiboot command line is whitespace, and a
+        // tab is whitespace.
+        let mut line = [b'\t'; TOKEN_BYTES + 1 + FRAME_TOKEN_BYTES];
+        line[..TOKEN_BYTES].copy_from_slice(&Selection { root: ROOT }.render());
+        line[TOKEN_BYTES + 1..].copy_from_slice(&Declaration { frame: FRAME }.render());
+        assert_eq!(Selection::find(&line), Some(Ok(Selection { root: ROOT })));
+        assert_eq!(Declaration::find(&line), Some(Ok(Declaration { frame: FRAME })));
     }
 
     /// How wide the scratch buffer a test module is written into is.
