@@ -57,6 +57,14 @@ use std::path::{Path, PathBuf};
 /// manifest is silent about whether its component can be updated in place, and
 /// reading that silence as `restart_only` would be a component acquiring a
 /// property nobody chose — so it is refused and edited, not defaulted.
+///
+/// Three since RFC 0065 and RFC 0067, which were written in parallel and land
+/// in one bump. A schema-2 manifest declares no state tree, and a supervisor
+/// reading that silence as *this component has nothing to say about itself* is
+/// the tolerance RFC 0013 was written against; a schema-2 manifest also names
+/// no part, and a driver bound by the order a bus scan reported is a topology
+/// that is not a function of its root. Both are refused and edited, not
+/// defaulted.
 pub const SCHEMA: u64 = 3;
 
 /// The longest component, capability or ring name, in bytes. Names are
@@ -165,6 +173,48 @@ pub const PAYLOADS: &[&str] = &["inline", "registered", "shared_virtual"];
 /// Which end of a data ring the component occupies.
 pub const ROLES: &[&str] = &["server", "client"];
 
+/// The most `[[state]]` nodes a manifest may declare, its root included.
+/// `abi::manifest::STATE_NODES_MAX`, and the reason for the number is there:
+/// a component's published region is one frame.
+pub const STATE_NODES_MAX: usize = 16;
+
+/// The longest name a declared state node may carry, in bytes.
+///
+/// Sixteen and not [`NAME_MAX`], because this name goes on the wire as
+/// `abi::state::SchemaEntry::name`, which is sixteen bytes — and RFC 0013 says
+/// why: a label longer than that is a description, and descriptions belong in
+/// the document that owns the node rather than in a mapping every reader pays
+/// to carry.
+pub const NODE_NAME_MAX: usize = 16;
+
+/// `abi::state::kind`, one word per wire value, in wire order and starting at
+/// one. Zero is not a kind, so the position in this list is the value.
+///
+/// Closed, unlike [`NODE_UNITS`], and the asymmetry is the point: the kind says
+/// whether the word is a count, a level or an address — which is the arithmetic
+/// a reader will do to it — while the unit says what to print beside it. RFC
+/// 0013 lets a reader skip a node whose *kind* it cannot name; it does not let
+/// a publisher declare one nobody has defined.
+pub const NODE_KINDS: &[&str] = &["subtree", "counter", "gauge", "mount"];
+
+/// `abi::state::unit`, one word per wire value, in wire order and starting at
+/// zero — `none` is a real answer and not a missing one, because an identifier
+/// is not a quantity.
+pub const NODE_UNITS: &[&str] = &[
+    "none",
+    "nanoseconds",
+    "bytes",
+    "frames",
+    "entries",
+    "calls",
+    "cores",
+    "slots",
+    "events",
+    "address",
+    "trees",
+    "nodes",
+];
+
 /// The header every manifest starts with. A manifest is authored source that
 /// names an image and is hashed into a component's identity, so its licence is
 /// part of what is being hashed.
@@ -195,10 +245,13 @@ pub struct Manifest {
     ///
     /// Carried out of the check rather than counted, because the thing the lint
     /// has to decide is a question *between* manifests — whether two drivers
-    /// claim one part — and a count cannot answer it. RFC 0065.
+    /// claim one part — and a count cannot answer it. RFC 0067.
     /// Unit: entries; each pair is two PCI identifiers and neither is a
     /// quantity.
     pub devices: Vec<(u64, u64)>,
+    /// How many `[[state]]` nodes, this component's tree root included. Never
+    /// zero on a manifest that passed: RFC 0065.
+    pub state_nodes: usize,
 }
 
 impl Manifest {
@@ -329,7 +382,16 @@ pub fn check(rel: &str, text: &str) -> Result<Manifest, Vec<String>> {
 /// boot that goes red naming the field, not a component carrying a wrong number.
 mod record {
     /// Bytes in a whole record.
-    pub const BYTES: usize = 2248;
+    /// Bytes in a whole record.
+    ///
+    /// Derived and not typed. Schema 3 landed two arrays from two parallel
+    /// worktrees — `[[device]]` and `[[state]]` — and each was sized without
+    /// the other, so a number carried over from either would have been wrong
+    /// by the other's width. The sum below is the one the record actually has:
+    /// 2696 = 104 + 16 + 4 * 4 + 16 * 80 + 8 * 104 + 16 * 28, and
+    /// `the_record_layout_matches_the_abi` compares it against the assertion
+    /// `abi/src/manifest.rs` compiles.
+    pub const BYTES: usize = STATE_AT + super::STATE_NODES_MAX * NODE;
     /// Bytes in one `[[capability]]` slot.
     pub const NEED: usize = 80;
     /// Bytes in one `[[ring]]` slot.
@@ -347,6 +409,11 @@ mod record {
     pub const CAPS_AT: usize = BINDINGS_AT + super::DEVICES_MAX * BINDING;
     /// The first byte of the ring array.
     pub const RINGS_AT: usize = CAPS_AT + super::CAPABILITIES_MAX * NEED;
+    /// Bytes in one `[[state]]` slot — `abi::manifest::Node`.
+    pub const NODE: usize = 28;
+    /// The first byte of the state array. Last in the record, because putting
+    /// it anywhere else would move every slot the three offsets above name.
+    pub const STATE_AT: usize = RINGS_AT + super::RINGS_MAX * RING;
     /// `abi::manifest::MAGIC`.
     pub const MAGIC: u64 = 0x465f_4d41_4e00_0001;
     /// `abi::manifest::NO_CAPABILITY`, which is not zero because zero is a
@@ -456,7 +523,7 @@ pub fn compile(rel: &str, text: &str, image: &[u8]) -> Result<Vec<u8>, Vec<Strin
 
     // `[[device]]`, in file order — which the checker has already required to
     // be canonical order, so this writes what it read rather than sorting.
-    // RFC 0065.
+    // RFC 0067.
     let devices: &[(usize, Table)] = doc.arrays.get("device").map_or(&[], Vec::as_slice);
     put8(&mut out, 101, narrow8(devices.len()));
     for (index, (_, table)) in devices.iter().enumerate() {
@@ -525,10 +592,64 @@ pub fn compile(rel: &str, text: &str, image: &[u8]) -> Result<Vec<u8>, Vec<Strin
         put8(&mut out, at + 98, through);
     }
 
+    // `[[state]]`, in file order — which is the order the words tile the data
+    // block, so the offset a node's word lives at is its index here and is
+    // never written down. RFC 0065; `abi::manifest::Node::entry` is the other
+    // half of that arithmetic and the only other place it appears.
+    let nodes: &[(usize, Table)] = doc.arrays.get("state").map_or(&[], Vec::as_slice);
+    put8(&mut out, 102, narrow8(nodes.len()));
+    for (index, (_, table)) in nodes.iter().enumerate() {
+        let at = record::STATE_AT + index * record::NODE;
+        let name = string(table, "name");
+        put32(&mut out, at, narrow(int(table, "id")));
+        // The root's `parent` is absent rather than zero, because zero is a
+        // node identifier everywhere else in this file and a manifest that
+        // wrote `parent = 0` would be naming a node rather than naming none.
+        // The checker has already refused a `parent` that names nothing.
+        let parent = names_to_id(nodes, &string(table, "parent"));
+        put32(&mut out, at + 4, parent);
+        // Position in the list is the wire value, and `kind` starts at one
+        // because zero is not a kind; `unit` starts at zero because `none` is
+        // a real unit.
+        put8(&mut out, at + 8, index_of(NODE_KINDS, &string(table, "kind")));
+        put8(&mut out, at + 9, unit_of(&string(table, "unit")));
+        let len = name.len().min(NODE_NAME_MAX);
+        put8(&mut out, at + 10, narrow8(len));
+        if let Some(slot) = out.get_mut(at + 12..at + 12 + len) {
+            slot.copy_from_slice(&name.as_bytes()[..len]);
+        }
+    }
+
     if let Some(tail) = out.get_mut(record::BYTES..) {
         tail.copy_from_slice(image);
     }
     if findings.is_empty() { Ok(out) } else { Err(findings) }
+}
+
+/// The id a node's `parent` names, or zero for the root.
+///
+/// A manifest names a parent by *name* and the record carries an *id*, and the
+/// resolution happens here rather than in the frame for the reason a ring's
+/// `to` field is resolved here: two resolutions of one name is how two readers
+/// come to disagree about which node was meant. The checker has already refused
+/// a name that no earlier node carries.
+fn names_to_id(nodes: &[(usize, Table)], parent: &str) -> u32 {
+    if parent.is_empty() {
+        return 0;
+    }
+    nodes
+        .iter()
+        .find(|(_, table)| string(table, "name") == parent)
+        .map_or(0, |(_, table)| narrow(int(table, "id")))
+}
+
+/// The wire value of a unit word.
+///
+/// Zero-based, because `none` is a real unit and not a missing one — which is
+/// the one place this differs from [`index_of`], and the reason it is a
+/// function rather than a call to that one with an adjustment nobody would see.
+fn unit_of(unit: &str) -> u8 {
+    NODE_UNITS.iter().position(|known| *known == unit).map_or(0, narrow8)
 }
 
 /// The identity of a component file: one hash over the record and the image
@@ -1479,6 +1600,73 @@ impl Checker<'_> {
             }
         };
 
+        // The state tree. RFC 0065: what this component publishes about itself,
+        // declared here so that the schema block exists before the component's
+        // first instruction and so that a component publishing nothing can be
+        // refused before a frame is spent on it.
+        //
+        // Required, and required *non-empty*, which is the same thing said
+        // twice on purpose: an empty `[[state]]` array and no array at all are
+        // one component — one nobody can read — and a lint that accepted the
+        // first would be a lint somebody satisfies with a header.
+        let node_items = arrays.remove("state").unwrap_or_default();
+        let node_count = node_items.len();
+        if node_items.is_empty() {
+            self.note(1, "no `[[state]]` node; every component publishes a state tree and a supervisor refuses one that does not — RFC 0013, RFC 0065. The smallest honest tree is a root and one counter");
+        }
+        if node_items.len() > STATE_NODES_MAX {
+            self.note(node_items[STATE_NODES_MAX].0, &format!("more than {STATE_NODES_MAX} state nodes; a component's published region is one frame, and a tree that does not fit it is a component publishing its heap one node at a time"));
+        }
+        // Name to id, in declaration order, so a `parent` can only name a node
+        // already declared — which is what makes the hierarchy a tree in one
+        // pass rather than possibly a cycle.
+        let mut node_names: BTreeMap<String, u64> = BTreeMap::new();
+        let mut node_ids: BTreeSet<u64> = BTreeSet::new();
+        let mut highest = 0u64;
+        for (index, (line, table)) in node_items.into_iter().enumerate() {
+            let place = format!("[[state]] #{}", index + 1);
+            let mut f = self.fields(place, line, table);
+            if let Some((line, id)) = f.int("id", true) {
+                if id == 0 {
+                    f.refuse(line, "`id = 0` is not a node; a node id counts from one and is never reused — RFC 0013");
+                } else if id > u64::from(u32::MAX) {
+                    f.refuse(
+                        line,
+                        &format!("`id = {id}` is more than the record's field can carry"),
+                    );
+                } else if !node_ids.insert(id) {
+                    f.refuse(line, &format!("a second node with `id = {id}`; an id is what makes two readings of this component across time comparable at all"));
+                } else if id <= highest {
+                    f.refuse(line, &format!("`id = {id}` does not ascend past {highest}; the record requires ascending ids, which is what makes the one-pass parent check sound"));
+                } else {
+                    highest = id;
+                }
+            }
+            let this = f.string("name", true).and_then(|(line, n)| {
+                if n.is_empty() || n.len() > NODE_NAME_MAX || !is_name(&n) {
+                    f.refuse(line, &format!("`name = \"{n}\"` is not `[a-z0-9-]`, at most {NODE_NAME_MAX} bytes, with no edge hyphen; a longer label is a description, and a description belongs in the document that owns the node — RFC 0013"));
+                    return None;
+                }
+                Some(n)
+            });
+            f.one_of("kind", NODE_KINDS);
+            f.one_of("unit", NODE_UNITS);
+            // The root is the first node and the only one without a parent.
+            // Two parentless nodes is two trees at one mount address, with the
+            // second reachable only by whoever went looking.
+            if index == 0 {
+                f.forbid("parent", "the first node is this tree's root and has no parent; every node after it names one");
+            } else if let Some((line, parent)) = f.string("parent", true)
+                && !node_names.contains_key(&parent)
+            {
+                f.refuse(line, &format!("`parent = \"{parent}\"` names no node declared above this one; a parent is named before its child, which is what makes this a tree rather than possibly a cycle"));
+            }
+            f.finish();
+            if let (Some(name), Some(id)) = (this, node_ids.last().copied()) {
+                node_names.insert(name, id);
+            }
+        }
+
         // Transfer. RFC 0063: what this component declares about being updated
         // in place, and what it declares when it cannot.
         //
@@ -1543,7 +1731,7 @@ impl Checker<'_> {
             }
         }
 
-        // `[[device]]`. RFC 0065: what part this component drives, declared as
+        // `[[device]]`. RFC 0067: what part this component drives, declared as
         // a property and never as an address — `docs/manifest.md` has refused
         // an address since schema 1 and still does.
         //
@@ -1576,7 +1764,7 @@ impl Checker<'_> {
             if let Some((line, device)) = device
                 && (device == 0 || device > 0xFFFF)
             {
-                f.refuse(line, &format!("`device = {device:#x}` is not a PCI device identifier; zero is not one and neither is anything above sixteen bits. There is no wildcard here — a driver that binds a class rather than a part is RFC 0065's stated reversal and needs a wider record"));
+                f.refuse(line, &format!("`device = {device:#x}` is not a PCI device identifier; zero is not one and neither is anything above sixteen bits. There is no wildcard here — a driver that binds a class rather than a part is RFC 0067's stated reversal and needs a wider record"));
             }
             f.finish();
             if let (Some((_, vendor)), Some((line, device))) = (vendor, device) {
@@ -1616,6 +1804,7 @@ impl Checker<'_> {
             rings: ring_count,
             restart: restart?,
             devices,
+            state_nodes: node_count,
         })
     }
 }
@@ -1699,6 +1888,19 @@ memory_bytes = 65536
 
 [transfer]
 mode = \"restart_only\"
+
+[[state]]
+id   = 1
+name = \"example\"
+kind = \"subtree\"
+unit = \"none\"
+
+[[state]]
+id     = 2
+parent = \"example\"
+name   = \"served\"
+kind   = \"counter\"
+unit   = \"entries\"
 ";
 
     fn findings(text: &str) -> Vec<String> {
@@ -2182,6 +2384,109 @@ mode = \"restart_only\"
         refused_for(&with_devices(&[("0x_1af4", "0x1041")]), "underscores sit between digits");
     }
 
+    /// Every way a `[[state]]` declaration can fail to be a tree, and the one
+    /// way it can fail to be there at all.
+    ///
+    /// The last is the one this task exists for: a manifest that declares no
+    /// tree is a component nobody can read, and RFC 0065 refuses it here so
+    /// that the supervisor's `ADMISSION/NO_STATE_TREE` is a check that has
+    /// already been made rather than the first time anybody looked.
+    #[test]
+    fn a_state_tree_is_declared_and_is_one_tree() {
+        // The whole array removed, which is what a schema-2 manifest looks like
+        // to this checker.
+        let mute = SOUND.split_once("\n[[state]]").map(|(head, _)| head).unwrap().to_string();
+        refused_for(&mute, "no `[[state]]` node");
+
+        refused_for(&edit("id   = 1\n", "id   = 0\n"), "is not a node");
+        refused_for(&edit("id     = 2", "id     = 1"), "a second node with");
+        refused_for(&edit("kind = \"subtree\"", "kind = \"histogram\""), "one of");
+        refused_for(&edit("unit = \"none\"", "unit = \"furlongs\""), "one of");
+        refused_for(
+            &edit("name = \"example\"\nkind", "name = \"Example\"\nkind"),
+            "is not `[a-z0-9-]`",
+        );
+        refused_for(
+            &edit("name = \"example\"\nkind", "name = \"a-name-far-too-long-for-the-field\"\nkind"),
+            "is not `[a-z0-9-]`",
+        );
+        // The root has no parent, and nothing after it may be a second one.
+        refused_for(
+            &edit(
+                "id   = 1\nname = \"example\"",
+                "id   = 1\nparent = \"example\"\nname = \"example\"",
+            ),
+            "is this tree's root",
+        );
+        refused_for(
+            &edit("parent = \"example\"", "parent = \"served\""),
+            "names no node declared above this one",
+        );
+        // And a parent naming a node declared *below* is the cycle case, which
+        // is the same refusal seen from the other side.
+        refused_for(
+            &edit("parent = \"example\"", "parent = \"nowhere\""),
+            "names no node declared above this one",
+        );
+
+        let m = check("user/example/manifest.toml", SOUND)
+            .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+        assert_eq!(m.state_nodes, 2, "the sound fixture's tree was not counted");
+    }
+
+    /// The declaration reaches the record at the offsets the frame reads it
+    /// from, with the parent resolved from a name to an id.
+    ///
+    /// The resolution is what this checks and it is the part that could be
+    /// wrong silently: a manifest names a parent and the record carries an id,
+    /// and a writer that stamped a zero there would produce a forest of roots
+    /// that `Record::read` refuses at the next boot rather than here.
+    #[test]
+    fn a_declared_tree_reaches_the_record_with_its_parents_resolved() {
+        let bytes = compile("user/example/manifest.toml", SOUND, b"image")
+            .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+        // 102 and not 101: `[[device]]` took the first of the record's spare
+        // count bytes and `[[state]]` took the second, and a writer that
+        // stamped both at one offset would publish a node count over a device
+        // count with no reader ever the wiser.
+        assert_eq!(bytes[102], 2, "the node count is not where the record carries it");
+
+        let node = |index: usize, at: usize| bytes[record::STATE_AT + index * record::NODE + at];
+        let id = |index: usize| {
+            u32::from_le_bytes(
+                bytes[record::STATE_AT + index * record::NODE
+                    ..record::STATE_AT + index * record::NODE + 4]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        let parent = |index: usize| {
+            u32::from_le_bytes(
+                bytes[record::STATE_AT + index * record::NODE + 4
+                    ..record::STATE_AT + index * record::NODE + 8]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        assert_eq!((id(0), parent(0)), (1, 0), "the root is not parentless");
+        assert_eq!((id(1), parent(1)), (2, 1), "the child's parent was not resolved to an id");
+        // `subtree` is one and `counter` is two, because zero is not a kind;
+        // `none` is zero and `entries` is four, because `none` is a real unit.
+        assert_eq!((node(0, 8), node(0, 9)), (1, 0), "the root's kind or unit is wrong");
+        assert_eq!((node(1, 8), node(1, 9)), (2, 4), "the counter's kind or unit is wrong");
+        assert_eq!(node(1, 10), 6, "the name length is not the name's");
+        assert_eq!(
+            &bytes[record::STATE_AT + record::NODE + 12..record::STATE_AT + record::NODE + 18],
+            b"served"
+        );
+        // Everything past the count is zero, because the record is hashed whole
+        // and a byte nobody judges is a byte two files can differ in.
+        assert!(
+            bytes[record::STATE_AT + 2 * record::NODE..record::BYTES].iter().all(|b| *b == 0),
+            "a slot past the count carries something"
+        );
+    }
+
     #[test]
     fn the_syntax_is_the_subset_and_nothing_else() {
         refused_for(&edit("name   = \"example\"", "name   = \"\"\"example\"\"\""), "no quote");
@@ -2227,6 +2532,10 @@ mode = \"restart_only\"
     fn a_manifest_may_declare_no_capabilities_and_no_rings() {
         // `init` today holds three grants and speaks on nothing; a manifest for
         // it has empty lists and is complete.
+        //
+        // It may not declare no *tree*, and the asymmetry is RFC 0065's whole
+        // argument: a component with no needs asks for nothing, and a component
+        // with no tree is one nobody can read.
         let text = "\
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 schema = 3
@@ -2243,6 +2552,12 @@ memory_bytes = 8192
 
 [transfer]
 mode = \"restart_only\"
+
+[[state]]
+id   = 1
+name = \"init\"
+kind = \"subtree\"
+unit = \"none\"
 ";
         let m =
             check("user/init/manifest.toml", text).unwrap_or_else(|f| panic!("{}", f.join("\n")));
@@ -2335,6 +2650,8 @@ mode = \"restart_only\"
         assert_eq!(size_of("Record"), record::BYTES, "the record has changed size");
         assert_eq!(size_of("Need"), record::NEED, "a capability slot has changed size");
         assert_eq!(size_of("Ring"), record::RING, "a ring slot has changed size");
+        assert_eq!(size_of("Node"), record::NODE, "a state node slot has changed size");
+        assert_eq!(size_of("Binding"), record::BINDING, "a device slot has changed size");
 
         let konst = |name: &str, ty: &str| -> String {
             let needle = format!("pub const {name}: {ty} = ");
@@ -2368,6 +2685,16 @@ mode = \"restart_only\"
             RINGS_MAX,
             "abi::manifest::RINGS_MAX has drifted from this checker's"
         );
+        assert_eq!(
+            konst("STATE_NODES_MAX", "usize").parse::<usize>().unwrap(),
+            STATE_NODES_MAX,
+            "abi::manifest::STATE_NODES_MAX has drifted from this checker's"
+        );
+        assert_eq!(
+            konst("DEVICES_MAX", "usize").parse::<usize>().unwrap(),
+            DEVICES_MAX,
+            "abi::manifest::DEVICES_MAX has drifted from this checker's"
+        );
 
         // The transfer declaration is a second file's assertion, because the
         // type is `abi/src/transfer.rs`'s and only the field sits in the
@@ -2398,8 +2725,39 @@ mode = \"restart_only\"
                 .unwrap_or_else(|| panic!("no offset assertion for {field} in abi/src/manifest.rs"))
         };
         assert_eq!(offset("transfer"), record::TRANSFER_AT, "the transfer field has moved");
+        assert_eq!(offset("binding"), record::BINDINGS_AT, "the device array has moved");
         assert_eq!(offset("capability"), record::CAPS_AT, "the capability array has moved");
         assert_eq!(offset("ring"), record::RINGS_AT, "the ring array has moved");
+        assert_eq!(offset("state"), record::STATE_AT, "the state array has moved");
+
+        // The two closed vocabularies a `[[state]]` node is judged against,
+        // read out of `abi/src/state.rs` and compared word for word and in wire
+        // order. A table nothing checks is a table that is wrong within a
+        // milestone, which is the sentence this whole test was written under.
+        let state =
+            std::fs::read_to_string(root.join("abi/src/state.rs")).expect("abi/src/state.rs");
+        let words = |after: &str| -> Vec<String> {
+            state
+                .split_once(after)
+                .map(|(_, rest)| rest)
+                .unwrap_or_default()
+                .lines()
+                .take_while(|line| *line != "}")
+                .filter_map(|line| line.split_once("    pub const "))
+                .filter_map(|(_, rest)| rest.split_once(": u8 = "))
+                .map(|(name, _)| name.to_lowercase())
+                .collect()
+        };
+        assert_eq!(
+            words("pub mod kind {"),
+            NODE_KINDS,
+            "abi::state::kind has drifted from this checker's spelling or wire order"
+        );
+        assert_eq!(
+            words("pub mod unit {"),
+            NODE_UNITS,
+            "abi::state::unit has drifted from this checker's spelling or wire order"
+        );
         let modes: Vec<&str> = transfer
             .lines()
             .filter_map(|line| line.split_once("    pub const "))

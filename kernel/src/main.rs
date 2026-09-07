@@ -688,6 +688,76 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // the three stages above, and printing nothing on a default boot.
     admission_demonstration(&boot);
 
+    // E1-B05. The component lifecycle, end to end, against real memory: a place
+    // built from a manifest the loader carried, a component spawned into it, a
+    // client connected, the component killed, the place refilled under its
+    // declared policy, and the client's connect pending across the gap and
+    // resuming at the higher epoch.
+    //
+    // Before the timer window and not inside it, for the reason `timed_window`
+    // gives about its own contents: this builds address spaces and writes
+    // serial lines, and a window that logged what happened inside it would be a
+    // measurement of the logging. Nothing here is a measurement — every number
+    // it prints is a count — so it has no window to be inside.
+    //
+    // And **before the tree is rendered**, which is where it moved to at
+    // E1-B15 and is the same fix `dma_provocation` and `runtime_demonstration`
+    // already record above: everything this does is something the tree
+    // publishes — RFC 0065 mounts a subtree per component under the frame's
+    // root and counts what it refused — and a tree rendered first would
+    // publish the state of a machine this boot had not finished being. It
+    // used to run after the render, and the four mount nodes it fills were
+    // therefore printed as empty on every boot.
+    //
+    // The tick count the restart budget's window is measured against is read
+    // here, from the hardware `Env`, and converted once. RFC 0004 permits no
+    // other route to a clock, and RFC 0008 states the window in timer ticks
+    // because a supervisor compares it against a count the frame keeps rather
+    // than against a duration. Only the *epoch* comes from the machine: the
+    // demonstration advances its own count by the backoff it was told to wait,
+    // which is what a supervisor does, so nothing it prints moves between a
+    // fast host and a slow one.
+    let now = hardware.now().as_nanos() / (1_000_000_000 / u64::from(TIMER_HZ));
+    // SAFETY: the boot processor, once, with the kernel's address space in
+    // `CR3`, `frames` rebound onto its direct map, and no process running. The
+    // direct map covers every module: `reserved_ranges` put them all in the
+    // reserved list before the allocator was populated.
+    match unsafe { component::demonstrate(&mut frames, &space, features, &boot, now, &tree) } {
+        Ok(report) => kprintln!(
+            "  supervisor    ok — {} place(s), {} spawn(s), {} fault(s), {} restart(s), \
+             {} resumed, {} client(s) lost, {} probe(s) refused, {} retired, \
+             {} need(s) bound to nothing, {} tree(s) mounted carrying {} node(s), \
+             {} refused for declaring none",
+            report.places,
+            report.spawns,
+            report.faults,
+            report.restarts,
+            report.resumed,
+            report.lost,
+            report.probed,
+            report.retired,
+            report.unbound,
+            report.mounted,
+            report.nodes,
+            report.mute,
+        ),
+        // A machine that carried no component file is not a broken machine.
+        // `docs/booting-on-hardware.md` makes every component file optional and
+        // the first boot outside QEMU carried none at all, so a demonstration
+        // the milestone does not require must not be the thing that stops it.
+        // The same shape `discover` uses for a machine with no DMAR, and for the
+        // same reason: a boot log line is what a machine missing something
+        // optional earns, and an exit is what a machine that has it and got it
+        // wrong earns. Every other `Failure` below is the second case.
+        Err(component::Failure::NoComponent) => {
+            kprintln!("  supervisor    no component file among the boot modules; no place to fill");
+        }
+        Err(why) => {
+            kprintln!("FAIL: the component lifecycle: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+
     // Last of the frame's own numbers, because the allocator is still handing
     // out frames until the line above. The self-test is what says the hash
     // works: two readings with nothing in between must agree, and a reading
@@ -780,63 +850,6 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         }
     }
     tree.render();
-
-    // E1-B05. The component lifecycle, end to end, against real memory: a place
-    // built from a manifest the loader carried, a component spawned into it, a
-    // client connected, the component killed, the place refilled under its
-    // declared policy, and the client's connect pending across the gap and
-    // resuming at the higher epoch.
-    //
-    // Before the timer window and not inside it, for the reason `timed_window`
-    // gives about its own contents: this builds address spaces and writes
-    // serial lines, and a window that logged what happened inside it would be a
-    // measurement of the logging. Nothing here is a measurement — every number
-    // it prints is a count — so it has no window to be inside.
-    //
-    // The tick count the restart budget's window is measured against is read
-    // here, from the hardware `Env`, and converted once. RFC 0004 permits no
-    // other route to a clock, and RFC 0008 states the window in timer ticks
-    // because a supervisor compares it against a count the frame keeps rather
-    // than against a duration. Only the *epoch* comes from the machine: the
-    // demonstration advances its own count by the backoff it was told to wait,
-    // which is what a supervisor does, so nothing it prints moves between a
-    // fast host and a slow one.
-    let now = hardware.now().as_nanos() / (1_000_000_000 / u64::from(TIMER_HZ));
-    // SAFETY: the boot processor, once, with the kernel's address space in
-    // `CR3`, `frames` rebound onto its direct map, and no process running. The
-    // direct map covers every module: `reserved_ranges` put them all in the
-    // reserved list before the allocator was populated.
-    match unsafe { component::demonstrate(&mut frames, &space, features, &boot, now) } {
-        Ok(report) => kprintln!(
-            "  supervisor    ok — {} place(s), {} spawn(s), {} fault(s), {} restart(s), \
-             {} resumed, {} client(s) lost, {} probe(s) refused, {} retired, \
-             {} need(s) bound to nothing",
-            report.places,
-            report.spawns,
-            report.faults,
-            report.restarts,
-            report.resumed,
-            report.lost,
-            report.probed,
-            report.retired,
-            report.unbound,
-        ),
-        // A machine that carried no component file is not a broken machine.
-        // `docs/booting-on-hardware.md` makes every component file optional and
-        // the first boot outside QEMU carried none at all, so a demonstration
-        // the milestone does not require must not be the thing that stops it.
-        // The same shape `discover` uses for a machine with no DMAR, and for the
-        // same reason: a boot log line is what a machine missing something
-        // optional earns, and an exit is what a machine that has it and got it
-        // wrong earns. Every other `Failure` below is the second case.
-        Err(component::Failure::NoComponent) => {
-            kprintln!("  supervisor    no component file among the boot modules; no place to fill");
-        }
-        Err(why) => {
-            kprintln!("FAIL: the component lifecycle: {}", why.message());
-            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
-        }
-    }
 
     // M3. The other privilege level, and the first thing in this system that is
     // not the kernel. It runs inside a timer window on purpose: the milestone's

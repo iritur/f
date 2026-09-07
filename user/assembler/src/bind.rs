@@ -31,7 +31,7 @@
 //!
 //! Refused, and the refusal that matters is `cargo xtask lint-manifests`'s: two
 //! manifests declaring one `(vendor, device)` pair is a compile-time finding,
-//! named in RFC 0065, because at boot the only things available to break the
+//! named in RFC 0067, because at boot the only things available to break the
 //! tie are a scan's order and the topology's, and a topology broken by either
 //! is not a function of the root.
 //!
@@ -158,7 +158,7 @@ pub enum Refusal {
     /// Two components' declarations match one device. Carries the address and
     /// the two member indices, lower first.
     ///
-    /// `cargo xtask lint-manifests` refuses this at compile time and RFC 0065
+    /// `cargo xtask lint-manifests` refuses this at compile time and RFC 0067
     /// says why that is the refusal that matters. This one exists because a
     /// build-time check is a check that is skipped by not running the build.
     Claimed(Address, u16, u16),

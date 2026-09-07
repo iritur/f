@@ -33,6 +33,9 @@ row per entry that needs one, and an entry that needs none does not get a row.
 | 0062 | `E2-P02` | A period below the minimum starves every rule, so the starved clause carries periodic content and is measured | accepted; superseded in part by 0064 |
 | 0063 | `E2-D04` | A transfer is declared in the manifest, and quiescence is asserted by its occupant | accepted |
 | 0064 | `E2-B09` | A starved run is crossed and not inhabited, so the flat clause is scoped by a window and not by a point | accepted |
+| 0065 | `E1-B15` | A component declares its state tree, and a spawn refuses one that does not | accepted |
+| 0066 | `E2-B05` | The assembler lands above the frame with no caller, rather than inside it with one | accepted |
+| 0067 | `E2-B05` | A driver declares the part it binds, and the topology never inherits a scan order | accepted; written as 0065 in its own worktree and renumbered here at the merge |
 
 **0012 is why this directory runs 0011, 0013.** `TODO.md` reserved the number
 for the generation swap when the E2 line was written, and then E0 and E1 wrote
@@ -139,3 +142,34 @@ question was asked rather than left to lapse. What could still fire it is
 `E2-P05`, which compares two whole-system trees under load and is the task that
 would read two nodes at one instant; that reading is owed there and not here,
 and `E2-P05` waits on `E1-B15`.
+
+**0067 was 0065 too, and the collision is what these three rows are for.**
+`E2-B05` and `E1-B15` were built in parallel worktrees, neither able to see the
+other, and both needed the manifest. Both wrote an RFC and both called it 0065;
+both bumped `schema` 2 → 3. Nothing warned them, because the only thing that
+would have is a number allocated in a place both could read, and a worktree is
+by construction not that place. The merge is where it surfaced.
+
+It was fixed rather than preserved, and the distinction is worth stating because
+this directory is append-only. Append-only protects *decisions*: an entry that
+was accepted stays readable at the number it was accepted under, so that a
+reader following a citation from 2026 lands on what the citation meant. A number
+assigned twice is not a decision — it is two files that cannot both answer to
+the name they claim, and a citation to "RFC 0065" that resolves to either one is
+worth nothing. So one of them moved. **0065** kept *a component declares its
+state tree*, because it had twenty-seven references in the tree against the
+other's sixteen and the cheaper edit is the one that leaves more citations
+alone; the driver entry became **0067**. 0066 sat between them, is `E2-B05`'s
+other entry, and did not move — its one citation of "RFC 0065" now reads 0067,
+which is the only forward reference in this directory and is a consequence of
+renumbering the later half of a pair rather than the earlier.
+
+What the two decisions did *not* do is collide in substance. Both wanted a
+manifest array and neither supersedes the other: schema 3 carries `[[device]]`
+and `[[state]]` together, each count byte took one of the record's three
+reserved bytes, and `abi::manifest::Record` is 2696 bytes — neither worktree's
+number, because each computed its own without the other's fields in it. The
+lesson is filed here rather than in either entry: **two parallel worktrees that
+both touch one numbered registry will both take the same number**, and the only
+defences are to allocate the number before the branch or to expect the merge to
+resolve it. This tree does the second, and this row is what that looks like.

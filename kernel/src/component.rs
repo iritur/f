@@ -246,6 +246,16 @@ pub enum Failure {
     Notice(i32),
     /// The frame's own count of what it built and what it gave back disagreed.
     Leaked,
+    /// A component's state tree could not be published, or could not be read
+    /// back once it had been. Carries the packed refusal.
+    ///
+    /// Always a bug in the frame and never in a manifest: `Record::read` has
+    /// already judged the declaration and [`admit`] has already refused an
+    /// empty one, so what is left is this build writing bytes it cannot read.
+    /// It fails the boot for the reason every other variant here does — a
+    /// component half-built is worse than no component, and one nobody can read
+    /// is exactly what RFC 0013 says this mechanism exists to prevent.
+    StateTree(i32),
 }
 
 impl Failure {
@@ -267,6 +277,7 @@ impl Failure {
             Self::Need(_) => "a spawn's supplied handles did not satisfy the manifest's needs",
             Self::Notice(_) => "a notice could not be published on a control ring",
             Self::Leaked => "a component's frames did not all come back",
+            Self::StateTree(_) => "a component's state tree could not be published or read back",
         }
     }
 }
@@ -426,18 +437,48 @@ struct Instance {
     ring: Mapping,
     /// Its capability table.
     table: Table,
+    /// Where its published state tree lives, as a kernel address. Unit: bytes.
+    tree: u64,
+    /// The same frame's physical address, which is what a mount word carries
+    /// and what a grant would need. Unit: bytes, physical.
+    tree_physical: u64,
+    /// How many nodes it publishes, out of its manifest's declaration.
+    /// Unit: nodes. Never zero — a spawn that would have made it zero was
+    /// refused `ADMISSION/NO_STATE_TREE` before this instance existed.
+    tree_nodes: u32,
+    /// The snapshot the frame read back off that tree the moment it published
+    /// it, through `f_abi::state::Reader` and not from what it had just
+    /// written.
+    ///
+    /// Kept rather than recomputed, because it is the *first* reading and the
+    /// only one taken before the component could have touched a word — so a
+    /// later reading that differs is the component having done something, which
+    /// is what a reader wants to know, and a later reading that agrees on a
+    /// component which has run is a tree nothing is writing into.
+    /// Unit: none — a hash.
+    tree_snapshot: u64,
 }
 
-/// What every instance is made of besides its text: a stack and a control ring.
+/// What every instance is made of besides its text: a stack, a control ring and
+/// a state tree.
 ///
 /// It was three, with text as the third, and text stopped being one frame the
 /// day a component's image stopped fitting in one page — RFC 0047. So the fixed
-/// part is two and the variable part is [`text_pages`], and the two are added
-/// by [`parts`] rather than by each caller, because the number appears in three
-/// places: what [`charges_for`] predicts, what [`admit`] refuses on, and what
-/// [`spawn`] actually takes. Three copies of one sum is how a manifest gets
-/// admitted for a footprint it then overruns.
-const FIXED_PARTS: usize = 2;
+/// part is the variable part's complement, and the two are added by [`parts`]
+/// rather than by each caller, because the number appears in three places: what
+/// [`charges_for`] predicts, what [`admit`] refuses on, and what [`spawn`]
+/// actually takes. Three copies of one sum is how a manifest gets admitted for
+/// a footprint it then overruns.
+///
+/// **Three since RFC 0065**, and the third is the state tree. It is charged to
+/// the account like everything else an instance is made of, which is the point
+/// rather than an implementation detail: a tree the frame paid for out of
+/// something it kept back would be observability the supervisor's quota does
+/// not bound, and that is the shape of every metrics subsystem that ends up
+/// switched off. Every manifest in this tree already names it — *address space,
+/// page tables, text, stack, control ring, state tree, capability table* — so
+/// what changed is that the sentence is now a frame.
+const FIXED_PARTS: usize = 3;
 
 /// How many frames one instance of an image this long is made of.
 /// Unit: frames.
@@ -541,6 +582,15 @@ impl Supply {
 
 /// A place in the topology.
 struct Place {
+    /// Which of the frame's mount nodes this place publishes its occupant's
+    /// tree into. Unit: none — a slot ordinal, below [`PLACES_MAX`].
+    ///
+    /// On the place and not on the occupant, and it is the same lifetime
+    /// argument [`Place::reservation`] makes below: a mount is a slot in the
+    /// frame's own tree, a place survives its occupant, and a reader watching
+    /// one node across a restart is watching *this place* refill rather than
+    /// two unrelated components that happened to be given one address.
+    slot: usize,
     /// What may occupy it. A spawn naming a different manifest is refused: a
     /// different manifest is a different place, and E2-D04's state-transfer
     /// protocol is where a newer one may lawfully take over an older one's.
@@ -683,6 +733,30 @@ pub struct Report {
     /// counting from zero; one after a single restart, which is the whole of
     /// what a reconnecting client can see of a peer it did not have before.
     pub epoch: u32,
+    /// State trees mounted under the frame's root and read back through it.
+    /// Unit: trees.
+    ///
+    /// **Equal to [`Report::spawns`] on any boot that finished**, and that is
+    /// the number E1-B15's first clause is: every component the supervisor
+    /// started published a tree. A spawn that had produced no tree would be a
+    /// spawn `admit` should have refused, so a gap between these two is a hole
+    /// in the refusal rather than a component that was merely quiet.
+    pub mounted: u32,
+    /// Nodes across every tree mounted, summed as they were mounted.
+    /// Unit: nodes.
+    ///
+    /// Beside the count for the reason `BLK_BYTES` sits beside `BLK_COPIES`:
+    /// *four trees were mounted* is a claim about a mechanism and says nothing
+    /// about whether any of them had anything in it.
+    pub nodes: u32,
+    /// Spawns refused because the manifest declared no state tree.
+    /// Unit: refusals.
+    ///
+    /// Non-zero on every boot, on purpose. RFC 0065's refusal is what makes the
+    /// clause above stay true, and a refusal nobody has watched happen is
+    /// indistinguishable from one that cannot — the same argument
+    /// `state::node::MEMORY_FORCED` makes about a counter.
+    pub mute: u32,
 }
 
 /// Build a place per component file the loader carried, put a component in each,
@@ -738,6 +812,7 @@ pub unsafe fn demonstrate(
     features: Features,
     boot: &BootInfo,
     now: u64,
+    tree: &crate::state::Tree,
 ) -> Result<Report, Failure> {
     // SAFETY: the caller's guarantee that the direct map is live and covers
     // every module.
@@ -856,6 +931,8 @@ pub unsafe fn demonstrate(
     )?;
 
     let mut place = Place {
+        // The scripted place, and slot zero of the frame's mount nodes.
+        slot: 0,
         manifest: ContentId::of(module),
         module,
         endpoint,
@@ -906,6 +983,7 @@ pub unsafe fn demonstrate(
     report.spawns += 1;
     report.unbound += unbound_needs(record);
     spawned_line(record, &place, spawned);
+    mounted_line(record, &place, mount(tree, &place, &mut report)?);
 
     // And the reservation the *place* holds, kept once and not per occupant.
     // RFC 0007's memory is never reclaimed for the life of the reservation and
@@ -940,7 +1018,17 @@ pub unsafe fn demonstrate(
         // SAFETY: the caller's guarantee, passed down; `module` came out of
         // `modules` above and is one of the boot modules the direct map covers.
         let mut extra = unsafe {
-            fill(frames, kernel, features, &mut supervisor, &mut reservations, module, &mut report)
+            fill(
+                frames,
+                kernel,
+                features,
+                &mut supervisor,
+                &mut reservations,
+                module,
+                &mut report,
+                tree,
+                index,
+            )
         }?;
         // This place's own polling point, not the first place's: what a spawn
         // owes is owed to *its* occupant, and pumping the wrong ring would leave
@@ -986,7 +1074,7 @@ pub unsafe fn demonstrate(
         return Err(Failure::Ring(0));
     }
     let cause = cause::pack(cause::FAULT, u64::from(error::argument::MALFORMED_HEADER));
-    let torn = tear_down(frames, &mut place, &mut supervisor, &account, cause, &mut report)?;
+    let torn = tear_down(frames, &mut place, &mut supervisor, &account, cause, &mut report, tree)?;
     crate::kprintln!(
         "  fault         place {} epoch {} stopped speaking: its control ring header no longer \
          validates",
@@ -1051,10 +1139,18 @@ pub unsafe fn demonstrate(
         )
     }?;
     report.probed += refusals;
+    // One of them is the state-tree refusal, and it is counted apart because it
+    // is not about a *supply*: the other five are ways a supervisor can offer
+    // the wrong thing, and this one is a component that would have nothing to
+    // say about itself. RFC 0065.
+    report.mute += 1;
+    tree.add(crate::state::node::COMPONENTS_REFUSED, 1);
     crate::kprintln!(
-        "  refusals      {} spawn(s) refused on purpose, one per way a supply can be wrong: \
-         missing, undeclared, wrong type, short rights, short quantity",
+        "  refusals      {} spawn(s) refused on purpose: {} way(s) a supply can be wrong — \
+         missing, undeclared, wrong type, short rights, short quantity — and a manifest \
+         declaring no state tree, refused ADMISSION/NO_STATE_TREE",
         refusals,
+        refusals - 1,
     );
 
     // -------------------------------------------------------------- restart
@@ -1097,10 +1193,17 @@ pub unsafe fn demonstrate(
     report.spawns += 1;
     crate::kprintln!(
         "  spawn         place {} epoch {} — nothing carried over: new table, new memory, \
-         new control ring",
+         new control ring, new state tree",
         Name(record.label()),
         spawned.0,
     );
+    // And the place's mount, filled again. The *node* is the place's and
+    // survives its occupant; the address in it is the occupant's and does not,
+    // which is what a reader watching one mount across a restart sees and is
+    // the whole reason the slot lives on the place. Nothing is carried over
+    // here either: the frame this instance publishes into was zeroed by
+    // `charge` on its way out of the account.
+    mounted_line(record, &place, mount(tree, &place, &mut report)?);
 
     // --------------------------------------------------------------- resume
     // The pending connect is answered by the refill, which is the first of its
@@ -1152,7 +1255,7 @@ pub unsafe fn demonstrate(
     publish(&mut place, &mut supervisor, &ledger_ring, &mut report)?;
 
     let cause = cause::pack(cause::STOPPED, kept);
-    let torn = tear_down(frames, &mut place, &mut supervisor, &account, cause, &mut report)?;
+    let torn = tear_down(frames, &mut place, &mut supervisor, &account, cause, &mut report, tree)?;
     crate::kprintln!(
         "  stop          place {} epoch {} stopped against a deadline already behind it — a \
          kill, and a second stop could not move it later",
@@ -1183,7 +1286,7 @@ pub unsafe fn demonstrate(
         return Err(Failure::WrongPlace);
     }
     let cause = cause::pack(cause::RETIRED, u64::from(place.epoch));
-    let torn = tear_down(frames, &mut place, &mut supervisor, &account, cause, &mut report)?;
+    let torn = tear_down(frames, &mut place, &mut supervisor, &account, cause, &mut report, tree)?;
     crate::kprintln!(
         "  retire        place {} spent its budget of {} restart(s) — retired, and {} \
          peer-gone notice(s) went to the endpoint's holders",
@@ -1258,6 +1361,7 @@ pub unsafe fn demonstrate(
             &extra.account,
             cause,
             &mut report,
+            tree,
         )?;
         crate::kprintln!(
             "  teardown      place {} — {} capabilit(ies) revoked, {} frame(s) refunded to its \
@@ -1310,6 +1414,27 @@ pub unsafe fn demonstrate(
         return Err(Failure::Leaked);
     }
 
+    // E1-B15's first clause, as an equality rather than as a log line: **every
+    // component the supervisor started published a tree**. A spawn that had
+    // produced no tree would be one `admit` should have refused, so a gap here
+    // is a hole in the refusal and not a component that was merely quiet — and
+    // it fails the boot for the reason every other check in this function does.
+    if report.mounted != report.spawns {
+        return Err(Failure::StateTree(error::pack(
+            error::ADMISSION,
+            error::admission::NO_STATE_TREE,
+        )));
+    }
+    // And every mount is out again, which is the other half: a root still
+    // naming a frame that has gone back to an account is a reader following one
+    // place's mount into whatever was put there next.
+    if tree.mounted() != 0 {
+        return Err(Failure::StateTree(error::pack(
+            error::ARGUMENT,
+            error::argument::MALFORMED_HEADER,
+        )));
+    }
+
     report.faults = place.faults;
     Ok(report)
 }
@@ -1347,6 +1472,14 @@ struct Extra {
 ///
 /// As [`demonstrate`], and `module` must be one of the boot modules the direct
 /// map covers.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the same argument `spawn` makes one function down, and this list is that one \
+              plus the two a place is built from rather than spawned into: the frame's own \
+              tree, which is where this place's occupant is mounted, and the mount slot it \
+              takes. Bundling them would be a type that exists so a lint passes, which \
+              `runtime::demonstrate` already declined for this reason"
+)]
 unsafe fn fill(
     frames: &mut FrameAllocator,
     kernel: &paging::AddressSpace,
@@ -1355,6 +1488,8 @@ unsafe fn fill(
     reservations: &mut Reservations,
     module: &'static [u8],
     report: &mut Report,
+    tree: &crate::state::Tree,
+    slot: usize,
 ) -> Result<Extra, Failure> {
     // `fill` keeps the table by value below; every call it makes downwards
     // takes a shared reference, because a spawn tests and does not keep.
@@ -1376,6 +1511,7 @@ unsafe fn fill(
     let endpoint =
         grant_into(supervisor, frames, CapType::Endpoint, rights::ALL & !rights::EXECUTE, 0, 0)?;
     let mut place = Place {
+        slot,
         manifest: ContentId::of(module),
         module,
         endpoint,
@@ -1410,6 +1546,7 @@ unsafe fn fill(
     report.spawns += 1;
     report.unbound += unbound_needs(record);
     spawned_line(record, &place, spawned);
+    mounted_line(record, &place, mount(tree, &place, report)?);
 
     // And the reservation the *place* holds, kept once and not per occupant.
     // RFC 0007's memory is never reclaimed for the life of the reservation and
@@ -1484,6 +1621,32 @@ fn spawned_line(record: &Record, place: &Place, spawned: (u32, usize, usize)) {
         spawned.1,
         spawned.2,
         FRAME_SIZE,
+    );
+}
+
+/// What the frame found when it followed its own root into a component's tree.
+///
+/// A fourth line per spawn, after [`spawned_line`], and it is the evidence
+/// E1-B15's first clause is about: the mount, the node count and the snapshot
+/// the frame read back *through* the root rather than out of what it had
+/// written. A boot that printed only *a tree was published* would be making the
+/// claim; this prints the reading.
+///
+/// The snapshot of a tree whose component has not run is the hash of a block of
+/// zeros under this schema, which is a constant for a manifest — so it is a
+/// fixture number and the boot log stays reproducible. The day a component
+/// writes into its own tree before this line, it stops being one, and that is
+/// the day it says something a reader cares about.
+fn mounted_line(record: &Record, place: &Place, found: (u64, [u8; 16], usize)) {
+    let (snapshot, label, width) = found;
+    let nodes = place.occupant.as_ref().map_or(0, |occupant| occupant.tree_nodes);
+    crate::kprintln!(
+        "  state mount   place {} -> frame root slot {}: root {}, {} node(s), snapshot \
+         {snapshot:#018x}, read back through the root and not from what was written",
+        Name(record.label()),
+        place.slot,
+        Name(label.get(..width).unwrap_or(&[])),
+        nodes,
     );
 }
 
@@ -1659,13 +1822,24 @@ unsafe fn spawn(
         charges += 1;
         *slot = object;
     }
-    let (Some(&stack), Some(&control)) = (fixed.first(), fixed.get(1)) else {
+    let (Some(&stack), Some(&control), Some(&published)) =
+        (fixed.first(), fixed.get(1), fixed.get(2))
+    else {
         return Err(Failure::Account);
     };
 
     for (virt, phys, kind) in [
         (crate::process::SPAWN_STACK, stack, UserPage::Data),
         (crate::process::SPAWN_CONTROL, control, UserPage::Data),
+        // Writable, and that is the one thing about this mapping worth arguing.
+        // RFC 0013's *read, never delivered* is about the **reader**: a tree is
+        // read and never pushed. The publisher writes it, and the publisher is
+        // this component — so the page it publishes into is its own to write and
+        // everybody else's to read. What would be a control plane is the other
+        // direction, a mapping somebody *else* writes that this component acts
+        // on, and there is none: nothing in the frame writes a word here after
+        // the schema block, and `what-must-be-stated.html` section 19 is why.
+        (crate::process::SPAWN_TREE, published, UserPage::Data),
     ] {
         // SAFETY: as `user_space`, and `space` is not in `CR3` — it has never
         // been.
@@ -1731,6 +1905,34 @@ unsafe fn spawn(
         satisfied += 1;
     }
 
+    // The state tree, written before the component's first instruction. RFC
+    // 0065: the schema block comes out of the manifest's declaration, so a
+    // component that is spawned and never scheduled still has a readable tree
+    // with zeros in it — which is the difference between *this component has
+    // done nothing* and *this component cannot be read*, and a supervisor that
+    // could not tell those apart is the one this task was written against.
+    //
+    // The words are the component's and the frame writes none of them. What it
+    // writes is the description, and it writes it once: `generation` is zero
+    // and stays zero, because a component's schema changes only when its
+    // manifest does and a different manifest is a different place.
+    let tree_at = frames.virt(Frame::from_addr(published));
+    let tree_nodes = publish_tree(tree_at, record)?;
+    // Read back through the ordinary reader rather than trusted from what was
+    // just written, for the reason `state::Tree::publish` reads its own header
+    // back: the value that matters is the one in the bytes, and a round trip is
+    // what catches a schema whose Rust type and whose wire image disagree. It
+    // is also the *first* reading of this tree and the only one taken before
+    // the component could have touched a word.
+    let reader =
+        f_abi::state::Reader::at(tree_at as u64, FRAME_SIZE as u32).map_err(Failure::StateTree)?;
+    if reader.nodes() != tree_nodes {
+        return Err(Failure::StateTree(error::pack(
+            error::ARGUMENT,
+            error::argument::MALFORMED_HEADER,
+        )));
+    }
+
     let epoch = place.epoch;
     place.occupant = Some(Instance {
         epoch,
@@ -1742,9 +1944,158 @@ unsafe fn spawn(
         control: at as u64,
         ring,
         table,
+        tree: tree_at as u64,
+        tree_physical: published,
+        tree_nodes,
+        tree_snapshot: reader.snapshot(),
     });
     place.epoch += 1;
     Ok((epoch, satisfied, charges))
+}
+
+/// Put a place's occupant's published tree under the frame's root, and read it
+/// back from there.
+///
+/// **The reading is the point.** Writing an address into a mount node and
+/// calling the tree reachable would be a claim; what makes it a check is that
+/// this function then does what any other reader would do — takes the address
+/// out of the node it just wrote, binds `f_abi::state::Reader` to it, and
+/// requires the header, the schema and every offset in them to validate. A root
+/// that named a region nobody had opened would be found by the first reader to
+/// follow it, and that reader is this one.
+///
+/// # Errors
+///
+/// [`Failure::StateTree`] for a mount this build has no node for, or a child
+/// the frame cannot read back through its own root.
+fn mount(
+    tree: &crate::state::Tree,
+    place: &Place,
+    report: &mut Report,
+) -> Result<(u64, [u8; 16], usize), Failure> {
+    let malformed = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
+    let occupant = place.occupant.as_ref().ok_or(Failure::WrongPlace)?;
+    if !tree.mount(place.slot, occupant.tree_physical) {
+        return Err(Failure::StateTree(malformed));
+    }
+    // Back out through the root, which is what a reader that only has the frame
+    // does. The kernel address is what this build can bind to — the mount word
+    // is physical and the frame reaches physical memory through its direct map
+    // — and the two naming one frame is `FrameAllocator::virt`'s whole
+    // contract. *Reversal:* a reader outside the frame, which needs the mount
+    // to be followed by a grant rather than by a direct-map lookup, and that is
+    // a capability handed over and not a wider mount node.
+    let Some(id) = crate::state::node::mount(place.slot) else {
+        return Err(Failure::StateTree(malformed));
+    };
+    let named = tree.value(id).ok_or(Failure::StateTree(malformed))?;
+    if named != occupant.tree_physical {
+        return Err(Failure::StateTree(malformed));
+    }
+    let reader =
+        f_abi::state::Reader::at(occupant.tree, FRAME_SIZE as u32).map_err(Failure::StateTree)?;
+    if reader.nodes() != occupant.tree_nodes || reader.snapshot() != occupant.tree_snapshot {
+        return Err(Failure::StateTree(malformed));
+    }
+
+    // The child's root, taken out of the schema the reader validated. It is
+    // what makes this line evidence rather than an assertion: four components
+    // publishing five zeroed nodes each hash identically — the snapshot is over
+    // bytes and never over interpretation, which is RFC 0013's decision and not
+    // a defect — so a mount line carrying only a count and a hash would say the
+    // same words about every place. The root's *name* is the one thing in a
+    // child's region that differs per manifest before its first instruction,
+    // and reading it back proves the frame descended into the schema it wrote
+    // rather than merely finding a header where it left one.
+    let root = reader.schema().first().ok_or(Failure::StateTree(malformed))?;
+    let label = root.name;
+    let width = root.label().len();
+
+    report.mounted += 1;
+    report.nodes += occupant.tree_nodes;
+    tree.set(crate::state::node::COMPONENTS_MOUNTED, tree.mounted());
+    tree.add(crate::state::node::COMPONENTS_PUBLISHED, 1);
+    tree.add(crate::state::node::COMPONENTS_NODES, u64::from(occupant.tree_nodes));
+    Ok((reader.snapshot(), label, width))
+}
+
+/// Take a place's mount out of the frame's root.
+///
+/// Called from [`tear_down`] and nowhere else, because a mount naming a frame
+/// that has gone back to the account is the one shape of dangling pointer a
+/// state tree can have: the next instance is about to be given those bytes, and
+/// a reader following the old address would be reading a live component's tree
+/// under a dead one's name.
+fn unmount(tree: &crate::state::Tree, place: &Place) {
+    let _ = tree.mount(place.slot, 0);
+    tree.set(crate::state::node::COMPONENTS_MOUNTED, tree.mounted());
+}
+
+/// Write a component's state-tree header and schema block into a frame it owns.
+///
+/// The whole of RFC 0013's *the data block is generated from the same
+/// declaration the schema is*, which that RFC names as a build-time obligation
+/// and as the only defence against the two drifting. There is one declaration —
+/// the manifest's, inside the content hash a spawn names — and this is the one
+/// place it becomes bytes. `f_abi::manifest::Node::entry` is the other half of
+/// the arithmetic, and it is the only thing that decides where a node's word
+/// lives.
+///
+/// Answers how many nodes it wrote.
+///
+/// # Errors
+///
+/// [`Failure::StateTree`], carrying the packed refusal, for a declaration this
+/// build cannot turn into a readable tree — which after [`admit`] and
+/// `Record::read` means a bound this function got wrong rather than a manifest
+/// that is wrong.
+fn publish_tree(base: *mut u8, record: &Record) -> Result<u32, Failure> {
+    let malformed = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
+    let declared = record.state_nodes();
+    let nodes = u32::try_from(declared.len()).map_err(|_| Failure::StateTree(malformed))?;
+
+    // The two blocks, at the offsets the format fixes: the schema immediately
+    // after the header on the thirty-two byte boundary an entry array needs,
+    // and the data block after it on an eight-byte one. Both are computed here
+    // and checked by `Reader::at` against the frame's own length, so a bound
+    // this function got wrong is a refusal rather than a write past the page.
+    let schema_at = core::mem::size_of::<f_abi::state::TreeHeader>() as u32;
+    let data_at = schema_at + nodes * 32;
+    if u64::from(data_at) + u64::from(nodes) * u64::from(f_abi::state::WORD) > FRAME_SIZE {
+        return Err(Failure::StateTree(malformed));
+    }
+
+    let header = f_abi::state::TreeHeader {
+        magic: f_abi::state::TREE_MAGIC,
+        version: f_abi::state::TREE_VERSION,
+        nodes,
+        schema_offset: schema_at,
+        data_offset: data_at,
+        // Zero, and it stays zero for this instance's life: a generation counts
+        // *schema* republications, a component's schema is its manifest's, and
+        // a spawn naming a different manifest is refused as a different place.
+        generation: 0,
+        _reserved: [0; 3],
+    };
+    // SAFETY: `base` is the direct-map address of a frame this function retyped
+    // out of the account a few lines ago, zeroed by `charge` and handed to
+    // nobody else. It is frame-aligned, which is stronger than the sixty-four
+    // bytes a `TreeHeader` needs.
+    unsafe { base.cast::<f_abi::state::TreeHeader>().write(header) };
+
+    // SAFETY: `schema_at` is sixty-four, which is inside the frame and is
+    // aligned for a `SchemaEntry` — thirty-two divides it.
+    let block = unsafe { base.add(schema_at as usize) }.cast::<f_abi::state::SchemaEntry>();
+    for (index, node) in declared.iter().enumerate() {
+        // SAFETY: the schema block is `nodes` thirty-two byte entries at
+        // `block`; the bound above places the whole of it, and the data block
+        // after it, below `FRAME_SIZE`. `index` is a position in `declared`, so
+        // it is below `nodes`.
+        let slot = unsafe { block.add(index) };
+        // SAFETY: as above; `slot` is inside the frame and aligned for the type.
+        unsafe { slot.write(node.entry(index as u32)) };
+    }
+    Ok(nodes)
 }
 
 /// The refusals R04 asks of a spawn, decided before anything is spent.
@@ -2049,6 +2400,31 @@ unsafe fn probe_refusals(
         supervisor.relinquish(held).map_err(Failure::Capability)?;
     }
 
+    // 6. A manifest that declares no state tree. RFC 0065, and it is the
+    //    refusal that keeps *every component publishes one* true rather than
+    //    aspirational — so it is provoked on every boot, for the reason every
+    //    other probe here is: a refusal nobody has watched happen is
+    //    indistinguishable from one that cannot.
+    //
+    //    Driven through `admit` and not through `spawn`, and the difference is
+    //    worth stating rather than hiding. `spawn` reads its record out of the
+    //    place's module, which is a component file on the boot medium and not
+    //    something this function may bend; `admit` takes the record as an
+    //    argument and is the function the refusal actually lives in — the same
+    //    one a real spawn reaches on its way past. So the probe is the shipped
+    //    predicate driven against a record whose *only* difference from the
+    //    real one is the declaration, which is a sharper test than a second
+    //    component file carried for the purpose would be.
+    let mut mute = *record;
+    mute.state_nodes = 0;
+    let outcome = admit(&mute, supervisor, account, 1, reservations, place.reservation);
+    let want = error::pack(error::ADMISSION, error::admission::NO_STATE_TREE);
+    match outcome {
+        Err(Failure::Admission(code)) if code == want => taken += 1,
+        Err(why) => return Err(why),
+        Ok(()) => return Err(Failure::Admission(want)),
+    }
+
     Ok(taken)
 }
 
@@ -2179,6 +2555,24 @@ fn admit(
     reservations: &Reservations,
     kept: Option<Grant>,
 ) -> Result<(), Failure> {
+    // A component that publishes nothing is refused rather than tolerated, and
+    // it is refused **first** — before the reservation is even tested, because
+    // this is the one check in the function that reads nothing but the record.
+    // RFC 0013 puts a tree in every component and this is the line that makes
+    // *every* mean every: the declaration is in the manifest, so the refusal
+    // costs nothing and happens before a frame is spent, and a component that
+    // got past here can be read whether or not anybody remembers to look.
+    //
+    // `ADMISSION` and not `ARGUMENT`, for the reason `admission::NO_STATE_TREE`
+    // gives: the record is well formed and the supply is sound. What is missing
+    // is something a supervisor requires of anything it will host, which is
+    // where every other admission refusal is decided.
+    if record.state_nodes().is_empty() {
+        return Err(Failure::Admission(error::pack(
+            error::ADMISSION,
+            error::admission::NO_STATE_TREE,
+        )));
+    }
     // A place that already holds the grant this record's demand was admitted
     // for is not asking for a second one, and testing it would refuse it its
     // own cores. `Grant::answers` compares what the record declares rather than
@@ -2488,8 +2882,17 @@ fn tear_down(
     account: &Account,
     why: u64,
     report: &mut Report,
+    tree: &crate::state::Tree,
 ) -> Result<(u32, u32, u32, u32), Failure> {
     let mut withdrawn = (0, 0, 0, 0);
+    // 0. Take the mount out of the frame's root, and take it out *first*. The
+    //    frame this place's occupant published into is about to go back to the
+    //    account and be handed to the next instance, so a root still naming it
+    //    would be a reader following one place's mount into another
+    //    component's live tree. Outside the branch below for the same reason
+    //    step 5 is: an empty place has nothing mounted, and clearing a word
+    //    that is already zero costs one store.
+    unmount(tree, place);
     if let Some(mut occupant) = place.occupant.take() {
         // 1. Revoke the table. Every slot, in slot order, and the mappings a
         //    revoked capability authorised go with the names — which for this

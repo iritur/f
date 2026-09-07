@@ -390,6 +390,22 @@ pub mod error {
         /// Added by E1-B08 (RFC 0038), which is where a core first belongs to
         /// anything that could be asked to give it back.
         pub const RESERVED: u16 = 6;
+        /// The manifest declares no state tree, so nothing this component did
+        /// could ever be read from outside it.
+        ///
+        /// In [`super::ADMISSION`] and not [`super::ARGUMENT`], and the
+        /// distinction is [`MEMORY`]'s: the record is well formed and the
+        /// supply is sound. What is missing is something the component has to
+        /// have declared before it starts, the way it declares what it is made
+        /// of — RFC 0013 puts a tree in *every* component, and a component with
+        /// no tree is one whose only account of itself is a serial line the
+        /// machine it runs on may not have. Refused before anything is spent,
+        /// because a component does not start and then discover nobody can see
+        /// it. Detail: none; the refusal is the whole of the finding.
+        ///
+        /// Added by E1-B15, which is the task that made RFC 0013's *every*
+        /// mean every. RFC 0065.
+        pub const NO_STATE_TREE: u16 = 7;
     }
 
     /// Codes within [`RESOURCE`].

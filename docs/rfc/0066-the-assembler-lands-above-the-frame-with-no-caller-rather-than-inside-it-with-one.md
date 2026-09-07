@@ -66,7 +66,7 @@ deliberately not the module, which is the input — and `cargo xtask generation`
 instantiates its own output twice and prints the digest, so the claim holds for
 this tree's real generation rather than only for a fixture. A driver failed on
 purpose leaves its subtree unstarted, two routes deep, with the boot alive and a
-report coming back. Discovery order cannot reach a topology, which is RFC 0065.
+report coming back. Discovery order cannot reach a topology, which is RFC 0067.
 `user/generation.toml`'s standing promise that its routes are *checked against
 the manifests by `E2-B05`* is paid.
 

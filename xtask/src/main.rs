@@ -10218,7 +10218,7 @@ fn lint_manifests() -> Result<(), String> {
     let mut findings = Vec::new();
     let mut pending = Vec::new();
     let mut names: BTreeMap<String, String> = BTreeMap::new();
-    // Which manifest has already claimed a part. RFC 0065: two drivers matching
+    // Which manifest has already claimed a part. RFC 0067: two drivers matching
     // one device is refused *here*, at compile time, because the only things
     // available to resolve it at boot are a bus scan's order and the topology's
     // — and a topology decided by either is not a function of the generation
@@ -10248,7 +10248,7 @@ fn lint_manifests() -> Result<(), String> {
                      {other}; two drivers may not claim one part. Whichever bound it at boot \
                      would have been chosen by a bus scan's order or by the topology's, and a \
                      topology decided by either is not a function of the generation root — \
-                     RFC 0065",
+                     RFC 0067",
                     part.0, part.1
                 ));
             }

@@ -1,8 +1,28 @@
-# RFC 0065: A driver declares the part it binds, and the topology never inherits a scan order
+# RFC 0067: A driver declares the part it binds, and the topology never inherits a scan order
 
 - Status: accepted
 - Date: 2026-09-07
 - Affects: `docs/manifest.md` (`schema` 2 → 3, a new `[[device]]` array, hexadecimal in the value subset); `abi/src/manifest.rs` (`Binding`, `Record::binding`, `Record::devices`, `Record::read_unaligned`); `abi/src/boot.rs` (the boot module's layout moves here); `xtask/src/manifest.rs` and `xtask/src/main.rs` (`lint-manifests` gains the cross-manifest refusal); every `manifest.toml` in the tree; `user/assembler/` (new); `intent/0006-state/spec.md`'s assembler paragraph, which this implements
+
+## This entry was 0065 for a day
+
+`E2-B05` and `E1-B15` were built in parallel worktrees, neither able to see the
+other, and both needed a manifest change. Both took `0065`, both took `schema`
+2 → 3, and the collision surfaced at the merge. It is fixed here rather than
+preserved: entries in this directory are append-only because a decision that was
+taken should stay readable, and a *number assigned twice* is not a decision — it
+is two files that cannot both be found by the name they claim, which is the one
+defect append-only was never meant to protect. So `0065` stays with **a
+component declares its state tree**, which had the more references in the tree
+and therefore cost less to leave alone, and this entry moved to `0067`. `0066`
+sat between them and did not move; it is `E2-B05`'s other entry and its one
+reference to "RFC 0065" now reads 0067.
+
+There is one schema 3 and it carries both arrays. Neither declaration
+supersedes the other, and neither was weakened to fit: `Record` grew
+`[[device]]` *and* `[[state]]`, `Record::BYTES` is 2696 rather than either
+worktree's number, and each array's count byte took one of the record's three
+reserved bytes.
 
 ## Decision
 

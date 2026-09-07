@@ -415,6 +415,11 @@ mod tests {
             trace,
             log: Vec::new(),
             injected: 0,
+            // No component published anything, because no component ran: this
+            // is records assembled by hand. Empty rather than forged, so a
+            // check that ever starts reading a tree fails here loudly rather
+            // than passing against one this function invented.
+            trees: std::collections::BTreeMap::new(),
         }
     }
 

@@ -102,6 +102,96 @@ pub const MAX_BUFFER_BYTES: u32 = 64 * 1024;
 /// and are told apart by this number alone.
 const REGISTRATION: u32 = u32::MAX;
 
+/// What this component publishes about itself: RFC 0013's tree, declared once.
+///
+/// The ids are permanent and are never reused, for the reason `TODO.md` never
+/// reuses a task id — a reader comparing two runs of two commits is comparing
+/// ids and nothing else. The *names* are free to change and the numbers are
+/// not, which is the whole of why they are written down here rather than
+/// derived from a position in the array.
+///
+/// A component above the frame declares this in its `manifest.toml` and the
+/// frame writes the schema block out of it (RFC 0065). A modelled component has
+/// no manifest and no frame, so it declares the same thing in the same order
+/// here — and `crate::state::Published` lays it out with the same
+/// `f_abi::state::publish` the frame uses, so what a scenario reads is what a
+/// reader of a real component's mapping would read.
+pub mod node {
+    use crate::state::Declared;
+    use f_abi::state::{kind, unit};
+
+    /// This component, and the root everything hangs under.
+    pub const ROOT: u32 = 1;
+    /// Operations it has put on the wire. Unit: operations.
+    pub const ISSUED: u32 = 2;
+    /// Operations it will not submit again — answered or refused for good.
+    /// Unit: operations.
+    ///
+    /// *Operations this client will not submit again* and not *operations that
+    /// succeeded*, which is the reading the field it replaced already had: a
+    /// refusal the client will not retry is over, and a reader that wants the
+    /// difference has [`REFUSED`] beside it.
+    pub const COMPLETED: u32 = 3;
+    /// Buffers out with the peer right now. Unit: buffers.
+    ///
+    /// A gauge, and the one node in this tree a count of records could not
+    /// give: *how many buffers are out at this instant* is a level, and a trace
+    /// reader would have to difference two labels and hope it had them all.
+    pub const FLIGHT: u32 = 4;
+    /// Buffers taken back because the peer went away. Unit: buffers.
+    ///
+    /// Published because RFC 0024 gives a component no other way to take a
+    /// buffer back: a peer that died quietly would leave this client holding
+    /// memory it can never touch and never free, which is a hang with a clean
+    /// trace. This is the node that says it did not happen.
+    pub const RECLAIMED: u32 = 5;
+    /// Refusals the peer answered with, retried or not. Unit: operations.
+    pub const REFUSED: u32 = 6;
+    /// Whether it has said what it managed. Unit: none — a flag.
+    pub const ENDED: u32 = 7;
+
+    /// The declaration, in data-block order.
+    pub const TREE: &[Declared] = &[
+        Declared { id: ROOT, parent: 0, kind: kind::SUBTREE, unit: unit::NONE, name: b"app" },
+        Declared {
+            id: ISSUED,
+            parent: ROOT,
+            kind: kind::COUNTER,
+            unit: unit::ENTRIES,
+            name: b"issued",
+        },
+        Declared {
+            id: COMPLETED,
+            parent: ROOT,
+            kind: kind::COUNTER,
+            unit: unit::ENTRIES,
+            name: b"completed",
+        },
+        Declared {
+            id: FLIGHT,
+            parent: ROOT,
+            kind: kind::GAUGE,
+            unit: unit::ENTRIES,
+            name: b"flight",
+        },
+        Declared {
+            id: RECLAIMED,
+            parent: ROOT,
+            kind: kind::COUNTER,
+            unit: unit::ENTRIES,
+            name: b"reclaimed",
+        },
+        Declared {
+            id: REFUSED,
+            parent: ROOT,
+            kind: kind::COUNTER,
+            unit: unit::ENTRIES,
+            name: b"refused",
+        },
+        Declared { id: ENDED, parent: ROOT, kind: kind::GAUGE, unit: unit::NONE, name: b"ended" },
+    ];
+}
+
 /// A client that registers a buffer set, submits operations against it, and
 /// takes every buffer back before it stops.
 pub struct App {
@@ -129,9 +219,17 @@ pub struct App {
     /// `Idle::submit` states that obligation as the caller's; this is the
     /// caller meeting it.
     pending: VecDeque<u64>,
-    issued: u32,
-    completed: u32,
-    ended: bool,
+    /// What this component publishes about itself, and **where its counters
+    /// live**.
+    ///
+    /// It replaced three fields — `issued`, `completed` and `ended` — rather
+    /// than being added beside them, and that is RFC 0013's first property
+    /// rather than tidiness: a tree that were a copy of three `u32`s would have
+    /// a collect step, a moment at which the two could disagree, and a reason
+    /// for somebody to read the struct instead. There is no struct to read.
+    /// `E1-P02`'s `alloc` scenario asserts its response out of this and out of
+    /// nothing else, which is RFC 0013's own test of worth being taken.
+    published: crate::state::Published,
     /// Whether one operation in [`URGENT_EVERY`] carries the hard class and a
     /// deadline.
     ///
@@ -204,9 +302,7 @@ impl App {
             flight: Vec::new(),
             naming: None,
             pending: VecDeque::new(),
-            issued: 0,
-            completed: 0,
-            ended: false,
+            published: crate::state::Published::new(node::TREE),
             urgent: false,
         }
     }
@@ -272,9 +368,16 @@ impl App {
         for token in &self.pending {
             out.u64(*token);
         }
-        out.u32(self.issued);
-        out.u32(self.completed);
-        out.bool(self.ended);
+        // The tree's words, because the tree is where the counters are. A
+        // snapshot that carried three `u32`s copied out of it would be a
+        // snapshot of a projection, and `snap.rs`'s own argument says what that
+        // costs: a field that quietly did not travel produces a plausible run
+        // that diverges from the real one.
+        let words = self.published.words();
+        out.count(words.len());
+        for word in &words {
+            out.u64(*word);
+        }
     }
 
     /// Read one back, rebuilding its buffer set the way it was built.
@@ -332,9 +435,20 @@ impl App {
         let mut app =
             Self::new(who, peer, window, operations, buffer_bytes, retry_ns, depth).urgent(urgent);
         app.pending = pending;
-        app.issued = input.u32();
-        app.completed = input.u32();
-        app.ended = input.bool();
+        let words = input.count(8, "more published words than a client's tree can hold");
+        let mut published = Vec::with_capacity(words);
+        for _ in 0..words {
+            published.push(input.u64());
+        }
+        // A file describing a tree of a different shape is a file this build did
+        // not write. Refused rather than partly applied, for the reason every
+        // other bound in this function gives: a restore that took the words it
+        // recognised would produce a plausible run whose counters are somebody
+        // else's, and a plausible divergent run is worse than no snapshot.
+        if !app.published.restore(&published) {
+            input.refuse(crate::snap::Broken::Bounds("a state tree of a shape this build has not"));
+            return app;
+        }
         if !bound || input.faulted() {
             // A client that never bound a set holds no buffers, which is the
             // state it is in between `register` and the completion that answers
@@ -447,9 +561,30 @@ impl App {
     }
 
     /// How many operations completed. Unit: operations.
+    ///
+    /// Read out of the published tree rather than out of a field, because there
+    /// is no field: [`App::published`] is where this client's counters live.
     #[must_use]
-    pub const fn completed(&self) -> u32 {
-        self.completed
+    pub fn completed(&self) -> u32 {
+        self.published.get(node::COMPLETED) as u32
+    }
+
+    /// How many operations this client has put on the wire. Unit: operations.
+    #[must_use]
+    pub fn issued(&self) -> u32 {
+        self.published.get(node::ISSUED) as u32
+    }
+
+    /// Has it said what it managed?
+    #[must_use]
+    pub fn ended(&self) -> bool {
+        self.published.get(node::ENDED) != 0
+    }
+
+    /// The tree this component publishes, for a reader that wants to open it.
+    #[must_use]
+    pub fn tree(&self) -> &crate::state::Published {
+        &self.published
     }
 
     /// Ask the peer for a buffer set.
@@ -483,7 +618,7 @@ impl App {
             // outstanding, and there is no work this client can do — so it
             // finishes here rather than submitting entries naming a set it does
             // not hold, which the peer would refuse one at a time.
-            world.record(me, Self::NAME, wrote::REFUSED, cqe.user_data, cqe.ext);
+            self.refuse(world, me, cqe.user_data, cqe.ext);
             self.finish(world, me);
             return;
         };
@@ -498,13 +633,13 @@ impl App {
         // one refusal, which is what `E1-B10` measures.
         let agreed = Negotiated { version: ABI_VERSION, features: 0 };
         let Ok(set) = BufferSet::bind(naming, agreed, region) else {
-            world.record(me, Self::NAME, wrote::REFUSED, cqe.user_data, u64::MAX);
+            self.refuse(world, me, cqe.user_data, u64::MAX);
             self.finish(world, me);
             return;
         };
         let set: &'static mut BufferSet<'static, Fixed> = Box::leak(Box::new(set));
         let Ok(buffers) = set.carve::<BUFFERS>() else {
-            world.record(me, Self::NAME, wrote::REFUSED, cqe.user_data, u64::MAX);
+            self.refuse(world, me, cqe.user_data, u64::MAX);
             self.finish(world, me);
             return;
         };
@@ -523,9 +658,9 @@ impl App {
         while u32::try_from(self.flight.len()).unwrap_or(u32::MAX) < self.window {
             let token = if let Some(again) = self.pending.pop_front() {
                 again
-            } else if self.issued < self.operations {
-                let fresh = self.token(self.issued);
-                self.issued = self.issued.saturating_add(1);
+            } else if self.issued() < self.operations {
+                let fresh = self.token(self.issued());
+                self.published.add(node::ISSUED, 1);
                 fresh
             } else {
                 break;
@@ -588,6 +723,7 @@ impl App {
             match buffer.submit(&mut post, entry) {
                 Ok((lent, _rang)) => {
                     self.flight.push(lent);
+                    self.republish_flight();
                     world.record(
                         me,
                         Self::NAME,
@@ -639,14 +775,14 @@ impl App {
                     // likely. Not a peer's doing and not a retry: recorded, and
                     // the client stops rather than repeating it forever.
                     self.idle.push(back);
-                    world.record(me, Self::NAME, wrote::REFUSED, token, refused_as(&refused));
-                    self.ended = true;
+                    self.refuse(world, me, token, refused_as(&refused));
+                    self.published.set(node::ENDED, 1);
                     return;
                 }
             }
         }
 
-        if self.issued == self.operations && self.flight.is_empty() && self.pending.is_empty() {
+        if self.issued() == self.operations && self.flight.is_empty() && self.pending.is_empty() {
             self.finish(world, me);
         }
     }
@@ -671,13 +807,14 @@ impl App {
             }
         }
         self.flight = rest;
+        self.republish_flight();
 
         let Some(buffer) = returned else {
             // R04: a completion for a token this client does not hold is
             // recorded rather than ignored. It changes the digest, which fails
             // the comparison this whole crate exists to make — and a peer that
             // answered a token nobody lent is a peer with a bug worth seeing.
-            world.record(me, Self::NAME, wrote::REFUSED, cqe.user_data, u64::MAX);
+            self.refuse(world, me, cqe.user_data, u64::MAX);
             return;
         };
 
@@ -690,7 +827,7 @@ impl App {
         self.idle.push(buffer);
 
         if let Some((domain, code)) = cqe.error() {
-            world.record(me, Self::NAME, wrote::REFUSED, cqe.user_data, packed(domain, code));
+            self.refuse(world, me, cqe.user_data, packed(domain, code));
             if domain == error::RESOURCE {
                 // The peer is busy rather than broken, so this is back-pressure
                 // and the answer is to wait and submit again — with this token,
@@ -707,9 +844,9 @@ impl App {
             // the operation is over: `completed` is *operations this client will
             // not submit again*, not *operations that succeeded*, and a trace
             // reader has the refusal record beside it to tell the two apart.
-            self.completed = self.completed.saturating_add(1);
+            self.published.add(node::COMPLETED, 1);
         } else {
-            self.completed = self.completed.saturating_add(1);
+            self.published.add(node::COMPLETED, 1);
             world.record(
                 me,
                 Self::NAME,
@@ -737,23 +874,46 @@ impl App {
         for lent in self.flight.drain(..) {
             let token = lent.token();
             self.idle.push(lent.reclaim(gone));
+            self.published.add(node::RECLAIMED, 1);
             world.record(me, Self::NAME, wrote::RECLAIM, token, 0);
         }
+        self.republish_flight();
         self.finish(world, me);
+    }
+
+    /// Record a refusal and publish it, in one call.
+    ///
+    /// Six call sites wrote the record and none of them wrote the node, which
+    /// is how a trace and a tree come to disagree about one event. RFC 0013's
+    /// whole economy is that a claim and a live reading are the same number,
+    /// and two statements at six sites is the cheapest way to lose it.
+    fn refuse(&mut self, world: &mut World, me: ActorId, token: u64, detail: u64) {
+        self.published.add(node::REFUSED, 1);
+        world.record(me, Self::NAME, wrote::REFUSED, token, detail);
+    }
+
+    /// Publish how many buffers are out.
+    ///
+    /// A gauge, so it is set rather than added, and it is set from
+    /// `self.flight` rather than tracked beside it — the list *is* the state,
+    /// and a counter kept alongside it is a second opinion that can be wrong.
+    fn republish_flight(&mut self) {
+        let out = u64::try_from(self.flight.len()).unwrap_or(u64::MAX);
+        self.published.set(node::FLIGHT, out);
     }
 
     /// Say what this client managed, once.
     fn finish(&mut self, world: &mut World, me: ActorId) {
-        if self.ended {
+        if self.ended() {
             return;
         }
-        self.ended = true;
+        self.published.set(node::ENDED, 1);
         world.record(
             me,
             Self::NAME,
             wrote::FINISHED,
             u64::from(self.who),
-            u64::from(self.completed),
+            u64::from(self.completed()),
         );
     }
 }
@@ -761,6 +921,10 @@ impl App {
 impl Actor for App {
     fn name(&self) -> &'static str {
         Self::NAME
+    }
+
+    fn published(&self) -> Option<&[u8]> {
+        Some(self.published.bytes())
     }
 
     fn deliver(&mut self, world: &mut World, me: ActorId, message: Message) {

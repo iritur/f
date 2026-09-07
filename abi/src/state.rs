@@ -62,6 +62,22 @@ pub mod kind {
     pub const COUNTER: u8 = 2;
     /// A value that goes both ways.
     pub const GAUGE: u8 = 3;
+    /// Another published region, named by the physical address of its first
+    /// byte. Zero is *nothing is mounted here*.
+    ///
+    /// This is the node that makes "one root" a fact rather than a diagram. A
+    /// tree is a map of memory and a mount is the only kind of node that names
+    /// memory *outside* the region it lives in, which is why it is a kind of
+    /// its own rather than a gauge whose documentation asks to be believed: a
+    /// reader that follows a `GAUGE` because a comment told it to is a reader
+    /// that will one day follow a counter.
+    ///
+    /// It is an address and not a handle, because a mount is read by whoever
+    /// can already map the region — the frame, and a process the frame has
+    /// granted the child's frame to. A mount that carried authority would be a
+    /// state tree handing out capabilities, which is the control plane RFC 0013
+    /// declines to become.
+    pub const MOUNT: u8 = 4;
 }
 
 /// What a node's word is counted in.
@@ -91,6 +107,22 @@ pub mod unit {
     /// asked for and an event is something a subsystem did to itself, and a
     /// reader charting the two together would be adding a demand to a cost.
     pub const EVENTS: u8 = 8;
+    /// A physical address.
+    ///
+    /// Not a quantity, and the unit exists to say so: a reader that summed two
+    /// of these, or charted one against a byte count, would be adding two
+    /// places together. [`super::kind::MOUNT`] is the only kind that carries
+    /// one today, and a node that carries an address under any other unit is a
+    /// node whose reader has been told the wrong thing.
+    pub const ADDRESS: u8 = 9;
+    /// Published state trees, counted one at a time.
+    ///
+    /// Distinct from [`EVENTS`] because a mounted tree is a *thing that is
+    /// there*, not something that happened: a reader charting the two together
+    /// would be adding an inventory to a rate.
+    pub const TREES: u8 = 10;
+    /// Nodes in a tree, or in a set of them.
+    pub const NODES: u8 = 11;
 }
 
 /// The first cache line of a published region.
@@ -474,6 +506,48 @@ impl Reader {
         self.header.generation
     }
 
+    /// The schema block, as this reader validated it.
+    ///
+    /// A reader that can name a node has to be able to look at the description
+    /// it named it by; and a reader that *cannot* name one still sees it here,
+    /// which is what makes RFC 0013's skip-and-count honest — the count is over
+    /// entries this method returned, not over nodes somebody guessed at.
+    #[must_use]
+    #[inline]
+    pub fn schema(&self) -> &[SchemaEntry] {
+        // SAFETY: `Reader::at` established, before this value existed, that the
+        // schema block is `nodes` 32-byte entries at a 32-byte aligned offset
+        // inside the mapping. The lifetime is this reader's, which is the
+        // lifetime of the caller's claim about the mapping.
+        unsafe {
+            core::slice::from_raw_parts(
+                (self.base + u64::from(self.header.schema_offset)) as *const SchemaEntry,
+                self.header.nodes as usize,
+            )
+        }
+    }
+
+    /// The word the node `id` names, read once.
+    ///
+    /// `None` for an id this tree does not carry, which is a reader asking
+    /// about a node that is not there rather than an error: two builds of a
+    /// reader differ in exactly this way, and RFC 0013's whole position on
+    /// unknown nodes is that the older one keeps working.
+    ///
+    /// Atomic per node and promising nothing about a second call, which is the
+    /// decision and not a limitation: a caller that needs two numbers from one
+    /// instant needs one node holding both.
+    #[must_use]
+    #[inline]
+    pub fn value(&self, id: u32) -> Option<u64> {
+        let index = self.schema().iter().position(|entry| entry.id == id)?;
+        let at = self.base + u64::from(self.header.data_offset) + index as u64 * u64::from(WORD);
+        // SAFETY: `index` is a position in the validated schema, so it is below
+        // `nodes`, and `Reader::at` established that `nodes` eight-byte aligned
+        // words at `data_offset` are inside the mapping.
+        Some(unsafe { (at as *const u64).read_volatile() })
+    }
+
     /// The snapshot hash of the tree as it stands.
     ///
     /// Each word is read exactly once and volatilely — atomic per node, and
@@ -495,6 +569,268 @@ impl Reader {
         }
         hash
     }
+}
+
+/// Lay a header and a schema block out in a region a caller owns, and answer
+/// how many bytes the whole tree occupies.
+///
+/// # Why this exists beside [`Reader`] rather than inside it
+///
+/// Because a publisher and a reader are two different jobs and only one of them
+/// needs an address. [`Reader`] binds to a mapping somebody else wrote and is
+/// the frame's tool; this writes bytes into a slice and is everybody's — the
+/// frame uses it over a frame it just retyped, and a host tool uses it over a
+/// buffer. One serialiser and one deserialiser for the format, which is the
+/// whole point: the failure mode of a wire format with two writers is two
+/// writers that agree until the day they do not.
+///
+/// Nothing here is `unsafe` and nothing here needs to be. Every field goes out
+/// through `to_le_bytes`, so a caller above the frame can publish a tree
+/// without the frame's permission to write one — which is what makes RFC 0013's
+/// *every component publishes* something a component can actually do.
+///
+/// The data block is zeroed, because a published word nobody has written is
+/// zero and not whatever was in the buffer.
+///
+/// # Errors
+///
+/// `ARGUMENT/MALFORMED_HEADER` for a schema this function cannot lay out —
+/// empty, or longer than the region — and whatever [`validate`] refuses the
+/// schema itself with.
+pub fn publish(out: &mut [u8], schema: &[SchemaEntry]) -> Result<usize, i32> {
+    let malformed = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
+    let nodes = u32::try_from(schema.len()).map_err(|_| malformed)?;
+    let head = core::mem::size_of::<TreeHeader>() as u32;
+    let data_at = head.checked_add(nodes.checked_mul(32).ok_or(malformed)?).ok_or(malformed)?;
+    let total = data_at.checked_add(nodes.checked_mul(WORD).ok_or(malformed)?).ok_or(malformed)?;
+    let extent = u32::try_from(out.len()).unwrap_or(u32::MAX);
+
+    let header = TreeHeader {
+        magic: TREE_MAGIC,
+        version: TREE_VERSION,
+        nodes,
+        schema_offset: head,
+        data_offset: data_at,
+        generation: 0,
+        _reserved: [0; 3],
+    };
+    // Checked against the *region* and not against the sum above, so a caller
+    // that handed over a short buffer is refused here rather than found out by
+    // whoever reads what was written into the next thing along.
+    header.check(extent)?;
+    validate(&header, schema)?;
+
+    let Some(region) = out.get_mut(..total as usize) else { return Err(malformed) };
+    region.fill(0);
+    put(region, 0, &header.magic.to_le_bytes())?;
+    put(region, 8, &header.version.to_le_bytes())?;
+    put(region, 12, &header.nodes.to_le_bytes())?;
+    put(region, 16, &header.schema_offset.to_le_bytes())?;
+    put(region, 20, &header.data_offset.to_le_bytes())?;
+    put(region, 24, &header.generation.to_le_bytes())?;
+
+    for (index, entry) in schema.iter().enumerate() {
+        let at = head as usize + index * 32;
+        put(region, at, &entry.id.to_le_bytes())?;
+        put(region, at + 4, &entry.parent.to_le_bytes())?;
+        put(region, at + 8, &entry.offset.to_le_bytes())?;
+        put(region, at + 12, &[entry.kind, entry.unit, entry.name_len, 0])?;
+        put(region, at + 16, &entry.name)?;
+    }
+    Ok(total as usize)
+}
+
+/// One field into a region, refusing rather than truncating.
+fn put(region: &mut [u8], at: usize, bytes: &[u8]) -> Result<(), i32> {
+    let malformed = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
+    let slot = region.get_mut(at..at + bytes.len()).ok_or(malformed)?;
+    slot.copy_from_slice(bytes);
+    Ok(())
+}
+
+/// Four bytes out of a region, as a `u32`.
+fn get32(region: &[u8], at: usize) -> Option<u32> {
+    let bytes: [u8; 4] = region.get(at..at + 4)?.try_into().ok()?;
+    Some(u32::from_le_bytes(bytes))
+}
+
+/// A published tree in bytes a caller already holds, read the way [`Reader`]
+/// reads one in a mapping.
+///
+/// The same format, the same validation and the same hash — [`TreeHeader::check`],
+/// [`validate`] and [`fold`] are called from here and from there, so the two
+/// cannot drift about what a tree *is*. What differs is only where the bytes
+/// come from: a mapping the frame was given, or a buffer a component above the
+/// frame owns. `tests::a_region_and_a_reader_over_one_set_of_bytes_agree` is
+/// what holds the two together, and it is the test to look at first if this
+/// type is ever changed.
+///
+/// It is a borrow and not a copy, deliberately: a snapshot of a tree is a
+/// snapshot, and a type that quietly took one would make *read once, atomic per
+/// node* into *read whenever, consistent across the tree*, which is the promise
+/// RFC 0013 declines to make.
+pub struct Region<'bytes> {
+    bytes: &'bytes [u8],
+    header: TreeHeader,
+}
+
+/// The most nodes [`Region::open`] will decode, and the size of the buffer it
+/// puts on the caller's stack while it does. Unit: nodes.
+///
+/// Sixty-four, which is two kibibytes of `SchemaEntry` and is the number that
+/// decides where this type may be called from. It is comfortably above the
+/// frame's own tree and four times `manifest::STATE_NODES_MAX`, which is what a
+/// component may declare — so nothing in this tree can publish a region this
+/// refuses.
+///
+/// A bound rather than an allocation, because `abi` is `no_std` and has no
+/// allocator; and stated as a constant rather than left as a literal, because
+/// what it really bounds is *the stack of whoever calls this*. A caller inside
+/// the frame would be spending two kibibytes of a kernel stack, which is why
+/// the frame uses [`Reader`] instead — the one that needs no buffer because a
+/// mapping is already aligned.
+///
+/// *Reversal:* a tree wider than this that somebody legitimately wants to read
+/// from bytes. At that point the schema is validated in place against an
+/// unaligned slice, which means `validate` growing a byte-oriented sibling —
+/// and two validators for one format is exactly what this constant is buying
+/// its way out of.
+pub const REGION_NODES_MAX: usize = 64;
+
+impl<'bytes> Region<'bytes> {
+    /// Bind to bytes that hold a tree.
+    ///
+    /// # Errors
+    ///
+    /// `ARGUMENT/MALFORMED_HEADER` for anything [`TreeHeader::check`] or
+    /// [`validate`] refuses.
+    pub fn open(bytes: &'bytes [u8]) -> Result<Self, i32> {
+        let malformed = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
+        let extent = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+        if bytes.len() < core::mem::size_of::<TreeHeader>() {
+            return Err(malformed);
+        }
+        let magic: [u8; 8] = bytes.get(..8).ok_or(malformed)?.try_into().map_err(|_| malformed)?;
+        let header = TreeHeader {
+            magic: u64::from_le_bytes(magic),
+            version: get32(bytes, 8).ok_or(malformed)?,
+            nodes: get32(bytes, 12).ok_or(malformed)?,
+            schema_offset: get32(bytes, 16).ok_or(malformed)?,
+            data_offset: get32(bytes, 20).ok_or(malformed)?,
+            generation: get32(bytes, 24).ok_or(malformed)?,
+            _reserved: [
+                get32(bytes, 28).ok_or(malformed)?,
+                get32(bytes, 32).ok_or(malformed)?,
+                get32(bytes, 36).ok_or(malformed)?,
+            ],
+        };
+        header.check(extent)?;
+        let region = Self { bytes, header };
+        // The schema is decoded and judged before the region is handed back, so
+        // a caller that got one may index it without checking anything again —
+        // which is the only reading of "validated" worth having, and is the
+        // sentence `Record::read` already makes about a manifest.
+        //
+        // Decoded into a buffer rather than validated in place, because
+        // `validate` takes a slice of `SchemaEntry` and these bytes may be at
+        // any alignment. Sharing that function rather than re-implementing its
+        // seven checks here is the whole reason this type can be trusted beside
+        // `Reader`, and [`REGION_NODES_MAX`] is what it costs.
+        let mut entries = [SchemaEntry::ZERO; REGION_NODES_MAX];
+        let nodes = header.nodes as usize;
+        if nodes > entries.len() {
+            return Err(malformed);
+        }
+        for (index, slot) in entries.iter_mut().take(nodes).enumerate() {
+            *slot = region.entry(index).ok_or(malformed)?;
+        }
+        validate(&header, entries.get(..nodes).ok_or(malformed)?)?;
+        Ok(region)
+    }
+
+    /// How many nodes the tree describes. Unit: nodes.
+    #[must_use]
+    pub fn nodes(&self) -> u32 {
+        self.header.nodes
+    }
+
+    /// The schema entry at `index`, decoded.
+    #[must_use]
+    pub fn entry(&self, index: usize) -> Option<SchemaEntry> {
+        let at = self.header.schema_offset as usize + index * 32;
+        if index >= self.header.nodes as usize {
+            return None;
+        }
+        let mut entry = SchemaEntry::ZERO;
+        entry.id = get32(self.bytes, at)?;
+        entry.parent = get32(self.bytes, at + 4)?;
+        entry.offset = get32(self.bytes, at + 8)?;
+        let tail = self.bytes.get(at + 12..at + 16)?;
+        entry.kind = *tail.first()?;
+        entry.unit = *tail.get(1)?;
+        entry.name_len = *tail.get(2)?;
+        entry._reserved = *tail.get(3)?;
+        entry.name.copy_from_slice(self.bytes.get(at + 16..at + 32)?);
+        Some(entry)
+    }
+
+    /// The index of the node `id` names.
+    #[must_use]
+    pub fn index_of(&self, id: u32) -> Option<usize> {
+        (0..self.header.nodes as usize)
+            .find(|index| self.entry(*index).is_some_and(|entry| entry.id == id))
+    }
+
+    /// The word the node `id` names, or `None` for an id this tree does not
+    /// carry.
+    #[must_use]
+    pub fn value(&self, id: u32) -> Option<u64> {
+        self.word(self.index_of(id)?)
+    }
+
+    /// The word at `index` in the data block.
+    #[must_use]
+    pub fn word(&self, index: usize) -> Option<u64> {
+        if index >= self.header.nodes as usize {
+            return None;
+        }
+        let at = self.header.data_offset as usize + index * WORD as usize;
+        let bytes: [u8; 8] = self.bytes.get(at..at + 8)?.try_into().ok()?;
+        Some(u64::from_le_bytes(bytes))
+    }
+
+    /// The snapshot hash of the tree as it stands.
+    #[must_use]
+    pub fn snapshot(&self) -> u64 {
+        let mut hash = SEED;
+        for index in 0..self.header.nodes as usize {
+            hash = fold(hash, self.word(index).unwrap_or(0));
+        }
+        hash
+    }
+}
+
+/// Write a word into a published region.
+///
+/// The publisher's half of [`Region`], and it is a free function rather than a
+/// method on a `RegionMut` for one reason: a publisher writes into a region it
+/// *owns*, so it does not need the schema decoded and re-validated on every
+/// store. What it needs is the offset, and the offset is the index — the words
+/// tile the data block in schema order and [`validate`] has already required
+/// exactly that.
+///
+/// # Errors
+///
+/// `ARGUMENT/MALFORMED_HEADER` for an index past the tree or a region too short
+/// to hold the word it names.
+pub fn write_word(region: &mut [u8], index: usize, value: u64) -> Result<(), i32> {
+    let malformed = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
+    let nodes = get32(region, 12).ok_or(malformed)? as usize;
+    let data_at = get32(region, 20).ok_or(malformed)? as usize;
+    if index >= nodes {
+        return Err(malformed);
+    }
+    put(region, data_at + index * WORD as usize, &value.to_le_bytes())
 }
 
 #[cfg(test)]
@@ -633,5 +969,93 @@ mod tests {
         let entry = SchemaEntry::new(1, 0, 0, kind::GAUGE, unit::BYTES, b"a-very-long-node-name");
         assert_eq!(entry.name_len, 16);
         assert_eq!(entry.label(), b"a-very-long-node");
+    }
+
+    /// A buffer big enough for any tree these tests publish, aligned the way a
+    /// mapping is so that [`Reader::at`] can be pointed at it.
+    ///
+    /// `#[repr(C, align(64))]` rather than a heap allocation, because this
+    /// crate is `no_std` and because a buffer that happened to be aligned would
+    /// make the alignment check below pass for the wrong reason.
+    #[repr(C, align(64))]
+    struct Buffer([u8; 512]);
+
+    /// The format has one writer and two readers, and the two readers agree.
+    ///
+    /// **The test to look at first if `Region` or `Reader` is ever changed.**
+    /// They exist because a publisher above the frame owns bytes and the frame
+    /// owns a mapping, and the failure mode of that split is not a crash: it is
+    /// two builds that agree about every tree anybody has written so far. So
+    /// the same bytes are read both ways and every answer is compared — the
+    /// node count, every schema entry, every word, and the snapshot, which is
+    /// the one number two whole-system states are compared by.
+    #[test]
+    fn a_region_and_a_reader_over_one_set_of_bytes_agree() {
+        let mut buffer = Buffer([0xAA; 512]);
+        let wrote = publish(&mut buffer.0, &schema()).expect("a sound schema was refused");
+        assert_eq!(wrote, 64 + 3 * 32 + 3 * 8);
+
+        // Words a publisher wrote, through the free function a publisher uses.
+        for (index, value) in [11u64, 0, u64::MAX].into_iter().enumerate() {
+            write_word(&mut buffer.0, index, value).expect("a word inside the tree was refused");
+        }
+        assert_eq!(write_word(&mut buffer.0, 3, 1), Err(malformed()), "a word past the tree");
+
+        let region = Region::open(&buffer.0).expect("bytes this module wrote were unreadable");
+        let reader = Reader::at(core::ptr::from_ref(&buffer.0).cast::<u8>() as u64, 512)
+            .expect("the same bytes were unreadable through a mapping");
+
+        assert_eq!(region.nodes(), reader.nodes(), "the two readers count differently");
+        assert_eq!(region.snapshot(), reader.snapshot(), "the two readers hash differently");
+        for (index, entry) in reader.schema().iter().enumerate() {
+            let seen = region.entry(index).expect("a node the mapping has and the bytes do not");
+            assert_eq!((seen.id, seen.parent, seen.offset), (entry.id, entry.parent, entry.offset));
+            assert_eq!((seen.kind, seen.unit), (entry.kind, entry.unit));
+            assert_eq!(seen.label(), entry.label());
+        }
+        for entry in reader.schema() {
+            assert_eq!(region.value(entry.id), reader.value(entry.id), "node {}", entry.id);
+        }
+        assert_eq!(region.value(11), None, "an id no tree carries was answered");
+        assert_eq!(region.value(3), Some(u64::MAX), "the high word did not survive");
+    }
+
+    /// A region is refused for everything a mapping is refused for, which is
+    /// what stops the byte reader being the lenient one.
+    ///
+    /// The asymmetry would be invisible and expensive: a component could
+    /// publish a tree its own tools read and the frame refuses, and the first
+    /// anybody would know is a mount that failed on a machine.
+    #[test]
+    fn a_region_is_refused_for_everything_a_mapping_is() {
+        let mut buffer = Buffer([0; 512]);
+        publish(&mut buffer.0, &schema()).expect("a sound schema was refused");
+        assert!(Region::open(&buffer.0).is_ok(), "the control was refused");
+
+        for (what, at, byte) in [
+            ("an unwritten page", 0, 0),
+            ("a format this build does not speak", 8, 9),
+            ("a tree with no nodes", 12, 0),
+            ("a reserved word carrying something", 28, 1),
+        ] {
+            let mut bent = Buffer([0; 512]);
+            publish(&mut bent.0, &schema()).expect("a sound schema was refused");
+            bent.0[at] = byte;
+            assert_eq!(Region::open(&bent.0).err(), Some(malformed()), "{what} was accepted");
+        }
+        // And a buffer too short for the tree its own header describes.
+        assert_eq!(Region::open(&buffer.0[..96]).err(), Some(malformed()), "a truncated region");
+        // A schema that is not a tree, refused by the publisher rather than
+        // written and found later: `publish` runs `validate` before a byte
+        // moves, so a caller cannot lay out a region a reader will refuse.
+        let mut gap = schema();
+        gap[2].offset = 24;
+        assert_eq!(publish(&mut buffer.0, &gap).err(), Some(malformed()), "a word no node names");
+        // A region that cannot hold what it was asked to lay out.
+        assert_eq!(publish(&mut [0u8; 64], &schema()).err(), Some(malformed()), "a short region");
+    }
+
+    fn malformed() -> i32 {
+        error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER)
     }
 }

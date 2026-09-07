@@ -192,6 +192,74 @@ pub mod node {
     /// happen. What was wrong was not where the line was drawn; it was that
     /// three vectors were on neither side of it. RFC 0038.
     pub const RUNTIME_INTERRUPTS: u32 = 31;
+    /// Every component the supervisor holds a place for.
+    ///
+    /// The root of the *other* trees, and the node that makes RFC 0013's one
+    /// root a fact rather than a diagram: a component publishes into a frame of
+    /// its own, and the four mounts below are how a reader holding this tree
+    /// reaches those without being told separately where they are.
+    pub const COMPONENTS: u32 = 32;
+    /// Component trees mounted right now.
+    ///
+    /// A gauge and not a counter, because a place empties: this is how many of
+    /// the mounts below are non-zero at the instant it is read, and it is zero
+    /// at the end of a boot in which every place was torn down on purpose.
+    pub const COMPONENTS_MOUNTED: u32 = 33;
+    /// Component trees the frame mounted and read back over this boot.
+    ///
+    /// The counter beside the gauge, and it is here for [`MEMORY_FORCED`]'s
+    /// reason one subsystem over: a gauge that is zero at the end of a boot is
+    /// indistinguishable from a gauge nothing ever moved. This one says how many
+    /// times a component published a tree the frame could read.
+    pub const COMPONENTS_PUBLISHED: u32 = 34;
+    /// Nodes across every tree the frame mounted, summed as it mounted them.
+    ///
+    /// Published because *a tree was mounted* and *a tree with something in it
+    /// was mounted* are two claims, and a mount whose child declared one node
+    /// would satisfy the first while saying nothing.
+    pub const COMPONENTS_NODES: u32 = 35;
+    /// Spawns refused because the manifest declared no state tree.
+    ///
+    /// `ADMISSION/NO_STATE_TREE`, RFC 0065, and the node exists for the reason
+    /// every provoked counter in this module exists: a refusal nobody has
+    /// watched happen is indistinguishable from one that cannot. The boot drives
+    /// it on purpose against a record whose declaration has been emptied, so a
+    /// build in which the refusal had been lost publishes zero here and fails.
+    pub const COMPONENTS_REFUSED: u32 = 36;
+    /// Where the first place's occupant publishes. Zero when the place is empty.
+    ///
+    /// Four of them, one per place, and they are separate nodes rather than one
+    /// array because a node is a machine word and RFC 0013 has no other shape:
+    /// an array would be a node whose reader has to know a length, and a length
+    /// read separately from the data it describes is exactly the cross-node
+    /// consistency this format refuses to promise.
+    pub const COMPONENT_TREE_0: u32 = 37;
+    /// The second place's.
+    pub const COMPONENT_TREE_1: u32 = 38;
+    /// The third place's.
+    pub const COMPONENT_TREE_2: u32 = 39;
+    /// The fourth place's.
+    pub const COMPONENT_TREE_3: u32 = 40;
+
+    /// The mount node the place at `slot` publishes into, or `None` for a slot
+    /// this build has no node for.
+    ///
+    /// A function rather than an array, because the ids are the wire and an
+    /// array would make a *position* the wire — which is the mistake this
+    /// module's first paragraph is about. A build that grew a fifth place would
+    /// mint a fifth id here and find the `None` arm at the call site rather than
+    /// silently publishing into the fourth.
+    #[must_use]
+    pub const fn mount(slot: usize) -> Option<u32> {
+        match slot {
+            0 => Some(COMPONENT_TREE_0),
+            1 => Some(COMPONENT_TREE_1),
+            2 => Some(COMPONENT_TREE_2),
+            3 => Some(COMPONENT_TREE_3),
+            _ => None,
+        }
+    }
+
     /// A node of a kind this build does not name, published on purpose.
     ///
     /// RFC 0013's one deliberate exception to R04 is that a reader skips and
@@ -203,7 +271,7 @@ pub mod node {
 }
 
 /// How many nodes this build publishes.
-pub const NODES: usize = 32;
+pub const NODES: usize = 41;
 
 /// The schema, written once and never again for a generation.
 ///
@@ -375,8 +443,84 @@ const SCHEMA: [SchemaEntry; NODES] = [
         unit::EVENTS,
         b"interrupts",
     ),
+    // The components, and the four mounts under them. RFC 0065. These sit
+    // before the reserved node and after everything else for the reason the
+    // three allocation paths above give: ids ascend in schema order, ids are
+    // permanent, and sixty-three was minted before thirty-two was.
+    SchemaEntry::new(
+        node::COMPONENTS,
+        node::ROOT,
+        31 * WORD,
+        kind::SUBTREE,
+        unit::NONE,
+        b"components",
+    ),
+    SchemaEntry::new(
+        node::COMPONENTS_MOUNTED,
+        node::COMPONENTS,
+        32 * WORD,
+        kind::GAUGE,
+        unit::TREES,
+        b"mounted",
+    ),
+    SchemaEntry::new(
+        node::COMPONENTS_PUBLISHED,
+        node::COMPONENTS,
+        33 * WORD,
+        kind::COUNTER,
+        unit::TREES,
+        b"published",
+    ),
+    SchemaEntry::new(
+        node::COMPONENTS_NODES,
+        node::COMPONENTS,
+        34 * WORD,
+        kind::COUNTER,
+        unit::NODES,
+        b"nodes",
+    ),
+    SchemaEntry::new(
+        node::COMPONENTS_REFUSED,
+        node::COMPONENTS,
+        35 * WORD,
+        kind::COUNTER,
+        unit::EVENTS,
+        b"refused",
+    ),
+    SchemaEntry::new(
+        node::COMPONENT_TREE_0,
+        node::COMPONENTS,
+        36 * WORD,
+        kind::MOUNT,
+        unit::ADDRESS,
+        b"place0",
+    ),
+    SchemaEntry::new(
+        node::COMPONENT_TREE_1,
+        node::COMPONENTS,
+        37 * WORD,
+        kind::MOUNT,
+        unit::ADDRESS,
+        b"place1",
+    ),
+    SchemaEntry::new(
+        node::COMPONENT_TREE_2,
+        node::COMPONENTS,
+        38 * WORD,
+        kind::MOUNT,
+        unit::ADDRESS,
+        b"place2",
+    ),
+    SchemaEntry::new(
+        node::COMPONENT_TREE_3,
+        node::COMPONENTS,
+        39 * WORD,
+        kind::MOUNT,
+        unit::ADDRESS,
+        b"place3",
+    ),
     // Deliberately a kind nothing names. See `node::RESERVED_KIND`.
-    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 31 * WORD, 0xEE, unit::NONE, b"reserved"),
+    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 40 * WORD, 0xEE, unit::NONE, b"reserved"),
 ];
 
 /// Where the schema block starts: immediately after the header, on the
@@ -520,6 +664,83 @@ impl Tree {
         unsafe { slot.write_volatile(value) };
     }
 
+    /// The word the node `id` names, read once, or `None` for an id this build
+    /// does not publish.
+    ///
+    /// The publishing side's counterpart to `f_abi::state::Reader::value`, and
+    /// it exists so that the frame can read its own tree the way anybody else
+    /// would rather than from whatever it happened to have in a register. That
+    /// distinction is the whole of why a mount is checked by reading it back.
+    #[must_use]
+    pub fn value(&self, id: u32) -> Option<u64> {
+        let index = SCHEMA.iter().position(|entry| entry.id == id)?;
+        self.read().get(index).copied()
+    }
+
+    /// Add to the node `id` names.
+    ///
+    /// Read, add, write — three instructions and not one, and that is sound
+    /// here for the reason nothing under `kernel/` locks: the tree is written
+    /// only from the boot processor, and a second writer would be the fifth
+    /// cross-core word RFC 0016 says needs an argument. A reader on another
+    /// core sees one value or the other and never a torn one, which is all the
+    /// format promises.
+    ///
+    /// Saturating, because a counter that wrapped would report a small number
+    /// for a large one — which is the shape of lie a counter exists not to
+    /// tell — and a saturated one reports its own ceiling, which a reader can
+    /// recognise.
+    pub fn add(&self, id: u32, delta: u64) {
+        let Some(index) = SCHEMA.iter().position(|entry| entry.id == id) else { return };
+        let Some(current) = self.read().get(index).copied() else { return };
+        self.set(id, current.saturating_add(delta));
+    }
+
+    /// Put a component's published region under this tree's `components`
+    /// subtree, or take it out again with a `physical` of zero.
+    ///
+    /// **The frame reads the child before it names it.** A mount whose word was
+    /// written from what the spawn intended rather than from what is actually
+    /// in the frame would be a root pointing at a region nobody had opened, and
+    /// the first reader to follow it would be the first to find out. So the
+    /// caller hands over what `f_abi::state::Reader::at` gave it back, which is
+    /// a value that cannot exist unless the header, the schema and every offset
+    /// in them validated — and the mount word is then the address that reader
+    /// was built from.
+    ///
+    /// Answers `false` for a slot this build has no node for, which a caller
+    /// must treat as a failure rather than as nothing: a place whose tree is
+    /// unmountable is a place whose occupant is invisible, which is the state
+    /// RFC 0065 exists to make impossible.
+    #[must_use]
+    pub fn mount(&self, slot: usize, physical: u64) -> bool {
+        let Some(id) = node::mount(slot) else { return false };
+        self.set(id, physical);
+        true
+    }
+
+    /// How many mounts are occupied. Unit: trees.
+    ///
+    /// Counted off the data block rather than kept beside it, because a count
+    /// kept beside the thing it counts is a second opinion that can be wrong —
+    /// and the whole of RFC 0013's economy is that a node names a live word
+    /// rather than a summary somebody remembered to update.
+    #[must_use]
+    pub fn mounted(&self) -> u64 {
+        let words = self.read();
+        let mut count = 0;
+        let mut slot = 0;
+        while let Some(id) = node::mount(slot) {
+            if let Some(index) = SCHEMA.iter().position(|entry| entry.id == id)
+                && words.get(index).copied().unwrap_or(0) != 0
+            {
+                count += 1;
+            }
+            slot += 1;
+        }
+        count
+    }
+
     /// Read the whole data block, once, in node-id order.
     ///
     /// The order is the schema's, which `validate` has already required to be
@@ -589,12 +810,25 @@ impl Tree {
     pub fn render(&self) {
         let words = self.read();
         for (entry, value) in self.schema().iter().zip(words) {
-            let known = matches!(entry.kind, kind::SUBTREE | kind::COUNTER | kind::GAUGE);
+            let known =
+                matches!(entry.kind, kind::SUBTREE | kind::COUNTER | kind::GAUGE | kind::MOUNT);
             crate::kprint!("  state         {:>3}  ", entry.id);
             for byte in entry.label() {
                 crate::kprint!("{}", *byte as char);
             }
-            if known {
+            if entry.kind == kind::MOUNT {
+                // Hexadecimal because it is an address, and an address printed
+                // in decimal is a number a reader has to convert before it
+                // means anything. Zero is *nothing is mounted here* and is
+                // printed as a word rather than as `0x0`, because a mount that
+                // is empty and a mount at address zero would otherwise read the
+                // same and only one of them can happen.
+                if value == 0 {
+                    crate::kprintln!(" = <empty>");
+                } else {
+                    crate::kprintln!(" = {value:#018x}");
+                }
+            } else if known {
                 crate::kprintln!(" = {value}");
             } else {
                 // The skip-and-count path, taken every boot. A reader that
