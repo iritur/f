@@ -23,6 +23,8 @@
     { "name": "blob-verification-refusals", "status": "gating", "milestone": "E2", "file": "claims/0023-blob-verification-refusals.toml" },
     { "name": "index-blocks-per-query", "status": "gating", "milestone": "E2", "file": "claims/0024-index-blocks-per-query.toml" },
     { "name": "cut-outcomes", "status": "gating", "milestone": "E2", "file": "claims/0025-cut-outcomes.toml" },
-    { "name": "collector-invariants", "status": "gating", "milestone": "E2", "file": "claims/0026-collector-invariants.toml" }
+    { "name": "collector-invariants", "status": "gating", "milestone": "E2", "file": "claims/0026-collector-invariants.toml" },
+    { "name": "topology-renderings-per-root", "status": "gating", "milestone": "E2", "file": "claims/0027-topology-renderings-per-root.toml" },
+    { "name": "generation-roots-across-paths", "status": "gating", "milestone": "E2", "file": "claims/0028-generation-roots-across-paths.toml" }
   ]
 }

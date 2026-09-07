@@ -1,0 +1,161 @@
+# `E2-P06`'s naming half as a number: one expression, two checkout paths, one
+# root — and a deliberate defect that makes the two-path comparison go red and
+# name the input that moved.
+#
+# **What this claim is not, stated before the number rather than after it.**
+# `E2-P06`'s exit is *identical generation root hash, checked weekly; a
+# non-reproducible input fails the job and names itself.* This claim is the
+# second clause and the *path* axis of the first. It is not two machines and it
+# is not two dates: `--elsewhere` separates the checkout path out of the bundle
+# a second machine differs by and says nothing whatever about the rest — one
+# host, one kernel, one filesystem, one uid, one clock. That half is
+# `.github/workflows/weekly.yml`, which is a job rather than a command for
+# `E0-R01`'s `address` job's reason, and `REPRODUCE_RUN_GAP` in xtask is where
+# the local loop prints what neither can decide.
+#
+# **Why the path axis is the one worth a number.** `E2-B04`'s rehearsal ran the
+# fold in two containers with genuinely separate volumes and got one root, and
+# its own `TODO.md` line says what that left untested: two containers over one
+# checkout share a path. When the remap was added the difference was measured
+# rather than assumed — at `/work` and at a second path the same commit gave two
+# frame leaves and two roots, four component leaves and the topology hash
+# identical in both. So this is the class of divergence that was real in this
+# tree on the day the flag landed, and the row that would go red if the flag
+# stopped applying is the frame's.
+#
+# **0028 and not a reserved number.** 0019 through 0022 are reserved by
+# `intent/0006-state/spec.md`, 0023 through 0026 are registered files, and 0027
+# is `topology-renderings-per-root` in this same diff.
+name       = "generation-roots-across-paths"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E2"
+
+statement  = """
+One `user/generation.toml`, evaluated at two checkout paths of different
+lengths, produces one generation root — and with a defect that compiles the
+build path into the frame image, the same comparison produces two and names
+`kernel`.
+
+Measured by `cargo xtask claim generation-roots-across-paths` — one invocation
+of `cargo xtask generation --mutate`, which is four builds: two honest and two
+armed, at `/work` and at
+`/tmp/f-generation-at-an-entirely-different-checkout-path`.
+
+  generation roots across two checkout paths       1   the headline
+  the same, with the path defect armed             2   the control
+  checkout path length difference, bytes          51
+  leaves folded into the root                      5
+  armed comparisons naming the frame               1
+
+**The honest number is 1 because of three writings of one flag, and the
+repetition is the design.** Cargo *replaces* `build.rustflags` with
+`target.<triple>.rustflags` rather than merging them, so `-Zremap-cwd-prefix=.`
+in one list only would cover every crate in this tree except the one image the
+frame leaf is taken over; and the component build sets `RUSTFLAGS` in the
+environment, which replaces both. `cargo xtask lint-remap` counts the
+occurrences rather than finding one, because the failure it is written against
+is one list losing the flag while the other keeps it — a hole of exactly the
+wrong shape, every leaf but the one that matters.
+
+**The control is the half that says a green comparison means anything.** A
+reproducibility check that has only ever passed is indistinguishable from one
+that cannot fail, and this one is unusually easy to get wrong in that direction:
+a comparison over an artefact that did not contain the build at all would agree
+with itself forever. So `mutate-path-in-image` compiles `CARGO_MANIFEST_DIR`
+into the frame — `CARGO_MANIFEST_DIR` and not `file!()`, because the remap
+already covers `file!()` and a defect the fix covers demonstrates nothing — and
+the armed run is required to go red **and to name `kernel` by name**. Red alone
+would satisfy an exit code and prove nothing, which is the argument `MUTATIONS`
+makes for every boot.
+
+**Both halves are one invocation, and that is not a convenience.** The armed run
+overwrites the artefacts the honest one wrote, so a claim that took its two
+numbers from two commands would be comparing two states of one directory and
+would say nothing about either. `distinct_roots` reads each root back out of the
+emitted artefact — where `read_emitted` has already required the recorded root
+to equal a fold over the tree stored beside it — rather than inferring it from
+whether the comparison returned an error. A row that reads 1 because a function
+did not return an error says only that the function did not return an error.
+
+**The path length gap is a measurement and not a decoration.** `ELSEWHERE`'s own
+comment argues that two checkout paths of equal length could hide the failure
+being looked for: a remap that replaced one prefix with another of the same
+width would leave two images that differ nowhere a byte comparison could see,
+and the check would pass for the wrong reason. The row is that argument made
+checkable.
+"""
+
+[baseline]
+# The baseline is the same run with the property broken on purpose, and it is in
+# the command rather than in a directory.
+system  = "none"
+notes   = "There is no other system to compare against: what is claimed is that one expression evaluates to one hash at two paths in *this* tree, and another project's build reproducing or not reproducing says nothing about it. The comparison that does mean something is the same run with the defect armed, and it is the second half of the same command — `armed_generation_roots_across_two_checkout_paths` = 2 and `armed_comparisons_naming_the_frame` = 1 are that baseline written as rows rather than as prose. The measurement that made this claim worth taking is also a baseline of a kind and is recorded in `xtask/src/generation.rs`: before `.cargo/config.toml` carried a remap, the two paths gave frame `c764535 0…`/`d03b72f8…` and roots `b142e37c…`/`65494a4f…` at one commit, with all four component leaves and the topology hash identical."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "07"
+notes    = "Section 07's second bullet is *everything else follows from that hash, which is what makes a generation reproducible* — the sentence this claim is the path axis of. The subsystems that own the number are `xtask/src/generation.rs` for the compilation and the two-path run, `.cargo/config.toml` and `component_image`'s `RUSTFLAGS` for the three writings of the remap, `generation/src/fold.rs` for the arithmetic over the tree, and `generation/src/diff.rs` for descending leaves before roots so that a red run names an input rather than reporting that two roots differed."
+
+[workload]
+path        = "xtask/src/generation.rs"
+second      = ".github/workflows/weekly.yml"
+builds      = 4
+components  = 4
+leaves      = 5
+notes       = "Four builds — the frame and four component images at each of two paths, twice over — and about five minutes cold in the development container. That is the claim's own cost rather than an accident: reproduction across paths is not observable from one build tree, and a cheaper workload would be measuring something else. — What stands in, and it is most of the exit: this is one host, one kernel, one filesystem, one uid, one clock and one commit, so the only difference between the two runs is where the tree is. Two machines and two dates are `.github/workflows/weekly.yml`, whose `dates` job prints the gap between the two runs rather than reporting a comparison it did not make — a week apart on one commit is, on a moving branch, the exception. `docker/README.md` records the other standing gap: the image is repeatable and not reproducible in this task's sense, which is smaller than it looks because the root is produced by the build rather than by the image, and is still a gap."
+
+[metrics]
+# Counts, every one of them, and no duration anywhere.
+primary   = "generation_roots_across_two_checkout_paths"
+secondary = [
+  "armed_generation_roots_across_two_checkout_paths",
+  "checkout_path_length_difference_bytes",
+  "leaves_folded_into_the_root",
+  "armed_comparisons_naming_the_frame",
+]
+
+[threshold]
+# The headline, exact in both directions. Above 1 the expression is a function
+# of where it was evaluated, which is the whole finding; there is no reading
+# under which a build is 99% path-independent.
+generation_roots_across_two_checkout_paths       = { min = 1, max = 1 }
+# The control, exact in both directions and in the other direction from the
+# headline. At 1 the armed build no longer diverges, which means the defect is
+# not in the image — `#[used]` is what keeps the linker from dropping a static
+# nothing reads — and the green row above is worth nothing. At 3 something other
+# than the two roots is moving, and the pair is not a pair.
+armed_generation_roots_across_two_checkout_paths = { min = 2, max = 2 }
+# The named leaf. Reached only after the armed report was required to contain
+# *the input that moved is `kernel`*, so this row does not assert that fact — it
+# says the assertion ran. A run that never got here prints no rows at all, and a
+# threshold no workload printed is a finding rather than a silence.
+armed_comparisons_naming_the_frame               = { min = 1, max = 1 }
+# The two paths are actually two. A floor of one byte rather than the measured
+# 51, because what `ELSEWHERE`'s comment argues for is *a different shape* and
+# not a particular width; what it rules out is equal length, at which a remap
+# swapping one prefix for another of the same size would leave the check passing
+# for the wrong reason.
+checkout_path_length_difference_bytes            = { min = 1 }
+# What was folded. Five leaves — the frame and four components — read back out
+# of the emitted tree rather than counted from the source, so a run whose
+# generation lost its members compares two roots over nothing and says they
+# agreed. The floor moves up when `user/generation.toml` gains a component, and
+# that is a diff naming the component.
+leaves_folded_into_the_root                      = { min = 5 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "This claim does not need that machine, for `claims/0026`'s reason: every metric is a count of distinct hashes or of leaves, taken by the run over artefacts it wrote, and `f_bench::Environment` has nothing to refuse because nothing here is timed. What the claim *does* need and cannot have from one machine is a second one — stated in `[workload]` and in the statement above rather than left to be inferred from a runner name. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it."
+
+[reproduce]
+command = "cargo xtask claim generation-roots-across-paths"
+
+[diagnosis]
+# Recorded while the system is understood rather than at 2 a.m. when it is not.
+generation_roots_across_two_checkout_paths_above_one = "the finding this job exists to produce, and the run has already named the leaf that moved — read its output and not this file. If the leaf is `kernel`, the first thing to check is that `.cargo/config.toml`'s remap still reaches the `x86_64-unknown-none` target: cargo replaces `build.rustflags` with the target's list rather than merging them, so a remap that stopped applying there applies everywhere except the one image this leaf is taken over, and `cargo xtask lint-remap` being green while this is red is itself a finding. If it is a component leaf, the suspect is `component_image`'s `RUSTFLAGS`, which replaces both lists wholesale; note that the components reproduce across paths today because `[profile.init]` carries `debug = false`, which is an accident of a profile rather than a property. If every leaf agreed and the roots still differ, the run says so in as many words and the defect is in `generation/` or `abi/src/store.rs` rather than in any input"
+armed_generation_roots_across_two_checkout_paths_is_one = "worse than the row above and much quieter: the control can no longer fail, so every green run under it is worth nothing. The armed build compiled `CARGO_MANIFEST_DIR` into the frame and the two paths still agreed, which means either the defect is no longer reaching the image — `#[used]` is what keeps the linker from dropping a static nothing reads, and `MUTATIONS`' own rule is that a defect must be off by default and must change the artefact when it is on — or the comparison is being taken over something that does not contain the frame at all. Do not repair this by relaxing the row; the repair is in `kernel/`'s defect or in what the comparison reads"
+armed_comparisons_naming_the_frame_is_missing = "the armed run went red for some reason other than the frame, or did not go red at all, and `--mutate` refused before printing anything. Red is not the assertion: `mutate-path-in-image` puts a path in exactly one leaf, so a comparison that names a different leaf — or that names nothing, which is the `Compiler` case — is reading something other than what it believes it is reading, and the honest half above says nothing either. The workload's own report is above the table and names what it got"
+leaves_folded_into_the_root_below_five = "the generation lost members between being compiled and being emitted, and the comparison above then agreed about a tree with less in it. Read `user/generation.toml` and the leaf block `cargo xtask generation` prints before anything in `xtask`: five is the frame plus four components, and this row is read back out of the emitted record tree rather than counted from the source precisely so that the two can be seen to disagree"
+checkout_path_length_difference_bytes_is_zero = "the second checkout went to a path of the same length as the first, at which point a remap that replaced one prefix with another of equal width would leave two images a byte comparison cannot tell apart, and a green headline would mean nothing. `ELSEWHERE` in `xtask/src/generation.rs` is the constant, and its own comment is the argument; the likeliest cause is that constant being shortened, and the second likeliest is this tree being checked out somewhere much longer than `/work`"
+a_threshold_no_workload_printed = "`cargo xtask generation --mutate` failed before its summary block, which for this claim is the ordinary way a real finding arrives — the run refuses rather than printing rows when the honest halves disagree or the armed half does not name the frame. Read the workload's output above the table; the rows are the last thing it prints and their absence is a symptom rather than the disease"

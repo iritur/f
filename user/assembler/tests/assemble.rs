@@ -69,13 +69,17 @@ fn main() {
     );
     println!("  root       {}\n", hex(&workload.root));
 
+    let mut tally = Tally::default();
     let mut failures = 0;
-    failures += the_same_root_produces_a_byte_identical_topology(&workload);
-    failures += a_bus_in_any_order_produces_one_topology(&workload);
-    failures += a_module_that_does_not_fold_to_the_root_is_refused(&workload);
-    failures += a_driver_that_fails_to_start_leaves_its_subtree_unstarted(&workload);
-    failures += a_driver_whose_card_is_absent_costs_its_subtree_and_no_more(&workload);
-    failures += two_drivers_claiming_one_device_is_refused(&workload);
+    failures += the_same_root_produces_a_byte_identical_topology(&workload, &mut tally);
+    failures += a_bus_in_any_order_produces_one_topology(&workload, &mut tally);
+    failures += a_module_that_does_not_fold_to_the_root_is_refused(&workload, &mut tally);
+    failures += a_driver_that_fails_to_start_leaves_its_subtree_unstarted(&workload, &mut tally);
+    failures += a_driver_whose_card_is_absent_costs_its_subtree_and_no_more(&workload, &mut tally);
+    failures += two_drivers_claiming_one_device_is_refused(&workload, &mut tally);
+
+    println!();
+    tally.rows();
 
     println!();
     if failures == 0 {
@@ -87,12 +91,103 @@ fn main() {
 }
 
 // ---------------------------------------------------------------------------
+// The rows `claims/0027 topology-renderings-per-root` compares against.
+// ---------------------------------------------------------------------------
+
+/// What the six demonstrations counted, printed once at the end as
+/// `name value` rows.
+///
+/// # Why a struct and not six `println!`s where the numbers are computed
+///
+/// Because `xtask`'s claim route reads a row as *a claim-registered name,
+/// whitespace, and a count*, and a row emitted in the middle of a demonstration
+/// is a row whose name a reader has to re-find every time this file is
+/// reordered. Collected here, the block at the bottom is the claim's table and
+/// the demonstrations above it are the evidence.
+///
+/// The load-bearing member is [`Tally::renderings`], and it is a set rather
+/// than a pair of booleans on purpose: **every** instantiation of this file's
+/// one root goes into it, so the headline row is the size of a set and not a
+/// count of equalities that happened to hold pairwise. Two renderings that
+/// agree with each other and disagree with the other nine would satisfy every
+/// `==` in this file and would still put a 2 in that row.
+#[derive(Default)]
+struct Tally {
+    /// Every rendering produced from `Workload::root`, deduplicated.
+    /// Unit: distinct byte strings.
+    renderings: std::collections::BTreeSet<Vec<u8>>,
+    /// How many instantiations went into that set.
+    /// Unit: instantiations.
+    instantiations: usize,
+    /// The width of one rendering, which is what *byte-identical* is taken
+    /// over. A zero here would make the headline row true and empty.
+    /// Unit: bytes.
+    rendered_bytes: usize,
+    /// Bus permutations drawn.
+    /// Unit: permutations.
+    orders_drawn: usize,
+    /// How many of those were distinct device orders.
+    /// Unit: distinct orders.
+    orders_distinct: usize,
+    /// Refusals reached: a wrong root, a tampered file, a route nothing
+    /// declared, a need nothing routes, and two claimants for one part.
+    /// Unit: refusals.
+    refusals: usize,
+    /// The second half of the exit, taken off the failing run's report.
+    /// Unit: components.
+    failed: usize,
+    /// Unit: components.
+    unstarted: usize,
+    /// Unit: components.
+    started_outside_the_subtree: usize,
+    /// Members left unstarted that are not in the failed driver's subtree, plus
+    /// members of that subtree that started anyway. Zero in both directions,
+    /// and the only row here whose threshold is a ceiling.
+    /// Unit: components.
+    subtree_mismatches: usize,
+    /// Unit: components.
+    unstarted_for_an_absent_card: usize,
+}
+
+impl Tally {
+    /// Record one instantiation's rendering.
+    fn saw(&mut self, rendering: &[u8]) {
+        self.instantiations += 1;
+        self.rendered_bytes = rendering.len();
+        self.renderings.insert(rendering.to_vec());
+    }
+
+    /// The block `cargo xtask claim topology-renderings-per-root` reads.
+    fn rows(&self) {
+        println!("  claims/0027 topology-renderings-per-root");
+        for (name, value) in [
+            ("distinct_topology_renderings_per_root", self.renderings.len()),
+            ("topology_instantiations_rendered", self.instantiations),
+            ("rendered_topology_bytes", self.rendered_bytes),
+            ("bus_orders_drawn", self.orders_drawn),
+            ("bus_orders_distinct", self.orders_distinct),
+            ("refusals_demonstrated", self.refusals),
+            ("components_failed_on_purpose", self.failed),
+            ("components_left_unstarted", self.unstarted),
+            ("components_started_outside_the_subtree", self.started_outside_the_subtree),
+            ("subtree_membership_mismatches", self.subtree_mismatches),
+            ("components_unstarted_for_an_absent_card", self.unstarted_for_an_absent_card),
+        ] {
+            println!("    {name:<42} {value}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The first half of the exit: boot is a pure function of one hash.
 // ---------------------------------------------------------------------------
 
 /// Instantiate twice from one root, start both the same way, and compare the
 /// bytes.
-fn the_same_root_produces_a_byte_identical_topology(workload: &Workload) -> usize {
+fn the_same_root_produces_a_byte_identical_topology(
+    workload: &Workload,
+    tally: &mut Tally,
+) -> usize {
     let mut first = Assembly::instantiate(&workload.root, &workload.module).expect("first");
     bind::bind(&mut first, &workload.bus_in_scan_order()).expect("bind");
     let report_one = f_assembler::start::start(&mut first, &mut Always);
@@ -103,6 +198,8 @@ fn the_same_root_produces_a_byte_identical_topology(workload: &Workload) -> usiz
 
     let one = render::topology(&first);
     let two = render::topology(&second);
+    tally.saw(&one);
+    tally.saw(&two);
 
     println!("  byte-identical over {} bytes of rendered topology", one.len());
     println!("    run 1    {}  {report_one:?}", hex(&render::digest(&first)));
@@ -124,7 +221,7 @@ fn the_same_root_produces_a_byte_identical_topology(workload: &Workload) -> usiz
 /// discovery order could reach a topology, *this* is the test that would go
 /// red, and the one above would still pass on a machine whose scan never
 /// changed.
-fn a_bus_in_any_order_produces_one_topology(workload: &Workload) -> usize {
+fn a_bus_in_any_order_produces_one_topology(workload: &Workload, tally: &mut Tally) -> usize {
     let mut digests = Vec::new();
     let mut renderings = Vec::new();
     for run in 0..8u64 {
@@ -132,8 +229,13 @@ fn a_bus_in_any_order_produces_one_topology(workload: &Workload) -> usize {
         bind::bind(&mut assembly, &workload.bus_shuffled(run)).expect("bind");
         f_assembler::start::start(&mut assembly, &mut Always);
         digests.push(hex(&render::digest(&assembly)));
-        renderings.push(render::topology(&assembly));
+        let rendering = render::topology(&assembly);
+        tally.saw(&rendering);
+        renderings.push(rendering);
     }
+
+    tally.orders_drawn = 8;
+    tally.orders_distinct = workload.distinct_orders(8);
 
     let distinct: std::collections::BTreeSet<&String> = digests.iter().collect();
     println!("\n  a shuffled bus, 8 seeded permutations");
@@ -146,14 +248,19 @@ fn a_bus_in_any_order_produces_one_topology(workload: &Workload) -> usize {
         let mut plain = Assembly::instantiate(&workload.root, &workload.module).expect("root");
         bind::bind(&mut plain, &workload.bus_in_scan_order()).expect("bind");
         f_assembler::start::start(&mut plain, &mut Always);
-        renderings[0] == render::topology(&plain)
+        let rendering = render::topology(&plain);
+        tally.saw(&rendering);
+        renderings[0] == rendering
     });
     failures
 }
 
 /// A module whose fold is not the root the boot selected is refused, and
 /// refused before anything in it is believed.
-fn a_module_that_does_not_fold_to_the_root_is_refused(workload: &Workload) -> usize {
+fn a_module_that_does_not_fold_to_the_root_is_refused(
+    workload: &Workload,
+    tally: &mut Tally,
+) -> usize {
     let mut wrong = workload.root;
     wrong[0] ^= 0x01;
     let refused = Assembly::instantiate(&wrong, &workload.module);
@@ -200,6 +307,10 @@ fn a_module_that_does_not_fold_to_the_root_is_refused(workload: &Workload) -> us
         "a required sibling need the topology routes nothing is refused",
         matches!(unsupplied, Err(f_assembler::Refusal::Unsupplied(_, _))),
     );
+    // Counted off the four `check`s above rather than written as a literal 4:
+    // a demonstration deleted from this function then moves the row rather than
+    // leaving a constant behind that says it is still here.
+    tally.refusals += 4 - failures;
     failures
 }
 
@@ -209,7 +320,10 @@ fn a_module_that_does_not_fold_to_the_root_is_refused(workload: &Workload) -> us
 
 /// Fail `blk` on purpose. Its subtree is `objects` and, through it, `shell`;
 /// `net`, `gpu` and `log` are outside the subtree and start.
-fn a_driver_that_fails_to_start_leaves_its_subtree_unstarted(workload: &Workload) -> usize {
+fn a_driver_that_fails_to_start_leaves_its_subtree_unstarted(
+    workload: &Workload,
+    tally: &mut Tally,
+) -> usize {
     let mut assembly = Assembly::instantiate(&workload.root, &workload.module).expect("root");
     bind::bind(&mut assembly, &workload.bus_in_scan_order()).expect("bind");
 
@@ -236,9 +350,16 @@ fn a_driver_that_fails_to_start_leaves_its_subtree_unstarted(workload: &Workload
         .filter(|member| matches!(member.state, State::Unstarted(_)))
         .map(|member| member.index)
         .collect();
+    // The symmetric difference between what stopped and what the topology says
+    // blk's subtree is: a member stopped that is not in the subtree, plus a
+    // member of the subtree that started anyway. Both directions, because a
+    // one-directional count is green on an assembler that stops everything.
+    let subtree = assembly.subtree(blk);
+    tally.subtree_mismatches = cost.iter().filter(|index| !subtree.contains(index)).count()
+        + subtree.iter().filter(|index| !cost.contains(index)).count();
     failures += check(
         &format!("what stopped is exactly blk's subtree ({})", workload.names_of(&cost)),
-        cost == assembly.subtree(blk),
+        cost == subtree,
     );
     failures += check(
         "and each one names the nearest component that did not start",
@@ -256,13 +377,19 @@ fn a_driver_that_fails_to_start_leaves_its_subtree_unstarted(workload: &Workload
     failures += check("the boot is alive", report != Report::default() && !report.whole());
     failures += check("exactly one component failed", report.failed == 1);
     failures += check("exactly two were left unstarted", report.unstarted == 2);
+    tally.failed = report.failed;
+    tally.unstarted = report.unstarted;
+    tally.started_outside_the_subtree = report.started;
     failures
 }
 
 /// The same shape reached the other way: the driver is fine and the card is
 /// gone. The subtree is the same subtree, and the state tells the operator
 /// which of the two it was.
-fn a_driver_whose_card_is_absent_costs_its_subtree_and_no_more(workload: &Workload) -> usize {
+fn a_driver_whose_card_is_absent_costs_its_subtree_and_no_more(
+    workload: &Workload,
+    tally: &mut Tally,
+) -> usize {
     let mut assembly = Assembly::instantiate(&workload.root, &workload.module).expect("root");
     let mut bus = workload.bus_in_scan_order();
     let bus = {
@@ -296,11 +423,12 @@ fn a_driver_whose_card_is_absent_costs_its_subtree_and_no_more(workload: &Worklo
     failures +=
         check("net still started", state(&assembly, workload.index_of("net")) == State::Started);
     failures += check("nothing was reported as failed", report.failed == 0 && report.absent == 1);
+    tally.unstarted_for_an_absent_card = report.unstarted;
     failures
 }
 
 /// Two components declaring one part is refused, not resolved.
-fn two_drivers_claiming_one_device_is_refused(workload: &Workload) -> usize {
+fn two_drivers_claiming_one_device_is_refused(workload: &Workload, tally: &mut Tally) -> usize {
     let module = workload.module_with_a_second_claimant();
     let root = workload.root_of(&module);
     let mut assembly = Assembly::instantiate(&root, &module).expect("root");
@@ -309,10 +437,9 @@ fn two_drivers_claiming_one_device_is_refused(workload: &Workload) -> usize {
     println!("\n  two components declare one part");
     println!("    bind     {refused:?}");
 
-    check(
-        "the binding refuses rather than choosing",
-        matches!(refused, Err(bind::Refusal::Claimed(_, _, _))),
-    )
+    let held = matches!(refused, Err(bind::Refusal::Claimed(_, _, _)));
+    tally.refusals += usize::from(held);
+    check("the binding refuses rather than choosing", held)
 }
 
 // ---------------------------------------------------------------------------
@@ -489,8 +616,15 @@ impl Workload {
         order
     }
 
-    /// How the first `runs` permutations addressed the bus, as one line.
-    fn orders_seen(&self, runs: u64) -> String {
+    /// How many distinct device orders the first `runs` permutations were.
+    ///
+    /// Split out from the line below because `claims/0027` needs the number and
+    /// a reader needs the sentence, and a claim row parsed back out of a
+    /// formatted sentence is the two-readers problem in miniature. It is the
+    /// row that goes red if `permutation` ever stops permuting: eight draws of
+    /// one order would leave every equality in this file true and the property
+    /// it is about untested.
+    fn distinct_orders(&self, runs: u64) -> usize {
         let mut seen = std::collections::BTreeSet::new();
         for run in 0..runs {
             let order: Vec<String> = self
@@ -500,7 +634,12 @@ impl Workload {
                 .collect();
             seen.insert(order.join(" "));
         }
-        format!("{} distinct of {runs}", seen.len())
+        seen.len()
+    }
+
+    /// How the first `runs` permutations addressed the bus, as one line.
+    fn orders_seen(&self, runs: u64) -> String {
+        format!("{} distinct of {runs}", self.distinct_orders(runs))
     }
 
     /// The same six components, with `log` also declaring the block driver's

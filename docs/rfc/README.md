@@ -168,8 +168,39 @@ What the two decisions did *not* do is collide in substance. Both wanted a
 manifest array and neither supersedes the other: schema 3 carries `[[device]]`
 and `[[state]]` together, each count byte took one of the record's three
 reserved bytes, and `abi::manifest::Record` is 2696 bytes — neither worktree's
-number, because each computed its own without the other's fields in it. The
-lesson is filed here rather than in either entry: **two parallel worktrees that
-both touch one numbered registry will both take the same number**, and the only
-defences are to allocate the number before the branch or to expect the merge to
-resolve it. This tree does the second, and this row is what that looks like.
+number, because each computed its own without the other's fields in it.
+
+The number in this directory is what surfaced, and it is not what the collision
+cost. **Both writers had stamped their count at byte 101.** Each had taken *the
+first* of the record's three reserved bytes, which is the obvious choice and the
+only one either could see, so two manifests compiled by two branches would have
+answered one offset with two different meanings — a component's device count
+read as its state-node count and back again — with every test on both branches
+green, because neither branch contained the other's field to disagree with. That
+is a silent corruption in the one place this project has decided a corruption
+must never be silent, and no lint could have found it: `lint-manifests` checks a
+manifest against the record it was built from, and both were self-consistent.
+The merge is the only reader that had both. `devices` keeps 101, `state_nodes`
+takes 102, two of the three reserved bytes are spent and one is left, and
+`every_structural_lie_is_refused` now breaks byte 0 because that is the only
+reserved index there is.
+
+The lesson is filed here rather than in either entry: **two parallel worktrees
+that both touch one numbered registry will both take the same number**, and the
+only defences are to allocate the number before the branch or to expect the
+merge to resolve it. That holds for the reserved *bytes* of a wire record
+exactly as it holds for the numbers of the entries in this directory, and the
+byte is the more dangerous of the two because a doubled RFC number is loud and a
+doubled offset is not. This tree does the second defence, and this row is what
+that looks like.
+
+`CLAUDE.md`'s *Common mistakes* did **not** gain a line, and the judgement is
+recorded rather than left to be re-taken. That section's rule is *added when the
+same mistake happens twice*, and two agents making one mistake simultaneously —
+neither able to learn from the other — is one occurrence with two symptoms
+rather than two occurrences. A line saying *do not take a registry number in a
+worktree* would also not have prevented it: both agents checked the tree they
+could see, and the tree they could see was complete. If it happens a second
+time, that is the twice the rule asks for and the line is earned. `TODO.md`'s
+`E1-B15` line carries the same paragraph from the manifest's side, and the two
+are meant to agree.

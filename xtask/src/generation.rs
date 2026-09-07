@@ -245,6 +245,22 @@ fn assemble(root: &[u8; 32], module: &Path) -> Result<(), String> {
         digests[0],
         renderings[0].len()
     );
+
+    // `claims/0027`'s second workload. The test beside `f-assembler` reaches the
+    // cases a four-component tree does not have; this reaches the tree somebody
+    // is about to boot, and the claim compares both. The row names differ from
+    // the test's on purpose — they are two measurements of one property over two
+    // different topologies, and averaging them into one row would hide whichever
+    // of the two moved.
+    let distinct: std::collections::BTreeSet<&Vec<u8>> = renderings.iter().collect();
+    println!("\n  claims/0027 topology-renderings-per-root, over this tree's own generation");
+    for (name, value) in [
+        ("distinct_renderings_of_the_packed_module", distinct.len()),
+        ("packed_module_instantiations", renderings.len()),
+        ("rendered_topology_bytes_on_this_tree", renderings[0].len()),
+    ] {
+        println!("    {name:<42} {value}");
+    }
     Ok(())
 }
 
@@ -977,8 +993,7 @@ const ELSEWHERE: &str = "f-generation-at-an-entirely-different-checkout-path";
 /// than a command for the reason `E0-R01`'s `address` job is one.
 fn elsewhere(defects: &[&str]) -> Result<(), String> {
     let there = copy_tree()?;
-    let here = crate::target_dir().join("generation").join("here");
-    let mirror = there.join("target").join("generation").join("there");
+    let (here, mirror) = artefacts();
 
     let mut args = vec!["xtask".to_string(), "generation".to_string(), "--emit".to_string()];
     args.push(here.display().to_string());
@@ -1012,6 +1027,41 @@ fn elsewhere(defects: &[&str]) -> Result<(), String> {
     compare(&here, &mirror)
 }
 
+/// The two directories a two-path run leaves its artefacts in.
+///
+/// Spelled once rather than at each caller. [`mutate`] reads back the pair
+/// [`elsewhere`] wrote, and two spellings of one path is how a comparison comes
+/// to read last week's artefact and report on a run nobody made.
+fn artefacts() -> (PathBuf, PathBuf) {
+    let there = std::env::temp_dir().join(ELSEWHERE);
+    (
+        crate::target_dir().join("generation").join("here"),
+        there.join("target").join("generation").join("there"),
+    )
+}
+
+/// How many distinct roots the two emitted artefacts hold.
+///
+/// Read back out of the files rather than inferred from whether [`compare`]
+/// returned `Ok`. A row that reads 1 because a function did not return an error
+/// says only that the function did not return an error; this one is the size of
+/// a set of roots, each of which [`read_emitted`] has already required to equal
+/// a fold over the tree stored beside it. So the number is wrong only if the
+/// fold is, which is the case [`finding`]'s `Compiler` arm is for.
+///
+/// # Errors
+///
+/// [`read_emitted`]'s, and [`checked`]'s.
+fn distinct_roots(here: &Path, there: &Path) -> Result<usize, String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for dir in [here, there] {
+        let bytes = read_emitted(dir)?;
+        let tree = checked(&bytes)?;
+        seen.insert(hex(&fold::root(&tree)));
+    }
+    Ok(seen.len())
+}
+
 /// `cargo xtask generation --mutate`: the half that says a green comparison
 /// means something.
 ///
@@ -1024,8 +1074,20 @@ fn elsewhere(defects: &[&str]) -> Result<(), String> {
 /// comparison that failed for some other reason would satisfy an exit code and
 /// prove nothing, which is the argument `MUTATIONS` makes for every boot.
 fn mutate() -> Result<(), String> {
+    let (here, there) = artefacts();
+
     println!("[1/2] two checkouts, honest build — the roots must agree\n");
     elsewhere(&[])?;
+
+    // Read before the armed run overwrites both artefacts. The order is the
+    // whole of why these two lines are here and not at the bottom beside the
+    // rows they feed.
+    let honest = distinct_roots(&here, &there)?;
+    let leaves = {
+        let bytes = read_emitted(&here)?;
+        let tree = checked(&bytes)?;
+        usize::from(tree.members()) + 1
+    };
 
     println!("\n[2/2] with the build path compiled in — they must differ, and name the frame\n");
     let armed = elsewhere(&[PATH_DEFECT]);
@@ -1047,10 +1109,39 @@ fn mutate() -> Result<(), String> {
              says nothing either."
         ));
     }
+    let armed_roots = distinct_roots(&here, &there)?;
     println!("{report}");
+    println!("\n  ...which is the required failure, and it named the frame.");
+
+    // The path gap is a measurement and not a decoration: `ELSEWHERE`'s own
+    // comment argues that two checkout paths of *equal length* would let a
+    // remap that replaced one prefix with another of the same width leave two
+    // images a byte comparison cannot tell apart. This row is that argument
+    // made checkable, so a future edit that shortens the constant fails the
+    // claim rather than quietly weakening every run under it.
+    let gap = crate::root()
+        .display()
+        .to_string()
+        .len()
+        .abs_diff(std::env::temp_dir().join(ELSEWHERE).display().to_string().len());
+
+    println!("\n  claims/0028 generation-roots-across-paths");
+    for (name, value) in [
+        ("generation_roots_across_two_checkout_paths", honest),
+        ("armed_generation_roots_across_two_checkout_paths", armed_roots),
+        ("checkout_path_length_difference_bytes", gap),
+        ("leaves_folded_into_the_root", leaves),
+        // Reached only after the report above was required to name `kernel` by
+        // name, so this row is not the assertion — it is what says the
+        // assertion ran. A run that never got here prints nothing, and a
+        // threshold no workload printed is a finding rather than a silence.
+        ("armed_comparisons_naming_the_frame", 1),
+    ] {
+        println!("    {name:<50} {value}");
+    }
+
     println!(
-        "\n  ...which is the required failure, and it named the frame.\n\n\
-         generation --mutate: ok — the two-path comparison can fail, and the leaf it \
+        "\ngeneration --mutate: ok — the two-path comparison can fail, and the leaf it \
          names is the one the defect is in."
     );
     Ok(())

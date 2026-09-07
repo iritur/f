@@ -13194,6 +13194,40 @@ enum Route {
     /// what it read.
     /// E2-B08.
     Reads,
+    /// `E2-B05`'s two demonstrations over two topologies — the six-component
+    /// workload in `user/assembler/tests/assemble.rs`, and the module this tree
+    /// would actually boot, instantiated twice by `cargo xtask generation` —
+    /// compared against `claims/0027`'s `[threshold]` table.
+    ///
+    /// Two workloads rather than one because they fail differently. The test
+    /// reaches what a four-component tree has no cases for: a failed driver, an
+    /// absent card, a subtree, five refusals, and eight seeded bus orders. The
+    /// command reaches the only topology anybody boots, and reaches it through
+    /// the same reader the frame will use. A claim over the fixture alone would
+    /// be a claim about a fixture; a claim over the command alone would be a
+    /// claim with no bus in it at all, and *binding order cannot reach a
+    /// topology* is the half a build machine with no devices cannot test.
+    ///
+    /// A count and not a time, which is why `claims/0027` may gate in the
+    /// development container for `claims/0005`'s reason.
+    /// E2-B05, RFC 0066, RFC 0067.
+    Topology,
+    /// `E2-P06`'s two-path run and its control — `cargo xtask generation
+    /// --mutate` — compared against `claims/0028`'s `[threshold]` table.
+    ///
+    /// One command and four builds, because the honest half and the armed half
+    /// have to be one run: the armed run overwrites the artefacts the honest one
+    /// wrote, so a claim that took them from two invocations would be comparing
+    /// two states of one directory and would say nothing about either. What the
+    /// rows separate is the pair that must agree from the pair that must not.
+    ///
+    /// It is the most expensive route in this table — a second checkout and four
+    /// kernel builds, about five minutes cold — and that is the claim's own
+    /// cost rather than an accident: reproduction across paths is not observable
+    /// from one build tree, and a cheaper workload would be measuring something
+    /// else. `cargo xtask lint-remap` is the per-run half a checkout can decide.
+    /// E2-P06.
+    Roots,
 }
 
 const ROUTES: &[(&str, Route)] = &[
@@ -13285,6 +13319,12 @@ const ROUTES: &[(&str, Route)] = &[
     // number is being taken. Both are `pending` and say why at length.
     ("copies-per-read", Route::Reads),
     ("resident-bytes-per-unit-of-work", Route::Reads),
+    // Wave 4's two, and neither is a pair: each has one sentence and one
+    // workload set. `topology-renderings-per-root` is a count over two
+    // topologies; `generation-roots-across-paths` is a count over two checkout
+    // paths, with its own control in the same command.
+    ("topology-renderings-per-root", Route::Topology),
+    ("generation-roots-across-paths", Route::Roots),
 ];
 
 /// The registry file one claim name resolves to.
@@ -13402,6 +13442,8 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         Route::Cut => claim_cut(&text, &relative(&file))?,
         Route::Invariants => claim_invariants(&text, &relative(&file))?,
         Route::Reads => claim_reads(&text, &relative(&file))?,
+        Route::Topology => claim_topology(&text, &relative(&file))?,
+        Route::Roots => claim_roots(&text, &relative(&file))?,
     }
 
     // The harness itself refuses in a non-measurement environment and says so
@@ -13737,6 +13779,74 @@ fn claim_reads(claim: &str, file: &str) -> Result<(), String> {
          copy or a real residency, not an accounting change. Read the two provocation\n\
          rows first: if they are zero the tallies have stopped moving at all, and\n\
          every zero above them is a default rather than a count.",
+    )
+}
+
+/// `claims/0027`'s two workloads: the fixture that has the cases, and the
+/// generation that has the reader.
+///
+/// The test first and the command second, because the test is seconds and the
+/// command builds a kernel and four component images: a run that is going to be
+/// red on the cheap workload says so before the expensive one starts, and still
+/// runs it. `claim_rechunk`'s ordering, for `claim_rechunk`'s reason.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_topology(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[
+            (
+                "user/assembler/tests/assemble.rs: eleven instantiations of one root, eight of \
+                 them from a shuffled bus",
+                "cargo",
+                &["test", "--release", "-p", "f-assembler", "--test", "assemble"],
+            ),
+            (
+                "cargo xtask generation: the module this tree would boot, instantiated twice",
+                "cargo",
+                &["xtask", "generation"],
+            ),
+        ],
+        "A `distinct_*` row above 1 is E2-B05's exit failing: one root produced two\n\
+         topologies, and the assembler is a function of something that is not the\n\
+         root. The likelier red is quieter and is what the floors are for — a run\n\
+         that stopped reaching a case still renders one topology and still\n\
+         publishes a 1. `bus_orders_distinct` is the first row to read: eight draws\n\
+         of one order leave every equality in that file true and the property it is\n\
+         about untested.",
+    )
+}
+
+/// `claims/0028`'s one command, which is honest run and control in a single
+/// invocation.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s. Note that a `--mutate` that fails — the armed build no
+/// longer diverging, or diverging and naming some leaf other than the frame —
+/// prints no rows at all, so the failure arrives twice: once as the workload's
+/// own report and once as five thresholds nothing printed.
+fn claim_roots(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "cargo xtask generation --mutate: two checkout paths honest, then with the build \
+             path compiled into the frame",
+            "cargo",
+            &["xtask", "generation", "--mutate"],
+        )],
+        "`generation_roots_across_two_checkout_paths` above 1 is the finding this job\n\
+         exists to produce, and the run has already named the leaf that moved —\n\
+         start there and not here. The armed rows going quiet is the other failure\n\
+         and the worse one: a control that can no longer fail makes every green run\n\
+         under it worth nothing. Neither is repaired by moving a number in the\n\
+         claim. What this command cannot decide at all is two machines and two\n\
+         dates; `.github/workflows/weekly.yml` is that half, and `REPRODUCE_RUN_GAP`\n\
+         is where the local loop prints what neither can.",
     )
 }
 
