@@ -89,15 +89,11 @@ pub fn generation(args: &[String]) -> Result<(), String> {
     let decompile = match option {
         None => false,
         Some("--decompile") => true,
-        // Named rather than accepted, so the flag is not invented twice: it is
-        // `E2-P07`'s and it writes a `menuentry` per installed generation into
-        // the GRUB fragment `docs/booting-on-hardware.md` documents.
-        Some("--install") => {
-            return Err("`--install` is E2-P07's and is not built yet. It will write one \
-                        `menuentry` per installed generation into the GRUB fragment \
-                        docs/booting-on-hardware.md documents."
-                .into());
-        }
+        // `E2-P07`'s. One `menuentry` per installed generation, written into the
+        // GRUB fragment `docs/booting-on-hardware.md` documents — the loader's
+        // own menu, configuration this repository already writes, nothing
+        // imported and no boot-time reader of the on-disk format.
+        Some("--install") => return install(args.get(1).map(String::as_str)),
         // E2-P06's four. Each is below, beside the argument for its shape.
         Some("--emit") => return emit(args.get(1..).unwrap_or_default()),
         Some("--compare") => {
@@ -683,6 +679,225 @@ fn pack_module(root: &[u8; 32], tree: &Tree<'_>, names: &[String]) -> Result<Pat
     let path = dir.join(format!("{}.fcm", hex(root)));
     std::fs::write(&path, &out).map_err(|e| format!("writing {}: {e}", path.display()))?;
     Ok(path)
+}
+
+/// Everything one generation is, for a caller that has to hold two of them at
+/// once and say how they differ.
+///
+/// `E2-P07` is that caller and there is no second one yet. It exists as a type
+/// rather than as four return values because three of its four fields are
+/// `[u8; 32]`-shaped, which is one transposition away from a comparison that
+/// passes for the wrong reason — [`Compiled`]'s own comment, one level up and
+/// with more at stake, since what is being compared here is *the machine before
+/// and after*.
+pub(crate) struct Packed {
+    /// The root the fold produced over the record tree.
+    /// Unit: bytes, exactly 32 — a SHA-256.
+    pub root: [u8; 32],
+    /// Where the boot module was written, named `<root>.fcm`.
+    /// Unit: none — a path.
+    pub module: PathBuf,
+    /// The whole boot module, as it was written.
+    /// Unit: bytes.
+    pub bytes: Vec<u8>,
+    /// The frame image's content address.
+    /// Unit: bytes, exactly 32 — a SHA-256.
+    pub frame: [u8; 32],
+    /// Every component, by the name the source gives it and the content address
+    /// this build produced for it, in the source's canonical order.
+    /// Unit: none — a name and a SHA-256 each.
+    pub components: Vec<(String, [u8; 32])>,
+}
+
+/// Compile, check, fold and pack one generation, and hand back all of it.
+///
+/// The same four steps [`generation`] takes and without the printing, so that a
+/// caller building two generations in one command does not have to read one out
+/// of a log it also has to print. `defects` reach the frame build and nothing
+/// else, which is [`compile_here`]'s contract.
+///
+/// # Errors
+///
+/// Anything [`compile_here`], [`checked`] or [`pack_module`] refuses.
+pub(crate) fn pack(defects: &[&str]) -> Result<Packed, String> {
+    let built = compile_here(defects)?;
+    let tree = checked(&built.bytes)?;
+    let root = fold::root(&tree);
+    let module = pack_module(&root, &tree, &built.source.components)?;
+    let bytes =
+        std::fs::read(&module).map_err(|e| format!("reading {}: {e}", crate::relative(&module)))?;
+    let components =
+        built.source.components.iter().cloned().zip(built.components.iter().copied()).collect();
+    Ok(Packed { root, module, bytes, frame: built.frame, components })
+}
+
+/// Where `--install` writes, under the build directory rather than under
+/// `/etc`.
+///
+/// A command that rewrote a bootloader configuration as a side effect of a
+/// build would be a command nobody could run twice on a machine they cared
+/// about. `tools/f-on-metal.sh` is what installs on metal and it already backs
+/// up `grub.cfg`, never touches `GRUB_DEFAULT`, and writes a whole file rather
+/// than appending to `40_custom`; this writes the same shape of file for it to
+/// copy, so the two agree by construction and only one of them can break a
+/// machine.
+const FRAGMENT: &str = "45_f_generations";
+
+/// The most generations one `menuentry` can offer.
+///
+/// `kernel::arch::x86_64::multiboot::MAX_MODULES` is eight and the entry
+/// already spends five of them — `init.bin` and four component files — so three
+/// is what is left. Refused rather than truncated: a menu entry silently
+/// missing the generation somebody meant to roll back to is the failure this
+/// whole task is a test for.
+/// Unit: count of boot modules.
+const GENERATIONS_MAX: usize = 3;
+
+/// `cargo xtask generation --install [DIR]`.
+///
+/// # What "the boot menu" means, settled rather than inferred
+///
+/// `E2-P07`'s exit says *roll back from the boot menu* and there is no boot
+/// menu in this system, which a reviewer found and `intent/0006-state/spec.md`
+/// settled: the menu is **the loader's own**. On hardware that is GRUB, whose
+/// configuration this repository already writes and whose source it does not
+/// import — GRUB is GPLv3 and `LICENSING.md` is where that boundary lives. So
+/// this writes one `menuentry` per installed generation, each carrying
+/// `f.root=<64 hex>` on its `multiboot` line, and every generation on offer as
+/// `module` lines so the token has something to select from.
+///
+/// Under QEMU there is no menu at all and none is needed: `-append` is the same
+/// command line and `cargo xtask rollback` passes it. That is the whole of the
+/// difference between the two, which is why one token rather than a menu format
+/// is the mechanism.
+///
+/// # Errors
+///
+/// A build directory with no modules in it, or more of them than one entry can
+/// offer.
+fn install(into: Option<&str>) -> Result<(), String> {
+    let dir = crate::target_dir().join("generation");
+    let mut modules = std::collections::BTreeMap::new();
+    let entries = std::fs::read_dir(&dir).map_err(|e| {
+        format!(
+            "reading {}: {e}\n\n\
+             There is nothing installed to write a menu for. `cargo xtask generation` \
+             packs a boot module into that directory; this writes the entries that \
+             offer them.",
+            crate::relative(&dir)
+        )
+    })?;
+    for entry in entries {
+        let path = entry.map_err(|e| format!("reading {}: {e}", crate::relative(&dir)))?.path();
+        if path.extension().is_some_and(|e| e == "fcm")
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            modules.insert(stem.to_string(), size);
+        }
+    }
+
+    if modules.is_empty() {
+        return Err(format!(
+            "no boot module in {}. `cargo xtask generation` is what packs one.",
+            crate::relative(&dir)
+        ));
+    }
+    if modules.len() > GENERATIONS_MAX {
+        return Err(format!(
+            "{} generations are installed and one menu entry can offer {GENERATIONS_MAX}.\n\n\
+             A loader hands the frame at most {} modules and this entry already spends five \
+             of them on `init.bin` and the component files. Truncating the list would leave \
+             a menu quietly missing the generation somebody meant to roll back to, which is \
+             the failure this command exists to prevent — so delete the modules you are not \
+             keeping from {} and run this again.",
+            modules.len(),
+            GENERATIONS_MAX + 5,
+            crate::relative(&dir)
+        ));
+    }
+
+    let out = match into {
+        Some(path) => PathBuf::from(path).join(FRAGMENT),
+        None => dir.join(FRAGMENT),
+    };
+    let text = fragment(&modules);
+    std::fs::write(&out, &text).map_err(|e| format!("writing {}: {e}", out.display()))?;
+
+    println!("generation --install\n");
+    for (root, size) in &modules {
+        println!("  menuentry  f.root={root}  ({size} bytes)");
+    }
+    println!(
+        "\n  fragment   {}  ({} entries, {} bytes)\n\n  \
+         Copy it to /etc/grub.d/{FRAGMENT}, chmod 0755, and regenerate grub.cfg —\n  \
+         `docs/booting-on-hardware.md` is the whole procedure and \
+         `tools/f-on-metal.sh`\n  is what does it with the backups.",
+        crate::relative(&out),
+        modules.len(),
+        text.len()
+    );
+    Ok(())
+}
+
+/// The fragment's text: a `/etc/grub.d` script that emits one entry per
+/// generation.
+///
+/// # Why the order is the root's and not the age's
+///
+/// The spec's sentence is that the default is the newest module the loader
+/// offered, and *newest* is a clock. Nothing in this tree may read one outside
+/// `f_env::Env` — RFC 0004 — and a generation record carries no ordinal, so
+/// there is no in-band answer to *which of these is later*. Sorting by root hex
+/// is arbitrary and **stable**, which is the property that matters for a file
+/// under review: two runs over one build directory produce one fragment. The
+/// person at the console picks the entry; `GRUB_DEFAULT` is theirs and this
+/// never touches it, for `tools/f-on-metal.sh`'s reason.
+///
+/// *What would reverse this:* something that orders generations without a
+/// clock — a predecessor hash in the record tree, which is a fifth thing in
+/// `abi/store` and therefore an RFC, not a patch.
+fn fragment(modules: &std::collections::BTreeMap<String, u64>) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "#!/bin/sh\n\
+         # SPDX-License-Identifier: Apache-2.0 OR MIT\n\
+         #\n\
+         # Generated by `cargo xtask generation --install`. One entry per installed\n\
+         # generation; the root on the `multiboot` line is what selects it, and every\n\
+         # generation is offered as a `module` so the frame has something to select\n\
+         # from. `abi/src/boot.rs` is the grammar and `kernel/src/generation.rs` is\n\
+         # the reader.\n\
+         #\n\
+         # Entries are in ascending root order, which is arbitrary and stable: there\n\
+         # is no clock in this tree and a record tree carries no ordinal, so there is\n\
+         # no in-band answer to which generation is newer. GRUB_DEFAULT is yours.\n\
+         cat <<'MENU'\n",
+    );
+    for root in modules.keys() {
+        out.push_str(&format!(
+            "menuentry \"F — generation {short}\" --class f {{\n    \
+             echo \"F: loading generation {short}. Output on COM1 — there is no video.\"\n    \
+             insmod part_gpt\n    \
+             insmod part_msdos\n    \
+             insmod fat\n    \
+             insmod ext2\n    \
+             insmod multiboot\n    \
+             search --no-floppy --file --set=root /boot/f/f-kernel.elf32\n    \
+             multiboot /boot/f/f-kernel.elf32 f.root={root}\n    \
+             module /boot/f/init.bin\n",
+            short = &root[..16],
+        ));
+        for name in crate::COMPONENTS {
+            out.push_str(&format!("    module /boot/f/{name}.fc\n"));
+        }
+        for offered in modules.keys() {
+            out.push_str(&format!("    module /boot/f/{offered}.fcm\n"));
+        }
+        out.push_str("}\n\n");
+    }
+    out.push_str("MENU\n");
+    out
 }
 
 /// The round-trip fixpoint, over every `generation.toml` in the tree.
@@ -1296,5 +1511,68 @@ source = \"virtio-net\"
         let bytes = compile(&source, [0; 32], &zero).expect("it compiles");
         let tree = Tree::check(&bytes).expect("the tree is believed");
         assert_eq!(read(SOURCE, &decompile_tree(&tree)).expect("it re-reads"), source);
+    }
+
+    /// Two roots, so that the ordering and the offer list are both visible.
+    fn installed() -> std::collections::BTreeMap<String, u64> {
+        let mut out = std::collections::BTreeMap::new();
+        out.insert("b".repeat(64), 65_348);
+        out.insert("a".repeat(64), 64_000);
+        out
+    }
+
+    #[test]
+    fn every_entry_carries_its_own_root_and_offers_every_generation() {
+        let text = fragment(&installed());
+        // One entry per generation, each naming its own root on the multiboot
+        // line: an entry that offered a module and did not name it would be a
+        // menu line that boots whatever the frame defaults to.
+        for root in installed().keys() {
+            assert!(
+                text.contains(&format!("multiboot /boot/f/f-kernel.elf32 f.root={root}")),
+                "no entry selects {root}"
+            );
+            // And every generation is offered by *both* entries, because a token
+            // can only select from what the loader placed. An entry offering
+            // one module could never roll back.
+            assert_eq!(
+                text.matches(&format!("module /boot/f/{root}.fcm")).count(),
+                installed().len()
+            );
+        }
+        assert_eq!(text.matches("menuentry ").count(), installed().len());
+    }
+
+    #[test]
+    fn the_order_is_the_roots_and_two_runs_write_one_file() {
+        // Arbitrary and stable is the property, and stable is the half that
+        // matters for a file under review. There is no clock in this tree, so
+        // *newest* is not available and is not pretended at.
+        let text = fragment(&installed());
+        assert_eq!(text, fragment(&installed()));
+        let first = text.find(&"a".repeat(64)).expect("the lower root is in there");
+        let second = text.find(&"b".repeat(64)).expect("the higher root is in there");
+        assert!(first < second, "entries are in ascending root order");
+    }
+
+    #[test]
+    fn a_fragment_is_a_grub_d_script_and_not_a_grub_cfg() {
+        // `/etc/grub.d/*` are executable scripts whose *output* is the menu, so
+        // a fragment that was the menu itself would be copied into place and
+        // emit nothing. `tools/f-on-metal.sh` writes the same shape.
+        let text = fragment(&installed());
+        assert!(text.starts_with(
+            "#!/bin/sh
+"
+        ));
+        assert!(text.contains("SPDX-License-Identifier: Apache-2.0 OR MIT"));
+        assert!(text.contains(
+            "cat <<'MENU'
+"
+        ));
+        assert!(text.ends_with(
+            "MENU
+"
+        ));
     }
 }

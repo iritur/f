@@ -29,6 +29,13 @@ mod manifest;
 /// rather than a second one of its own. E2-B04.
 mod generation;
 
+/// Gate G2's first half: break a generation on purpose, boot the previous one by
+/// name, and check that what came back is the same bytes. Split out because it
+/// is a story with seven steps and six boots rather than a verb with a body, and
+/// because the sentence it is strict about — *bit-identical* — needs the room to
+/// say what is compared. E2-P07.
+mod rollback;
+
 /// The target the kernel is built for.
 ///
 /// A built-in target and not a JSON file in `targets/`, which is a decision
@@ -540,6 +547,13 @@ fn main() -> ExitCode {
         // is the driver: the component directory, the two processes the
         // reproduction check needs, and the declared gap between what the
         // simulator kills and what a boot can. RFC 0041.
+        // E2-P07, and half of gate G2. Break a generation with a real defect,
+        // offer both to the loader, name the previous one with `f.root=<hex>`,
+        // and require what came back to be bit-identical — the root, every byte
+        // of the module as the loader delivered it, and the generation rebuilt
+        // from source. `rollback.rs` says why the second of those is not implied
+        // by the first, and builds the module that proves it.
+        "rollback" => rollback::rollback(),
         "chaos" => chaos(),
         "mutate" => mutate(),
         "prove" => prove(args.get(1).map(String::as_str)),
@@ -746,7 +760,17 @@ cargo xtask <command>
                      disagree about, --elsewhere evaluates the same expression at
                      two checkout paths and requires one root, and --mutate
                      compiles the build path into the frame and requires that
-                     comparison to go red and name the frame. E2-P06
+                     comparison to go red and name the frame. E2-P06.
+                     --install writes one menuentry per installed generation
+                     into a GRUB fragment — the loader's menu, nothing imported.
+                     E2-P07
+  rollback           Break a generation with a real frame defect, offer both to
+                     the loader, name the previous one with f.root=<64 hex>, and
+                     require what came back to be bit-identical: the root, every
+                     byte of the module as the loader delivered it, and the
+                     generation rebuilt from source. A module that folds to the
+                     right root and carries the wrong bytes is built on purpose
+                     and must be caught. Half of gate G2. E2-P07
   admission          Refuse an over-subscribed reservation and put a granted
                      one under adversarial load, with two controls beside it:
                      the same load without a reservation, which must miss, and
@@ -1921,6 +1945,37 @@ fn boot_ending(append: Option<&str>, seconds: u64) -> Result<(Ending, String), S
     machine_with(append, &[], Capture::Printed, seconds, BOOT_MEMORY)
 }
 
+/// [`boot_captured`], offering extra boot modules on top of the standing list.
+///
+/// `E2-P07`'s, and the only caller: a rollback is a machine offered more than
+/// one generation and told which to be, so the menu has to be something the
+/// harness composes per boot rather than the fixed list every other command
+/// wants. Everything else about the emulator is unchanged, which is the whole
+/// reason this takes a slice rather than describing a machine of its own.
+fn boot_carrying(
+    append: &str,
+    carrying: &[String],
+    features: &[&str],
+) -> Result<(Option<i32>, String), String> {
+    let (ending, log) = machine_devices(
+        Some(append),
+        features,
+        Capture::Printed,
+        BOOT_TIMEOUT,
+        BOOT_MEMORY,
+        &[],
+        carrying,
+    )?;
+    match ending {
+        Ending::TimedOut(seconds) => Err(format!(
+            "the boot was still running after {seconds}s and was killed
+
+             The log up to that point is above."
+        )),
+        ending => Ok((ending.code(), log)),
+    }
+}
+
 /// [`boot`], with the serial log.
 fn boot_captured(append: Option<&str>, features: &[&str]) -> Result<(Option<i32>, String), String> {
     let (ending, log) = machine(append, features, Capture::Printed)?;
@@ -1959,7 +2014,7 @@ fn machine_with(
     timeout: u64,
     memory: &str,
 ) -> Result<(Ending, String), String> {
-    machine_devices(append, features, capture, timeout, memory, &[])
+    machine_devices(append, features, capture, timeout, memory, &[], &[])
 }
 
 /// The emulator, described once.
@@ -1984,6 +2039,7 @@ fn emulator(
     features: &[&str],
     memory: &str,
     devices: &[&str],
+    carrying: &[String],
 ) -> Result<Command, String> {
     build_with(features)?;
     let kernel = kernel_elf32();
@@ -2015,6 +2071,15 @@ fn emulator(
     let mut modules = vec![init.to_str().ok_or("the init image path is not valid UTF-8")?];
     for path in &components {
         modules.push(path.to_str().ok_or("a component file path is not valid UTF-8")?);
+    }
+    // `E2-P07`. Boot modules the caller is offering on top of the standing list:
+    // one packed generation each, which is what makes `f.root=` a selection
+    // rather than a statement. Appended rather than inserted, because module one
+    // is `user/init`'s and its position is the contract; everything after it is
+    // found by magic, and a `.fcm` has a magic of its own that the frame's
+    // component walk does not answer to.
+    for path in carrying {
+        modules.push(path.as_str());
     }
     qemu.args(["-initrd", &modules.join(",")]);
 
@@ -2084,8 +2149,9 @@ fn machine_devices(
     timeout: u64,
     memory: &str,
     devices: &[&str],
+    carrying: &[String],
 ) -> Result<(Ending, String), String> {
-    let mut qemu = emulator(append, features, memory, devices)?;
+    let mut qemu = emulator(append, features, memory, devices, carrying)?;
 
     // Spawned rather than run to completion, because a boot that never ends has
     // to be a result this function can return. `status()` and `output()` both
@@ -7339,6 +7405,7 @@ fn iommu(kind: Option<&str>) -> Result<(), String> {
             BOOT_TIMEOUT,
             BOOT_MEMORY,
             DMA_DEVICE,
+            &[],
         )?;
         match ending {
             Ending::Exited(33) => {}
@@ -7465,6 +7532,7 @@ fn blk(kind: Option<&str>) -> Result<(), String> {
             BOOT_TIMEOUT,
             BOOT_MEMORY,
             &borrowed,
+            &[],
         )?;
         match ending {
             Ending::Exited(33) => {}
@@ -7586,6 +7654,7 @@ fn net(kind: Option<&str>) -> Result<(), String> {
             BOOT_TIMEOUT,
             BOOT_MEMORY,
             NET_DEVICE,
+            &[],
         )?;
         match ending {
             Ending::Exited(33) => {}
@@ -7972,7 +8041,7 @@ fn watched_boot(append: &str, shot: &Path) -> Result<Watched, String> {
     devices.push("-qmp");
     devices.push(&monitor);
 
-    let mut qemu = emulator(Some(append), &[], BOOT_MEMORY, &devices)?;
+    let mut qemu = emulator(Some(append), &[], BOOT_MEMORY, &devices, &[])?;
     qemu.stdout(Stdio::piped());
     // The other direction, which no other boot in this file needs: the byte that
     // says the capture has been taken.
@@ -8449,6 +8518,7 @@ fn deadline(kind: Option<&str>) -> Result<(), String> {
             BOOT_TIMEOUT,
             BOOT_MEMORY,
             &borrowed,
+            &[],
         )?;
         match ending {
             Ending::Exited(33) => {}

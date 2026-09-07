@@ -60,6 +60,16 @@
 //! to stay true. `E2-P06` is its consumer and `xtask` is where the finding is
 //! rendered into a sentence, because that is where an allocator is.
 //!
+//! # Why the boot-time selection is here too
+//!
+//! [`select`] answers *which of these modules is the one `f.root=` named*, and
+//! it is the fold used as an identity rather than as a summary. It lives beside
+//! the fold for [`diff`]'s reason and one more: `E2-P07` puts the reader in the
+//! frame, `kernel/` is a crate with `test = false` and no host harness, and a
+//! selection rule that could only be exercised by booting QEMU is a selection
+//! rule whose refusals nothing checks. The frame's share is a loop over the
+//! modules the loader gave it; every branch is here.
+//!
 //! # What this crate does not hold
 //!
 //! A codec. Every byte layout is `f_abi::store`'s, and the reason is in that
@@ -71,7 +81,9 @@
 pub mod diff;
 pub mod fold;
 pub mod record;
+pub mod select;
 
 pub use diff::{Divergence, divergence};
 pub use fold::root;
 pub use record::{Refusal, Tree};
+pub use select::{Chosen, Examined, Rejected, select};

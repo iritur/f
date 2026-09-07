@@ -297,6 +297,52 @@ is what `E0-P06` needs on `runner-class-A`, and the reason this page exists at
 all. `fault=pf|ud|df|nx|wx|stack` provokes a deliberate fault. Both are read by
 `kernel/src/main.rs` from the same `BootInfo`.
 
+### `f.root=<64 hex>` — which generation this machine is
+
+The third parameter, and the one that makes a rollback possible. It names a
+**boot module** by the root hash `cargo xtask generation` printed for it, and
+the frame selects the module whose record tree folds to that root — the same
+fold, in the same crate, that produced the root on the build host. The grammar
+is `abi/src/boot.rs`; the reader is `kernel/src/generation.rs`; the rule it
+calls is `generation/src/select.rs`.
+
+A boot module is a `<root>.fcm` file and travels as a `module` line like any
+other. **Every generation you want to be able to select has to be on the entry's
+module list** — a token can only choose from what the loader placed — and the
+loader hands the frame at most eight modules, of which `init.bin` and the
+component files already take five. So three generations per entry, which is what
+`cargo xtask generation --install` writes and refuses to exceed.
+
+```
+menuentry "F — generation 8b08fdea33bd197f" {
+    multiboot /boot/f/f-kernel.elf32 f.root=8b08fdea…c1c8a38a
+    module    /boot/f/init.bin
+    module    /boot/f/store.fc          # …and the other three component files
+    module    /boot/f/8b08fdea….fcm     # every generation on offer, so the
+    module    /boot/f/139a401f….fcm     # token has something to choose from
+}
+```
+
+`cargo xtask generation --install` writes that whole fragment — one `menuentry`
+per installed generation — into `target/generation/45_f_generations`, ready to
+copy to `/etc/grub.d/`. It writes a file under the build directory rather than
+under `/etc` on purpose: a command that rewrote a bootloader configuration as a
+side effect of a build is a command nobody could run twice on a machine they
+cared about. `tools/f-on-metal.sh` is what installs, and it is the half with the
+backups.
+
+Sixty-four lower-case hexadecimal characters, and only lower case: a hash
+printed one way and parsed another is a hash two people compare by eye and
+disagree about. A machine handed a root that no offered module carries **refuses
+the boot** and says so, rather than quietly booting something else — the whole
+value of a rollback is that the operator can tell whether it happened.
+
+What the frame does *not* do with the answer is instantiate a topology from it;
+RFC 0066 is that decision, and `user/assembler` is where instantiation lives
+until there is a supervisor above the frame to call it. What the frame does is
+select, refold, and report the root and a SHA-256 over every byte of the module
+it was handed — which is what `cargo xtask rollback` compares.
+
 ## The boot log will not match CI, and that is not a regression
 
 `xtask` pins `-m 128M` and `-smp 2` deliberately, because the kernel prints the

@@ -76,6 +76,7 @@ version = "0.0.1"
 dependencies = [
  "f-abi",
  "f-env",
+ "f-generation",
  "f-ring",
  "f-store",
  "f-virtio-blk",

@@ -29,6 +29,10 @@ pub mod churn;
 pub mod component;
 pub mod doorbell;
 pub mod env;
+// `E2-P07`. The frame's whole share of `f.root=`: read the token, hand the
+// loader's modules to `f-generation`, print what came back. Every branch that
+// could be wrong is in that library, where a host test can reach it.
+pub mod generation;
 // The third driver's supervisor. Beside `blk` and `net` and deliberately not
 // merged with them; `kernel/src/gpu.rs` says why and RFC 0054 argues it.
 pub mod gpu;
@@ -893,6 +897,21 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // The two endings a harness has to tell apart from success and from each
     // other, each reachable on purpose. `cargo xtask panic` boots all three.
     deliberate_stop(&boot);
+
+    // `E2-P07`. Which generation this machine was asked to be, if it was asked
+    // at all. Late rather than early on purpose: the frame does not instantiate
+    // a topology from the answer — RFC 0066 — so nothing above depends on it,
+    // and a report that ran before the modules were reserved would be reading
+    // memory the allocator had not been told about yet.
+    //
+    // SAFETY: the boot processor, past the point where `reserved_ranges` put
+    // every module in the reserved list and the allocator was populated from
+    // it, with the direct map live and `frames` rebound onto it. That is
+    // `multiboot::Module::bytes`'s obligation and it is the same one
+    // `component::demonstrate` discharged above.
+    if !generation::report(unsafe { generation::selected(&boot) }) {
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
 
     boot_time(&boot, entered);
 
