@@ -13,7 +13,7 @@
 //! | --- | --- | --- |
 //! | no dropped operation | an operation accepted before the swap and never answered after it | [`chaos::Load`]'s ledger, unchanged — the same client the kill test uses, so *dropped* means here exactly what it means there |
 //! | nothing answered twice or wrongly | the outgoing instance's completion and the incoming one's both arrive | the ledger again, and a read-back through a *later* generation |
-//! | the transfer verified | the incoming instance serving a client out of state it did not actually receive | three checks at three levels, below |
+//! | the transfer verified | the incoming instance serving a client out of state it did not actually receive | four checks at four levels, below |
 //!
 //! # Why the client is `chaos::Load` and not a client of this module's own
 //!
@@ -29,7 +29,7 @@
 //! number zero. So the same counter, over the same client, is the *whole* of
 //! what a swap buys over a restart, and this harness reports it for both.
 //!
-//! # The three levels the transfer is verified at
+//! # The four levels the transfer is verified at
 //!
 //! One check would be a placement rather than a claim, which is the finding
 //! `sim/src/chaos.rs` records about its own first draft.
@@ -48,6 +48,44 @@
 //!   told anything happened. A swap that handed over nothing would leave that id
 //!   naming a slot in a table that has never been filled, and the client would be
 //!   refused. [`Swap::amnesiac`] is that swap, and the run must go red.
+//! - **In the read-back**, which is the level the other three cannot reach and
+//!   the one the exit's own sentence asks for — *the transferred state verified
+//!   by reading it back through the new instance*, `intent/0006-state/spec.md`.
+//!   The incoming instance is asked what it would hand over, and the answer is
+//!   compared record for record against what the outgoing instance said it was
+//!   handing over: **what crossed against what should have crossed**.
+//!   [`Swap::forge`] is its control.
+//!
+//! # Why a check word is not the read-back, which is the argument for a fourth
+//!
+//! A check word is computed **by the sender**, so it proves the bytes are the
+//! bytes the outgoing build wrote and it proves nothing about what they mean.
+//! Every corruption that happens *before* the seal crosses with a check word
+//! that verifies: a field the outgoing build encoded out of the wrong variable,
+//! a unit it wrote in the wrong one, a byte the incoming build decoded
+//! differently from the outgoing one — which is the third of the three failures
+//! `user/virtio-blk/src/state.rs` says the check word is *for*, and is the one
+//! it cannot see. Two builds are the premise of a swap rather than an edge of
+//! it, so that class is the ordinary case and not the exotic one.
+//!
+//! The read-back closes it by comparing the two ends rather than the two
+//! copies of one end: the outgoing instance's own records, which no window has
+//! touched, against what the incoming instance answers when it is asked to
+//! encode the table it built. A field altered anywhere between them shows up,
+//! sealed or not, and so does a build that decoded one differently.
+//!
+//! **It is this harness's check and not the frame's**, and the line matters
+//! because the whole file is otherwise the protocol's. `f_abi::swap` holds no
+//! memory and reads no state record, so nothing in a frame can hold the
+//! outgoing records to compare against; a frame's defence is the check word,
+//! and a check word is the sender's. So the read-back is recorded in the
+//! artefact and refused by [`verdict`] — the same position the two
+//! live-registration counts are already in — and the protocol is left saying
+//! what it can honestly say. *What would reverse that:* a deployment where two
+//! builds of one component disagree about a field often enough to matter, at
+//! which point phase A grows a step in which the *outgoing* instance verifies
+//! the incoming one's read-back before the word moves, and that is RFC 0063's
+//! reversal rather than this file's.
 //!
 //! # Something has to be able to drop an operation
 //!
@@ -141,6 +179,18 @@ pub mod wrote {
     /// The two counts above disagreed. **A failure**, and the one that says the
     /// state did not cross.
     pub const MISMATCH: &str = "mismatch";
+    /// The incoming instance was asked what it would hand over, before the
+    /// routing word moved. Detail: how many records it answered with.
+    ///
+    /// Written on every transfer and never only on a failing one: a check that
+    /// leaves no record when it passes is a check a reader cannot tell from one
+    /// that never ran, and [`verdict`] requires this to cover every record that
+    /// crossed.
+    pub const READBACK: &str = "readback";
+    /// What the incoming instance answered is not what the outgoing one handed
+    /// over. **A failure**, and the only one of the four levels that can see a
+    /// record which crossed intact and wrong. Detail: how many records differed.
+    pub const DIFFERED: &str = "differed";
     /// The routing word committed. Detail: the generation it now carries.
     pub const SWAPPED: &str = "swapped";
     /// The place was refilled by a teardown and a spawn, because a declaration
@@ -212,6 +262,61 @@ pub const LOAD: &str = chaos::LOAD;
 
 /// The answer a read gets at a position nothing has written.
 const NOTHING: u64 = u64::MAX;
+
+/// One state record's width, as an array length rather than as a declaration's
+/// field. Unit: bytes.
+///
+/// The declaration's `record_bytes` is what the *arithmetic over the window*
+/// uses, because that is what the two manifests agreed on; this is what the
+/// **array types** in this file are, because an array length is a compile-time
+/// quantity and a declaration is a run-time one. They are required equal by
+/// `f_virtio_blk::state::tests::the_declaration_matches_the_manifest`, which is
+/// why this file may hold both without holding two opinions.
+const WIDTH: usize = f_virtio_blk::state::RECORD_BYTES as usize;
+
+/// The same deed, with a token no client ever submitted, sealed so that its
+/// check word verifies.
+///
+/// **The corruption the first three levels cannot see, and it is built out of
+/// the record's own public constructors** rather than by flipping bits: those
+/// constructors seal, so what comes out is a record `Record::intact` accepts and
+/// `Record::replay` replays. Only the token moves, so the deed still names the
+/// same capability, the same length and the same set — a table rebuilt from it
+/// holds exactly the registrations the honest window would, and every count over
+/// that table agrees with every count over the honest one. That is deliberate:
+/// a control that also moved a count would be caught by the two tallies and
+/// would say nothing about the level it is here to test.
+///
+/// **Why a wrong token is a defect and not a curiosity.** The token is the
+/// client's own submission token, replayed unchanged because the completion the
+/// replay produces is matched by it — `user/virtio-blk/src/state.rs` says so
+/// where the field is declared. An instance whose journal says a deed was asked
+/// for by somebody who never asked for it will hand *that* history to the next
+/// generation, so the fiction outlives the swap that introduced it. It stands
+/// here for the whole class: a field encoded from the wrong variable by the
+/// outgoing build, or read differently by the incoming one, arrives sealed and
+/// consistent and is exactly what a sender-computed check word cannot refuse.
+fn forged(record: &State) -> Option<State> {
+    use f_virtio_blk::state::deed;
+    match record.kind {
+        deed::REGISTER => Some(State::registered(
+            record.token ^ 1,
+            record.cap,
+            u32::try_from(record.named).unwrap_or(u32::MAX),
+            record.buffers,
+        )),
+        deed::UNREGISTER => Some(State::unregistered(
+            record.token ^ 1,
+            u32::try_from(record.named).unwrap_or(u32::MAX),
+        )),
+        // `RETIRE_ALL` carries nothing but its kind, so there is no field to
+        // forge without turning it into a different deed — which the check word
+        // *would* catch, and would therefore be a control for the level above.
+        // `None` leaves the window honest, and the run says so by recording no
+        // difference.
+        _ => None,
+    }
+}
 
 // ----------------------------------------------------------------- the store
 
@@ -367,6 +472,9 @@ pub struct Place {
     /// Hand over nothing while declaring `in_place`.
     /// **The control that says the transferred state is load-bearing.**
     amnesiac: bool,
+    /// Alter a record in the window and seal it again, so that its check word
+    /// verifies. **The control for the read-back.**
+    forge: bool,
 }
 
 impl Place {
@@ -407,6 +515,7 @@ impl Place {
             hasty: swap.hasty,
             garble: swap.garble,
             amnesiac: swap.amnesiac,
+            forge: swap.forge,
         }
     }
 
@@ -568,17 +677,31 @@ impl Place {
             // reader is what has to catch it.
             *byte ^= 0x80;
         }
+        if self.forge
+            && let Some(slot) = window.get_mut(..width)
+            && let Ok(bytes) = <[u8; WIDTH]>::try_from(&*slot)
+            && let Some(altered) = forged(&State::from_bytes(&bytes))
+        {
+            // The control for the read-back: the same deed, naming the same
+            // capability and the same set, carrying a token no client ever
+            // submitted — and **sealed**, so the record's reader has nothing to
+            // refuse and the two live-registration counts cannot move. `forged`
+            // is where the argument for that shape is.
+            slot.copy_from_slice(&altered.to_bytes());
+        }
 
-        // Read back out of the window rather than from `handed`, because a
-        // transfer that verified the records it still held in memory would be
-        // verifying nothing about the bytes that crossed.
+        // Decoded out of the window rather than taken from `handed`, because an
+        // instance handed the records the outgoing one still held in memory
+        // would be an instance that never read the bytes that crossed. This is
+        // what is *replayed*; the read-back further down is what it is compared
+        // against, and the two are deliberately different objects.
         let mut crossed = Vec::with_capacity(handed.len());
         for nth in 0..records as usize {
             let at = nth.saturating_mul(width);
             let Some(slot) = window.get(at..at.saturating_add(width)) else {
                 return Err(Abandoned::Refused);
             };
-            let bytes: [u8; 32] = slot.try_into().map_err(|_| Abandoned::Refused)?;
+            let bytes: [u8; WIDTH] = slot.try_into().map_err(|_| Abandoned::Refused)?;
             crossed.push(State::from_bytes(&bytes));
         }
 
@@ -596,6 +719,71 @@ impl Place {
             // and the whole reason an abandonment has no cleanup path of its own.
             return Err(Abandoned::Refused);
         }
+
+        // **The read-back**, and it is the exit's own sentence: *the transferred
+        // state verified by reading it back through the new instance*. The
+        // incoming instance has rebuilt its table out of the window; asking it
+        // what it would hand over now runs that table back out through its own
+        // encoder, so the two ends of the comparison are **what should have
+        // crossed** — the records the outgoing instance answered with, still in
+        // its own memory — and **what the incoming build made of what did**.
+        //
+        // Against `handed` and deliberately not against `crossed`: `crossed` is
+        // the window read back, so it is the far end of the check word and
+        // nothing more, and a record that was altered before it was sealed is
+        // identical in both. `handed` is the only copy in this run that no
+        // window ever touched, which is what makes it the reference.
+        //
+        // **This is the harness's check and not the frame's**, and the
+        // difference is worth stating where it is made. `f_abi::swap` reads no
+        // state record and holds no memory, so a frame cannot hold `handed` to
+        // compare anything against it; what a frame has is the check word, and a
+        // check word is computed by the sender. The two live-registration counts
+        // above are in the same position and for the same reason — a comparison
+        // across both sides of the window, made by the thing that is measuring
+        // rather than by the thing being measured — so this is recorded and
+        // refused by [`verdict`], and the protocol is left saying what it can
+        // honestly say.
+        let back = incoming.hand_over();
+        let read = back.as_ref().map_or(0, Vec::len);
+        world.record(
+            me,
+            PLACE,
+            wrote::READBACK,
+            u64::from(self.generation),
+            u64::try_from(read).unwrap_or(u64::MAX),
+        );
+        let differed = match back.as_deref() {
+            Some(records) if records.len() == handed.len() => {
+                records.iter().zip(handed.iter()).filter(|(after, before)| after != before).count()
+            }
+            // A read-back of a different length is not a comparison that came
+            // out wrong in one place: nothing in it is accounted for, so every
+            // record on the longer side counts. Reporting one here would let the
+            // widest failure print the narrowest number.
+            Some(records) => records.len().max(handed.len()),
+            // The incoming instance cannot say what it holds — `Service::
+            // handover`'s own refusal — and the honest answer to *reproduce
+            // this* is that it did not. Counted as everything differing rather
+            // than as nothing, R04.
+            None => handed.len(),
+        };
+        if differed != 0 {
+            world.record(
+                me,
+                PLACE,
+                wrote::DIFFERED,
+                u64::from(self.generation),
+                u64::try_from(differed).unwrap_or(u64::MAX),
+            );
+        }
+        // The acknowledgement is the incoming occupant's own answer to *did you
+        // take these records*, which is what `f_abi::swap::Swap::acknowledged`
+        // documents it to be, and it stays that answer: the comparison above is
+        // not something the frame could have made, so gating this on it would
+        // model a step no frame has. What the difference gates instead is the
+        // run — [`verdict`] refuses it, and the swap that produced it is
+        // reported as a swap that happened and should not have.
         swap.acknowledged(true)?;
 
         // Phase B. One `Release` store, and after it the state belongs to the
@@ -877,6 +1065,17 @@ pub struct Swap {
     /// whatever crossed was not what the client depended on and the green run
     /// beside it means nothing.
     pub amnesiac: bool,
+    /// Alter a record in the window and seal it again.
+    ///
+    /// **The negative control for the read-back, and the only one of the four
+    /// that the other three are blind to by construction.** The record's reader
+    /// accepts it because its check word verifies; the two live-registration
+    /// counts cannot move because the deed still names what it named; the client
+    /// cannot see it because a replayed token is not something a client is
+    /// waiting on. What is left is reading the state back through the new
+    /// instance and comparing it against what the outgoing one handed over,
+    /// which is the exit's own sentence. `forged` is what it writes and why.
+    pub forge: bool,
 }
 
 impl Swap {
@@ -913,6 +1112,7 @@ impl Swap {
             hasty: false,
             garble: false,
             amnesiac: false,
+            forge: false,
         }
     }
 
@@ -1087,6 +1287,16 @@ pub struct Report {
     /// Swaps where the two live-registration counts disagreed. **A failure**,
     /// and the one that says the state did not cross. Unit: swaps.
     pub mismatch: u32,
+    /// State records read back through the incoming instance, before its
+    /// routing word moved, added up. Unit: records.
+    ///
+    /// Required equal to [`Report::handed`] by [`verdict`]: a read-back that
+    /// covered fewer records than crossed is a comparison with a hole in it, and
+    /// a zero here is the check not having run at all.
+    pub read_back: u32,
+    /// Swaps whose read-back disagreed with what the outgoing instance handed
+    /// over. **A failure**, and the one no check word can see. Unit: swaps.
+    pub differed: u32,
     /// Live registrations counted on the outgoing side, summed over the run.
     /// Unit: buffer sets.
     pub sets_out: u32,
@@ -1195,6 +1405,8 @@ impl Report {
             handed: total(PLACE, wrote::HANDED),
             adopted: total(PLACE, wrote::ADOPTED),
             mismatch: count(PLACE, wrote::MISMATCH),
+            read_back: total(PLACE, wrote::READBACK),
+            differed: count(PLACE, wrote::DIFFERED),
             sets_out: sets(0),
             sets_in: sets(1),
             pended: count(PLACE, wrote::PENDED),
@@ -1372,6 +1584,30 @@ pub fn verdict(swap: &Swap, moved: &Report, calm: &Report) -> Result<(), String>
                 moved.handed, moved.adopted
             ));
         }
+        // The read-back, and it is the level the three below it cannot reach:
+        // a record that crossed intact and wrong passes the check word, moves
+        // no count, and is invisible to a client. Two clauses, because *the
+        // comparison came out wrong* and *the comparison did not happen* are
+        // different findings and the second is the quieter one.
+        if moved.read_back != moved.handed {
+            return Err(format!(
+                "{} record(s) crossed the window and {} were read back through the incoming \
+                 instance. A transfer verified over fewer records than crossed is verified \
+                 with a hole in it, and at zero the read-back did not happen at all",
+                moved.handed, moved.read_back
+            ));
+        }
+        if moved.differed != 0 {
+            return Err(format!(
+                "{} swap(s) left the incoming instance holding a state that is not the one \
+                 the outgoing instance handed over. Every other check in this run agreed — \
+                 the reader accepted the window, the two registration counts matched and the \
+                 client noticed nothing — which is what a comparison of what crossed against \
+                 what should have crossed is for. *The state transfer is verified rather \
+                 than assumed* is the second clause of E2-P08's exit and this is it failing",
+                moved.differed
+            ));
+        }
         // The two tallies. Taken on opposite sides, through two real
         // registration tables, neither derived from the other.
         if moved.mismatch != 0 || moved.sets_in != moved.sets_out {
@@ -1410,10 +1646,11 @@ pub fn verdict(swap: &Swap, moved: &Report, calm: &Report) -> Result<(), String>
                 moved.restarted, swap.swaps
             ));
         }
-        if moved.handed != 0 || moved.adopted != 0 {
+        if moved.handed != 0 || moved.adopted != 0 || moved.read_back != 0 {
             return Err(format!(
-                "a `restart_only` component handed over {} record(s) and adopted {}",
-                moved.handed, moved.adopted
+                "a `restart_only` component handed over {} record(s), adopted {} and had {} \
+                 read back through an incoming instance",
+                moved.handed, moved.adopted, moved.read_back
             ));
         }
         // A restart *discards* what pended rather than ringing for it: those
@@ -1601,6 +1838,11 @@ mod tests {
             assert_eq!(moved.lost, 0);
             assert_eq!(moved.redone, 0, "an in-place swap costs the client no re-registration");
             assert!(moved.handed > 0 && moved.adopted == moved.handed);
+            // The read-back covered every record that crossed, and none of them
+            // came back as something else. A run where this is zero has done the
+            // transfer and verified nothing about it.
+            assert_eq!(moved.read_back, moved.handed);
+            assert_eq!(moved.differed, 0);
             // The three counters RFC 0012 and RFC 0063 keep apart, read out
             // of the artefact: every replacement was a swap, none was a
             // restart, and nothing was abandoned.
@@ -1693,6 +1935,80 @@ mod tests {
         assert!(verdict(&swap, &moved, &calm).is_err(), "the run stayed green with no state");
     }
 
+    /// **The read-back's negative control, and the one the other three are blind
+    /// to by construction.** A record altered *before* it was sealed crosses
+    /// with a check word that verifies, carries a deed that moves no count, and
+    /// names nothing a client is waiting on. Only reading the state back through
+    /// the new instance and comparing it with what crossed can refuse it.
+    #[test]
+    fn a_record_that_crosses_intact_and_wrong_is_caught_by_the_read_back() {
+        // One swap and not two, so the plan completes and the counters below are
+        // about the transfer that was attempted.
+        let mut swap = blk(1);
+        swap.forge = true;
+        let mut control = swap;
+        control.swaps = 0;
+        control.forge = false;
+
+        let moved = report(&swap, DEFAULT_SEED);
+        let calm = report(&control, DEFAULT_SEED);
+
+        // **The first level was blind**, and the run says so rather than the
+        // comment: the record's reader accepted every byte of the window —
+        // `read_back` is written only after `take_over` answered `true` — and
+        // the protocol ran to the end.
+        assert!(moved.handed > 0, "a record has to have crossed for this to be about one");
+        assert_eq!(moved.read_back, moved.handed, "the reader accepted the forged window");
+        assert_eq!(moved.swapped, 1, "and every step of the protocol succeeded");
+        assert_eq!(moved.abandoned, 0);
+        // **The second was blind**: the deed still named what it named, so the
+        // two live-registration counts agree on both sides of the window.
+        assert_eq!(moved.mismatch, 0);
+        assert_eq!((moved.sets_out, moved.sets_in), (1, 1));
+        // **The third was blind**: a replayed token is not something a client
+        // waits on, so its ledger is clean.
+        assert_eq!(moved.lost, 0);
+        assert_eq!(moved.failed, 0);
+        assert_eq!(moved.clients_failed, 0);
+
+        // And the fourth was not. This is the whole of *verified rather than
+        // assumed*: with the other three green, a run without this comparison is
+        // a run that would have reported a clean swap of a state nobody handed
+        // over.
+        assert!(moved.differed > 0, "the read-back has to be what notices");
+        let why = verdict(&swap, &moved, &calm).expect_err("the run stayed green with a forgery");
+        assert!(why.contains("handed over"), "{why}");
+    }
+
+    /// The second level is blind by construction, and this is the construction.
+    ///
+    /// A forgery that moved a count would be caught by the two tallies and would
+    /// say nothing about the level it exists to test, so the deed it produces
+    /// has to name what the honest one named. Asserted on the record rather than
+    /// on a run, because it is a property of `forged` and not of a seed.
+    #[test]
+    fn a_forged_record_is_sealed_and_names_what_the_honest_one_named() {
+        for honest in [State::registered(0x1234, 2, 4096, 8), State::unregistered(9, 0x00FF_0001)] {
+            let fake = forged(&honest).expect("a deed with a field in it is forgeable");
+            assert!(honest.intact() && fake.intact(), "both are records the reader accepts");
+            assert!(
+                State::from_bytes(&fake.to_bytes()).intact(),
+                "and it survives the window, which is where the check word is read"
+            );
+            assert_ne!(fake, honest, "a forgery that changed nothing verifies nothing");
+            assert_eq!(
+                (fake.kind, fake.cap, fake.named, fake.buffers),
+                (honest.kind, honest.cap, honest.named, honest.buffers),
+                "only the token may move: a deed that named something else would move a \
+                 registration count, and the two tallies would catch it instead"
+            );
+        }
+        // The one deed with no field to forge. `None` leaves the window honest,
+        // which is better than a control that quietly turns a `RETIRE_ALL` into
+        // a registration — that is a kind change and the check word's own job.
+        assert!(forged(&State::retired_all()).is_none());
+    }
+
     /// A `restart_only` component takes a restart at the place, and it costs the
     /// client the re-registration the in-place one does not pay.
     #[test]
@@ -1750,6 +2066,8 @@ mod tests {
             wrote::ADOPTED,
             wrote::SETS,
             wrote::MISMATCH,
+            wrote::READBACK,
+            wrote::DIFFERED,
             wrote::SWAPPED,
             wrote::RESTART,
             wrote::ABANDON,
