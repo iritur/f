@@ -174,7 +174,7 @@ Each line names something that runs.
   composer of this line calls `generation::tokens`* is a lint with one call site
   and no second implementation to disagree with it.
 
-## Still open, and recorded rather than answered
+## Recorded rather than answered, and since answered
 
 `cargo xtask rollback`'s `refuses()` boots `f.root=` with an all-zero root, which
 is a well-formed token and selects nothing. The frame parses it, publishes
@@ -186,3 +186,10 @@ it. Zero is reserved on the *counter*, and this is a well-formed counter over a
 root value nothing can produce. It is written up against RFC 0012 in
 `docs/rfc/README.md`, where that decision's owner will see it; it is not
 answered here, and nothing in this wave depends on the answer.
+
+**Answered on 2026-09-07 and the paragraph above is kept as it was written.**
+The selection now runs before the state tree is published, so the refusal boot
+publishes no identity at all and there is no counter for a reader to believe.
+The full answer, including the two alternatives that were refused and what
+would reverse this one, is against RFC 0012 in `docs/rfc/README.md` — one
+decision, written where its owner filed the question, and named from here.

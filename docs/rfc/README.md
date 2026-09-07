@@ -24,7 +24,7 @@ row per entry that needs one, and an entry that needs none does not get a row.
 
 | RFC | Task | Title | Status |
 |---|---|---|---|
-| 0012 | `E2-D01` | An update is a generation swap, and the root is the attestation | accepted; one open question against it, below, from `E2-P07`'s refusal boot |
+| 0012 | `E2-D01` | An update is a generation swap, and the root is the attestation | accepted; the open question below, from `E2-P07`'s refusal boot, was answered on 2026-09-07 by reordering the boot |
 | 0013 | `E0-B14` | Every component publishes a state tree | accepted; reversal condition read twice on 2026-09-07 — against `E2-P01`'s sweep and against `E2-P05`'s comparison — and not met by either |
 | 0058 | `E2-D02` | A mutable extent is a second object kind, and not a unification | accepted |
 | 0059 | `E2-D03` | A collector is three invariants and a batch-class consumer | accepted |
@@ -138,8 +138,9 @@ thresholds stand. The column reads `E2-B09` because that is the build whose
 measurement produced it; `E2-P02` is where the strict reading still lives, and
 0064 says in as many words that it must stay strict.
 
-**An open question against 0012, put here because this is where its owner will
-see it, and deliberately not answered by the bookkeeping that found it.**
+**An open question against 0012, and its answer.** The question is left standing
+below exactly as it was filed, because a question deleted once it is answered is
+a question the next reader has to ask again from nothing.
 `cargo xtask rollback`'s `refuses()` boots a command line carrying
 `f.root=0000…0` — sixty-four zeros, which is a well-formed token that no module
 can fold to, and the boot is expected to end in the frame's refusal. It does.
@@ -169,6 +170,27 @@ decision belongs to whoever owns 0012 rather than to the run that noticed.
 Recorded on 2026-09-07, with `docs/postmortem/0001` carrying the same paragraph
 from the merge's side; nothing in wave 5 depends on the answer, and
 `claims/0030`'s `unknown_roots_refused` row measures the refusal and not this.
+
+**Answered on 2026-09-07: the second of the three, and the boot was reordered.**
+`kernel::generation::report` now runs *before* `state::Tree::publish`, so a
+machine that cannot be the generation it was named ends the boot having
+published nothing — no tree and no identity — and the log of the refusal boot no
+longer carries `counter = 1` at all. The other two were refused for what they
+would have cost. Refusing an all-zero root in `abi/src/boot.rs` puts a *value*
+into a grammar that until now only spelled a width, and it answers a narrower
+question than the one asked: `f.root=` with any sixty-four digits no module
+carries has the same defect, and zeros are only the case somebody happened to
+write. Publishing counter zero for a root the frame has not resolved makes *told
+nothing* and *told something impossible* the same state in the tree, which is
+the one distinction the refusal exists to draw.
+
+This is an answer to a question 0012 left open and not a reversal of anything it
+decided, so it carries no RFC of its own: the reserved-counter sentence already
+says a zeroed block is never a generation, and this is that sentence applied to
+the instant at which the counter stops being zero. *What would reverse it:* a
+frame that must publish before it can select — a store mounted on the boot path,
+which is the same condition `FRAME_KEY`'s own reversal names — at which point the
+publish comes first and the counter has to carry the distinction instead.
 
 **0013 gets a row because its reversal condition fell due and somebody had to
 say what reading it.** That entry's *what would reverse this* names E1's seeded

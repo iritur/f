@@ -600,6 +600,43 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         }
     }
 
+    // `E2-P07`. Which generation this machine was asked to be, if it was asked
+    // at all — and it runs *here*, before the tree below exists, because
+    // everything below this line is a publish and this is the only thing that
+    // has checked the answer.
+    //
+    // It used to run three hundred lines further down, after the tree, the
+    // identity, the ring and a process. The consequence was a real one and is
+    // `docs/postmortem/0001`'s: `measure::identity` returns generation counter
+    // 1 for any *well-formed* `f.root=`, so `cargo xtask rollback`'s refusal
+    // boot — which selects a root no offered module carries — published counter
+    // 1 beside four zeroed root words and only then refused. A reader following
+    // RFC 0012's protocol (counter, eight words, counter again) would have
+    // accepted that: a machine attesting to a generation nothing can produce.
+    // Ordering is the whole fix — the frame already knew, it just said so too
+    // late.
+    //
+    // It is sound this early because `f.root=` decides nothing above it: RFC
+    // 0066 keeps instantiation out of the frame, so this is a fold over bytes
+    // the loader delivered and a block of `kprintln!`. What it does need is
+    // every module reserved and reachable, and that is `populate` and the
+    // rebind, both far above.
+    //
+    // The two readers of the token now agree by construction — both call
+    // `f_abi::boot::Selection::find` — which is what makes *this* root the one
+    // `measure::identity` put in `identity.root`. Before that they were two
+    // scans with opposite tie-breaking, and this ordering would have been a
+    // check on a different root from the one published.
+    //
+    // SAFETY: the boot processor, past the point where `reserved_ranges` put
+    // every module in the reserved list and the allocator was populated from
+    // it, with the direct map live and `frames` rebound onto it. That is
+    // `multiboot::Module::bytes`'s obligation, discharged here rather than by
+    // `component::demonstrate`, which now discharges it later for itself.
+    if !generation::report(unsafe { generation::selected(&boot) }) {
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+
     // RFC 0013, and E0-B14. Published *before* the subsystems that fill it,
     // because a node names a live word rather than a value copied in later —
     // the tree has to exist for the store to have somewhere to go.
@@ -628,6 +665,10 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // ends the boot for the reason a failed mount does: a machine that cannot
     // say what it is running has not answered the question, and a boot that
     // carried on would be publishing a tree with the answer missing from it.
+    //
+    // Reached only by a machine that *is* the generation it names: the selection
+    // above ends the boot otherwise, which is what makes the counter this
+    // publishes an attestation rather than a restatement of the command line.
     if !tree.publish_identity(identity.generation(), identity.root.as_ref(), &identity.measured) {
         kprintln!("FAIL: the state tree has no node for what this machine is running");
         arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
@@ -968,21 +1009,6 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // The two endings a harness has to tell apart from success and from each
     // other, each reachable on purpose. `cargo xtask panic` boots all three.
     deliberate_stop(&boot);
-
-    // `E2-P07`. Which generation this machine was asked to be, if it was asked
-    // at all. Late rather than early on purpose: the frame does not instantiate
-    // a topology from the answer — RFC 0066 — so nothing above depends on it,
-    // and a report that ran before the modules were reserved would be reading
-    // memory the allocator had not been told about yet.
-    //
-    // SAFETY: the boot processor, past the point where `reserved_ranges` put
-    // every module in the reserved list and the allocator was populated from
-    // it, with the direct map live and `frames` rebound onto it. That is
-    // `multiboot::Module::bytes`'s obligation and it is the same one
-    // `component::demonstrate` discharged above.
-    if !generation::report(unsafe { generation::selected(&boot) }) {
-        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
-    }
 
     boot_time(&boot, entered);
 
