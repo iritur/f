@@ -1095,9 +1095,7 @@ impl Record {
         if record.capabilities as usize > CAPABILITIES_MAX || record.rings as usize > RINGS_MAX {
             return Err(Refusal::Count);
         }
-        if record.devices as usize > DEVICES_MAX
-            || record.state_nodes as usize > STATE_NODES_MAX
-        {
+        if record.devices as usize > DEVICES_MAX || record.state_nodes as usize > STATE_NODES_MAX {
             return Err(Refusal::Count);
         }
 
@@ -1903,7 +1901,7 @@ mod tests {
             ("magic", |r| r.magic = 0, Refusal::NotAManifest),
             ("schema", |r| r.schema = SCHEMA + 1, Refusal::Schema),
             ("record length", |r| r.record_bytes += 8, Refusal::RecordSize),
-            ("reserved", |r| r._reserved[1] = 1, Refusal::Reserved),
+            ("reserved", |r| r._reserved[0] = 1, Refusal::Reserved),
             ("no image", |r| r.image_bytes = 0, Refusal::Quantity),
             ("domain", |r| r.domain = 9, Refusal::Value),
             ("policy", |r| r.restart = 0, Refusal::Value),
