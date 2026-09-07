@@ -529,6 +529,12 @@ fn main() -> ExitCode {
         // component directory and the wall clock. Everything that decides a
         // verdict is in `f-sim`, where no clock can reach it. RFC 0040.
         "sweep" => sweep_verb(args.get(1..).unwrap_or_default()),
+        // E2-P01. Gate G2's headline property: cut the power at every write
+        // boundary in a publish and never observe a state that was not one of
+        // the two intended ones. The verb `xtask` owns is the driver and the
+        // control; everything that decides a verdict is in `zone/tests/cut.rs`,
+        // where the model and the four required observations live. RFC 0060.
+        "cut" => cut_verb(args.get(1..).unwrap_or_default()),
         // E1-P04. A peer that writes arbitrary values to the shared header and
         // cursors, restarts mid-operation and lies about its epoch, generated
         // from a seed. Three properties, three counts, three defects — one per
@@ -814,6 +820,19 @@ cargo xtask <command>
   sweep --record --mutate
                      The same, with the deliberate defect armed. This is how
                      the entries in sim/corpus.txt were produced
+
+  cut [seeds]        Cut the power at every write boundary in a publish, at
+                     block and at byte granularity, in honest and lying mode,
+                     across a set of seeds — and require every cut to leave
+                     either the old root or the new one, with the generation
+                     tree it names resolving. Gate G2's headline property.
+                     16 seeds and every publish by default
+  cut --mutate       Arm the deliberate defect that appends a root record
+                     without waiting for the blobs it names, require the sweep
+                     to find it and to print the cut point, then disarm it and
+                     require the same point to go quiet
+  cut --quick        The gate's own settings — four seeds and four publishes —
+                     which is what `cargo test --workspace` already runs
 
   hostile [n]        A peer that writes arbitrary values to the shared header
                      and cursors, restarts mid-operation and lies about its
@@ -2283,6 +2302,17 @@ const DEFECTS: &[&str] = &[
     "mutate-ignored-flag",
     "mutate-reusable-slot",
     "mutate-lenient-index",
+    // E2-P01's, and the first defect in this list that is not the kernel's, the
+    // simulator's or the ring's: it is in the *format*. It appends a root record
+    // without waiting for the blobs it names, which RFC 0060's first barrier
+    // exists to make impossible. One rather than three, and the arithmetic RFC
+    // 0042 asks for is answered by which property catches it: the headline
+    // property cannot — a root over missing blobs is refused by resolution and
+    // the mount rolls back, which is the design working — so what finds it is
+    // *in honest mode no root is ever refused for non-resolution*, and a defect
+    // found by the property it is about is a defect that says what the property
+    // is for.
+    CUT_DEFECT,
 ];
 
 /// The seed every reproduction run uses.
@@ -4520,6 +4550,175 @@ fn snapshot() -> Result<(), String> {
              measured against each other."
         ));
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// E2-P01 — cut the power at every write boundary in a publish.
+// ---------------------------------------------------------------------------
+
+/// The deliberate defect `cargo xtask cut --mutate` arms.
+///
+/// Separate from [`DEFECTS`]'s other entries only in which command drives it —
+/// it is in that list too, because `lint-mutations` has one job and a second
+/// list is how the second defect gets forgotten.
+const CUT_DEFECT: &str = "mutate-root-before-blobs";
+
+/// Seeds the sweep runs when nothing says otherwise.
+///
+/// Unit: count of seeds. Sixty-four and every publish — 108 280 cuts in 120 s
+/// release on the four-core development container, measured — against the four
+/// seeds and four publishes `cargo test --workspace` pays. The gate and the exit
+/// differ by a number and by nothing else, which is the whole reason
+/// `zone/tests/cut.rs` has a target of its own rather than a `#[test]`.
+const CUT_SEEDS: &str = "64";
+
+/// Gate G2's headline property, and the control that says a green sweep means
+/// something.
+///
+/// # Why this is a command and not only a test
+///
+/// The sweep itself *is* a test and `cargo test --workspace` runs it — at four
+/// seeds and the four publishes that matter, which is the gate. What a command
+/// adds is the two halves that cannot be a test: the wide run, which is minutes
+/// rather than seconds and belongs in the night; and the control, which requires
+/// a *build with a defect in it* to be found and then requires the same
+/// reproduction line to go quiet without it. A test cannot arm a cargo feature
+/// on itself.
+fn cut_verb(args: &[String]) -> Result<(), String> {
+    match args.first().map(String::as_str) {
+        Some("--mutate") => cut_mutate(),
+        Some("--quick") => cut_sweep(&["--seeds", "4"], &[]),
+        Some(other) if other.starts_with('-') => Err(format!(
+            "unknown option for cut: {other}\n\n\
+             `cargo xtask cut` sweeps, `--mutate` runs the control, `--quick` runs the \
+             gate's own settings."
+        )),
+        Some(seeds) => cut_sweep(&["--seeds", seeds, "--all"], &[]),
+        None => cut_sweep(&["--seeds", CUT_SEEDS, "--all"], &[]),
+    }
+}
+
+/// Run `zone/tests/cut.rs`, and answer whether it was clean along with what it
+/// printed.
+///
+/// Release, because the sweep is arithmetic and hashing and a debug build of it
+/// is six times the wall clock for the same verdict. The gate runs it in debug
+/// because the gate runs everything in debug, and the two agree by construction:
+/// the same binary, the same seeds, the same draws.
+fn cut_run(args: &[&str], features: &[&str]) -> Result<(bool, String), String> {
+    let mut argv: Vec<String> = ["test", "--release", "-p", "f-zone", "--test", "cut"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    if !features.is_empty() {
+        argv.push("--features".into());
+        argv.push(features.join(","));
+    }
+    argv.push("--".into());
+    argv.extend(args.iter().map(|s| (*s).to_string()));
+
+    let out = Command::new("cargo")
+        .args(&argv)
+        .current_dir(root())
+        .output()
+        .map_err(|e| format!("could not run cargo: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    print!("{text}");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    // The compiler's own output goes to standard error and is worth seeing when
+    // the build is what failed; the run's verdict is on standard output. A run
+    // that printed nothing at all did not run.
+    if !text.contains("cut") {
+        return Err(format!("the cut sweep did not run:\n{stderr}"));
+    }
+    Ok((out.status.success(), text))
+}
+
+/// The sweep, and nothing else.
+fn cut_sweep(args: &[&str], features: &[&str]) -> Result<(), String> {
+    let (clean, _) = cut_run(args, features)?;
+    if clean {
+        Ok(())
+    } else {
+        Err("the cut sweep found a cut that did not leave one of the two intended states.\n\n\
+             Every finding above carries the one line that reproduces it, and that line \
+             runs one cut. This is gate G2's headline property: a publish is atomic or it \
+             is not, and a finding here is a finding about the format."
+            .to_string())
+    }
+}
+
+/// Arm the defect, require the sweep to find it and to say where, then require
+/// the same point to go quiet without it.
+///
+/// # Why the reproduction line is run rather than read
+///
+/// `cargo xtask sweep --mutate` established the shape and the argument is the
+/// same: a report that prints a command nobody has executed is a report whose
+/// command may not work. So the line the red half printed is taken out of the
+/// report and run — armed, where it must exit non-zero, and disarmed, where it
+/// must exit zero. That pair is what makes the finding a finding about the
+/// defect rather than about the seed.
+fn cut_mutate() -> Result<(), String> {
+    println!("\n[1/4] with the defect — the sweep must go red");
+    let (armed_clean, report) = cut_run(&["--seeds", "4"], &[CUT_DEFECT])?;
+    if armed_clean {
+        return Err(format!(
+            "the sweep is clean on a build with `{CUT_DEFECT}` in it.\n\n\
+             That defect appends a root record without waiting for the blobs it names, \
+             so an honest device can be cut with a root on the media over a tree that is \
+             not. The property that sees it is *in honest mode no root is ever refused \
+             for non-resolution* — RFC 0060's first barrier, which is what the defect \
+             removes. If that assertion has legitimately changed, change it in \
+             zone/tests/cut.rs and say so in an RFC; do not widen it to whatever fires."
+        ));
+    }
+    println!("\n{CUT_DEFECT}: found");
+
+    println!("\n[2/4] the report must carry a line that reproduces one cut");
+    let line = report
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("reproduce: "))
+        .ok_or_else(|| {
+            "the sweep went red and printed no reproduction line, so the finding is a \
+             symptom rather than a bug report. `zone/tests/cut.rs` prints one per \
+             finding; something has stopped it."
+                .to_string()
+        })?
+        .to_string();
+    println!("  {line}");
+    let narrowed: Vec<&str> =
+        line.split_whitespace().skip_while(|word| *word != "--").skip(1).collect();
+    if narrowed.is_empty() {
+        return Err(format!("the reproduction line carries no arguments: {line}"));
+    }
+
+    println!("\n[3/4] that one cut, with the defect — it must exit non-zero");
+    let (one_armed, _) = cut_run(&narrowed, &[CUT_DEFECT])?;
+    if one_armed {
+        return Err(format!(
+            "the line the sweep printed exits zero when it is run:\n  {line}\n\n\
+             A reproduction that does not reproduce is worse than none, because it is \
+             the thing a reader would try first."
+        ));
+    }
+
+    println!("\n[4/4] the same cut, without it — it must go quiet");
+    let (one_clean, _) = cut_run(&narrowed, &[])?;
+    if !one_clean {
+        return Err(format!(
+            "the same cut fails on a build with no defect in it:\n  {line}\n\n\
+             So the red result above says nothing about `{CUT_DEFECT}` — and the finding \
+             is a real one, with a reproduction command already written."
+        ));
+    }
+
+    println!(
+        "\ncut --mutate: ok — the sweep goes red on `{CUT_DEFECT}` and green without it,\n\
+        \x20             and the line the red half printed runs one cut, non-zero armed\n\
+        \x20             and zero disarmed."
+    );
     Ok(())
 }
 

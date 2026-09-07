@@ -32,7 +32,12 @@
 //! - [`collect`] — the cycle, and the refusal that stops it breaking its own
 //!   invariant.
 //! - [`invariants`] — I1, I2 and I3, as predicates over named state.
-//! - [`publish`] — the half of RFC 0060's publish sequence `blob/` does not own.
+//! - [`publish`] — the half of RFC 0060's publish sequence `blob/` does not own,
+//!   and the root-zone wrap.
+//! - [`mount`] — verify before accept, both halves: the highest generation whose
+//!   `check` verifies *and* whose generation tree resolves. `E2-P01` is what
+//!   needs the second half, because a root that verifies and does not resolve is
+//!   the third state its exit forbids.
 //!
 //! # Determinism
 //!
@@ -85,6 +90,7 @@ pub mod device;
 pub mod invariants;
 pub mod map;
 pub mod mark;
+pub mod mount;
 pub mod publish;
 pub mod queue;
 pub mod roots;

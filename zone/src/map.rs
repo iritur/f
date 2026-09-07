@@ -179,6 +179,60 @@ impl<Z: Zoned> ZoneMap<Z> {
         })
     }
 
+    /// A map over a device that already holds data: the mapping half of a
+    /// mount, rebuilt from the device's own write pointers.
+    ///
+    /// # Why the logical numbering can be recovered at all
+    ///
+    /// Nothing on the device records which logical block a physical block is.
+    /// It does not have to. This map fills zones in ascending index and appends
+    /// within a zone in ascending offset, and a logical block is handed out by
+    /// the store's allocator in ascending order — so *the physical order of the
+    /// written data blocks is the logical order*, and a walk in that order
+    /// re-derives the numbering exactly. That is a property of the fill and it
+    /// is stated here because it is what the recovery rests on.
+    ///
+    /// **It is a property the collector breaks**, deliberately: `copy_forward`
+    /// moves a logical block to a new zone and the two orders part company. So
+    /// this constructor is honest only about a device no collection has run on,
+    /// which is what `E2-P01`'s sweep has and what a general mount does not.
+    /// *What would reverse this:* `E2-B03`'s index on the device, which records
+    /// the association rather than re-deriving it, and is the thing a mount
+    /// after a collection needs.
+    ///
+    /// # What is deliberately not recovered
+    ///
+    /// Every non-empty data zone comes back `Sealed` and no zone comes back
+    /// `Open`, so the next write opens a fresh one rather than resuming a zone
+    /// whose remaining capacity this map would have to trust the device about.
+    /// `live_bytes` comes back zero, because reachable bytes are what RFC 0059's
+    /// mark accumulates and a scan that guessed at them would be a second
+    /// answer to a question the mark already owns.
+    ///
+    /// # Errors
+    ///
+    /// [`refusal::MALFORMED`] as [`ZoneMap::new`] gives it; whatever the device
+    /// says about a report.
+    pub fn remount(device: Z, data_from: u32) -> Result<Self, i32> {
+        let mut map = Self::new(device, data_from)?;
+        let mut logical = 1u64;
+        for zone in data_from..map.device.zone_count() {
+            let report = map.device.report(zone)?;
+            for at in report.start..report.write_pointer {
+                map.physical.insert(logical, at);
+                map.logical.insert(at, logical);
+                logical += 1;
+            }
+            if report.write_pointer > report.start {
+                map.zones.insert(
+                    zone,
+                    Zone { zone, state: State::Sealed, live_bytes: 0, reads_outstanding: 0 },
+                );
+            }
+        }
+        Ok(map)
+    }
+
     /// The device underneath, for a caller with business there — a counter, a
     /// report, a control that corrupts a byte.
     pub fn device_mut(&mut self) -> &mut Z {
@@ -189,6 +243,17 @@ impl<Z: Zoned> ZoneMap<Z> {
     #[must_use]
     pub const fn device(&self) -> &Z {
         &self.device
+    }
+
+    /// Give the device back and drop the mapping over it.
+    ///
+    /// [`f_blob::store::Store::into_device`]'s reason, one layer down: after a
+    /// power cut the mapping describes a state that no longer exists, and
+    /// [`ZoneMap::remount`] takes a device by value because there is exactly one
+    /// map over a device and re-deriving it is what a mount *is*.
+    #[must_use]
+    pub fn into_device(self) -> Z {
+        self.device
     }
 
     /// The first zone this map fills.
@@ -558,6 +623,7 @@ mod tests {
     use super::{State, ZoneMap, placed};
     use crate::device::{Zoned, ZonedMemory};
     use alloc::vec;
+    use alloc::vec::Vec;
     use f_abi::store::refusal;
     use f_blob::device::Device;
 
@@ -679,5 +745,45 @@ mod tests {
         // Five data zones of four blocks, plus the superblock's own.
         assert_eq!(map.blocks(), 1 + 5 * 4);
         assert_eq!(map.zones_free(), 5);
+    }
+
+    #[test]
+    fn a_remount_re_derives_the_logical_order_from_the_physical_one() {
+        let mut map = map();
+        // Six blocks into four-block zones, so the fill crosses a zone boundary
+        // and the recovered numbering has to follow it.
+        for logical in 1..=6u64 {
+            let mut block = vec![0u8; BLOCK];
+            block[0] = logical as u8;
+            map.write(logical, &block).expect("room in the data zones");
+        }
+        let placed_before: Vec<(u64, Option<u64>)> =
+            (1..=6).map(|logical| (logical, map.physical(logical))).collect();
+
+        let mut back = ZoneMap::remount(map.into_device(), 1).expect("the same device");
+        assert_eq!(
+            placed_before,
+            (1..=6).map(|logical| (logical, back.physical(logical))).collect::<Vec<_>>(),
+            "every logical block is where the fill put it"
+        );
+        // And the bytes are readable through the recovered map, which is the
+        // only thing a mount actually needs of it.
+        let mut read = vec![0u8; BLOCK];
+        back.read(6, &mut read).expect("the last block written");
+        assert_eq!(read[0], 6);
+        // Nothing comes back open: the next write opens a fresh zone rather than
+        // resuming one whose remaining capacity this map would have to trust the
+        // device about.
+        assert_eq!(back.open(), None);
+    }
+
+    #[test]
+    fn a_remount_of_an_untouched_device_finds_nothing_and_says_so() {
+        let mut back = ZoneMap::remount(ZonedMemory::new(BLOCK, 4, 6), 1).expect("a device");
+        assert_eq!(back.physical(1), None);
+        assert_eq!(back.zones_free(), 5, "every data zone is free");
+        assert_eq!(placed(&back).len(), 1, "the superblock's block and nothing else");
+        let mut read = vec![0u8; BLOCK];
+        assert_eq!(back.read(1, &mut read), Err(refusal::ADDRESS));
     }
 }

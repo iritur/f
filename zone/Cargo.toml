@@ -54,6 +54,21 @@ f-env.workspace = true
 # wanted for: the day `E1-B09` raises `IN_FLIGHT` and does not re-derive this,
 # the run goes red.
 
+# The deliberate defect, off by default and refused as a default by
+# `cargo xtask lint-mutations`. `zone/src/publish.rs` argues why it lives in the
+# shipped source rather than in a patch, and RFC 0040 is the record.
+#
+# One rather than two, and the arithmetic RFC 0042 asks for is answered by what
+# it breaks rather than by a second feature: the publish's two barriers are one
+# ordering, and a build that skips the first is a build in which a root record
+# can name blobs that are not there. `cargo xtask cut` requires the sweep to find
+# it and to print the cut point it was found at.
+#
+# There is no `default` key here on purpose: a defect on by default is the
+# defect, shipped.
+[features]
+mutate-root-before-blobs = []
+
 [lints]
 workspace = true
 
@@ -66,4 +81,15 @@ workspace = true
 [[test]]
 name = "cycle"
 path = "tests/cycle.rs"
+harness = false
+
+# `E2-P01`'s sweep, and a target of its own for the reason above it: the gate and
+# the exit differ by *numbers* — how many seeds, and whether every publish is
+# swept or the four that matter — and a libtest harness would swallow the
+# arguments that carry them. It also prints its four required observations, and a
+# harness that captured output would make them visible only to somebody who knew
+# to pass `--nocapture`.
+[[test]]
+name = "cut"
+path = "tests/cut.rs"
 harness = false

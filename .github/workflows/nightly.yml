@@ -386,6 +386,43 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+  # Gate G2's headline property, overnight: cut the power at every write
+  # boundary in a publish and never observe a state that was not one of the two
+  # intended ones. Beside the sweep rather than in ci.yml for the sweep's own
+  # reason — `cargo test --workspace` already runs the same binary at four seeds
+  # and the four publishes that matter, which is seconds, and the wide grid lives
+  # here where nobody is waiting for it.
+  #
+  # It does not vary its base by run number the way the sweep and the fuzzers do,
+  # and that is deliberate: this grid is *exhaustive* in the dimension that
+  # matters — every cut point of every publish, both granularities, both modes —
+  # so the seeds vary the workload rather than the search, and a night that
+  # covered new seed space would be covering new content and the same cuts. What
+  # a wider night buys here is more seeds, which is the `--seeds` argument.
+  cut:
+    name: every write boundary in a publish, cut
+    needs: [environment, image]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      # The control first, for the sweep's reason: a night where the oracle has
+      # broken should report that rather than report a clean hundred thousand
+      # nobody should believe.
+      - run: cargo xtask cut --mutate
+      - name: every cut point of every publish
+        run: |
+          set -o pipefail
+          cargo xtask cut 2>&1 | tee cut-report.txt
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cut-report
+          path: cut-report.txt
+          retention-days: 90
+          if-no-files-found: error
+
   # The unsafety property at the count a night can afford. Separate from the job
   # above because the two differ by six orders of magnitude in cost and by one
   # in what they can see.
