@@ -24,14 +24,14 @@ row per entry that needs one, and an entry that needs none does not get a row.
 
 | RFC | Task | Title | Status |
 |---|---|---|---|
-| 0012 | `E2-D01` | An update is a generation swap, and the root is the attestation | accepted |
-| 0013 | `E0-B14` | Every component publishes a state tree | accepted; reversal condition read against `E2-P01`'s sweep on 2026-09-07 and not met |
+| 0012 | `E2-D01` | An update is a generation swap, and the root is the attestation | accepted; one open question against it, below, from `E2-P07`'s refusal boot |
+| 0013 | `E0-B14` | Every component publishes a state tree | accepted; reversal condition read twice on 2026-09-07 — against `E2-P01`'s sweep and against `E2-P05`'s comparison — and not met by either |
 | 0058 | `E2-D02` | A mutable extent is a second object kind, and not a unification | accepted |
 | 0059 | `E2-D03` | A collector is three invariants and a batch-class consumer | accepted |
 | 0060 | `E2-D05` | A publish is a barrier sequence, and atomicity is not free | accepted |
 | 0061 | `E2-P02` | A boundary is a predicate over a window of content, and not a distance from the last cut | accepted; superseded in part by 0062 |
 | 0062 | `E2-P02` | A period below the minimum starves every rule, so the starved clause carries periodic content and is measured | accepted; superseded in part by 0064 |
-| 0063 | `E2-D04` | A transfer is declared in the manifest, and quiescence is asserted by its occupant | accepted |
+| 0063 | `E2-D04` | A transfer is declared in the manifest, and quiescence is asserted by its occupant | accepted; reversal condition read against `E2-P08`'s sweep on 2026-09-07 and not met |
 | 0064 | `E2-B09` | A starved run is crossed and not inhabited, so the flat clause is scoped by a window and not by a point | accepted |
 | 0065 | `E1-B15` | A component declares its state tree, and a spawn refuses one that does not | accepted |
 | 0066 | `E2-B05` | The assembler lands above the frame with no caller, rather than inside it with one | accepted |
@@ -109,6 +109,19 @@ rather than the first: the manifest schema goes 1 to 2, which RFC 0030 priced as
 a rebuild of every component file and `docs/manifest.md` refused outright, and
 no task line in that file named it.
 
+**That row now reads `[x]`, and the reversal condition behind it has been read.**
+`E2-P08` swapped it on 2026-09-07: `cargo xtask swap` replaces `user/virtio-blk`
+in place twice under sustained load, and `claims/0029` is the artefact — 0
+operations redone in place beside 24 redone by the restart route, through one
+client at one seed, which is 0063's central sentence measured rather than
+argued. Its stated reversal is that same task *observing a dropped, doubled or
+wrongly-answered operation across a swap*, and the run observed none of the
+three with three negative controls in shipped source proving each counter can
+move. So the decision closes and what stays open is its implementation in the
+frame: no boot can put two generations of one component in front of the frame,
+`SWAP_GAP` in `xtask/src/main.rs` is the checked line, and `E2-B06` is where a
+reader meets it.
+
 **0064 is the third entry on one bound and the first produced by a workload the
 registry could not reach.** 0061 was falsified by a property test, 0062 by 0061's
 own confirming run, and 0064 by `bench/src/bin/rechunk.rs` — which measured
@@ -124,6 +137,38 @@ edit rather than under it — and its theorem, its arithmetic and its four
 thresholds stand. The column reads `E2-B09` because that is the build whose
 measurement produced it; `E2-P02` is where the strict reading still lives, and
 0064 says in as many words that it must stay strict.
+
+**An open question against 0012, put here because this is where its owner will
+see it, and deliberately not answered by the bookkeeping that found it.**
+`cargo xtask rollback`'s `refuses()` boots a command line carrying
+`f.root=0000…0` — sixty-four zeros, which is a well-formed token that no module
+can fold to, and the boot is expected to end in the frame's refusal. It does.
+But the refusal is `kernel::generation::report`'s, five hundred lines into
+`kernel/src/main.rs`, and the frame has already published its identity by then:
+`Identity::generation` answers **1** for any `Some(root)`, so the state tree
+carries counter 1 beside four zeroed root words. That is read out of the boot
+rather than inferred from the source: the log of that boot says
+`generation    0000…0000 selected as publish 1`, then
+`state 42 counter = 1` with `root0` through `root3` at zero, and only then
+`FAIL: the generation: no module this machine was offered folds to the root it
+was asked for`. A reader following the protocol 0012 fixes — load the counter,
+and if it is non-zero load the four root words — reads a machine attesting to a
+root of zeros on a boot that is about to refuse.
+
+The reserved value in that RFC is the **counter**, and the sentence it is
+reserved by is *the value the format already reserves so that a zeroed block is
+never a generation*. This is the other half of that sentence and 0012 does not
+say which way it goes: whether an all-zero root is a token the grammar should
+refuse in `abi/src/boot.rs`, whether `publish_identity` should happen after
+selection rather than before it, or whether a published root the frame has not
+yet found a module for should carry the counter zero it carries when nobody
+named a generation at all. Each of the three costs something different — the
+first is a wire refusal, the second reorders a boot, the third makes *told
+nothing* and *told something impossible* indistinguishable in the tree — and the
+decision belongs to whoever owns 0012 rather than to the run that noticed.
+Recorded on 2026-09-07, with `docs/postmortem/0001` carrying the same paragraph
+from the merge's side; nothing in wave 5 depends on the answer, and
+`claims/0030`'s `unknown_roots_refused` row measures the refusal and not this.
 
 **0013 gets a row because its reversal condition fell due and somebody had to
 say what reading it.** That entry's *what would reverse this* names E1's seeded
@@ -142,6 +187,19 @@ question was asked rather than left to lapse. What could still fire it is
 `E2-P05`, which compares two whole-system trees under load and is the task that
 would read two nodes at one instant; that reading is owed there and not here,
 and `E2-P05` waits on `E1-B15`.
+
+**That second reading has now been taken, and it is also not met.** `E2-P05`
+landed on 2026-09-07 — `claims/0031`, 64 of 64 injected divergences localised to
+the exact node — and the reason it does not fire 0013's condition is the same
+shape as the sweep's: `sim/src/whole.rs` folds each component's tree **quiesced**
+and one component at a time, so no node in any of those 64 injections, and none
+in the disarmed control run, was read at the same instant as another. The task
+that *would* read two nodes at one instant is a comparison taken of a machine
+under load, and this tree cannot take one yet for a reason that is not the
+comparison's: the frame lays out a child's header and schema and writes no word
+after that (RFC 0065), so a boot's component subtrees are constants.
+`compare::WHOLE_SYSTEM_GAP` is the checked declaration of that, printed on every
+green run, and it is where the third reading of this condition will come from.
 
 **0067 was 0065 too, and the collision is what these three rows are for.**
 `E2-B05` and `E1-B15` were built in parallel worktrees, neither able to see the
@@ -193,6 +251,20 @@ exactly as it holds for the numbers of the entries in this directory, and the
 byte is the more dangerous of the two because a doubled RFC number is loud and a
 doubled offset is not. This tree does the second defence, and this row is what
 that looks like.
+
+**It happened again one wave later, so the line was earned and taken.** The
+paragraph below said that if it happened a second time the rule's *twice* was
+satisfied; wave 5 is that second time, in a form the first did not have. Four
+worktrees split one *grammar* rather than one registry: `E2-B07` wrote the
+reader of `f.root=`/`f.frame=` and made every boot carry both, `E2-P07` wrote
+the composer and composed only the first — in three commands and in every
+`menuentry` `cargo xtask generation --install` writes — and the merged frame
+refuses half a declaration by name. Every tree was green, every conflict was a
+keep-both, and the merged tree could not boot. `CLAUDE.md` now carries the line;
+`docs/postmortem/0001` is the incident, including the one defect of the five
+whose first reader would have been somebody's hardware. The paragraph below
+stands unedited, because what it decided was right for what it could see and the
+condition it set is exactly the one that fired.
 
 `CLAUDE.md`'s *Common mistakes* did **not** gain a line, and the judgement is
 recorded rather than left to be re-taken. That section's rule is *added when the

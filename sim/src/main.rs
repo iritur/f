@@ -1211,6 +1211,62 @@ fn swap(asked: &Asked, hash_only: bool) -> Result<bool, String> {
     println!("\nblast radius  {blast} client(s) observed anything except added latency");
     println!("redone        {redone} operation(s) redone across every in-place swap");
     println!("digest        {:#018x}", swap::digest(&pairs));
+
+    // `claims/0029`'s rows, summed out of the same per-component table printed
+    // above rather than recounted from the run — a second traversal would be a
+    // second opinion about what the columns say.
+    //
+    // **Four of the names are RFC 0012's own** — `places_swapped`,
+    // `places_restarted`, `operations_dropped` and the two `operations_redone`
+    // halves — because that RFC writes the rollback metric as a named set and a
+    // claim that renamed them would be a second vocabulary for one measurement.
+    // Its other three, `generation_swaps`, `reboots` and `frame_changed`, are
+    // deliberately **not** here: they are counts over a whole machine changing
+    // generation, this sweep replaces occupants one place at a time inside one
+    // process, and a zero printed under those names would read as *this ran and
+    // found none* rather than as *this cannot run at all yet*. `SWAP_GAP` in
+    // xtask is where that is said, and the claim says it again.
+    //
+    // `operations_redone_by_restart` is the control and not a decoration: RFC
+    // 0063's whole justification for `in_place` is that a client re-registers
+    // nothing, and a zero beside three components that redid eight operations
+    // each is that sentence measured. A zero beside three other zeros would be
+    // a harness that never made anybody redo anything.
+    let settled: u64 = pairs.iter().map(|pair| u64::from(pair.moved.settled)).sum();
+    let flying = pairs.iter().map(|pair| pair.moved.flying_min).min().unwrap_or(0);
+    let sum = |get: fn(&f_sim::swap::Report) -> u32| -> u64 {
+        pairs.iter().map(|pair| u64::from(get(&pair.moved))).sum()
+    };
+    let redone_by_restart: u64 = pairs
+        .iter()
+        .filter(|pair| !pair.swap.transfers())
+        .map(|pair| u64::from(pair.moved.redone))
+        .sum();
+    println!(
+        "\n  components_replaced                      {}\n  \
+         places_swapped                           {}\n  \
+         places_restarted                         {}\n  \
+         operations_settled_under_load            {settled}\n  \
+         operations_in_flight_at_every_pause      {flying}\n  \
+         operations_dropped                       {}\n  \
+         operations_answered_twice                {}\n  \
+         operations_answered_from_a_stale_place   {}\n  \
+         operations_answered_wrongly              {}\n  \
+         operations_refused                       {}\n  \
+         clients_observing_anything_but_latency   {blast}\n  \
+         operations_redone_in_place               {redone}\n  \
+         operations_redone_by_restart             {redone_by_restart}\n  \
+         registration_sets_replayed               {}",
+        pairs.len(),
+        sum(|report| report.swapped),
+        sum(|report| report.restarted),
+        sum(|report| report.lost),
+        sum(|report| report.twice),
+        sum(|report| report.stale),
+        sum(|report| report.wrong),
+        sum(|report| report.failed),
+        sum(|report| report.sets_in),
+    );
     Ok(true)
 }
 
@@ -1951,6 +2007,26 @@ fn compare(asked: &Asked, hash_only: bool) -> Result<bool, String> {
         );
         return Ok(false);
     }
+
+    // `claims/0031`'s rows, printed by the run that took them rather than
+    // inferred by the command that called it. `cargo xtask compare` echoes this
+    // output, so the claim's comparison reads the same lines a person does.
+    //
+    // The floors matter more than the headline here: `injections_attempted` and
+    // `component_trees_folded` are how a green run says it had something to
+    // localise. A descent that named every node correctly over zero injections
+    // into one tree would print a perfect `64 of 64` above with nothing behind
+    // it, which is the failure `[a]`'s `parts() == 0` refusal is about, one
+    // phase earlier and in the same spirit.
+    println!(
+        "\n  component_trees_folded                              {}\n  \
+         component_trees_diverged_when_the_class_was_disarmed {spread}\n  \
+         subtrees_named_by_the_descent                       {}\n  \
+         injections_attempted                                {COMPARE_TRIALS}\n  \
+         injections_localised_to_the_exact_node              {named_exactly}",
+        first.parts(),
+        u64::from(!named.is_empty()),
+    );
 
     println!("\nlocalised: `{named}` — every phase held");
     Ok(true)

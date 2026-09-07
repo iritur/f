@@ -93,6 +93,14 @@ Added when the same mistake happens twice. Each line is a scar.
 - Writing code above the frame that only compiles on x86-64, and finding out
   from the AArch64 job. `cargo xtask test` now cross-checks the four crates that
   job tests; the ordering still needs the arm runner, the compile does not.
+- Believing four green worktrees compose. Twice now they took one registry entry
+  twice — an RFC number, a reserved byte — and once they split one grammar
+  between a reader and a composer, so every tree passed and the merge could not
+  boot. Run the merged tree: the merge is the first execution of a program
+  nobody has run. `docs/postmortem/0001`.
+- Writing a directory walker with its own copy of the skip list. Five carry one
+  now; the four that forgot `.claude` read four *other* checkouts of this
+  repository and reported their findings against this one.
 
 ## How work reaches this repo
 

@@ -1,0 +1,202 @@
+# `E2-P08` as a number: what a client observes while the component answering it
+# is replaced under load, and what a replacement costs in work redone by each of
+# the two routes a manifest may declare.
+#
+# **What this claim is not, stated before the number rather than after it.** It
+# is not a generation swap. RFC 0012 defines that as the ordered set of place
+# swaps for a whole machine, publishing one root when the last place has landed,
+# and this measures **places** — four of them, in one host process, with no root
+# record written and no reboot decided. The three metrics RFC 0012 names for
+# that whole — `generation_swaps`, `reboots`, `frame_changed` — are deliberately
+# absent rather than printed as zeros, because a zero under those names would
+# read as *this ran and found none* when the truth is *this cannot run yet*:
+# `SWAP_GAP` in `xtask/src/main.rs` is the checked reason, and it is one line of
+# `kernel/src/component.rs` refusing to refill a place from anything but the
+# manifest it already holds. The four names that *are* RFC 0012's —
+# `places_swapped`, `places_restarted`, `operations_dropped` and the two
+# `operations_redone` halves — are spelled exactly as that RFC spells them, so
+# that this claim is the beginning of its metric row and not a second vocabulary
+# for the same measurement.
+#
+# It is also not a pause. RFC 0012's rollback row will eventually want *how long
+# a client waited*, and that number is `claims/0021 generation-swap-pause`, still
+# a reservation and still owed the machine `E0-D10` names. `f_bench::Environment`
+# refuses to record a timing in this container, so the run prints its worst
+# latency and this file publishes none of it.
+#
+# **0029 and not a reserved number.** 0020 (`read-path-latency`) and 0021
+# (`generation-swap-pause`) are reservations that outrank a landing, by the rule
+# `intent/0006-state/plan.md` states and `claims/0017` established; 0022 through
+# 0028 are registered files. So the first number that is neither is 0029, and
+# this wave takes 0029 through 0032 in the order the demonstrations landed.
+name       = "operations-across-a-place-swap"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E2"
+
+statement  = """
+Every component this tree declares is replaced twice while a client submits to
+it, and **no client observes anything except added latency**: nothing dropped,
+nothing answered twice, nothing answered out of the retired occupant, nothing
+answered wrongly, and no refusal the client could not retry. The replacement
+that declared `in_place` costs the client **0** operations redone; the three
+that declared `restart_only` cost **24** between them, through the same client,
+in the same run, at the same seed.
+
+Measured by `cargo xtask claim operations-across-a-place-swap` — one invocation
+of `cargo xtask swap`, which is a reproduction check in two processes and then
+one sweep: 4 components, 2 replacements each, and 96 phases of one client's work
+across each of them, with every replacement begun with operations in flight.
+
+  components replaced                                4
+  places swapped in place                            2
+  places restarted                                   6
+  operations settled under load                    384
+  operations in flight at the least busy pause       4
+  operations dropped                                 0
+  operations answered twice                          0
+  operations answered from a stale place             0
+  operations answered wrongly                        0
+  operations refused                                 0
+  clients observing anything but latency             0
+  operations redone in place                         0
+  operations redone by restart                      24
+  registration sets replayed                         2
+
+**The last two rows are one row, and that is the whole claim.** RFC 0063 says
+the entire purchase `in_place` makes over `restart_only` is that a client
+re-registers nothing. A zero standing alone would be indistinguishable from a
+harness that never made anybody redo anything; a zero beside a 24 taken from the
+same client under the same load is that sentence measured. This is the only
+place in the tree where the two routes are counted by one counter.
+
+**Five zeros, and each has a name that can move.** `sim/src/swap.rs` ships three
+negative controls as source rather than as a patch, and each moves a different
+one of them: `hasty` lies to the protocol about the drain — the cursors-only
+transfer RFC 0063 forecloses — and loses 73 of 96 phases; `garble` flips a byte
+of the transfer window, the record's *reader* refuses it, and the swap abandons
+naming `refused` while the client observes only latency; `amnesiac` hands over
+nothing while declaring `in_place`, every step of the protocol succeeds, the two
+live-registration counts disagree 1 against 0, and the *client* is refused for a
+set the incoming table never received. Those three are assertions in
+`cargo test -p f-sim` rather than rows here, because a test that asserts a
+number does not print one — but they are why the zeros above are readings and
+not defaults.
+
+**`operations_in_flight_at_every_pause` is what stops this being a quiescent
+system's number.** It is the fewest operations outstanding at any pause in the
+whole sweep, and at zero the experiment would be *a place replaced between two
+operations*, which nothing in RFC 0063 is about. The floor is 1 because that is
+where the property lives; the measurement is 4, and a drop to 1 is a harness
+whose load has thinned rather than a bug.
+
+**The transfer is verified at three levels and not one**, which is what the exit
+means by *rather than assumed*: a check word over the other twenty-eight bytes
+of the record, refused by the reader; two live-registration counts taken through
+two real registration tables on opposite sides of the window and required to
+agree; and the client's own ledger of what it submitted and what came back.
+"""
+
+[baseline]
+# The baseline is the same client and the same load, replaced by the other
+# route, and it is in the same command rather than in a directory.
+system  = "none"
+notes   = "There is no other system to compare against, and the comparison that would mean something is not with another operating system but with the *other route*: `operations_redone_by_restart` = 24 is the baseline `operations_redone_in_place` = 0 is measured against, taken by one client in one run at one seed. That is the same shape `claims/0005`'s kill has — a count of what a component's disappearance costs — and it is why this claim gates in a container the way that one does. What is genuinely missing and is not a baseline: nothing outside this tree has ever replaced a running component under a declared transfer protocol in a way this could be compared with, and a number from a system whose update is a reboot is a number about a different question."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/fast-path.html"
+section  = "10"
+notes    = "Section 10's metrics table carries the row RFC 0012 reversed — *full system rollback: not possible / 1 reboot* — and this claim is the half of the replacement that reversal promised: a component replaced without one. The subsystems that own the number are `abi/src/swap.rs` for the protocol as a state machine over two declarations and the routing word between them, `abi/src/transfer.rs` for what a manifest declares, `user/virtio-blk/src/state.rs` for the thirty-two-byte record that actually crosses, `sim/src/swap.rs` for the sweep, the three negative controls and the verdict, and `kernel/src/component.rs` for the place that cannot yet be refilled — which is `SWAP_GAP`, and is why this number is taken in a process rather than on a machine."
+
+[workload]
+path        = "sim/src/swap.rs"
+second      = "xtask/src/main.rs"
+components  = 4
+replacements = 8
+phases      = 96
+notes       = "Four components, two replacements each, 96 phases of a client's work across each, and a control run beside every one of them with nothing replaced — which is what makes a survival evidence rather than an absence of trouble. The client is `chaos::Load` unchanged, deliberately: *dropped*, *doubled* and *answered wrongly* already have definitions in that crate, and a second client would be a second opinion about what a client observes. About fifteen seconds in the development container, including the two-process reproduction check that precedes it. — What stands in: this is the simulator's component set and not a boot's. No boot in this tree can put two generations of one component in front of the frame at once — `SWAP_GAP` is the exact line — so a swap on a machine is not available to be measured, and the day it is, this claim's `[workload]` gains a second row rather than this one being reinterpreted."
+
+[metrics]
+# Counts, every one of them, and no duration anywhere — which is why this may
+# gate where `claims/0021` cannot.
+primary   = "clients_observing_anything_but_latency"
+secondary = [
+  "components_replaced",
+  "places_swapped",
+  "places_restarted",
+  "operations_settled_under_load",
+  "operations_in_flight_at_every_pause",
+  "operations_dropped",
+  "operations_answered_twice",
+  "operations_answered_from_a_stale_place",
+  "operations_answered_wrongly",
+  "operations_refused",
+  "operations_redone_in_place",
+  "operations_redone_by_restart",
+  "registration_sets_replayed",
+]
+
+[threshold]
+# The headline, exact in both directions. There is no reading under which a
+# client observing one dropped operation is 99% of a swap nobody noticed.
+clients_observing_anything_but_latency = { min = 0, max = 0 }
+# The five observations behind it, each bounded on its own rather than summed.
+# A sum would let a run that lost an operation and gained a duplicate report the
+# same number as one that did neither, and those are different failures with
+# different causes.
+operations_dropped                     = { max = 0 }
+operations_answered_twice              = { max = 0 }
+operations_answered_from_a_stale_place = { max = 0 }
+operations_answered_wrongly            = { max = 0 }
+operations_refused                     = { max = 0 }
+# RFC 0063's sentence, exact. A client that re-registers nothing is the whole of
+# what `in_place` buys, and one operation redone is that purchase not made.
+operations_redone_in_place             = { min = 0, max = 0 }
+# The control, and in the other direction from the row above it. At zero the
+# comparison has stopped being one: either every component now declares
+# `in_place`, in which case there is no route to compare against and this claim
+# is measuring one arm of a two-arm experiment, or the restart arm has stopped
+# costing the client anything, which contradicts `claims/0005`. Do not repair a
+# red here by lowering it.
+operations_redone_by_restart           = { min = 1 }
+# Every component this tree declares, read back from the manifests rather than
+# from the build output — `cargo xtask swap` refuses a sweep that reached fewer
+# than `lint-components` declares. The floor moves up when a manifest is added,
+# and that is a diff naming the component.
+components_replaced                    = { min = 4 }
+# At least one place actually swapped in place, and at least one actually
+# restarted. Without the first the `in_place` zero is a zero over nothing;
+# without the second the row above it has no baseline. Two, because the one
+# component declaring `in_place` is replaced twice.
+places_swapped                         = { min = 2 }
+places_restarted                       = { min = 1 }
+# The load. 384 is four components' 96 phases, and a run settling fewer has
+# stopped putting a client under the replacement rather than beside it — the
+# floor rises with a component the same way `components_replaced` does.
+operations_settled_under_load          = { min = 384 }
+# The non-vacuity row, and the reason the five zeros above are about anything.
+# At zero the sweep replaced a place with nothing outstanding, which is the
+# weaker experiment this one is named after not being.
+operations_in_flight_at_every_pause    = { min = 1 }
+# The `SetId` the client already holds keeps working across the window, counted
+# on the incoming side through a real registration table. At zero the transfer
+# carried no registrations and `amnesiac` is indistinguishable from an honest
+# swap.
+registration_sets_replayed             = { min = 1 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "This claim does not need that machine, for `claims/0005`'s reason: every metric is a count of operations, places or registrations taken by a deterministic simulation, and `f_bench::Environment` has nothing to refuse because nothing here is timed. The run *does* print a worst latency and a cost in nanoseconds per replacement, and this file publishes neither — those are virtual nanoseconds inside a seeded model, and `claims/0021` is where a real one will go. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it."
+
+[reproduce]
+command = "cargo xtask claim operations-across-a-place-swap"
+
+[diagnosis]
+# Recorded while the system is understood rather than at 2 a.m. when it is not.
+clients_observing_anything_but_latency_above_zero = "E2-P08's exit failing, and the sweep has already said which component and which clause — read its table and not this file. The five rows below the headline separate the causes: `operations_dropped` is an operation the swap swallowed, `operations_answered_twice` is one the incoming occupant re-answered, `operations_answered_from_a_stale_place` is a completion for a token nobody holds, `operations_answered_wrongly` is a read that disagreed with what was written, and `operations_refused` is the `amnesiac` shape — a client refused for a registration the incoming table never received. Start with `abi/src/swap.rs`'s phase A and the five ways it may be abandoned"
+operations_redone_in_place_above_zero = "RFC 0063's central sentence failing: the client re-registered something across a swap that declared it would not have to. That is the reversal condition this claim exists to make checkable, and the repair is in the transfer or in the declaration, never here. Check `registration_sets_replayed` first — if it fell to zero the window carried nothing and the redone operations are the client rebuilding what was never handed over"
+operations_redone_by_restart_is_zero = "worse than the row above and much quieter: the control can no longer fail, so the zero beside it is worth nothing. Either every component now declares `in_place` — in which case this experiment has one arm and the claim needs a second workload rather than a lower floor — or a restart has stopped costing a client the buffers it had registered, which contradicts `claims/0005` and is a finding in its own right"
+operations_in_flight_at_every_pause_is_zero = "the sweep is replacing places with nothing outstanding, so every zero above it is a statement about a quiescent system. `sim/src/swap.rs`'s `flying_min` is the reading; the likeliest cause is the load thinning — a client whose submissions all settled before the pause — and the second likeliest is the pause moving to a point the harness chooses rather than a point the seed does"
+components_replaced_below_four = "the sweep reached fewer components than this tree's manifests declare, and `cargo xtask swap` refuses before printing rows when it can see that. A row that got here at three means the manifests and the build output disagree about what exists — `cargo xtask lint-components` says which list is short — and every zero above was taken over a smaller set than the claim describes"
+operations_settled_under_load_below_384 = "the client is doing less work than the claim states, so the observation rows are over a smaller sample than they say. Read `replacements` and `phases` in `[workload]`: 384 is four components' 96 phases, and the two ways to get here are a component that dropped out — in which case `components_replaced` is red too — or a phase count that changed, which is a change to what this claim measures and belongs in the statement rather than in the threshold"
+a_threshold_no_workload_printed = "`cargo xtask swap` failed before its summary block, which for this claim is the ordinary way a real finding arrives: the reproduction check refuses when two runs at one seed disagree, and the verdict refuses when a client observed something. Read the workload's own output above the table — the rows are the last thing it prints and their absence is a symptom rather than the disease"

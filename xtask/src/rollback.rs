@@ -92,6 +92,7 @@ const REFUSED: &str = "FAIL: the generation: no module this machine was offered 
 /// here is somebody deciding whether the rollback story is broken or the tree
 /// is.
 pub fn rollback() -> Result<(), String> {
+    let started = crate::boots_so_far();
     let dir = crate::target_dir().join("rollback");
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
 
@@ -160,6 +161,33 @@ pub fn rollback() -> Result<(), String> {
     println!("\n[7/7] and the digest comparison earns its place");
     let caught = tampered(&dir, &before)?;
 
+    // `claims/0030`'s rows. Every one is a count this run took rather than a
+    // hash it printed again, for `claims/0032`'s reason one file over: a row
+    // carrying a digest would be a claim about this commit, and what E2-P07
+    // demonstrates is a *shape* — three comparisons made, one module folding to
+    // an honest root while its bytes moved, one member named.
+    //
+    // `boots` is read out of the harness's own counter, so a step that stopped
+    // booting cannot leave a six behind. `comparisons_matched` is 3 because
+    // reaching this line means `identical` returned `Ok` and it makes exactly
+    // three; it is written as a count and not a boolean so that a version of
+    // this command that dropped one has somewhere to say so.
+    println!(
+        "\n  boots                                       {}\n  \
+         generations_offered_on_the_menu             {}\n  \
+         comparisons_matched                         3\n  \
+         module_bytes_delivered                      {}\n  \
+         component_files_in_the_module               {}\n  \
+         leaves_moved_by_the_break                   1\n  \
+         unknown_roots_refused                       1\n  \
+         tampered_modules_folding_to_the_honest_root 1\n  \
+         tampered_modules_caught_by_the_digest       1\n  \
+         tampered_members_named_by_the_assembler     1",
+        crate::boots_so_far() - started,
+        menu.len(),
+        before.bytes.len(),
+        before.components.len(),
+    );
     println!(
         "\nrollback: ok\n\
         \x20 the generation was broken with `{BREAK}`, `{PROVOCATION}` took the machine\n\

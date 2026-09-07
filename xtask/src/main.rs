@@ -2228,6 +2228,31 @@ fn emulator(
     Ok(qemu)
 }
 
+/// How many machines this process has actually started.
+///
+/// Counted here rather than by the commands that publish the number, because a
+/// count a command states about its own boots is a count that survives the
+/// boots being removed. `claims/0029` and `claims/0030` both publish a `boots`
+/// row, and the failure those rows exist to catch is a demonstration that
+/// quietly stopped demonstrating — a step that returned early, a boot skipped
+/// because a file was already there. A constant would still read 6.
+///
+/// `Relaxed` and no ordering argument owed: `xtask` is one thread, this counter
+/// orders nothing, and nothing reads it except the same thread between two
+/// boots. The ordering rule this tree is strict about is the ring's, and
+/// `ring/tests/litmus.rs` is where a weakening has to fail.
+/// Unit: count of emulator processes started.
+static BOOTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// What [`BOOTS`] says now.
+///
+/// Read as a pair — before and after — so that a command publishes the boots
+/// *it* ran rather than every boot in the process.
+/// Unit: count of emulator processes started.
+fn boots_so_far() -> u64 {
+    BOOTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// [`machine_with`], plus devices only one command wants.
 ///
 /// A parameter rather than a second description of the emulator, because there
@@ -2255,6 +2280,10 @@ fn machine_devices(
         qemu.stdout(Stdio::piped());
     }
     let mut child = qemu.spawn().map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
+    // After the spawn and not before it: a machine that could not be started is
+    // not a boot, and a counter that said otherwise would let a claim publish a
+    // boot count over an emulator that is not installed.
+    BOOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     // The reader runs on its own thread because a piped child can fill the pipe
     // and block on a write while this thread sleeps waiting for it to exit — a
@@ -5952,6 +5981,7 @@ const SELECTED_LINE: &str = "  generation    ";
 /// measured. What boot 3 catches is a modified image booted honestly. The rest
 /// is E5's hardware.
 fn attest() -> Result<(), String> {
+    let started = boots_so_far();
     println!("\n[1/5] the clean build — what is this machine running");
     let clean = attest_boot(&[], None, "the clean build")?;
     println!(
@@ -6063,6 +6093,10 @@ fn attest() -> Result<(), String> {
             clean.frame
         ));
     }
+    // Counted where the refusal was established rather than stated at the
+    // bottom: the row below is *this boot refused*, and a phase that stopped
+    // running would then print a zero instead of a one somebody wrote down.
+    let refusals = 1u64;
     println!("\n  refused, and it measured {modified_measurement}\n  which is not {}", clean.frame);
 
     println!("\n[4/5] the same modified image, holding its own — green, and a different machine");
@@ -6131,6 +6165,36 @@ fn attest() -> Result<(), String> {
          generation it belongs to. The command line is outside the ranges."
     );
 
+    // `claims/0032`'s rows, and every one of them is a **count of distinct
+    // values** rather than a hash printed again. The hashes are above; what a
+    // threshold can hold is how many different ones five boots produced, which
+    // is the shape of the exit's two sentences: *one hash* is a 1 where the
+    // image did not move, and *a different one* is a 2 where it did. A row that
+    // restated a digest would be a claim about this commit and would have to be
+    // rewritten by every commit that changes a byte of the frame.
+    //
+    // The boot count is read out of [`BOOTS`] and not written here, so a version
+    // of this command that stopped booting cannot go on publishing a five.
+    let distinct = |values: [&str; 2]| -> u64 {
+        values.iter().collect::<std::collections::BTreeSet<_>>().len() as u64
+    };
+    println!(
+        "\n  boots                                    {}\n  \
+         bytes_measured                           {}\n  \
+         measured_ranges                          {}\n  \
+         frame_hashes_across_two_clean_boots      {}\n  \
+         frame_hashes_across_the_modification     {}\n  \
+         generation_roots_across_the_modification {}\n  \
+         roots_published_when_told_nothing        {}\n  \
+         refusals_when_the_declaration_disagrees  {refusals}",
+        boots_so_far() - started,
+        clean.covered,
+        ranges.len(),
+        distinct([clean.frame.as_str(), again.frame.as_str()]),
+        distinct([clean.frame.as_str(), modified.frame.as_str()]),
+        distinct([clean_root.as_str(), modified_root.as_str()]),
+        u64::from(silent.root.is_some()),
+    );
     println!(
         "\nattest: 5 boots. One identity, stable across two runs; one modification, and\n\
          both published hashes moved; the frame refused to publish a root it could not\n\
@@ -13984,6 +14048,44 @@ enum Route {
     /// else. `cargo xtask lint-remap` is the per-run half a checkout can decide.
     /// E2-P06.
     Roots,
+    /// `E2-P08`'s sweep — `cargo xtask swap` — compared against `claims/0029`'s
+    /// `[threshold]` table.
+    ///
+    /// One command and not two, although the negative controls that give its
+    /// zeros meaning live in `sim/src/swap.rs`'s tests: those controls are
+    /// *assertions* — `hasty` must lose operations, `garble` must be refused,
+    /// `amnesiac` must fail a client — and a test that asserts a number does not
+    /// print one. What this route compares is the sweep's own table, whose two
+    /// `operations_redone` rows carry a control inside the run: the in-place
+    /// zero is only worth reading beside the restart route's non-zero, and both
+    /// are taken from one client under one load.
+    /// E2-B06, E2-P08, RFC 0063.
+    Swap,
+    /// `E2-P07`'s six boots — `cargo xtask rollback` — compared against
+    /// `claims/0030`'s table.
+    ///
+    /// The most expensive route in this table after [`Route::Roots`]: three
+    /// generation builds and six boots. That is the claim's cost rather than an
+    /// accident — a rollback that did not boot the generation it selected would
+    /// be a comparison of two files on a host, which is the weaker experiment
+    /// `rollback::Reported` exists to refuse.
+    /// E2-P07, RFC 0012.
+    Rollback,
+    /// `E2-P05`'s three phases — `cargo xtask compare` — against `claims/0031`.
+    ///
+    /// Two of its rows are the command's own, taken across two *processes*, and
+    /// five are `f-sim --compare`'s, taken inside one. Both halves are printed by
+    /// the run that took them, and this route reads them out of one stream.
+    /// E2-P05, RFC 0013.
+    Compare,
+    /// `E2-B07`'s five boots — `cargo xtask attest` — against `claims/0032`.
+    ///
+    /// Every row is a count of *distinct* published hashes rather than a hash,
+    /// so the claim states the property and not the commit. What it cannot state
+    /// is what RFC 0012 lists as unproven, and the claim carries that list
+    /// rather than leaving a green run to imply otherwise.
+    /// E2-B07, RFC 0012.
+    Attest,
 }
 
 const ROUTES: &[(&str, Route)] = &[
@@ -14081,6 +14183,16 @@ const ROUTES: &[(&str, Route)] = &[
     // paths, with its own control in the same command.
     ("topology-renderings-per-root", Route::Topology),
     ("generation-roots-across-paths", Route::Roots),
+    // Wave 5's four, one per demonstration, and none of them a pair: each has
+    // one workload and one sentence. Every one is a **count** — operations,
+    // boots, distinct hashes, injections localised — which is why all four may
+    // gate in the development container for `claims/0005`'s reason, and why the
+    // one number of this wave that is a *time* is not here at all: the swap's
+    // pause is `claims/0021`, still a reservation, still owed a machine.
+    ("operations-across-a-place-swap", Route::Swap),
+    ("rollback-comparisons", Route::Rollback),
+    ("whole-system-divergences-localised", Route::Compare),
+    ("frame-identities-across-boots", Route::Attest),
 ];
 
 /// The registry file one claim name resolves to.
@@ -14200,6 +14312,10 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         Route::Reads => claim_reads(&text, &relative(&file))?,
         Route::Topology => claim_topology(&text, &relative(&file))?,
         Route::Roots => claim_roots(&text, &relative(&file))?,
+        Route::Swap => claim_swap(&text, &relative(&file))?,
+        Route::Rollback => claim_rollback(&text, &relative(&file))?,
+        Route::Compare => claim_compare_run(&text, &relative(&file))?,
+        Route::Attest => claim_attest(&text, &relative(&file))?,
     }
 
     // The harness itself refuses in a non-measurement environment and says so
@@ -14603,6 +14719,113 @@ fn claim_roots(claim: &str, file: &str) -> Result<(), String> {
          claim. What this command cannot decide at all is two machines and two\n\
          dates; `.github/workflows/weekly.yml` is that half, and `REPRODUCE_RUN_GAP`\n\
          is where the local loop prints what neither can.",
+    )
+}
+
+/// `claims/0029`'s sweep: four components replaced twice each under load, and
+/// the two `operations_redone` rows that make the in-place zero a comparison.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_swap(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "cargo xtask swap: every declared component replaced twice under sustained load, \
+             with a control run beside each",
+            "cargo",
+            &["xtask", "swap"],
+        )],
+        "A non-zero in any of the five observation rows is E2-P08's exit failing and\n\
+         the sweep has already said at which component and in which phase — read its\n\
+         table and not this file. The quieter red is a floor: `operations_settled`,\n\
+         `operations_in_flight_at_every_pause` and `operations_redone_by_restart`\n\
+         are how a green run says it had a client, a load and a route to compare\n\
+         against. A swap begun between operations observes nothing because there\n\
+         was nothing to observe, and that is a pass this claim refuses to report.",
+    )
+}
+
+/// `claims/0030`'s six boots, against the claim's own table.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s. A `rollback` that fails prints no rows at all — it
+/// refuses at the step that failed — so the failure arrives twice, once as the
+/// command's own report and once as ten thresholds nothing printed.
+fn claim_rollback(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "cargo xtask rollback: a generation broken with a real defect, the previous one \
+             selected out of a menu of two, and a module that folds honestly with one byte \
+             changed",
+            "cargo",
+            &["xtask", "rollback"],
+        )],
+        "`comparisons_matched` below 3 is E2-P07's strict clause failing, and the\n\
+         command names which of the three: the root, the module digest taken on the\n\
+         machine, or the generation rebuilt from source after the break. The rows to\n\
+         read first are the three `tampered_*` ones — they are the reason the digest\n\
+         comparison exists rather than being asserted to exist, and if they go quiet\n\
+         a rollback that compared roots alone would pass every remaining row.",
+    )
+}
+
+/// `claims/0031`'s two-process pair and its three in-process phases.
+///
+/// Named `claim_compare_run` because [`claim_compare`] is the comparison every
+/// route now goes through, and a second function called `claim_compare` would be
+/// the kind of near-collision this tree spends its comments avoiding.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_compare_run(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "cargo xtask compare: two processes at one seed, a second seed, and 64 injected \
+             divergences the descent must name by node",
+            "cargo",
+            &["xtask", "compare"],
+        )],
+        "`injections_localised_to_the_exact_node` below `injections_attempted` is\n\
+         E2-P05's exit failing, and the run has printed the first four misses with\n\
+         the node each was injected at. `whole_system_roots_across_two_seeds` at 1 is\n\
+         the worse red and the quiet one: a fold over something that does not vary\n\
+         agrees with itself forever, and every other row above it is then worth\n\
+         nothing. What this command does not reach at all is a *boot's* whole-system\n\
+         state, and `compare::WHOLE_SYSTEM_GAP` prints that on every green run.",
+    )
+}
+
+/// `claims/0032`'s five boots, against the claim's own table.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_attest(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "cargo xtask attest: one image booted twice, a modified image refused against the \
+             clean declaration and accepted against its own, and a machine told nothing",
+            "cargo",
+            &["xtask", "attest"],
+        )],
+        "`frame_hashes_across_two_clean_boots` above 1 means the measurement is\n\
+         reaching something outside the two ranges RFC 0012 names. The pair below it\n\
+         at 1 is the control failing, which is worse: sixteen bytes of rodata moved\n\
+         and the published hash did not, so every green run of this claim says only\n\
+         that a number was printed. Neither is repaired here. And no row in this\n\
+         table says anything about a *remote* verifier: there is no signature and no\n\
+         freshness, and the claim's statement carries RFC 0012's full list.",
     )
 }
 

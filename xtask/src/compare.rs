@@ -215,6 +215,24 @@ pub fn compare() -> Result<(), String> {
         )?
         .to_string();
 
+    // `claims/0031`'s two rows, and they are the two this command owns: the
+    // phases below are `f-sim`'s and print their own. Counts of *distinct roots*
+    // rather than the roots themselves, for the reason `claims/0032` gives about
+    // a digest in a threshold — a row carrying a hash is a claim about this
+    // commit, and every commit that changes what a component publishes would
+    // have to rewrite it. What is being claimed is that one seed gives one root
+    // and two seeds give two, which is a pair of small integers that stays true
+    // for as long as the property does.
+    let distinct = |values: [&str; 2]| -> usize {
+        values.iter().collect::<std::collections::BTreeSet<_>>().len()
+    };
+    println!(
+        "\n  whole_system_roots_at_one_seed      {}\n  \
+         whole_system_roots_across_two_seeds {}",
+        distinct([first.as_str(), second.as_str()]),
+        distinct([first.as_str(), other.as_str()]),
+    );
+
     println!("\ncompare: ok — the divergence was localised to `{named}`\n");
     println!("{WHOLE_SYSTEM_GAP}");
     Ok(())

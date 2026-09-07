@@ -25,6 +25,10 @@
     { "name": "cut-outcomes", "status": "gating", "milestone": "E2", "file": "claims/0025-cut-outcomes.toml" },
     { "name": "collector-invariants", "status": "gating", "milestone": "E2", "file": "claims/0026-collector-invariants.toml" },
     { "name": "topology-renderings-per-root", "status": "gating", "milestone": "E2", "file": "claims/0027-topology-renderings-per-root.toml" },
-    { "name": "generation-roots-across-paths", "status": "gating", "milestone": "E2", "file": "claims/0028-generation-roots-across-paths.toml" }
+    { "name": "generation-roots-across-paths", "status": "gating", "milestone": "E2", "file": "claims/0028-generation-roots-across-paths.toml" },
+    { "name": "operations-across-a-place-swap", "status": "gating", "milestone": "E2", "file": "claims/0029-operations-across-a-place-swap.toml" },
+    { "name": "rollback-comparisons", "status": "gating", "milestone": "E2", "file": "claims/0030-rollback-comparisons.toml" },
+    { "name": "whole-system-divergences-localised", "status": "gating", "milestone": "E2", "file": "claims/0031-whole-system-divergences-localised.toml" },
+    { "name": "frame-identities-across-boots", "status": "gating", "milestone": "E2", "file": "claims/0032-frame-identities-across-boots.toml" }
   ]
 }
