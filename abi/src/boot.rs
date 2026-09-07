@@ -106,19 +106,100 @@ impl Selection {
         let Some(digits) = word.strip_prefix(KEY.as_bytes()) else {
             return Err(error::pack(error::ARGUMENT, error::argument::UNKNOWN_FLAG));
         };
-        let bad = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
-        if digits.len() != DIGITS {
-            return Err(bad);
+        Ok(Self { root: digest(digits)? })
+    }
+}
+
+/// Sixty-four lower-case hexadecimal characters, or a refusal.
+///
+/// Shared by both tokens because there is one spelling of a digest on a command
+/// line and two parsers would be two chances to disagree about it — the same
+/// argument this module's own header makes about the grammar living beside the
+/// format rather than beside whichever parser was written first. It is the
+/// *spelling* that is shared and not the meaning: the two callers wrap it in two
+/// types, so nothing downstream can hold one where the other belongs.
+fn digest(digits: &[u8]) -> Result<[u8; ROOT_BYTES], i32> {
+    let bad = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
+    if digits.len() != DIGITS {
+        return Err(bad);
+    }
+    let mut out = [0u8; ROOT_BYTES];
+    let mut n = 0;
+    while n < ROOT_BYTES {
+        let high = nibble(digits[2 * n]).ok_or(bad)?;
+        let low = nibble(digits[2 * n + 1]).ok_or(bad)?;
+        out[n] = (high << 4) | low;
+        n += 1;
+    }
+    Ok(out)
+}
+
+/// The second token's key, including its `=`.
+///
+/// Namespaced for [`KEY`]'s reason, and separate from it for a reason of its
+/// own: a selection and a declaration are two different statements. `f.root=`
+/// says *be this generation*; `f.frame=` says *and this is the frame hash that
+/// generation was compiled against*. RFC 0012 puts the second in the root
+/// record's `frame` field so that a swap can decide whether it needs a reboot by
+/// comparing thirty-two bytes without resolving a tree; on the boot path there
+/// is no record to read it out of yet, so the loader carries it beside the
+/// selection and the frame compares it against what it measured of itself.
+///
+/// *Reversal:* a frame that mounts a store on its boot path. Then the field is
+/// read out of the root record the way RFC 0012 describes, this token becomes
+/// the way a machine with no store is told what it is, and the day nothing needs
+/// that is the day this key goes.
+/// Unit: none — a literal.
+pub const FRAME_KEY: &str = "f.frame=";
+
+/// How wide the rendered declaration is: the key and its sixty-four digits.
+/// Unit: bytes.
+pub const FRAME_TOKEN_BYTES: usize = FRAME_KEY.len() + DIGITS;
+
+/// The frame hash a generation declares for the image it was compiled against.
+///
+/// # Why this is not a `Selection` with a different key
+///
+/// Because the two would then be one type whose meaning depended on a string,
+/// and the one mistake worth designing against here is a caller that compares a
+/// root against a frame hash and finds them equal at a length rather than at a
+/// meaning. Two types cost twenty lines and make that a compile error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Declaration {
+    /// The frame hash the generation carries for its frame leaf.
+    /// Unit: bytes, exactly 32 of them — the SHA-256 RFC 0012 defines over
+    /// `__text_start .. __text_end` then `__rodata_start .. __rodata_end` of the
+    /// linked kernel image, in the order FIPS 180-4 produces it.
+    pub frame: [u8; ROOT_BYTES],
+}
+
+impl Declaration {
+    /// Render the token a loader would be given.
+    ///
+    /// Lower case only, for [`Selection::render`]'s reason and by the same
+    /// arithmetic.
+    #[must_use]
+    pub fn render(&self) -> [u8; FRAME_TOKEN_BYTES] {
+        let mut out = [0u8; FRAME_TOKEN_BYTES];
+        out[..FRAME_KEY.len()].copy_from_slice(FRAME_KEY.as_bytes());
+        for (n, byte) in self.frame.iter().enumerate() {
+            out[FRAME_KEY.len() + 2 * n] = HEX[(byte >> 4) as usize];
+            out[FRAME_KEY.len() + 2 * n + 1] = HEX[(byte & 0xF) as usize];
         }
-        let mut root = [0u8; ROOT_BYTES];
-        let mut n = 0;
-        while n < ROOT_BYTES {
-            let high = nibble(digits[2 * n]).ok_or(bad)?;
-            let low = nibble(digits[2 * n + 1]).ok_or(bad)?;
-            root[n] = (high << 4) | low;
-            n += 1;
-        }
-        Ok(Self { root })
+        out
+    }
+
+    /// Parse one command-line word.
+    ///
+    /// # Errors
+    ///
+    /// The same two as [`Selection::parse`], for the same reasons: `UNKNOWN_FLAG`
+    /// for *not mine*, `MALFORMED_HEADER` for *mine and wrong*.
+    pub fn parse(word: &[u8]) -> Result<Self, i32> {
+        let Some(digits) = word.strip_prefix(FRAME_KEY.as_bytes()) else {
+            return Err(error::pack(error::ARGUMENT, error::argument::UNKNOWN_FLAG));
+        };
+        Ok(Self { frame: digest(digits)? })
     }
 }
 
@@ -416,5 +497,37 @@ mod tests {
         let mut junk = good;
         junk[KEY.len()] = b'g';
         assert_eq!(Selection::parse(&junk), Err(bad));
+    }
+
+    #[test]
+    fn a_declaration_round_trips_and_is_told_apart_from_a_selection() {
+        let out = Declaration { frame: ROOT }.render();
+        assert_eq!(&out[..FRAME_KEY.len()], b"f.frame=");
+        assert_eq!(Declaration::parse(&out), Ok(Declaration { frame: ROOT }));
+
+        // The two tokens are not each other, and neither parser accepts the
+        // other's word. That is the property the two types exist for: a caller
+        // that fed a root to the frame comparison would be comparing thirty-two
+        // bytes that mean something else and finding them unequal for the right
+        // answer's wrong reason.
+        let unknown = error::pack(error::ARGUMENT, error::argument::UNKNOWN_FLAG);
+        assert_eq!(Declaration::parse(&Selection { root: ROOT }.render()), Err(unknown));
+        assert_eq!(Selection::parse(&out), Err(unknown));
+    }
+
+    #[test]
+    fn a_declaration_that_is_not_sixty_four_lower_case_hex_digits_is_refused() {
+        // The same alphabet, checked again through the other token, because the
+        // shared parser is an implementation detail and the *grammar* is what
+        // both keys promise. A refactor that gave one of them a lenient parser
+        // would pass the test above and fail this one.
+        let bad = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
+        let good = Declaration { frame: ROOT }.render();
+
+        let mut shouted = good;
+        shouted[FRAME_KEY.len() + 10] = b'A';
+        assert_eq!(Declaration::parse(&shouted), Err(bad));
+        assert_eq!(Declaration::parse(&good[..good.len() - 1]), Err(bad));
+        assert_eq!(Declaration::parse(b"f.frame="), Err(bad));
     }
 }

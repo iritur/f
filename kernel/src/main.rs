@@ -34,6 +34,7 @@ pub mod env;
 pub mod gpu;
 pub mod iommu;
 pub mod jitter;
+pub mod measure;
 pub mod mem;
 pub mod net;
 pub mod percpu;
@@ -312,6 +313,61 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         paging::PHYS_OFFSET
     );
 
+    // RFC 0012, and `E2-B07`. The frame measures its own text and rodata *here*
+    // and not earlier or later, and both bounds are load-bearing. Earlier and
+    // the pages being hashed are still writable by the code hashing them — the
+    // measurement would be of memory that could still change. Later and
+    // something could already have been published under a root this image has
+    // not yet earned the right to publish.
+    //
+    // A disagreement is a refusal to publish a root and not a warning line, so
+    // this ends the boot. What it catches is a modified image booted honestly;
+    // what it cannot catch is an image modified to report the old digest, and
+    // `kernel/src/measure.rs` carries RFC 0012's full list of five rather than
+    // leaving a reader to infer the scope from the fact that a hash was printed.
+    let identity = match measure::identity(boot.cmdline()) {
+        Ok(identity) => identity,
+        Err(why) => {
+            kprintln!("FAIL: the frame's measurement: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+    kprintln!(
+        "  frame         {} over {} bytes of text and rodata",
+        measure::hex(&identity.measured),
+        identity.covered,
+    );
+    match identity.root {
+        // What the loader asked this machine to be, printed before the frame has
+        // decided whether it may be it. The verdict is the next paragraph, and
+        // keeping the two apart is what stops this line from claiming agreement
+        // on a boot that is about to refuse.
+        Some(root) => kprintln!(
+            "  generation    {} selected as publish {}",
+            measure::hex(&root),
+            identity.generation(),
+        ),
+        // Zero is the format's word for *no root describes this machine*, and a
+        // boot the loader named no generation for is exactly that. Printed
+        // rather than left silent: a machine that cannot say which generation it
+        // is has answered half the question, and the half it answered is above.
+        None => kprintln!("  generation    none selected, so no root is published"),
+    }
+    // The comparison, after both numbers are in the log and not before. RFC
+    // 0012: *disagreement is a refusal to publish a root, not a warning line* —
+    // so this ends the boot, and it ends it with the measurement above it rather
+    // than with a sentence a reader has to take on trust.
+    if !identity.agrees() {
+        if let Some(declared) = identity.declared {
+            kprintln!("  declared      {}", measure::hex(&declared));
+        }
+        kprintln!("FAIL: the frame's measurement: {}", measure::Refusal::FrameDisagrees.message());
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+    if identity.declared.is_some() {
+        kprintln!("  measurement   agrees with the frame hash the generation declares");
+    }
+
     // Memory the identity window could not reach is now reachable. Nothing was
     // skipped on this machine; the pass exists so that the first machine with
     // more than a gibibyte does not quietly lose the rest of it.
@@ -557,6 +613,21 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     };
     tree.set(state::node::TOPOLOGY_STARTED, smp::started() as u64);
     tree.set(state::node::CAPS_SLOTS, cap::TABLE_SLOTS as u64);
+
+    // What the machine is running, into the tree a reader can map. RFC 0012 and
+    // `E2-B07`: the boot log above says it once to whoever is watching a serial
+    // port, and this says it to a component, which is the difference between a
+    // machine that printed a hash and a machine that answers a question about
+    // itself. RFC 0013 is why that is a node and not a new channel.
+    //
+    // A `false` here is a build whose schema lost one of the nine nodes, and it
+    // ends the boot for the reason a failed mount does: a machine that cannot
+    // say what it is running has not answered the question, and a boot that
+    // carried on would be publishing a tree with the answer missing from it.
+    if !tree.publish_identity(identity.generation(), identity.root.as_ref(), &identity.measured) {
+        kprintln!("FAIL: the state tree has no node for what this machine is running");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
 
     // M5, the first piece of it. One channel laid out by `f_abi::layout` in a
     // real frame, a batch of four published with one store, and both opcodes

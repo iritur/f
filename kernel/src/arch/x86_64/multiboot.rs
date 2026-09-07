@@ -37,11 +37,25 @@ const MAX_MODULES: usize = 8;
 
 /// How much of a command line this kernel will read.
 ///
-/// Long enough for the parameters phase 00 has any use for, short enough to sit
-/// in a structure that is copied by value. A longer one is truncated rather
+/// Long enough for the parameters this frame has any use for, short enough to
+/// sit in a structure that is copied by value. A longer one is truncated rather
 /// than rejected: a parameter that does not fit is a parameter that does not
 /// take effect, which is visible, and refusing to boot over it would not be.
-const CMDLINE_MAX: usize = 128;
+///
+/// **This was 128 and the arithmetic that moved it is worth keeping.** RFC 0012
+/// puts two digests on the command line — `f.root=` is 71 bytes and `f.frame=`
+/// is 72 — and 143 of 128 would have truncated the second every time. The
+/// failure mode is exactly the one the paragraph above calls visible and would
+/// not have been: a truncated `f.frame=` parses as malformed rather than as
+/// absent, so the boot refuses and says so. It was still the wrong number. What
+/// is left over is room for the provocations every boot command in `xtask`
+/// appends beside them, and 320 is 143 plus the longest of those with headroom
+/// rounded to a cache line.
+///
+/// *Reversal:* a frame that reads its generation out of a root record on a
+/// mounted store rather than off the command line. Then both tokens go and this
+/// is a boot parameter buffer again.
+const CMDLINE_MAX: usize = 320;
 
 /// A cap on the memory-map walk.
 ///

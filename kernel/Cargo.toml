@@ -11,6 +11,24 @@ f-abi.workspace = true
 f-env.workspace = true
 f-ring.workspace = true
 
+# SHA-256, for the frame to measure itself with. RFC 0012 makes the frame hash
+# the thing a swap compares to decide whether it needs a reboot, and a frame that
+# could not recompute its own would be carrying a field nothing checks.
+#
+# The one dependency in this list the frame calls *code* from rather than sharing
+# a vocabulary with, and it is worth saying why that is acceptable here and is
+# refused three lines down for the drivers. `f-hash` is `no_std`, has no
+# allocator, no arch-specific path and no dependencies of its own, and it forbids
+# `unsafe` — so linking it adds nothing to the surface `lint-unsafe` measures.
+# The alternative was a second SHA-256 inside `kernel/`, which is the one shape
+# of duplication a content-addressed system cannot afford: two implementations of
+# one hash are two answers to *what are you running*.
+#
+# *Reversal:* a measurement taken before the frame runs — E5's TPM — at which
+# point the frame is handed a digest rather than computing one, and this line
+# goes with the self-hash it exists for.
+f-hash.workspace = true
+
 # The block driver, which is a component and not part of the frame — it inherits
 # `unsafe_code = "forbid"` like every other `user/` crate and `cargo xtask
 # lint-unsafe` holds it to that.
@@ -111,6 +129,17 @@ mutate-unseeded-time = []
 # the same comparison to go green. Everything else in this tree is green on it,
 # which is the point.
 mutate-path-in-image = []
+# `E2-B07`'s, and the only defect in this list that breaks nothing. It changes
+# sixteen bytes of `kernel/src/measure.rs`'s `MARK`, which nothing reads, no
+# branch depends on and no log line mentions — so the *only* thing in the system
+# that can notice this build is different from the clean one is the frame's
+# measurement of its own rodata. That is the point: a modification which also
+# broke something would have demonstrated that the broken thing goes red, not
+# that the identity moved. `cargo xtask attest` boots it twice, once with the
+# clean build's declared hash — where the frame must refuse to publish a root —
+# and once with its own, where the published root and frame hash must both differ
+# from the clean boot's.
+mutate-modified-frame = []
 
 [[bin]]
 name = "f-kernel"

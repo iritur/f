@@ -297,6 +297,36 @@ is what `E0-P06` needs on `runner-class-A`, and the reason this page exists at
 all. `fault=pf|ud|df|nx|wx|stack` provokes a deliberate fault. Both are read by
 `kernel/src/main.rs` from the same `BootInfo`.
 
+### Telling the machine what it is
+
+Two more, and they travel together. RFC 0012 makes the generation root the
+answer to *what are you running*, and the frame is told it here:
+
+```
+multiboot /boot/f/f-kernel.elf32 f.root=<64 hex> f.frame=<64 hex>
+```
+
+`f.root=` **selects**: it names the generation, and on hardware the menu these
+entries live in is written by `cargo xtask generation --install`. `f.frame=`
+**declares**: it is the frame hash that generation was compiled against, and the
+frame compares it against SHA-256 over its own `__text_start .. __text_end` and
+`__rodata_start .. __rodata_end` after the mapper has made both read-only. A
+disagreement is a refusal to publish a root and ends the boot; the log carries
+both numbers, so what a refusal says is which two hashes differed.
+
+Neither is authentication. Anyone who can set the command line can select
+anything the loader offered, and a self-hash is a claim by the thing being
+measured — RFC 0012 lists in full what this proves and what it does not, and an
+image modified to report the old digest defeats it entirely. What it catches is
+a modified image booted honestly, and `cargo xtask attest` is the four boots
+that demonstrate that rather than assert it.
+
+Omit both and the machine still measures itself and still publishes the frame
+hash in its state tree; the generation counter is then **zero**, which is the
+format's word for *no root describes this machine*. Passing one without the
+other is refused, because half of a two-part statement is a different statement
+rather than a weaker one.
+
 ## The boot log will not match CI, and that is not a regression
 
 `xtask` pins `-m 128M` and `-smp 2` deliberately, because the kernel prints the
@@ -319,7 +349,7 @@ These are four different sorts of number and it is worth not confusing them.
 | `-m 128M`, `-smp 2` | | **Fixture pins.** Not kernel limits at all — QEMU launch parameters chosen so the boot log is reproducible. Irrelevant on hardware. |
 | `MAX_REGIONS` | 256 | **A bound on untrusted input.** The memory map is length-prefixed and a corrupt length is a loop that never ends. "QEMU reports a handful of regions; a real machine reports tens." |
 | `MAX_MODULES` | 8 | **A bound on untrusted input**, and a ninth module is *reported* as dropped rather than ignored — because a module nobody reserved is one the frame allocator hands out from under its owner. |
-| `CMDLINE_MAX` | 128 | Same kind. A longer command line is truncated rather than rejected, on the grounds that a parameter that does not take effect is visible and a refusal to boot is not. |
+| `CMDLINE_MAX` | 320 | Same kind. A longer command line is truncated rather than rejected, on the grounds that a parameter that does not take effect is visible and a refusal to boot is not. It was 128 until `f.root=` and `f.frame=` — 71 and 72 bytes — made 128 the wrong number; the arithmetic is in `kernel/src/arch/x86_64/multiboot.rs` beside the constant. |
 | `MAX_CPUS` | 8 | **A real capacity choice with a real cost**, and the one to watch. |
 
 ### `MAX_CPUS` is logical processors, per socket
