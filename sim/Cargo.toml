@@ -21,6 +21,15 @@ f-env.workspace = true
 # RFC 0032 rejected shape (b) to avoid, arrived at from the other side.
 f-abi.workspace = true
 f-ring.workspace = true
+# The one SHA-256 in the tree, and it is taken here rather than reimplemented
+# for the reason the workspace row gives: there is one identity, not two that
+# agree until they do not. `whole.rs` folds a whole-system state with it —
+# every component's published region under one root — and that root is compared
+# across two *processes*, so the fold has to be a function of the bytes and of
+# nothing the standard library reserves the right to change. `f_abi::state`'s
+# own FNV-1a stays where it is and answers a different question; `whole.rs`
+# says which.
+f-hash.workspace = true
 
 # The deliberate defects, off by default and refused as defaults by
 # `cargo xtask lint-mutations`. `sim/src/dev.rs` argues why they live in the
