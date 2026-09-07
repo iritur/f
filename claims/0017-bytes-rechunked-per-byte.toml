@@ -6,39 +6,95 @@
 # step 8 names this file.
 #
 # **0017 and not 0016.** `intent/0006-state/spec.md` reserves 0016 for
-# `write-amplification`, which lands with `E2-B02` and cannot be registered
-# before there is a zoned device to write to. The hole between 0015 and 0017 is
-# a reservation and not a withdrawal, said here because the RFC directory spent
-# two epochs teaching that lesson about the number 0012.
+# `write-amplification`. That hole is now filled — `E2-B02` registered it on
+# 2026-09-07 — and the sentence stays because the *reason* it was a hole is what
+# the next reader needs: it was a reservation and not a withdrawal, which the
+# RFC directory spent two epochs teaching about the number 0012.
 #
-# **Why this is `pending` when three of its rows have numbers today.** The
-# claim's own subject is *bytes re-chunked per application byte written*, and an
+# **Why this is still `pending` now that the denominator exists.** The claim's
+# own subject is *bytes re-chunked per application byte written*, and an
 # application byte is defined once, in the spec, as a byte the client submitted
-# on the objects ring. There is no objects ring, no store and no
-# `bench/src/bin/rechunk.rs`: the denominator does not exist, so the primary
-# cannot be taken. What does exist is `blob/tests/chunker.rs`, which measures
-# the numerator's worst case directly — the distance from an edit to the first
-# boundary the two streams agree on again — and those rows are recorded below
-# with the thresholds they must meet. One of them was not met on the day this
-# file was registered, was written down as not met rather than left out, and has
-# since been **replaced rather than widened** by the four rows the reversal
-# produced: see `[diagnosis]`, RFC 0061 and RFC 0062.
+# **on the objects ring**. `bench/src/bin/rechunk.rs` now exists and writes 4096
+# bytes at a drawn offset through a real `Store` over a modelled device, which
+# is a write path and a denominator — and it is not a client on a ring, because
+# `user/objects` is `E2-B08` and has not been built. So the ratio below is
+# counted at a boundary one layer under the one the claim names, and the claim
+# says so rather than promoting itself.
+#
+# **What the two workloads each supply.** `blob/tests/chunker.rs` measures the
+# numerator's worst case directly — the distance from an edit to the first
+# boundary the two streams agree on again — over 32 (seed, mixture) pairs; the
+# bench measures the cost of a write, on both object kinds, at two object sizes.
+# One row of the first was not met on the day this file was registered, was
+# written down as not met rather than left out, and was **replaced rather than
+# widened** by the four rows RFC 0062 produced. One row of the second was not
+# met on the day the bench first ran at full geometry, was written down here the
+# same way, and was answered by RFC 0064 scoping the clause it belongs to rather
+# than by moving the number it failed: see `[diagnosis]`, and RFC 0061, 0062 and
+# 0064.
+#
+# **Both workloads are run by this claim's one command, and every row below is
+# compared against what they print.** That was not true until 2026-09-07: the
+# reproduction ran the test alone, the bench was unreachable from
+# `cargo xtask claim`, and a threshold breach inside it went unobserved inside a
+# green `verify`. A threshold nothing compares against is a number in a file.
 name       = "bytes-rechunked-per-byte"
 status     = "pending"          # pending | tracked | gating
 milestone  = "E2"
 
 statement  = """
 An edit re-chunks a bounded region around it, and the bound does not scale with
-the object.
+the object — **on content that admits no forced cut near the edit, which is the
+clause RFC 0064 added after the bench measured what happens without it.**
 
 The bound is `CHUNK_MAX_BYTES` + `RESYNC_BOUND_BYTES` = 786 432 bytes on the
 chunked kind, at both object sizes, so a number that grows with the object
-fails. On the extent kind it is `2 × EXTENT_BYTES` = 2 097 152 bytes, which is
-the copy-on-write granularity and not the object's size, and `E2-B09` adds those
-rows with its own diff.
+fails, **provided no starved run meets the window that clause allows itself,
+`[X + L, X + L + RESYNC_BOUND_BYTES]`**. A starved run is RFC 0061's: a maximal
+run in which no two consecutive candidates are closer than
+`CHUNK_MAX_BYTES − CHUNK_MIN_BYTES` = 245 760 bytes. Where one meets that
+window the second clause applies instead — agreement by the run's end plus one
+chunk — and that number scales with the object, which is what the second object
+kind exists for. On the extent kind the bound is `2 × EXTENT_BYTES` =
+2 097 152 bytes, the copy-on-write granularity and not the object's size.
 
-What has been measured so far, and it is the numerator rather than the ratio.
-`blob/tests/chunker.rs` inserts a drawn run of bytes at a drawn offset into a
+**Why the scope sentence is there, and it is a measurement rather than a
+hedge.** Run at the geometry below, the bench measured
+`bytes_rechunked_per_edit_chunked_small` = **1 138 541 bytes against the
+786 432-byte threshold**, on 5 of the 158 edits at 8 MiB that were outside a
+starved run by the predicate this file used until then — all five on
+`concatenated` content, every one of them a hundred kilobytes or so ahead of a
+candidate gap of 645 661 or 576 301 bytes that both boundary streams then walked
+into and forced a cut in at different phases. RFC 0061's own words are *except
+**across** a starved run*; both workloads read *across* as *inside*. RFC 0064
+scopes the clause by the window rather than by the point, moves no threshold and
+no constant, and the four rows are re-measured at **345 390 bytes at 8 MiB and
+262 144 at 128 MiB** — sixteen times the object and a smaller number, which is
+the comparison that makes this a bound rather than a description.
+
+What the scope costs, stated because a scope that is not priced is an excuse:
+the flat clause covers **231 of the 1280 drawn edits**, 117 and 114 at the two
+sizes. The rest are excused by the second clause — 87 near a starved run and 962
+inside one, most of the latter on the three mixtures RFC 0062 accounts for —
+zero-filled by the register's fixed point, the two periodic ones by its theorem — and the second clause is *asserted* over every one of them at
+`rechunk_edits_exceeding_the_second_clause = 0`, because a class excused from
+one clause and asserted under none is a class that cannot go red. On uniform
+content the arithmetic says the flat clause covers about 74% of edits: roughly
+one edit in four, on content this chunker is good at, has a cost the flat clause
+does not bound.
+
+**The extent kind, and RFC 0058's two predictions confirmed.** The extent path's
+maximum is 2 097 152 bytes — exactly `2 × EXTENT_BYTES`, and *the same number at
+8 MiB and at 128 MiB*, so it is bounded by the granularity and not by the object;
+`pieces_touched_max` is 2. Straddling writes are 5 of the 1280 drawn, **0.391%**,
+against the `4095 / 1048576` = 0.3906% RFC 0058 derived from the geometry before
+anything was built. One straddling write per cell is *placed* rather than drawn,
+and the count of placed writes is printed beside the drawn one so that nobody has
+to guess which observations were arranged.
+
+What the second workload measures, and it is the numerator rather than the
+ratio — kept because the rows above rest on it and because the stricter reading
+of the starved clause lives there. `blob/tests/chunker.rs` inserts a drawn run of bytes at a drawn offset into a
 drawn object, chunks both streams, and reports the first offset at which the two
 boundary sequences agree again. Over eight recorded seeds and four content
 mixtures:
@@ -110,7 +166,7 @@ notes   = "An absolute statement about what this chunker was made to do, rather 
 # R09: every headline claim names the subsystem that owns it.
 document = "docs/design/deadline-all-the-way-down.html"
 section  = "04"
-notes    = "Section 04 is where the sentence being priced lives — line 204, *an edit near the start of a large file does not re-chunk everything after it* — which `E2-P02` measured false on periodic content and RFC 0061 restates. The subsystem that owns the number is the chunker, `blob/src/chunk.rs` with the mask in `blob/src/gear.rs`; RFC 0061 is the decision, RFC 0062 is what its own confirming run bought — the rule stands, the forecast about which clause carries periodic content does not — RFC 0058 is the second object kind that answers the class this one cannot, and `E2-P02` is the test."
+notes    = "Section 04 is where the sentence being priced lives — line 204, *an edit near the start of a large file does not re-chunk everything after it* — which `E2-P02` measured false on periodic content and RFC 0061 restates. The subsystem that owns the number is the chunker, `blob/src/chunk.rs` with the mask in `blob/src/gear.rs`; RFC 0061 is the decision, RFC 0062 is what its own confirming run bought — the rule stands, the forecast about which clause carries periodic content does not — RFC 0064 is what the bench bought, which is the scope of the flat clause and not its number, RFC 0058 is the second object kind that answers the class neither reaches, and `E2-P02` and `bench/src/bin/rechunk.rs` are the two workloads."
 
 [workload]
 # Today's workload, and it is deliberately not the one this claim will finally
@@ -121,10 +177,22 @@ notes    = "Section 04 is where the sentence being priced lives — line 204, *a
 # two object sizes so that a number scaling with the object fails, 4 KiB writes,
 # and both object kinds. The row is a path rather than a description so that
 # swapping it is a diff naming the swap.
-path      = "blob/tests/chunker.rs"
-seeds     = 8
-mixtures  = 4
-notes     = "Four content mixtures, iterated rather than drawn: uniform, zero-filled, periodic with a period below `CHUNK_TARGET_BYTES`, and concatenations of those. The mixture is the load-bearing part of the geometry and is stated rather than left in the source — uniform bytes alone would have let a chunker that is bad at zero-filled content pass without anybody seeing it, and the periodic mixture is the one that falsified the first bound. Objects are 2 to 4 MB, which is enough for the bound to be able to fail and far short of the 8 MiB and 128 MiB `bench/src/bin/rechunk.rs` will draw; that is why the geometry rows below are minimums and why the two large-object thresholds are `pending` rather than measured. — What no run in this tree observes yet: a re-chunk driven by a client's write through a store, counted per application byte at a ring boundary. The numerator is measured against a `Vec<u8>` in a test, which is the honest description of it. — **What `E2-B09` owes this workload, and it is a row rather than a paragraph.** A periodic-below-`CHUNK_MIN_BYTES` object, drawn at a period below 16 KiB and with that period recorded beside the number, as its own row next to the zero-filled one. The 786 432-byte threshold does **not** apply to it: on starved content the re-chunk cost scales with the object, which is the design admitting what it admits, and a threshold there would be either false or vacuous. It is recorded for the reason the zero-filled row is — so that the number the design is bad at is visible rather than averaged into a mean — and the period must be below 16 KiB, because a bench drawing 48 KiB periods would report a bounded number and hide the whole class RFC 0062 names. The extent-kind rows are owed on that content too: periodic content below the minimum is now a measured member of the class the second object kind exists to serve, so a run that never handed the extent path that content has not measured the case the kind was bought for."
+path      = "bench/src/bin/rechunk.rs"
+# The second workload, and it is a row rather than a sentence because both are
+# run by this claim's one reproduction command and neither on its own carries
+# the table below. `cargo xtask claim bytes-rechunked-per-byte` runs the test
+# first — it is seconds against the bench's minutes, so a red cheap row says so
+# before the expensive one starts — then the bench, then compares every row of
+# `[threshold]` against what the two printed. A row neither prints is a failure
+# and not a silence: that was the state this claim was in until 2026-09-07, when
+# the bench measured 1 138 541 against a published 786 432 and nothing in the
+# tree said a word, because `path` named the file below and the route ran it.
+also      = "blob/tests/chunker.rs"
+seeds     = 2
+mixtures  = 5
+pairs     = 32
+edits     = 1280
+notes     = "**Two workloads, and which row comes from which is the whole of why there are two.** `bench/src/bin/rechunk.rs` writes 4096 bytes at a drawn offset into an 8 MiB and a 128 MiB object, on both object kinds, over five iterated mixtures and two seeds — 1280 edits — and it is where the write path, the extent kind and the object-size comparison live. `blob/tests/chunker.rs` inserts a drawn run into a drawn 2-to-4 MB object over eight seeds and four mixtures — 32 pairs — and is where the resynchronisation and deduplication rows live, because those need a pair of streams rather than a write path. The `resync_*` and `dedup_*` rows below are the test's; every other row is the bench's. — Four content mixtures in the test, iterated rather than drawn: uniform, zero-filled, periodic with a period below `CHUNK_TARGET_BYTES`, and concatenations of those. The mixture is the load-bearing part of the geometry and is stated rather than left in the source — uniform bytes alone would have let a chunker that is bad at zero-filled content pass without anybody seeing it, and the periodic mixture is the one that falsified the first bound. The bench draws a fifth — periodic below `CHUNK_MIN_BYTES`, which RFC 0062 owed this claim by name — with the drawn period printed beside every number it produces, because a bounded cost at a 48 KiB period means one thing and at a 4 KiB period means another. — What no run in this tree observes yet: a re-chunk driven by a client's write **over the objects ring**, which is why this claim is still `pending` after the denominator arrived. The bench's denominator is a 4096-byte write through a real `Store` over a modelled device, which is a write path and not a client; `user/objects` is `E2-B08` and does not exist. — **What `E2-B09` owed this workload, paid on 2026-09-07.** A periodic-below-`CHUNK_MIN_BYTES` object, drawn at a period below 16 KiB and with that period recorded beside the number, as its own row next to the zero-filled one. The 786 432-byte threshold does **not** apply to it: on starved content the re-chunk cost scales with the object, which is the design admitting what it admits, and a threshold there would be either false or vacuous. It is recorded for the reason the zero-filled row is — so that the number the design is bad at is visible rather than averaged into a mean — and the period must be below 16 KiB, because a bench drawing 48 KiB periods would report a bounded number and hide the whole class RFC 0062 names. The extent-kind rows are owed on that content too: periodic content below the minimum is now a measured member of the class the second object kind exists to serve, so a run that never handed the extent path that content has not measured the case the kind was bought for."
 
 [metrics]
 # Distributions rather than summaries where there is a distribution to keep:
@@ -138,10 +206,37 @@ secondary = [
   # Scanning and hashing are two costs and the second is the expensive one.
   "bytes_rehashed_per_edit_chunked_large",
   "bytes_rehashed_per_edit_chunked_small",
-  # The starved case as its own row rather than averaged into an aggregate. On
+  # The starved case as its own rows rather than averaged into an aggregate. On
   # wholly zero-filled content every boundary after an edit moves, `E2-P02`
   # asserts exactly that, and RFC 0058's second object kind exists because of it.
-  "bytes_rechunked_per_edit_zero_filled",
+  # Named `_starved_` and not `_zero_filled_` since RFC 0062: the mixture label
+  # decides nothing and the candidate gaps decide everything, so the row is
+  # keyed to the content's own structure. The bench prints the drawn period
+  # beside every periodic cell, which is what makes these readable.
+  "bytes_rechunked_per_edit_starved_small",
+  "bytes_rechunked_per_edit_starved_large",
+  "bytes_rehashed_per_edit_starved_small",
+  "bytes_rehashed_per_edit_starved_large",
+  # The class RFC 0064 named: outside every starved run, and with one inside the
+  # window the flat clause allows itself. Recorded with no flat threshold, and
+  # with the second clause asserted over it below.
+  "bytes_rechunked_per_edit_near_starved_small",
+  "bytes_rechunked_per_edit_near_starved_large",
+  "rechunk_edits_clear_of_a_starved_run_small",
+  "rechunk_edits_clear_of_a_starved_run_large",
+  "rechunk_edits_near_a_starved_run_small",
+  "rechunk_edits_near_a_starved_run_large",
+  "rechunk_edits_exceeding_the_second_clause",
+  # The extent kind, which is the comparison the whole claim is for: the same
+  # edits, the same seeds, the other object kind. RFC 0058's `2 x EXTENT_BYTES`
+  # at both object sizes, with the two-piece case and the straddling write as
+  # their own rows so that neither is averaged into the aligned case.
+  "bytes_rechunked_per_edit_extent_small",
+  "bytes_rechunked_per_edit_extent_large",
+  "bytes_rehashed_per_edit_extent_small",
+  "bytes_rehashed_per_edit_extent_large",
+  "bytes_rechunked_per_edit_extent_straddling",
+  "pieces_touched_max",
   # The three rows this slice can take, and the reason the claim is registered
   # now rather than with the bench.
   "resync_bytes_max",
@@ -179,6 +274,15 @@ secondary = [
 #
 # The primary and its twin. `CHUNK_MAX_BYTES` 256 KiB + `RESYNC_BOUND_BYTES`
 # 512 KiB, the same number at both object sizes.
+# **The scope these four are stated over, and RFC 0064 is where it was
+# established with a measurement rather than assumed.** They are maxima over the
+# edits *clear of every starved run* — no maximal candidate gap of
+# `CHUNK_MAX_BYTES - CHUNK_MIN_BYTES` = 245 760 bytes meets
+# `[X + L, X + L + RESYNC_BOUND_BYTES]`. That predicate is a function of the
+# content and the edit and is fixed before the chunker runs; it is not the set of
+# edits that passed, which would be the fitted threshold the `[diagnosis]` below
+# tells the next reader not to write. Measured 345 390 and 262 144 — sixteen
+# times the object and a smaller number.
 bytes_rechunked_per_edit_chunked_large  = { max = 786432 }
 bytes_rechunked_per_edit_chunked_small  = { max = 786432 }
 # Re-hashing cannot exceed re-scanning; equality is the expected case and this
@@ -189,6 +293,31 @@ bytes_rehashed_per_edit_chunked_small   = { max = 786432 }
 # The published outer allowance on its own, which is the second clause of the
 # bound and the row a starved object is allowed to exceed.
 resync_bytes_max                        = { max = 524288 }
+# **The positive control on RFC 0064's scope, and the reason that scope is not
+# an excuse.** A scope that excuses every edit asserts nothing, so the count it
+# still covers is a threshold. Sixty-four is derived and not measured: the
+# uniform mixture alone puts `seeds x writes` = 128 edits into each size, and on
+# uniform content the candidate gaps are geometric with mean `2^MASK_BITS` =
+# 65 536 bytes, so an edit is inside a starved run with the length-biased
+# probability `(1 + r)e^(-r)` = 0.112 at `r = 245760 / 65536` = 3.75, and a
+# starved gap begins inside the 512 KiB window with probability
+# `1 - e^(-8 e^(-r))` = 0.172 — leaving 0.736 clear, about 94 of the 128, with a
+# standard deviation near five. Sixty-four is six of those below it and is
+# reachable by a broken generator and nothing else. Measured 117 and 114 in
+# total, of which the uniform mixture's own share is 99 and 102 — the rest is
+# the concatenated mixture, and the three RFC 0062 accounts for contribute
+# nothing at all.
+rechunk_edits_clear_of_a_starved_run_small = { min = 64 }
+rechunk_edits_clear_of_a_starved_run_large = { min = 64 }
+# **The excused classes' own threshold**, over both sizes and both classes:
+# `agreed <= max(X + L + RESYNC_BOUND_BYTES, run_end + CHUNK_MAX_BYTES)`, with
+# the run taken from the content rather than from where the two streams happened
+# to agree — an allowance derived from the outcome would be satisfied by any
+# outcome. Zero is the only threshold it can have, because RFC 0061 states the
+# clause as an equality of kind: the sequences agree by the end of the run plus
+# one chunk. Measured 0 over the 1049 excused edits of 1280, which is the first
+# run in which that clause was asserted anywhere rather than assumed.
+rechunk_edits_exceeding_the_second_clause = { max = 0 }
 # Property 4 as RFC 0061 states it: every pair inside the published bound.
 # Measured 32 of 32, and the row below says on how many of them that could have
 # come out otherwise.
@@ -247,6 +376,21 @@ resync_pairs_starved_zero_filled        = { min = 8, max = 8 }
 # theorem says two placements of a period-below-16-KiB run share no chunk, so a
 # floor there would be a number the design cannot meet.
 dedup_pairs_with_a_non_zero_requirement = { min = 4 }
+# The extent kind, RFC 0058's number and the comparison this claim exists to
+# make. `2 x EXTENT_BYTES` = 2 097 152 is the copy-on-write granularity, and the
+# row that makes it a *bound* is the pair: the same maximum at 8 MiB and at
+# 128 MiB. Measured 2 097 152 at both, which is the worst case reached rather
+# than approached — a 4 KiB write that straddles a piece boundary rewrites two
+# whole pieces, and the workload places one per cell so that the case is
+# observed rather than waited for.
+bytes_rechunked_per_edit_extent_small   = { max = 2097152 }
+bytes_rechunked_per_edit_extent_large   = { max = 2097152 }
+bytes_rehashed_per_edit_extent_small    = { max = 2097152 }
+bytes_rehashed_per_edit_extent_large    = { max = 2097152 }
+# Two, and it is what the 2 above is made of: a 4 KiB write touches one piece or
+# two, and three would mean the piece size or the write size had moved without
+# the threshold moving with it.
+pieces_touched_max                      = { max = 2 }
 # The geometry `bench/src/bin/rechunk.rs` owes, as minimums, so that the two
 # object rows above are a bound and not a description of a small draw.
 object_bytes_small                      = { min = 8388608 }
@@ -265,7 +409,9 @@ command = "cargo xtask claim bytes-rechunked-per-byte"
 # Recorded while the system is understood rather than at 2 a.m. when it is not.
 resync_pairs_starved_periodic_above_7 = "the mask has drifted and nobody noticed what it does to short periods, which is the regression RFC 0062 documents happening once already — `MASK_BITS` 14 to 16 moved `P(empty) = e^(−p / 65536)` from 0.245 to 0.632. At eight of eight the chunked kind has stopped serving periodic content altogether rather than serving a third of it. **The diagnosis is not that a better rule exists.** A period below `CHUNK_MIN_BYTES` = 16 KiB is starved under every boundary rule this design permits, because the candidate set of any predicate over a bounded window of `p`-periodic content is closed under adding `p` and a minimum of `m > p` accepts none of it. So the repair is RFC 0058's second object kind and not a chunker change, and the only knob that moves the class is `CHUNK_MIN_BYTES` itself — which is a superblock field, decides every object hash ever written, and costs the size distribution `claims/0018` gates on. Local-maximum chunking is the answer this row used to name and RFC 0062 forecloses it: MAXP's minimum is its own 32 KiB window, so it starves strictly *more* periods, including both of the ones RFC 0058 names"
 resync_pairs_unstarved_below_4 = "the positive control has gone, and with it the meaning of the two rows above it: the tight clause and the carriage check are both conditioned on the edit being outside a starved run, so a run in which everything is starved asserts nothing while reporting green on both. Look first at the generator — a draw that stopped producing uniform content would do this — and only then at the chunker"
-bytes_rechunked_per_edit_above_786432 = "the bound is failing as a bound, and RFC 0061 says this is the observation it most wants somebody to go looking for. Check first whether the mixture reporting it is starved: a run of `CHUNK_MAX_BYTES − CHUNK_MIN_BYTES` = 240 KiB with no candidate is the class the second clause covers, and a number above the threshold there is the design admitting what it admits. Above it on a mixture that is *not* starved is the acceptance rule reading something outside its window, and `blob/src/chunk.rs`'s three words are where to look"
+bytes_rechunked_per_edit_above_786432 = "the bound is failing as a bound on the content it is stated over, and there is no clause left to move it into — the mixture is not the question and the starved run is not the answer, because the row is already scoped to edits with no starved run in the flat clause's own window. RFC 0064 is the entry that put that scope there and it says this is the observation it most wants somebody to go looking for. Read the per-edit line the bench prints beside the violation: it names the edit, the region rescanned and the widest candidate gap crossed. A gap below `CHUNK_MAX_BYTES − CHUNK_MIN_BYTES` = 240 KiB there means no cut was forced anywhere in the region, which leaves the acceptance rule reading something outside its window, and `blob/src/chunk.rs`'s three words are where to look. **What is not a repair is widening this row.** The number a violation reports is a fact about one drawn candidate gap; the next seed draws a different one, and a threshold set from the measurement is red again the first time a wider gap appears"
+rechunk_edits_exceeding_the_second_clause_above_0 = "the *second* clause is wrong, which is a larger finding than a red flat row and lands in the same command. RFC 0061 says the two sequences agree by the end of the starved run plus one chunk; a violation says they do not, and then the bound has no clause that holds — not the flat one, which this content was excused from, and not this one. Look at `starved_end` and at the forced-cut suppression in `blob/src/chunk.rs` before anything else: the clause rests on a forced cut being taken at exactly `CHUNK_MAX_BYTES` from the previous boundary in both streams once the run ends"
+rechunk_edits_clear_of_a_starved_run_below_64 = "the scope has eaten the sample and the four rows above it are green over nothing, which is the same vacuity `resync_pairs_unstarved` names one level up and has the same first suspect: the generator. A draw that stopped producing uniform content does this. The second suspect is `MASK_BITS`, which sets candidate density and therefore how often a 240 KiB gap appears — the floor of 64 is derived from gaps being geometric with mean 65 536 bytes, so a mask change invalidates the derivation before it invalidates the count"
 large_and_small_disagree = "the number scales with the object, which is the failure the two rows exist to separate. That is phase-lock: two cut orbits with identical spacing and different phase, which the chunker was rewritten to remove. Reproduce with `cargo test -p f-blob --test chunker` and read which clause carried each pair before concluding anything about the store"
 resync_pairs_where_the_allowance_exceeds_the_object_above_28 = "the bound is being asserted on a sample smaller than the positive control allows, so `resync_pairs_within_the_published_bound` has become a count of pairs that could not fail rather than a count of tests. Read it with `resync_pairs_unstarved`, which fails at the same time and for the same reason: the draw has stopped producing content the chunker can cut. Look at the generator before the chunker. Below 8 is the opposite event and a worse one — zero-filled content has acquired a candidate, which is the register's fixed point hitting the mask, and every object hash ever written has changed"
 dedup_pairs_with_a_non_zero_requirement_below_4 = "property 5 is passing on a draw it asserts nothing about, which is exactly the state this row was added to make visible: `owed` is the shared run less the allowance, and an allowance that has grown to cover two megabytes on most pairs makes `agreed >= owed` true at zero deduplicated bytes. It is the same event as the row above and has the same first suspect, the generator. What it is *not* evidence of is a deduplication regression: a starved pair deduplicating nothing is RFC 0062's theorem holding, and the number that would say deduplication had regressed is a shortfall on a pair whose requirement is not zero"

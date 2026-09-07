@@ -785,6 +785,17 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
     // than left for a reader to derive from the printed lines. See the doc
     // comment's section on the effective sample.
     let mut allowance_past_the_object = 0usize;
+    // The three counts `claims/0017` registers that this property computed and
+    // never named. **They were asserted here and unreadable from outside**,
+    // which is how a threshold row comes to be a row nothing compares against:
+    // `cargo xtask claim bytes-rechunked-per-byte` parses `name value` lines out
+    // of this run and out of `bench/src/bin/rechunk.rs`, and a row neither of
+    // them prints is a row the registry cannot check. Nothing here is asserted
+    // differently for being printed — the assertions below are the ones that
+    // were already here, unchanged.
+    let mut within_the_published_bound = 0usize;
+    let mut unstarved_missing_the_tight_clause = 0usize;
+    let mut resync_bytes_max = 0usize;
     for &seed in SEEDS {
         for kind in Mixture::ALL {
             let mut sites = Sites::new(seed);
@@ -852,6 +863,17 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
                 object.len()
             );
 
+            if agreed <= allowed {
+                within_the_published_bound += 1;
+            }
+            // The outer allowance on its own, over the pairs it is stated over:
+            // a starved pair is allowed to exceed it by the second clause, so a
+            // maximum taken across both classes would report an excused number
+            // under a threshold that cannot apply to it.
+            if starved <= from {
+                resync_bytes_max = resync_bytes_max.max(agreed.saturating_sub(from));
+            }
+
             if agreed > allowed {
                 failures.push(format!(
                     "{pair}: the boundary sequences agree again only at {agreed}, past the \
@@ -888,6 +910,7 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
             // can separate the two streams past this point and the window
             // argument applies unaided.
             if starved <= from && agreed > tight {
+                unstarved_missing_the_tight_clause += 1;
                 failures.push(format!(
                     "{pair}: the edit is not inside a starved run, so every acceptance decision \
                      at or after {window_clear} reads only untouched content and the sequences \
@@ -962,6 +985,21 @@ fn the_boundary_sequences_resynchronise_within_the_bound() {
          `agreed <= allowed` is unsatisfiable",
         PAIRS - allowance_past_the_object
     );
+
+    // The rows `claims/0017` registers, under the names it registers them
+    // under, one per line so that the claim's reproduction can compare them
+    // rather than trust that an assertion somewhere below did — and printed
+    // *before* the three thresholds are asserted, so that a red threshold
+    // reports the row that is red rather than only a panic.
+    println!("resync_bytes_max {resync_bytes_max}");
+    println!("resync_pairs_within_the_published_bound {within_the_published_bound}");
+    println!("resync_pairs_where_the_allowance_exceeds_the_object {allowance_past_the_object}");
+    println!(
+        "resync_pairs_unstarved_missing_the_tight_clause {unstarved_missing_the_tight_clause}"
+    );
+    println!("resync_pairs_unstarved {unstarved_pairs}");
+    println!("resync_pairs_starved_periodic {starved_periodic}");
+    println!("resync_pairs_starved_zero_filled {starved_zero}");
 
     // The effective sample, thresholded from both sides. Neither number is the
     // measured 14: the floor is the exact count of zero-filled pairs, which are
@@ -1134,6 +1172,10 @@ fn identical_content_in_two_objects_yields_identical_chunk_hashes() {
          {deduplicating_nothing} of which deduplicated nothing at all",
         PAIRS - requiring_pairs
     );
+    // The row `claims/0017` registers, under its own name, for the reason
+    // property 4's seven rows are printed: a threshold nothing prints is a
+    // threshold `cargo xtask claim` cannot compare against.
+    println!("dedup_pairs_with_a_non_zero_requirement {requiring_pairs}");
     assert!(
         requiring_pairs >= DEDUP_REQUIRING_MIN,
         "only {requiring_pairs} of {PAIRS} pairs place a non-zero requirement on deduplication, \

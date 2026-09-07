@@ -269,6 +269,15 @@ struct Measured {
     copied_bytes: u64,
     /// Unit: count of zones reset by the collector.
     zones_condemned: u64,
+    /// Unit: count of zones the mapping may fill — every zone but the
+    /// superblock's and the two root zones.
+    ///
+    /// Printed beside the count above because *ten zones reset* is a number and
+    /// *ten of twenty* is a measurement: what the run has to show is that
+    /// the collector reset a material share of the device rather than one zone
+    /// and stopped, and a reader cannot tell those apart without the
+    /// denominator. `claims/0016` records the pair.
+    data_zones: u32,
     /// Unit: count of device operations.
     ops_ahead_of_urgent_read: u32,
     /// Unit: count of steps the collect phase took.
@@ -297,7 +306,10 @@ impl Measured {
         println!("  copy-forward bytes per app byte  {:>14.4}", per(self.copied_bytes));
         println!("  device_bytes_per_app_byte        {:>14.4}", per(self.total_bytes));
         println!();
-        println!("  zones reset by the collector     {:>14}", self.zones_condemned);
+        println!(
+            "  zones reset by the collector     {:>14}  of {} data zones",
+            self.zones_condemned, self.data_zones
+        );
         println!("  ZONE_FINISH entries              {:>14}", self.counted.finishes);
         println!("  ZONE_RESET entries               {:>14}", self.counted.resets);
         println!("  FLUSH entries                    {:>14}", self.counted.flushes);
@@ -450,6 +462,7 @@ fn run(asked: &Asked) -> i32 {
         total_bytes: store.device().device().counted().device_bytes(),
         copied_bytes: published.copied_bytes,
         zones_condemned: published.zones_condemned,
+        data_zones: zones - DATA_FROM,
         ops_ahead_of_urgent_read: published.ops_ahead_of_urgent_read,
         steps,
         counted: *store.device().device().counted(),

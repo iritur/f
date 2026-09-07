@@ -42,15 +42,28 @@
 //!
 //! # Where the threshold applies, and where it cannot
 //!
-//! Per edit, this classifies the edit the way `E2-P02` does — by the candidate
-//! gap it sits in, not by the mixture's name, because RFC 0062's theorem says
-//! the name decides nothing. An edit outside a starved run is one the published
-//! bound `CHUNK_MAX_BYTES + RESYNC_BOUND_BYTES` = 786 432 must hold on, and the
-//! primary rows are the maximum over exactly those. An edit inside a starved run
-//! is one the bound's second clause excuses, and its cost is recorded per
-//! mixture with no threshold over it. The count of each is printed, because a
-//! primary taken over no edits at all is a green row asserting nothing — the
-//! same vacuity `claims/0017`'s `resync_pairs_unstarved` exists to make visible.
+//! Per edit, this classifies the edit by the candidate gaps around it and not
+//! by the mixture's name, because RFC 0062's theorem says the name decides
+//! nothing. **Three classes and not two, which is RFC 0064 and the correction
+//! this file carries**: an edit *inside* a starved run is excused by the bound's
+//! second clause; an edit *outside* every starved run whose flat window meets
+//! one is excused by the same clause for the same reason, because the forced cut
+//! that separates the two streams is in front of the edit rather than under it;
+//! and an edit that is neither is one the published flat bound
+//! `CHUNK_MAX_BYTES + RESYNC_BOUND_BYTES` = 786 432 must hold on. The primary
+//! rows are the maximum over exactly the third class.
+//!
+//! Until RFC 0064 the first two were one predicate evaluated at the edit, and
+//! this file measured 1 138 541 bytes against a 786 432-byte threshold on 5 of
+//! 158 in-scope edits at 8 MiB — every one of them on concatenated content
+//! ahead of a candidate gap of 645 661 or 576 301 bytes. That is what the third
+//! class is for, and the second class is recorded rather than dropped: its
+//! costs, its counts, and the second clause asserted over it at zero, because a
+//! class excused from one clause and asserted under none is a class that cannot
+//! go red. The count of each is printed, and the third has a floor
+//! ([`CLEAR_EDITS_MIN`]) — a primary taken over no edits at all is a green row
+//! asserting nothing, the same vacuity `claims/0017`'s `resync_pairs_unstarved`
+//! exists to make visible.
 //!
 //! # No clock, and therefore no `Sample`
 //!
@@ -132,6 +145,25 @@ const WINDOW_BYTES: usize = 64;
 /// `CHUNK_MAX_BYTES − CHUNK_MIN_BYTES` = 240 KiB is exactly the condition under
 /// which the forced cut is reachable at all.
 const STARVED_GAP_BYTES: usize = CHUNK_MAX_BYTES - CHUNK_MIN_BYTES;
+
+/// The positive control on RFC 0064's scope. Unit: count of edits, per object
+/// size.
+///
+/// **A scope that excuses everything asserts nothing**, and RFC 0064 widens
+/// what the flat clause does not cover, so the count of edits it still covers
+/// is a threshold rather than a printed line. Sixty-four is derived and not
+/// measured: the uniform mixture alone contributes `SEEDS.len() *
+/// WRITES_PER_OBJECT` = 128 edits per size, and on uniform content the
+/// candidate gaps are geometric with mean `2^MASK_BITS` = 65 536 bytes, so an
+/// edit is inside a starved run with the length-biased probability
+/// `(1 + r)e^(−r)` = 0.112 at `r = STARVED_GAP_BYTES / 65536` = 3.75, and a
+/// starved gap begins inside the 512 KiB window with probability
+/// `1 − e^(−8 e^(−r))` = 0.172. That leaves 0.736 of them clear, or about 94 of
+/// the 128, with a standard deviation near five. Sixty-four is six standard
+/// deviations below that and is reachable by a broken generator and by nothing
+/// else — the same shape `claims/0017`'s `resync_pairs_unstarved = { min = 4 }`
+/// is derived in, one level down.
+const CLEAR_EDITS_MIN: u64 = 64;
 
 /// The seeds this workload is taken over, unless an argument says otherwise.
 ///
@@ -364,6 +396,56 @@ fn widest_gap(candidates: &[usize], from: usize, to: usize) -> usize {
     widest.max(to.saturating_sub(previous))
 }
 
+/// The end of the last starved run reaching the flat clause's own window, if
+/// one does.
+///
+/// **This is RFC 0064's scope predicate and the reason it exists.** RFC 0061
+/// states the second clause of the bound over a starved run the two boundary
+/// sequences travel *across*; this workload, and `blob/tests/chunker.rs` before
+/// it, evaluated that clause at the edit alone — [`starved_end`] answers *is the
+/// edit inside a run*, which is a predicate at a point where the bound is a
+/// statement over an interval. An edit in cuttable content 100 KiB ahead of a
+/// 645 KiB candidate gap is outside every starved run and its two streams cross
+/// one anyway, which is a forced cut at two different phases and the same
+/// desynchronisation RFC 0062's theorem describes, reached from outside rather
+/// than from inside.
+///
+/// The window is `[from, from + RESYNC_BOUND_BYTES]` and it is the flat clause's
+/// own allowance rather than a fitted one: what the flat clause promises is
+/// agreement inside that interval, so the content it can promise it over is
+/// content with no forced cut in it. Anything shorter would be a window chosen
+/// to enlarge the sample, which is the fitted number `claims/0017`'s
+/// `[diagnosis]` tells the next reader not to write.
+///
+/// The gaps are measured whole and not clipped to the window: a run that begins
+/// before `from` or ends after the window's end forces its cut inside the window
+/// all the same, and a gap measured only over its intersection would report a
+/// run that can force a cut as one that cannot.
+fn starved_run_meeting_the_window(
+    candidates: &[usize],
+    length: usize,
+    from: usize,
+) -> Option<usize> {
+    let to = (from + RESYNC_BOUND_BYTES).min(length);
+    let mut previous = 0usize;
+    let mut last_start = None;
+    for &candidate in candidates.iter().chain(core::iter::once(&length)) {
+        // The gap is `(previous, candidate]`; it meets `[from, to]` when it
+        // ends at or after `from` and begins at or before `to`.
+        if candidate.saturating_sub(previous) >= STARVED_GAP_BYTES
+            && candidate >= from
+            && previous <= to
+        {
+            last_start = Some(previous);
+        }
+        previous = candidate;
+    }
+    // Consecutive starved gaps are one run, and the clause is about the run's
+    // end rather than the gap's — so the walk continues from the last gap that
+    // meets the window, which is exactly what `starved_end` does.
+    last_start.map(|start| starved_end(candidates, length, start))
+}
+
 /// The earliest position from which two boundary sequences agree again.
 ///
 /// The longest common suffix, and it always finds something: both sequences end
@@ -421,8 +503,28 @@ impl Tally {
 /// What one (seed, mixture, size) cell measured on the chunked kind.
 #[derive(Clone, Copy, Debug, Default)]
 struct Chunked {
-    /// Edits whose position is not inside a starved run: the ones the published
-    /// bound must hold on.
+    /// Edits the published flat bound is stated over: no starved run meets the
+    /// window that clause allows itself. RFC 0064, and the rows
+    /// `bytes_rechunked_per_edit_chunked_*` are the maximum over exactly these.
+    clear: Tally,
+    /// The same edits' hashing, kept apart from the classes below for the
+    /// reason the re-chunk rows are: the two carry the same threshold, and a
+    /// maximum taken across classes would report an excused number under a
+    /// threshold that cannot apply to it.
+    hashed_clear: Tally,
+    /// Edits outside every starved run whose flat window meets one — the class
+    /// RFC 0064 found and named, and the class this file measured under the
+    /// flat threshold until it did.
+    ///
+    /// Recorded with no flat threshold and *with* the second clause over it:
+    /// `near_second_clause_violations` is the falsifiable half, because a class
+    /// excused from one clause and asserted under none is a class that cannot
+    /// go red.
+    near: Tally,
+    hashed_near: Tally,
+    /// Edits whose position is not inside a starved run: `clear` and `near`
+    /// together, kept because it is what this file reported before RFC 0064 and
+    /// the difference between the two is the whole of that entry's measurement.
     unstarved: Tally,
     /// Edits inside a starved run: the ones its second clause excuses.
     starved: Tally,
@@ -432,27 +534,34 @@ struct Chunked {
     /// number under a threshold that cannot apply to it.
     hashed_unstarved: Tally,
     hashed_starved: Tally,
-    /// Unstarved edits that exceeded the published bound.
+    /// Edits in the `clear` class that exceeded the published flat bound.
     ///
     /// Counted rather than only maximised, because *how many* is the difference
     /// between a bound that is wrong and a bound that is wrong on a class
-    /// somebody can name. Each one prints its own line as it happens.
+    /// somebody can name. Each one prints its own line as it happens, and under
+    /// RFC 0064 a single one of them falsifies the flat clause on the content
+    /// that clause is stated over — there is no run left to blame.
     violations: Tally,
+    /// Edits in the `near` or `starved` classes that exceeded the **second**
+    /// clause: `max(edit_end + RESYNC_BOUND_BYTES, run_end + CHUNK_MAX_BYTES)`,
+    /// with the run taken from the content rather than from where the two
+    /// streams happened to agree.
+    ///
+    /// This is what keeps the excused classes falsifiable. RFC 0061 says the
+    /// sequences agree at the end of the run plus one chunk; if they do not,
+    /// the second clause is wrong and the bound has no clause left that holds.
+    second_clause_violations: Tally,
     /// The subset of the unstarved edits whose resynchronisation crossed no
     /// starved run.
     ///
-    /// **This is a diagnosis and not a second primary, and the distinction is
-    /// the whole reason it is here.** The published bound is stated over edits
-    /// that are not *inside* a starved run, and `unstarved` above is exactly
-    /// that set; this narrower set is the one whose two streams never had to
-    /// cross a 240 KiB candidate gap on their way back to agreement. When the
-    /// two numbers differ, the difference names the cause — a starved run
-    /// entered *after* the edit, which `starved_end` evaluated at the edit
-    /// cannot see — and it is recorded so that a reader can weigh the
-    /// falsification rather than take a maximum on trust. It is not offered as
-    /// a replacement threshold: a threshold taken over the edits that passed is
-    /// the fitted number `claims/0017`'s `[diagnosis]` tells the next reader not
-    /// to write.
+    /// **This is a diagnosis and not a threshold**, and it is kept beside
+    /// `clear` rather than replaced by it because the two ask different
+    /// questions: `clear` asks whether a forced cut was *possible* anywhere in
+    /// the flat clause's own window, before the chunker ran, and this asks
+    /// whether one was actually crossed on the way back to agreement. The first
+    /// is the scope of a bound and the second is what happened. When they
+    /// differ, the difference is the count of edits the scope excuses and the
+    /// run did not need excused.
     unstarved_crossing_nothing: Tally,
 }
 
@@ -505,8 +614,8 @@ fn main() {
         let large = which == 1;
         println!("--- object {size} bytes ---");
         println!(
-            "mixture            seed unstarved re-chunk max   starved starved max    pieces  \
-             period"
+            "mixture            seed     clear re-chunk max      near    near max   starved \
+             starved max  period"
         );
         for &seed in &geometry.seeds {
             for kind in Mixture::ALL {
@@ -521,14 +630,15 @@ fn main() {
                 let extents = measure_extent(object, &edits, geometry.snapshot_interval);
 
                 println!(
-                    "{:<17} {:>5} {:>9} {:>11} {:>9} {:>11} {:>9}  {}",
+                    "{:<17} {:>5} {:>9} {:>11} {:>9} {:>11} {:>9} {:>11}  {}",
                     kind.name(),
                     seed,
-                    chunked.unstarved.edits,
-                    chunked.unstarved.max,
+                    chunked.clear.edits,
+                    chunked.clear.max,
+                    chunked.near.edits,
+                    chunked.near.max,
                     chunked.starved.edits,
                     chunked.starved.max,
-                    extents.pieces.max,
                     period.map_or_else(|| "none".to_string(), |p| p.to_string()),
                 );
 
@@ -676,12 +786,67 @@ fn measure_chunked(object: &[u8], edits: &[Edit], label: &str) -> Chunked {
 
         let marks = candidates_after(&base_candidates, &edited, edit.at, edit.bytes.len());
         let run_end = starved_end(&marks, edited.len(), edit_end);
+        // The run the *bound* is stated over, which is not always the run the
+        // edit sits in. RFC 0064: a starved run anywhere in the window the flat
+        // clause allows itself forces a cut the two streams reach at different
+        // phases, and the clause cannot promise agreement across it whether the
+        // edit was inside the run or a hundred kilobytes ahead of it.
+        let meeting = starved_run_meeting_the_window(&marks, edited.len(), edit_end);
+        // The second clause, evaluated on the content: the end of that run plus
+        // one chunk, or the flat allowance, whichever is later. `run_end` and
+        // `meeting` agree whenever the edit is inside a run, because a run
+        // containing `edit_end` meets any window starting there.
+        let second_clause =
+            meeting.map(|end| (edit_end + RESYNC_BOUND_BYTES).max(end + CHUNK_MAX_BYTES));
         if run_end > edit_end {
             out.starved.record(rechunked);
             out.hashed_starved.record(hashed);
+            record_second_clause(
+                &mut out,
+                second_clause,
+                agreed,
+                rechunked,
+                label,
+                edit.at,
+                "inside",
+            );
+        } else if let Some(end) = meeting {
+            out.unstarved.record(rechunked);
+            out.hashed_unstarved.record(hashed);
+            out.near.record(rechunked);
+            out.hashed_near.record(hashed);
+            record_second_clause(
+                &mut out,
+                second_clause,
+                agreed,
+                rechunked,
+                label,
+                edit.at,
+                "near",
+            );
+            // Printed whenever this class costs more than the flat clause
+            // allows, because that is RFC 0064's whole measurement and a run
+            // that only reported the maximum would hand the next reader a
+            // number and no way to reach the edit behind it.
+            if rechunked > (CHUNK_MAX_BYTES + RESYNC_BOUND_BYTES) as u64 {
+                println!(
+                    "  ~ {label} edit at {} re-chunked {rechunked} ({region_start} -> {agreed}); \
+                     outside every starved run, and a run ending at {end} meets the flat clause's \
+                     own {RESYNC_BOUND_BYTES}-byte window — RFC 0064's class, second clause \
+                     allows {}",
+                    edit.at,
+                    second_clause.unwrap_or(0),
+                );
+            }
+            let crossed = widest_gap(&marks, edit_end, agreed);
+            if crossed < STARVED_GAP_BYTES {
+                out.unstarved_crossing_nothing.record(rechunked);
+            }
         } else {
             out.unstarved.record(rechunked);
             out.hashed_unstarved.record(hashed);
+            out.clear.record(rechunked);
+            out.hashed_clear.record(hashed);
             let crossed = widest_gap(&marks, edit_end, agreed);
             if crossed < STARVED_GAP_BYTES {
                 out.unstarved_crossing_nothing.record(rechunked);
@@ -701,11 +866,11 @@ fn measure_chunked(object: &[u8], edits: &[Edit], label: &str) -> Chunked {
             // cross was starved even though the region they started in was not.
             if rechunked > (CHUNK_MAX_BYTES + RESYNC_BOUND_BYTES) as u64 {
                 out.violations.record(rechunked);
-                let allowed = (edit_end + RESYNC_BOUND_BYTES).max(run_end + CHUNK_MAX_BYTES);
+                let allowed = edit_end + RESYNC_BOUND_BYTES;
                 println!(
                     "  ! {label} edit at {} re-chunked {rechunked} ({region_start} -> {agreed}); \
-                     E2-P02 allowance {allowed}, starved_end {run_end}, widest candidate gap \
-                     crossed {crossed}",
+                     no starved run meets the flat clause's window, so its allowance {allowed} is \
+                     the whole of it; widest candidate gap crossed {crossed}",
                     edit.at,
                 );
             }
@@ -714,6 +879,36 @@ fn measure_chunked(object: &[u8], edits: &[Edit], label: &str) -> Chunked {
         edited[edit.at..edit.at + saved.len()].copy_from_slice(&saved);
     }
     out
+}
+
+/// The second clause, checked on the two classes the flat one excuses.
+///
+/// **A class excused from one clause and asserted under none is a class that
+/// cannot go red**, which is the failure mode RFC 0064 is most exposed to: it
+/// widens what the flat clause does not cover, and a widening that reports no
+/// number is a widening nobody can argue with. RFC 0061 says the two sequences
+/// agree at the end of the starved run plus one chunk, so that is asserted here
+/// — over the run the *content* has, not over where the streams happened to
+/// agree, because an allowance derived from the outcome would be satisfied by
+/// any outcome.
+fn record_second_clause(
+    out: &mut Chunked,
+    allowed: Option<usize>,
+    agreed: usize,
+    rechunked: u64,
+    label: &str,
+    at: usize,
+    class: &str,
+) {
+    let Some(allowed) = allowed else { return };
+    if agreed > allowed {
+        out.second_clause_violations.record(rechunked);
+        println!(
+            "  !! {label} edit at {at} ({class} a starved run) agreed only at {agreed}, past the \
+             {allowed} the bound's second clause allows — the run's end plus one chunk. RFC 0061's \
+             second clause is what is wrong here, and it is the last clause the bound has"
+        );
+    }
 }
 
 /// The extent kind: the same edits through the real write path.
@@ -817,11 +1012,16 @@ fn merge_tally(into: &mut Tally, from: &Tally) {
 }
 
 fn merge_chunked(into: &mut Chunked, from: &Chunked) {
+    merge_tally(&mut into.clear, &from.clear);
+    merge_tally(&mut into.hashed_clear, &from.hashed_clear);
+    merge_tally(&mut into.near, &from.near);
+    merge_tally(&mut into.hashed_near, &from.hashed_near);
     merge_tally(&mut into.unstarved, &from.unstarved);
     merge_tally(&mut into.starved, &from.starved);
     merge_tally(&mut into.hashed_unstarved, &from.hashed_unstarved);
     merge_tally(&mut into.hashed_starved, &from.hashed_starved);
     merge_tally(&mut into.violations, &from.violations);
+    merge_tally(&mut into.second_clause_violations, &from.second_clause_violations);
     merge_tally(&mut into.unstarved_crossing_nothing, &from.unstarved_crossing_nothing);
 }
 
@@ -854,38 +1054,60 @@ fn report(
     // two things.
     println!("application_bytes_written (drawn)            {app_bytes}");
     println!();
-    println!("bytes_rechunked_per_edit_chunked_small       {}", chunked_small.unstarved.max);
-    println!("bytes_rechunked_per_edit_chunked_large       {}", chunked_large.unstarved.max);
-    println!("bytes_rehashed_per_edit_chunked_small        {}", chunked_small.hashed_unstarved.max);
-    println!("bytes_rehashed_per_edit_chunked_large        {}", chunked_large.hashed_unstarved.max);
+    println!("bytes_rechunked_per_edit_chunked_small       {}", chunked_small.clear.max);
+    println!("bytes_rechunked_per_edit_chunked_large       {}", chunked_large.clear.max);
+    println!("bytes_rehashed_per_edit_chunked_small        {}", chunked_small.hashed_clear.max);
+    println!("bytes_rehashed_per_edit_chunked_large        {}", chunked_large.hashed_clear.max);
     println!("  threshold                                  {published} (all four, and the same");
     println!("  at both sizes, so a number that scales fails)");
+    println!("  The four rows above are taken over the edits RFC 0064 says the flat clause");
+    println!("  is stated over: no starved run meets the {RESYNC_BOUND_BYTES}-byte window that");
+    println!("  clause allows itself. That is a predicate on the content and the edit, fixed");
+    println!("  before the chunker runs; it is not the set of edits that passed.");
+    println!("rechunk_edits_clear_of_a_starved_run_small   {}", chunked_small.clear.edits);
+    println!("rechunk_edits_clear_of_a_starved_run_large   {}", chunked_large.clear.edits);
+    println!("rechunk_edits_near_a_starved_run_small       {}", chunked_small.near.edits);
+    println!("rechunk_edits_near_a_starved_run_large       {}", chunked_large.near.edits);
+    println!("bytes_rechunked_per_edit_near_starved_small  {}", chunked_small.near.max);
+    println!("bytes_rechunked_per_edit_near_starved_large  {}", chunked_large.near.max);
+    println!("  no flat threshold on those two, and the second clause instead: the edit is");
+    println!("  outside every starved run and its two streams cross one anyway, which is a");
+    println!("  forced cut at two phases and the desynchronisation RFC 0062 proves — reached");
+    println!("  from outside the run rather than from inside it. RFC 0064 is that entry.");
     println!(
-        "  edits the bound was exercised on            {} small, {} large",
-        chunked_small.unstarved.edits, chunked_large.unstarved.edits
+        "rechunk_edits_exceeding_the_second_clause     {}",
+        chunked_small.second_clause_violations.edits + chunked_large.second_clause_violations.edits
     );
+    println!("  the excused classes' own threshold, and it is zero: RFC 0061 says the two");
+    println!("  sequences agree at the end of the starved run plus one chunk.");
     println!(
-        "  edits inside a starved run (no threshold)   {} small, {} large",
+        "  edits inside a starved run (second clause)  {} small, {} large",
         chunked_small.starved.edits, chunked_large.starved.edits
     );
     println!(
-        "  of the unstarved edits, violating that bound {} small, {} large",
+        "  of the clear edits, violating the flat bound {} small, {} large",
         chunked_small.violations.edits, chunked_large.violations.edits
+    );
+    println!(
+        "  edits outside a starved run in total        {} small, {} large",
+        chunked_small.unstarved.edits, chunked_large.unstarved.edits
+    );
+    println!(
+        "  their re-chunk maximum                      {} small, {} large",
+        chunked_small.unstarved.max, chunked_large.unstarved.max
     );
     println!(
         "  unstarved edits crossing no starved run     {} small, {} large",
         chunked_small.unstarved_crossing_nothing.edits,
         chunked_large.unstarved_crossing_nothing.edits
     );
-    println!(
-        "  their re-chunk maximum                      {} small, {} large",
-        chunked_small.unstarved_crossing_nothing.max, chunked_large.unstarved_crossing_nothing.max
-    );
-    println!("  That last pair is a diagnosis and not a second threshold: a bound taken");
-    println!("  over the edits that passed is a bound fitted to its measurement. It is");
-    println!("  here because when it differs from the row above it, the difference names");
-    println!("  the cause — a starved run the two streams entered *after* the edit, which");
-    println!("  `starved_end` evaluated at the edit cannot see.");
+    println!("  The last three lines are the falsification RFC 0064 was written from, kept");
+    println!("  where a reader finds them: `edits outside a starved run` is what this file");
+    println!("  measured the flat threshold over until that entry, and the maximum beside it");
+    println!("  is the number that exceeded it. `crossing no starved run` asks what actually");
+    println!("  happened rather than what the content allowed, and is a diagnosis and never");
+    println!("  a threshold: a bound taken over the edits that passed is a bound fitted to");
+    println!("  its measurement.");
     println!("bytes_rechunked_per_edit_starved_small       {}", chunked_small.starved.max);
     println!("bytes_rechunked_per_edit_starved_large       {}", chunked_large.starved.max);
     println!("bytes_rehashed_per_edit_starved_small        {}", chunked_small.hashed_starved.max);
@@ -923,9 +1145,14 @@ fn report(
     println!();
     println!("--- per application byte written, which is what the claim's name says ---");
     println!(
-        "chunked, unstarved edits                     {:.1} small, {:.1} large",
-        chunked_small.unstarved.per_app_byte(chunked_small.unstarved.edits * WRITE_BYTES as u64),
-        chunked_large.unstarved.per_app_byte(chunked_large.unstarved.edits * WRITE_BYTES as u64)
+        "chunked, edits clear of a starved run        {:.1} small, {:.1} large",
+        chunked_small.clear.per_app_byte(chunked_small.clear.edits * WRITE_BYTES as u64),
+        chunked_large.clear.per_app_byte(chunked_large.clear.edits * WRITE_BYTES as u64)
+    );
+    println!(
+        "chunked, edits near a starved run            {:.1} small, {:.1} large",
+        chunked_small.near.per_app_byte(chunked_small.near.edits * WRITE_BYTES as u64),
+        chunked_large.near.per_app_byte(chunked_large.near.edits * WRITE_BYTES as u64)
     );
     println!(
         "chunked, starved edits                       {:.1} small, {:.1} large",
@@ -940,15 +1167,23 @@ fn report(
     println!();
 
     let verdicts = [
-        ("bytes_rechunked_per_edit_chunked_small", chunked_small.unstarved.max, published),
-        ("bytes_rechunked_per_edit_chunked_large", chunked_large.unstarved.max, published),
+        ("bytes_rechunked_per_edit_chunked_small", chunked_small.clear.max, published),
+        ("bytes_rechunked_per_edit_chunked_large", chunked_large.clear.max, published),
         ("bytes_rechunked_per_edit_extent_small", extent_small.copied.max, extent_bound),
         ("bytes_rechunked_per_edit_extent_large", extent_large.copied.max, extent_bound),
         ("bytes_rehashed_per_edit_extent_small", extent_small.hashed.max, extent_bound),
         ("bytes_rehashed_per_edit_extent_large", extent_large.hashed.max, extent_bound),
-        ("bytes_rehashed_per_edit_chunked_small", chunked_small.hashed_unstarved.max, published),
-        ("bytes_rehashed_per_edit_chunked_large", chunked_large.hashed_unstarved.max, published),
+        ("bytes_rehashed_per_edit_chunked_small", chunked_small.hashed_clear.max, published),
+        ("bytes_rehashed_per_edit_chunked_large", chunked_large.hashed_clear.max, published),
         ("pieces_touched_max", extent_large.pieces.max.max(extent_small.pieces.max), 2),
+        // The excused classes' own row, and the reason RFC 0064 is a scope and
+        // not an excuse: zero, over both sizes and both classes.
+        (
+            "rechunk_edits_exceeding_the_second_clause",
+            chunked_small.second_clause_violations.edits
+                + chunked_large.second_clause_violations.edits,
+            0,
+        ),
     ];
     let mut red = 0;
     for (name, measured, threshold) in verdicts {
@@ -964,12 +1199,32 @@ fn report(
     // as green while asserting nothing about any of them. It is the same vacuity
     // `claims/0017`'s `resync_pairs_unstarved` row exists to make visible, one
     // level down.
-    assert!(
-        chunked_small.unstarved.edits > 0 && chunked_large.unstarved.edits > 0,
-        "no edit at either size landed outside a starved run, so the published bound was \
-         asserted on nothing. Look at the generator before the chunker: a draw that stopped \
-         producing uniform content does exactly this"
-    );
+    //
+    // Under RFC 0064 the set is narrower than it was — an edit merely *near* a
+    // starved run is excused too — so the control is stated over the narrower
+    // set, and at a floor rather than at one edit. `CLEAR_EDITS_MIN` is where
+    // that floor comes from and why it is a number and not a `> 0`.
+    //
+    // The floor scales down with a shrunken geometry rather than failing on it,
+    // because the arguments exist so that an agent changing this file can run it
+    // in a minute and a control that only holds at full size would be deleted by
+    // the second person who met it. What catches a shrunken run is the claim's
+    // own geometry rows — `writes_per_object`, `object_bytes_small` and
+    // `object_bytes_large` are thresholds too, and `cargo xtask claim` compares
+    // them — so the smoke run reports its numbers and the registry still refuses
+    // to publish them.
+    let floor = ((geometry.seeds.len() * geometry.writes) as u64 / 2).min(CLEAR_EDITS_MIN);
+    for (size, chunked) in [("small", chunked_small), ("large", chunked_large)] {
+        assert!(
+            chunked.clear.edits >= floor,
+            "only {} of the {size} object's edits are clear of every starved run, below the \
+             {floor} the uniform draw alone puts out of reach of anything but a broken \
+             generator. The published bound is being asserted on a sample that has quietly \
+             emptied, which is the same vacuity `claims/0017`'s `resync_pairs_unstarved` row \
+             exists to make visible, one level down",
+            chunked.clear.edits
+        );
+    }
     assert!(
         extent_small.straddling.edits > 0 && extent_large.straddling.edits > 0,
         "no straddling write was measured, so the row that says why the extent threshold is \

@@ -12604,12 +12604,17 @@ enum Route {
     /// filter now that both are green rather than a reason it was added. An
     /// empty filter runs everything.
     ///
-    /// It is a test rather than a benchmark because the store this number will
-    /// finally be taken against does not exist. `bench/src/bin/rechunk.rs` is
-    /// `intent/0006-state/plan.md` step 8 and `E2-B09`'s, and the day it lands
-    /// `bytes-rechunked-per-byte` moves to `Route::Bench("rechunk")` — the
-    /// claim's `[workload] path` says so too, in the file a stranger reads.
-    /// E2-B01, E2-P02, RFC 0061.
+    /// It is a test rather than a benchmark because the store `claims/0018`'s
+    /// distribution is measured against does not exist. **The sentence that
+    /// stood here predicted the other half of that and predicted it wrongly**:
+    /// it said `bytes-rechunked-per-byte` would move to
+    /// `Route::Bench("rechunk")` the day `E2-B09` landed. It landed, and one
+    /// route that runs one binary is exactly what let a bench print
+    /// 1 138 541 against a published 786 432 with nothing comparing the two —
+    /// so that claim moved to [`Route::Rechunk`], which runs both workloads and
+    /// compares every threshold row. This route keeps `claims/0018`, whose rows
+    /// all come from the test.
+    /// E2-B01, E2-P02, RFC 0061, RFC 0064.
     Chunker(&'static str),
     /// `E2-B01`'s exit run: a million blobs into a modelled device, every one
     /// read back and verified, then one bit flipped inside one stored blob's
@@ -12630,6 +12635,52 @@ enum Route {
     /// has to see to disagree with `claims/0023`.
     /// E2-B01, RFC 0060.
     Million,
+    /// `claims/0017`'s two workloads, run and then **compared against the
+    /// claim's own `[threshold]` table** — `bench/src/bin/rechunk.rs` for the
+    /// rows that need a write path, `blob/tests/chunker.rs` for the rows that
+    /// need thirty-two (seed, mixture) pairs.
+    ///
+    /// # Why this route exists rather than a second `Route::Bench`
+    ///
+    /// Because a threshold nobody compares against is not a threshold. Until
+    /// this landed, `bytes-rechunked-per-byte` routed to the chunker test alone:
+    /// `bench/src/bin/rechunk.rs` was unreachable from `cargo xtask claim`, and
+    /// the day it measured 1 138 541 bytes against a published 786 432 the
+    /// registry said nothing and `verify` was green — which is the same defect
+    /// an audit raised against `claims/0018` one wave earlier, in the same
+    /// directory, for the same reason. RFC 0064 is the entry that decides what
+    /// that measurement meant; this is the wiring that would have shown it
+    /// without anybody going looking.
+    ///
+    /// Every row of the `[threshold]` table is compared, and a row **neither**
+    /// workload prints is a failure rather than a silence: a published bound
+    /// whose number nothing emits is exactly the state this route was added to
+    /// end. Both workloads run even when the first is red, because one command
+    /// reporting every red row is worth more than one reporting the first.
+    /// E2-B09, RFC 0064.
+    Rechunk,
+    /// `E2-B02`'s fill-seal-copy-forward-reset cycle against a modelled zoned
+    /// device — `cargo test -p f-zone --test cycle`.
+    ///
+    /// Not a boot, and `claims/0016` is `pending` because of it: the exit's
+    /// *or its emulation* is satisfied by a model in the host, and the claim's
+    /// own `device_bytes_per_app_byte` is defined as a count taken by QEMU's
+    /// `query-blockstats` inside a guest. What this route reproduces is the
+    /// ratio's decomposition — fill, copy-forward, padding — which is a property
+    /// of the design rather than of a device. The day `user/objects` and QEMU 8
+    /// exist, this route gains the boot beside the cycle rather than instead of
+    /// it: two boundaries, two rows, and the claim says which is which.
+    /// E2-B02, RFC 0059.
+    ZoneCycle,
+    /// `E2-B03`'s comparison — `cargo test -p f-index --test query`: 4096 paths
+    /// resolved through the index and again by a tree walk over the same data on
+    /// the same modelled device, counting the device blocks each asks for.
+    ///
+    /// A count and not a time, which is why `claims/0024` gates in the
+    /// development container the way `claims/0005` does, and why the workload is
+    /// a test rather than a benchmark.
+    /// E2-B03.
+    IndexQuery,
 }
 
 const ROUTES: &[(&str, Route)] = &[
@@ -12680,7 +12731,12 @@ const ROUTES: &[(&str, Route)] = &[
     // — the split was made while property 4 was red under RFC 0061's open
     // reversal, and it is kept because a claim whose reproduction runs a whole
     // binary reports the wrong red the next time one of them goes.
-    ("bytes-rechunked-per-byte", Route::Chunker("")),
+    // `E2-B09` landed the denominator, so this claim leaves `Route::Chunker`
+    // for the route that runs the bench beside the test and compares both
+    // against the claim's own thresholds. The `[workload] path` row moved in the
+    // same diff, and RFC 0064 says why one of those rows now means something
+    // narrower than it did.
+    ("bytes-rechunked-per-byte", Route::Rechunk),
     (
         "chunk-size-distribution",
         Route::Chunker("the_mean_chunk_is_within_a_factor_of_two_of_the_target"),
@@ -12691,6 +12747,14 @@ const ROUTES: &[(&str, Route)] = &[
     // gate at ten thousand blobs and this claim at a million, which is the whole
     // reason `blob/tests/million.rs` is `harness = false`.
     ("blob-verification-refusals", Route::Million),
+    // Wave 2's two, registered with the builds that took them. Both are counts
+    // taken by their own workload against a modelled device, so both may be run
+    // here for `claims/0005`'s reason; what separates them is that one of them
+    // is not yet measured at the boundary its claim defines, and `claims/0016`
+    // is `pending` and says so at length rather than gating on a number taken
+    // somewhere else and called the same thing.
+    ("write-amplification", Route::ZoneCycle),
+    ("index-blocks-per-query", Route::IndexQuery),
 ];
 
 /// The registry file one claim name resolves to.
@@ -12802,6 +12866,9 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
             "cargo",
             &["test", "--release", "-p", "f-blob", "--test", "million", "--", "--blobs", "1000000"],
         )?,
+        Route::Rechunk => claim_rechunk(&text)?,
+        Route::ZoneCycle => sh("cargo", &["test", "-p", "f-zone", "--test", "cycle"])?,
+        Route::IndexQuery => sh("cargo", &["test", "-p", "f-index", "--test", "query"])?,
     }
 
     // The harness itself refuses in a non-measurement environment and says so
@@ -12833,6 +12900,196 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         }
         _ => Ok(()),
     }
+}
+
+/// One claim's `[threshold]` table, read out of its own file.
+///
+/// Read rather than restated, for [`hostile_thresholds`]' reason: two copies of
+/// a number are one number and one rumour, and the copy nobody reads is the one
+/// that rots. This is that function's body with the path taken as an argument,
+/// which is what makes it usable by a claim whose rows are not `claims/0008`'s.
+fn thresholds_in(text: &str) -> std::collections::BTreeMap<String, Bound> {
+    let value = |rest: &str, which: &str| -> Option<u64> {
+        let (_, after) = rest.split_once(which)?;
+        after
+            .trim_start()
+            .strip_prefix('=')?
+            .split_whitespace()
+            .next()?
+            .trim_end_matches([',', '}'])
+            .parse()
+            .ok()
+    };
+
+    let mut rows = std::collections::BTreeMap::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            inside = trimmed.trim_end().trim_end_matches('\r') == "[threshold]";
+            continue;
+        }
+        if !inside || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, rest)) = trimmed.split_once('=') else { continue };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        rows.insert(key.to_string(), Bound { min: value(rest, "min"), max: value(rest, "max") });
+    }
+    rows
+}
+
+/// Every `name value` row a workload printed.
+///
+/// The contract is one line, deliberately: a metric is its claim-registered
+/// name, whitespace, and a count. It is what `bench/src/bin/rechunk.rs` and
+/// `blob/tests/chunker.rs` already printed for a human, so nothing had to be
+/// reshaped into a format for a machine — and a workload that stops printing a
+/// row fails the comparison below rather than quietly dropping it.
+///
+/// A name printed twice with two values is recorded as a conflict rather than
+/// resolved here. Two workloads disagreeing about one row is a fact somebody has
+/// to look at, and taking the larger would hide it.
+fn measured_rows(
+    text: &str,
+    known: &std::collections::BTreeMap<String, Bound>,
+    into: &mut std::collections::BTreeMap<String, u64>,
+    conflicts: &mut Vec<String>,
+) {
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(name), Some(value)) = (fields.next(), fields.next()) else { continue };
+        if !known.contains_key(name) {
+            continue;
+        }
+        let Ok(value) = value.trim_end_matches(',').parse::<u64>() else { continue };
+        if let Some(&already) = into.get(name)
+            && already != value
+        {
+            conflicts.push(format!(
+                "  {name}: printed twice, as {already} and as {value}. Two workloads disagreeing \
+                 about one row is not something this command may average away"
+            ));
+            continue;
+        }
+        into.insert(name.to_string(), value);
+    }
+}
+
+/// A command whose output is both shown and kept.
+///
+/// [`capture`] swallows the output until the child exits and throws it away on
+/// failure; [`sh`] shows it and keeps nothing. A claim that runs for twenty
+/// minutes needs both — a reader watching a silent terminal concludes it has
+/// hung, and a comparison needs the rows — so this streams each line as it
+/// arrives and returns the whole of it. Standard error is inherited, so a
+/// panic's message and its backtrace land where they would have anyway.
+///
+/// The exit status is returned rather than turned into an error: a workload that
+/// failed still printed rows, and those rows are how the caller says *which* row
+/// was red.
+fn capture_echoing(program: &str, args: &[&str]) -> Result<(String, bool), String> {
+    use std::io::{BufRead, BufReader};
+
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(root())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run {program}: {e}"))?;
+    let stdout = child.stdout.take().ok_or_else(|| format!("{program} has no stdout"))?;
+    let mut collected = String::new();
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|e| format!("reading {program}'s output: {e}"))?;
+        println!("{line}");
+        collected.push_str(&line);
+        collected.push('\n');
+    }
+    let status = child.wait().map_err(|e| format!("waiting for {program}: {e}"))?;
+    Ok((collected, status.success()))
+}
+
+/// `claims/0017`'s two workloads, and its `[threshold]` table applied to what
+/// they printed.
+///
+/// # Errors
+///
+/// A list naming every row that is red, every row neither workload printed, and
+/// either workload's own failure. All of them at once: a claim run that stopped
+/// at the first red row would make the second one somebody's next afternoon.
+fn claim_rechunk(claim: &str) -> Result<(), String> {
+    let thresholds = thresholds_in(claim);
+    if thresholds.is_empty() {
+        return Err("claims/0017 has no `[threshold]` table, so this route compares nothing".into());
+    }
+
+    let mut measured = std::collections::BTreeMap::new();
+    let mut findings = Vec::new();
+
+    // The property test first and the bench second, because the test is seconds
+    // and the bench is minutes: a run that is going to be red on the cheap
+    // workload says so before the expensive one starts, and still runs it.
+    println!("--- blob/tests/chunker.rs: the rows measured over 32 (seed, mixture) pairs ---\n");
+    let (chunker, chunker_ok) = capture_echoing(
+        "cargo",
+        &["test", "-p", "f-blob", "--test", "chunker", "--", "--nocapture"],
+    )?;
+    measured_rows(&chunker, &thresholds, &mut measured, &mut findings);
+    if !chunker_ok {
+        findings.push("  blob/tests/chunker.rs failed; see its output above".into());
+    }
+
+    println!("\n--- bench/src/bin/rechunk.rs: the rows measured through the write path ---\n");
+    let (rechunk, rechunk_ok) =
+        capture_echoing("cargo", &["run", "--release", "-p", "f-bench", "--bin", "rechunk"])?;
+    measured_rows(&rechunk, &thresholds, &mut measured, &mut findings);
+    if !rechunk_ok {
+        findings.push("  bench/src/bin/rechunk.rs failed; see its output above".into());
+    }
+
+    println!("\n=== claims/0017's [threshold] table against what the two workloads printed ===\n");
+    for (name, bound) in &thresholds {
+        let Some(&value) = measured.get(name) else {
+            println!("    ?  {name}: no workload printed this row");
+            findings.push(format!(
+                "  {name}: a threshold neither workload printed. A published bound whose number \
+                 nothing emits is a bound nothing checks, which is the state this route exists \
+                 to end — print the row or retire the threshold, and do not do the second to \
+                 make this green"
+            ));
+            continue;
+        };
+        let low = bound.min.is_some_and(|min| value < min);
+        let high = bound.max.is_some_and(|max| value > max);
+        let stated = match (bound.min, bound.max) {
+            (Some(min), Some(max)) => format!("min {min}, max {max}"),
+            (Some(min), None) => format!("min {min}"),
+            (None, Some(max)) => format!("max {max}"),
+            (None, None) => "no bound".to_string(),
+        };
+        let verdict = if low || high { "RED" } else { "green" };
+        println!("{verdict:>5}  {name} = {value}  ({stated})");
+        if low || high {
+            findings.push(format!("  {name} = {value}, against {stated}"));
+        }
+    }
+
+    if findings.is_empty() {
+        println!("\nevery row in claims/0017's [threshold] table was printed and holds");
+        return Ok(());
+    }
+    Err(format!(
+        "{} finding(s) against claims/0017:\n{}\n\n\
+         A bound moves only by an RFC carrying the measurement that moved it —\n\
+         RFC 0061, RFC 0062 and RFC 0064 are the three that have looked, and every\n\
+         one of them left the 786 432 where it was. The `[diagnosis]` table in the\n\
+         claim says what each of these rows means before it says what to do.",
+        findings.len(),
+        findings.join("\n")
+    ))
 }
 
 fn bench(name: Option<&str>) -> Result<(), String> {

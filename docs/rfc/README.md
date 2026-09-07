@@ -29,8 +29,9 @@ row per entry that needs one, and an entry that needs none does not get a row.
 | 0059 | `E2-D03` | A collector is three invariants and a batch-class consumer | accepted |
 | 0060 | `E2-D05` | A publish is a barrier sequence, and atomicity is not free | accepted |
 | 0061 | `E2-P02` | A boundary is a predicate over a window of content, and not a distance from the last cut | accepted; superseded in part by 0062 |
-| 0062 | `E2-P02` | A period below the minimum starves every rule, so the starved clause carries periodic content and is measured | accepted |
+| 0062 | `E2-P02` | A period below the minimum starves every rule, so the starved clause carries periodic content and is measured | accepted; superseded in part by 0064 |
 | 0063 | `E2-D04` | A transfer is declared in the manifest, and quiescence is asserted by its occupant | accepted |
+| 0064 | `E2-B09` | A starved run is crossed and not inhabited, so the flat clause is scoped by a window and not by a point | accepted |
 
 **0012 is why this directory runs 0011, 0013.** `TODO.md` reserved the number
 for the generation swap when the E2 line was written, and then E0 and E1 wrote
@@ -103,3 +104,19 @@ decision itself is closed, and it exists for the *second* reversal in this entry
 rather than the first: the manifest schema goes 1 to 2, which RFC 0030 priced as
 a rebuild of every component file and `docs/manifest.md` refused outright, and
 no task line in that file named it.
+
+**0064 is the third entry on one bound and the first produced by a workload the
+registry could not reach.** 0061 was falsified by a property test, 0062 by 0061's
+own confirming run, and 0064 by `bench/src/bin/rechunk.rs` — which measured
+1 138 541 bytes against a published 786 432 and reported it inside a green
+`verify`, because the claim's reproduction command routed to the property test
+and not to the bench. So the row that matters here is not only the decision but
+what it says about this directory's neighbour: a threshold in `claims/` that no
+command compares against is a number in a file, and the same defect had been
+raised against `claims/0018` one wave earlier. 0062 is marked *superseded in
+part* for one assertion in its universal form — an edit outside a starved run is
+not always carried by the flat clause, because the run can be in front of the
+edit rather than under it — and its theorem, its arithmetic and its four
+thresholds stand. The column reads `E2-B09` because that is the build whose
+measurement produced it; `E2-P02` is where the strict reading still lives, and
+0064 says in as many words that it must stay strict.

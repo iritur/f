@@ -1,0 +1,178 @@
+# The number `E2-B02`'s exit calls *write amplification*: device bytes the
+# store causes per application byte the client submitted. Reserved at this
+# number by `intent/0006-state/spec.md` before `zone/` existed, which is why
+# `claims/0017` landed first and why the hole between 0015 and 0017 was a
+# reservation rather than a withdrawal.
+#
+# **Why this is `pending` when the primary row has a number today, and this is
+# the whole of the honesty in this file.** The claim's own subject, as the spec
+# defines it, is `device_bytes_per_app_byte` counted by QEMU's
+# `query-blockstats` on an emulated zoned device, inside a guest, against a
+# tuned Linux baseline on the identical device — with `emulated = true` beside
+# the runner and copied into the artefact header. No such run has happened. Two
+# things are missing and neither is a detail:
+#
+#   the boot. `intent/0006-state/spec.md` says B02 closes on a QEMU boot of
+#     `user/objects` over the blk driver's ring against zoned virtio-blk.
+#     `user/objects` is `E2-B08` and does not exist; `user/virtio-blk` numbers
+#     the five zone opcodes and answers two of seven. So the boot is owed to a
+#     task that has not started;
+#   the device. Zoned virtio-blk emulation is materially better from QEMU 8 and
+#     the development image is on bookworm's 7.2. `docker/README.md` names the
+#     one-line base change to trixie, and the image digest is in every
+#     reproduction, so that change is its own commit.
+#
+# What exists is `zone/tests/cycle.rs`: a full fill-seal-copy-forward-reset
+# cycle against a modelled zoned device in the host, with every device byte
+# counted at the `ZonedDevice` boundary. **A count taken at a different boundary
+# is a different count however similar it looks**, so the rows below say which
+# boundary each was taken at, and the modelled ones do not gate. The value they
+# have is the ratio's *decomposition* — how much is data, how much copy-forward,
+# how much block padding — which is a property of the design rather than of a
+# device, and which is the part of `E2-B02` a reviewer can check today.
+name       = "write-amplification"
+status     = "pending"          # pending | tracked | gating
+milestone  = "E2"
+
+statement  = """
+The store writes at most 1.5 device bytes per application byte, and at most
+what a tuned Linux filesystem writes on the identical zoned device.
+
+**Measured at the modelled boundary, and that is not the boundary above.**
+`cargo test -p f-zone --test cycle` publishes 64 objects of 128 to 192 KiB into
+a modelled zoned device of 20 data zones, one generation in eight pinned, with
+the collector held; then collects to quiescence with the client idle; then
+counts. From seed 1:
+
+  application bytes submitted        10 558 873
+  device bytes, fill phase           10 676 224     1.0111 per application byte
+  device bytes, collect phase         1 293 824     0.1225 per application byte
+  device bytes, total                11 970 048     1.1336 per application byte
+    of which ZONE_APPEND             11 969 536
+    of which positioned WRITE               512
+
+  zones reset by the collector               10     of 20 data zones
+  ZONE_FINISH entries                        11
+  ZONE_RESET entries                         10
+  FLUSH entries                             138
+  collector steps                         2 637
+  operations ahead of an urgent read          1
+
+The decomposition is the part worth arguing with. The fill term is 1.0111
+rather than 1.0 because a record is padded to the 512-byte logical block, which
+is the whole of the overhead the format costs at rest. The copy-forward term is
+0.1225 against the 0.33 that `f/(1 − f)` predicts at `SWEEP_LIVE_FRACTION` =
+0.25, because the sweep takes the *least* live zone available rather than one at
+the threshold, so the mean live fraction of a swept zone is well under the
+quarter that constant admits — RFC 0059 fixes the ceiling and the ranking
+decides where under it a run lands. The root records are 512 bytes in total,
+which rounds to nothing here and would not on a workload that published sixty
+objects one at a time.
+
+**What this run is evidence for, and what it is not.** It is evidence that a
+full cycle happens: 10 of 20 data zones were reset, 1 293 824 bytes were copied
+forward, 9 kept generations were read back and verified after collection, and a
+publish spanning two zones survived a 78-step cycle taken while it was open. It
+is evidence that the ratio's shape is what the design says. It is **not**
+`device_bytes_per_app_byte` as this claim finally defines it, because nothing
+here is counted by a device: `ZonedMemory` is a model, and a model cannot
+report the writes a real device does that nobody asked for. That number is owed
+by the boot, and the boot is owed by `E2-B08` and by QEMU 8.
+
+The baseline half — `ratio_vs_baseline` against a tuned Linux filesystem — has
+no number at all and no directory yet. It is `E1-D06`'s work and it is stated
+here rather than left implied: a comparison against a system answering a
+different question is worse than none, and a baseline that is prose rather than
+configuration in the tree decays without anybody noticing.
+"""
+
+[baseline]
+# `none` **today**, and it is a lie by omission unless the sentence beside it
+# says what is owed. The baseline this claim finally needs is
+# `claims/baselines/linux-6.x-tuned-zoned/` — f2fs in zoned mode, applied by a
+# script inside a guest that the script builds, on the identical emulated
+# device — and it does not exist. Naming it in the `path` row before it exists
+# would make `lint-reproduce` red for the right reason, so the debt is recorded
+# in prose and paid by `E1-D06`, which is where "a baseline is configuration in
+# the tree or it is prose that decays" became a task.
+system  = "none"
+notes   = "Owed: `claims/baselines/linux-6.x-tuned-zoned/`, with the README, apply.sh and verify.sh `lint-reproduce` requires of a baseline directory. Until it exists, `ratio_vs_baseline` has no number and this claim cannot be more than `pending` however good the absolute figure looks. The absolute row is falsifiable without a peer — 1.5 is derived from `SWEEP_LIVE_FRACTION` = 0.25 as 1.0 for the data plus `f/(1 − f)` = 0.33 of copy-forward plus padding and root records, totalling 1.39 with the rest as margin — and the ratio row is not falsifiable at all without one."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "04"
+notes    = "Section 04 is where the zoned mapping and its copy-forward are argued. The subsystem that owns the number is `zone/`: `zone/src/map.rs` for the fill, `zone/src/collect.rs` for the sweep and its ranking, `zone/src/device.rs` for the counting boundary. RFC 0059 is the decision that fixes `SWEEP_LIVE_FRACTION` = 0.25 and the three invariants the cycle asserts, and RFC 0060 is the barrier sequence the FLUSH count above is a count of."
+
+[workload]
+path      = "zone/tests/cycle.rs"
+objects   = 64
+seeds     = 1
+notes     = "Phased, and the phasing is load-bearing rather than convenient: *fill N zones with the collector held; collect to quiescence with the client idle; count*. Copy-forward bytes depend on the live fraction at the moment each zone is swept, so a collector running concurrently with a client makes this number a function of the interleaving between two components rather than of (seed, commit). RFC 0059 requires the phasing and the explicit `COLLECT` verb that makes it expressible. — One seed and one object count are the defaults; `--objects 256` and `--seed` are arguments, and a longer run is a different draw rather than a different measurement. — **What the workload is not**: a boot. It is a host process against `ZonedMemory`, a model of a zoned device, reached through the same `ZonedDevice` trait the driver will implement. RFC 0034 is why a modelled device is allowed to be a peer on the real types; it is not why a modelled device may be called a device in a published ratio, and this claim does not call it one."
+
+[metrics]
+# Two boundaries, and every row says which. The `device_*` rows are the claim's
+# subject and have no number; the `modelled_*` rows are what
+# `zone/tests/cycle.rs` counts and are recorded so that the design's arithmetic
+# can be checked before the boot exists.
+primary   = "device_bytes_per_app_byte"
+secondary = [
+  "ratio_vs_baseline",
+  "modelled_device_bytes_per_app_byte",
+  "modelled_fill_bytes_per_app_byte",
+  "modelled_copy_forward_bytes_per_app_byte",
+  "zones_reset",
+  "data_zones",
+  "zone_finish_entries",
+  "zone_reset_entries",
+  "flush_entries",
+  "collector_operations_ahead_of_hard_read",
+]
+
+[threshold]
+# **The two rows this claim finally gates on, stated now and measured never.**
+# They are here rather than added later because a claim registered without its
+# thresholds is a claim whose thresholds get written to fit its first
+# measurement. 1.5 is `intent/0006-state/spec.md`'s and is derived from
+# `SWEEP_LIVE_FRACTION`; 1.0 is the statement that this store writes no more
+# than a tuned Linux filesystem does on the same device, which is the whole of
+# the comparison and is either met or the design has a problem the ratio names.
+device_bytes_per_app_byte              = { max = 1.5 }
+ratio_vs_baseline                      = { max = 1.0 }
+# The modelled boundary's row, under the same ceiling and marked by its name so
+# that nobody reads it as the row above. If the arithmetic on a *model* — where
+# no device does anything nobody asked for — cannot fit inside the ceiling, the
+# real one will not either, so this is the cheap half of the test and it is worth
+# having early. Measured 1.1336.
+modelled_device_bytes_per_app_byte     = { max = 1.5 }
+# The cycle happened at all, which is what `E2-B02`'s exit asks for and what a
+# green run without it would not show. Both are asserted by
+# `zone/tests/cycle.rs`, which fails when no zone is reset or no block is copied
+# forward; the numbers are floors and not the measurement — measured 10 zones of
+# 20, and 1 293 824 bytes copied.
+zones_reset                            = { min = 1 }
+# RFC 0059's third invariant as a count, and `claims/0012`'s `in_flight` rather
+# than an invented number: the collector may be at most one operation ahead of a
+# deadline-class read. Measured 1.
+collector_operations_ahead_of_hard_read = { min = 1, max = 1 }
+
+[hardware]
+runner   = "runner-class-A"     # pinned bare metal, thermally stable
+# `intent/0006-state/spec.md` requires this field beside the runner for this
+# claim specifically, and requires it copied into the artefact header: the
+# device both sides are counted on is emulated, so a reader comparing this
+# against a number from real zoned hardware is comparing two things. It is
+# `true` before the QEMU run exists and stays `true` after it, because the run
+# it describes is the emulated one.
+emulated = true
+notes    = "The modelled rows do not need this machine and do not pretend to: every one of them is a count of bytes the mapping asked the device for, taken by the workload itself, and it is the same count on a fast host and a slow one — the same note `claims/0014` and `claims/0017` carry. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it, and because the row above it will need a machine the day `query-blockstats` is the counter."
+
+[reproduce]
+command = "cargo xtask claim write-amplification"
+
+[diagnosis]
+# Recorded while the system is understood rather than at 2 a.m. when it is not.
+modelled_ratio_above_1_5 = "the copy-forward term has moved, and the first place to look is the sweep's ranking rather than `SWEEP_LIVE_FRACTION`. The ceiling admits a live fraction of 0.25, which is `f/(1 − f)` = 0.33 of copy-forward per application byte; the measured 0.1225 says the ranking picks zones well under that. A ratio at the ceiling with the constant unchanged means the sweep is taking zones it should not have — read `zones reset by the collector` beside it, because a run that reset many more zones for the same application bytes is a run whose retention policy changed, not whose collector did"
+fill_term_above_1_05 = "record padding, and it is arithmetic rather than a defect: a record is padded to the logical block, so the term is `1 + (padding per record / bytes per record)`. Above 1.05 either the block grew or the records shrank, and the second is the interesting one — a fill of many small objects pays padding per object. Check the object size draw in `zone/tests/cycle.rs` before concluding anything about the mapping"
+zones_reset_at_zero = "the run collected nothing and proved nothing, which the workload already refuses — it fails rather than reporting a green cycle. If it is ever seen green with a zero here, the refusal itself has been removed, and that is the finding"
+collector_operations_ahead_above_1 = "RFC 0059's third invariant is broken and a deadline-class read is queued behind more than one collector operation. `zone/src/queue.rs` holds the bound and `claims/0012`'s `in_flight` is where the number comes from; the two move together or the invariant is asserting a number nothing else believes. Below 1 is the opposite event and is not a pass: it means the urgent read never arrived while a collector operation was in flight, so the invariant was not asked anything"
