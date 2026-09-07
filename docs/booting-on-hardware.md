@@ -318,7 +318,7 @@ Neither is authentication. Anyone who can set the command line can select
 anything the loader offered, and a self-hash is a claim by the thing being
 measured — RFC 0012 lists in full what this proves and what it does not, and an
 image modified to report the old digest defeats it entirely. What it catches is
-a modified image booted honestly, and `cargo xtask attest` is the four boots
+a modified image booted honestly, and `cargo xtask attest` is the five boots
 that demonstrate that rather than assert it.
 
 Omit both and the machine still measures itself and still publishes the frame

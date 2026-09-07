@@ -2096,6 +2096,27 @@ fn emulator(
     let init = init_image()?;
     let components = components()?;
 
+    // What this machine is, decided before the module list because half of the
+    // answer goes on that list. RFC 0012 and `E2-B07`: `f.root=` selects a
+    // generation and `f.frame=` carries the frame hash that generation was
+    // compiled against, which the frame compares against its measurement of its
+    // own text and rodata before it will publish a root. Every boot gets them,
+    // because *what are you running* is a question a machine should be able to
+    // answer on a Tuesday and not only when a command asked it to.
+    //
+    // A caller that has already said what the machine is keeps what it said, and
+    // exactly one does. `attest` boots an image against a declaration taken from
+    // a *different* build in order to watch the comparison fail — the only way
+    // that comparison can fail at all, because a declaration computed from the
+    // image it is handed to agrees by construction, which would be a check that
+    // cannot go red and this tree does not keep those. And it boots one machine
+    // with [`UNSTATED`], which is how a caller says *tell this machine nothing*.
+    // Such a caller composes its own module list too, which is why this is one
+    // decision and not two.
+    let stated =
+        append.is_some_and(|line| line.contains(f_abi::boot::KEY) || line.contains(UNSTATED));
+    let identity = if stated { None } else { Some(generation::identity(features)?) };
+
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.args(["-kernel", kernel.to_str().ok_or("kernel path is not valid UTF-8")?]);
 
@@ -2128,30 +2149,32 @@ fn emulator(
     for path in carrying {
         modules.push(path.as_str());
     }
+    // And the generation this boot is *told* it is, for every caller that did
+    // not compose a menu of its own. This is the half `E2-B07` and `E2-P07`
+    // could not see between them: one put `f.root=` on every command line, the
+    // other made a root no offered module folds to a refusal that ends the boot,
+    // and neither is wrong. Together they mean a machine told which generation
+    // it is has to be handed that generation, so it is handed it here — which
+    // also makes every boot in this tree a demonstration that selection works,
+    // rather than only the six `cargo xtask rollback` runs.
+    //
+    // Six modules of `MAX_MODULES`'s eight on an ordinary boot; the callers that
+    // compose their own menu are the ones that spend the other two, and
+    // `generation --install`'s `GENERATIONS_MAX` is the same arithmetic for a
+    // real loader.
+    if let Some(identity) = &identity {
+        modules.push(identity.module.to_str().ok_or("the boot module path is not valid UTF-8")?);
+    }
     qemu.args(["-initrd", &modules.join(",")]);
 
-    // What this machine is, on the command line the loader hands the frame. RFC
-    // 0012 and `E2-B07`: `f.root=` selects a generation and `f.frame=` carries
-    // the frame hash that generation was compiled against, which the frame
-    // compares against its measurement of its own text and rodata before it will
-    // publish a root. Every boot gets them, because *what are you running* is a
-    // question a machine should be able to answer on a Tuesday and not only when
-    // a command asked it to.
-    //
-    // A caller that has already said what the machine is keeps what it said, and
-    // exactly one does. `attest` boots an image against a declaration taken from
-    // a *different* build in order to watch the comparison fail — the only way
-    // that comparison can fail at all, because a declaration computed from the
-    // image it is handed to agrees by construction, which would be a check that
-    // cannot go red and this tree does not keep those. And it boots one machine
-    // with [`UNSTATED`], which is how a caller says *tell this machine nothing*.
-    let stated =
-        append.is_some_and(|line| line.contains(f_abi::boot::KEY) || line.contains(UNSTATED));
-    let identity = if stated { String::new() } else { generation::identity_tokens(features)? };
-    let line = match (append, stated) {
-        (Some(append), true) => append.to_string(),
-        (Some(append), false) => format!("{append} {identity}"),
-        (None, _) => identity,
+    // And the same statement on the command line the loader hands the frame,
+    // argued where it is decided, above the module list it had to be decided
+    // before.
+    let tokens = identity.as_ref().map_or("", |identity| identity.tokens.as_str());
+    let line = match append {
+        Some(append) if tokens.is_empty() => append.to_string(),
+        Some(append) => format!("{append} {tokens}"),
+        None => tokens.to_string(),
     };
     if !line.is_empty() {
         qemu.args(["-append", &line]);
@@ -5860,6 +5883,17 @@ const FRAME_DEFECT: &str = "mutate-modified-frame";
 const MEASURED_LINE: &str = "  frame         ";
 
 /// The line it prints the generation on.
+///
+/// **Two lines in one boot log begin with this label, and that was not true when
+/// this constant was written.** `E2-B07`'s is the one meant here — `generation
+/// <64 hex> selected as publish <n>`, printed in the identity window before
+/// anything is published. `E2-P07`'s frame prints `generation    selected — one
+/// offered module folds to the root asked for` much later, from
+/// `kernel::generation::report`, and the two arrived from parallel worktrees
+/// that could not see each other. So the reader below picks by *content* — the
+/// first line under this label whose first word is sixty-four characters — and
+/// not by order, because order here is a fact about where two unrelated
+/// `kprintln!`s sit in `kernel/src/main.rs` and nothing holds it still.
 const SELECTED_LINE: &str = "  generation    ";
 
 /// `cargo xtask attest`: what is this machine running, and does it move.
@@ -6151,12 +6185,19 @@ fn attest_boot(features: &[&str], append: Option<&str>, what: &str) -> Result<At
         ));
     }
 
-    let selected = log
+    if !log.lines().any(|line| line.starts_with(SELECTED_LINE)) {
+        return Err(format!("{what} said nothing about which generation it is"));
+    }
+    // By content and not by position — [`SELECTED_LINE`] says why there is more
+    // than one line to choose from. A boot that selected nothing has a line here
+    // too (`none selected, so no root is published`), and it carries no
+    // sixty-four-character word, which is how *no root* stays distinguishable
+    // from *a root this reader failed to find*.
+    let root = log
         .lines()
-        .find_map(|line| line.strip_prefix(SELECTED_LINE))
-        .ok_or_else(|| format!("{what} said nothing about which generation it is"))?;
-    let root =
-        selected.split_whitespace().next().filter(|word| word.len() == 64).map(str::to_string);
+        .filter_map(|line| line.strip_prefix(SELECTED_LINE))
+        .find_map(|rest| rest.split_whitespace().next().filter(|word| word.len() == 64))
+        .map(str::to_string);
 
     Ok(Attested { root, frame: measured, covered })
 }
@@ -7752,7 +7793,18 @@ fn manifests() -> Result<Vec<PathBuf>, String> {
             let path = entry?.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if path.is_dir() {
-                if !matches!(name, "target" | ".git" | "third_party" | "docs") && path != build {
+                // `.claude` for the reason written out at [`rust_sources`]'s
+                // own skip: an agent harness puts git worktrees under
+                // `.claude/worktrees/`, so other checkouts of this repository
+                // sit inside this one, and a walker that reads them reports
+                // findings that name paths in this tree and are about a
+                // different one. That skip was added to the source walker when
+                // it was found; this is the same tree and the same argument,
+                // and a walker left out of it is how the finding comes back
+                // wearing a different lint's name.
+                if !matches!(name, "target" | ".git" | ".claude" | "third_party" | "docs")
+                    && path != build
+                {
                     walk(&path, build, out)?;
                 }
             } else if name == "Cargo.toml" {

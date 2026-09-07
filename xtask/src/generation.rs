@@ -715,7 +715,7 @@ fn pack_module(root: &[u8; 32], tree: &Tree<'_>, names: &[String]) -> Result<Pat
 /// `kernel/src/measure.rs` answers `HalfADeclaration` to a command line
 /// carrying one without the other, on the grounds that half of a two-part
 /// statement is a different statement rather than a weaker one. Two callers
-/// hold the pair as bytes and compose a command line from it: [`identity_tokens`]
+/// hold the pair as bytes and compose a command line from it: [`identity`]
 /// for every ordinary boot, and `rollback` for a boot that names a generation
 /// other than the one just built. [`fragment`] makes the same statement for a
 /// `menuentry` and spells it out of the hex it already holds. A caller that
@@ -729,7 +729,34 @@ pub(crate) fn tokens(root: &[u8; 32], frame: &[u8; 32]) -> String {
     format!("{}{} {}{}", f_abi::boot::KEY, hex(root), f_abi::boot::FRAME_KEY, hex(frame))
 }
 
-/// What a booting machine is told it is: `f.root=<hex> f.frame=<hex>`.
+/// What a booting machine is told it is, and the module that makes it true.
+///
+/// # Why the two travel together
+///
+/// Because each half is a failure without the other, and the two halves were
+/// written by two people who could not see each other. `f.root=` on the command
+/// line is `E2-B07`'s: RFC 0012 makes the generation root the answer to *what
+/// are you running*, and every boot gets asked. A module the loader offers is
+/// `E2-P07`'s: the frame refuses a boot that names a generation no offered
+/// module folds to, because a machine that quietly booted a different one is the
+/// exact failure a rollback test exists to catch.
+///
+/// Put the two together and an ordinary boot has to be *handed the generation it
+/// is told it is*. It was not, for the length of one merge — every boot in the
+/// tree named a root, none was offered a module, and every boot went red on a
+/// refusal that was correct. So this hands back both, and [`crate::emulator`]
+/// puts the module on the loader's list beside the tokens on the command line.
+#[derive(Clone)]
+pub(crate) struct Identity {
+    /// `f.root=<64 hex> f.frame=<64 hex>`, for the `-append` line.
+    /// Unit: none — a command-line fragment.
+    pub tokens: String,
+    /// The `<root>.fcm` those tokens name, for the loader's module list.
+    /// Unit: none — a path.
+    pub module: PathBuf,
+}
+
+/// What a booting machine is told it is, and the boot module it is handed.
 ///
 /// # Why a boot gets both tokens and not just the first
 ///
@@ -753,31 +780,33 @@ pub(crate) fn tokens(root: &[u8; 32], frame: &[u8; 32]) -> String {
 ///
 /// # Errors
 ///
-/// Anything [`compile_here`] can fail with.
-pub fn identity_tokens(features: &[&str]) -> Result<String, String> {
-    static MEMO: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<String, String>>> =
-        std::sync::OnceLock::new();
+/// Anything [`pack`] can fail with.
+pub(crate) fn identity(features: &[&str]) -> Result<Identity, String> {
+    static MEMO: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, Identity>>,
+    > = std::sync::OnceLock::new();
     let memo = MEMO.get_or_init(Default::default);
     let key = features.join(",");
     if let Ok(seen) = memo.lock()
-        && let Some(tokens) = seen.get(&key)
+        && let Some(identity) = seen.get(&key)
     {
-        return Ok(tokens.clone());
+        return Ok(identity.clone());
     }
 
-    let built = compile_here(features)?;
-    let tree = checked(&built.bytes)?;
-    let root = fold::root(&tree);
-    // The frame leaf, and not a second measurement taken here. RFC 0012's
-    // `frame` field is *a duplicate of a leaf that already sits under `root`*,
-    // and a boot told a number this command computed on the side would be a
-    // boot checking something the root does not contain.
-    let tokens = tokens(&root, &built.frame);
+    let packed = pack(features)?;
+    let identity = Identity {
+        // The frame leaf, and not a second measurement taken here. RFC 0012's
+        // `frame` field is *a duplicate of a leaf that already sits under
+        // `root`*, and a boot told a number this command computed on the side
+        // would be a boot checking something the root does not contain.
+        tokens: tokens(&packed.root, &packed.frame),
+        module: packed.module,
+    };
 
     if let Ok(mut seen) = memo.lock() {
-        seen.insert(key, tokens.clone());
+        seen.insert(key, identity.clone());
     }
-    Ok(tokens)
+    Ok(identity)
 }
 
 /// Everything one generation is, for a caller that has to hold two of them at
@@ -892,10 +921,13 @@ struct Installed {
 /// A `.fcm` in the build directory that is not a boot module, or whose record
 /// tree is not one the checker believes.
 fn frame_leaf(path: &Path) -> Result<[u8; 32], String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("reading {}: {e}", crate::relative(path)))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("reading {}: {e}", crate::relative(path)))?;
     let module = f_abi::boot::Module::read(&bytes).map_err(|why| {
         format!(
-            "{} is not a boot module this tree can read ({why:#x}). `cargo xtask generation`              is what packs one; a stray `.fcm` in that directory cannot be offered.",
+            "{} is not a boot module this tree can read ({why:#x}). `cargo xtask \
+             generation` is what packs one; a stray `.fcm` in that directory cannot be \
+             offered.",
             crate::relative(path)
         )
     })?;
@@ -1148,7 +1180,12 @@ fn walk(dir: &Path, found: &mut Vec<PathBuf>) -> Result<(), String> {
     for path in paths {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if path.is_dir() {
-            if matches!(name, "target" | ".git" | "third_party") {
+            // `.claude` for `crate::rust_sources`'s reason: an agent harness
+            // puts git worktrees under `.claude/worktrees/`, so other checkouts
+            // of this repository sit inside this one. A `generation.toml` found
+            // in one of them is another tree's source, and the fixpoint below
+            // would hold it to this tree's grammar.
+            if matches!(name, "target" | ".git" | ".claude" | "third_party") {
                 continue;
             }
             walk(&path, found)?;
@@ -1567,7 +1604,13 @@ fn copy_into(from: &Path, to: &Path, copied: &mut usize) -> Result<(), String> {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let target = to.join(name);
         if path.is_dir() {
-            if matches!(name, "target" | ".git") {
+            // And `.claude`, which here is not a lint's accuracy but a copy's
+            // size and meaning: `.claude/worktrees/` holds whole checkouts of
+            // this repository, so copying it would copy the tree into itself
+            // once per parallel worktree — and the copy is supposed to be *this*
+            // tree at a different path, which a copy containing three others is
+            // not.
+            if matches!(name, "target" | ".git" | ".claude") {
                 continue;
             }
             copy_into(&path, &target, copied)?;

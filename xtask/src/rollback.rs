@@ -10,6 +10,9 @@
 //! loaded by multiboot 1 — from QEMU's `-kernel` here and from a GRUB entry on
 //! metal — so selection is a **command-line token**, `f.root=<64 hex>`, whose
 //! grammar is `abi/src/boot.rs` and whose reader is `kernel/src/generation.rs`.
+//! It never travels alone: RFC 0012 puts `f.frame=<64 hex>` beside it and the
+//! frame refuses a command line carrying one without the other, so every boot
+//! below declares the clean build's frame hash as well as naming a root.
 //! Under QEMU the menu is `-append` and a list of `-initrd` modules; on hardware
 //! it is the `menuentry` block `cargo xtask generation --install` writes.
 //! Nothing is imported, and in particular no GRUB source: GRUB is GPLv3 and the

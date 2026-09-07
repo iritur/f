@@ -319,7 +319,18 @@ pub fn files(root: &Path, build: &Path) -> Result<Vec<PathBuf>, String> {
             let path = entry?.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if path.is_dir() {
-                if !matches!(name, "target" | ".git" | "third_party" | "docs") && path != build {
+                // `.claude` for the reason written out at `main::rust_sources`'s
+                // own skip: an agent harness puts git worktrees under
+                // `.claude/worktrees/`, so other checkouts of this repository
+                // sit inside this one, and a walker that reads them reports
+                // findings that name paths in this tree and are about a
+                // different one. That skip was added to the source walker when
+                // it was found; this is the same tree and the same argument,
+                // and a walker left out of it is how the finding comes back
+                // wearing a different lint's name.
+                if !matches!(name, "target" | ".git" | ".claude" | "third_party" | "docs")
+                    && path != build
+                {
                     walk(&path, build, out)?;
                 }
             } else if name == FILE_NAME {
