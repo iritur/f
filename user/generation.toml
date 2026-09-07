@@ -50,11 +50,19 @@ component = ["store", "virtio-blk", "virtio-gpu", "virtio-net"]
 # client in both, because `store` is the component a place holds and the only
 # one in this tree with clients of its own.
 #
-# They are declared here and checked against the manifests by `E2-B05`, which is
-# the task that instantiates a topology and routes capabilities as it declares.
-# Until then a route is a statement about intent that changes the root — which is
-# the useful half now: two machines that disagree about the routing disagree
-# about what they are running, and say so in one hash.
+# They are declared here and **checked against the manifests**, which `E2-B05`
+# paid: `f-assembler` refuses a topology in which a route hands over a capability
+# the consuming manifest never declared, and refuses one in which a required
+# `sibling:` need is routed nothing. `user/store/manifest.toml` declares `block`
+# and `net` for that reason, and says in its own comment why both are `optional`
+# until a supervisor exists to supply them.
+#
+# So a route is no longer only a statement about intent. It was that until the
+# assembler landed, and the useful half was already real then — two machines that
+# disagree about the routing disagree about what they are running, and say so in
+# one hash. What is added is that a routing nothing can honour is refused before
+# a single component is started, rather than at the spawn that would be refused
+# for it, which is in a different file from the one that has to change.
 
 [[route]]
 component = "store"

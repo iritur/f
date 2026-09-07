@@ -8638,6 +8638,13 @@ const PORTABILITY: &[Portability] = &[
     // because the record decode borrows a `&[u8; N]` out of a device's bytes —
     // alignment and endianness are exactly what a second architecture is for.
     Portability { krate: "f-objects", host: None, bare: None },
+    // `E2-B05`'s assembler. Both answers are `None`, and the AArch64 compile
+    // earns its place for `f-objects`'s reason one row up and one more of its
+    // own: this crate decodes a boot module, a record tree and a component
+    // record out of bytes somebody else laid down, so endianness and alignment
+    // are precisely what a second architecture checks — and one of the two ways
+    // it reads a record exists *because* those bytes are not always aligned.
+    Portability { krate: "f-assembler", host: None, bare: None },
     Portability { krate: "f-store", host: None, bare: None },
     Portability { krate: "f-virtio-blk", host: None, bare: None },
     Portability { krate: "f-virtio-net", host: None, bare: None },
@@ -10104,7 +10111,8 @@ fn claim_owner_findings(rel: &str, text: &str) -> Vec<String> {
 /// work — and both of them are public fields whose unit is the whole of what
 /// they mean. A `held_bytes` with no unit beside it is precisely the field a
 /// later reader divides by the wrong thing.
-const UNIT_SCOPE: &[&str] = &["abi/", "blob/", "index/", "generation/", "zone/", "user/objects/"];
+const UNIT_SCOPE: &[&str] =
+    &["abi/", "blob/", "index/", "generation/", "zone/", "user/objects/", "user/assembler/"];
 
 /// R03, over the trees whose public quantities cross something.
 fn lint_units() -> Result<(), String> {
@@ -10210,6 +10218,12 @@ fn lint_manifests() -> Result<(), String> {
     let mut findings = Vec::new();
     let mut pending = Vec::new();
     let mut names: BTreeMap<String, String> = BTreeMap::new();
+    // Which manifest has already claimed a part. RFC 0065: two drivers matching
+    // one device is refused *here*, at compile time, because the only things
+    // available to resolve it at boot are a bus scan's order and the topology's
+    // — and a topology decided by either is not a function of the generation
+    // root, which is what `E2-B05` claims it is.
+    let mut claimed: BTreeMap<(u64, u64), String> = BTreeMap::new();
 
     for path in &files {
         let rel = relative(path);
@@ -10227,6 +10241,18 @@ fn lint_manifests() -> Result<(), String> {
                 checked.name
             ));
         }
+        for part in &checked.devices {
+            if let Some(other) = claimed.insert(*part, rel.clone()) {
+                findings.push(format!(
+                    "  {rel}  `[[device]] vendor = {:#x}, device = {:#x}` is also declared in \
+                     {other}; two drivers may not claim one part. Whichever bound it at boot \
+                     would have been chosen by a bus scan's order or by the topology's, and a \
+                     topology decided by either is not a function of the generation root — \
+                     RFC 0065",
+                    part.0, part.1
+                ));
+            }
+        }
         match manifest::image_state(&root(), &checked) {
             manifest::Image::Present | manifest::Image::ByHash => {}
             manifest::Image::NotYet => pending.push(format!("{} ({rel})", checked.image)),
@@ -10240,7 +10266,12 @@ fn lint_manifests() -> Result<(), String> {
         } else {
             format!("; not yet built: {}", pending.join(", "))
         };
-        println!("lint-manifests: ok  ({} manifest(s) fit the schema{not_yet})", files.len());
+        println!(
+            "lint-manifests: ok  ({} manifest(s) fit the schema; {} device(s) claimed, none \
+             twice{not_yet})",
+            files.len(),
+            claimed.len()
+        );
         return Ok(());
     }
     Err(format!(

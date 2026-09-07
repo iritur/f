@@ -71,7 +71,17 @@ pub const MAGIC: u64 = 0x465f_4d41_4e00_0001;
 /// component file in the tree is rebuilt. RFC 0030 priced that cost when it
 /// made a manifest compiled rather than parsed; this is the first change to
 /// pay it.
-pub const SCHEMA: u32 = 2;
+///
+/// **Three since RFC 0065.** Schema 2 had no [`Record::binding`], so a driver
+/// said nothing about which device it drives and an assembler had nothing to
+/// bind it by except the order a bus scan reported — which is the one thing
+/// `E2-B05`'s exit cannot survive, because a topology bound by a scan order is
+/// not a function of a root. Silence is not readable as *binds nothing* for
+/// [`Record::transfer`]'s reason: a driver that acquired *binds nothing* by
+/// omission would be a component with a property nobody chose. So a schema-2
+/// component file is refused and every component file in the tree is rebuilt
+/// again, at the cost RFC 0030 priced.
+pub const SCHEMA: u32 = 3;
 
 /// The longest name, in bytes.
 ///
@@ -87,6 +97,16 @@ pub const CAPABILITIES_MAX: usize = 16;
 /// one of them: every component has exactly one, created with it, and RFC 0008
 /// is why it is never declared.
 pub const RINGS_MAX: usize = 8;
+
+/// The most `[[device]]` entries a manifest may declare.
+///
+/// Four, and the number is a bound rather than a guess: a driver declares one
+/// entry per device identity it will drive, and the widest case in this tree is
+/// a virtio driver that accepts a modern id and the transitional id beside it —
+/// two. Four leaves room for a third and a fourth part number without leaving
+/// room for a manifest that binds a bus.
+/// Unit: entries.
+pub const DEVICES_MAX: usize = 4;
 
 /// One page, as the record counts memory. Unit: bytes.
 pub const FRAME_BYTES: u64 = 4096;
@@ -419,6 +439,73 @@ pub struct Ring {
 /// value is the bug this constant exists to not have.
 pub const NO_CAPABILITY: u8 = u8::MAX;
 
+/// One device identity a driver declares it will bind.
+///
+/// # Why a property and not an address
+///
+/// `docs/manifest.md` has said since schema 1 that nothing in a manifest names a
+/// device address: *which* slot a card is in is the machine's business, and a
+/// manifest that named one would be a manifest bound to one machine, so two
+/// spawns of one hash would stop being the same component. That sentence still
+/// holds and this record does not weaken it. What is declared here is *what the
+/// part is* — the vendor and the part number a bus reports — and what is
+/// discovered is *where it is*. The assembler matches the first against the
+/// second, which is the whole of `E2-B05`'s *bind drivers by declared
+/// properties*.
+///
+/// # Why the pair and not a class code
+///
+/// Because the pair is what this tree already matches on:
+/// `kernel::arch::x86_64::pci::Survey::find` takes a vendor and a device and
+/// nothing else, and a field here that no matcher reads would be a field two
+/// builds could differ in while naming one component.
+///
+/// *What would reverse this:* a driver that binds a class rather than a part —
+/// an AHCI or an xHCI driver, which are defined by their class code and not by
+/// anybody's vendor id. That is a wider `Binding`, a wider overlap test in
+/// `cargo xtask lint-manifests`, and a schema bump. It is deliberately not a
+/// wildcard added to these two fields: a wildcard would make two property sets
+/// overlap without being equal, and the compile-time refusal below would
+/// silently become a subsumption test nobody wrote.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Binding {
+    /// Who made the part.
+    /// Unit: none — a PCI vendor identifier as the bus reports it. Zero is not
+    /// a vendor and is refused; so is [`Binding::NO_VENDOR`], which is how a
+    /// bus says nothing answered and would therefore match every empty slot on
+    /// the machine.
+    pub vendor: u16,
+    /// Which part.
+    /// Unit: none — a PCI device identifier as the bus reports it. Zero is not
+    /// a device identifier and is refused. There is no wildcard, deliberately;
+    /// the type's own comment says why.
+    pub device: u16,
+}
+
+impl Binding {
+    /// A binding with nothing in it, which is what every slot past
+    /// [`Record::devices`] must be.
+    pub const EMPTY: Self = Self { vendor: 0, device: 0 };
+
+    /// The value a bus returns when nothing answered at an address.
+    ///
+    /// Refused as a declared vendor for `kernel::arch::x86_64::pci`'s own
+    /// reason: a manifest declaring it would match every empty slot there is.
+    /// Unit: none — a PCI vendor identifier.
+    pub const NO_VENDOR: u16 = 0xFFFF;
+
+    /// Does this declaration match a part a bus reported?
+    ///
+    /// Equality on both fields, which is the whole of the match: there is no
+    /// wildcard in this record, and this is the function that would have to
+    /// grow one.
+    #[must_use]
+    pub const fn matches(&self, vendor: u16, device: u16) -> bool {
+        self.vendor == vendor && self.device == device
+    }
+}
+
 /// A whole manifest, as the frame reads it.
 ///
 /// Field order is by alignment and not by the order `docs/manifest.md` lists
@@ -501,11 +588,21 @@ pub struct Record {
     /// Unit: entries, at most [`RINGS_MAX`]. The control ring is not counted:
     /// every component has exactly one and never declares it.
     pub rings: u8,
+    /// How many of [`Record::binding`] are real.
+    ///
+    /// **Zero is a declaration and not a silence.** A component that binds no
+    /// device declares no `[[device]]` entry, and `cargo xtask lint-manifests`
+    /// requires the choice to have been made in the source rather than left to
+    /// whoever reads the record next — which is the same argument RFC 0063 made
+    /// for [`Record::transfer`], one field over.
+    /// Unit: entries, at most [`DEVICES_MAX`]. Every entry past this must be
+    /// all zero.
+    pub devices: u8,
     /// Reserved. Must be zero — a non-zero value is refused rather than
     /// ignored, per R04.
     /// Unit: none; this is not a quantity and is not expected to become one
     /// without a schema bump.
-    pub _reserved: [u8; 3],
+    pub _reserved: [u8; 2],
     /// What this component declares about being updated in place, and what it
     /// declares when it cannot.
     ///
@@ -515,6 +612,18 @@ pub struct Record {
     /// Unit: none — a [`crate::transfer::Declaration`], every field of which
     /// states its own.
     pub transfer: Declaration,
+    /// The device identities this component declares it will bind.
+    ///
+    /// A *set* written as an array, and the order in the array is the source's
+    /// own: two entries swapped are two component files with different content
+    /// hashes naming one driver, which is why `cargo xtask lint-manifests`
+    /// refuses a manifest whose entries are not sorted on (vendor, device).
+    /// Canonical here for the reason `f_generation::record` is canonical one
+    /// level up — the same declaration has to produce the same bytes or the
+    /// root is not a function of the source.
+    /// Unit: entries; the first [`Record::devices`] are real and the rest are
+    /// all zero.
+    pub binding: [Binding; DEVICES_MAX],
     /// The declared capabilities, in the order the supervisor supplies them and
     /// the order the `granted` notices arrive.
     /// Unit: entries; the first [`Record::capabilities`] are real and the rest
@@ -533,7 +642,8 @@ pub struct Record {
 // cost rather than hiding it.
 const _: () = assert!(core::mem::size_of::<Need>() == 80);
 const _: () = assert!(core::mem::size_of::<Ring>() == 104);
-const _: () = assert!(core::mem::size_of::<Record>() == 2232);
+const _: () = assert!(core::mem::size_of::<Binding>() == 4);
+const _: () = assert!(core::mem::size_of::<Record>() == 2248);
 // No padding anywhere: the sum of the parts is the whole. A padded record has
 // bytes the reader never judges, and an unjudged byte inside a hashed structure
 // is a place two files can differ while claiming to name one component.
@@ -541,18 +651,20 @@ const _: () = assert!(
     core::mem::size_of::<Record>()
         == 104
             + core::mem::size_of::<Declaration>()
+            + DEVICES_MAX * core::mem::size_of::<Binding>()
             + CAPABILITIES_MAX * core::mem::size_of::<Need>()
             + RINGS_MAX * core::mem::size_of::<Ring>()
 );
-// And the three offsets `xtask::manifest::record` mirrors, pinned here rather
+// And the four offsets `xtask::manifest::record` mirrors, pinned here rather
 // than derived there. The writer stamps fields at literal offsets because
 // `xtask` deliberately does not depend on `f-abi`; a size assertion alone would
 // let a field inserted *before* the arrays keep the total and move every slot,
 // which is a component file the writer and the reader disagree about in a way
 // no test that only sums sizes can see.
 const _: () = assert!(core::mem::offset_of!(Record, transfer) == 104);
-const _: () = assert!(core::mem::offset_of!(Record, capability) == 120);
-const _: () = assert!(core::mem::offset_of!(Record, ring) == 1400);
+const _: () = assert!(core::mem::offset_of!(Record, binding) == 120);
+const _: () = assert!(core::mem::offset_of!(Record, capability) == 136);
+const _: () = assert!(core::mem::offset_of!(Record, ring) == 1416);
 
 /// Why a component file was refused.
 ///
@@ -596,6 +708,12 @@ pub enum Refusal {
     /// and is not zero. Refused rather than ignored, because a reader who sees
     /// a backoff under `never` will believe there is one.
     NotUnderThisPolicy,
+    /// A list that has to be canonical is not: two `[[device]]` entries name
+    /// one part, or they are not sorted on (vendor, device). Refused rather
+    /// than sorted, because a reader that reordered would let two different
+    /// component files carry one meaning and the content address would stop
+    /// naming what was written.
+    Order,
 }
 
 impl Refusal {
@@ -615,6 +733,7 @@ impl Refusal {
             Self::Rights => "a rights bitmap is undefined here",
             Self::Quantity => "a quantity is out of range, or two of them disagree",
             Self::NotUnderThisPolicy => "a field means nothing under what was declared",
+            Self::Order => "a canonical list repeats an entry or is out of order",
         }
     }
 
@@ -665,8 +784,10 @@ impl Record {
         class: 0,
         capabilities: 0,
         rings: 0,
-        _reserved: [0; 3],
+        devices: 0,
+        _reserved: [0; 2],
         transfer: Declaration::EMPTY,
+        binding: [Binding::EMPTY; DEVICES_MAX],
         capability: [Need::EMPTY; CAPABILITIES_MAX],
         ring: [Ring::EMPTY; RINGS_MAX],
     };
@@ -698,6 +819,66 @@ impl Record {
         // is no niche here for arbitrary bytes to violate. The reference
         // borrows `module`, so it cannot outlive the bytes it names.
         let record = unsafe { &*module.as_ptr().cast::<Self>() };
+        record.judge(module.len())?;
+        Ok(record)
+    }
+
+    /// Read a component file out of bytes that are not aligned for a record.
+    ///
+    /// # Why this exists beside [`Record::read`], and does not replace it
+    ///
+    /// [`Refusal::Unaligned`] is a real refusal and stays one: a *loader* that
+    /// puts a module at an odd address has done something this kernel should
+    /// disbelieve rather than work around, and the frame's path keeps that
+    /// refusal untouched.
+    ///
+    /// What changed is that a component file is no longer always something a
+    /// loader placed. `E2-B05`'s assembler is handed **one** boot module —
+    /// [`crate::boot::Module`] — with the component files packed inside it at
+    /// offsets the *format* chose, and no format that packs variable-length
+    /// files end to end can promise every one of them an eight-byte boundary
+    /// without padding the reader would then have to judge. So the caller that
+    /// holds bytes it did not place gets a way in that copies, and the record it
+    /// gets back is owned rather than borrowed.
+    ///
+    /// **Every judgement is the same one**, not a second set: both entry points
+    /// call one private function, so a field that becomes refusable becomes
+    /// refusable in both by construction. Two validators over one layout is
+    /// exactly the defect this crate exists to not have.
+    ///
+    /// The cost is one copy of the record — not of the image, which stays where
+    /// it is — per component file per instantiation.
+    ///
+    /// # Errors
+    ///
+    /// Every [`Refusal`] [`Record::read`] produces except [`Refusal::Unaligned`],
+    /// which cannot arise here.
+    pub fn read_unaligned(module: &[u8]) -> Result<Self, Refusal> {
+        let size = core::mem::size_of::<Self>();
+        if module.len() < size {
+            return Err(Refusal::Truncated);
+        }
+        // SAFETY: `module` is at least `size_of::<Record>()` bytes long, checked
+        // above. `read_unaligned` requires the pointer to be valid for a read of
+        // that many bytes and imposes no alignment requirement, which is the
+        // whole reason it is the call here. `Record` is `#[repr(C)]` and every
+        // one of its fields is an integer or an array of integers, so every bit
+        // pattern is a valid value and there is no niche for arbitrary bytes to
+        // violate; the result is an owned copy that borrows nothing.
+        let record = unsafe { module.as_ptr().cast::<Self>().read_unaligned() };
+        record.judge(module.len())?;
+        Ok(record)
+    }
+
+    /// Every judgement a component file has to pass, over a record that is
+    /// already in memory.
+    ///
+    /// `module_bytes` is the whole file's length, because two of the checks are
+    /// about the file and not about the record: the image is not empty, and the
+    /// file is exactly the record and the image with nothing after it.
+    fn judge(&self, module_bytes: usize) -> Result<(), Refusal> {
+        let size = core::mem::size_of::<Self>();
+        let record = self;
 
         if record.magic != MAGIC {
             return Err(Refusal::NotAManifest);
@@ -708,7 +889,7 @@ impl Record {
         if record.record_bytes as usize != size {
             return Err(Refusal::RecordSize);
         }
-        if record._reserved != [0; 3] {
+        if record._reserved != [0; 2] {
             return Err(Refusal::Reserved);
         }
         if record.image_bytes == 0 {
@@ -718,7 +899,7 @@ impl Record {
         // Trailing bytes are refused rather than ignored because the content
         // hash covers the whole module: bytes nobody reads are bytes two files
         // can differ in while naming one component.
-        if module.len() != size + record.image_bytes as usize {
+        if module_bytes != size + record.image_bytes as usize {
             return Err(Refusal::Truncated);
         }
 
@@ -734,13 +915,17 @@ impl Record {
         if record.capabilities as usize > CAPABILITIES_MAX || record.rings as usize > RINGS_MAX {
             return Err(Refusal::Count);
         }
+        if record.devices as usize > DEVICES_MAX {
+            return Err(Refusal::Count);
+        }
 
         record.check_restart()?;
         record.check_reservation()?;
         record.check_transfer()?;
+        record.check_bindings()?;
         record.check_capabilities()?;
         record.check_rings()?;
-        Ok(record)
+        Ok(())
     }
 
     /// The image bytes of a module whose record this is.
@@ -773,6 +958,19 @@ impl Record {
     #[must_use]
     pub fn rings(&self) -> &[Ring] {
         self.ring.get(..self.rings as usize).unwrap_or(&[])
+    }
+
+    /// The device identities this component declares it will bind, in canonical
+    /// order.
+    ///
+    /// Empty is the common answer and is a statement: this component binds no
+    /// device. Nothing here distinguishes *declared none* from *said nothing*,
+    /// because [`Record::read`] does not admit the second — a manifest that made
+    /// no choice is refused by `cargo xtask lint-manifests` before a record
+    /// exists.
+    #[must_use]
+    pub fn bindings(&self) -> &[Binding] {
+        self.binding.get(..self.devices as usize).unwrap_or(&[])
     }
 
     /// Does this policy restart after a death of this cause?
@@ -908,6 +1106,45 @@ impl Record {
         }
         if declared.window_bytes() > self.memory_bytes {
             return Err(Refusal::Quantity);
+        }
+        Ok(())
+    }
+
+    /// Every declared binding is a part, no two of them are the same part, and
+    /// they are in the order the encoder is required to write them.
+    ///
+    /// The order is checked and not applied, which is `f_generation::record`'s
+    /// argument one level up and is the same argument here: a reader that sorted
+    /// on the way in would let two different component files fold to one leaf,
+    /// and the whole claim of a content address is that it does not.
+    fn check_bindings(&self) -> Result<(), Refusal> {
+        let mut previous: Option<Binding> = None;
+        for (index, binding) in self.binding.iter().enumerate() {
+            if index >= self.devices as usize {
+                // Past the count, all zero — the same rule the capability and
+                // ring arrays are held to, and for the same reason: a byte
+                // nobody judges is a byte two files can differ in while naming
+                // one component.
+                if *binding != Binding::EMPTY {
+                    return Err(Refusal::Count);
+                }
+                continue;
+            }
+            if binding.vendor == 0 || binding.device == 0 || binding.vendor == Binding::NO_VENDOR {
+                return Err(Refusal::Value);
+            }
+            if let Some(before) = previous {
+                match before.cmp(binding) {
+                    core::cmp::Ordering::Less => {}
+                    // Equal is a driver that declared one part twice, which is
+                    // an author with two beliefs about one thing rather than a
+                    // list to be de-duplicated.
+                    core::cmp::Ordering::Equal | core::cmp::Ordering::Greater => {
+                        return Err(Refusal::Order);
+                    }
+                }
+            }
+            previous = Some(*binding);
         }
         Ok(())
     }
@@ -1386,6 +1623,53 @@ mod tests {
         record.ring[3].entries = 4;
         let bytes = module(&record);
         assert_eq!(read(&bytes.0).err(), Some(Refusal::Count));
+
+        let mut record = well_formed();
+        record.binding[2] = Binding { vendor: 0x1AF4, device: 0x1042 };
+        let bytes = module(&record);
+        assert_eq!(read(&bytes.0).err(), Some(Refusal::Count));
+    }
+
+    #[test]
+    fn a_declared_device_is_a_part_and_the_list_is_canonical() {
+        // A driver that declares two parts is the shape this tree actually
+        // has — a virtio device answers to a modern id and a transitional one —
+        // so the accepting case is the two-entry one.
+        let mut record = well_formed();
+        record.binding[0] = Binding { vendor: 0x1AF4, device: 0x1001 };
+        record.binding[1] = Binding { vendor: 0x1AF4, device: 0x1042 };
+        record.devices = 2;
+        let bytes = module(&record);
+        assert_eq!(read(&bytes.0).map(|r| r.bindings().len()), Ok(2));
+
+        // Out of order, and refused rather than sorted: a reader that reordered
+        // would let two component files carry one meaning, and a content
+        // address that names two things names nothing.
+        let mut swapped = record;
+        swapped.binding.swap(0, 1);
+        let bytes = module(&swapped);
+        assert_eq!(read(&bytes.0).err(), Some(Refusal::Order));
+
+        // One part declared twice is an author with two beliefs about one
+        // thing, not a list to be de-duplicated.
+        let mut twice = record;
+        twice.binding[1] = twice.binding[0];
+        let bytes = module(&twice);
+        assert_eq!(read(&bytes.0).err(), Some(Refusal::Order));
+
+        // Neither zero nor the value a bus returns when nothing answered: the
+        // second would match every empty slot on the machine.
+        for bad in [
+            Binding { vendor: 0, device: 0x1042 },
+            Binding { vendor: 0x1AF4, device: 0 },
+            Binding { vendor: Binding::NO_VENDOR, device: 0x1042 },
+        ] {
+            let mut record = well_formed();
+            record.binding[0] = bad;
+            record.devices = 1;
+            let bytes = module(&record);
+            assert_eq!(read(&bytes.0).err(), Some(Refusal::Value), "{bad:?}");
+        }
     }
 
     #[test]

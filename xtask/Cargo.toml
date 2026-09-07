@@ -30,5 +30,15 @@ f-hash.workspace = true
 f-abi.workspace = true
 f-generation.workspace = true
 
+# The assembler, so that `cargo xtask generation` instantiates the module it just
+# packed rather than only writing it. Two reasons, and the second is the one
+# worth stating: the writer believing its own output through the reader that will
+# read it at boot is the cheapest way to keep a defect here from being found by a
+# boot; and `E2-B05`'s exit is about *this* tree's generation and not only about
+# a test's fixture, so the command that produces the real one is where the
+# byte-identity is demonstrated on it. `no_std` library, `std` binary — the same
+# arrangement the three rows above take, on `f-hash`'s argument.
+f-assembler.workspace = true
+
 [lints]
 workspace = true

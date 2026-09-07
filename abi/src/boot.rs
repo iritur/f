@@ -13,12 +13,19 @@
 //!
 //! # Why the grammar is here rather than beside the parser that will use it
 //!
-//! Nothing parses this yet: the frame does at `E2-P07`. It is written now, in
-//! this crate and in this commit, because the boot module `cargo xtask
+//! Nothing parsed the token when it was written: the frame does at `E2-P07`. It
+//! was written anyway, in this crate, because the boot module `cargo xtask
 //! generation` packs is named by the same hash this token names — and a grammar
 //! written later by a different hand is the second reader of a format that the
 //! spec spends a page refusing to have. One definition, in the crate whose
 //! layout is already load-bearing against code we do not control.
+//!
+//! [`Module`] arrived here on that argument being cashed rather than restated.
+//! Its layout lived in `xtask/src/generation.rs` while `xtask` was the only
+//! thing that knew it, with a comment naming the day it should move: the day
+//! something read it. `E2-B05`'s assembler is that reader, so the writer in
+//! `xtask` and the reader in `f-assembler` now share this one definition
+//! instead of two that agree until they do not.
 //!
 //! # What this is not
 //!
@@ -115,6 +122,159 @@ impl Selection {
     }
 }
 
+/// The magic a boot module begins with. `F_MOD`, and a schema in the low half.
+/// Unit: none — a fixed byte pattern.
+pub const MODULE_MAGIC: u64 = 0x465f_4d4f_4400_0001;
+
+/// How many bytes of head a module has before its per-file lengths.
+///
+/// The magic, the record tree's length and the file count.
+/// Unit: bytes.
+pub const MODULE_HEAD_BYTES: usize = 8 + 4 + 4;
+
+/// The most component files one boot module may carry.
+///
+/// [`crate::manifest::CAPABILITIES_MAX`]'s reason, one level up: the whole
+/// module is decoded without an allocator, and a decoder with no bound is a
+/// decoder that trusts a length field somebody else wrote. Sixty-four is
+/// `f_abi::store::MEMBERS_MAX`, because the files are the tree's members and a
+/// module with more files than the tree has members is a module the fold cannot
+/// cover.
+/// Unit: files.
+pub const MODULE_FILES_MAX: usize = crate::store::MEMBERS_MAX;
+
+/// The boot module a generation travels in.
+///
+/// # Why a module at all, and why the layout is here
+///
+/// At boot the store is not running, so an assembler holding a root hash has
+/// nothing to read. The answer is not a loader that understands the on-disk
+/// format — that is a second implementation of the format, outside the tree and
+/// outside the claim, and on hardware it would be GRUB, which is GPLv3 and
+/// would cross the licence boundary this epoch does not cross. So the record
+/// tree and the component files it names travel together as one multiboot
+/// module, RFC 0030's component-file shape one level up, and the assembler
+/// recomputes the fold over what it was handed.
+///
+/// The writer of this layout is `xtask/src/generation.rs` and its first reader
+/// is `f-assembler`. That is exactly the moment its own doc comment named for
+/// moving it here: a format with a writer in `xtask` and a reader above the
+/// frame, described in two places, is the two-readers problem this whole
+/// arrangement exists to not have.
+///
+/// # The layout, and what it deliberately is not
+///
+/// ```text
+/// 0   u64  MODULE_MAGIC
+/// 8   u32  the record tree's length in bytes
+/// 12  u32  how many component files follow
+/// 16  u32 x files   each file's length in bytes
+///     the record tree
+///     each component file, in the tree's canonical member order
+/// ```
+///
+/// Little-endian, fixed-width, no offsets and no names: the names are in the
+/// tree and a second copy of a name is a second thing to disagree about. The
+/// order is the tree's own canonical order, which is why the module needs no
+/// index — the *n*th file is the *n*th member.
+#[derive(Clone, Copy, Debug)]
+pub struct Module<'a> {
+    /// The whole module, as the loader placed it.
+    bytes: &'a [u8],
+    /// The record tree's length. Unit: bytes.
+    tree_bytes: usize,
+    /// How many component files follow. Unit: files.
+    files: usize,
+}
+
+impl<'a> Module<'a> {
+    /// Believe a module, or say why not.
+    ///
+    /// Every offset below is a function of a count that has already been
+    /// believed, and the total length is checked **exactly**: a trailing byte is
+    /// a byte no fold covers, and a byte no fold covers is a place two modules
+    /// differ while naming one generation.
+    ///
+    /// # Errors
+    ///
+    /// A packed [`error::ARGUMENT`]: `MALFORMED_HEADER` for a magic or a length
+    /// this build does not believe, `UNKNOWN_FLAG` for a file count past
+    /// [`MODULE_FILES_MAX`].
+    pub fn read(bytes: &'a [u8]) -> Result<Self, i32> {
+        let bad = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
+        let head = bytes.get(..MODULE_HEAD_BYTES).ok_or(bad)?;
+        let magic = u64::from_le_bytes([
+            head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7],
+        ]);
+        if magic != MODULE_MAGIC {
+            return Err(bad);
+        }
+        let tree_bytes = u32::from_le_bytes([head[8], head[9], head[10], head[11]]) as usize;
+        let files = u32::from_le_bytes([head[12], head[13], head[14], head[15]]) as usize;
+        if files > MODULE_FILES_MAX {
+            return Err(error::pack(error::ARGUMENT, error::argument::UNKNOWN_FLAG));
+        }
+
+        let lengths_at = MODULE_HEAD_BYTES;
+        let tree_at = lengths_at.checked_add(files.checked_mul(4).ok_or(bad)?).ok_or(bad)?;
+        let files_at = tree_at.checked_add(tree_bytes).ok_or(bad)?;
+        let module = Self { bytes, tree_bytes, files };
+
+        let mut total = files_at;
+        let mut index = 0;
+        while index < files {
+            total = total.checked_add(module.file_bytes(index).ok_or(bad)?).ok_or(bad)?;
+            index += 1;
+        }
+        if bytes.len() != total {
+            return Err(bad);
+        }
+        Ok(module)
+    }
+
+    /// How many component files this module carries.
+    /// Unit: files.
+    #[must_use]
+    pub const fn files(&self) -> usize {
+        self.files
+    }
+
+    /// The record tree, for [`crate::store`]'s codec and `f-generation`'s
+    /// checker to walk. Nothing here decodes it: this type knows where the tree
+    /// is and deliberately not what is in it.
+    #[must_use]
+    pub fn tree(&self) -> &'a [u8] {
+        let at = MODULE_HEAD_BYTES + self.files * 4;
+        self.bytes.get(at..at + self.tree_bytes).unwrap_or(&[])
+    }
+
+    /// The *n*th component file, in the tree's canonical member order.
+    ///
+    /// `None` past the count. There is no name here and no search: the module
+    /// carries no index because the tree already is one, and a second ordering
+    /// would be a second thing to disagree about.
+    #[must_use]
+    pub fn file(&self, index: usize) -> Option<&'a [u8]> {
+        if index >= self.files {
+            return None;
+        }
+        let mut at = MODULE_HEAD_BYTES + self.files * 4 + self.tree_bytes;
+        let mut n = 0;
+        while n < index {
+            at = at.checked_add(self.file_bytes(n)?)?;
+            n += 1;
+        }
+        self.bytes.get(at..at.checked_add(self.file_bytes(index)?)?)
+    }
+
+    /// The declared length of one file, read out of the length array.
+    fn file_bytes(&self, index: usize) -> Option<usize> {
+        let at = MODULE_HEAD_BYTES + index * 4;
+        let raw = self.bytes.get(at..at + 4)?;
+        Some(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize)
+    }
+}
+
 /// The lower-case alphabet a root is printed in.
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
@@ -153,6 +313,86 @@ mod tests {
         assert_eq!(Selection::parse(b"timer=60"), Err(unknown));
         assert_eq!(Selection::parse(b"root=00"), Err(unknown));
         assert_eq!(Selection::parse(b"f.root="), Err(bad));
+    }
+
+    /// How wide the scratch buffer a test module is written into is.
+    /// Unit: bytes.
+    const SCRATCH: usize = 128;
+
+    /// A module carrying files of the given lengths and a tree of `tree` bytes,
+    /// filled with bytes a reader can tell apart. Returns how much of `out` it
+    /// used, because this crate has no allocator and a fixed buffer with a
+    /// length is the shape a `no_std` test can hold.
+    fn module(out: &mut [u8; SCRATCH], tree: usize, files: &[usize]) -> usize {
+        let mut at = 0;
+        let mut put = |bytes: &[u8]| {
+            out[at..at + bytes.len()].copy_from_slice(bytes);
+            at += bytes.len();
+        };
+        put(&MODULE_MAGIC.to_le_bytes());
+        put(&(tree as u32).to_le_bytes());
+        put(&(files.len() as u32).to_le_bytes());
+        for length in files {
+            put(&(*length as u32).to_le_bytes());
+        }
+        for _ in 0..tree {
+            put(&[0xAA]);
+        }
+        for (n, length) in files.iter().enumerate() {
+            for _ in 0..*length {
+                put(&[n as u8]);
+            }
+        }
+        at
+    }
+
+    #[test]
+    fn a_module_hands_back_the_tree_and_each_file_in_member_order() {
+        let mut scratch = [0u8; SCRATCH];
+        let used = module(&mut scratch, 40, &[3, 5, 7]);
+        let bytes = &scratch[..used];
+        let read = Module::read(bytes).expect("a module this function wrote");
+
+        assert_eq!(read.files(), 3);
+        assert_eq!(read.tree().len(), 40);
+        assert!(read.tree().iter().all(|b| *b == 0xAA));
+        // The nth file is the nth member: there is no index in the module and
+        // this is the property that lets there not be one.
+        assert_eq!(read.file(0), Some([0u8; 3].as_slice()));
+        assert_eq!(read.file(1), Some([1u8; 5].as_slice()));
+        assert_eq!(read.file(2), Some([2u8; 7].as_slice()));
+        assert_eq!(read.file(3), None);
+    }
+
+    #[test]
+    fn a_module_with_a_trailing_byte_is_refused_rather_than_ignored() {
+        // A byte no fold covers is a place two modules differ while naming one
+        // generation, so the length is exact and not a minimum.
+        let bad = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
+        let mut scratch = [0u8; SCRATCH];
+        let used = module(&mut scratch, 8, &[4]);
+
+        assert_eq!(Module::read(&scratch[..used + 1]).map(|m| m.files()), Err(bad));
+        assert_eq!(Module::read(&scratch[..used - 1]).map(|m| m.files()), Err(bad));
+        assert_eq!(Module::read(&scratch[..used]).map(|m| m.files()), Ok(1));
+    }
+
+    #[test]
+    fn a_module_whose_head_is_not_this_format_is_refused() {
+        let bad = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
+        let mut scratch = [0u8; SCRATCH];
+        let used = module(&mut scratch, 8, &[4]);
+        scratch[0] ^= 0xFF;
+        assert_eq!(Module::read(&scratch[..used]).map(|m| m.files()), Err(bad));
+        assert_eq!(Module::read(&[]).map(|m| m.files()), Err(bad));
+
+        // A file count past the bound is refused before any offset is computed
+        // from it, which is the whole reason the bound is in this crate.
+        let unknown = error::pack(error::ARGUMENT, error::argument::UNKNOWN_FLAG);
+        let mut vast = [0u8; SCRATCH];
+        let used = module(&mut vast, 0, &[]);
+        vast[12..16].copy_from_slice(&((MODULE_FILES_MAX + 1) as u32).to_le_bytes());
+        assert_eq!(Module::read(&vast[..used]).map(|m| m.files()), Err(unknown));
     }
 
     #[test]
