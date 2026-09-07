@@ -224,6 +224,13 @@ enum What {
     /// The same, reduced to one digest so that two processes can be compared
     /// without parsing a report.
     AdmissionHash,
+    /// Two whole-system states, two hashes, and the descent that names the
+    /// subtree they differ in. Exit status is the verdict. `E2-P05`, RFC 0013.
+    Compare,
+    /// One whole-system root and nothing else, so that two *processes* can be
+    /// compared without parsing a report — the same argument `--hash` makes
+    /// about a trace, asked of a tree instead of a log.
+    CompareHash,
 }
 
 fn main() -> ExitCode {
@@ -357,6 +364,12 @@ fn parse(args: &[String]) -> Result<Asked, String> {
             // whose meaning depended on their order would be a command line
             // with a bug in it.
             "--admission-hash" => asked.what = What::AdmissionHash,
+            "--compare" => asked.what = What::Compare,
+            // Its own flag rather than `--compare --hash`, for the reason
+            // `--chaos-hash` above gives: `what` is one value, and a pair of
+            // flags whose meaning depended on their order is a command line
+            // with a bug in it.
+            "--compare-hash" => asked.what = What::CompareHash,
             // A *source*, not a `what`. `--resume file --trace` and `--trace
             // --resume file` mean the same thing, which they did not when this
             // set `what`: one order printed a usage banner and the other
@@ -509,6 +522,7 @@ fn usage() -> String {
          f-sim --resume <file.snap> [--commit <sha>] [--check|--trace|--hash]\n\
          f-sim --chaos | --chaos-hash [--seed <n>] [--components <dir>]\n\
          f-sim --swap | --swap-hash [--seed <n>] [--components <dir>]\n\
+         f-sim --compare | --compare-hash [--seed <n>] <scenario>\n\
          f-sim --deployment [--components <dir>]\n\
          f-sim --list\n\n\
          The deterministic simulator. One scenario, one seed, one artefact —\n\
@@ -801,6 +815,8 @@ fn run(asked: Asked) -> Result<bool, String> {
         What::SwapHash => return swap(&asked, true),
         What::Admission => return admission(&asked, false),
         What::AdmissionHash => return admission(&asked, true),
+        What::Compare => return compare(&asked, false),
+        What::CompareHash => return compare(&asked, true),
         What::Hash | What::Trace | What::Check | What::Report => {}
     }
 
@@ -1754,6 +1770,190 @@ fn read_components(dir: Option<&Path>) -> Result<Deployment, String> {
 /// without needing a build to have happened first.
 fn deployment_for(scenario: &Scenario, dir: Option<&Path>) -> Result<Deployment, String> {
     if scenario.needs_components() { read_components(dir) } else { Ok(Deployment::default()) }
+}
+
+/// How many seeded injections `--compare` requires the descent to name.
+///
+/// Sixty-four, which is [`DEFAULT_SEEDS`]'s number and is chosen for its
+/// argument rather than by coincidence: a localisation checked at one node is a
+/// localisation checked at one node, and what is being claimed here is about
+/// *every* node in every component tree — of which the shipped scenarios
+/// publish seven each. Unit: injections.
+const COMPARE_TRIALS: u64 = 64;
+
+/// Two whole-system states, two hashes, and the subtree they differ in.
+///
+/// # What this command is evidence for
+///
+/// `E2-P05`'s exit is *an injected divergence is localised to a named subtree
+/// automatically, with no human reading a log*. So the output of the second and
+/// last two phases below is a **name** — a path from a component's key down to the
+/// node — and not a diff a person is expected to read. The exit status is the
+/// verdict, which is what `automatically` means for a caller.
+///
+/// # Why three phases and not one
+///
+/// Because a comparison that reports a divergence has said nothing until it is
+/// known that it *can* report agreement, and a comparison that reports agreement
+/// has said nothing until it is known that it can fail. That is the argument
+/// `trace_check` makes with a deliberately broken kernel and `sim_check` makes
+/// with a second seed, and it is the same argument here:
+///
+/// - **[a]** the same run twice, in this process — the roots must agree, and
+///   the descent must name nothing.
+/// - **[b]** the same scenario at the same seed with its fault class
+///   disarmed — the roots must differ, and the descent must *name where*. This
+///   is a real divergence produced by a real injection, and the localisation is
+///   whatever the run makes it.
+/// - **[c]** a divergence injected at a node the seed picks, [`COMPARE_TRIALS`]
+///   times — and the descent must name **exactly** the node that was disturbed.
+///   This is the phase in which the harness knows the answer before it asks, and
+///   it is what makes [b]'s name mean *this subtree* rather than *a subtree*.
+///
+/// # Why the whole system and not one component
+///
+/// RFC 0013 publishes a tree per component and the frame mounts them under one
+/// root; a comparison of one component's tree would be a comparison of one
+/// component. `Outcome::trees` is every component that published, read when
+/// virtual time has stopped and nothing is in flight — the one configuration
+/// that document says a reading across a whole tree is meaningful in.
+fn compare(asked: &Asked, hash_only: bool) -> Result<bool, String> {
+    use f_sim::whole::{self, Divergence, Whole};
+
+    let armed = trial(asked)?;
+    let deployment = deployment_for(armed.base(), asked.components.as_deref())?;
+    let state = |trial: &Trial| -> Result<Whole, String> {
+        Ok(Whole::of(&trial.run(&deployment).map_err(Trouble::message)?))
+    };
+
+    if hash_only {
+        println!("{}", whole::hex(&state(&armed)?.root()));
+        return Ok(true);
+    }
+
+    println!(
+        "whole-system state comparison — scenario {}, seed {:#018x}",
+        armed.scenario, armed.seed
+    );
+    println!("  every component's RFC 0013 tree, read quiesced, folded to one SHA-256 root\n");
+
+    println!("[a] the same run twice, in this process — the roots must agree");
+    let first = state(&armed)?;
+    let second = state(&armed)?;
+    println!("  run 1     {}", whole::hex(&first.root()));
+    println!("  run 2     {}", whole::hex(&second.root()));
+    println!("  trees     {} component tree(s)", first.parts());
+    if first.parts() == 0 {
+        // Fail closed. A whole-system state with nothing in it hashes to a
+        // constant, agrees with itself forever, and would carry every phase
+        // below it for the wrong reason — the same result `Trouble::Deployment`
+        // refuses one layer down.
+        return Err(format!(
+            "scenario `{}` published no component tree at all, so there is no\n\
+             whole-system state to compare. A comparison over nothing agrees with\n\
+             itself forever, which is the one result this check must never report\n\
+             as a pass.",
+            armed.scenario
+        ));
+    }
+    let settled = first.diff(&second);
+    if settled != Divergence::Agree {
+        println!("  FAILED    {}", settled.describe());
+        println!(
+            "\nTwo runs of one (seed, commit) produced two states. That is RFC 0004's\n\
+             contract failing above the simulator's own digest, and it makes every\n\
+             comparison below meaningless."
+        );
+        return Ok(false);
+    }
+    println!("  agreed    the descent named nothing, which is what agreement is\n");
+
+    println!("[b] the same seed with the class disarmed — the roots must differ, and");
+    println!("    the descent must name where");
+    if armed.injects.is_empty() {
+        return Err(format!(
+            "scenario `{}` arms no fault class, so there is nothing to disarm and\n\
+             no divergence to inject. `--compare` needs a scenario that arms one —\n\
+             `f-sim --list` says which do.",
+            armed.scenario
+        ));
+    }
+    let mut clean = armed;
+    clean.injects = &[];
+    let quiet = state(&clean)?;
+    println!("  armed     {}", whole::hex(&first.root()));
+    println!("  disarmed  {}", whole::hex(&quiet.root()));
+    let found = first.diff(&quiet);
+    let spread = first.divergences(&quiet).len();
+    if first.root() == quiet.root() || found == Divergence::Agree {
+        println!("  FAILED    arming the class changed no component's published state");
+        println!(
+            "\nThe injection reached nothing this comparison can see, so a green result\n\
+             here would say only that two identical states are identical."
+        );
+        return Ok(false);
+    }
+    // A `Node` and nothing else, deliberately. The exit's word is *descends*,
+    // and every other variant names a component and can name nothing inside it:
+    // a tree that went missing, one that changed shape, one whose bytes are not
+    // a tree. Those are honest answers to different questions, and accepting one
+    // here would let this check go green on a run in which the descent never
+    // walked into a tree at all.
+    let named = match &found {
+        Divergence::Node { component, subtree, .. } if subtree != component => subtree.clone(),
+        other => {
+            println!("  FAILED    {}", other.describe());
+            println!(
+                "\nThe roots differ and the descent did not reach a node inside a component's\n\
+                 tree. E2-P05's exit is *localised to a named subtree*, and a finding that\n\
+                 names only the component it is in has not localised anything."
+            );
+            return Ok(false);
+        }
+    };
+    println!("  subtree   {named}");
+    println!("  where     {}", found.describe());
+    println!("  diverged  {spread} of {} component tree(s)\n", first.parts());
+
+    println!("[c] a divergence injected at a node the seed picks — the descent must");
+    println!("    name exactly the node it was injected into");
+    let mut named_exactly = 0u64;
+    let mut wrong: Vec<String> = Vec::new();
+    for occurrence in 0..COMPARE_TRIALS {
+        let Some((component, index)) = first.pick(clean.seed, occurrence) else {
+            wrong.push(format!("trial {occurrence}: no node to disturb"));
+            continue;
+        };
+        let mut hurt = first.clone();
+        let Some(site) = hurt.disturb(&component, index) else {
+            wrong.push(format!("trial {occurrence}: {component}[{index}] could not be disturbed"));
+            continue;
+        };
+        match first.diff(&hurt) {
+            Divergence::Node { path, id, .. } if path == site.path && id == site.id => {
+                named_exactly += 1;
+            }
+            other => wrong.push(format!(
+                "trial {occurrence}: injected at {} and the descent answered `{}`",
+                site.path,
+                other.describe()
+            )),
+        }
+    }
+    println!("  named     {named_exactly} of {COMPARE_TRIALS} injections, by exact node");
+    for line in wrong.iter().take(4) {
+        println!("  MISSED    {line}");
+    }
+    if named_exactly != COMPARE_TRIALS {
+        println!(
+            "\nA divergence the comparison found but could not name is a divergence a\n\
+             person has to go and find, which is exactly what E2-P05's exit refuses."
+        );
+        return Ok(false);
+    }
+
+    println!("\nlocalised: `{named}` — every phase held");
+    Ok(true)
 }
 
 #[cfg(test)]

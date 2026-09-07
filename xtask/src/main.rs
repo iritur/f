@@ -44,6 +44,13 @@ mod measure;
 /// say what is compared. E2-P07.
 mod rollback;
 
+/// Two whole-system states as two hashes, and the descent that names the subtree
+/// they differ in. Split out for `generation`'s reason — it is a check with an
+/// argument behind it rather than a grep with a policy behind it — and it runs
+/// the fold that lives beside the states, in `sim/src/whole.rs`, rather than a
+/// second copy of it here. E2-P05, RFC 0013.
+mod compare;
+
 /// The target the kernel is built for.
 ///
 /// A built-in target and not a JSON file in `targets/`, which is a decision
@@ -630,6 +637,11 @@ fn main() -> ExitCode {
             Some(other) => Err(format!("unknown option for sim: {other}")),
             None => sim_check(),
         },
+        // The same question `sim` asks of a trace, asked of a *tree*: two runs,
+        // two whole-system hashes, and — when they differ — the name of the
+        // subtree they differ in rather than a diff somebody has to read.
+        // E2-P05, RFC 0013.
+        "compare" => compare::compare(),
         // `reproduce` used to mean the determinism check above, and it now
         // means what `RELEASING.md`, the long plan and `proving-ground` all use
         // the word for: re-running a published number. The old spelling gets a
@@ -886,6 +898,11 @@ cargo xtask <command>
                      the boot spawned. The two halves of boot-to-workload,
                      joined at an artefact rather than at a sentence
   sim --list         The scenario set
+
+  compare            Two whole-system states as two hashes, and the subtree they
+                     differ in. Two processes at one seed must fold to one root,
+                     a second seed must not, and an injected divergence must be
+                     localised to a named subtree by name rather than found
 
   sweep [n] [m]      N seeds across M scenarios, every failure minimised to a
                      reproduction command that judges itself. 64 seeds and every
@@ -10531,6 +10548,16 @@ fn verify() -> Result<(), String> {
     // the cost of the claim being about the kernel's own behaviour rather than
     // about a directory listing.
     sim_join()?;
+    // The same two questions asked of a *tree* rather than of a log. `trace` and
+    // `sim` establish that one run reproduces; this establishes that two runs
+    // which do not can be told apart *by name*, which is a different claim and
+    // is E2-P05's exit. It is in the loop rather than beside it for
+    // `sim_check`'s reason: the failure it catches is one nothing else here can
+    // see — a fold that has stopped reading what a run publishes agrees with
+    // itself forever, and every other check in this file is green on it. Three
+    // simulated runs and no boot, and it reads no component file, so it costs a
+    // few seconds and needs nothing built ahead of it.
+    compare::compare()?;
     // And gate G1's own sentence, which is here rather than in CI alone because
     // `claims/0005` says `status = "gating"` and a gating claim that nothing in
     // the local loop runs is a claim that gates nothing. It costs a few seconds:

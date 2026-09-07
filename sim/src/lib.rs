@@ -141,6 +141,7 @@ pub mod sweep;
 pub mod time;
 pub mod trace;
 pub mod virtq;
+pub mod whole;
 pub mod wire;
 
 use f_env::{Env, Instant, Scheduler, WallSource, WallTime, split};
