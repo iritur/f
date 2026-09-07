@@ -93,3 +93,16 @@ harness = false
 name = "cut"
 path = "tests/cut.rs"
 harness = false
+
+# `E2-P03`: RFC 0059's three invariants asserted at every step of a run in which
+# collection, adversarial allocation and a hard-class reader are interleaved.
+# `harness = false` for the target above's reason and one more of its own: the
+# gate and a sweep differ by a *number* — how many seeds the interleaving is
+# drawn over — and the counts each invariant was checked against are the run's
+# output rather than something a reader has to pass `--nocapture` to see. A
+# property whose evidence is invisible by default is a property nobody can
+# report.
+[[test]]
+name = "invariants"
+path = "tests/invariants.rs"
+harness = false
