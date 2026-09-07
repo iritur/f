@@ -350,6 +350,8 @@ row saying a person has to apply it, which is a plan.
 | A dependency with a bad licence or a known advisory | X | `cargo deny check` in the `deps` job; `security-scan.yml` against the advisory database | every PR, weekly | **catches** |
 | A credential in the diff | X | `.claude/hooks/no-credentials.sh`, `REVIEW.md` pass 3, `security-scan.yml` | every edit, every PR, weekly | **catches** |
 | Release package non-reproducible across two machines | X | the `package` matrix and the `address` job; `release --twice` is the same-machine half | every PR | **catches** |
+| A generation root that is a function of where the tree was checked out | X | `-Zremap-cwd-prefix` in both of `.cargo/config.toml`'s rustflags lists and in the component build's `RUSTFLAGS`; `cargo xtask lint-remap` reads that it is still there and `cargo xtask generation --elsewhere` builds at two paths and requires one root; `--mutate` compiles the build path into the frame and requires that comparison to go red and name the frame | every verify, weekly | **catches** |
+| A generation root that is a function of which machine or which week built it | X | the `root` matrix and the `runners` job in `weekly.yml`; the `dates` job compares against the previous successful run and only when both landed on one commit | weekly | **partially** |
 | A release that cannot name its own tree | X | `cargo xtask release --dry-run` — version and commit are fatal rather than `unknown` | every PR, per release | **catches** |
 | A release crossing the boundary without authorisation | X | `.claude/hooks/release-gate.sh` on every `Bash` | every edit | **catches** |
 | Coverage falling on the entry-validation path | L4 | `cargo xtask entries --coverage`: the share of a named list of thirty-seven functions that `ring/entries-corpus.txt` covers, per function, out of `llvm-cov`. `claims/0009` is gating and states the floor; `cargo xtask coverage` still publishes the per-crate figure beside it and still gates nothing | every PR | **catches** |
@@ -470,11 +472,15 @@ reversal condition. Nothing is left as "we should probably".
   or a second runner — so a check requiring them to be equal would assert
   something false. *Reverse this* when a third check exists in one and not the
   other with no stated reason, which is what `lint-taxonomy` would notice.
-- **Crash inconsistency, torn writes, a generation root that does not
-  reproduce.** No row at all rather than a row with an empty cell: there is no
-  store to cut power to, so a row here would be a placeholder pretending to be
-  an assessment. `E2-P01`, `E2-P06` and `E2-P07` own them, and the condition that
-  brings them into this table is `E2-B01` landing.
+- **Crash inconsistency and torn writes.** No row at all rather than a row with
+  an empty cell: there is no store to cut power to, so a row here would be a
+  placeholder pretending to be an assessment. `E2-P01` and `E2-P07` own them,
+  and the condition that brings them into this table is `E2-B01` landing. The
+  third member of this bullet — *a generation root that does not reproduce* —
+  has left it: `E2-B01` did land, `E2-P06` built the checks, and the two rows in
+  group I above are what that class looks like assessed rather than deferred.
+  The second of them is `partially` and says why, which is the assessment this
+  bullet existed to avoid faking.
 - **A shim diverging from the API it imitates.** Differential fuzzing against
   Linux is named in `proving-ground.html` section 08 and owned by no task,
   because there is no shim. *Reverse this* when the first imported driver is

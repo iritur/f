@@ -534,7 +534,7 @@ fn main() -> ExitCode {
         // E2-B04. One expression to one root hash, with every leaf printed
         // beside its name so that two runners that disagree name the input that
         // moved rather than reporting that two roots differed. RFC 0012.
-        "generation" => generation::generation(args.get(1).map(String::as_str)),
+        "generation" => generation::generation(args.get(1..).unwrap_or_default()),
         // E1-P06. Every component the build produced, killed under sustained
         // load and again with nothing killed. The verdict is `f-sim`'s and this
         // is the driver: the component directory, the two processes the
@@ -634,6 +634,7 @@ fn main() -> ExitCode {
         "lint-snapshot" => lint_snapshot(),
         "lint-reproduce" => lint_reproduce(),
         "lint-proofs" => lint_proofs(),
+        "lint-remap" => lint_remap(),
         "lint-style" => lint_style(),
         "unsafe" => unsafe_report(args.get(1).map(String::as_str) == Some("--by-file")),
         "release" => release(args.get(1).map(String::as_str)),
@@ -739,7 +740,13 @@ cargo xtask <command>
                      canonical form is refused with the canonical form printed
                      as a diff, never silently reordered. --decompile renders
                      the record tree back to canonical source, which is the half
-                     `cargo xtask lint` checks is a fixpoint
+                     `cargo xtask lint` checks is a fixpoint. --emit DIR writes
+                     one run's record tree and root for another run to compare
+                     against, --compare A B names the first leaf two emitted runs
+                     disagree about, --elsewhere evaluates the same expression at
+                     two checkout paths and requires one root, and --mutate
+                     compiles the build path into the frame and requires that
+                     comparison to go red and name the frame. E2-P06
   admission          Refuse an over-subscribed reservation and put a granted
                      one under adversarial load, with two controls beside it:
                      the same load without a reservation, which must miss, and
@@ -799,6 +806,12 @@ cargo xtask <command>
                      code they prove, under the pinned toolchain and in every
                      feature configuration `prove` builds. Both are outside the
                      workspace, so nothing else in the gate builds them
+  lint-remap         The checkout path still cannot reach a build product: the
+                     remap is in both of .cargo/config.toml's rustflags lists
+                     and in the component build's RUSTFLAGS, and the weekly job
+                     still holds a schedule, the comparison and its harness.
+                     Whether the remap still *works* is decided by
+                     `cargo xtask generation --elsewhere`, which costs two builds
 
   unsafe             The number A-05 reports: lines inside `unsafe` as a share
                      of the frame crates and of the whole tree, against
@@ -1487,7 +1500,22 @@ fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
         // because the profile key needs `cargo-features` at the top of the
         // workspace manifest — an opt-in that would apply to every build in the
         // tree to change one step. *Reversal:* the key stabilising.
-        .env("RUSTFLAGS", "-C relocation-model=static -Zunstable-options -Cpanic=immediate-abort")
+        //
+        // `-Zremap-cwd-prefix=.` because this string *replaces*
+        // `.cargo/config.toml`'s flags rather than adding to them — which is
+        // what the doc comment above says and is exactly why the remap has to
+        // be written a third time. A component image reproduces across two
+        // checkout paths today without it, measured, and that is an accident of
+        // `[profile.init]` carrying `debug = false`: turn debug information on
+        // for one investigation and four leaves of the generation root become
+        // functions of where the tree was checked out. The flag costs nothing
+        // on an image with no DWARF in it and is the difference between a
+        // property and a coincidence. `cargo xtask lint-remap` reads this line.
+        .env(
+            "RUSTFLAGS",
+            "-Zremap-cwd-prefix=. -C relocation-model=static -Zunstable-options \
+             -Cpanic=immediate-abort",
+        )
         .current_dir(root())
         .stdout(Stdio::piped())
         .spawn()
@@ -2336,6 +2364,15 @@ const DEFECTS: &[&str] = &[
     // found by the property it is about is a defect that says what the property
     // is for.
     CUT_DEFECT,
+    // E2-P06's, and the sibling of `TRACE_DEFECT` at the top of this list: that
+    // one makes two runs on one machine differ, this one makes two *checkouts*
+    // differ. It compiles the absolute build path into the frame image, so the
+    // frame leaf and therefore the generation root become a function of where
+    // the tree sits — which is precisely the class `E2-B04`'s rehearsal could
+    // not test, because two containers over one checkout share a path. `cargo
+    // xtask generation --mutate` is its harness and requires the two-path
+    // comparison to name the frame rather than merely to go red.
+    generation::PATH_DEFECT,
 ];
 
 /// The seed every reproduction run uses.
@@ -6437,6 +6474,152 @@ fn proof_schedule() -> Result<usize, String> {
 /// The schedule E1-P07's exit names.
 const NIGHTLY: &str = ".github/workflows/nightly.yml";
 
+/// The schedule E2-P06's exit names.
+const WEEKLY: &str = ".github/workflows/weekly.yml";
+
+/// The build configuration the generation root's reproducibility rests on.
+const CARGO_CONFIG: &str = ".cargo/config.toml";
+
+/// The flag, written once here so that three places cannot drift apart in four.
+const REMAP: &str = "-Zremap-cwd-prefix=.";
+
+/// The checkout path still cannot reach a build product, and the weekly job is
+/// still there to notice if it does.
+///
+/// # Why a lint and not a test
+///
+/// Because the thing being defended is a *configuration file*, and the only
+/// cheap failure mode it has is somebody editing it. The expensive failure mode
+/// — the remap not actually working — is decided by `cargo xtask generation
+/// --elsewhere`, which builds the tree twice at two paths and costs minutes.
+/// Running that per commit would be paying a build for a question whose answer
+/// changes when one file changes, so the split is: the demonstration is a verb
+/// and a weekly job, and the reading is here.
+///
+/// # The three places, and why three
+///
+/// Cargo does not merge `build.rustflags` with `target.<triple>.rustflags`: the
+/// more specific list *replaces* the other one. So a remap written only under
+/// `[build]` covers every crate in this tree except the one image whose hash is
+/// the generation root's frame leaf — which is the leaf the whole check is
+/// about, and a silent hole of exactly the wrong shape. And
+/// `component_image` sets `RUSTFLAGS` in the environment, which replaces both.
+/// Three copies of one flag is worse than one copy in every way except the one
+/// that matters, which is that the other arrangements do not work.
+///
+/// A component image reproduces across two paths today *without* the flag,
+/// measured — `[profile.init]` carries `debug = false` — so the third copy is
+/// buying a property rather than fixing a fault. That is why it is checked here:
+/// nothing would notice it going away until somebody turned debug information on
+/// for one investigation.
+///
+/// # What it cannot see
+///
+/// [`REPRODUCE_RUN_GAP`].
+fn lint_remap() -> Result<(), String> {
+    let config = std::fs::read_to_string(root().join(CARGO_CONFIG))
+        .map_err(|e| format!("reading {CARGO_CONFIG}: {e}"))?;
+
+    // Counted rather than merely found, because the failure this is written
+    // against is one of the two lists losing it while the other keeps it — and a
+    // `contains` would be green on exactly that.
+    let occurrences = config.matches(REMAP).count();
+    if occurrences < 2 {
+        return Err(format!(
+            "{CARGO_CONFIG} carries `{REMAP}` {occurrences} time(s), and it needs two.\n\n\
+             Cargo replaces `build.rustflags` with `target.<triple>.rustflags` rather than\n\
+             merging them, so the flag has to be in both lists or the kernel — the one\n\
+             image the generation root's frame leaf is taken over — is built without it.\n\
+             That is a hole of exactly the wrong shape: every leaf but the one that\n\
+             matters. `cargo xtask generation --elsewhere` is what demonstrates the\n\
+             difference, and E2-P06 is why."
+        ));
+    }
+    if !config.contains("[target.x86_64-unknown-none]") {
+        return Err(format!(
+            "{CARGO_CONFIG} no longer has a `[target.x86_64-unknown-none]` section, so the\n\
+             count above is not evidence that the kernel's build carries the remap."
+        ));
+    }
+
+    let source = std::fs::read_to_string(root().join("xtask/src/main.rs"))
+        .map_err(|e| format!("reading xtask/src/main.rs: {e}"))?;
+    if !source.contains("\"-Zremap-cwd-prefix=. -C relocation-model=static") {
+        return Err(format!(
+            "the component build's `RUSTFLAGS` no longer begins with `{REMAP}`.\n\n\
+             That string replaces `{CARGO_CONFIG}`'s flags wholesale rather than adding to\n\
+             them — `component_image` says so where it sets it — so a remap removed there\n\
+             is a remap that does not apply to any of the four component leaves. They\n\
+             reproduce across two paths without it today, because `[profile.init]` carries\n\
+             `debug = false`; that is an accident of a profile and not a property, and this\n\
+             is the line that keeps it from becoming one silently."
+        ));
+    }
+
+    let weekly = std::fs::read_to_string(root().join(WEEKLY)).map_err(|e| {
+        format!(
+            "reading {WEEKLY}: {e}\n\n\
+             E2-P06's exit is *checked weekly*, and nothing in this tree can watch GitHub\n\
+             run a schedule. What it can read is that the file still exists and still says\n\
+             what it must, and it no longer does."
+        )
+    })?;
+    for (needle, what) in [
+        ("cron:", "a schedule at all"),
+        ("--compare", "the comparison the job exists to make"),
+        ("--mutate", "the harness that says a green comparison means something"),
+    ] {
+        if !weekly.contains(needle) {
+            return Err(format!(
+                "{WEEKLY} no longer contains `{needle}`, which is {what}.\n\n\
+                 If the job moved, move this check with it. If it went, E2-P06's line in\n\
+                 TODO.md now describes a cadence that does not exist."
+            ));
+        }
+    }
+
+    println!(
+        "lint-remap: ok  (`{REMAP}` in both of {CARGO_CONFIG}'s lists and in the component \
+         build's RUSTFLAGS; {WEEKLY} still holds a schedule, the comparison and its harness)"
+    );
+    println!(
+        "            What this cannot decide, and `cargo xtask generation --elsewhere` \
+         can:\n            whether the flag still works. What neither can:"
+    );
+    for gap in REPRODUCE_RUN_GAP {
+        println!("              - {gap}");
+    }
+    Ok(())
+}
+
+/// What no command in this tree can observe about E2-P06's exit, as a set
+/// rather than a sentence.
+///
+/// `PROVE_RUN_GAP` is the precedent and the argument is the same one. The exit
+/// has two clauses. *A non-reproducible input fails the job and names itself* is
+/// decided by running something, so it is decided here, by `cargo xtask
+/// generation --mutate`. *Identical generation root hash, checked weekly* is
+/// decided by GitHub and by the calendar, and nothing in this repository can
+/// watch either — so rather than write "CI covers it" and move on, the honest
+/// move is to name exactly what is unobserved and to check the part that is not.
+///
+/// The list is longer than `PROVE_RUN_GAP`'s and that is not a defect in this
+/// task; it is what *two machines and two dates* costs when the machine running
+/// the check is one machine on one date.
+const REPRODUCE_RUN_GAP: &[&str] = &[
+    "two physical machines. `--elsewhere` separates the checkout path out of the bundle a \
+     second machine differs by, and says nothing about the rest of it — core count, host \
+     load, filesystem, kernel, uid. The two-runner half is the `root` matrix in the weekly \
+     job, and it is a job for the reason E0-R01's `address` job is one",
+    "two dates. A second date is a second run of the same commit a week later, so the job \
+     compares against the previous week's artefact and can only do so when both weeks \
+     landed on one commit — which on a moving branch is the exception. The job prints that \
+     as a gap rather than reporting a comparison it did not make",
+    "that GitHub runs the job at all. The schedule, the container pull and the runner's own \
+     two cores are outside anything this tree can execute, so a green `--elsewhere` here is \
+     evidence about the *remap* and not about the cadence",
+];
+
 /// What the local loop cannot observe about the scheduled proofs, as a set
 /// rather than a sentence.
 ///
@@ -9842,6 +10025,12 @@ fn lint_all() -> Result<(), String> {
     // outside the workspace, so the two invocations below reach it and neither
     // does the `fmt --all` above. Under fifteen seconds, and no checker.
     lint_proofs()?;
+    // The half of E2-P06 the local loop *can* decide. The two-path
+    // demonstration costs two builds and is `cargo xtask generation
+    // --elsewhere`; what belongs in the per-commit loop is the reading that
+    // nothing has quietly deleted the remap out from under it, which is one
+    // file read and is the way this check would rot.
+    lint_remap()?;
     // The same check the CI policy job runs — and it runs it by *calling this*,
     // which is the half that was missing. It lives here because a local `lint`
     // that is a subset of the gate teaches people the gate is passing when it is

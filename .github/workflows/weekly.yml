@@ -1,0 +1,360 @@
+name: weekly
+
+# E2-P06. The generation root, compared across two runners and across two dates,
+# with a non-reproducible input named rather than reported.
+#
+# ## Why this is its own file and not three jobs in nightly.yml
+#
+# Because the cadence is the exit. `E2-P06`'s line says *checked weekly*, and a
+# weekly check living in a file called `nightly` is a check whose schedule
+# nobody can read off the thing that runs it. The two files duplicate their
+# `environment` and `image` jobs for the reason nightly.yml duplicates ci.yml's:
+# a scheduled workflow that depended on another workflow having run is one that
+# fails at "Initialize containers" on any week nobody pushed.
+#
+# ## What is being compared, and why it is a file rather than a log
+#
+# The record tree — `cargo xtask generation --emit` writes it, and
+# `--compare` folds both sides itself. Not the printed block: a job that parses
+# a log is a job that can parse it wrong, and the root and the comparison should
+# come from one artefact rather than from two things that are supposed to agree.
+# `E0-R01`'s `package`/`address` pair made the same choice one epoch earlier and
+# this is that shape with a richer artefact.
+#
+# ## What a failure produces
+#
+# A named leaf, not a mismatch. `f_generation::diff` descends leaves before
+# roots, so a red run says *the input that moved is `virtio-net`* — or, when
+# every leaf stands still and the roots do not, says that instead and blames the
+# fold rather than an input it cannot name. That difference is the whole of why
+# this task exists; `docs/rfc/0012` is where *the root is the attestation* is
+# argued and reproducibility is named as the thing the root does not prove.
+#
+# ## The three jobs, and why the harness is first
+#
+# `harness` arms a deliberate defect that compiles the build path into the frame
+# image, requires the two-path comparison to go red **and to name the frame**,
+# disarms it and requires it to go green. It runs first and everything depends
+# on it, so a week where the comparison has quietly stopped comparing reports
+# *that* rather than reporting an agreement nobody should believe. Same argument
+# nightly.yml's `harness` job makes about the sweep, and RFC 0017's about the
+# boot suite.
+#
+# `runners` is the two-machine half. Both runners check out at
+# `/__w/<repo>/<repo>`, fixed by the runner rather than chosen here — so this
+# half compares two machines at *one path* and says nothing about
+# path-dependence. That class is the remap in `.cargo/config.toml`, demonstrated
+# by `cargo xtask generation --elsewhere`, which `harness` runs. Saying which
+# half covers which class is the point; a job that claimed both would be
+# claiming one of them without evidence.
+#
+# `dates` is the second-date half and it is the honest one. A second date is the
+# same commit compiled a week later, so it compares against the previous
+# successful run's artefact and can only do so when both weeks landed on one
+# commit. On a branch that moves that is the exception, and the job prints it as
+# a gap rather than reporting a comparison it did not make. `workflow_dispatch`
+# is there so a person can force the pair: run it, wait, run it again on the
+# same commit.
+
+on:
+  schedule:
+    # 05:17 UTC on Mondays. Not on the hour, for nightly.yml's reason: GitHub's
+    # scheduler is busiest at exact hours and delays a job that asks for one.
+    # Monday rather than Sunday so that a red week is read on a working day —
+    # the failure mode of a scheduled job is nobody looking at it.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository_owner }}/f-dev
+
+jobs:
+  # Computed and built exactly as nightly.yml does it, and duplicated for the
+  # reason that file gives: a scheduled workflow that depends on another
+  # workflow having run is one that fails on any week nobody pushed.
+  environment:
+    name: environment tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      image: ${{ steps.tag.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: tag
+        run: |
+          hash=$(echo "${{ hashFiles('docker/Dockerfile', 'docker/entrypoint.sh', 'rust-toolchain.toml') }}" | cut -c1-16)
+          echo "tag=env-$hash" >> "$GITHUB_OUTPUT"
+          echo "image=${REGISTRY}/${IMAGE}:env-$hash-amd64" >> "$GITHUB_OUTPUT"
+          echo "environment tag: env-$hash"
+
+  image:
+    name: environment image
+    needs: environment
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: dev
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ needs.environment.outputs.tag }}-amd64
+          cache-from: type=gha,scope=dev-amd64
+          cache-to: type=gha,mode=max,scope=dev-amd64
+
+  # The half that says a green comparison means something. Two builds at two
+  # paths with the defect off, which must agree, and two with it on, which must
+  # differ *and name the frame*. Going red is not the assertion — a comparison
+  # that failed for another reason would satisfy an exit code and prove nothing.
+  #
+  # It is also the only job in this file that tests the path-dependence class at
+  # all: the two runners below share a workspace path by construction.
+  harness:
+    name: the comparison can fail, and names the frame
+    needs: [environment, image]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: two checkout paths, honest and armed
+        run: |
+          set -o pipefail
+          cargo xtask generation --mutate 2>&1 | tee harness-report.txt
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-report
+          path: harness-report.txt
+          retention-days: 90
+          if-no-files-found: error
+
+  # One commit, two runners, one root each. Two jobs and not two runs in one,
+  # for the reason E0-R01's `package` job is two: the claim is about two
+  # machines, and the things a machine can differ in — core count, host load,
+  # filesystem, `read_dir` order — are exactly the things a content address must
+  # not be reading.
+  root:
+    name: generation root (runner ${{ matrix.runner_id }})
+    needs: [environment, image, harness]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_id: [a, b]
+    steps:
+      - uses: actions/checkout@v7
+      - name: compile this commit's generation
+        run: |
+          cargo xtask generation --emit "generation-${{ matrix.runner_id }}"
+          # The commit and the path travel with the tree, because the two
+          # comparisons below need them for different reasons: `dates` cannot
+          # compare two roots without knowing whether they are of one commit,
+          # and `runners` needs the path to tell "the build is not hermetic"
+          # from "these two ran in different places" — different findings,
+          # different fixes, and only one of them is about this repository.
+          echo "${{ github.sha }}" > "generation-${{ matrix.runner_id }}/commit"
+          pwd > "generation-${{ matrix.runner_id }}/path"
+          cat "generation-${{ matrix.runner_id }}/root"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: generation-${{ matrix.runner_id }}
+          path: generation-${{ matrix.runner_id }}
+          retention-days: 90
+          if-no-files-found: error
+
+  runners:
+    name: the two runners must agree
+    needs: [environment, image, root]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      # A checkout, unlike E0-R01's `address` job, because the comparison here
+      # is a verb in this tree rather than two lines of shell. That is the trade
+      # `f_generation::diff` buys: the job can name a leaf, and it needs the
+      # code that knows how.
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: generation-*
+      - name: the two runners must agree
+        id: compare
+        run: |
+          set -o pipefail
+          pa=$(cat generation-a/path); pb=$(cat generation-b/path)
+          echo "runner a  at $pa"
+          echo "runner b  at $pb"
+          if [ "$pa" != "$pb" ]; then
+            echo
+            echo "The two runners built at different paths. That is not fatal here —"
+            echo "the remap in .cargo/config.toml exists precisely so it would not be —"
+            echo "but it does mean a difference below could be either class, and the"
+            echo "harness job is the one that separates them. A container job's"
+            echo "workspace is /__w/<repo>/<repo> and both of these should be it, so"
+            echo "this is worth reading before the comparison."
+          fi
+          cargo xtask generation --compare generation-a generation-b 2>&1 | tee runners-report.txt
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runners-report
+          path: runners-report.txt
+          retention-days: 90
+          if-no-files-found: error
+      # The part that reaches a person, for nightly.yml's reason: a scheduled
+      # workflow's red cross is a notification nobody has subscribed to.
+      - name: open an issue for it
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The report's first finding line names the leaf, so the title carries
+          # it and stays stable across weeks that find the same thing.
+          headline=$(grep -m1 -E 'the input that moved is|every leaf agrees' runners-report.txt || echo "(the report's shape moved)")
+          title="weekly reproduction: $headline"
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number')
+          {
+            echo "Two runners compiled \`${{ github.sha }}\` and did not get one generation root."
+            echo
+            echo "The report below names the first leaf they disagree about, which is the"
+            echo "input that moved. A leaf names a content address, so the fix is in"
+            echo "whatever produced those bytes. If instead every leaf agrees and only the"
+            echo "roots differ, the fold is what differed and the defect is in"
+            echo "\`generation/\` or \`abi/src/store.rs\` — the report says which."
+            echo
+            echo '```'
+            cat runners-report.txt
+            echo '```'
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > body.md
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file body.md
+          else
+            gh issue create --title "$title" --body-file body.md --label weekly || \
+              gh issue create --title "$title" --body-file body.md
+          fi
+
+  # The second date. It compares this week's artefact with the last successful
+  # week's, and it can only do so when both weeks landed on one commit — a root
+  # is a function of the tree, so two roots of two commits differing is the
+  # design working and not a finding.
+  #
+  # That condition is stated rather than engineered around, and it is the
+  # honest half of this file: on a branch that moves, most weeks this job prints
+  # a gap and stays green. `workflow_dispatch` is how a person forces the pair —
+  # run it, then run it again on the same commit — and it is how this half was
+  # ever demonstrated at all.
+  dates:
+    name: this week against the last
+    needs: [environment, image, root]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: generation-a
+          path: this-week
+      - name: the previous week's root, if there is one at this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          this=$(cat this-week/commit)
+          echo "this week   $this  $(cat this-week/root)"
+
+          # The most recent earlier successful run of this workflow. `--status
+          # success` excludes the run in progress, so this cannot find itself.
+          previous=$(gh run list --workflow weekly.yml --status success \
+                       --json databaseId --jq '.[0].databaseId' || true)
+          if [ -z "$previous" ]; then
+            echo
+            echo "No earlier successful run of this workflow, so there is no second date"
+            echo "to compare against. That is this job's first week and not a finding."
+            exit 0
+          fi
+          if ! gh run download "$previous" -n generation-a -D last-week; then
+            echo
+            echo "Run $previous has no generation-a artefact any more — artefacts expire"
+            echo "at 90 days. The second-date comparison is not made this week, and that"
+            echo "is reported rather than passed over."
+            exit 0
+          fi
+
+          last=$(cat last-week/commit)
+          echo "last run    $last  $(cat last-week/root)"
+          if [ "$this" != "$last" ]; then
+            echo
+            echo "The two runs are of two different commits, so their roots are expected"
+            echo "to differ and comparing them would assert nothing. The second-date half"
+            echo "of E2-P06's exit is NOT checked this week."
+            echo
+            echo "This is the gap the exit's own words leave open on a branch that moves,"
+            echo "and it is printed rather than rounded up. To close it deliberately, run"
+            echo "this workflow twice by hand on one commit with a day between."
+            exit 0
+          fi
+
+          echo
+          echo "Both runs are of $this, so the roots must agree."
+          cargo xtask generation --compare last-week this-week 2>&1 | tee dates-report.txt
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dates-report
+          path: dates-report.txt
+          retention-days: 90
+          if-no-files-found: ignore
+      - name: open an issue for it
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          headline=$(grep -m1 -E 'the input that moved is|every leaf agrees' dates-report.txt || echo "(the report's shape moved)")
+          title="weekly reproduction, across dates: $headline"
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number')
+          {
+            echo "One commit, compiled a week apart, produced two generation roots."
+            echo
+            echo "Everything a second runner can differ in was already ruled out by the"
+            echo "\`runners\` job in both weeks, so what is left is what changed between"
+            echo "the two dates: the base image, the registry, or something in the build"
+            echo "that reads a clock. \`docker/README.md\` records the standing gap here —"
+            echo "the image is repeatable and not reproducible — and the leaf named below"
+            echo "says whether that is what this is."
+            echo
+            echo '```'
+            cat dates-report.txt
+            echo '```'
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > body.md
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file body.md
+          else
+            gh issue create --title "$title" --body-file body.md --label weekly || \
+              gh issue create --title "$title" --body-file body.md
+          fi

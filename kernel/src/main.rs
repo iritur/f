@@ -54,6 +54,34 @@ use f_env::{Env, SeededEnv};
 // importing them again is a redefinition rather than a clarification. Do not
 // re-add the `use`; the export is what makes the ordering non-fragile.
 
+/// A deliberate defect, off by default, and the one `E2-P06` is built around:
+/// the absolute path this image was built at, compiled into the image.
+///
+/// # Why a defect of this shape
+///
+/// Because the property `cargo xtask generation --elsewhere` asserts is that the
+/// checkout path cannot reach the generation root, and a check that has only
+/// ever passed is one nobody knows can fail. This is the smallest thing that
+/// makes it fail for the reason it is about: no behaviour changes, the boot is
+/// byte-identical to itself at one path, every other check in this tree is green
+/// on it, and the *only* observable is that the same commit compiled in two
+/// directories produces two frame leaves and two roots. That is the shape of the
+/// bug the weekly job exists for, and RFC 0017 is where living in the shipped
+/// source behind a feature is argued.
+///
+/// `CARGO_MANIFEST_DIR` and not `file!()`, deliberately. `file!()` is remapped
+/// by `-Zremap-cwd-prefix` and would therefore demonstrate nothing — a defect
+/// the fix already covers is a defect that proves the check is asleep. Cargo
+/// sets this variable itself and no rustc flag touches it, so this is a genuine
+/// second route by which a path reaches an artefact, and the job that catches it
+/// is catching a class rather than a flag.
+///
+/// `#[used]` because nothing reads it: without that the linker is free to drop
+/// the symbol and the defect would quietly build a byte-identical image.
+#[cfg(feature = "mutate-path-in-image")]
+#[used]
+static BUILT_AT: &[u8] = env!("CARGO_MANIFEST_DIR").as_bytes();
+
 /// The seed this build runs under.
 ///
 /// A later milestone has `xtask` generate this so a simulator run is selected
