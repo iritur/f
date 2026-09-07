@@ -178,6 +178,18 @@ const DATAPATH: &[(&str, &str, &str)] = &[
     // self-check, so the published zero remains a measurement rather than an
     // absence.
     ("user/virtio-gpu/", "stage", "provoke_copy"),
+    // `E2-B08`, and the row is *stronger* on this crate than on the three
+    // above it rather than weaker. A driver can be zero-copy by accident,
+    // because a client's bytes go past it and it never needs to look at them;
+    // a read path has every reason to look — it decodes a header out of the
+    // record and it hashes the content before it accepts it — and the obvious
+    // implementation stages the record somewhere it can do both. This one does
+    // neither: the header is *borrowed* out of the caller's registered buffer
+    // as a `&[u8; N]` and the content is hashed in place, so the crate's one
+    // mover is reached only by the provocation. That is what this row holds it
+    // to, and it is what makes `copies_per_read = 0` a count rather than a
+    // sentence about a typestate.
+    ("user/objects/", "stage", "provoke_copy"),
 ];
 
 /// The constructors that turn a bare address into a granted window.
@@ -254,6 +266,16 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
     // the same string for the third time and the third field is what keeps the
     // rule from being satisfied by a name nothing defines.
     ("kernel/", "Driver::", "user/virtio-gpu/"),
+    // The fourth, and the first whose needle is not `Driver::` — which is the
+    // doc comment above working rather than an exception to it. `user/objects`
+    // is not a driver and spells its own type, so the rule that the frame must
+    // not call a component's code needs its own subject here. The reason it
+    // matters on this crate in particular: `ReadPath` resolves a destination
+    // through `f_ring::registry::Table` and then writes into the memory that
+    // table answered for, so a frame that ran this code would be running it
+    // with the direct map underneath every address in it — and `copies_per_read
+    // = 0` would be a number about a component that is not one.
+    ("kernel/", "ReadPath::", "user/objects/"),
 ];
 
 /// The reversal conditions that have fallen due and are **not paid**, declared
@@ -8410,6 +8432,12 @@ const PORTABILITY: &[Portability] = &[
         ),
     },
     Portability { krate: "f-init", host: None, bare: None },
+    // `E2-B08`'s read path. Both answers are `None` and that is the whole row:
+    // it is a `no_std` library above the frame with no architecture in it at
+    // all, and the AArch64 compile is worth more here than in most crates
+    // because the record decode borrows a `&[u8; N]` out of a device's bytes —
+    // alignment and endianness are exactly what a second architecture is for.
+    Portability { krate: "f-objects", host: None, bare: None },
     Portability { krate: "f-store", host: None, bare: None },
     Portability { krate: "f-virtio-blk", host: None, bare: None },
     Portability { krate: "f-virtio-net", host: None, bare: None },
@@ -9869,7 +9897,14 @@ fn claim_owner_findings(rel: &str, text: &str) -> Vec<String> {
 /// a device, its region is a block index and a block count, and its mount cost
 /// is a number the design is argued about with — every one of which is a
 /// quantity whose unit is obvious only to whoever wrote it down.
-const UNIT_SCOPE: &[&str] = &["abi/", "blob/", "index/", "generation/", "zone/"];
+///
+/// `user/objects/` joined at `E2-B08` on grounds narrower than the four above
+/// and worth stating for that reason: this crate exists to publish two numbers
+/// — bytes moved through an unregistered buffer, and resident bytes per unit of
+/// work — and both of them are public fields whose unit is the whole of what
+/// they mean. A `held_bytes` with no unit beside it is precisely the field a
+/// later reader divides by the wrong thing.
+const UNIT_SCOPE: &[&str] = &["abi/", "blob/", "index/", "generation/", "zone/", "user/objects/"];
 
 /// R03, over the trees whose public quantities cross something.
 fn lint_units() -> Result<(), String> {

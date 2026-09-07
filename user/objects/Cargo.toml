@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "f-objects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The read path: a hash to a zone and an offset, and the device landing the bytes in the caller's own registered buffer."
+
+[dependencies]
+# The wire half of a buffer name — `SetId`, and the `FIXED_BUF` reading of an
+# entry's twelve bytes at offset 32 — and the blob header this crate decodes
+# *in place* out of the caller's registered buffer. Both are in `abi/` for the
+# reason that crate gives: the only use for `#[repr(C)]` over a record is a
+# pointer cast, RFC 0001 puts a pointer cast inside the frame, and this crate is
+# not in the frame.
+f-abi.workspace = true
+
+# `registry::Table`, which is E1-B10's service-side registration and the only
+# thing in this tree that can answer *is this destination one the caller
+# registered*. Nothing here re-implements it: a second registration table would
+# be a second thing that could disagree with the driver about which memory a
+# device may reach, and then `copies_per_read = 0` would be a count taken
+# against the wrong question.
+f-ring.workspace = true
+
+# The store, the `Device` trait underneath it and the blob format's own
+# refusals. The read path resolves a hash to a block through `Store::address`
+# and never decodes a record `f_abi::store` has not first been asked to believe.
+f-blob.workspace = true
+
+# The mapping that turns a logical block into a zone and a device-absolute
+# offset. This is the "hash to zone and offset" half of the task and it is
+# `f-zone`'s arithmetic rather than a copy of it, for `blob/src/store.rs`'s own
+# reason: two crates with an opinion about an offset is one crate too many.
+f-zone.workspace = true
+
+# Name to hash. The index is embedded and not a service — `index/src/lib.rs`
+# argues that at length — so resolving a name costs this crate a `&self` call
+# and no ring crossing at all.
+f-index.workspace = true
+
+# Verify before accept, at the granularity a blob has one. The content that
+# landed in the caller's buffer is hashed *in that buffer* and compared against
+# the name it was asked for, which is the one check that makes a zero-copy read
+# worth as much as a copied one.
+f-hash.workspace = true
+
+[dev-dependencies]
+# The workload draws its content from a seeded `Env` through a `Stream` split at
+# a named identity, RFC 0026, so that adding a draw site later cannot move a
+# number this crate recorded.
+f-env.workspace = true
+
+[lints]
+workspace = true
+
+# The two numbers `E2-B08` owes are a *measurement*, and a libtest harness
+# captures output — so the run that takes them prints them and fails on the
+# bounds beneath them, which is `blob/tests/million.rs`'s arrangement under RFC
+# 0046 and `zone/tests/cycle.rs`'s one crate over. A `#[test]` would leave the
+# exit visible only to somebody who knew to pass `--nocapture`.
+[[test]]
+name = "reads"
+path = "tests/reads.rs"
+harness = false

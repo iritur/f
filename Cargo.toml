@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["abi", "env", "ring", "hash", "blob", "zone", "index", "generation", "kernel", "user/init", "user/store", "user/virtio-blk", "user/virtio-net", "user/virtio-gpu", "bench", "sim", "xtask"]
+members = ["abi", "env", "ring", "hash", "blob", "zone", "index", "generation", "kernel", "user/init", "user/objects", "user/store", "user/virtio-blk", "user/virtio-net", "user/virtio-gpu", "bench", "sim", "xtask"]
 
 # The checker's crate, and it is excluded rather than absent for the reason RFC
 # 0022 gave the last one: a verification tool's toolchain is the tool's
@@ -63,6 +63,17 @@ f-zone = { path = "zone" }
 # path for everybody who inherits it, and `E2-B08`'s `user/objects` is the
 # consumer this was written for.
 f-index = { path = "index" }
+# The read path, and the row that consumes the four above it. There is no
+# `default-features = false` and no `image` feature, because this is not yet a
+# component: an image linking `f-blob` needs a `#[global_allocator]`, that is an
+# `unsafe impl GlobalAlloc`, and RFC 0001 forbids `unsafe` above the frame — so
+# it waits for the heap `intent/0006-state/spec.md`'s decision 4 puts in
+# `ring/`, and `user/objects/src/lib.rs` records the debt rather than leaving it
+# to be inferred from an absent `manifest.toml`. The row is here now for the
+# reason the three driver rows below give: a workspace row fixes the path for
+# everybody who inherits it, and adding the feature later is a smaller diff than
+# moving the path.
+f-objects = { path = "user/objects" }
 f-generation = { path = "generation" }
 # `default-features = false` here rather than at the one consumer, because a
 # workspace dependency fixes it for everybody who inherits it and cargo refuses

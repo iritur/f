@@ -74,6 +74,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "f-objects"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-blob",
+ "f-env",
+ "f-hash",
+ "f-index",
+ "f-ring",
+ "f-zone",
+]
+
+[[package]]
 name = "f-ring"
 version = "0.0.1"
 dependencies = [
