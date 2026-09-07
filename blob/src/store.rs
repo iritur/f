@@ -212,6 +212,118 @@ impl<D: Device> Store<D> {
         Ok(store)
     }
 
+    /// Adopt a device that already holds records, rebuilding the hash-to-block
+    /// map by reading it.
+    ///
+    /// # Why a scan, and what it costs
+    ///
+    /// This file's third paragraph says the map is in memory and survives no
+    /// restart, and `E2-B03`'s durable index is what will make a mount cheap.
+    /// Until it does, the only thing on the device that says where a blob is, is
+    /// the blob: every record starts at a block boundary and begins with a
+    /// header that refuses on its magic, its kind and its declared length before
+    /// any field of it is believed. So a mount reads every block the device will
+    /// answer for and keeps the records that decode. It costs one read per block
+    /// of the address space, and it buys a mount that depends on no second
+    /// structure being correct first — which is the only kind of mount there is
+    /// after a power cut, because a cut is exactly the event that leaves nothing
+    /// else standing.
+    ///
+    /// *What would reverse this:* `E2-B03`'s index on the device, at which point
+    /// this becomes the recovery path taken when the index does not verify,
+    /// rather than the mount itself.
+    ///
+    /// # A block the device refuses is a block with nothing in it
+    ///
+    /// A sequential zone refuses a read past its write pointer, which is how an
+    /// implementation of [`Device`] says *nothing was ever written here*. A scan
+    /// that treated that as a failure could not mount a device that is not full,
+    /// which is every device. So a refused read advances by one block and the
+    /// scan carries on — and the hole a power cut leaves in the middle of an
+    /// address space is exactly that, one block at a time.
+    ///
+    /// The first record found under a hash is the one kept. Two records under
+    /// one hash are not something [`Store::put`] can write, because it
+    /// deduplicates; two can survive a cut that re-wrote one which had not
+    /// landed, and in that case they hold the same bytes by construction — the
+    /// hash is over the content — so which is kept changes nothing but a block
+    /// number.
+    ///
+    /// # Errors
+    ///
+    /// [`refusal::MALFORMED`] for a device whose block zero is not a superblock
+    /// this build can read, or whose block size disagrees with the one the
+    /// superblock declares; [`refusal::UNKNOWN`] for a chunker that moved;
+    /// whatever the device says about the read of block zero.
+    pub fn mount(mut device: D) -> Result<Self, i32> {
+        let block_bytes = device.block_bytes();
+        let mut block = vec![0u8; block_bytes];
+        device.read(0, &mut block)?;
+        if block.len() < Superblock::BYTES {
+            return Err(refusal::MALFORMED);
+        }
+        let mut raw = [0u8; Superblock::BYTES];
+        raw.copy_from_slice(&block[..Superblock::BYTES]);
+        let superblock = Superblock::from_bytes(&raw)?;
+        // The declared block size against the device's own, before the scan uses
+        // it as a stride. A superblock claiming 4096 on a device that reads 512
+        // would make every record length below wrong by a factor of eight, and
+        // the first symptom would be a hash that did not verify — which is a
+        // report about content when the fault is in the geometry.
+        if superblock.block_bytes as usize != block_bytes {
+            return Err(refusal::MALFORMED);
+        }
+        refuse_a_chunker_that_moved(&superblock)?;
+
+        let mut located: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+        let mut free = 1u64;
+        let mut at = 1u64;
+        let blocks = device.blocks();
+        while at < blocks {
+            if device.read(at, &mut block).is_err() {
+                at += 1;
+                continue;
+            }
+            let Ok(header) = Self::header_at(&block) else {
+                at += 1;
+                continue;
+            };
+            let Ok(content_bytes) = usize::try_from(header.content_bytes) else {
+                at += 1;
+                continue;
+            };
+            let Some(record_bytes) = Header::BYTES.checked_add(content_bytes) else {
+                at += 1;
+                continue;
+            };
+            let span = record_bytes.div_ceil(block_bytes) as u64;
+            located.entry(header.hash).or_insert(at);
+            // Past the record and not past the block: the blocks after the first
+            // hold content, and content that happened to begin with this
+            // format's magic would otherwise be adopted as a record of its own.
+            at = at.saturating_add(span);
+            free = at.min(blocks);
+        }
+        Ok(Self { device, superblock, free, located })
+    }
+
+    /// Decode the header at the start of a block without knowing what hash it
+    /// ought to carry.
+    ///
+    /// [`Store::header_in`] is the same decode with the name checked against the
+    /// hash the caller asked for, which a scan has not got: a scan is *finding*
+    /// names rather than confirming one. Two functions rather than an `Option`
+    /// argument, so that the name check is not something a caller can pass
+    /// `None` to.
+    fn header_at(block: &[u8]) -> Result<Header, i32> {
+        if block.len() < Header::BYTES {
+            return Err(refusal::MALFORMED);
+        }
+        let mut raw = [0u8; Header::BYTES];
+        raw.copy_from_slice(&block[..Header::BYTES]);
+        Header::from_bytes(&raw)
+    }
+
     /// What this store was formatted with.
     #[must_use]
     pub const fn superblock(&self) -> &Superblock {
@@ -259,6 +371,20 @@ impl<D: Device> Store<D> {
     #[must_use]
     pub const fn device(&self) -> &D {
         &self.device
+    }
+
+    /// Give the device back and drop everything this store believed about it.
+    ///
+    /// The one caller that needs this is a mount after a power cut: the map
+    /// above the device describes a state that no longer exists, the device is
+    /// the only thing that survived, and [`Store::mount`] wants it by value.
+    /// Handing it back rather than lending it is the honest shape — a store that
+    /// kept a handle to a device somebody else had re-mounted would be two
+    /// stores over one device, each with its own idea of where the free block
+    /// is.
+    #[must_use]
+    pub fn into_device(self) -> D {
+        self.device
     }
 
     /// The barrier: the first half of RFC 0060's publish sequence ends here.
@@ -726,6 +852,41 @@ mod tests {
         let mut store = store_over(2);
         store.put(kind::CHUNK, &content(4, 8)).expect("the one block that is left");
         assert_eq!(store.put(kind::CHUNK, &content(6, 8)), Err(refusal::FULL));
+    }
+
+    #[test]
+    fn a_mount_rebuilds_the_map_by_reading_the_device() {
+        let mut store = store_over(64);
+        // Records of three different lengths, so the scan has to step by the
+        // record and not by the block: a mount that advanced one block at a time
+        // would adopt a block of content as a record of its own.
+        let written: Vec<[u8; 32]> = [8usize, 600, 1400]
+            .iter()
+            .enumerate()
+            .map(|(index, len)| {
+                store.put(kind::CHUNK, &content(index as u8, *len)).expect("room on the device")
+            })
+            .collect();
+        let free = store.free();
+        let device = store.into_device();
+
+        let mut back = Store::mount(device).expect("a device this build wrote");
+        assert_eq!(back.records(), written.len(), "every record and nothing else");
+        assert_eq!(back.free(), free, "and the allocator picks up where it left off");
+        for (index, hash) in written.iter().enumerate() {
+            let mut read = vec![0u8; 2048];
+            let moved = back.get(hash, &mut read).expect("a record the scan found");
+            assert_eq!(&read[..moved], &content(index as u8, moved)[..]);
+        }
+    }
+
+    #[test]
+    fn a_mount_of_an_unformatted_device_is_refused_rather_than_empty() {
+        // Zeros in block zero are not a superblock, and a mount that answered an
+        // empty store for one would make *unformatted* and *formatted and empty*
+        // the same answer.
+        let blank = Memory::new(BLOCK as usize, 8);
+        assert_eq!(Store::mount(blank).err(), Some(refusal::MALFORMED));
     }
 
     #[test]

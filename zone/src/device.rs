@@ -307,6 +307,56 @@ impl ZonedMemory {
         Ok(())
     }
 
+    /// Put bytes on the media at an absolute block, underneath the zone rules,
+    /// and pull the zone's write pointer far enough to cover them.
+    ///
+    /// # Why a device model needs an operation no device offers
+    ///
+    /// Because this is not an operation, it is a *state*: what the platters hold
+    /// after the power went off. `E2-P01`'s cut model records the operations one
+    /// publish submitted and then asks what the media looks like when an
+    /// arbitrary subset of them landed — and a subset is not something the
+    /// interface above can express, by construction. `ZONE_APPEND` assigns its
+    /// own position, so replaying two appends in the other order through
+    /// [`Zoned::append`] would put them at each other's addresses and the model
+    /// would be testing its own arithmetic. This lands each one where the device
+    /// put it when it was submitted.
+    ///
+    /// [`ZonedMemory::flip`] is here for the neighbouring reason and the
+    /// paragraph above it argues the general case: a fault that had to be
+    /// expressible as a device operation could not model the class of fault
+    /// these exist for.
+    ///
+    /// `from` may be shorter than one block, which is the torn write byte
+    /// granularity is about: the bytes given land and the rest of the block is
+    /// left as it was. A device that stopped mid-block wrote a prefix, and a
+    /// model that could only write whole blocks could not produce a torn record
+    /// at all — which is one of the four observations the sweep requires of
+    /// itself.
+    ///
+    /// The pointer is pulled to `max(pointer, offset + 1)` rather than set,
+    /// because a cut that landed a later append and not an earlier one leaves a
+    /// hole *behind* a pointer that has moved past it. That is the state the
+    /// mount has to survive, so it is the state this can produce.
+    ///
+    /// # Errors
+    ///
+    /// [`refusal::ADDRESS`] for a block outside the device, or a buffer longer
+    /// than one block.
+    pub fn land(&mut self, block: u64, from: &[u8]) -> Result<(), i32> {
+        if from.len() > self.block_bytes {
+            return Err(refusal::ADDRESS);
+        }
+        let zone = self.zone_of(block).ok_or(refusal::ADDRESS)?;
+        let (at, _) = self.span(block).ok_or(refusal::ADDRESS)?;
+        self.bytes[at..at + from.len()].copy_from_slice(from);
+        if Self::kind_of(zone) == Kind::SequentialWriteRequired {
+            let offset = block - self.start_of(zone);
+            self.written[zone as usize] = self.written[zone as usize].max(offset + 1);
+        }
+        Ok(())
+    }
+
     /// The byte range one block occupies, or `None` for a block outside the
     /// device.
     fn span(&self, block: u64) -> Option<(usize, usize)> {
@@ -570,5 +620,36 @@ mod tests {
         assert_eq!(counted.appended_bytes, BLOCK as u64);
         assert_eq!(counted.device_bytes(), 2 * BLOCK as u64);
         assert_eq!(counted.flushes, 1);
+    }
+
+    #[test]
+    fn what_a_cut_leaves_is_a_hole_behind_a_pointer_that_moved_past_it() {
+        let mut zoned = device();
+        // Zone 1 starts at block 4. Land the *second* block of it and not the
+        // first, which is the state an append that landed out of order leaves
+        // and which no sequence of operations on this device could produce.
+        let block = vec![0xAB; BLOCK];
+        zoned.land(5, &block).expect("a block inside the device");
+        let report = zoned.report(1).expect("zone 1");
+        assert_eq!(report.write_pointer, 6, "the pointer covers the block that landed");
+
+        let mut read = vec![0u8; BLOCK];
+        zoned.read(4, &mut read).expect("the hole is behind the pointer and readable");
+        assert!(read.iter().all(|byte| *byte == 0), "and it is zeros, which no record decodes");
+        zoned.read(5, &mut read).expect("the block that landed");
+        assert_eq!(read, block);
+    }
+
+    #[test]
+    fn a_torn_write_lands_a_prefix_and_leaves_the_rest_of_the_block_alone() {
+        let mut zoned = device();
+        zoned.append(1, &vec![0xFFu8; BLOCK]).expect("a whole block first");
+        zoned.land(4, &[0x11u8; 8]).expect("eight bytes of it");
+        let mut read = vec![0u8; BLOCK];
+        zoned.read(4, &mut read).expect("the torn block");
+        assert!(read[..8].iter().all(|byte| *byte == 0x11), "the prefix that landed");
+        assert!(read[8..].iter().all(|byte| *byte == 0xFF), "and what was there before it");
+        assert_eq!(zoned.land(12, &[0u8; 8]), Err(refusal::ADDRESS), "a block outside");
+        assert_eq!(zoned.land(4, &[0u8; BLOCK + 1]), Err(refusal::ADDRESS), "more than a block");
     }
 }
