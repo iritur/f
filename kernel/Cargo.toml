@@ -84,7 +84,7 @@ multiple_unsafe_ops_per_block = "deny"
 
 # Deliberate defects, off by default and never on in anything that ships.
 #
-# There is exactly one, and it exists because property five of the capability
+# The first of them exists because property five of the capability
 # negative suite — *a process cannot make the kernel panic by trying* — cannot
 # have a fixture of the shape the other four have. A table that panics takes the
 # machine down rather than being caught, so the mutation has to be a build
@@ -102,6 +102,15 @@ mutate-unchecked-index = []
 # runs of the same commit differ, which nothing but a reproduction check
 # would ever notice.
 mutate-unseeded-time = []
+# The defect E2-P06 exists to catch, and the sibling of the one above: it does
+# not make two runs on one machine differ, it makes two *checkouts* differ. The
+# image compiles the absolute path it was built at into itself, so the frame
+# leaf — and therefore the generation root — becomes a function of where the
+# tree happens to sit. `cargo xtask generation --mutate` arms it, requires the
+# two-path comparison to go red and to name the frame, disarms it and requires
+# the same comparison to go green. Everything else in this tree is green on it,
+# which is the point.
+mutate-path-in-image = []
 
 [[bin]]
 name = "f-kernel"

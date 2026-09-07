@@ -50,6 +50,16 @@
 //!   about *source*; what lives here is the property it rests on, which is that
 //!   an out-of-order record tree is refused by [`record::Tree::check`].
 //!
+//! # Why the comparison is here too
+//!
+//! [`diff`] answers *where do these two trees stop agreeing* and it lives beside
+//! the fold rather than in `xtask`, because it is the fold read backwards: the
+//! order it descends in is the order [`fold::root`] hashes in, and the two going
+//! out of step would make a job report a leaf that is not the one that moved.
+//! One file over from the arithmetic it mirrors is the cheapest place for that
+//! to stay true. `E2-P06` is its consumer and `xtask` is where the finding is
+//! rendered into a sentence, because that is where an allocator is.
+//!
 //! # What this crate does not hold
 //!
 //! A codec. Every byte layout is `f_abi::store`'s, and the reason is in that
@@ -58,8 +68,10 @@
 
 #![no_std]
 
+pub mod diff;
 pub mod fold;
 pub mod record;
 
+pub use diff::{Divergence, divergence};
 pub use fold::root;
 pub use record::{Refusal, Tree};

@@ -4,6 +4,28 @@ xtask = "run --package xtask --"
 [build]
 # Host builds by default so `cargo test` covers abi/env/ring/init. The kernel is
 # built for its own target explicitly by `cargo xtask build`.
+#
+# The checkout path must not reach a build product. `E0-R01` measured
+# reproduction at one path and `E2-B04`'s rehearsal ran two containers over one
+# checkout, so until this line existed the whole path-dependence class was
+# untested — and it was not empty: `cargo xtask generation` at `/work` and at
+# `/tmp/a-second-checkout-path`, same commit, same image, same volumes, produced
+# two different frame leaves and two different roots. Two runners on two dates do
+# not share a checkout, so without this the first leaf `E2-P06`'s job names is
+# the frame's, every week, for a reason that is not the evaluator's.
+#
+# `-Zremap-cwd-prefix` and not `--remap-path-prefix`, which is what
+# `intent/0006-state/spec.md` offers as the alternative: the stable flag takes a
+# literal prefix, and the prefix wanted here is *wherever this tree happens to be
+# checked out*, which a committed file cannot spell. This one remaps the working
+# directory itself, so it is the same line on every runner. It costs the nightly
+# channel, which `rust-toolchain.toml` already pins for other reasons.
+#
+# *What would reverse this:* the tree moving to a stable channel. Then the prefix
+# has to be computed by whoever spawns cargo — `xtask` knows `root()` — and this
+# becomes `--remap-path-prefix=<root>=/f` injected there instead, which is worse
+# only in that a plain `cargo build` no longer gets it.
+rustflags = ["-Zremap-cwd-prefix=."]
 
 # The kernel is a fixed-address image, not a relocatable one. Without these it
 # links as a static-PIE at vaddr 0, which no loader can place — and the failure
@@ -11,8 +33,17 @@ xtask = "run --package xtask --"
 #
 # The linker script is relative to the workspace root, which is where xtask runs
 # cargo from.
+#
+# The remap is repeated here rather than inherited, and the repetition is the
+# point: cargo does not merge `build.rustflags` with `target.<triple>.rustflags`
+# — the more specific list *replaces* the other one — so a remap written only
+# above would apply to every crate in this tree except the one image the
+# generation root's frame leaf is taken over. That is the exact shape of a check
+# that silently stops checking, so the duplication stays and this comment is why.
+# `cargo xtask lint-remap` is what keeps the two lists agreeing.
 [target.x86_64-unknown-none]
 rustflags = [
+    "-Zremap-cwd-prefix=.",
     "-C", "relocation-model=static",
     # The image lives in the top two gibibytes, which is what this code model
     # describes: a sign-extended 32-bit displacement reaches anything in the

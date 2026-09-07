@@ -78,13 +78,14 @@ struct Source {
     routes: Vec<(String, String, String)>,
 }
 
-/// `cargo xtask generation [--decompile]`.
+/// `cargo xtask generation [--decompile | --emit DIR | --compare A B | --elsewhere | --mutate]`.
 ///
 /// # Errors
 ///
 /// Anything from a source that does not fit the grammar to a build that did not
 /// produce a component file.
-pub fn generation(option: Option<&str>) -> Result<(), String> {
+pub fn generation(args: &[String]) -> Result<(), String> {
+    let option = args.first().map(String::as_str);
     let decompile = match option {
         None => false,
         Some("--decompile") => true,
@@ -97,9 +98,46 @@ pub fn generation(option: Option<&str>) -> Result<(), String> {
                         docs/booting-on-hardware.md documents."
                 .into());
         }
+        // E2-P06's four. Each is below, beside the argument for its shape.
+        Some("--emit") => return emit(args.get(1..).unwrap_or_default()),
+        Some("--compare") => {
+            let (Some(left), Some(right)) = (args.get(1), args.get(2)) else {
+                return Err("`--compare` takes two directories, each written by `cargo xtask \
+                            generation --emit`. The weekly job hands it one per runner."
+                    .into());
+            };
+            return compare(Path::new(left), Path::new(right));
+        }
+        Some("--elsewhere") => return elsewhere(&[]),
+        Some("--mutate") => return mutate(),
         Some(other) => return Err(format!("unknown option for generation: {other}")),
     };
 
+    let built = compile_here(&[])?;
+    let tree = checked(&built.bytes)?;
+
+    if decompile {
+        print!("{}", decompile_tree(&tree));
+        return Ok(());
+    }
+
+    print_tree(&built, &tree);
+    let root = fold::root(&tree);
+
+    let module = pack_module(&root, &tree, &built.source.components)?;
+    let size = std::fs::metadata(&module).map(|m| m.len()).unwrap_or(0);
+    println!("\n  module     {}  ({size} bytes)", crate::relative(&module));
+    Ok(())
+}
+
+/// Read the source, build everything it names, and encode the record tree.
+///
+/// `defects` are kernel features, and the only caller that passes any is
+/// [`mutate`]. They reach the *frame* build and nothing else, which is what
+/// makes a defect built this way land in exactly one leaf — so a comparison that
+/// then names some other leaf is a comparison that is not reading what it thinks
+/// it is reading.
+fn compile_here(defects: &[&str]) -> Result<Compiled, String> {
     let path = crate::root().join(SOURCE);
     let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {SOURCE}: {e}"))?;
     let source = read(SOURCE, &text)?;
@@ -107,14 +145,36 @@ pub fn generation(option: Option<&str>) -> Result<(), String> {
 
     // The frame, then the components, in that order because the frame's build
     // is the slow one and a source that is wrong should not have paid for it.
-    let frame_hash = frame_image()?;
+    let frame = frame_image(defects)?;
     let mut components = Vec::new();
     for name in &source.components {
         components.push(component_hash(name)?);
     }
 
-    let bytes = compile(&source, frame_hash, &components)?;
-    let tree = Tree::check(&bytes).map_err(|why| {
+    let bytes = compile(&source, frame, &components)?;
+    Ok(Compiled { source, frame, components, bytes })
+}
+
+/// One compilation of `user/generation.toml`: the source it read, the content
+/// addresses it built, and the record tree it encoded from them.
+///
+/// A struct rather than a tuple because the tuple had four members and two of
+/// them were `[u8; 32]`-shaped, which is one transposition away from a leaf
+/// printed under the wrong name — and the whole value of this command is that
+/// the name beside a hash is right.
+struct Compiled {
+    source: Source,
+    /// The frame image's content address.
+    frame: [u8; 32],
+    /// Every component file's, in the source's canonical order.
+    components: Vec<[u8; 32]>,
+    /// The encoded record tree, unchecked. [`checked`] is what believes it.
+    bytes: Vec<u8>,
+}
+
+/// The checker's refusal, with the sentence that says whose defect it is.
+fn checked(bytes: &[u8]) -> Result<Tree<'_>, String> {
+    Tree::check(bytes).map_err(|why| {
         format!(
             "the record tree this compiler produced is not one it believes: {}\n\n\
              That is a defect in xtask/src/generation.rs and not in {SOURCE}: the source \
@@ -122,26 +182,18 @@ pub fn generation(option: Option<&str>) -> Result<(), String> {
              encoder disagreeing with the checker about the format they share.",
             why.message()
         )
-    })?;
+    })
+}
 
-    if decompile {
-        print!("{}", decompile_tree(&tree));
-        return Ok(());
-    }
-
+/// The block every mode prints, so that two runs are two comparable logs.
+fn print_tree(built: &Compiled, tree: &Tree<'_>) {
     println!("generation  {SOURCE}\n");
-    println!("  {:<10} {:<14} {}", "frame", source.frame, hex(&frame_hash));
-    for (name, hash) in source.components.iter().zip(&components) {
+    println!("  {:<10} {:<14} {}", "frame", built.source.frame, hex(&built.frame));
+    for (name, hash) in built.source.components.iter().zip(&built.components) {
         println!("  {:<10} {:<14} {}", "component", name, hex(hash));
     }
-    println!("  {:<10} {:<14} {}", "topology", "", hex(&fold::topology(&tree)));
-    let root = fold::root(&tree);
-    println!("  {:<10} {:<14} {}", "root", "", hex(&root));
-
-    let module = pack_module(&root, &tree, &source.components)?;
-    let size = std::fs::metadata(&module).map(|m| m.len()).unwrap_or(0);
-    println!("\n  module     {}  ({size} bytes)", crate::relative(&module));
-    Ok(())
+    println!("  {:<10} {:<14} {}", "topology", "", hex(&fold::topology(tree)));
+    println!("  {:<10} {:<14} {}", "root", "", hex(&fold::root(tree)));
 }
 
 /// Read the source through the reader `manifest.rs` already has.
@@ -472,8 +524,8 @@ fn from_tree(tree: &Tree<'_>) -> Source {
 /// `to_elf32` rewrites headers only, so the two differ by a container and not by
 /// a byte of code — which is exactly why naming which one is hashed is worth a
 /// sentence rather than being left to whoever reads the path.
-fn frame_image() -> Result<[u8; 32], String> {
-    crate::build()?;
+fn frame_image(defects: &[&str]) -> Result<[u8; 32], String> {
+    crate::build_with(defects)?;
     let path = crate::kernel_elf32();
     let bytes =
         std::fs::read(&path).map_err(|e| format!("reading {}: {e}", crate::relative(&path)))?;
@@ -658,6 +710,355 @@ fn walk(dir: &Path, found: &mut Vec<PathBuf>) -> Result<(), String> {
             walk(&path, found)?;
         } else if name == "generation.toml" {
             found.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// The file a run leaves for another run to compare against: the record tree,
+/// as bytes.
+///
+/// The *tree* and not the printed block, because a job that parses a log is a
+/// job that can parse it wrong, and because the tree is what the fold is over —
+/// so the comparison and the root are taken from one artefact rather than from
+/// two things that are supposed to agree. `trace --hash` made the same choice
+/// for the same reason one epoch earlier.
+const TREE_FILE: &str = "tree.bin";
+
+/// The root, as sixty-four hexadecimal characters and a newline.
+///
+/// Redundant with [`TREE_FILE`] — it can be recomputed from it — and written
+/// anyway, because it is what a person reads out of an artefact and what a
+/// workflow can compare with `test`. [`compare`] recomputes it and refuses a
+/// pair whose file and tree disagree, so the redundancy is checked rather than
+/// trusted.
+const ROOT_FILE: &str = "root";
+
+/// `cargo xtask generation --emit DIR [--defect FEATURE]`.
+///
+/// One run's half of a comparison. The weekly job runs this on each runner and
+/// uploads the directory; [`compare`] is what a third job then runs over the
+/// two.
+fn emit(rest: &[String]) -> Result<(), String> {
+    let Some(dir) = rest.first() else {
+        return Err("`--emit` takes a directory to write the run's artefact into.".into());
+    };
+    let defect = match rest.get(1).map(String::as_str) {
+        None => None,
+        Some("--defect") => Some(rest.get(2).ok_or("`--defect` takes a kernel feature name")?),
+        Some(other) => return Err(format!("unknown option for generation --emit: {other}")),
+    };
+    let defects: Vec<&str> = defect.map(|name| vec![name.as_str()]).unwrap_or_default();
+
+    let built = compile_here(&defects)?;
+    let tree = checked(&built.bytes)?;
+    print_tree(&built, &tree);
+
+    let dir = Path::new(dir);
+    std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    std::fs::write(dir.join(TREE_FILE), tree.bytes())
+        .map_err(|e| format!("writing {}: {e}", dir.join(TREE_FILE).display()))?;
+    let root = hex(&fold::root(&tree));
+    std::fs::write(dir.join(ROOT_FILE), format!("{root}\n"))
+        .map_err(|e| format!("writing {}: {e}", dir.join(ROOT_FILE).display()))?;
+    println!("\n  emitted    {}  ({} bytes of record tree)", dir.display(), tree.bytes().len());
+    Ok(())
+}
+
+/// One emitted artefact, checked.
+fn read_emitted(dir: &Path) -> Result<Vec<u8>, String> {
+    let path = dir.join(TREE_FILE);
+    let bytes = std::fs::read(&path).map_err(|e| {
+        format!(
+            "reading {}: {e}\n\n\
+             That file is written by `cargo xtask generation --emit`. A comparison with \
+             one side missing is not a comparison, so this is fatal rather than a skip: \
+             the likeliest cause is a run that failed before it emitted, and reporting \
+             *agreed* for a pair with one member would be the worst possible answer.",
+            path.display()
+        )
+    })?;
+    let recorded = std::fs::read_to_string(dir.join(ROOT_FILE))
+        .map_err(|e| format!("reading {}: {e}", dir.join(ROOT_FILE).display()))?;
+    let tree = Tree::check(&bytes).map_err(|why| {
+        format!("{}: the record tree is refused: {}", path.display(), why.message())
+    })?;
+    let root = hex(&fold::root(&tree));
+    if root != recorded.trim() {
+        return Err(format!(
+            "{}: the recorded root is {}, and folding the tree beside it gives {root}.\n\n\
+             The two are written by one command over one tree, so they cannot disagree \
+             unless the artefact was edited or the fold moved between writing and reading. \
+             Either way the pair is not evidence about anything.",
+            dir.display(),
+            recorded.trim()
+        ));
+    }
+    Ok(bytes)
+}
+
+/// `cargo xtask generation --compare A B`: two emitted runs, and the first place
+/// they stop agreeing.
+///
+/// # Why this prints a leaf and not a verdict
+///
+/// Because *two roots differed* is the finding nobody can act on, and it is the
+/// one this whole task exists to stop producing. `f_generation::diff` descends
+/// leaves before roots, so what comes back names the input that moved — and when
+/// nothing below the root moved, it says *that* instead of blaming an input it
+/// cannot name.
+fn compare(left: &Path, right: &Path) -> Result<(), String> {
+    let (a, b) = (read_emitted(left)?, read_emitted(right)?);
+    let (ta, tb) = (checked(&a)?, checked(&b)?);
+    let (ra, rb) = (fold::root(&ta), fold::root(&tb));
+
+    println!("generation root");
+    println!("  {:<28} {}", crate::relative(left), hex(&ra));
+    println!("  {:<28} {}", crate::relative(right), hex(&rb));
+
+    let Some(divergence) = f_generation::divergence(&ta, &tb) else {
+        println!("\n  agreed: {}", hex(&ra));
+        return Ok(());
+    };
+    Err(finding(&divergence, left, right))
+}
+
+/// The divergence, as the sentence the job's log carries and its issue quotes.
+///
+/// Written here and not in `f-generation` because this is where an allocator is:
+/// that crate is `no_std`, hands back the padded name out of the record, and
+/// deliberately does not know that one of these two runs is a runner called `a`.
+fn finding(divergence: &f_generation::Divergence, left: &Path, right: &Path) -> String {
+    use f_generation::Divergence;
+
+    let name = |padded: &[u8]| -> String {
+        let end = padded.iter().position(|b| *b == 0).unwrap_or(padded.len());
+        String::from_utf8_lossy(&padded[..end]).into_owned()
+    };
+    let (l, r) = (crate::relative(left), crate::relative(right));
+
+    match divergence {
+        Divergence::Leaf { left: a, right: b } => format!(
+            "the generation roots differ, and the input that moved is `{}`.\n\n\
+             \x20 {l:<28} {}\n\
+             \x20 {r:<28} {}\n\n\
+             That leaf names a content address, so the two runs were handed different \
+             bytes under one name. It is the *first* leaf that differs in fold order and \
+             not necessarily the only one — fix this one and run the comparison again.\n\n\
+             The frame is the leaf that carries debug information, so if this is `{}` the \
+             first thing to check is that `.cargo/config.toml`'s remap still reaches the \
+             `x86_64-unknown-none` target: cargo replaces `build.rustflags` with the \
+             target's list rather than merging them, and a remap that stopped applying \
+             there applies everywhere except the one image this leaf is taken over. \
+             `cargo xtask lint-remap` is the check that was supposed to catch that, and \
+             its being green while this is red is itself a finding.",
+            name(&a.name),
+            hex(&a.hash),
+            hex(&b.hash),
+            name(&a.name),
+        ),
+        Divergence::Membership { left: a, right: b } => format!(
+            "the two runs do not name the same components.\n\n\
+             \x20 {l:<28} {}\n\
+             \x20 {r:<28} {}\n\n\
+             That is not a reproducibility finding about a build: it is two different \
+             `user/generation.toml` files, which means the two runs were not at one \
+             commit. Check what each one checked out before looking at anything else.",
+            a.map_or("(nothing here)".into(), |leaf| name(&leaf.name)),
+            b.map_or("(nothing here)".into(), |leaf| name(&leaf.name)),
+        ),
+        Divergence::Route { index, .. } => format!(
+            "every leaf agrees and route {index} does not.\n\n\
+             A route is a field of the topology and not a child of it, so this changes \
+             the root while every content address under it stands still. Same conclusion \
+             as a membership difference: two sources, not two builds."
+        ),
+        Divergence::Head => "every member and every route agrees and the topology's stored head \
+             does not.\n\n\
+             Only two counts live in that head and both are implied by what has already \
+             been compared, so reaching this is a statement about the encoder in \
+             xtask/src/generation.rs rather than about either run's inputs."
+            .to_string(),
+        Divergence::Compiler => "every leaf agrees and the roots do not.\n\n\
+             Nothing was handed different bytes, so the *fold* is what differed. That is \
+             a defect in `generation/` or in `abi/src/store.rs` — two builds of this \
+             workspace that do not agree about the arithmetic over one tree — and it is \
+             not a non-reproducible input. No input is named here because there is none \
+             to name, which is the whole reason this case is separated from the one \
+             above it."
+            .to_string(),
+    }
+}
+
+/// Where the second checkout goes.
+///
+/// Deliberately of a different length and a different shape from any checkout
+/// this tree is built in, because the failure being looked for is a path
+/// *appearing in* an artefact and two paths of equal length can hide one: a
+/// remap that replaced the prefix with something the same width would leave two
+/// images that differ nowhere a byte comparison could see, and the check would
+/// pass for the wrong reason.
+const ELSEWHERE: &str = "f-generation-at-an-entirely-different-checkout-path";
+
+/// `cargo xtask generation --elsewhere`: the same expression, evaluated at two
+/// paths, and one root.
+///
+/// # What this demonstrates that `E2-B04`'s rehearsal could not
+///
+/// `E2-B04` ran the fold twice in two containers over **one checkout**, and its
+/// own `TODO.md` line says what that leaves untested: every difference two
+/// machines can have except the one they certainly do have, which is where the
+/// tree is. This is that one. It copies the working tree to a second path, runs
+/// the same verb there, and requires one root — and before `.cargo/config.toml`
+/// carried a remap it did not get one:
+///
+/// ```text
+/// /work                          frame c764535 0…  root b142e37c…
+/// /tmp/a-second-checkout-path     frame d03b72f8…  root 65494a4f…
+/// ```
+///
+/// Measured on 2026-09-07, same image, same commit, same volumes, four component
+/// leaves and the topology hash identical in both — so the divergence was one
+/// leaf and it named itself, which is the behaviour the job is built on.
+///
+/// # What it still is not
+///
+/// Two machines. One host, one kernel, one filesystem, one uid, one clock: this
+/// separates the *path* out of that bundle and says nothing about the rest. The
+/// two-runner half is `.github/workflows/weekly.yml`, and it is a job rather
+/// than a command for the reason `E0-R01`'s `address` job is one.
+fn elsewhere(defects: &[&str]) -> Result<(), String> {
+    let there = copy_tree()?;
+    let here = crate::target_dir().join("generation").join("here");
+    let mirror = there.join("target").join("generation").join("there");
+
+    let mut args = vec!["xtask".to_string(), "generation".to_string(), "--emit".to_string()];
+    args.push(here.display().to_string());
+    for defect in defects {
+        args.push("--defect".to_string());
+        args.push((*defect).to_string());
+    }
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    crate::sh("cargo", &borrowed)?;
+
+    // The second run is a *child process* rather than another call into this
+    // one, and that is not incidental. `crate::root()` is `env!("CARGO_MANIFEST_DIR")`
+    // — the path this binary was compiled at — so an xtask built here and called
+    // in a loop would compile the second tree's kernel while still believing it
+    // was at the first path, and would then compare an image against itself. The
+    // child rebuilds xtask in the tree it is run from, which is what makes the
+    // two paths two paths.
+    let mut args = vec!["xtask".to_string(), "generation".to_string(), "--emit".to_string()];
+    args.push(mirror.display().to_string());
+    for defect in defects {
+        args.push("--defect".to_string());
+        args.push((*defect).to_string());
+    }
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    crate::run_in(&there, "cargo", &borrowed)?;
+
+    println!("\ntwo checkouts, one expression\n");
+    println!("  {:<12} {}", "here", crate::root().display());
+    println!("  {:<12} {}", "elsewhere", there.display());
+    println!();
+    compare(&here, &mirror)
+}
+
+/// `cargo xtask generation --mutate`: the half that says a green comparison
+/// means something.
+///
+/// A reproducibility check that has only ever passed is indistinguishable from
+/// one that cannot fail, and this one is unusually easy to get wrong in that
+/// direction — a comparison over an artefact that does not contain the build at
+/// all would agree with itself forever. So the deliberate defect compiles the
+/// build path into the frame image, and this requires the two-path comparison to
+/// go red **and to name the frame**. Going red is not the assertion: a
+/// comparison that failed for some other reason would satisfy an exit code and
+/// prove nothing, which is the argument `MUTATIONS` makes for every boot.
+fn mutate() -> Result<(), String> {
+    println!("[1/2] two checkouts, honest build — the roots must agree\n");
+    elsewhere(&[])?;
+
+    println!("\n[2/2] with the build path compiled in — they must differ, and name the frame\n");
+    let armed = elsewhere(&[PATH_DEFECT]);
+    let Err(report) = armed else {
+        return Err(format!(
+            "the kernel built with `{PATH_DEFECT}` still produced one root at two paths.\n\n\
+             That means this check cannot fail, which makes the green result above worth \
+             nothing. Either the defect is no longer in the image — `#[used]` is what keeps \
+             the linker from dropping a static nothing reads — or the comparison is over \
+             something that does not contain the frame."
+        ));
+    };
+    if !report.contains("the input that moved is `kernel`") {
+        return Err(format!(
+            "the armed comparison went red and did not name the frame:\n\n{report}\n\n\
+             Red is not the assertion. `{PATH_DEFECT}` puts a path in exactly one leaf, so \
+             a comparison that names a different one — or that names nothing — is reading \
+             something other than what it believes it is reading, and the green run above \
+             says nothing either."
+        ));
+    }
+    println!("{report}");
+    println!(
+        "\n  ...which is the required failure, and it named the frame.\n\n\
+         generation --mutate: ok — the two-path comparison can fail, and the leaf it \
+         names is the one the defect is in."
+    );
+    Ok(())
+}
+
+/// The kernel feature that makes an image a function of where it was built.
+pub const PATH_DEFECT: &str = "mutate-path-in-image";
+
+/// Copy the working tree to [`ELSEWHERE`], and say where it went.
+///
+/// `target/` is skipped because it is build output and because in the
+/// development container it is a volume rather than a directory; `.git` is
+/// skipped because it is a checkout's identity and not its content, and in a
+/// worktree it is a file pointing outside the tree entirely. Everything else
+/// goes, including the dotfiles, because `.cargo/config.toml` is the thing being
+/// tested and a copy without it would test nothing.
+///
+/// The copy is refreshed rather than rebuilt: the second tree keeps its own
+/// `target/` between runs, so `--mutate`'s four builds are one cold build and
+/// three kernel rebuilds rather than four cold builds.
+fn copy_tree() -> Result<PathBuf, String> {
+    let dest = std::env::temp_dir().join(ELSEWHERE);
+    let source = crate::root();
+    let mut copied = 0usize;
+    copy_into(&source, &dest, &mut copied)?;
+    println!("  copied     {copied} file(s) to {}", dest.display());
+    Ok(dest)
+}
+
+fn copy_into(from: &Path, to: &Path, copied: &mut usize) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|e| format!("creating {}: {e}", to.display()))?;
+    let entries =
+        std::fs::read_dir(from).map_err(|e| format!("reading {}: {e}", from.display()))?;
+    // Sorted for the reason `walk` above is sorted: directory order is a
+    // filesystem's business, and this function's whole purpose is to leave two
+    // trees that differ in nothing.
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        paths.push(entry.map_err(|e| format!("reading {}: {e}", from.display()))?.path());
+    }
+    paths.sort();
+    for path in paths {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let target = to.join(name);
+        if path.is_dir() {
+            if matches!(name, "target" | ".git") {
+                continue;
+            }
+            copy_into(&path, &target, copied)?;
+        } else if path.is_file() {
+            if name == ".git" {
+                continue;
+            }
+            std::fs::copy(&path, &target)
+                .map_err(|e| format!("copying {} to {}: {e}", path.display(), target.display()))?;
+            *copied += 1;
         }
     }
     Ok(())
