@@ -14,6 +14,7 @@ cargo xtask fault pf   # boot into a deliberate fault; pf, ud, df, nx, wx or sta
 cargo xtask user       # seven boots: a process violates one rule each, and is killed
 cargo xtask cap        # eight boots: a process tries to escape its capabilities
 cargo xtask mutate     # build the kernel wrong on purpose; the boot must go red
+cargo xtask attest     # what is this machine running; modify the frame, the answer moves
 cargo xtask iommu      # a real device transfers outside its domain, and is faulted
 cargo xtask blk|net|gpu # the three datapath boots; each has a control that must fail
 cargo xtask sim        # the simulator: every scenario reproduces from its seed

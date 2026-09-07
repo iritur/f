@@ -585,19 +585,45 @@ fn from_tree(tree: &Tree<'_>) -> Source {
     Source { frame: label(&tree.frame().name), components, routes }
 }
 
-/// The frame image's content address.
+/// The frame image's content address: RFC 0012's two ranges, and not the file.
 ///
-/// The ELF32 container and not the ELF64 one, because the ELF32 is what a loader
-/// is handed and *what are you running* is a question about the thing that ran.
-/// `to_elf32` rewrites headers only, so the two differ by a container and not by
-/// a byte of code — which is exactly why naming which one is hashed is worth a
-/// sentence rather than being left to whoever reads the path.
+/// # Why this is not the SHA-256 of the ELF
+///
+/// It was, and the change is `E2-B07`'s. RFC 0012 says two things about this
+/// value in one paragraph each, and only one hash satisfies both. It is *the
+/// frame hash*, defined there as SHA-256 over `__text_start .. __text_end` then
+/// `__rodata_start .. __rodata_end` of the linked image, which the frame
+/// recomputes over itself at boot. And it is *a duplicate of a leaf that already
+/// sits under `root`*, which is this leaf. A whole-file digest satisfies the
+/// second and cannot satisfy the first: a running frame has no access to its own
+/// ELF — `.boot` is unmapped after the address-space switch, the section headers
+/// were never loaded at all — so a `frame` field spelled that way is a field
+/// nothing on the machine can ever check, which is a field nothing checks.
+///
+/// What the change costs, stated rather than discovered: every root this command
+/// has ever printed moves, because the leaf under it does. Nothing in the tree
+/// pins one, and `E2-P06`'s two-checkout comparison is unaffected — the path
+/// `mutate-path-in-image` compiles in is a string literal and lands in
+/// `.rodata`, inside the measured range.
+///
+/// What it deliberately stops covering is what RFC 0012 deliberately excludes:
+/// `.boot`, `.data`, `.got`, `.bss`, `.stacks` and the ELF headers themselves. A
+/// change confined to a writable initial value is invisible in this leaf now,
+/// where a whole-file hash would have caught it. That is a real narrowing and it
+/// is the RFC's, not this function's; the RFC names it as one of its own
+/// reversal conditions, and `cargo xtask attest` is where the coverage is
+/// demonstrated rather than asserted.
+///
+/// The ELF64 is read rather than the ELF32, and the old comment's argument for
+/// the other choice does not survive the change: it was about which *file* a
+/// loader is handed, and the value is no longer a digest of a file. `to_elf32`
+/// rewrites headers only, so the two ranges are the same bytes at the same
+/// offsets in both; the 64-bit container is the one the linker produced and the
+/// one whose symbol table `crate::measure` reads the boundaries out of.
 fn frame_image(defects: &[&str]) -> Result<[u8; 32], String> {
     crate::build_with(defects)?;
-    let path = crate::kernel_elf32();
-    let bytes =
-        std::fs::read(&path).map_err(|e| format!("reading {}: {e}", crate::relative(&path)))?;
-    Ok(f_hash::sha256(&bytes))
+    let (digest, _) = crate::measure::frame(&crate::kernel_elf64())?;
+    Ok(digest)
 }
 
 /// One component file's content address.
@@ -683,6 +709,63 @@ fn pack_module(root: &[u8; 32], tree: &Tree<'_>, names: &[String]) -> Result<Pat
     let path = dir.join(format!("{}.fcm", hex(root)));
     std::fs::write(&path, &out).map_err(|e| format!("writing {}: {e}", path.display()))?;
     Ok(path)
+}
+
+/// What a booting machine is told it is: `f.root=<hex> f.frame=<hex>`.
+///
+/// # Why a boot gets both tokens and not just the first
+///
+/// Because a selection is not a statement about the frame. `f.root=` says *be
+/// this generation*; the frame then has thirty-two bytes it cannot check —
+/// checking them means folding a record tree, which is `f-assembler`'s job and
+/// RFC 0066 puts that above the frame with no caller. `f.frame=` is the half the
+/// frame *can* check, and RFC 0012 is explicit that checking it is the whole of
+/// what a self-measurement buys: the field it compares is the same field a swap
+/// compares to decide whether it needs a reboot.
+///
+/// # Why this is memoised
+///
+/// Because `emulator` is on the path of every boot in this tree — `user` runs
+/// seven, `cap` eight — and a generation compiled per boot would run the
+/// component builder once per boot for a value that cannot have changed between
+/// two boots of one command. The key is the feature list, because a defect
+/// reaches the frame leaf and two boots with different defects are two
+/// generations. A `BTreeMap` rather than the obvious other thing, because
+/// `xtask` is checked by the determinism lint it implements.
+///
+/// # Errors
+///
+/// Anything [`compile_here`] can fail with.
+pub fn identity_tokens(features: &[&str]) -> Result<String, String> {
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<String, String>>> =
+        std::sync::OnceLock::new();
+    let memo = MEMO.get_or_init(Default::default);
+    let key = features.join(",");
+    if let Ok(seen) = memo.lock()
+        && let Some(tokens) = seen.get(&key)
+    {
+        return Ok(tokens.clone());
+    }
+
+    let built = compile_here(features)?;
+    let tree = checked(&built.bytes)?;
+    let root = fold::root(&tree);
+    let tokens = format!(
+        "{}{} {}{}",
+        f_abi::boot::KEY,
+        hex(&root),
+        f_abi::boot::FRAME_KEY,
+        // The frame leaf, and not a second measurement taken here. RFC 0012's
+        // `frame` field is *a duplicate of a leaf that already sits under
+        // `root`*, and a boot told a number this command computed on the side
+        // would be a boot checking something the root does not contain.
+        hex(&built.frame),
+    );
+
+    if let Ok(mut seen) = memo.lock() {
+        seen.insert(key, tokens.clone());
+    }
+    Ok(tokens)
 }
 
 /// The round-trip fixpoint, over every `generation.toml` in the tree.

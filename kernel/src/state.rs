@@ -240,6 +240,95 @@ pub mod node {
     pub const COMPONENT_TREE_2: u32 = 39;
     /// The fourth place's.
     pub const COMPONENT_TREE_3: u32 = 40;
+    /// What this machine is running. RFC 0012.
+    ///
+    /// The node the exit of `E2-B07` is about: *the machine answers "what are
+    /// you running" with one hash*. The nine below are that answer, and they are
+    /// nine rather than two because a node here is a machine word and a digest
+    /// is four of them — which is the price RFC 0013's per-node atomicity
+    /// charges for a value wider than a word, and the reason the counter beside
+    /// them exists.
+    pub const GENERATION: u32 = 41;
+    /// Which publish the root below is, or zero for *no root describes this
+    /// machine*.
+    ///
+    /// **Read this first and last.** RFC 0013 promises that a snapshot is atomic
+    /// per node and says nothing about two nodes being from one instant, so a
+    /// reader that loaded four root words without bracketing them would be
+    /// entitled to a torn root. The protocol RFC 0012 fixes is: load this; if it
+    /// is zero there is no answer; otherwise load the four root words and the
+    /// four frame words, load this again, and accept only if it did not change.
+    ///
+    /// Zero on this boot means the loader named no generation — the frame knows
+    /// what it is running and has not been told which generation that is. It is
+    /// the same zero a swap publishes while it is in progress, which is why the
+    /// format reserves it rather than giving *none* a value of its own.
+    pub const GENERATION_COUNTER: u32 = 42;
+    /// The generation root, low word first. Zero when the counter is.
+    ///
+    /// Four nodes and not one, and the split is little-endian over the digest's
+    /// own byte order: word `n` is bytes `8n .. 8n + 8` of the thirty-two
+    /// SHA-256 produces, read as a little-endian `u64`. Written down because a
+    /// reader assembling the wrong way round gets a hash that is not any
+    /// machine's and no length check would say so.
+    pub const GENERATION_ROOT_0: u32 = 43;
+    /// Bytes 8..16 of the root.
+    pub const GENERATION_ROOT_1: u32 = 44;
+    /// Bytes 16..24 of the root.
+    pub const GENERATION_ROOT_2: u32 = 45;
+    /// Bytes 24..32 of the root.
+    pub const GENERATION_ROOT_3: u32 = 46;
+    /// The frame hash this image measured of itself, low word first.
+    ///
+    /// **Published whether or not a root is**, which is the one place this
+    /// subtree departs from RFC 0012's root record. There the `frame` field is a
+    /// field of a record that exists only when a generation does; here it is the
+    /// frame's own measurement of its own text and rodata, and it is true of the
+    /// machine whether or not anybody told the machine which generation it is.
+    /// A reader that has the counter at zero still has this, and what it has is
+    /// *what this frame is*, without *which generation that frame belongs to*.
+    ///
+    /// It is a measurement and not a declaration: when the counter is one, the
+    /// frame has already refused to boot unless this equalled what the
+    /// generation declared, so the two readings are the same number arrived at
+    /// twice. RFC 0012 is explicit about what that does not prove — it is a
+    /// claim by the thing being measured, and an image modified to report the
+    /// old digest defeats it.
+    pub const GENERATION_FRAME_0: u32 = 47;
+    /// Bytes 8..16 of the frame hash.
+    pub const GENERATION_FRAME_1: u32 = 48;
+    /// Bytes 16..24 of the frame hash.
+    pub const GENERATION_FRAME_2: u32 = 49;
+    /// Bytes 24..32 of the frame hash.
+    pub const GENERATION_FRAME_3: u32 = 50;
+
+    /// The node the `n`th word of the root lives in, or `None` past the fourth.
+    ///
+    /// A function rather than an array, for [`mount`]'s reason: the ids are the
+    /// wire, and an array would make a position the wire.
+    #[must_use]
+    pub const fn root_word(n: usize) -> Option<u32> {
+        match n {
+            0 => Some(GENERATION_ROOT_0),
+            1 => Some(GENERATION_ROOT_1),
+            2 => Some(GENERATION_ROOT_2),
+            3 => Some(GENERATION_ROOT_3),
+            _ => None,
+        }
+    }
+
+    /// The node the `n`th word of the frame hash lives in, or `None` past the
+    /// fourth.
+    #[must_use]
+    pub const fn frame_word(n: usize) -> Option<u32> {
+        match n {
+            0 => Some(GENERATION_FRAME_0),
+            1 => Some(GENERATION_FRAME_1),
+            2 => Some(GENERATION_FRAME_2),
+            3 => Some(GENERATION_FRAME_3),
+            _ => None,
+        }
+    }
 
     /// The mount node the place at `slot` publishes into, or `None` for a slot
     /// this build has no node for.
@@ -271,7 +360,7 @@ pub mod node {
 }
 
 /// How many nodes this build publishes.
-pub const NODES: usize = 41;
+pub const NODES: usize = 51;
 
 /// The schema, written once and never again for a generation.
 ///
@@ -519,8 +608,105 @@ const SCHEMA: [SchemaEntry; NODES] = [
         unit::ADDRESS,
         b"place3",
     ),
+    // What the machine is running. RFC 0012, and `E2-B07`.
+    //
+    // Every one of the nine is a `GAUGE` carrying `unit::NONE`, and both halves
+    // of that are deliberate. `NONE` because a digest word is an identifier and
+    // not a quantity — the same claim `unit::ADDRESS` exists to make one node
+    // over, and a reader that summed two of these would be adding two hashes
+    // together. `GAUGE` because the kinds this format has are subtree, counter,
+    // gauge and mount, and of those a gauge is the only one that means *what
+    // this is now*: a counter would invite a reader to chart a difference
+    // between two readings of a hash.
+    //
+    // A `DIGEST` kind would say it properly, and it is not minted here: that is
+    // a change to `f_abi::state`'s wire vocabulary, every reader in the tree has
+    // to learn it, and the format already has the escape RFC 0013 designed for
+    // exactly this — an unknown kind is skipped and counted rather than refused.
+    // *Reversal:* a second publisher of a digest, at which point one kind
+    // carries the convention instead of two comments agreeing about a unit.
+    SchemaEntry::new(
+        node::GENERATION,
+        node::ROOT,
+        40 * WORD,
+        kind::SUBTREE,
+        unit::NONE,
+        b"generation",
+    ),
+    SchemaEntry::new(
+        node::GENERATION_COUNTER,
+        node::GENERATION,
+        41 * WORD,
+        kind::GAUGE,
+        unit::NONE,
+        b"counter",
+    ),
+    SchemaEntry::new(
+        node::GENERATION_ROOT_0,
+        node::GENERATION,
+        42 * WORD,
+        kind::GAUGE,
+        unit::NONE,
+        b"root0",
+    ),
+    SchemaEntry::new(
+        node::GENERATION_ROOT_1,
+        node::GENERATION,
+        43 * WORD,
+        kind::GAUGE,
+        unit::NONE,
+        b"root1",
+    ),
+    SchemaEntry::new(
+        node::GENERATION_ROOT_2,
+        node::GENERATION,
+        44 * WORD,
+        kind::GAUGE,
+        unit::NONE,
+        b"root2",
+    ),
+    SchemaEntry::new(
+        node::GENERATION_ROOT_3,
+        node::GENERATION,
+        45 * WORD,
+        kind::GAUGE,
+        unit::NONE,
+        b"root3",
+    ),
+    SchemaEntry::new(
+        node::GENERATION_FRAME_0,
+        node::GENERATION,
+        46 * WORD,
+        kind::GAUGE,
+        unit::NONE,
+        b"frame0",
+    ),
+    SchemaEntry::new(
+        node::GENERATION_FRAME_1,
+        node::GENERATION,
+        47 * WORD,
+        kind::GAUGE,
+        unit::NONE,
+        b"frame1",
+    ),
+    SchemaEntry::new(
+        node::GENERATION_FRAME_2,
+        node::GENERATION,
+        48 * WORD,
+        kind::GAUGE,
+        unit::NONE,
+        b"frame2",
+    ),
+    SchemaEntry::new(
+        node::GENERATION_FRAME_3,
+        node::GENERATION,
+        49 * WORD,
+        kind::GAUGE,
+        unit::NONE,
+        b"frame3",
+    ),
     // Deliberately a kind nothing names. See `node::RESERVED_KIND`.
-    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 40 * WORD, 0xEE, unit::NONE, b"reserved"),
+    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 50 * WORD, 0xEE, unit::NONE, b"reserved"),
 ];
 
 /// Where the schema block starts: immediately after the header, on the
@@ -529,6 +715,39 @@ const SCHEMA_AT: u32 = 64;
 
 /// Where the data block starts.
 const DATA_AT: u32 = SCHEMA_AT + (NODES as u32) * 32;
+
+/// The `n`th eight bytes of a digest, as one published word.
+///
+/// Little-endian over the digest's own byte order, which is the order FIPS 180-4
+/// produces and the order the hexadecimal reads left to right. Written as a
+/// function rather than inline because the split is the wire: a reader that
+/// reassembled the wrong way round would get a hash that is not any machine's,
+/// and no length check anywhere would say so. `kernel/src/state.rs`'s node
+/// documentation states the same rule in words, for a reader who has only the
+/// schema.
+const fn word(digest: &[u8; 32], n: usize) -> u64 {
+    let at = n * 8;
+    u64::from_le_bytes([
+        digest[at],
+        digest[at + 1],
+        digest[at + 2],
+        digest[at + 3],
+        digest[at + 4],
+        digest[at + 5],
+        digest[at + 6],
+        digest[at + 7],
+    ])
+}
+
+/// Does this build have a node for `id`?
+///
+/// The question [`Tree::set`] answers silently and by doing nothing. That is the
+/// right behaviour for a counter — a mistaken counter must not take the machine
+/// down — and the wrong behaviour for anything a reader assembles out of more
+/// than one node, so a publisher of those asks first.
+fn publishes(id: u32) -> bool {
+    SCHEMA.iter().any(|entry| entry.id == id)
+}
 
 /// A published state tree, and the only handle to it.
 ///
@@ -719,6 +938,58 @@ impl Tree {
         true
     }
 
+    /// Publish what this machine is running, in the order a reader can survive.
+    ///
+    /// # Why the counter is stored last
+    ///
+    /// Because it is what brackets the other eight. RFC 0012 fixes the reader's
+    /// protocol — counter, eight words, counter again, accept only if it did not
+    /// change — and that protocol is only sound if the writer stores zero before
+    /// the words move and the new counter after they have all landed. The frame
+    /// gets the first half for free: the tree is published into a zeroed frame,
+    /// so the counter is already zero when this is called for the first and only
+    /// time on a boot. `E2-B06`'s swap is where the zero has to be stored on
+    /// purpose, and it is that task's to write.
+    ///
+    /// The frame words are published even when `root` is `None`, because they
+    /// are the frame's measurement of itself and are true of the machine whether
+    /// or not anybody told it which generation it belongs to. The root words are
+    /// not: a root nobody named is not zero, it is absent, and the counter is how
+    /// this format spells absent.
+    ///
+    /// Answers `false` for a build whose schema has lost one of the nine, which
+    /// a caller must treat as a failure rather than as nothing: a machine that
+    /// cannot say what it is running has not answered the question.
+    #[must_use]
+    pub fn publish_identity(
+        &self,
+        generation: u64,
+        root: Option<&[u8; 32]>,
+        frame: &[u8; 32],
+    ) -> bool {
+        for n in 0..4 {
+            let (Some(root_id), Some(frame_id)) = (node::root_word(n), node::frame_word(n)) else {
+                return false;
+            };
+            // Each id checked on its own and not as a pair. `set` is silent for
+            // an id this build has no node for, which is right for a counter and
+            // wrong here: half a digest published and half dropped is a value a
+            // reader would assemble and believe, so a missing node has to be a
+            // refusal and the refusal has to be able to see one of the two
+            // missing rather than only both.
+            if !publishes(root_id) || !publishes(frame_id) {
+                return false;
+            }
+            self.set(frame_id, word(frame, n));
+            self.set(root_id, root.map_or(0, |bytes| word(bytes, n)));
+        }
+        if !publishes(node::GENERATION_COUNTER) {
+            return false;
+        }
+        self.set(node::GENERATION_COUNTER, generation);
+        true
+    }
+
     /// How many mounts are occupied. Unit: trees.
     ///
     /// Counted off the data block rather than kept beside it, because a count
@@ -816,7 +1087,22 @@ impl Tree {
             for byte in entry.label() {
                 crate::kprint!("{}", *byte as char);
             }
-            if entry.kind == kind::MOUNT {
+            // A quarter of a digest, printed as sixteen hexadecimal characters
+            // rather than as a decimal number. RFC 0012 makes the root the thing
+            // two machines are compared on, and a comparison by eye against a
+            // number that has to be converted first is a comparison nobody
+            // performs. The full digest is on the `frame` and `generation` lines
+            // above; these four-word groups are what the *tree* carries, and a
+            // reader assembling them out of a log should be able to see the same
+            // characters in both places.
+            //
+            // Selected by parent rather than by kind, because the kind is
+            // `GAUGE` — see the schema — and a `DIGEST` kind is the change this
+            // would rather have. That is `f_abi::state`'s wire vocabulary and it
+            // is not minted for one publisher.
+            if entry.parent == node::GENERATION && entry.id != node::GENERATION_COUNTER {
+                crate::kprintln!(" = {value:#018x}");
+            } else if entry.kind == kind::MOUNT {
                 // Hexadecimal because it is an address, and an address printed
                 // in decimal is a number a reader has to convert before it
                 // means anything. Zero is *nothing is mounted here* and is

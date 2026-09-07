@@ -29,6 +29,14 @@ mod manifest;
 /// rather than a second one of its own. E2-B04.
 mod generation;
 
+/// The build side of RFC 0012's frame measurement: two ranges out of the linked
+/// ELF, hashed in the order the frame recomputes them. Split out because it is
+/// a format reader rather than a policy, and because the whole point of it is
+/// that it is a *second* implementation of one sentence — `kernel/src/measure.rs`
+/// is the other, and code shared between them would agree with itself and say
+/// nothing. E2-B07.
+mod measure;
+
 /// The target the kernel is built for.
 ///
 /// A built-in target and not a JSON file in `targets/`, which is a decision
@@ -542,6 +550,12 @@ fn main() -> ExitCode {
         // simulator kills and what a boot can. RFC 0041.
         "chaos" => chaos(),
         "mutate" => mutate(),
+        // E2-B07. What this machine is running, whether two boots of one image
+        // agree about it, and whether a modification to the frame moves it. RFC
+        // 0012 is the decision and is explicit about what the answer does not
+        // prove — which the command's own last paragraph repeats rather than
+        // leaving to a reader who has only seen a hash.
+        "attest" => attest(),
         "prove" => prove(args.get(1).map(String::as_str)),
         // E1-B14. What an unmap costs under churn, counted both ways in one
         // boot, and the host workload beside the E1-P10 claims that asks the
@@ -758,6 +772,11 @@ cargo xtask <command>
   mutate             Build the kernel with a deliberate defect, boot it, and
                      require the boot to go red — then require the same boot to
                      go green without it
+  attest             Five boots. What is this machine running, is the answer the
+                     same twice, does a modification to the frame move it, does
+                     the frame refuse to publish a root it cannot measure its way
+                     to, and is the reserved zero reachable. No signature and no
+                     freshness — RFC 0012 says what it does not prove
   prove [harness]    Bounded model checking, in two crates: the five capability
                      properties over arbitrary handles, and the ring's
                      validation paths over arbitrary peer bytes. Every harness
@@ -2018,8 +2037,31 @@ fn emulator(
     }
     qemu.args(["-initrd", &modules.join(",")]);
 
-    if let Some(append) = append {
-        qemu.args(["-append", append]);
+    // What this machine is, on the command line the loader hands the frame. RFC
+    // 0012 and `E2-B07`: `f.root=` selects a generation and `f.frame=` carries
+    // the frame hash that generation was compiled against, which the frame
+    // compares against its measurement of its own text and rodata before it will
+    // publish a root. Every boot gets them, because *what are you running* is a
+    // question a machine should be able to answer on a Tuesday and not only when
+    // a command asked it to.
+    //
+    // A caller that has already said what the machine is keeps what it said, and
+    // exactly one does. `attest` boots an image against a declaration taken from
+    // a *different* build in order to watch the comparison fail — the only way
+    // that comparison can fail at all, because a declaration computed from the
+    // image it is handed to agrees by construction, which would be a check that
+    // cannot go red and this tree does not keep those. And it boots one machine
+    // with [`UNSTATED`], which is how a caller says *tell this machine nothing*.
+    let stated =
+        append.is_some_and(|line| line.contains(f_abi::boot::KEY) || line.contains(UNSTATED));
+    let identity = if stated { String::new() } else { generation::identity_tokens(features)? };
+    let line = match (append, stated) {
+        (Some(append), true) => append.to_string(),
+        (Some(append), false) => format!("{append} {identity}"),
+        (None, _) => identity,
+    };
+    if !line.is_empty() {
+        qemu.args(["-append", &line]);
     }
 
     // Named by the caller, not defaulted. The kernel prints the loader's memory
@@ -2373,6 +2415,13 @@ const DEFECTS: &[&str] = &[
     // xtask generation --mutate` is its harness and requires the two-path
     // comparison to name the frame rather than merely to go red.
     generation::PATH_DEFECT,
+    // E2-B07's, and the only defect in this list that breaks nothing at all. It
+    // changes sixteen bytes of read-only data nothing reads, so the only thing
+    // in the system that can notice it is the frame's measurement of its own
+    // rodata — which is the property `cargo xtask attest` is about. A defect
+    // that also broke something would have demonstrated that the broken thing
+    // goes red rather than that the identity moved.
+    FRAME_DEFECT,
 ];
 
 /// The seed every reproduction run uses.
@@ -5509,6 +5558,365 @@ fn mutate() -> Result<(), String> {
 
     println!("\nall {} mutation(s) caught", MUTATIONS.len());
     Ok(())
+}
+
+/// How a caller says *boot this machine without telling it what it is*.
+///
+/// A word on the command line rather than a parameter on [`emulator`], because
+/// the frame's own rule is that a word it does not recognise is a word it
+/// ignores — so this reaches the kernel, changes nothing there, and is visible in
+/// the boot log of the one run that used it. A parameter would have been a fifth
+/// argument to a function six callers pass through and one caller cares about.
+///
+/// It is namespaced `f.` so that it reads as ours and cannot collide with a
+/// loader's own, and it is deliberately not `f.root=` with an empty value: an
+/// empty digest is a *malformed* token, which the frame refuses, and *nothing was
+/// said* is a different state from *something wrong was said*.
+const UNSTATED: &str = "f.unstated";
+
+/// The defect `attest` modifies the frame with.
+///
+/// Named here rather than spelled at four call sites, and it is in [`DEFECTS`]
+/// like every other one so that `lint-mutations` refuses the day somebody puts
+/// it in a default feature list.
+const FRAME_DEFECT: &str = "mutate-modified-frame";
+
+/// The line the frame prints its measurement on.
+///
+/// A constant because two things parse it — [`attest`] below and nothing else
+/// today — and a boot log is an artefact rather than a convenience. A change to
+/// the wording in `kernel/src/main.rs` that did not change this stops the
+/// command with *nothing said what this machine measured*, which is the failure
+/// naming itself.
+const MEASURED_LINE: &str = "  frame         ";
+
+/// The line it prints the generation on.
+const SELECTED_LINE: &str = "  generation    ";
+
+/// `cargo xtask attest`: what is this machine running, and does it move.
+///
+/// # What this command exists to demonstrate
+///
+/// `E2-B07`'s exit is two sentences and this is the artefact for both. *The
+/// machine answers "what are you running" with one hash* — boots 1 and 2, which
+/// also require the answer to be the **same** hash twice, because an identity
+/// that has only ever been computed once is a number rather than an identity.
+/// *Any modification produces a different one* — boot 4, which changes sixteen
+/// bytes of the frame's rodata that nothing reads and requires both published
+/// hashes to move.
+///
+/// # Why there are five boots and not two
+///
+/// Because the two obvious ones are each worthless without a control.
+///
+/// A boot that publishes a hash proves nothing about *stability* until a second
+/// boot of the same image publishes the same one; that is boot 2, and it is the
+/// boot that would catch a measurement over anything that varies between runs.
+///
+/// A boot that publishes a different hash after a modification proves nothing
+/// about *checking* — it says the number moved, not that anything cares. Boot 3
+/// is where something cares: the modified image is handed the **clean** build's
+/// declaration, the frame measures itself, the two disagree, and it refuses to
+/// publish a root. That is the only arrangement in which the comparison can go
+/// red at all. A declaration computed from the image it is handed to agrees by
+/// construction, which is a check that cannot fail, and this tree does not keep
+/// those.
+///
+/// And boot 3 alone would leave the modified image looking like a broken build
+/// rather than a different machine, so boot 4 hands it its own declaration and
+/// requires it to come up green with a *different* root and a *different* frame
+/// hash from boot 1's. Boot 5 is the last control and the cheapest: a machine
+/// told nothing at all, which must publish the reserved **zero** rather than a
+/// root it invented, and must publish the same frame hash as boot 1 — because
+/// the command line is outside the ranges being hashed and a measurement that
+/// moved with it would be reaching somewhere RFC 0012 says it does not. A
+/// reserved value nothing in this tree ever produces is a value nobody has
+/// tested, which is the argument every provoked counter in
+/// `kernel/src/state.rs` makes.
+///
+/// Red because it was modified, and green-but-different
+/// because it is a modification and not a fault: the pair is the sentence.
+///
+/// # What it does not demonstrate, and must not be read as
+///
+/// RFC 0012 lists five things this attestation does not prove and every one of
+/// them survives this command. There is no signature and no verifier, so the
+/// value means nothing over a network. There is no freshness. The measurement is
+/// taken once, at boot, so a frame compromised at run time publishes the digest
+/// it computed before it was. And the residual this command is closest to
+/// touching and does not close: **an image modified to report the old digest
+/// defeats it entirely**, because a self-hash is a claim by the thing being
+/// measured. What boot 3 catches is a modified image booted honestly. The rest
+/// is E5's hardware.
+fn attest() -> Result<(), String> {
+    println!("\n[1/5] the clean build — what is this machine running");
+    let clean = attest_boot(&[], None, "the clean build")?;
+    println!(
+        "\n  root   {}\n  frame  {}\n  over   {} bytes of text and rodata",
+        clean.root.as_deref().unwrap_or("<none selected>"),
+        clean.frame,
+        clean.covered
+    );
+    let Some(clean_root) = clean.root.clone() else {
+        return Err("the clean boot published no root, so there is nothing for the rest of this\n\
+             command to compare. `emulator` puts `f.root=` on every command line, so a boot\n\
+             without one means the tokens did not survive the command line — check\n\
+             `CMDLINE_MAX` in kernel/src/arch/x86_64/multiboot.rs against how long the\n\
+             appended line actually is."
+            .into());
+    };
+
+    // The two implementations agreeing on the *extent* and not only on the
+    // digest. A frame that measured one range and a build that measured two
+    // would still produce two digests that differ, and the boot would refuse
+    // with no line saying which of the two was wrong; two byte counts compared
+    // is what turns that into a sentence. Both ranges are required to be
+    // non-empty for the same reason `covered` is required to be non-zero one
+    // function down: a digest over an empty section is a perfectly stable
+    // number that says nothing.
+    let (_, ranges) = measure::frame(&kernel_elf64())?;
+    for range in &ranges {
+        if range.len == 0 {
+            return Err(format!(
+                "the `{}` range of the linked image is empty, so the frame hash covers\n\
+                 whatever the other one holds and nothing else. RFC 0012 names two ranges\n\
+                 and kernel/linker.ld exports both; an empty one is a linker script that\n\
+                 has stopped putting anything in that section.",
+                range.section
+            ));
+        }
+    }
+    let extent: u64 = ranges.iter().map(|range| range.len).sum();
+    if clean.covered != extent.to_string() {
+        return Err(format!(
+            "the build measured {extent} bytes and the boot measured {}.\n\n\
+             The two implementations of RFC 0012's sentence — xtask/src/measure.rs over\n\
+             the ELF and kernel/src/measure.rs over its own mapping — are covering\n\
+             different intervals. They agree on a digest only by covering the same bytes,\n\
+             so this is the failure that would otherwise present as every boot refusing\n\
+             to publish a root for no stated reason.",
+            clean.covered
+        ));
+    }
+    println!(
+        "  which is {} of `{}` and {} of `{}`, the same extent the build measured",
+        ranges[0].len, ranges[0].section, ranges[1].len, ranges[1].section
+    );
+
+    println!("\n[2/5] the same build again — the same answer, or it is not an identity");
+    let again = attest_boot(&[], None, "the clean build, a second time")?;
+    if again.frame != clean.frame || again.root.as_deref() != Some(clean_root.as_str()) {
+        return Err(format!(
+            "two boots of one image answered *what are you running* differently.\n\n\
+             first   root {clean_root}\n         frame {}\n\
+             second  root {}\n         frame {}\n\n\
+             A hash over the frame's own text and rodata cannot depend on a run, so\n\
+             either the measurement is reaching outside those two ranges or the ranges\n\
+             themselves are not what kernel/linker.ld exports. RFC 0012 names the two\n\
+             ranges; kernel/src/measure.rs and xtask/src/measure.rs implement them.",
+            clean.frame,
+            again.root.as_deref().unwrap_or("<none>"),
+            again.frame,
+        ));
+    }
+    println!("\n  the same root and the same frame hash: {}", clean.frame);
+
+    println!("\n[3/5] the image modified, holding the clean build's declaration — it must refuse");
+    let declared =
+        format!("{}{clean_root} {}{}", f_abi::boot::KEY, f_abi::boot::FRAME_KEY, clean.frame);
+    let (code, log) = boot_captured(Some(&declared), &[FRAME_DEFECT])?;
+    match code {
+        Some(33) => {
+            return Err(format!(
+                "a kernel built with `{FRAME_DEFECT}` booted green while holding the clean\n\
+                 build's frame hash. The frame either did not measure itself or did not\n\
+                 compare what it measured.\n\n\
+                 RFC 0012: *disagreement is a refusal to publish a root, not a warning\n\
+                 line.* kernel/src/measure.rs is where the comparison is."
+            ));
+        }
+        Some(_) => {}
+        None => return Err("qemu terminated by signal".into()),
+    }
+    let refusal = "FAIL: the frame's measurement: the frame this image measures is not the frame";
+    if !log.contains(refusal) {
+        return Err(format!(
+            "the modified boot went red and not for the reason it was supposed to: the\n\
+             log does not contain `{refusal}`.\n\n\
+             A boot that fails some other way satisfies the exit code and proves nothing.\n\
+             The serial log is above."
+        ));
+    }
+    // The measurement is printed before the refusal, so the log says what the
+    // modified image measured — which is the evidence that the refusal was a
+    // disagreement about a number rather than a token that failed to parse.
+    let modified_measurement = attest_line(&log, MEASURED_LINE, "the modified boot")?;
+    if modified_measurement == clean.frame {
+        return Err(format!(
+            "the modified image measured the same frame hash as the clean one\n\
+             ({}), and then refused to publish a root anyway. That is the refusal\n\
+             firing for some reason other than the comparison, and the comparison is\n\
+             what this command is about.",
+            clean.frame
+        ));
+    }
+    println!("\n  refused, and it measured {modified_measurement}\n  which is not {}", clean.frame);
+
+    println!("\n[4/5] the same modified image, holding its own — green, and a different machine");
+    let modified = attest_boot(&[FRAME_DEFECT], None, "the modified build")?;
+    let Some(modified_root) = modified.root.clone() else {
+        return Err("the modified boot published no root".into());
+    };
+    if modified.frame != modified_measurement {
+        return Err(format!(
+            "the modified image measured {modified_measurement} when it was refused and\n\
+             {} when it was accepted. One image has one measurement, so this is a\n\
+             measurement that depends on its command line — which is exactly what RFC\n\
+             0012 excludes from the ranges being hashed.",
+            modified.frame
+        ));
+    }
+    if modified.frame == clean.frame {
+        return Err(format!(
+            "sixteen bytes of the frame's rodata changed and the published frame hash did\n\
+             not move: both boots published {}.\n\n\
+             That is RFC 0012's own reversal condition, in as many words: *a frame\n\
+             mutation that boots with the published `frame` unchanged*. Either `MARK` in\n\
+             kernel/src/measure.rs has left the measured range — its self-test says it\n\
+             has not, so read that first — or the range being hashed is not the range the\n\
+             linker script exports.",
+            clean.frame
+        ));
+    }
+    if modified_root == clean_root {
+        return Err(format!(
+            "the frame hash moved and the generation root did not: both boots published\n\
+             {clean_root}.\n\n\
+             The root is a fold over the frame leaf and the topology, and RFC 0012 makes\n\
+             the root record's `frame` field a duplicate of that leaf. A leaf that moved\n\
+             without moving the root above it means xtask/src/generation.rs is folding\n\
+             something other than what it measured."
+        ));
+    }
+    println!(
+        "\n  root   {modified_root}\n  frame  {}\n\n\
+         Both moved, and neither is the clean build's. The modification changed nothing\n\
+         the machine does — nothing reads `MARK` — so the measurement is the only thing\n\
+         in the system that could have noticed it.",
+        modified.frame
+    );
+
+    println!("\n[5/5] told nothing — the reserved zero, and a measurement all the same");
+    let silent = attest_boot(&[], Some(UNSTATED), "the clean build, told nothing")?;
+    if silent.root.is_some() {
+        return Err("a boot that was told no generation published a root anyway. Zero is the\n\
+             format's word for *no root describes this machine*, and a frame that\n\
+             invented one would be answering a question nobody had answered for it."
+            .into());
+    }
+    if silent.frame != clean.frame {
+        return Err(format!(
+            "one image measured {} when it was told which generation it is and {} when\n\
+             it was not. RFC 0012 puts the command line outside the ranges being hashed,\n\
+             so this is a measurement reaching something it was not meant to reach.",
+            clean.frame, silent.frame
+        ));
+    }
+    println!(
+        "\n  no root, counter zero — and the same frame hash as boot 1, because what the\n\
+         frame measured is true of the machine whether or not anybody told it which\n\
+         generation it belongs to. The command line is outside the ranges."
+    );
+
+    println!(
+        "\nattest: 5 boots. One identity, stable across two runs; one modification, and\n\
+         both published hashes moved; the frame refused to publish a root it could not\n\
+         measure its way to; and the reserved zero is a state a boot can reach.\n\n\
+         What this is not, from RFC 0012 and not softened here: no signature, no\n\
+         verifier, no freshness, nothing about data, and no defence at all against an\n\
+         image modified to report the old digest. It attests to a local reader and to\n\
+         somebody who can recompile. Remote attestation on this root is not made\n\
+         possible by any of the above and must not be described as though it were."
+    );
+    Ok(())
+}
+
+/// What one boot said about itself.
+struct Attested {
+    /// The generation root it published, or `None` when it selected none.
+    /// Unit: none — sixty-four lower-case hexadecimal characters.
+    root: Option<String>,
+    /// The frame hash it measured of itself.
+    /// Unit: none — sixty-four lower-case hexadecimal characters.
+    frame: String,
+    /// How many bytes it measured.
+    /// Unit: bytes.
+    covered: String,
+}
+
+/// Boot, require green, and read what the machine said it was.
+fn attest_boot(features: &[&str], append: Option<&str>, what: &str) -> Result<Attested, String> {
+    let (code, log) = boot_captured(append, features)?;
+    match code {
+        Some(33) => {}
+        Some(other) => {
+            return Err(format!("{what} exited {other}; expected 33. The serial log is above."));
+        }
+        None => return Err(format!("{what}: qemu terminated by signal")),
+    }
+
+    let measured = attest_line(&log, MEASURED_LINE, what)?;
+    // ` over <n> bytes of text and rodata` follows the digest on the same line,
+    // and it is read rather than skipped because a measurement over zero bytes
+    // would otherwise be a perfectly stable, perfectly meaningless hash.
+    let covered = log
+        .lines()
+        .find_map(|line| line.strip_prefix(MEASURED_LINE)?.split_whitespace().nth(2))
+        .ok_or_else(|| format!("{what} did not say how many bytes it measured"))?
+        .to_string();
+    if covered == "0" {
+        return Err(format!(
+            "{what} measured zero bytes and published a hash over them. That is the\n\
+             SHA-256 of the empty message and it is the same on every machine in the\n\
+             world, which is the opposite of an identity."
+        ));
+    }
+
+    let selected = log
+        .lines()
+        .find_map(|line| line.strip_prefix(SELECTED_LINE))
+        .ok_or_else(|| format!("{what} said nothing about which generation it is"))?;
+    let root =
+        selected.split_whitespace().next().filter(|word| word.len() == 64).map(str::to_string);
+
+    Ok(Attested { root, frame: measured, covered })
+}
+
+/// The digest a boot log line carries, or a refusal naming the line that was
+/// not there.
+fn attest_line(log: &str, prefix: &str, what: &str) -> Result<String, String> {
+    let digest = log
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .and_then(|rest| rest.split_whitespace().next())
+        .ok_or_else(|| {
+            format!(
+                "{what} printed no line beginning `{}`.\n\n\
+                 That line is where the frame says what it measured, and this command\n\
+                 reads it. A change to the wording in kernel/src/main.rs needs the same\n\
+                 change to `MEASURED_LINE` in xtask/src/main.rs.",
+                prefix.trim_end()
+            )
+        })?;
+    if digest.len() != 64
+        || !digest.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(format!(
+            "{what} printed `{digest}` where sixty-four lower-case hexadecimal characters\n\
+             were expected."
+        ));
+    }
+    Ok(digest.to_string())
 }
 
 /// Where the checker's crate is.
@@ -9950,6 +10358,12 @@ fn verify() -> Result<(), String> {
     // properties hold on this tree, and this proves that a tree where one of
     // them did not would be caught. It leaves a clean build behind it.
     mutate()?;
+    // E2-B07, and here for `mutate`'s reason one line up: the two are the same
+    // shape of evidence — a property, and a build in which the property would
+    // fail. Four boots, and it is in the loop rather than beside it because a
+    // machine identity nothing local checks is an identity that stays right
+    // until somebody edits the linker script. RFC 0012.
+    attest()?;
     println!("\nverify: all green");
     println!(
         "         Local only. The AArch64 tests and the litmus job run in CI and\n         \
