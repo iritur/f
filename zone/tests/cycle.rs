@@ -287,7 +287,7 @@ struct Measured {
 }
 
 impl Measured {
-    /// `device_bytes_per_app_byte`, in the parts a reader can check.
+    /// `modelled_device_bytes_per_app_byte`, in the parts a reader can check.
     ///
     /// Printed as three ratios rather than one, because the whole point of the
     /// number is its decomposition: 1.0-ish for the data plus block padding,
@@ -295,26 +295,37 @@ impl Measured {
     /// hides which term moved.
     fn report(&self) {
         let per = |bytes: u64| bytes as f64 / self.app_bytes as f64;
-        println!("  application bytes submitted      {:>14}", self.app_bytes);
-        println!("  device bytes, fill phase         {:>14}", self.fill_bytes);
-        println!("  device bytes, collect phase      {:>14}", self.total_bytes - self.fill_bytes);
-        println!("  device bytes, total              {:>14}", self.total_bytes);
-        println!("    of which ZONE_APPEND           {:>14}", self.counted.appended_bytes);
-        println!("    of which positioned WRITE      {:>14}", self.counted.written_bytes);
+        println!("  application bytes submitted            {:>14}", self.app_bytes);
+        println!("  device bytes, fill phase               {:>14}", self.fill_bytes);
+        println!(
+            "  device bytes, collect phase            {:>14}",
+            self.total_bytes - self.fill_bytes
+        );
+        println!("  device bytes, total                    {:>14}", self.total_bytes);
+        println!("    of which ZONE_APPEND                 {:>14}", self.counted.appended_bytes);
+        println!("    of which positioned WRITE            {:>14}", self.counted.written_bytes);
         println!();
-        println!("  fill bytes per app byte          {:>14.4}", per(self.fill_bytes));
-        println!("  copy-forward bytes per app byte  {:>14.4}", per(self.copied_bytes));
-        println!("  device_bytes_per_app_byte        {:>14.4}", per(self.total_bytes));
+        println!("  fill bytes per app byte                {:>14.4}", per(self.fill_bytes));
+        println!("  copy-forward bytes per app byte        {:>14.4}", per(self.copied_bytes));
+        // The claim's `modelled_*` name and not the row above it in
+        // `claims/0016`. `device_bytes_per_app_byte` is that claim's headline and
+        // is defined as a count taken by QEMU's `query-blockstats` in a guest;
+        // this is `ZonedMemory`, a host model, and a model cannot report the
+        // writes a real device does that nobody asked for. Printing it under the
+        // gating row's name is how a modelled number gets read as a measured one,
+        // which is the worst mistake the registry can make — so the name it is
+        // printed under is the name it is registered under.
+        println!("  modelled_device_bytes_per_app_byte     {:>14.4}", per(self.total_bytes));
         println!();
         println!(
-            "  zones reset by the collector     {:>14}  of {} data zones",
+            "  zones reset by the collector           {:>14}  of {} data zones",
             self.zones_condemned, self.data_zones
         );
-        println!("  ZONE_FINISH entries              {:>14}", self.counted.finishes);
-        println!("  ZONE_RESET entries               {:>14}", self.counted.resets);
-        println!("  FLUSH entries                    {:>14}", self.counted.flushes);
-        println!("  collector steps                  {:>14}", self.steps);
-        println!("  ops ahead of an urgent read      {:>14}", self.ops_ahead_of_urgent_read);
+        println!("  ZONE_FINISH entries                    {:>14}", self.counted.finishes);
+        println!("  ZONE_RESET entries                     {:>14}", self.counted.resets);
+        println!("  FLUSH entries                          {:>14}", self.counted.flushes);
+        println!("  collector steps                        {:>14}", self.steps);
+        println!("  ops ahead of an urgent read            {:>14}", self.ops_ahead_of_urgent_read);
     }
 }
 
