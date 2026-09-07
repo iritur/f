@@ -99,7 +99,14 @@ pub const RECORD_ALIGN: u32 = 8;
 /// it may happen, whether the two builds understand each other, and how much
 /// memory the window costs.
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+// `PartialEq` is *identity* and not compatibility, and the distinction is the
+// whole reason [`Declaration::transfers_to`] exists: that function compares
+// three fields and deliberately not [`Declaration::records_max`], so two
+// declarations that are `==` transfer to each other and two that transfer to
+// each other need not be `==`. Reaching for `==` to decide a swap is the bug the
+// named function exists to prevent, which is why this comment is here rather
+// than the derive being left to look obvious.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Declaration {
     /// The state-record schema this build writes and reads.
     ///

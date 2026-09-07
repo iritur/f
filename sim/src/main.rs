@@ -208,6 +208,13 @@ enum What {
     /// The same, reduced to one digest so that two processes can be compared
     /// without parsing a report.
     ChaosHash,
+    /// Every component in the deployment, replaced under sustained load and
+    /// again with nothing replaced. Exit status is the verdict. `E2-P08`,
+    /// RFC 0063.
+    Swap,
+    /// The same, reduced to one digest so that two processes can be compared
+    /// without parsing a report.
+    SwapHash,
     /// Run a scenario once, writing a snapshot every `--every` simulated
     /// minutes. `E1-P08`, RFC 0043.
     Scan,
@@ -339,6 +346,10 @@ fn parse(args: &[String]) -> Result<Asked, String> {
             // would be a command line with a bug in it. R04, applied to this
             // tool's own argument parser.
             "--chaos-hash" => asked.what = What::ChaosHash,
+            "--swap" => asked.what = What::Swap,
+            // Its own flag rather than `--swap --hash`, for `--chaos-hash`'s
+            // reason one line up.
+            "--swap-hash" => asked.what = What::SwapHash,
             "--scan" => asked.what = What::Scan,
             "--admission" => asked.what = What::Admission,
             // Its own flag rather than `--admission --hash`, for the reason
@@ -497,6 +508,7 @@ fn usage() -> String {
         \x20        [--terse] [--after <minutes>] [--seed <n>] <scenario>\n\
          f-sim --resume <file.snap> [--commit <sha>] [--check|--trace|--hash]\n\
          f-sim --chaos | --chaos-hash [--seed <n>] [--components <dir>]\n\
+         f-sim --swap | --swap-hash [--seed <n>] [--components <dir>]\n\
          f-sim --deployment [--components <dir>]\n\
          f-sim --list\n\n\
          The deterministic simulator. One scenario, one seed, one artefact —\n\
@@ -785,6 +797,8 @@ fn run(asked: Asked) -> Result<bool, String> {
         What::Scan => return scan(&asked),
         What::Chaos => return chaos(&asked, false),
         What::ChaosHash => return chaos(&asked, true),
+        What::Swap => return swap(&asked, false),
+        What::SwapHash => return swap(&asked, true),
         What::Admission => return admission(&asked, false),
         What::AdmissionHash => return admission(&asked, true),
         What::Hash | What::Trace | What::Check | What::Report => {}
@@ -1061,6 +1075,126 @@ fn chaos(asked: &Asked, hash_only: bool) -> Result<bool, String> {
     let blast: u32 = pairs.iter().map(|pair| pair.killed.clients_failed).sum();
     println!("\nblast radius  {blast} client(s) observed anything except added latency");
     println!("digest        {:#018x}", chaos::digest(&pairs));
+    Ok(true)
+}
+
+/// Replace every component in the deployment under load, and judge each pair.
+///
+/// **`E2-P08`.** One pair per component — a run with replacements in it and the
+/// same run with none — because a survival with no control beside it establishes
+/// that nothing went wrong rather than that anything was under test.
+/// `f_sim::swap` is where the mechanism and the verdict live; this prints what
+/// they produced and turns a failure into an exit status.
+///
+/// `Ok(false)` is *the command worked and found something*, the convention
+/// `--check`, `--sweep` and `--chaos` use.
+fn swap(asked: &Asked, hash_only: bool) -> Result<bool, String> {
+    use f_sim::swap;
+
+    let deployment = read_components(asked.components.as_deref())?;
+    let pairs = match swap::sweep(&deployment, asked.seed, swap::SWAPS) {
+        Ok(pairs) => pairs,
+        Err(why) => {
+            println!("swap       FAILED\n\n{why}");
+            return Ok(false);
+        }
+    };
+    if hash_only {
+        println!("{:#018x}", swap::digest(&pairs));
+        return Ok(true);
+    }
+
+    println!("seed       {:#018x}", asked.seed);
+    println!("components {}", pairs.len());
+    println!("swaps      {} per component, under sustained load", swap::SWAPS);
+    println!();
+    // `mode` first, because it is what decides which question every column after
+    // it is asked. `flying` is the fewest operations outstanding at any pause,
+    // which is what stops the zeros beside it being about a quiescent system;
+    // `sets` is the two live-registration counts, taken on opposite sides
+    // through two real tables; and `redone` is the number RFC 0063 says
+    // `in_place` exists to make zero, printed for both modes so that the zero is
+    // a comparison rather than an assertion.
+    println!(
+        "  {:<20} {:<12} {:>7} {:>5} {:>5} {:>6} {:>6} {:>4} {:>5} {:>5} {:>5} {:>6} {:>7} {:>6}",
+        "component",
+        "mode",
+        "settled",
+        "swap",
+        "rstrt",
+        "abandn",
+        "flying",
+        "lost",
+        "twice",
+        "stale",
+        "wrong",
+        "refusd",
+        "sets",
+        "redone",
+    );
+    for pair in &pairs {
+        println!(
+            "  {:<20} {:<12} {:>7} {:>5} {:>5} {:>6} {:>6} {:>4} {:>5} {:>5} {:>5} {:>6} {:>7} \
+             {:>6}",
+            pair.swap.name,
+            f_abi::transfer::mode::label(pair.swap.declared.mode),
+            pair.moved.settled,
+            pair.moved.swapped,
+            pair.moved.restarted,
+            pair.moved.abandoned,
+            pair.moved.flying_min,
+            pair.moved.lost,
+            pair.moved.twice,
+            pair.moved.stale,
+            pair.moved.wrong,
+            pair.moved.failed,
+            format!("{}/{}", pair.moved.sets_out, pair.moved.sets_in),
+            pair.moved.redone,
+        );
+    }
+
+    println!();
+    // The transfer itself, in its own block because *a replacement happened* and
+    // *state crossed* are two claims and a reader should be able to see the
+    // second without reading the first's columns. A `restart_only` row printing
+    // zeros here is the declaration working rather than a gap.
+    for pair in &pairs {
+        println!(
+            "  {:<20} {} record(s) written into a window and {} replayed out of one; {} \
+             submission(s) pended, {} rang for, {} discarded",
+            pair.swap.name,
+            pair.moved.handed,
+            pair.moved.adopted,
+            pair.moved.pended,
+            pair.moved.resumed,
+            pair.moved.voided,
+        );
+    }
+
+    println!();
+    for pair in &pairs {
+        println!(
+            "  {:<20} control {} of {} answered, worst {} ns; replacing cost {} ns more, \
+             against a declared ladder of {} ns",
+            pair.swap.name,
+            pair.calm.settled,
+            pair.calm.owed,
+            pair.calm.worst_ns,
+            pair.added_ns(),
+            pair.swap.policy.ladder_ns(swap::SWAPS),
+        );
+    }
+
+    // The two numbers a reader takes away, and they are counts rather than
+    // times — which is why this command may gate in a container while three
+    // claims wait for a machine. `bench/src/lib.rs` is where that rule is
+    // decided.
+    let blast: u32 = pairs.iter().map(|pair| pair.moved.clients_failed).sum();
+    let redone: u32 =
+        pairs.iter().filter(|pair| pair.swap.transfers()).map(|pair| pair.moved.redone).sum();
+    println!("\nblast radius  {blast} client(s) observed anything except added latency");
+    println!("redone        {redone} operation(s) redone across every in-place swap");
+    println!("digest        {:#018x}", swap::digest(&pairs));
     Ok(true)
 }
 

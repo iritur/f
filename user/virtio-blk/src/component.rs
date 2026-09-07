@@ -574,7 +574,32 @@ fn park() -> ! {
 /// same way it notices anything else — the component stops making progress and
 /// its supervisor's stop deadline passes. Its manifest then restarts it, which
 /// is what `restart.policy = "on_fault"` is for.
-#[cfg(not(test))]
+///
+/// # Why `target_os = "none"` and not the `image` feature alone
+///
+/// A `#[panic_handler]` is a lang item and there may be exactly one in a linked
+/// artefact. `user/virtio-blk/Cargo.toml` turns the `image` feature off for the
+/// one crate that links this as a library — the frame, which has its own — and
+/// that worked while every consumer was a bare-metal one. It stops working the
+/// moment a **host** crate takes this: cargo unifies features across a
+/// workspace build, so `f-virtio-blk` built as a member with its own defaults
+/// and taken by `f-sim` without them resolves to the union, and the handler
+/// collides with `std`'s. `f-sim` takes this crate for one module —
+/// `crate::state`, the state record RFC 0063 says only another build of this
+/// component may read — and a harness that swapped one component while writing
+/// its own copy of that layout would be the second reader `sim/src/deploy.rs`
+/// refuses one file over.
+///
+/// So the gate is narrowed rather than the feature's polarity flipped. This item
+/// belongs to a build that could *be* an image, and a host build never is. It
+/// costs nothing: the module around it still compiles for the host and is still
+/// linted there, which a `default = []` would have given up.
+///
+/// *Reversal:* a host target that is also `target_os = "none"`. There is none
+/// today and one would break this for the reason the feature alone broke — at
+/// which point the answer is the feature's polarity and an explicit
+/// `--features image` in `xtask`'s component build.
+#[cfg(all(not(test), target_os = "none"))]
 #[panic_handler]
 fn panicked(_: &core::panic::PanicInfo) -> ! {
     park()

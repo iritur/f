@@ -541,6 +541,12 @@ fn main() -> ExitCode {
         // reproduction check needs, and the declared gap between what the
         // simulator kills and what a boot can. RFC 0041.
         "chaos" => chaos(),
+        // E2-P08. Every component the build produced, replaced under sustained
+        // load and again with nothing replaced. The verdict is `f-sim`'s and
+        // this is the driver: the component directory, the two processes the
+        // reproduction check needs, and the declared gap between what the
+        // simulator can replace and what a boot can. RFC 0063.
+        "swap" => swap_gate(),
         "mutate" => mutate(),
         "prove" => prove(args.get(1).map(String::as_str)),
         // E1-B14. What an unmap costs under churn, counted both ways in one
@@ -755,6 +761,11 @@ cargo xtask <command>
   chaos              Kill every component under sustained load at seeded
                      moments, and again with nothing killed. No client may
                      observe anything except added latency
+  swap               Replace every component under sustained load at seeded
+                     moments, each by the route its own manifest declares, and
+                     again with nothing replaced. No client may observe a
+                     dropped operation, and the state that crossed is compared
+                     against what the outgoing instance held
   mutate             Build the kernel with a deliberate defect, boot it, and
                      require the boot to go red — then require the same boot to
                      go green without it
@@ -2373,6 +2384,15 @@ const DEFECTS: &[&str] = &[
     // xtask generation --mutate` is its harness and requires the two-path
     // comparison to name the frame rather than merely to go red.
     generation::PATH_DEFECT,
+    // E2-B06's, and the first defect this list carries in `abi/`. It weakens
+    // `abi::swap::Routing::commit` from `Release` to `Relaxed` — the one store
+    // phase B of a generation swap is, and the one that publishes an incoming
+    // occupant's rebuilt registration table before the generation naming it
+    // becomes visible. `ring/tests/litmus.rs` is its harness, on the runner
+    // where the weakening is a real defect: `Relaxed` there is faster and passes
+    // every functional test on x86-64 because total store order hides it. RFC
+    // 0063, RFC 0016, RFC 0020.
+    "mutate-relaxed-routing",
 ];
 
 /// The seed every reproduction run uses.
@@ -2970,6 +2990,172 @@ fn churn_counts(log: &str, marker: &str) -> Option<(u64, u64)> {
         .filter(|word| !word.is_empty())
         .filter_map(|word| word.parse::<u64>().ok());
     Some((numbers.next()?, numbers.next()?))
+}
+
+/// What `cargo xtask swap` replaces that a boot cannot, declared as a set
+/// rather than left as a silence.
+///
+/// # Why a declaration and not a paragraph
+///
+/// [`CHAOS_GAP`]'s reason one task back, and it is the same discipline for the
+/// same failure: a difference between two halves of a claim that is written in
+/// prose is a difference nobody re-checks. So the gap is data, the entry names
+/// the exact text whose *presence* keeps it open, and the day it goes this verb
+/// goes red and hands whoever closed it the list of documents to update.
+///
+/// One entry, and it is the precise line rather than an area. **A swap needs two
+/// generations of one component in one boot module set**, and there is exactly
+/// one file per component: `cargo xtask component` writes `<name>.fc`, the
+/// loader hands the frame that set, and `kernel/src/component.rs` builds one
+/// place per file. The line below is what that costs — a place refuses to be
+/// refilled from anything but the content hash it already holds, which is
+/// correct today and is precisely the refusal a generation swap exists to
+/// replace with a *transfer decided from two declarations*. RFC 0063's phase A
+/// is what would go in its place, and `f_abi::swap` is already the protocol both
+/// halves would drive.
+///
+/// The needle is deliberately the comparison and not the `Failure::WrongPlace`
+/// beside it: that value has other callers, and a gap whose needle is shared
+/// with an unrelated branch is a gap that closes when somebody refactors.
+const SWAP_GAP: &[Gap] = &[(
+    "kernel/src/component.rs",
+    "if ContentId::of(place.module) != place.manifest {",
+    "a place refuses to be refilled from anything but the manifest it already \
+     holds, so no boot can put a newer generation into an existing place",
+    "TODO.md E2-B06 and E2-P08; docs/rfc/0012's *what the frame changed means*; \
+     docs/rfc/0063's phase A and its `E2-P08` reversal condition; \
+     sim/src/swap.rs's module comment; abi/src/swap.rs's module comment",
+)];
+
+/// Replace every component the build produced, under sustained load, and
+/// require no client to notice.
+///
+/// **`E2-P08`.** Three things happen and none of them means much alone, which is
+/// why they are one command:
+///
+/// 1. **The reproduction check**, in two processes, for `chaos`'s reason: a
+///    harness called twice inside one process shares an address space and an
+///    allocator and can agree with itself for reasons the seed does not own. Two
+///    seeds, so a digest over something that does not vary cannot pass it.
+/// 2. **The run**, printed. The exit status is `f_sim::swap::verdict`'s, and the
+///    control run beside each component is what makes a survival evidence rather
+///    than an absence of trouble.
+/// 3. **The coverage**, against a set this command did not produce — the
+///    `manifest.toml` files the *source tree* carries. `chaos` argues that at
+///    length: a sweep over the build output checked against the build output is
+///    one directory read twice, and both sides fall silently to the same smaller
+///    number.
+///
+/// # Errors
+///
+/// A sentence naming which of the three did not hold.
+fn swap_gate() -> Result<(), String> {
+    components_quietly()?;
+    let dir = component_dir()?;
+
+    println!("swap reproduction check — seed {TRACE_SEED}\n");
+    let first = swap_hash(TRACE_SEED, &dir)?;
+    let second = swap_hash(TRACE_SEED, &dir)?;
+    let other = swap_hash(SIM_OTHER_SEED, &dir)?;
+    println!("  {:<12} {first}  {second}  {other}", "sweep");
+    if first != second {
+        return Err("two runs of the swap sweep at one seed produced different results.\n\n\
+             A swap begun at a seeded moment has to be begun at *the* seeded moment.\n\
+             Something in the harness is reading a clock, an address or an iteration\n\
+             order the seed does not own, and a failure it finds is a symptom rather\n\
+             than a bug report. RFC 0004, RFC 0063."
+            .into());
+    }
+    if first == other {
+        return Err("the swap sweep produced the same result at two different seeds.\n\n\
+             That makes the check above worth nothing: a digest over something that does\n\
+             not vary agrees with itself forever. Either the swaps are beginning at the\n\
+             same moment whatever the seed says, or the digest is taken over less than\n\
+             the run."
+            .into());
+    }
+
+    println!();
+    let (ok, report) = swap_report(TRACE_SEED, &dir)?;
+    print!("{report}");
+    if !ok {
+        return Err("a client observed the replacement.\n\n\
+             E2-P08: *replace a running component under sustained load; no client\n\
+             observes a dropped operation, and the state transfer is verified rather\n\
+             than assumed.* The report above says which clause failed and at which\n\
+             component — an operation never answered, one answered twice, an answer\n\
+             that disagreed with what was written, a refusal the client could not\n\
+             retry, or the two live-registration counts disagreeing across the window."
+            .into());
+    }
+
+    let ran = report
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("components "))
+        .and_then(|rest| rest.trim().parse::<usize>().ok())
+        .ok_or("the swap report did not say how many components it ran")?;
+    let declared = declared_components()?;
+    if ran != declared.len() {
+        return Err(format!(
+            "the sweep replaced {ran} component(s) and this tree declares {} in its\n\
+             manifests. A component the sweep did not reach is a component nobody has\n\
+             replaced, and a green result over a smaller set is the failure this check\n\
+             exists to refuse. `cargo xtask lint-components` says which list is short.",
+            declared.len()
+        ));
+    }
+    println!(
+        "\ncoverage      {ran} component(s) replaced, of {} this tree's manifests declare",
+        declared.len()
+    );
+
+    println!("\ndeclared gap  what this replaces that a boot cannot, and why it is still true:");
+    gap_holds("SWAP_GAP", SWAP_GAP).map_err(|why| {
+        format!(
+            "{why}\n\n\
+             The reason `cargo xtask swap` is the only half of E2-P08 that can replace a\n\
+             component under load has stopped being true, so RFC 0063's phase A and RFC\n\
+             0012's update section now describe a tree that no longer exists. Move the\n\
+             swap into the boot."
+        )
+    })?;
+    for (file, _, why, _) in SWAP_GAP {
+        println!("  {file:<24} {why}");
+    }
+
+    println!(
+        "\nswap: ok — every component the build produced was replaced under load, each by\n\
+         \x20     the route its own manifest declares, and no client observed anything except\n\
+         \x20     a wait. The control run beside each of them completed with nothing replaced,\n\
+         \x20     which is what makes the survival evidence rather than an absence of trouble."
+    );
+    Ok(())
+}
+
+/// One swap sweep, as a subprocess, reduced to its digest.
+fn swap_hash(seed: &str, dir: &str) -> Result<String, String> {
+    let out = capture(
+        "cargo",
+        &["run", "-q", "-p", "f-sim", "--", "--swap-hash", "--seed", seed, "--components", dir],
+    )?;
+    Ok(out.trim().to_string())
+}
+
+/// The same sweep, printed, with its verdict as a boolean.
+///
+/// The output is captured rather than streamed and the status is answered rather
+/// than turned into an error, for [`chaos_report`]'s reason: a failing verdict
+/// has to print its report, and a gate that says only *failed* is a gate whose
+/// first debugging step is running the command again by hand.
+fn swap_report(seed: &str, dir: &str) -> Result<(bool, String), String> {
+    let out = Command::new("cargo")
+        .args(["run", "-q", "-p", "f-sim", "--", "--swap", "--seed", seed, "--components", dir])
+        .current_dir(root())
+        .output()
+        .map_err(|e| format!("could not run f-sim: {e}"))?;
+    let text =
+        String::from_utf8(out.stdout).map_err(|e| format!("f-sim printed non-UTF-8: {e}"))?;
+    Ok((out.status.success(), text))
 }
 
 fn chaos() -> Result<(), String> {
@@ -9874,6 +10060,13 @@ fn verify() -> Result<(), String> {
     // and no reason to defer it — which is the whole argument for splitting the
     // latency half into `claims/0006` rather than making both wait.
     chaos()?;
+    // E2-P08's exit, and in the loop for the reason `chaos` is one line up: the
+    // clause *no client observes a dropped operation* is checkable in a
+    // container — every metric it produces is a count — and a check that only CI
+    // runs is a check a contributor finds out about after pushing. It costs a
+    // few seconds and it is the only thing in this loop that replaces a running
+    // component. RFC 0063.
+    swap_gate()?;
     // Gate G1's other sentence, and the half of it that says a sweep can fail.
     // `sim_check` above proves that a scenario reproduces; this proves that a
     // simulator with a defect in it is *found*, minimised and reported as a

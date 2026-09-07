@@ -105,6 +105,27 @@ impl Native {
         }
     }
 
+    /// Whether this instance holds no work it has accepted and not answered.
+    ///
+    /// The occupant's half of quiescence, and `dev::Device::quiescent` is where
+    /// the argument for asking the occupant at all is written down. One term
+    /// here rather than three, because a peer with no device under it has no
+    /// queue to hold anything and no reset to be in.
+    pub(crate) fn quiescent(&self) -> bool {
+        self.jobs.is_empty()
+    }
+
+    /// This instance's registration state, for the occupant replacing it.
+    pub(crate) const fn registrations(&self) -> &Service {
+        &self.service
+    }
+
+    /// The registration state this instance was handed, replayed into its own
+    /// table. See [`Service::adopt`].
+    pub(crate) fn adopt(&mut self, records: &[f_virtio_blk::state::Record]) -> bool {
+        self.service.adopt(records)
+    }
+
     /// Write this peer out, tag first.
     pub(crate) fn save(&self, out: &mut crate::snap::Writer) {
         out.u32(crate::snap::tag::NATIVE);

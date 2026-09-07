@@ -6,6 +6,23 @@ license.workspace = true
 publish.workspace = true
 description = "Wire types crossing a trust boundary. repr(C), fixed-width, no generics, no Drop."
 
+# One deliberate defect, and it is the first this crate has ever carried.
+#
+# `cargo xtask lint-mutations` reads every manifest in the workspace and refuses
+# any of these in a `default` list, which is what stops a defect from being
+# shipped. There is no `default` key here on purpose.
+#
+# It exists so that a litmus test can be shown to fail. `abi::swap::Routing` is
+# the fifth cross-core word RFC 0016 says needs an argument, its `Release` store
+# is what publishes an incoming occupant's rebuilt state before the generation
+# that names it becomes visible, and `Relaxed` there is faster and passes every
+# functional test on x86-64 because total store order hides it. A stress test
+# that has only ever passed cannot be told apart from one that cannot fail —
+# `ring/tests/litmus.rs` is where the pair is asserted and this is the fixture it
+# is asserted against. RFC 0063, RFC 0020.
+[features]
+mutate-relaxed-routing = []
+
 [lints.rust]
 # The frame. Overrides the workspace forbid — see the note in the root Cargo.toml.
 unsafe_code = "allow"

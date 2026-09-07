@@ -21,6 +21,15 @@ f-env.workspace = true
 # RFC 0032 rejected shape (b) to avoid, arrived at from the other side.
 f-abi.workspace = true
 f-ring.workspace = true
+# The block driver, taken for exactly one module: `f_virtio_blk::state`, the
+# thirty-two-byte state record its own manifest declares and RFC 0063 leaves to
+# `E2-B06`. It is here for `deploy.rs`'s reason and not a new one — *a second
+# reader is a second belief about what a component is* — and a swap harness that
+# wrote its own record layout would be checking that its copy agrees with itself
+# while the driver's real one drifted. The workspace row is
+# `default-features = false`, so the component's `#[panic_handler]` does not come
+# with it.
+f-virtio-blk.workspace = true
 
 # The deliberate defects, off by default and refused as defaults by
 # `cargo xtask lint-mutations`. `sim/src/dev.rs` argues why they live in the

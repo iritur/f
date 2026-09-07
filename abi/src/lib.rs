@@ -23,6 +23,7 @@ pub mod manifest;
 pub mod reserve;
 pub mod state;
 pub mod store;
+pub mod swap;
 pub mod transfer;
 
 /// The frame's opcode space.
