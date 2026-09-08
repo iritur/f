@@ -39,9 +39,16 @@ and no error.
 Every valid manifest is valid TOML, so any TOML reader accepts it. The lint
 accepts less: comments, `[table]` and `[[array]]` headers, and `key = value`
 where the value is a `"string"` with no escapes and no inner quote, an unsigned
-integer (underscores between digits allowed), `true`/`false`, or a one-line list
-of strings. Multi-line strings, inline tables, dotted keys, signed numbers and
-floats are refused with a line number. The reason is in `xtask/src/manifest.rs`:
+integer — decimal, or `0x` and lower-case hexadecimal, with underscores between
+digits allowed in either — `true`/`false`, or a one-line list of strings.
+Multi-line strings, inline tables, dotted keys, signed numbers and floats are
+refused with a line number. Upper-case hexadecimal is refused rather than
+accepted, for the reason a root hash is printed one way: two spellings of one
+identifier are two things a reader compares by eye and gets wrong. Hexadecimal
+is in the subset for `[[device]]`, whose two fields are bit patterns a bus
+reports and which every datasheet and every constant in
+`kernel::arch::x86_64::virtio` writes in hex — `vendor = 6900` would be a number
+a reviewer has to convert before they can check it. The reason is in `xtask/src/manifest.rs`:
 the tree parses its own formats and buys no dependency for one, and the
 supervisor does not read TOML at all — it reads a fixed-layout record that
 E1-B05 defines in `abi/` and that this file compiles to. Every bound below
@@ -72,7 +79,7 @@ imported driver's manifest lives in `user/` and its `image` points into
 
 | field | type | required | what it is |
 | --- | --- | --- | --- |
-| `schema` | integer | yes | The schema this file is written to. Must be `1`. A later value is refused: a reader that guesses at fields it was not written for is two readers. |
+| `schema` | integer | yes | The schema this file is written to. Must be `3`. A later value is refused: a reader that guesses at fields it was not written for is two readers. |
 | `name` | string | yes | The component's name in the topology: `[a-z0-9-]`, at most 32 bytes, no edge hyphen. Unique across the tree — `lint-manifests` refuses two manifests with one name, because `sibling:` references and the topology name a component by it. |
 | `image` | string | yes | Where the image comes from. Either a tree-relative path to the crate that builds it — forward slashes, no `.`/`..`/empty segment, not under `target/` — or `sha256:` and sixty-four lower-case hex digits for bytes the tree does not build. |
 | `domain` | string | yes | RFC 0005's kind: `shared`, `private` or `hostile`. No default, and none of the working names other documents used (`trusted`, `confined`) is accepted — the RFC's spelling is the only spelling. |
@@ -241,6 +248,144 @@ and admission records which; a manifest that stated a bandwidth demand would be
 stating it in units no two machines share. When a workload arrives that needs to
 declare one, that is schema 2 and the field name will carry its unit.
 
+## `[transfer]` — what a component declares about being updated in place
+
+Required. RFC 0063, and it is required for the reason `[restart]` is: a manifest
+that says nothing has not chosen `restart_only`, it has left the choice to
+whoever reads it next, and a place refilled from a newer manifest is exactly
+where two readers disagreeing costs a client.
+
+| field | type | required | what it is |
+| --- | --- | --- | --- |
+| `mode` | string | yes | `restart_only` or `in_place`. |
+| `schema` | integer | iff `in_place` | The state-record schema this build writes and reads, at least 1. The *component's* ordinal, not this file's: it is compared only against another build of the same component, and two components that both write `1` have said nothing to each other. Unit: none — a state-record schema ordinal. |
+| `record_bytes` | integer | iff `in_place` | The fixed width of one state record, a positive multiple of 8 — the window is records laid end to end and read in place, so a width that is not puts every other record on an odd boundary. Unit: bytes. |
+| `records_max` | integer | iff `in_place` | The most records this component will hand over. A bound and not a count: what crosses is however many the outgoing instance writes, up to this. Unit: count of records. |
+
+Under `restart_only` the three quantities are refused rather than ignored, for
+the same reason a backoff under `policy = "never"` is: a reader who sees a record
+width will believe there is one.
+
+`record_bytes * records_max` is the transfer window, and it may not exceed
+`[reservation] memory_bytes`. RFC 0063 buys the window out of the **incoming**
+instance's own `Untyped` account — so that a transfer is paid for by something
+revocable and never by the frame, which is what RFC 0008 rests a component's
+whole footprint on — and a window larger than the account is a swap admission
+could never grant. Refused here rather than at the swap, where a client's
+submissions are already being held.
+
+What the frame does **not** know is what a record means. It knows how wide one
+is and how many there can be, because those two size the window somebody has to
+pay for; the only reader of a state record is another build of the same
+component, and `schema` is what makes those two builds agree.
+
+There is no third mode meaning *transferable only from a named quiescent point*,
+and its absence is a decision. RFC 0018's cursors say the rings are empty; they
+cannot say the occupant is empty, because a driver holds work it has accepted
+and not answered and a request inside a device is behind both cursors. So every
+in-place transfer waits for a point the occupant asserts, which is what
+`in_place` already means — and the mode a third value would leave behind, a
+cursors-only transfer, is one no component in this tree can correctly use.
+
+## `[[device]]` — what part a driver binds
+
+Zero to four entries. RFC 0067. Most components have none, and none is the
+honest answer for anything that is not a driver: the array is absent, the
+compiled record carries `devices = 0`, and nothing was left undecided by the
+absence. That is the one place this table differs from `[transfer]`, which is
+required because silence there would pick one of two answers; a device list has
+a natural empty, and an empty list is the list rather than a default.
+
+| field | type | required | what it is |
+| --- | --- | --- | --- |
+| `vendor` | integer | yes | The PCI vendor identifier the bus reports, 1 to 0xFFFE. Zero is not a vendor and `0xFFFF` is how a bus says nothing answered — a manifest declaring it would match every empty slot on the machine. Unit: none — a device identifier, not a quantity. |
+| `device` | integer | yes | The PCI device identifier the bus reports, 1 to 0xFFFF. Unit: none — a device identifier, not a quantity. |
+
+**A property, and never an address.** The paragraph under `[[capability]]` still
+holds without amendment: nothing here names a vector, a device address or a
+peer's identity, because *which slot the card is in* is the machine's business
+and a manifest that named one would be bound to one machine. What is declared
+here is *what the part is*; where it is, is discovered. The assembler matches
+the first against the second, which is the whole of `E2-B05`'s **bind drivers by
+declared properties** — and it is what lets two spawns of one hash still be the
+same component on two machines whose buses are wired differently.
+
+**The entries are canonical and are checked, never sorted.** Sorted ascending on
+`(vendor, device)`, and a file out of order is refused with the offending entry
+named, for `f-generation`'s reason one level up: two entries swapped would be
+two component files with two content hashes naming one driver, and a content
+address that names two things names nothing. One part declared twice is refused
+for the neighbouring reason — that is an author with two beliefs about one part,
+not a list to be de-duplicated.
+
+**Two manifests may not declare one part.** This is the only rule in this
+document that no single file can satisfy on its own, and it is a
+`lint-manifests` refusal across the whole set rather than a run-time choice: two
+drivers matching one device at boot would be resolved by *something*, and the
+only things available at that moment are the order a bus scan reported and the
+order the topology happens to list — a topology decided by either is not a
+function of the generation root, which is exactly what `E2-B05` claims it is. So
+the ambiguity is refused where an author can see it.
+
+There is no wildcard and no class-code match, deliberately. A driver defined by
+its class rather than by a part number — AHCI, xHCI — is RFC 0067's stated
+reversal: a wider record, a wider overlap test, and a schema bump. It is not a
+sentinel added to these two fields, because a sentinel would make two property
+sets overlap without being equal and the refusal above would quietly become a
+subsumption test nobody wrote.
+
+## `[[state]]` — what the component publishes about itself
+
+Required, and required non-empty. RFC 0013 puts a hierarchical, typed state tree
+in **every** component and RFC 0065 is what makes *every* mean every: this array
+is the declaration, the frame writes the schema block out of it into the
+component's own page before the component's first instruction, and a manifest
+that declares nothing is refused `ADMISSION/NO_STATE_TREE` at the spawn.
+
+| field | type | required | what it is |
+| --- | --- | --- | --- |
+| `id` | integer | yes | This node's permanent identifier inside this component's tree, at least 1, strictly ascending down the array. **Never reused**, for the reason `TODO.md` never reuses a task id: the id is the only thing that makes two readings of this component across time comparable at all. A retired node takes its id with it. Unit: none — an identifier, not a quantity. |
+| `name` | string | yes | `[a-z0-9-]`, at most **16** bytes, no edge hyphen. Sixteen and not 32, because this goes on the wire as `abi::state::SchemaEntry::name`: RFC 0013 says a longer label is a description, and a description belongs in the document that owns the node. Unit: none. |
+| `kind` | string | yes | `subtree`, `counter`, `gauge` or `mount`. A subtree's word is reserved and reads zero; a counter only goes up; a gauge goes both ways; a mount names another published region by physical address. Unit: none. |
+| `unit` | string | yes | What the word is counted in: `none`, `nanoseconds`, `bytes`, `frames`, `entries`, `calls`, `cores`, `slots`, `events`, `address`, `trees` or `nodes`. `none` is a real answer and not a missing one — an identifier is not a quantity. Unit: none — it *is* the unit. |
+| `parent` | string | iff not the first | The `name` of a node declared **above** this one. Refused on the first node and required on every other. Unit: none. |
+
+At most 16 nodes. The bound is the frame's page rather than a taste: a
+component's published region is one frame, and header, schema block and data
+block share it. There is room for four times as many; what there is no room for
+is a component that publishes its heap one node at a time.
+
+**One root, and it is the first node.** The wire format does not require it and
+a component's tree does: the frame reaches a component's tree at one mount
+address, so a declaration with two parentless nodes would be two trees at that
+address with the second reachable only by whoever went looking. Because ids
+ascend and a parent must be named before its child, no node except the first
+*can* be the root.
+
+**The frame writes the description; the component writes the numbers.** The word
+a node names lives at its index in the data block — offsets tile it in
+declaration order, so a declared offset would be a second opinion the reader
+could contradict. That split is what buys three things a constant inside the
+component's image could not:
+
+- A supervisor can refuse a component that publishes nothing *before it spends a
+  frame on it*. A declaration inside the image is one the frame would have to
+  run the component to find out about, and a component that has already run has
+  already escaped the refusal.
+- The schema block exists before the component's first instruction, so a
+  component that is spawned and never scheduled still has a readable tree with
+  zeros in it. That is the difference between *this component has done nothing*
+  and *this component cannot be read*.
+- The declaration is inside the content hash a spawn names, so a component whose
+  account of itself changed is a different component — the same rule that
+  already applies to its code.
+
+What the frame does **not** know is what a node means. It knows the id, the
+shape and the unit, because those are what a reader needs to not do the wrong
+arithmetic to a number; what the word counts is the component's business, and
+the only thing that keeps a node's name honest is the same thing that keeps a
+claim's honest — somebody reading both.
+
 ## What is refused, collected
 
 For a reviewer, in one place:
@@ -249,13 +394,18 @@ For a reviewer, in one place:
 - Any syntax outside the subset: escapes, multi-line strings, inline tables,
   dotted or quoted keys, signed numbers, a list that does not close on its line.
 - A key or table appearing twice.
-- A `schema` other than 1.
-- A missing `name`, `image`, `domain`, `[restart]` or `[reservation]`.
+- A `schema` other than 3.
+- A missing `name`, `image`, `domain`, `[restart]`, `[reservation]`,
+  `[transfer]` or `[[state]]`.
 - A field this document does not list, anywhere.
 - A `domain`, `type`, right, feature, `from`, `role`, `payload`, `policy` or
   `class` outside its table.
 - A `third_party/` image in `shared`; a hash-named image outside `hostile`; an
   image path that leaves the tree or points at build output.
+- No `[[state]]` node at all; more than 16; an `id` of zero, repeated, or not
+  ascending; a `name` outside `[a-z0-9-]` or longer than 16 bytes; a `kind` or
+  `unit` outside its table; a `parent` on the first node, or one naming a node
+  not declared above.
 - `execute` on an endpoint; a right or feature named twice; `control_events` on
   a data ring; `features_required` beyond `features`; `shared_virtual` without
   its feature bit.
@@ -269,6 +419,9 @@ For a reviewer, in one place:
   zero restarts; a zero window, or one below the longest backoff.
 - CPU fields in the soft class; memory not in the class's grain; a budget above
   the period; zero cores.
+- Transfer quantities under `restart_only`; a zero state-record schema; a
+  `record_bytes` that is not a positive multiple of 8; zero `records_max`; a
+  window larger than the account that buys it.
 - Two manifests with one `name`; an image path that names a file.
 
 Two things are stated as *not* refused, because a reader will otherwise assume
@@ -311,6 +464,12 @@ Named so the tasks that own them are not surprised.
   than sixteen routed capabilities, or a variable-length field the record cannot
   carry, the bound moves *with* E1-B13's growable table and a stated cost, not
   quietly.
+- **The unused transfer mode.** The mirror of the row below. If by the end of
+  E2 every manifest says `restart_only` except the one `E2-P08` swaps, the
+  two-way enum is a field with one user, and the question to ask is whether
+  `in_place` is a property of components or a property of one driver. RFC 0051's
+  argument — a second driver is what says the shape is a shape — is the one that
+  answers it, and `user/virtio-gpu` is the second driver.
 - **The unused policy.** If by gate G1 every manifest in the tree says
   `on_fault` and none says `always` or `never`, the three-way enum is a
   preference wearing a decision's clothes and should collapse to two — the same

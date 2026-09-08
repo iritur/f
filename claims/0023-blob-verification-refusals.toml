@@ -1,0 +1,163 @@
+# What `E2-B01`'s first exit clause is actually worth, as a number. A million
+# blobs written into a modelled device and read back is green whether the
+# content hash is checked or thrown away — every byte comes out of the memory it
+# went into, so the verifier is never asked a question it could answer wrongly.
+# The number that means something is therefore not the million. It is the
+# **one**: one bit flipped inside one stored blob's content, all million read
+# again, exactly one read refused and no blob returning bytes that are not its
+# own. A verifier that has never failed is indistinguishable from one that
+# cannot fail, and this registry is where that distinction is kept.
+#
+# **0023 and not 0019, and the collision this entry had to resolve.**
+# `intent/0006-state/spec.md` reserved 0018 for `copies-per-read` at `E2-B08`,
+# and `claims/0018` landed as `chunk-size-distribution` at `E2-P02` instead. The
+# plan's own rule settles which one moves — *a number taken in a plan is a
+# number a concurrent landing takes first (claim 0008 became 0014); next free at
+# landing* — so the file keeps 0018 and the reservation moves, to 0022, where
+# `intent/0006-state/plan.md` now records it. What that leaves for this entry is
+# the first number that is neither a registered file nor a reservation: 0016
+# (`write-amplification`, `E2-B02`), 0019 (`resident-bytes-per-unit-of-work`,
+# `E2-B08`, and RFC 0059 cites it by that number), 0020 (`read-path-latency`),
+# 0021 (`generation-swap-pause`) and now 0022 are all spoken for, so this is
+# 0023. Reservations outrank landings here because `claims/0017` already
+# established that they do — it skipped 0016 for a claim that did not exist —
+# and a rule applied once and abandoned once is not a rule.
+#
+# **What gates per commit and what does not.** `blob/tests/million.rs` is
+# `harness = false` so that the gate and the exit differ by a *number* and not
+# by a build: `cargo test -p f-blob --test million` writes `DEFAULT_BLOBS` =
+# 10 000 and runs inside `cargo xtask test`, which `cargo xtask verify` runs;
+# the exit is the same binary at `--blobs 1000000`, which is what `[reproduce]`
+# below runs. Every assertion in that binary is *relative to the blob count it
+# was given* — records equal blobs, refusals are zero, exactly one refusal after
+# the flip — so the shape of every threshold below is asserted on every commit
+# and the scale is asserted only when the reproduction runs. A regression
+# visible at a million and invisible at ten thousand is therefore caught by the
+# reproduction and not by the local loop. That is stated rather than implied,
+# because `claims/0018` was audited on 2026-09-06 for saying its thresholds were
+# asserted when one of eleven was, and `CONTRIBUTING.md`'s rule is that a check
+# listed as mechanised and not mechanised is worse than one honestly listed as
+# review.
+name       = "blob-verification-refusals"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E2"
+
+statement  = """
+Every blob the store accepts reads back byte for byte under its own hash, and a
+single flipped bit inside one stored blob's content produces exactly one
+refusal, at that blob, for that reason, with nothing returning wrong bytes
+silently.
+
+Measured at `--blobs 1000000` from seed `0x0000000000000001`, into a modelled
+device of 1 003 529 blocks of 512 bytes:
+
+  content bytes                217 354 639
+  blocks written                 1 003 529     barriers 2
+  blobs written                  1 000 000     records 1 000 000
+  read back                      1 000 000 verified, 0 refused, 0 wrong bytes
+  after one flipped bit            999 999 verified, 1 refused, 0 wrong bytes
+
+Records equal blobs, which is an assertion and not an observation. The content
+is uniform and at least 32 bytes long precisely so that two drawn blobs cannot
+collide, so a store that deduplicated the draw into one record and answered a
+million reads from it would fail this row rather than pass every other one.
+
+The single refusal is `f_abi::store`'s `refusal::CONTENT` and it is at the blob
+that was corrupted. Both halves are asserted: a refusal for the wrong reason is
+a verifier that is right by accident, and a refusal at the wrong blob is a store
+whose bytes are not where its records say they are. The bit is flipped inside
+the blob's content rather than at a drawn offset in the device, because a bit
+flipped into a record's padding is refused by nothing and the control would then
+pass while proving nothing.
+
+The device numbers are recorded and carry no threshold. They are a function of
+the seed and the blob count and of nothing else in the system, so a bound on
+them would restate the draw rather than test the store; what makes them worth
+printing is that a run whose block count moved without its blob count moving is
+a format change nobody declared.
+"""
+
+[baseline]
+# No comparison, and a comparison would be a category error rather than a hard
+# measurement to arrange. What is claimed here is not that this store detects
+# corruption faster or more often than some other store: it is that this store
+# detects a corruption *at all*, on a run that would otherwise be green without
+# a verifier in it. A filesystem with checksums would answer the same question
+# with a yes, which tells a reader nothing about this code.
+system  = "none"
+notes   = "The honest baseline for a falsification control is the same run with the control removed, and that comparison is in the tree rather than in a directory: `blob/src/store.rs`'s `get` hashes what it read before it returns, and deleting that check turns a green run into a green run with `refused = 0` — which is exactly the row `reads_refused_after_one_flipped_bit` refuses. `cargo xtask mutate` is where this project builds that comparison as a command, and `E2-P01` is the task that owes a defect list for the store."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "04"
+notes    = "Section 04 is where content addressing is argued — a blob is named by the hash of its bytes, and the whole design rests on that name being checkable on the way out. The subsystem that owns the number is `blob/src/store.rs`, whose `get` refuses on a content mismatch before it returns, and `abi/src/store.rs`, whose records refuse on magic, then declared length, then discriminating field before any field is read. Section 04 also carries the sentence at line 214 that RFC 0060 reverses; that edit is `E2-B01`'s and is not this claim's to make."
+
+[workload]
+path      = "blob/tests/million.rs"
+blobs     = 1000000
+seeds     = 1
+notes     = "One seed and not eight, which is the opposite of `claims/0017` and `claims/0018` and is deliberate. Those two measure a distribution, where a single seed would be an anecdote about one draw. This measures an invariant — every blob reads back, exactly one refusal after exactly one flip — and an invariant that holds on a million blobs from one seed and fails on another seed is not a weaker invariant, it is a defect that the reproduction command finds by taking `--seed`. What the run costs is about half a gigabyte of host memory and a minute of hashing, which is the reason the per-commit gate is 10 000 and this is 1 000 000. — What stands in, said here rather than left for a reader to find: `Memory` is a modelled device and not a disk. It cannot lose a write, reorder one across a barrier, or return a torn block, so nothing here is evidence about durability; `E2-P01`'s power-cut model is what will be. What it can do is hold bytes and hand them back, which is all this claim asks of it."
+
+[metrics]
+# Counts, every one of them, and no duration anywhere: the binary reads no
+# clock and `f_bench::Environment` has nothing to refuse. The order below is the
+# order the run prints them in, so a reader comparing the two is comparing lines
+# rather than looking things up.
+primary   = "wrong_bytes_without_refusal_after_the_flip"
+secondary = [
+  # The million, which is the geometry row: without it every row below is
+  # satisfied by a run that wrote ten thousand blobs and called it an exit.
+  "blobs_verified_before_the_flip",
+  "records_written",
+  "reads_refused_before_the_flip",
+  "wrong_bytes_without_refusal_before_the_flip",
+  # The control, and the only row in this file that is not a zero or a million.
+  "reads_refused_after_one_flipped_bit",
+  "blobs_verified_after_the_flip",
+  # Recorded, not thresholded. See the statement.
+  "content_bytes",
+  "device_blocks",
+  "blocks_written",
+]
+
+[threshold]
+# Every row here is asserted by `blob/tests/million.rs` against the blob count
+# the run was given, and each names the check that fires. Nothing below was
+# chosen after seeing the run: a million verified out of a million written and
+# one refusal out of one flipped bit are the only values that are not a defect.
+#
+# `problems.push` on `store.records() != blobs`. The row that says a million
+# verifications are a million distinct verifications.
+records_written                             = { min = 1000000, max = 1000000 }
+# `read.refusals > 0` and `read.mismatches > 0`, before anything is corrupted.
+blobs_verified_before_the_flip              = { min = 1000000, max = 1000000 }
+reads_refused_before_the_flip               = { max = 0 }
+wrong_bytes_without_refusal_before_the_flip = { max = 0 }
+# The control. `after.refusals != 1` — both bounds, because zero means the
+# content hash is not checked at all and more than one means a blob's bytes are
+# not its own. The two rows the binary asserts beside it are not numbers and are
+# therefore not here: the refusal is `refusal::CONTENT`, and it is at the blob
+# that was corrupted.
+reads_refused_after_one_flipped_bit         = { min = 1, max = 1 }
+blobs_verified_after_the_flip               = { min = 999999, max = 999999 }
+# The primary, and the one row whose failure is silent corruption rather than a
+# loud one: `after.mismatches > 0` is a read that returned bytes which are not
+# its own *without* being refused, which is the verifier missing a corruption
+# rather than reporting one.
+wrong_bytes_without_refusal_after_the_flip  = { max = 0 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "**This claim does not need that machine**, for `claims/0018`'s reason and one of its own. Every metric is a count of blobs and the device is `Memory`, so the numbers are byte-identical on any machine that runs the binary at all — there is no clock in it and `f_bench::Environment` has nothing to refuse. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it. What this claim genuinely depends on is the toolchain and the host's memory: half a gigabyte of it, which is the reason the per-commit gate is a hundredth of this run rather than this run."
+
+[reproduce]
+command = "cargo xtask claim blob-verification-refusals"
+
+[diagnosis]
+# Recorded while the system is understood rather than at 2 a.m. when it is not.
+reads_refused_after_one_flipped_bit_is_zero = "the content hash is not being checked on the way out, and every other row in this file is green on a store that returns whatever the device held. Look at `blob/src/store.rs`'s `get` first — it hashes what it read and compares before returning — and at whether the flip landed in the blob's content rather than in a record's padding, which the run computes as `block * BLOCK_BYTES + Header::BYTES + inside` and which is the one place this control can silently stop testing anything"
+reads_refused_after_one_flipped_bit_above_one = "one bit was flipped in one blob and more than one read was refused, so a blob's bytes are not its own: either two records overlap on the device or `Store::address` is returning an address that is not where the record was written. This is worse than the row above it, because it says the format is wrong rather than that a check is missing. Read `first_refused` out of the run before anything else — the run prints it — and compare it against the corrupted index"
+wrong_bytes_without_refusal_above_zero = "a read returned bytes that are not the blob's and was **not** refused, which is the failure mode the whole content-addressed design exists to make impossible. It is not a chunker question and not a device question: the record decoded, the length was accepted, and the hash either was not computed over the bytes returned or was compared against the wrong digest. Do not tune anything; this is a correctness bug in `blob/src/store.rs`'s read path and it invalidates every object hash the store has ever answered"
+records_written_below_blobs = "two drawn blobs shared a record, so either the draw stopped being uniform — check `CONTENT_MIN_BYTES` and the content site's derivation — or `put` is deduplicating on something other than the full content hash. The second is the dangerous reading and it is testable: a store that keyed on a prefix would show this at a rate that grows with the blob count, so re-run at `--blobs 100000` and see whether the shortfall scales"
+blobs_verified_below_the_blob_count = "the run wrote fewer blobs than the claim publishes, which is a workload that has stopped measuring rather than a store that has stopped working — the same failure `claims/0018`'s geometry row names. `[reproduce]` passes `--blobs 1000000`; a run reporting ten thousand is the per-commit gate's number and is not this claim"

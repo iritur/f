@@ -44,6 +44,7 @@
 
 use crate::cap::{CapType, rights};
 use crate::error;
+use crate::transfer::{Declaration, mode};
 
 /// The first eight bytes of a component file.
 ///
@@ -61,7 +62,37 @@ pub const MAGIC: u64 = 0x465f_4d41_4e00_0001;
 /// a test in `xtask` requires the three to agree. A later schema is refused
 /// rather than read approximately: a reader that guesses at fields it was not
 /// written for is two readers with different beliefs about one component.
-pub const SCHEMA: u32 = 1;
+///
+/// **Two since RFC 0063.** Schema 1 had no [`Record::transfer`], so a schema-1
+/// record says nothing about whether its component can be updated in place —
+/// and reading silence as `restart_only` would be a component acquiring a
+/// property nobody chose, which is the one thing this format refuses. So a
+/// schema-1 component file is refused rather than read approximately, and every
+/// component file in the tree is rebuilt. RFC 0030 priced that cost when it
+/// made a manifest compiled rather than parsed; this is the first change to
+/// pay it.
+///
+/// **Three, and two decisions arrived at it together.** Schema 2 had no
+/// [`Record::state`], so a schema-2 component publishes no state tree — and a
+/// supervisor that read that silence as *this component has nothing to say
+/// about itself* would be reinventing exactly the tolerance RFC 0013 was
+/// written against. The refusal is `ADMISSION/NO_STATE_TREE` and it happens at
+/// the spawn; the schema bump is what makes a record that could not carry the
+/// declaration unreadable rather than quietly mute. RFC 0065.
+///
+/// Schema 2 also had no [`Record::binding`], so a driver said nothing about
+/// which device it drives and an assembler had nothing to bind it by except the
+/// order a bus scan reported — which is the one thing `E2-B05`'s exit cannot
+/// survive, because a topology bound by a scan order is not a function of a
+/// root. Silence is not readable as *binds nothing* for [`Record::transfer`]'s
+/// reason: a driver that acquired *binds nothing* by omission would be a
+/// component with a property nobody chose. RFC 0067.
+///
+/// The two were written in parallel and land in one schema, which is why one
+/// bump pays for both: schema 3 carries both declarations, a schema-2 component
+/// file is refused rather than read approximately, and every component file in
+/// the tree is rebuilt once at the cost RFC 0030 priced.
+pub const SCHEMA: u32 = 3;
 
 /// The longest name, in bytes.
 ///
@@ -77,6 +108,33 @@ pub const CAPABILITIES_MAX: usize = 16;
 /// one of them: every component has exactly one, created with it, and RFC 0008
 /// is why it is never declared.
 pub const RINGS_MAX: usize = 8;
+
+/// The most `[[device]]` entries a manifest may declare.
+///
+/// Four, and the number is a bound rather than a guess: a driver declares one
+/// entry per device identity it will drive, and the widest case in this tree is
+/// a virtio driver that accepts a modern id and the transitional id beside it —
+/// two. Four leaves room for a third and a fourth part number without leaving
+/// room for a manifest that binds a bus.
+/// Unit: entries.
+pub const DEVICES_MAX: usize = 4;
+/// The most `[[state]]` nodes a manifest may declare, its root included.
+///
+/// Sixteen, and the bound is the frame's page rather than a taste: a
+/// component's published region is one frame, [`crate::state::TreeHeader`] and
+/// the schema block share it with the data block, and sixteen nodes is
+/// `64 + 16 * 32 + 16 * 8` — six hundred and forty bytes of four thousand and
+/// ninety-six. There is room for four times as many; what there is not room for
+/// is a component that publishes its whole heap one node at a time, which is
+/// the failure mode a tree with no bound has. RFC 0013 puts names in the schema
+/// and numbers in the data block precisely so that a subtree is cheap and a
+/// *description* is not.
+///
+/// *Reversal:* a component whose honest account of itself does not fit. At that
+/// point the region stops being one frame and the declaration grows a page
+/// count, which is a change to this constant and to `component::spawn`'s fixed
+/// parts and to nothing else.
+pub const STATE_NODES_MAX: usize = 16;
 
 /// One page, as the record counts memory. Unit: bytes.
 pub const FRAME_BYTES: u64 = 4096;
@@ -409,6 +467,185 @@ pub struct Ring {
 /// value is the bug this constant exists to not have.
 pub const NO_CAPABILITY: u8 = u8::MAX;
 
+/// One device identity a driver declares it will bind.
+///
+/// # Why a property and not an address
+///
+/// `docs/manifest.md` has said since schema 1 that nothing in a manifest names a
+/// device address: *which* slot a card is in is the machine's business, and a
+/// manifest that named one would be a manifest bound to one machine, so two
+/// spawns of one hash would stop being the same component. That sentence still
+/// holds and this record does not weaken it. What is declared here is *what the
+/// part is* — the vendor and the part number a bus reports — and what is
+/// discovered is *where it is*. The assembler matches the first against the
+/// second, which is the whole of `E2-B05`'s *bind drivers by declared
+/// properties*.
+///
+/// # Why the pair and not a class code
+///
+/// Because the pair is what this tree already matches on:
+/// `kernel::arch::x86_64::pci::Survey::find` takes a vendor and a device and
+/// nothing else, and a field here that no matcher reads would be a field two
+/// builds could differ in while naming one component.
+///
+/// *What would reverse this:* a driver that binds a class rather than a part —
+/// an AHCI or an xHCI driver, which are defined by their class code and not by
+/// anybody's vendor id. That is a wider `Binding`, a wider overlap test in
+/// `cargo xtask lint-manifests`, and a schema bump. It is deliberately not a
+/// wildcard added to these two fields: a wildcard would make two property sets
+/// overlap without being equal, and the compile-time refusal below would
+/// silently become a subsumption test nobody wrote.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Binding {
+    /// Who made the part.
+    /// Unit: none — a PCI vendor identifier as the bus reports it. Zero is not
+    /// a vendor and is refused; so is [`Binding::NO_VENDOR`], which is how a
+    /// bus says nothing answered and would therefore match every empty slot on
+    /// the machine.
+    pub vendor: u16,
+    /// Which part.
+    /// Unit: none — a PCI device identifier as the bus reports it. Zero is not
+    /// a device identifier and is refused. There is no wildcard, deliberately;
+    /// the type's own comment says why.
+    pub device: u16,
+}
+
+impl Binding {
+    /// A binding with nothing in it, which is what every slot past
+    /// [`Record::devices`] must be.
+    pub const EMPTY: Self = Self { vendor: 0, device: 0 };
+
+    /// The value a bus returns when nothing answered at an address.
+    ///
+    /// Refused as a declared vendor for `kernel::arch::x86_64::pci`'s own
+    /// reason: a manifest declaring it would match every empty slot there is.
+    /// Unit: none — a PCI vendor identifier.
+    pub const NO_VENDOR: u16 = 0xFFFF;
+
+    /// Does this declaration match a part a bus reported?
+    ///
+    /// Equality on both fields, which is the whole of the match: there is no
+    /// wildcard in this record, and this is the function that would have to
+    /// grow one.
+    #[must_use]
+    pub const fn matches(&self, vendor: u16, device: u16) -> bool {
+        self.vendor == vendor && self.device == device
+    }
+}
+
+/// One node of the state tree a component declares it will publish.
+///
+/// # Why the declaration is in the manifest and not in the component
+///
+/// RFC 0013 says the schema block is *published once per generation* and that
+/// the data block has to be **generated from the same declaration the schema
+/// is** — a build-time obligation it creates and names as the only defence
+/// against the two drifting. This is that declaration, and putting it here
+/// rather than in the component's own image buys three things a component-side
+/// constant could not:
+///
+/// - A supervisor can **refuse a component that publishes nothing** before it
+///   spends a frame on it, which is `ADMISSION/NO_STATE_TREE` and is the clause
+///   that keeps RFC 0013's *every* honest. A declaration inside the image is
+///   one the frame would have to run the component to find out about, and a
+///   component that has already run has already escaped the refusal.
+/// - The schema block exists **before the component's first instruction**, so a
+///   component that is spawned and never scheduled still has a readable tree
+///   with zeros in it. That is the difference between *this component has done
+///   nothing* and *this component cannot be read*, and a boot that could not
+///   tell them apart is the boot this task exists to end.
+/// - The declaration is inside the content hash a spawn names, so a component
+///   whose *account of itself* changed is a different component — the same rule
+///   `ContentId` already applies to its code.
+///
+/// What it costs is that a node's name and hierarchy are chosen where the
+/// manifest is written rather than where the counter is kept, and the two can
+/// drift. That is a real cost and it is the one RFC 0013 already accepted for
+/// the schema block; what makes it survivable is that the ids are permanent and
+/// the *component* is what fills the words.
+///
+/// Exactly twenty-eight bytes: [`crate::state::SchemaEntry`] without its
+/// `offset`, because an offset is derived — the words tile the data block in
+/// declaration order — and a declared offset would be a second opinion about
+/// where a node lives.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Node {
+    /// This node's permanent identifier, unique within this component's tree
+    /// and never reused across its lifetime.
+    /// Unit: none — an identifier, not a quantity. Zero is not a node.
+    pub id: u32,
+    /// The id of the node this hangs under, or zero for this tree's root.
+    /// Unit: none — a node identifier. Exactly one node in a declaration may
+    /// carry zero, and it is the first: that is what makes a component's tree
+    /// *one* tree rather than a forest wearing one name.
+    pub parent: u32,
+    /// One of [`crate::state::kind`]. Unit: none. Zero is not a kind.
+    pub kind: u8,
+    /// One of [`crate::state::unit`]. Unit: none — it *is* the unit.
+    ///
+    /// Not closed against this build's set, deliberately: RFC 0013's reader
+    /// skips and counts a node it cannot name, so a manifest declaring a unit
+    /// a future build defines is a manifest an older frame can still publish.
+    /// What is closed is the *kind*, because the kind is what says whether the
+    /// word is a count, a level or an address, and a publisher that got that
+    /// wrong would be publishing a number under the wrong arithmetic.
+    pub unit: u8,
+    /// How many bytes of `name` are used.
+    /// Unit: bytes, at most sixteen. Zero is a node with no name, which the
+    /// wire format allows and this declaration refuses — a node nobody can
+    /// name in a file a person wrote is a typing mistake.
+    pub name_len: u8,
+    /// Reserved. Must be zero; a non-zero byte is refused rather than ignored,
+    /// per R04. Unit: none.
+    pub _reserved: u8,
+    /// The node's name, ASCII `[a-z0-9-]`, not terminated.
+    /// Unit: none. Sixteen bytes, which is [`crate::state::SchemaEntry`]'s
+    /// field and not [`NAME_MAX`]: this name goes on the wire as that one.
+    pub name: [u8; 16],
+}
+
+const _: () = assert!(core::mem::size_of::<Node>() == 28);
+
+impl Node {
+    /// A node that is not one.
+    pub const EMPTY: Self =
+        Self { id: 0, parent: 0, kind: 0, unit: 0, name_len: 0, _reserved: 0, name: [0; 16] };
+
+    /// The name, as far as it goes.
+    #[must_use]
+    pub fn label(&self) -> &[u8] {
+        let len = (self.name_len as usize).min(16);
+        self.name.get(..len).unwrap_or(&[])
+    }
+
+    /// The schema entry this declaration becomes, for a node at `index` in the
+    /// data block.
+    ///
+    /// The offset is `index * WORD` and comes from here rather than from the
+    /// declaration, because `crate::state::validate` requires exactly that
+    /// tiling and a declared offset would be a second opinion it could
+    /// contradict. One arithmetic, in one place, so that the schema the frame
+    /// writes and the schema a reader validates cannot disagree.
+    #[must_use]
+    pub const fn entry(&self, index: u32) -> crate::state::SchemaEntry {
+        let mut out = crate::state::SchemaEntry::ZERO;
+        out.id = self.id;
+        out.parent = self.parent;
+        out.offset = index * crate::state::WORD;
+        out.kind = self.kind;
+        out.unit = self.unit;
+        out.name_len = self.name_len;
+        let mut at = 0;
+        while at < 16 {
+            out.name[at] = self.name[at];
+            at += 1;
+        }
+        out
+    }
+}
+
 /// A whole manifest, as the frame reads it.
 ///
 /// Field order is by alignment and not by the order `docs/manifest.md` lists
@@ -491,11 +728,60 @@ pub struct Record {
     /// Unit: entries, at most [`RINGS_MAX`]. The control ring is not counted:
     /// every component has exactly one and never declares it.
     pub rings: u8,
+    /// How many of [`Record::binding`] are real.
+    ///
+    /// **Zero is a declaration and not a silence.** A component that binds no
+    /// device declares no `[[device]]` entry, and `cargo xtask lint-manifests`
+    /// requires the choice to have been made in the source rather than left to
+    /// whoever reads the record next — which is the same argument RFC 0063 made
+    /// for [`Record::transfer`], one field over.
+    /// Unit: entries, at most [`DEVICES_MAX`]. Every entry past this must be
+    /// all zero.
+    pub devices: u8,
+    /// How many of [`Record::state`] are real.
+    ///
+    /// **Zero refuses the spawn** — `ADMISSION/NO_STATE_TREE`, RFC 0065 — and
+    /// that is the field's whole point: it is not a count with an empty case,
+    /// it is the declaration RFC 0013 requires of every component, and the
+    /// count is how it is made. It is checked at the spawn and not at
+    /// [`Record::read`] on purpose: a record with no nodes is well formed, and
+    /// what is wrong with it is a decision the *supervisor* takes about what it
+    /// will host, which is where every other admission refusal is taken.
+    ///
+    /// Unit: entries, at most [`STATE_NODES_MAX`]. Every entry past this must
+    /// be all zero, so that two records declaring the same component cannot
+    /// differ in bytes nobody reads.
+    ///
+    /// It took a reserved byte, as [`Record::devices`] did one field over —
+    /// which is what a reserved byte is for and is why taking one is a schema
+    /// bump. Two of the three are spent and one is left.
+    pub state_nodes: u8,
     /// Reserved. Must be zero — a non-zero value is refused rather than
     /// ignored, per R04.
     /// Unit: none; this is not a quantity and is not expected to become one
     /// without a schema bump.
-    pub _reserved: [u8; 3],
+    pub _reserved: [u8; 1],
+    /// What this component declares about being updated in place, and what it
+    /// declares when it cannot.
+    ///
+    /// Here rather than in a second record, because a swap decides whether it
+    /// is possible by comparing two *manifests* and a manifest that carried
+    /// this somewhere else would be two files naming one component. RFC 0063.
+    /// Unit: none — a [`crate::transfer::Declaration`], every field of which
+    /// states its own.
+    pub transfer: Declaration,
+    /// The device identities this component declares it will bind.
+    ///
+    /// A *set* written as an array, and the order in the array is the source's
+    /// own: two entries swapped are two component files with different content
+    /// hashes naming one driver, which is why `cargo xtask lint-manifests`
+    /// refuses a manifest whose entries are not sorted on (vendor, device).
+    /// Canonical here for the reason `f_generation::record` is canonical one
+    /// level up — the same declaration has to produce the same bytes or the
+    /// root is not a function of the source.
+    /// Unit: entries; the first [`Record::devices`] are real and the rest are
+    /// all zero.
+    pub binding: [Binding; DEVICES_MAX],
     /// The declared capabilities, in the order the supervisor supplies them and
     /// the order the `granted` notices arrive.
     /// Unit: entries; the first [`Record::capabilities`] are real and the rest
@@ -505,25 +791,58 @@ pub struct Record {
     /// Unit: entries; the first [`Record::rings`] are real and the rest are all
     /// zero.
     pub ring: [Ring; RINGS_MAX],
+    /// The state tree this component publishes, in data-block order.
+    ///
+    /// Last in the record, because a field inserted before an array moves every
+    /// slot in it and a component file the writer and the reader disagree about
+    /// is exactly what the offset assertions below exist to prevent. Schema 3
+    /// paid that cost once already: [`Record::binding`] landed *before* the
+    /// arrays and moved [`Record::capability`] and [`Record::ring`] sixteen
+    /// bytes, which is why every component file is rebuilt. Appending here is
+    /// what kept it to one such move rather than two.
+    /// Unit: entries; the first [`Record::state_nodes`] are real and the rest
+    /// are all zero.
+    pub state: [Node; STATE_NODES_MAX],
 }
 
 // The layout is the ABI. Pinned here so that a field reordered, widened or
 // inserted is a build failure with a number in it rather than a component file
-// two builds of this tree disagree about. A change to any of these three is a
+// two builds of this tree disagree about. A change to any of these is a
 // `schema` bump and a rebuild of every component file — RFC 0030 states that
 // cost rather than hiding it.
 const _: () = assert!(core::mem::size_of::<Need>() == 80);
 const _: () = assert!(core::mem::size_of::<Ring>() == 104);
-const _: () = assert!(core::mem::size_of::<Record>() == 2216);
+const _: () = assert!(core::mem::size_of::<Binding>() == 4);
+const _: () = assert!(core::mem::size_of::<Node>() == 28);
+// 2696 = 104 + 16 + 4 * 4 + 16 * 80 + 8 * 104 + 16 * 28. The number is pinned
+// because `xtask::manifest`'s mirror reads it out of this line — it cannot
+// depend on this crate — but it is not *asserted* here on its own: the sum
+// below derives it from the parts, so a number typed wrong is a build failure
+// and not a component file two builds disagree about.
+const _: () = assert!(core::mem::size_of::<Record>() == 2696);
 // No padding anywhere: the sum of the parts is the whole. A padded record has
 // bytes the reader never judges, and an unjudged byte inside a hashed structure
 // is a place two files can differ while claiming to name one component.
 const _: () = assert!(
     core::mem::size_of::<Record>()
         == 104
+            + core::mem::size_of::<Declaration>()
+            + DEVICES_MAX * core::mem::size_of::<Binding>()
             + CAPABILITIES_MAX * core::mem::size_of::<Need>()
             + RINGS_MAX * core::mem::size_of::<Ring>()
+            + STATE_NODES_MAX * core::mem::size_of::<Node>()
 );
+// And the five offsets `xtask::manifest::record` mirrors, pinned here rather
+// than derived there. The writer stamps fields at literal offsets because
+// `xtask` deliberately does not depend on `f-abi`; a size assertion alone would
+// let a field inserted *before* the arrays keep the total and move every slot,
+// which is a component file the writer and the reader disagree about in a way
+// no test that only sums sizes can see.
+const _: () = assert!(core::mem::offset_of!(Record, transfer) == 104);
+const _: () = assert!(core::mem::offset_of!(Record, binding) == 120);
+const _: () = assert!(core::mem::offset_of!(Record, capability) == 136);
+const _: () = assert!(core::mem::offset_of!(Record, ring) == 1416);
+const _: () = assert!(core::mem::offset_of!(Record, state) == 2248);
 
 /// Why a component file was refused.
 ///
@@ -567,6 +886,12 @@ pub enum Refusal {
     /// and is not zero. Refused rather than ignored, because a reader who sees
     /// a backoff under `never` will believe there is one.
     NotUnderThisPolicy,
+    /// A list that has to be canonical is not: two `[[device]]` entries name
+    /// one part, or they are not sorted on (vendor, device). Refused rather
+    /// than sorted, because a reader that reordered would let two different
+    /// component files carry one meaning and the content address would stop
+    /// naming what was written.
+    Order,
 }
 
 impl Refusal {
@@ -586,6 +911,7 @@ impl Refusal {
             Self::Rights => "a rights bitmap is undefined here",
             Self::Quantity => "a quantity is out of range, or two of them disagree",
             Self::NotUnderThisPolicy => "a field means nothing under what was declared",
+            Self::Order => "a canonical list repeats an entry or is out of order",
         }
     }
 
@@ -636,9 +962,14 @@ impl Record {
         class: 0,
         capabilities: 0,
         rings: 0,
-        _reserved: [0; 3],
+        devices: 0,
+        state_nodes: 0,
+        _reserved: [0; 1],
+        transfer: Declaration::EMPTY,
+        binding: [Binding::EMPTY; DEVICES_MAX],
         capability: [Need::EMPTY; CAPABILITIES_MAX],
         ring: [Ring::EMPTY; RINGS_MAX],
+        state: [Node::EMPTY; STATE_NODES_MAX],
     };
 
     /// Read a component file where the loader left it.
@@ -668,6 +999,66 @@ impl Record {
         // is no niche here for arbitrary bytes to violate. The reference
         // borrows `module`, so it cannot outlive the bytes it names.
         let record = unsafe { &*module.as_ptr().cast::<Self>() };
+        record.judge(module.len())?;
+        Ok(record)
+    }
+
+    /// Read a component file out of bytes that are not aligned for a record.
+    ///
+    /// # Why this exists beside [`Record::read`], and does not replace it
+    ///
+    /// [`Refusal::Unaligned`] is a real refusal and stays one: a *loader* that
+    /// puts a module at an odd address has done something this kernel should
+    /// disbelieve rather than work around, and the frame's path keeps that
+    /// refusal untouched.
+    ///
+    /// What changed is that a component file is no longer always something a
+    /// loader placed. `E2-B05`'s assembler is handed **one** boot module —
+    /// [`crate::boot::Module`] — with the component files packed inside it at
+    /// offsets the *format* chose, and no format that packs variable-length
+    /// files end to end can promise every one of them an eight-byte boundary
+    /// without padding the reader would then have to judge. So the caller that
+    /// holds bytes it did not place gets a way in that copies, and the record it
+    /// gets back is owned rather than borrowed.
+    ///
+    /// **Every judgement is the same one**, not a second set: both entry points
+    /// call one private function, so a field that becomes refusable becomes
+    /// refusable in both by construction. Two validators over one layout is
+    /// exactly the defect this crate exists to not have.
+    ///
+    /// The cost is one copy of the record — not of the image, which stays where
+    /// it is — per component file per instantiation.
+    ///
+    /// # Errors
+    ///
+    /// Every [`Refusal`] [`Record::read`] produces except [`Refusal::Unaligned`],
+    /// which cannot arise here.
+    pub fn read_unaligned(module: &[u8]) -> Result<Self, Refusal> {
+        let size = core::mem::size_of::<Self>();
+        if module.len() < size {
+            return Err(Refusal::Truncated);
+        }
+        // SAFETY: `module` is at least `size_of::<Record>()` bytes long, checked
+        // above. `read_unaligned` requires the pointer to be valid for a read of
+        // that many bytes and imposes no alignment requirement, which is the
+        // whole reason it is the call here. `Record` is `#[repr(C)]` and every
+        // one of its fields is an integer or an array of integers, so every bit
+        // pattern is a valid value and there is no niche for arbitrary bytes to
+        // violate; the result is an owned copy that borrows nothing.
+        let record = unsafe { module.as_ptr().cast::<Self>().read_unaligned() };
+        record.judge(module.len())?;
+        Ok(record)
+    }
+
+    /// Every judgement a component file has to pass, over a record that is
+    /// already in memory.
+    ///
+    /// `module_bytes` is the whole file's length, because two of the checks are
+    /// about the file and not about the record: the image is not empty, and the
+    /// file is exactly the record and the image with nothing after it.
+    fn judge(&self, module_bytes: usize) -> Result<(), Refusal> {
+        let size = core::mem::size_of::<Self>();
+        let record = self;
 
         if record.magic != MAGIC {
             return Err(Refusal::NotAManifest);
@@ -678,7 +1069,7 @@ impl Record {
         if record.record_bytes as usize != size {
             return Err(Refusal::RecordSize);
         }
-        if record._reserved != [0; 3] {
+        if record._reserved != [0; 1] {
             return Err(Refusal::Reserved);
         }
         if record.image_bytes == 0 {
@@ -688,7 +1079,7 @@ impl Record {
         // Trailing bytes are refused rather than ignored because the content
         // hash covers the whole module: bytes nobody reads are bytes two files
         // can differ in while naming one component.
-        if module.len() != size + record.image_bytes as usize {
+        if module_bytes != size + record.image_bytes as usize {
             return Err(Refusal::Truncated);
         }
 
@@ -704,12 +1095,18 @@ impl Record {
         if record.capabilities as usize > CAPABILITIES_MAX || record.rings as usize > RINGS_MAX {
             return Err(Refusal::Count);
         }
+        if record.devices as usize > DEVICES_MAX || record.state_nodes as usize > STATE_NODES_MAX {
+            return Err(Refusal::Count);
+        }
 
         record.check_restart()?;
         record.check_reservation()?;
+        record.check_transfer()?;
+        record.check_bindings()?;
         record.check_capabilities()?;
         record.check_rings()?;
-        Ok(record)
+        record.check_state()?;
+        Ok(())
     }
 
     /// The image bytes of a module whose record this is.
@@ -742,6 +1139,31 @@ impl Record {
     #[must_use]
     pub fn rings(&self) -> &[Ring] {
         self.ring.get(..self.rings as usize).unwrap_or(&[])
+    }
+
+    /// The device identities this component declares it will bind, in canonical
+    /// order.
+    ///
+    /// Empty is the common answer and is a statement: this component binds no
+    /// device. Nothing here distinguishes *declared none* from *said nothing*,
+    /// because [`Record::read`] does not admit the second — a manifest that made
+    /// no choice is refused by `cargo xtask lint-manifests` before a record
+    /// exists.
+    #[must_use]
+    pub fn bindings(&self) -> &[Binding] {
+        self.binding.get(..self.devices as usize).unwrap_or(&[])
+    }
+
+    /// The state-tree nodes this component declares, in data-block order.
+    ///
+    /// Empty is a legal *reading* and an illegal *component*: the record is
+    /// well formed and the spawn is refused `ADMISSION/NO_STATE_TREE`. The
+    /// split is deliberate — see [`Record::state_nodes`] — so that a tool which
+    /// reads component files can say *this one declares no tree* rather than
+    /// failing to read it at all.
+    #[must_use]
+    pub fn state_nodes(&self) -> &[Node] {
+        self.state.get(..self.state_nodes as usize).unwrap_or(&[])
     }
 
     /// Does this policy restart after a death of this cause?
@@ -835,6 +1257,91 @@ impl Record {
         Ok(())
     }
 
+    /// RFC 0063's declaration, judged the way every other closed field is.
+    ///
+    /// Three rules and one piece of arithmetic. The mode is closed and zero is
+    /// not a value, so a zeroed record declares nothing rather than declaring
+    /// `restart_only` by accident. Under `restart_only` the other three fields
+    /// are refused when non-zero rather than ignored, because a reader who sees
+    /// a record width under a component that hands nothing over will believe
+    /// there is one — the same refusal [`Refusal::NotUnderThisPolicy`] makes of
+    /// a backoff under `never`.
+    ///
+    /// The arithmetic is the one rule that ties this table to another: the
+    /// window is bought out of the incoming component's own `Untyped` account
+    /// (RFC 0063), so a declaration whose window is larger than
+    /// [`Record::memory_bytes`] has declared a swap that can never be admitted.
+    /// Refused here rather than discovered at the swap, where the client's
+    /// submissions are already held.
+    fn check_transfer(&self) -> Result<(), Refusal> {
+        let declared = &self.transfer;
+        if declared._reserved != [0; 3] {
+            return Err(Refusal::Reserved);
+        }
+        if !mode::known(declared.mode) {
+            return Err(Refusal::Value);
+        }
+        if !declared.in_place() {
+            return if declared.schema == 0
+                && declared.record_bytes == 0
+                && declared.records_max == 0
+            {
+                Ok(())
+            } else {
+                Err(Refusal::NotUnderThisPolicy)
+            };
+        }
+        if declared.schema == 0 || declared.records_max == 0 || declared.record_bytes == 0 {
+            return Err(Refusal::Quantity);
+        }
+        if !declared.record_bytes.is_multiple_of(crate::transfer::RECORD_ALIGN) {
+            return Err(Refusal::Quantity);
+        }
+        if declared.window_bytes() > self.memory_bytes {
+            return Err(Refusal::Quantity);
+        }
+        Ok(())
+    }
+
+    /// Every declared binding is a part, no two of them are the same part, and
+    /// they are in the order the encoder is required to write them.
+    ///
+    /// The order is checked and not applied, which is `f_generation::record`'s
+    /// argument one level up and is the same argument here: a reader that sorted
+    /// on the way in would let two different component files fold to one leaf,
+    /// and the whole claim of a content address is that it does not.
+    fn check_bindings(&self) -> Result<(), Refusal> {
+        let mut previous: Option<Binding> = None;
+        for (index, binding) in self.binding.iter().enumerate() {
+            if index >= self.devices as usize {
+                // Past the count, all zero — the same rule the capability and
+                // ring arrays are held to, and for the same reason: a byte
+                // nobody judges is a byte two files can differ in while naming
+                // one component.
+                if *binding != Binding::EMPTY {
+                    return Err(Refusal::Count);
+                }
+                continue;
+            }
+            if binding.vendor == 0 || binding.device == 0 || binding.vendor == Binding::NO_VENDOR {
+                return Err(Refusal::Value);
+            }
+            if let Some(before) = previous {
+                match before.cmp(binding) {
+                    core::cmp::Ordering::Less => {}
+                    // Equal is a driver that declared one part twice, which is
+                    // an author with two beliefs about one thing rather than a
+                    // list to be de-duplicated.
+                    core::cmp::Ordering::Equal | core::cmp::Ordering::Greater => {
+                        return Err(Refusal::Order);
+                    }
+                }
+            }
+            previous = Some(*binding);
+        }
+        Ok(())
+    }
+
     fn check_capabilities(&self) -> Result<(), Refusal> {
         for (index, need) in self.capability.iter().enumerate() {
             if index >= self.capabilities as usize {
@@ -863,6 +1370,99 @@ impl Record {
         }
         Ok(())
     }
+
+    /// The declared state tree: one root, ascending ids, and no node hanging
+    /// from something that is not there.
+    ///
+    /// These are exactly the properties `crate::state::validate` will require
+    /// of the schema block the frame writes out of this declaration, checked
+    /// here so that the refusal names the *manifest* rather than surfacing as a
+    /// frame that wrote a tree it cannot read. The two checks are deliberately
+    /// duplicated and deliberately not shared: this one judges a declaration a
+    /// person wrote, that one judges bytes in a mapping a peer may have
+    /// scribbled, and folding them together would make the second trust the
+    /// first.
+    ///
+    /// **One root**, which the wire format does not require and a component's
+    /// tree does. RFC 0013's mount reaches a component's tree at one address,
+    /// and a declaration with two parentless nodes would be two trees at that
+    /// address with the second reachable only by whoever went looking. The
+    /// first node is the root because the ids ascend and a parent must be named
+    /// before its child, so no other node *can* be one.
+    ///
+    /// A zero count is not refused here. See [`Record::state_nodes`].
+    fn check_state(&self) -> Result<(), Refusal> {
+        for (index, node) in self.state.iter().enumerate() {
+            if index >= self.state_nodes as usize {
+                if node.id != 0
+                    || node.parent != 0
+                    || node.kind != 0
+                    || node.unit != 0
+                    || node.name_len != 0
+                    || node._reserved != 0
+                    || node.name != [0; 16]
+                {
+                    return Err(Refusal::Count);
+                }
+                continue;
+            }
+            if node._reserved != 0 {
+                return Err(Refusal::Reserved);
+            }
+            if node.kind == 0 {
+                return Err(Refusal::Value);
+            }
+            if node.name_len == 0 || node.name_len as usize > 16 || !is_node_name(node) {
+                return Err(Refusal::Name);
+            }
+            // Ids ascend and start above zero, which is what makes two readings
+            // of one component across time comparable and what makes the parent
+            // check below sound in one pass.
+            let previous =
+                index.checked_sub(1).and_then(|at| self.state.get(at)).map_or(0, |n| n.id);
+            if node.id == 0 || node.id <= previous {
+                return Err(Refusal::Quantity);
+            }
+            if index == 0 {
+                // The root, and the only node that may be parentless.
+                if node.parent != 0 {
+                    return Err(Refusal::Quantity);
+                }
+                continue;
+            }
+            if node.parent == 0 {
+                return Err(Refusal::Quantity);
+            }
+            let named =
+                self.state.get(..index).unwrap_or(&[]).iter().any(|prior| prior.id == node.parent);
+            if !named {
+                return Err(Refusal::Quantity);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Is a declared node's name `[a-z0-9-]`, with no edge hyphen and no byte past
+/// its length?
+///
+/// The alphabet is the one every other name in this file uses, and the bytes
+/// past `name_len` have to be zero for the reason the arrays past their counts
+/// do: the record is hashed whole, and a byte nobody judges is a byte two
+/// files can differ in while naming one component.
+fn is_node_name(node: &Node) -> bool {
+    let len = node.name_len as usize;
+    if len == 0 || len > 16 {
+        return false;
+    }
+    if node.name.iter().skip(len).any(|byte| *byte != 0) {
+        return false;
+    }
+    let Some(name) = node.name.get(..len) else { return false };
+    if name.first() == Some(&b'-') || name.last() == Some(&b'-') {
+        return false;
+    }
+    name.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 
 impl Need {
@@ -1186,6 +1786,9 @@ mod tests {
         record.max_restarts = 3;
         record.budget_window_ticks = 3_000;
         record.image_bytes = 4;
+        // The honest declaration, which is what a fixture that is not testing
+        // this field should carry: RFC 0063 and `crate::transfer`.
+        record.transfer = Declaration::RESTART_ONLY;
 
         record.capability[0] = Need {
             name: name_bytes("account").unwrap(),
@@ -1216,7 +1819,30 @@ mod tests {
             ..Ring::EMPTY
         };
         record.rings = 1;
+
+        // The tree, because RFC 0065 makes one part of what a well-formed
+        // manifest declares: a root and one counter under it. A fixture with no
+        // tree would be a fixture of a component the supervisor refuses, which
+        // is what `a_declaration_with_no_root_or_a_broken_one_is_refused`
+        // constructs on purpose rather than inheriting by accident.
+        record.state[0] =
+            node(1, 0, crate::state::kind::SUBTREE, crate::state::unit::NONE, b"store");
+        record.state[1] =
+            node(2, 1, crate::state::kind::COUNTER, crate::state::unit::EVENTS, b"served");
+        record.state_nodes = 2;
         record
+    }
+
+    /// One declared node, written the way a manifest compiler writes one.
+    fn node(id: u32, parent: u32, kind: u8, unit: u8, name: &[u8]) -> Node {
+        let mut out = Node::EMPTY;
+        out.id = id;
+        out.parent = parent;
+        out.kind = kind;
+        out.unit = unit;
+        out.name_len = name.len() as u8;
+        out.name.get_mut(..name.len()).unwrap().copy_from_slice(name);
+        out
     }
 
     /// How much image every fixture below carries. Four bytes, because the
@@ -1275,7 +1901,7 @@ mod tests {
             ("magic", |r| r.magic = 0, Refusal::NotAManifest),
             ("schema", |r| r.schema = SCHEMA + 1, Refusal::Schema),
             ("record length", |r| r.record_bytes += 8, Refusal::RecordSize),
-            ("reserved", |r| r._reserved[1] = 1, Refusal::Reserved),
+            ("reserved", |r| r._reserved[0] = 1, Refusal::Reserved),
             ("no image", |r| r.image_bytes = 0, Refusal::Quantity),
             ("domain", |r| r.domain = 9, Refusal::Value),
             ("policy", |r| r.restart = 0, Refusal::Value),
@@ -1306,6 +1932,53 @@ mod tests {
         record.ring[3].entries = 4;
         let bytes = module(&record);
         assert_eq!(read(&bytes.0).err(), Some(Refusal::Count));
+
+        let mut record = well_formed();
+        record.binding[2] = Binding { vendor: 0x1AF4, device: 0x1042 };
+        let bytes = module(&record);
+        assert_eq!(read(&bytes.0).err(), Some(Refusal::Count));
+    }
+
+    #[test]
+    fn a_declared_device_is_a_part_and_the_list_is_canonical() {
+        // A driver that declares two parts is the shape this tree actually
+        // has — a virtio device answers to a modern id and a transitional one —
+        // so the accepting case is the two-entry one.
+        let mut record = well_formed();
+        record.binding[0] = Binding { vendor: 0x1AF4, device: 0x1001 };
+        record.binding[1] = Binding { vendor: 0x1AF4, device: 0x1042 };
+        record.devices = 2;
+        let bytes = module(&record);
+        assert_eq!(read(&bytes.0).map(|r| r.bindings().len()), Ok(2));
+
+        // Out of order, and refused rather than sorted: a reader that reordered
+        // would let two component files carry one meaning, and a content
+        // address that names two things names nothing.
+        let mut swapped = record;
+        swapped.binding.swap(0, 1);
+        let bytes = module(&swapped);
+        assert_eq!(read(&bytes.0).err(), Some(Refusal::Order));
+
+        // One part declared twice is an author with two beliefs about one
+        // thing, not a list to be de-duplicated.
+        let mut twice = record;
+        twice.binding[1] = twice.binding[0];
+        let bytes = module(&twice);
+        assert_eq!(read(&bytes.0).err(), Some(Refusal::Order));
+
+        // Neither zero nor the value a bus returns when nothing answered: the
+        // second would match every empty slot on the machine.
+        for bad in [
+            Binding { vendor: 0, device: 0x1042 },
+            Binding { vendor: 0x1AF4, device: 0 },
+            Binding { vendor: Binding::NO_VENDOR, device: 0x1042 },
+        ] {
+            let mut record = well_formed();
+            record.binding[0] = bad;
+            record.devices = 1;
+            let bytes = module(&record);
+            assert_eq!(read(&bytes.0).err(), Some(Refusal::Value), "{bad:?}");
+        }
     }
 
     #[test]
@@ -1480,5 +2153,165 @@ mod tests {
             let ordinal = class::admitted(value).expect("a known class");
             assert!(crate::deadline::Admitted::new(ordinal).is_some());
         }
+    }
+
+    /// A record that declares nothing about being updated in place is refused,
+    /// which is what makes `restart_only` a declaration rather than a silence.
+    /// RFC 0063.
+    #[test]
+    fn a_record_with_no_transfer_mode_is_refused() {
+        let mut record = well_formed();
+        record.transfer = Declaration::EMPTY;
+        let bytes = module(&record);
+        assert_eq!(read(&bytes.0).err(), Some(Refusal::Value));
+    }
+
+    /// The three quantities mean nothing under `restart_only`, so a non-zero
+    /// one is refused rather than ignored — the same rule a backoff under
+    /// `never` is held to, and for the same reason: a reader who sees a record
+    /// width will believe there is one.
+    #[test]
+    fn a_quantity_under_restart_only_is_refused() {
+        for mutate in [
+            (|d: &mut Declaration| d.schema = 1) as fn(&mut Declaration),
+            |d: &mut Declaration| d.record_bytes = 8,
+            |d: &mut Declaration| d.records_max = 1,
+        ] {
+            let mut record = well_formed();
+            mutate(&mut record.transfer);
+            let bytes = module(&record);
+            assert_eq!(read(&bytes.0).err(), Some(Refusal::NotUnderThisPolicy));
+        }
+    }
+
+    /// `in_place` is the mode with arithmetic behind it: a schema, a width that
+    /// records can be laid end to end at, a bound, and a window the component's
+    /// own account can hold.
+    #[test]
+    fn an_in_place_declaration_is_judged_field_by_field() {
+        let sound = Declaration {
+            schema: 1,
+            record_bytes: 32,
+            records_max: 16,
+            mode: mode::IN_PLACE,
+            _reserved: [0; 3],
+        };
+        let mut record = well_formed();
+        record.transfer = sound;
+        assert!(read(&module(&record).0).is_ok(), "a sound declaration was refused");
+
+        for (broken, why) in [
+            (Declaration { schema: 0, ..sound }, "a state-record schema of zero"),
+            (Declaration { record_bytes: 0, ..sound }, "a record of no width"),
+            (Declaration { records_max: 0, ..sound }, "a bound of no records"),
+            (Declaration { record_bytes: 12, ..sound }, "a width records cannot be aligned at"),
+            // The window is bought out of this component's own account, and
+            // `well_formed` declares sixteen pages of it.
+            (Declaration { records_max: 4096, ..sound }, "a window larger than the account"),
+        ] {
+            let mut record = well_formed();
+            record.transfer = broken;
+            assert_eq!(read(&module(&record).0).err(), Some(Refusal::Quantity), "{why}");
+        }
+    }
+
+    /// R04 reaches inside the declaration too.
+    #[test]
+    fn a_reserved_byte_in_the_declaration_is_refused() {
+        let mut record = well_formed();
+        record.transfer._reserved = [0, 1, 0];
+        assert_eq!(read(&module(&record).0).err(), Some(Refusal::Reserved));
+    }
+
+    /// Every way a declared state tree can fail to be one, and each earns its
+    /// own refusal.
+    ///
+    /// The properties are `crate::state::validate`'s, checked one layer earlier
+    /// so that the finding names the manifest. The one that is *not* the wire
+    /// format's is **one root**: RFC 0065 argues it, and it is the property
+    /// that makes a mount reach a whole tree rather than whichever half a
+    /// reader started walking from.
+    #[test]
+    fn a_declaration_with_no_root_or_a_broken_one_is_refused() {
+        assert!(read(&module(&well_formed()).0).is_ok(), "the control was refused");
+
+        let cases: [Lie; 8] = [
+            ("a second root", |r| r.state[1].parent = 0, Refusal::Quantity),
+            ("a root with a parent", |r| r.state[0].parent = 9, Refusal::Quantity),
+            ("a parent nothing names", |r| r.state[1].parent = 7, Refusal::Quantity),
+            ("an id that does not ascend", |r| r.state[1].id = 1, Refusal::Quantity),
+            ("a node with no id", |r| r.state[0].id = 0, Refusal::Quantity),
+            ("a kind that is not one", |r| r.state[1].kind = 0, Refusal::Value),
+            ("a node with no name", |r| r.state[1].name_len = 0, Refusal::Name),
+            ("a reserved byte carrying something", |r| r.state[1]._reserved = 1, Refusal::Reserved),
+        ];
+        for (what, bend, want) in cases {
+            let mut record = well_formed();
+            bend(&mut record);
+            assert_eq!(read(&module(&record).0).err(), Some(want), "{what} was accepted");
+        }
+
+        // A byte past a declared name, and an entry past the count: two places
+        // a hashed record could differ while naming one component.
+        let mut trailing = well_formed();
+        trailing.state[1].name[15] = b'x';
+        assert_eq!(read(&module(&trailing).0).err(), Some(Refusal::Name), "a byte past a name");
+
+        let mut past = well_formed();
+        past.state[2] = node(9, 1, crate::state::kind::GAUGE, crate::state::unit::NONE, b"ghost");
+        assert_eq!(read(&module(&past).0).err(), Some(Refusal::Count), "an entry past the count");
+
+        let mut many = well_formed();
+        many.state_nodes = STATE_NODES_MAX as u8 + 1;
+        assert_eq!(read(&module(&many).0).err(), Some(Refusal::Count), "a count past its bound");
+    }
+
+    /// A record declaring no tree is *readable*, and that is the split RFC 0065
+    /// makes on purpose: refusing it here would leave a tool that reads
+    /// component files unable to say which of them publishes nothing, and the
+    /// refusal belongs where every other admission refusal is taken.
+    #[test]
+    fn a_record_that_declares_no_tree_reads_and_says_so() {
+        let mut record = well_formed();
+        record.state = [Node::EMPTY; STATE_NODES_MAX];
+        record.state_nodes = 0;
+        let bytes = module(&record);
+        let read = read(&bytes.0).expect("a record with no tree is well formed");
+        assert!(read.state_nodes().is_empty(), "a mute record claimed to declare something");
+    }
+
+    /// A declaration becomes the schema block the frame writes, and that block
+    /// is one `crate::state::validate` accepts.
+    ///
+    /// The property the whole mechanism rests on: the schema and the data block
+    /// come from *one* declaration, which is the build-time obligation RFC 0013
+    /// creates and names as the only defence against the two drifting. A
+    /// conversion that produced a schema the reader refused would be that drift
+    /// on its first day.
+    #[test]
+    fn a_declaration_becomes_a_schema_block_the_reader_accepts() {
+        let record = well_formed();
+        let mut schema = [crate::state::SchemaEntry::ZERO; STATE_NODES_MAX];
+        for (index, node) in record.state_nodes().iter().enumerate() {
+            schema[index] = node.entry(index as u32);
+        }
+        let nodes = record.state_nodes().len();
+        let header = crate::state::TreeHeader {
+            magic: crate::state::TREE_MAGIC,
+            version: crate::state::TREE_VERSION,
+            nodes: nodes as u32,
+            schema_offset: 64,
+            data_offset: 64 + nodes as u32 * 32,
+            generation: 0,
+            _reserved: [0; 3],
+        };
+        assert_eq!(header.check(4096), Ok(()), "the header the frame would write is unreadable");
+        assert_eq!(
+            crate::state::validate(&header, &schema[..nodes]),
+            Ok(()),
+            "the schema the frame would write is not one a reader accepts"
+        );
+        assert_eq!(schema[1].label(), b"served");
+        assert_eq!(schema[1].offset, crate::state::WORD);
     }
 }

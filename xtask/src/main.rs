@@ -29,6 +29,28 @@ mod manifest;
 /// rather than a second one of its own. E2-B04.
 mod generation;
 
+/// The build side of RFC 0012's frame measurement: two ranges out of the linked
+/// ELF, hashed in the order the frame recomputes them. Split out because it is
+/// a format reader rather than a policy, and because the whole point of it is
+/// that it is a *second* implementation of one sentence — `kernel/src/measure.rs`
+/// is the other, and code shared between them would agree with itself and say
+/// nothing. E2-B07.
+mod measure;
+
+/// Gate G2's first half: break a generation on purpose, boot the previous one by
+/// name, and check that what came back is the same bytes. Split out because it
+/// is a story with seven steps and six boots rather than a verb with a body, and
+/// because the sentence it is strict about — *bit-identical* — needs the room to
+/// say what is compared. E2-P07.
+mod rollback;
+
+/// Two whole-system states as two hashes, and the descent that names the subtree
+/// they differ in. Split out for `generation`'s reason — it is a check with an
+/// argument behind it rather than a grep with a policy behind it — and it runs
+/// the fold that lives beside the states, in `sim/src/whole.rs`, rather than a
+/// second copy of it here. E2-P05, RFC 0013.
+mod compare;
+
 /// The target the kernel is built for.
 ///
 /// A built-in target and not a JSON file in `targets/`, which is a decision
@@ -178,6 +200,18 @@ const DATAPATH: &[(&str, &str, &str)] = &[
     // self-check, so the published zero remains a measurement rather than an
     // absence.
     ("user/virtio-gpu/", "stage", "provoke_copy"),
+    // `E2-B08`, and the row is *stronger* on this crate than on the three
+    // above it rather than weaker. A driver can be zero-copy by accident,
+    // because a client's bytes go past it and it never needs to look at them;
+    // a read path has every reason to look — it decodes a header out of the
+    // record and it hashes the content before it accepts it — and the obvious
+    // implementation stages the record somewhere it can do both. This one does
+    // neither: the header is *borrowed* out of the caller's registered buffer
+    // as a `&[u8; N]` and the content is hashed in place, so the crate's one
+    // mover is reached only by the provocation. That is what this row holds it
+    // to, and it is what makes `copies_per_read = 0` a count rather than a
+    // sentence about a typestate.
+    ("user/objects/", "stage", "provoke_copy"),
 ];
 
 /// The constructors that turn a bare address into a granted window.
@@ -254,6 +288,16 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
     // the same string for the third time and the third field is what keeps the
     // rule from being satisfied by a name nothing defines.
     ("kernel/", "Driver::", "user/virtio-gpu/"),
+    // The fourth, and the first whose needle is not `Driver::` — which is the
+    // doc comment above working rather than an exception to it. `user/objects`
+    // is not a driver and spells its own type, so the rule that the frame must
+    // not call a component's code needs its own subject here. The reason it
+    // matters on this crate in particular: `ReadPath` resolves a destination
+    // through `f_ring::registry::Table` and then writes into the memory that
+    // table answered for, so a frame that ran this code would be running it
+    // with the direct map underneath every address in it — and `copies_per_read
+    // = 0` would be a number about a component that is not one.
+    ("kernel/", "ReadPath::", "user/objects/"),
 ];
 
 /// The reversal conditions that have fallen due and are **not paid**, declared
@@ -512,14 +556,33 @@ fn main() -> ExitCode {
         // E2-B04. One expression to one root hash, with every leaf printed
         // beside its name so that two runners that disagree name the input that
         // moved rather than reporting that two roots differed. RFC 0012.
-        "generation" => generation::generation(args.get(1).map(String::as_str)),
+        "generation" => generation::generation(args.get(1..).unwrap_or_default()),
         // E1-P06. Every component the build produced, killed under sustained
         // load and again with nothing killed. The verdict is `f-sim`'s and this
         // is the driver: the component directory, the two processes the
         // reproduction check needs, and the declared gap between what the
         // simulator kills and what a boot can. RFC 0041.
+        // E2-P07, and half of gate G2. Break a generation with a real defect,
+        // offer both to the loader, name the previous one with `f.root=<hex>`,
+        // and require what came back to be bit-identical — the root, every byte
+        // of the module as the loader delivered it, and the generation rebuilt
+        // from source. `rollback.rs` says why the second of those is not implied
+        // by the first, and builds the module that proves it.
+        "rollback" => rollback::rollback(),
         "chaos" => chaos(),
+        // E2-P08. Every component the build produced, replaced under sustained
+        // load and again with nothing replaced. The verdict is `f-sim`'s and
+        // this is the driver: the component directory, the two processes the
+        // reproduction check needs, and the declared gap between what the
+        // simulator can replace and what a boot can. RFC 0063.
+        "swap" => swap_gate(),
         "mutate" => mutate(),
+        // E2-B07. What this machine is running, whether two boots of one image
+        // agree about it, and whether a modification to the frame moves it. RFC
+        // 0012 is the decision and is explicit about what the answer does not
+        // prove — which the command's own last paragraph repeats rather than
+        // leaving to a reader who has only seen a hash.
+        "attest" => attest(),
         "prove" => prove(args.get(1).map(String::as_str)),
         // E1-B14. What an unmap costs under churn, counted both ways in one
         // boot, and the host workload beside the E1-P10 claims that asks the
@@ -529,6 +592,12 @@ fn main() -> ExitCode {
         // component directory and the wall clock. Everything that decides a
         // verdict is in `f-sim`, where no clock can reach it. RFC 0040.
         "sweep" => sweep_verb(args.get(1..).unwrap_or_default()),
+        // E2-P01. Gate G2's headline property: cut the power at every write
+        // boundary in a publish and never observe a state that was not one of
+        // the two intended ones. The verb `xtask` owns is the driver and the
+        // control; everything that decides a verdict is in `zone/tests/cut.rs`,
+        // where the model and the four required observations live. RFC 0060.
+        "cut" => cut_verb(args.get(1..).unwrap_or_default()),
         // E1-P04. A peer that writes arbitrary values to the shared header and
         // cursors, restarts mid-operation and lies about its epoch, generated
         // from a seed. Three properties, three counts, three defects — one per
@@ -568,6 +637,11 @@ fn main() -> ExitCode {
             Some(other) => Err(format!("unknown option for sim: {other}")),
             None => sim_check(),
         },
+        // The same question `sim` asks of a trace, asked of a *tree*: two runs,
+        // two whole-system hashes, and — when they differ — the name of the
+        // subtree they differ in rather than a diff somebody has to read.
+        // E2-P05, RFC 0013.
+        "compare" => compare::compare(),
         // `reproduce` used to mean the determinism check above, and it now
         // means what `RELEASING.md`, the long plan and `proving-ground` all use
         // the word for: re-running a published number. The old spelling gets a
@@ -606,6 +680,7 @@ fn main() -> ExitCode {
         "lint-snapshot" => lint_snapshot(),
         "lint-reproduce" => lint_reproduce(),
         "lint-proofs" => lint_proofs(),
+        "lint-remap" => lint_remap(),
         "lint-style" => lint_style(),
         "unsafe" => unsafe_report(args.get(1).map(String::as_str) == Some("--by-file")),
         "release" => release(args.get(1).map(String::as_str)),
@@ -711,7 +786,23 @@ cargo xtask <command>
                      canonical form is refused with the canonical form printed
                      as a diff, never silently reordered. --decompile renders
                      the record tree back to canonical source, which is the half
-                     `cargo xtask lint` checks is a fixpoint
+                     `cargo xtask lint` checks is a fixpoint. --emit DIR writes
+                     one run's record tree and root for another run to compare
+                     against, --compare A B names the first leaf two emitted runs
+                     disagree about, --elsewhere evaluates the same expression at
+                     two checkout paths and requires one root, and --mutate
+                     compiles the build path into the frame and requires that
+                     comparison to go red and name the frame. E2-P06.
+                     --install writes one menuentry per installed generation
+                     into a GRUB fragment — the loader's menu, nothing imported.
+                     E2-P07
+  rollback           Break a generation with a real frame defect, offer both to
+                     the loader, name the previous one with f.root=<64 hex>, and
+                     require what came back to be bit-identical: the root, every
+                     byte of the module as the loader delivered it, and the
+                     generation rebuilt from source. A module that folds to the
+                     right root and carries the wrong bytes is built on purpose
+                     and must be caught. Half of gate G2. E2-P07
   admission          Refuse an over-subscribed reservation and put a granted
                      one under adversarial load, with two controls beside it:
                      the same load without a reservation, which must miss, and
@@ -720,9 +811,19 @@ cargo xtask <command>
   chaos              Kill every component under sustained load at seeded
                      moments, and again with nothing killed. No client may
                      observe anything except added latency
+  swap               Replace every component under sustained load at seeded
+                     moments, each by the route its own manifest declares, and
+                     again with nothing replaced. No client may observe a
+                     dropped operation, and the state that crossed is compared
+                     against what the outgoing instance held
   mutate             Build the kernel with a deliberate defect, boot it, and
                      require the boot to go red — then require the same boot to
                      go green without it
+  attest             Five boots. What is this machine running, is the answer the
+                     same twice, does a modification to the frame move it, does
+                     the frame refuse to publish a root it cannot measure its way
+                     to, and is the reserved zero reachable. No signature and no
+                     freshness — RFC 0012 says what it does not prove
   prove [harness]    Bounded model checking, in two crates: the five capability
                      properties over arbitrary handles, and the ring's
                      validation paths over arbitrary peer bytes. Every harness
@@ -771,6 +872,12 @@ cargo xtask <command>
                      code they prove, under the pinned toolchain and in every
                      feature configuration `prove` builds. Both are outside the
                      workspace, so nothing else in the gate builds them
+  lint-remap         The checkout path still cannot reach a build product: the
+                     remap is in both of .cargo/config.toml's rustflags lists
+                     and in the component build's RUSTFLAGS, and the weekly job
+                     still holds a schedule, the comparison and its harness.
+                     Whether the remap still *works* is decided by
+                     `cargo xtask generation --elsewhere`, which costs two builds
 
   unsafe             The number A-05 reports: lines inside `unsafe` as a share
                      of the frame crates and of the whole tree, against
@@ -791,6 +898,11 @@ cargo xtask <command>
                      the boot spawned. The two halves of boot-to-workload,
                      joined at an artefact rather than at a sentence
   sim --list         The scenario set
+
+  compare            Two whole-system states as two hashes, and the subtree they
+                     differ in. Two processes at one seed must fold to one root,
+                     a second seed must not, and an injected divergence must be
+                     localised to a named subtree by name rather than found
 
   sweep [n] [m]      N seeds across M scenarios, every failure minimised to a
                      reproduction command that judges itself. 64 seeds and every
@@ -814,6 +926,20 @@ cargo xtask <command>
   sweep --record --mutate
                      The same, with the deliberate defect armed. This is how
                      the entries in sim/corpus.txt were produced
+
+  cut [seeds]        Cut the power at every write boundary in a publish, at
+                     block and at byte granularity, in honest and lying mode,
+                     across a set of seeds — and require every cut to leave
+                     either the old root or the new one, with the generation
+                     tree it names resolving. Gate G2's headline property.
+                     64 seeds and every publish by default: 108 280 cuts
+  cut --mutate       Arm the deliberate defect that appends a root record
+                     without waiting for the blobs it names, require the sweep
+                     to find it and to print the cut point, then disarm it and
+                     require the same point to go quiet
+  cut --quick        The gate's own settings — four seeds, and the four
+                     publishes that matter rather than all of them — which is
+                     what `cargo test --workspace` already runs
 
   hostile [n]        A peer that writes arbitrary values to the shared header
                      and cursors, restarts mid-operation and lies about its
@@ -1445,7 +1571,22 @@ fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
         // because the profile key needs `cargo-features` at the top of the
         // workspace manifest — an opt-in that would apply to every build in the
         // tree to change one step. *Reversal:* the key stabilising.
-        .env("RUSTFLAGS", "-C relocation-model=static -Zunstable-options -Cpanic=immediate-abort")
+        //
+        // `-Zremap-cwd-prefix=.` because this string *replaces*
+        // `.cargo/config.toml`'s flags rather than adding to them — which is
+        // what the doc comment above says and is exactly why the remap has to
+        // be written a third time. A component image reproduces across two
+        // checkout paths today without it, measured, and that is an accident of
+        // `[profile.init]` carrying `debug = false`: turn debug information on
+        // for one investigation and four leaves of the generation root become
+        // functions of where the tree was checked out. The flag costs nothing
+        // on an image with no DWARF in it and is the difference between a
+        // property and a coincidence. `cargo xtask lint-remap` reads this line.
+        .env(
+            "RUSTFLAGS",
+            "-Zremap-cwd-prefix=. -C relocation-model=static -Zunstable-options \
+             -Cpanic=immediate-abort",
+        )
         .current_dir(root())
         .stdout(Stdio::piped())
         .spawn()
@@ -1851,6 +1992,37 @@ fn boot_ending(append: Option<&str>, seconds: u64) -> Result<(Ending, String), S
     machine_with(append, &[], Capture::Printed, seconds, BOOT_MEMORY)
 }
 
+/// [`boot_captured`], offering extra boot modules on top of the standing list.
+///
+/// `E2-P07`'s, and the only caller: a rollback is a machine offered more than
+/// one generation and told which to be, so the menu has to be something the
+/// harness composes per boot rather than the fixed list every other command
+/// wants. Everything else about the emulator is unchanged, which is the whole
+/// reason this takes a slice rather than describing a machine of its own.
+fn boot_carrying(
+    append: &str,
+    carrying: &[String],
+    features: &[&str],
+) -> Result<(Option<i32>, String), String> {
+    let (ending, log) = machine_devices(
+        Some(append),
+        features,
+        Capture::Printed,
+        BOOT_TIMEOUT,
+        BOOT_MEMORY,
+        &[],
+        carrying,
+    )?;
+    match ending {
+        Ending::TimedOut(seconds) => Err(format!(
+            "the boot was still running after {seconds}s and was killed
+
+             The log up to that point is above."
+        )),
+        ending => Ok((ending.code(), log)),
+    }
+}
+
 /// [`boot`], with the serial log.
 fn boot_captured(append: Option<&str>, features: &[&str]) -> Result<(Option<i32>, String), String> {
     let (ending, log) = machine(append, features, Capture::Printed)?;
@@ -1889,7 +2061,7 @@ fn machine_with(
     timeout: u64,
     memory: &str,
 ) -> Result<(Ending, String), String> {
-    machine_devices(append, features, capture, timeout, memory, &[])
+    machine_devices(append, features, capture, timeout, memory, &[], &[])
 }
 
 /// The emulator, described once.
@@ -1914,6 +2086,7 @@ fn emulator(
     features: &[&str],
     memory: &str,
     devices: &[&str],
+    carrying: &[String],
 ) -> Result<Command, String> {
     build_with(features)?;
     let kernel = kernel_elf32();
@@ -1922,6 +2095,27 @@ fn emulator(
     }
     let init = init_image()?;
     let components = components()?;
+
+    // What this machine is, decided before the module list because half of the
+    // answer goes on that list. RFC 0012 and `E2-B07`: `f.root=` selects a
+    // generation and `f.frame=` carries the frame hash that generation was
+    // compiled against, which the frame compares against its measurement of its
+    // own text and rodata before it will publish a root. Every boot gets them,
+    // because *what are you running* is a question a machine should be able to
+    // answer on a Tuesday and not only when a command asked it to.
+    //
+    // A caller that has already said what the machine is keeps what it said, and
+    // exactly one does. `attest` boots an image against a declaration taken from
+    // a *different* build in order to watch the comparison fail — the only way
+    // that comparison can fail at all, because a declaration computed from the
+    // image it is handed to agrees by construction, which would be a check that
+    // cannot go red and this tree does not keep those. And it boots one machine
+    // with [`UNSTATED`], which is how a caller says *tell this machine nothing*.
+    // Such a caller composes its own module list too, which is why this is one
+    // decision and not two.
+    let stated =
+        append.is_some_and(|line| line.contains(f_abi::boot::KEY) || line.contains(UNSTATED));
+    let identity = if stated { None } else { Some(generation::identity(features)?) };
 
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.args(["-kernel", kernel.to_str().ok_or("kernel path is not valid UTF-8")?]);
@@ -1946,10 +2140,44 @@ fn emulator(
     for path in &components {
         modules.push(path.to_str().ok_or("a component file path is not valid UTF-8")?);
     }
+    // `E2-P07`. Boot modules the caller is offering on top of the standing list:
+    // one packed generation each, which is what makes `f.root=` a selection
+    // rather than a statement. Appended rather than inserted, because module one
+    // is `user/init`'s and its position is the contract; everything after it is
+    // found by magic, and a `.fcm` has a magic of its own that the frame's
+    // component walk does not answer to.
+    for path in carrying {
+        modules.push(path.as_str());
+    }
+    // And the generation this boot is *told* it is, for every caller that did
+    // not compose a menu of its own. This is the half `E2-B07` and `E2-P07`
+    // could not see between them: one put `f.root=` on every command line, the
+    // other made a root no offered module folds to a refusal that ends the boot,
+    // and neither is wrong. Together they mean a machine told which generation
+    // it is has to be handed that generation, so it is handed it here — which
+    // also makes every boot in this tree a demonstration that selection works,
+    // rather than only the six `cargo xtask rollback` runs.
+    //
+    // Six modules of `MAX_MODULES`'s eight on an ordinary boot; the callers that
+    // compose their own menu are the ones that spend the other two, and
+    // `generation --install`'s `GENERATIONS_MAX` is the same arithmetic for a
+    // real loader.
+    if let Some(identity) = &identity {
+        modules.push(identity.module.to_str().ok_or("the boot module path is not valid UTF-8")?);
+    }
     qemu.args(["-initrd", &modules.join(",")]);
 
-    if let Some(append) = append {
-        qemu.args(["-append", append]);
+    // And the same statement on the command line the loader hands the frame,
+    // argued where it is decided, above the module list it had to be decided
+    // before.
+    let tokens = identity.as_ref().map_or("", |identity| identity.tokens.as_str());
+    let line = match append {
+        Some(append) if tokens.is_empty() => append.to_string(),
+        Some(append) => format!("{append} {tokens}"),
+        None => tokens.to_string(),
+    };
+    if !line.is_empty() {
+        qemu.args(["-append", &line]);
     }
 
     // Named by the caller, not defaulted. The kernel prints the loader's memory
@@ -2000,6 +2228,31 @@ fn emulator(
     Ok(qemu)
 }
 
+/// How many machines this process has actually started.
+///
+/// Counted here rather than by the commands that publish the number, because a
+/// count a command states about its own boots is a count that survives the
+/// boots being removed. `claims/0029` and `claims/0030` both publish a `boots`
+/// row, and the failure those rows exist to catch is a demonstration that
+/// quietly stopped demonstrating — a step that returned early, a boot skipped
+/// because a file was already there. A constant would still read 6.
+///
+/// `Relaxed` and no ordering argument owed: `xtask` is one thread, this counter
+/// orders nothing, and nothing reads it except the same thread between two
+/// boots. The ordering rule this tree is strict about is the ring's, and
+/// `ring/tests/litmus.rs` is where a weakening has to fail.
+/// Unit: count of emulator processes started.
+static BOOTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// What [`BOOTS`] says now.
+///
+/// Read as a pair — before and after — so that a command publishes the boots
+/// *it* ran rather than every boot in the process.
+/// Unit: count of emulator processes started.
+fn boots_so_far() -> u64 {
+    BOOTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// [`machine_with`], plus devices only one command wants.
 ///
 /// A parameter rather than a second description of the emulator, because there
@@ -2014,8 +2267,9 @@ fn machine_devices(
     timeout: u64,
     memory: &str,
     devices: &[&str],
+    carrying: &[String],
 ) -> Result<(Ending, String), String> {
-    let mut qemu = emulator(append, features, memory, devices)?;
+    let mut qemu = emulator(append, features, memory, devices, carrying)?;
 
     // Spawned rather than run to completion, because a boot that never ends has
     // to be a result this function can return. `status()` and `output()` both
@@ -2026,6 +2280,10 @@ fn machine_devices(
         qemu.stdout(Stdio::piped());
     }
     let mut child = qemu.spawn().map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
+    // After the spawn and not before it: a machine that could not be started is
+    // not a boot, and a counter that said otherwise would let a claim publish a
+    // boot count over an emulator that is not installed.
+    BOOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     // The reader runs on its own thread because a piped child can fill the pipe
     // and block on a write while this thread sleeps waiting for it to exit — a
@@ -2283,6 +2541,42 @@ const DEFECTS: &[&str] = &[
     "mutate-ignored-flag",
     "mutate-reusable-slot",
     "mutate-lenient-index",
+    // E2-P01's, and the first defect in this list that is not the kernel's, the
+    // simulator's or the ring's: it is in the *format*. It appends a root record
+    // without waiting for the blobs it names, which RFC 0060's first barrier
+    // exists to make impossible. One rather than three, and the arithmetic RFC
+    // 0042 asks for is answered by which property catches it: the headline
+    // property cannot — a root over missing blobs is refused by resolution and
+    // the mount rolls back, which is the design working — so what finds it is
+    // *in honest mode no root is ever refused for non-resolution*, and a defect
+    // found by the property it is about is a defect that says what the property
+    // is for.
+    CUT_DEFECT,
+    // E2-P06's, and the sibling of `TRACE_DEFECT` at the top of this list: that
+    // one makes two runs on one machine differ, this one makes two *checkouts*
+    // differ. It compiles the absolute build path into the frame image, so the
+    // frame leaf and therefore the generation root become a function of where
+    // the tree sits — which is precisely the class `E2-B04`'s rehearsal could
+    // not test, because two containers over one checkout share a path. `cargo
+    // xtask generation --mutate` is its harness and requires the two-path
+    // comparison to name the frame rather than merely to go red.
+    generation::PATH_DEFECT,
+    // E2-B06's, and the first defect this list carries in `abi/`. It weakens
+    // `abi::swap::Routing::commit` from `Release` to `Relaxed` — the one store
+    // phase B of a generation swap is, and the one that publishes an incoming
+    // occupant's rebuilt registration table before the generation naming it
+    // becomes visible. `ring/tests/litmus.rs` is its harness, on the runner
+    // where the weakening is a real defect: `Relaxed` there is faster and passes
+    // every functional test on x86-64 because total store order hides it. RFC
+    // 0063, RFC 0016, RFC 0020.
+    "mutate-relaxed-routing",
+    // E2-B07's, and the only defect in this list that breaks nothing at all. It
+    // changes sixteen bytes of read-only data nothing reads, so the only thing
+    // in the system that can notice it is the frame's measurement of its own
+    // rodata — which is the property `cargo xtask attest` is about. A defect
+    // that also broke something would have demonstrated that the broken thing
+    // goes red rather than that the identity moved.
+    FRAME_DEFECT,
 ];
 
 /// The seed every reproduction run uses.
@@ -2880,6 +3174,174 @@ fn churn_counts(log: &str, marker: &str) -> Option<(u64, u64)> {
         .filter(|word| !word.is_empty())
         .filter_map(|word| word.parse::<u64>().ok());
     Some((numbers.next()?, numbers.next()?))
+}
+
+/// What `cargo xtask swap` replaces that a boot cannot, declared as a set
+/// rather than left as a silence.
+///
+/// # Why a declaration and not a paragraph
+///
+/// [`CHAOS_GAP`]'s reason one task back, and it is the same discipline for the
+/// same failure: a difference between two halves of a claim that is written in
+/// prose is a difference nobody re-checks. So the gap is data, the entry names
+/// the exact text whose *presence* keeps it open, and the day it goes this verb
+/// goes red and hands whoever closed it the list of documents to update.
+///
+/// One entry, and it is the precise line rather than an area. **A swap needs two
+/// generations of one component in one boot module set**, and there is exactly
+/// one file per component: `cargo xtask component` writes `<name>.fc`, the
+/// loader hands the frame that set, and `kernel/src/component.rs` builds one
+/// place per file. The line below is what that costs — a place refuses to be
+/// refilled from anything but the content hash it already holds, which is
+/// correct today and is precisely the refusal a generation swap exists to
+/// replace with a *transfer decided from two declarations*. RFC 0063's phase A
+/// is what would go in its place, and `f_abi::swap` is already the protocol both
+/// halves would drive.
+///
+/// The needle is deliberately the comparison and not the `Failure::WrongPlace`
+/// beside it: that value has other callers, and a gap whose needle is shared
+/// with an unrelated branch is a gap that closes when somebody refactors.
+const SWAP_GAP: &[Gap] = &[(
+    "kernel/src/component.rs",
+    "if ContentId::of(place.module) != place.manifest {",
+    "a place refuses to be refilled from anything but the manifest it already \
+     holds, so no boot can put a newer generation into an existing place",
+    "TODO.md E2-B06 and E2-P08; docs/rfc/0012's *what the frame changed means*; \
+     docs/rfc/0063's phase A and its `E2-P08` reversal condition; \
+     sim/src/swap.rs's module comment; abi/src/swap.rs's module comment",
+)];
+
+/// Replace every component the build produced, under sustained load, and
+/// require no client to notice.
+///
+/// **`E2-P08`.** Three things happen and none of them means much alone, which is
+/// why they are one command:
+///
+/// 1. **The reproduction check**, in two processes, for `chaos`'s reason: a
+///    harness called twice inside one process shares an address space and an
+///    allocator and can agree with itself for reasons the seed does not own. Two
+///    seeds, so a digest over something that does not vary cannot pass it.
+/// 2. **The run**, printed. The exit status is `f_sim::swap::verdict`'s, and the
+///    control run beside each component is what makes a survival evidence rather
+///    than an absence of trouble.
+/// 3. **The coverage**, against a set this command did not produce — the
+///    `manifest.toml` files the *source tree* carries. `chaos` argues that at
+///    length: a sweep over the build output checked against the build output is
+///    one directory read twice, and both sides fall silently to the same smaller
+///    number.
+///
+/// # Errors
+///
+/// A sentence naming which of the three did not hold.
+fn swap_gate() -> Result<(), String> {
+    components_quietly()?;
+    let dir = component_dir()?;
+
+    println!("swap reproduction check — seed {TRACE_SEED}\n");
+    let first = swap_hash(TRACE_SEED, &dir)?;
+    let second = swap_hash(TRACE_SEED, &dir)?;
+    let other = swap_hash(SIM_OTHER_SEED, &dir)?;
+    println!("  {:<12} {first}  {second}  {other}", "sweep");
+    if first != second {
+        return Err("two runs of the swap sweep at one seed produced different results.\n\n\
+             A swap begun at a seeded moment has to be begun at *the* seeded moment.\n\
+             Something in the harness is reading a clock, an address or an iteration\n\
+             order the seed does not own, and a failure it finds is a symptom rather\n\
+             than a bug report. RFC 0004, RFC 0063."
+            .into());
+    }
+    if first == other {
+        return Err("the swap sweep produced the same result at two different seeds.\n\n\
+             That makes the check above worth nothing: a digest over something that does\n\
+             not vary agrees with itself forever. Either the swaps are beginning at the\n\
+             same moment whatever the seed says, or the digest is taken over less than\n\
+             the run."
+            .into());
+    }
+
+    println!();
+    let (ok, report) = swap_report(TRACE_SEED, &dir)?;
+    print!("{report}");
+    if !ok {
+        return Err("a client observed the replacement.\n\n\
+             E2-P08: *replace a running component under sustained load; no client\n\
+             observes a dropped operation, and the state transfer is verified rather\n\
+             than assumed.* The report above says which clause failed and at which\n\
+             component — an operation never answered, one answered twice, an answer\n\
+             that disagreed with what was written, a refusal the client could not\n\
+             retry, the two live-registration counts disagreeing across the window, or\n\
+             the state read back through the incoming instance not being the state the\n\
+             outgoing one handed over."
+            .into());
+    }
+
+    let ran = report
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("components "))
+        .and_then(|rest| rest.trim().parse::<usize>().ok())
+        .ok_or("the swap report did not say how many components it ran")?;
+    let declared = declared_components()?;
+    if ran != declared.len() {
+        return Err(format!(
+            "the sweep replaced {ran} component(s) and this tree declares {} in its\n\
+             manifests. A component the sweep did not reach is a component nobody has\n\
+             replaced, and a green result over a smaller set is the failure this check\n\
+             exists to refuse. `cargo xtask lint-components` says which list is short.",
+            declared.len()
+        ));
+    }
+    println!(
+        "\ncoverage      {ran} component(s) replaced, of {} this tree's manifests declare",
+        declared.len()
+    );
+
+    println!("\ndeclared gap  what this replaces that a boot cannot, and why it is still true:");
+    gap_holds("SWAP_GAP", SWAP_GAP).map_err(|why| {
+        format!(
+            "{why}\n\n\
+             The reason `cargo xtask swap` is the only half of E2-P08 that can replace a\n\
+             component under load has stopped being true, so RFC 0063's phase A and RFC\n\
+             0012's update section now describe a tree that no longer exists. Move the\n\
+             swap into the boot."
+        )
+    })?;
+    for (file, _, why, _) in SWAP_GAP {
+        println!("  {file:<24} {why}");
+    }
+
+    println!(
+        "\nswap: ok — every component the build produced was replaced under load, each by\n\
+         \x20     the route its own manifest declares, and no client observed anything except\n\
+         \x20     a wait. The control run beside each of them completed with nothing replaced,\n\
+         \x20     which is what makes the survival evidence rather than an absence of trouble."
+    );
+    Ok(())
+}
+
+/// One swap sweep, as a subprocess, reduced to its digest.
+fn swap_hash(seed: &str, dir: &str) -> Result<String, String> {
+    let out = capture(
+        "cargo",
+        &["run", "-q", "-p", "f-sim", "--", "--swap-hash", "--seed", seed, "--components", dir],
+    )?;
+    Ok(out.trim().to_string())
+}
+
+/// The same sweep, printed, with its verdict as a boolean.
+///
+/// The output is captured rather than streamed and the status is answered rather
+/// than turned into an error, for [`chaos_report`]'s reason: a failing verdict
+/// has to print its report, and a gate that says only *failed* is a gate whose
+/// first debugging step is running the command again by hand.
+fn swap_report(seed: &str, dir: &str) -> Result<(bool, String), String> {
+    let out = Command::new("cargo")
+        .args(["run", "-q", "-p", "f-sim", "--", "--swap", "--seed", seed, "--components", dir])
+        .current_dir(root())
+        .output()
+        .map_err(|e| format!("could not run f-sim: {e}"))?;
+    let text =
+        String::from_utf8(out.stdout).map_err(|e| format!("f-sim printed non-UTF-8: {e}"))?;
+    Ok((out.status.success(), text))
 }
 
 fn chaos() -> Result<(), String> {
@@ -4523,6 +4985,175 @@ fn snapshot() -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// E2-P01 — cut the power at every write boundary in a publish.
+// ---------------------------------------------------------------------------
+
+/// The deliberate defect `cargo xtask cut --mutate` arms.
+///
+/// Separate from [`DEFECTS`]'s other entries only in which command drives it —
+/// it is in that list too, because `lint-mutations` has one job and a second
+/// list is how the second defect gets forgotten.
+const CUT_DEFECT: &str = "mutate-root-before-blobs";
+
+/// Seeds the sweep runs when nothing says otherwise.
+///
+/// Unit: count of seeds. Sixty-four and every publish — 108 280 cuts in 120 s
+/// release on the four-core development container, measured — against the four
+/// seeds and four publishes `cargo test --workspace` pays. The gate and the exit
+/// differ by a number and by nothing else, which is the whole reason
+/// `zone/tests/cut.rs` has a target of its own rather than a `#[test]`.
+const CUT_SEEDS: &str = "64";
+
+/// Gate G2's headline property, and the control that says a green sweep means
+/// something.
+///
+/// # Why this is a command and not only a test
+///
+/// The sweep itself *is* a test and `cargo test --workspace` runs it — at four
+/// seeds and the four publishes that matter, which is the gate. What a command
+/// adds is the two halves that cannot be a test: the wide run, which is minutes
+/// rather than seconds and belongs in the night; and the control, which requires
+/// a *build with a defect in it* to be found and then requires the same
+/// reproduction line to go quiet without it. A test cannot arm a cargo feature
+/// on itself.
+fn cut_verb(args: &[String]) -> Result<(), String> {
+    match args.first().map(String::as_str) {
+        Some("--mutate") => cut_mutate(),
+        Some("--quick") => cut_sweep(&["--seeds", "4"], &[]),
+        Some(other) if other.starts_with('-') => Err(format!(
+            "unknown option for cut: {other}\n\n\
+             `cargo xtask cut` sweeps, `--mutate` runs the control, `--quick` runs the \
+             gate's own settings."
+        )),
+        Some(seeds) => cut_sweep(&["--seeds", seeds, "--all"], &[]),
+        None => cut_sweep(&["--seeds", CUT_SEEDS, "--all"], &[]),
+    }
+}
+
+/// Run `zone/tests/cut.rs`, and answer whether it was clean along with what it
+/// printed.
+///
+/// Release, because the sweep is arithmetic and hashing and a debug build of it
+/// is six times the wall clock for the same verdict. The gate runs it in debug
+/// because the gate runs everything in debug, and the two agree by construction:
+/// the same binary, the same seeds, the same draws.
+fn cut_run(args: &[&str], features: &[&str]) -> Result<(bool, String), String> {
+    let mut argv: Vec<String> = ["test", "--release", "-p", "f-zone", "--test", "cut"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    if !features.is_empty() {
+        argv.push("--features".into());
+        argv.push(features.join(","));
+    }
+    argv.push("--".into());
+    argv.extend(args.iter().map(|s| (*s).to_string()));
+
+    let out = Command::new("cargo")
+        .args(&argv)
+        .current_dir(root())
+        .output()
+        .map_err(|e| format!("could not run cargo: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    print!("{text}");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    // The compiler's own output goes to standard error and is worth seeing when
+    // the build is what failed; the run's verdict is on standard output. A run
+    // that printed nothing at all did not run.
+    if !text.contains("cut") {
+        return Err(format!("the cut sweep did not run:\n{stderr}"));
+    }
+    Ok((out.status.success(), text))
+}
+
+/// The sweep, and nothing else.
+fn cut_sweep(args: &[&str], features: &[&str]) -> Result<(), String> {
+    let (clean, _) = cut_run(args, features)?;
+    if clean {
+        Ok(())
+    } else {
+        Err("the cut sweep found a cut that did not leave one of the two intended states.\n\n\
+             Every finding above carries the one line that reproduces it, and that line \
+             runs one cut. This is gate G2's headline property: a publish is atomic or it \
+             is not, and a finding here is a finding about the format."
+            .to_string())
+    }
+}
+
+/// Arm the defect, require the sweep to find it and to say where, then require
+/// the same point to go quiet without it.
+///
+/// # Why the reproduction line is run rather than read
+///
+/// `cargo xtask sweep --mutate` established the shape and the argument is the
+/// same: a report that prints a command nobody has executed is a report whose
+/// command may not work. So the line the red half printed is taken out of the
+/// report and run — armed, where it must exit non-zero, and disarmed, where it
+/// must exit zero. That pair is what makes the finding a finding about the
+/// defect rather than about the seed.
+fn cut_mutate() -> Result<(), String> {
+    println!("\n[1/4] with the defect — the sweep must go red");
+    let (armed_clean, report) = cut_run(&["--seeds", "4"], &[CUT_DEFECT])?;
+    if armed_clean {
+        return Err(format!(
+            "the sweep is clean on a build with `{CUT_DEFECT}` in it.\n\n\
+             That defect appends a root record without waiting for the blobs it names, \
+             so an honest device can be cut with a root on the media over a tree that is \
+             not. The property that sees it is *in honest mode no root is ever refused \
+             for non-resolution* — RFC 0060's first barrier, which is what the defect \
+             removes. If that assertion has legitimately changed, change it in \
+             zone/tests/cut.rs and say so in an RFC; do not widen it to whatever fires."
+        ));
+    }
+    println!("\n{CUT_DEFECT}: found");
+
+    println!("\n[2/4] the report must carry a line that reproduces one cut");
+    let line = report
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("reproduce: "))
+        .ok_or_else(|| {
+            "the sweep went red and printed no reproduction line, so the finding is a \
+             symptom rather than a bug report. `zone/tests/cut.rs` prints one per \
+             finding; something has stopped it."
+                .to_string()
+        })?
+        .to_string();
+    println!("  {line}");
+    let narrowed: Vec<&str> =
+        line.split_whitespace().skip_while(|word| *word != "--").skip(1).collect();
+    if narrowed.is_empty() {
+        return Err(format!("the reproduction line carries no arguments: {line}"));
+    }
+
+    println!("\n[3/4] that one cut, with the defect — it must exit non-zero");
+    let (one_armed, _) = cut_run(&narrowed, &[CUT_DEFECT])?;
+    if one_armed {
+        return Err(format!(
+            "the line the sweep printed exits zero when it is run:\n  {line}\n\n\
+             A reproduction that does not reproduce is worse than none, because it is \
+             the thing a reader would try first."
+        ));
+    }
+
+    println!("\n[4/4] the same cut, without it — it must go quiet");
+    let (one_clean, _) = cut_run(&narrowed, &[])?;
+    if !one_clean {
+        return Err(format!(
+            "the same cut fails on a build with no defect in it:\n  {line}\n\n\
+             So the red result above says nothing about `{CUT_DEFECT}` — and the finding \
+             is a real one, with a reproduction command already written."
+        ));
+    }
+
+    println!(
+        "\ncut --mutate: ok — the sweep goes red on `{CUT_DEFECT}` and green without it,\n\
+        \x20             and the line the red half printed runs one cut, non-zero armed\n\
+        \x20             and zero disarmed."
+    );
+    Ok(())
+}
+
 /// The `sweep` verb, and the one argument it owns that is not N or M.
 ///
 /// `--base <seed>` is pulled out here rather than taken positionally, because it
@@ -5250,6 +5881,418 @@ fn mutate() -> Result<(), String> {
 
     println!("\nall {} mutation(s) caught", MUTATIONS.len());
     Ok(())
+}
+
+/// How a caller says *boot this machine without telling it what it is*.
+///
+/// A word on the command line rather than a parameter on [`emulator`], because
+/// the frame's own rule is that a word it does not recognise is a word it
+/// ignores — so this reaches the kernel, changes nothing there, and is visible in
+/// the boot log of the one run that used it. A parameter would have been a fifth
+/// argument to a function six callers pass through and one caller cares about.
+///
+/// It is namespaced `f.` so that it reads as ours and cannot collide with a
+/// loader's own, and it is deliberately not `f.root=` with an empty value: an
+/// empty digest is a *malformed* token, which the frame refuses, and *nothing was
+/// said* is a different state from *something wrong was said*.
+const UNSTATED: &str = "f.unstated";
+
+/// The defect `attest` modifies the frame with.
+///
+/// Named here rather than spelled at four call sites, and it is in [`DEFECTS`]
+/// like every other one so that `lint-mutations` refuses the day somebody puts
+/// it in a default feature list.
+const FRAME_DEFECT: &str = "mutate-modified-frame";
+
+/// The line the frame prints its measurement on.
+///
+/// A constant because two things parse it — [`attest`] below and nothing else
+/// today — and a boot log is an artefact rather than a convenience. A change to
+/// the wording in `kernel/src/main.rs` that did not change this stops the
+/// command with *nothing said what this machine measured*, which is the failure
+/// naming itself.
+const MEASURED_LINE: &str = "  frame         ";
+
+/// The line it prints the generation on.
+///
+/// **Two lines in one boot log begin with this label, and that was not true when
+/// this constant was written.** `E2-B07`'s is the one meant here — `generation
+/// <64 hex> selected as publish <n>`, printed in the identity window before
+/// anything is published. `E2-P07`'s frame prints `generation    selected — one
+/// offered module folds to the root asked for` much later, from
+/// `kernel::generation::report`, and the two arrived from parallel worktrees
+/// that could not see each other. So the reader below picks by *content* — the
+/// first line under this label whose first word is sixty-four characters — and
+/// not by order, because order here is a fact about where two unrelated
+/// `kprintln!`s sit in `kernel/src/main.rs` and nothing holds it still.
+const SELECTED_LINE: &str = "  generation    ";
+
+/// `cargo xtask attest`: what is this machine running, and does it move.
+///
+/// # What this command exists to demonstrate
+///
+/// `E2-B07`'s exit is two sentences and this is the artefact for both. *The
+/// machine answers "what are you running" with one hash* — boots 1 and 2, which
+/// also require the answer to be the **same** hash twice, because an identity
+/// that has only ever been computed once is a number rather than an identity.
+/// *Any modification produces a different one* — boot 4, which changes sixteen
+/// bytes of the frame's rodata that nothing reads and requires both published
+/// hashes to move.
+///
+/// # Why there are five boots and not two
+///
+/// Because the two obvious ones are each worthless without a control.
+///
+/// A boot that publishes a hash proves nothing about *stability* until a second
+/// boot of the same image publishes the same one; that is boot 2, and it is the
+/// boot that would catch a measurement over anything that varies between runs.
+///
+/// A boot that publishes a different hash after a modification proves nothing
+/// about *checking* — it says the number moved, not that anything cares. Boot 3
+/// is where something cares: the modified image is handed the **clean** build's
+/// declaration, the frame measures itself, the two disagree, and it refuses to
+/// publish a root. That is the only arrangement in which the comparison can go
+/// red at all. A declaration computed from the image it is handed to agrees by
+/// construction, which is a check that cannot fail, and this tree does not keep
+/// those.
+///
+/// And boot 3 alone would leave the modified image looking like a broken build
+/// rather than a different machine, so boot 4 hands it its own declaration and
+/// requires it to come up green with a *different* root and a *different* frame
+/// hash from boot 1's. Boot 5 is the last control and the cheapest: a machine
+/// told nothing at all, which must publish the reserved **zero** rather than a
+/// root it invented, and must publish the same frame hash as boot 1 — because
+/// the command line is outside the ranges being hashed and a measurement that
+/// moved with it would be reaching somewhere RFC 0012 says it does not. A
+/// reserved value nothing in this tree ever produces is a value nobody has
+/// tested, which is the argument every provoked counter in
+/// `kernel/src/state.rs` makes.
+///
+/// Red because it was modified, and green-but-different
+/// because it is a modification and not a fault: the pair is the sentence.
+///
+/// # What it does not demonstrate, and must not be read as
+///
+/// RFC 0012 lists five things this attestation does not prove and every one of
+/// them survives this command. There is no signature and no verifier, so the
+/// value means nothing over a network. There is no freshness. The measurement is
+/// taken once, at boot, so a frame compromised at run time publishes the digest
+/// it computed before it was. And the residual this command is closest to
+/// touching and does not close: **an image modified to report the old digest
+/// defeats it entirely**, because a self-hash is a claim by the thing being
+/// measured. What boot 3 catches is a modified image booted honestly. The rest
+/// is E5's hardware.
+fn attest() -> Result<(), String> {
+    let started = boots_so_far();
+    println!("\n[1/5] the clean build — what is this machine running");
+    let clean = attest_boot(&[], None, "the clean build")?;
+    println!(
+        "\n  root   {}\n  frame  {}\n  over   {} bytes of text and rodata",
+        clean.root.as_deref().unwrap_or("<none selected>"),
+        clean.frame,
+        clean.covered
+    );
+    let Some(clean_root) = clean.root.clone() else {
+        return Err("the clean boot published no root, so there is nothing for the rest of this\n\
+             command to compare. `emulator` puts `f.root=` on every command line, so a boot\n\
+             without one means the tokens did not survive the command line — check\n\
+             `CMDLINE_MAX` in kernel/src/arch/x86_64/multiboot.rs against how long the\n\
+             appended line actually is."
+            .into());
+    };
+
+    // The two implementations agreeing on the *extent* and not only on the
+    // digest. A frame that measured one range and a build that measured two
+    // would still produce two digests that differ, and the boot would refuse
+    // with no line saying which of the two was wrong; two byte counts compared
+    // is what turns that into a sentence. Both ranges are required to be
+    // non-empty for the same reason `covered` is required to be non-zero one
+    // function down: a digest over an empty section is a perfectly stable
+    // number that says nothing.
+    let (_, ranges) = measure::frame(&kernel_elf64())?;
+    for range in &ranges {
+        if range.len == 0 {
+            return Err(format!(
+                "the `{}` range of the linked image is empty, so the frame hash covers\n\
+                 whatever the other one holds and nothing else. RFC 0012 names two ranges\n\
+                 and kernel/linker.ld exports both; an empty one is a linker script that\n\
+                 has stopped putting anything in that section.",
+                range.section
+            ));
+        }
+    }
+    let extent: u64 = ranges.iter().map(|range| range.len).sum();
+    if clean.covered != extent.to_string() {
+        return Err(format!(
+            "the build measured {extent} bytes and the boot measured {}.\n\n\
+             The two implementations of RFC 0012's sentence — xtask/src/measure.rs over\n\
+             the ELF and kernel/src/measure.rs over its own mapping — are covering\n\
+             different intervals. They agree on a digest only by covering the same bytes,\n\
+             so this is the failure that would otherwise present as every boot refusing\n\
+             to publish a root for no stated reason.",
+            clean.covered
+        ));
+    }
+    println!(
+        "  which is {} of `{}` and {} of `{}`, the same extent the build measured",
+        ranges[0].len, ranges[0].section, ranges[1].len, ranges[1].section
+    );
+
+    println!("\n[2/5] the same build again — the same answer, or it is not an identity");
+    let again = attest_boot(&[], None, "the clean build, a second time")?;
+    if again.frame != clean.frame || again.root.as_deref() != Some(clean_root.as_str()) {
+        return Err(format!(
+            "two boots of one image answered *what are you running* differently.\n\n\
+             first   root {clean_root}\n         frame {}\n\
+             second  root {}\n         frame {}\n\n\
+             A hash over the frame's own text and rodata cannot depend on a run, so\n\
+             either the measurement is reaching outside those two ranges or the ranges\n\
+             themselves are not what kernel/linker.ld exports. RFC 0012 names the two\n\
+             ranges; kernel/src/measure.rs and xtask/src/measure.rs implement them.",
+            clean.frame,
+            again.root.as_deref().unwrap_or("<none>"),
+            again.frame,
+        ));
+    }
+    println!("\n  the same root and the same frame hash: {}", clean.frame);
+
+    println!("\n[3/5] the image modified, holding the clean build's declaration — it must refuse");
+    let declared =
+        format!("{}{clean_root} {}{}", f_abi::boot::KEY, f_abi::boot::FRAME_KEY, clean.frame);
+    let (code, log) = boot_captured(Some(&declared), &[FRAME_DEFECT])?;
+    match code {
+        Some(33) => {
+            return Err(format!(
+                "a kernel built with `{FRAME_DEFECT}` booted green while holding the clean\n\
+                 build's frame hash. The frame either did not measure itself or did not\n\
+                 compare what it measured.\n\n\
+                 RFC 0012: *disagreement is a refusal to publish a root, not a warning\n\
+                 line.* kernel/src/measure.rs is where the comparison is."
+            ));
+        }
+        Some(_) => {}
+        None => return Err("qemu terminated by signal".into()),
+    }
+    let refusal = "FAIL: the frame's measurement: the frame this image measures is not the frame";
+    if !log.contains(refusal) {
+        return Err(format!(
+            "the modified boot went red and not for the reason it was supposed to: the\n\
+             log does not contain `{refusal}`.\n\n\
+             A boot that fails some other way satisfies the exit code and proves nothing.\n\
+             The serial log is above."
+        ));
+    }
+    // The measurement is printed before the refusal, so the log says what the
+    // modified image measured — which is the evidence that the refusal was a
+    // disagreement about a number rather than a token that failed to parse.
+    let modified_measurement = attest_line(&log, MEASURED_LINE, "the modified boot")?;
+    if modified_measurement == clean.frame {
+        return Err(format!(
+            "the modified image measured the same frame hash as the clean one\n\
+             ({}), and then refused to publish a root anyway. That is the refusal\n\
+             firing for some reason other than the comparison, and the comparison is\n\
+             what this command is about.",
+            clean.frame
+        ));
+    }
+    // Counted where the refusal was established rather than stated at the
+    // bottom: the row below is *this boot refused*, and a phase that stopped
+    // running would then print a zero instead of a one somebody wrote down.
+    let refusals = 1u64;
+    println!("\n  refused, and it measured {modified_measurement}\n  which is not {}", clean.frame);
+
+    println!("\n[4/5] the same modified image, holding its own — green, and a different machine");
+    let modified = attest_boot(&[FRAME_DEFECT], None, "the modified build")?;
+    let Some(modified_root) = modified.root.clone() else {
+        return Err("the modified boot published no root".into());
+    };
+    if modified.frame != modified_measurement {
+        return Err(format!(
+            "the modified image measured {modified_measurement} when it was refused and\n\
+             {} when it was accepted. One image has one measurement, so this is a\n\
+             measurement that depends on its command line — which is exactly what RFC\n\
+             0012 excludes from the ranges being hashed.",
+            modified.frame
+        ));
+    }
+    if modified.frame == clean.frame {
+        return Err(format!(
+            "sixteen bytes of the frame's rodata changed and the published frame hash did\n\
+             not move: both boots published {}.\n\n\
+             That is RFC 0012's own reversal condition, in as many words: *a frame\n\
+             mutation that boots with the published `frame` unchanged*. Either `MARK` in\n\
+             kernel/src/measure.rs has left the measured range — its self-test says it\n\
+             has not, so read that first — or the range being hashed is not the range the\n\
+             linker script exports.",
+            clean.frame
+        ));
+    }
+    if modified_root == clean_root {
+        return Err(format!(
+            "the frame hash moved and the generation root did not: both boots published\n\
+             {clean_root}.\n\n\
+             The root is a fold over the frame leaf and the topology, and RFC 0012 makes\n\
+             the root record's `frame` field a duplicate of that leaf. A leaf that moved\n\
+             without moving the root above it means xtask/src/generation.rs is folding\n\
+             something other than what it measured."
+        ));
+    }
+    println!(
+        "\n  root   {modified_root}\n  frame  {}\n\n\
+         Both moved, and neither is the clean build's. The modification changed nothing\n\
+         the machine does — nothing reads `MARK` — so the measurement is the only thing\n\
+         in the system that could have noticed it.",
+        modified.frame
+    );
+
+    println!("\n[5/5] told nothing — the reserved zero, and a measurement all the same");
+    let silent = attest_boot(&[], Some(UNSTATED), "the clean build, told nothing")?;
+    if silent.root.is_some() {
+        return Err("a boot that was told no generation published a root anyway. Zero is the\n\
+             format's word for *no root describes this machine*, and a frame that\n\
+             invented one would be answering a question nobody had answered for it."
+            .into());
+    }
+    if silent.frame != clean.frame {
+        return Err(format!(
+            "one image measured {} when it was told which generation it is and {} when\n\
+             it was not. RFC 0012 puts the command line outside the ranges being hashed,\n\
+             so this is a measurement reaching something it was not meant to reach.",
+            clean.frame, silent.frame
+        ));
+    }
+    println!(
+        "\n  no root, counter zero — and the same frame hash as boot 1, because what the\n\
+         frame measured is true of the machine whether or not anybody told it which\n\
+         generation it belongs to. The command line is outside the ranges."
+    );
+
+    // `claims/0032`'s rows, and every one of them is a **count of distinct
+    // values** rather than a hash printed again. The hashes are above; what a
+    // threshold can hold is how many different ones five boots produced, which
+    // is the shape of the exit's two sentences: *one hash* is a 1 where the
+    // image did not move, and *a different one* is a 2 where it did. A row that
+    // restated a digest would be a claim about this commit and would have to be
+    // rewritten by every commit that changes a byte of the frame.
+    //
+    // The boot count is read out of [`BOOTS`] and not written here, so a version
+    // of this command that stopped booting cannot go on publishing a five.
+    let distinct = |values: [&str; 2]| -> u64 {
+        values.iter().collect::<std::collections::BTreeSet<_>>().len() as u64
+    };
+    println!(
+        "\n  boots                                    {}\n  \
+         bytes_measured                           {}\n  \
+         measured_ranges                          {}\n  \
+         frame_hashes_across_two_clean_boots      {}\n  \
+         frame_hashes_across_the_modification     {}\n  \
+         generation_roots_across_the_modification {}\n  \
+         roots_published_when_told_nothing        {}\n  \
+         refusals_when_the_declaration_disagrees  {refusals}",
+        boots_so_far() - started,
+        clean.covered,
+        ranges.len(),
+        distinct([clean.frame.as_str(), again.frame.as_str()]),
+        distinct([clean.frame.as_str(), modified.frame.as_str()]),
+        distinct([clean_root.as_str(), modified_root.as_str()]),
+        u64::from(silent.root.is_some()),
+    );
+    println!(
+        "\nattest: 5 boots. One identity, stable across two runs; one modification, and\n\
+         both published hashes moved; the frame refused to publish a root it could not\n\
+         measure its way to; and the reserved zero is a state a boot can reach.\n\n\
+         What this is not, from RFC 0012 and not softened here: no signature, no\n\
+         verifier, no freshness, nothing about data, and no defence at all against an\n\
+         image modified to report the old digest. It attests to a local reader and to\n\
+         somebody who can recompile. Remote attestation on this root is not made\n\
+         possible by any of the above and must not be described as though it were."
+    );
+    Ok(())
+}
+
+/// What one boot said about itself.
+struct Attested {
+    /// The generation root it published, or `None` when it selected none.
+    /// Unit: none — sixty-four lower-case hexadecimal characters.
+    root: Option<String>,
+    /// The frame hash it measured of itself.
+    /// Unit: none — sixty-four lower-case hexadecimal characters.
+    frame: String,
+    /// How many bytes it measured.
+    /// Unit: bytes.
+    covered: String,
+}
+
+/// Boot, require green, and read what the machine said it was.
+fn attest_boot(features: &[&str], append: Option<&str>, what: &str) -> Result<Attested, String> {
+    let (code, log) = boot_captured(append, features)?;
+    match code {
+        Some(33) => {}
+        Some(other) => {
+            return Err(format!("{what} exited {other}; expected 33. The serial log is above."));
+        }
+        None => return Err(format!("{what}: qemu terminated by signal")),
+    }
+
+    let measured = attest_line(&log, MEASURED_LINE, what)?;
+    // ` over <n> bytes of text and rodata` follows the digest on the same line,
+    // and it is read rather than skipped because a measurement over zero bytes
+    // would otherwise be a perfectly stable, perfectly meaningless hash.
+    let covered = log
+        .lines()
+        .find_map(|line| line.strip_prefix(MEASURED_LINE)?.split_whitespace().nth(2))
+        .ok_or_else(|| format!("{what} did not say how many bytes it measured"))?
+        .to_string();
+    if covered == "0" {
+        return Err(format!(
+            "{what} measured zero bytes and published a hash over them. That is the\n\
+             SHA-256 of the empty message and it is the same on every machine in the\n\
+             world, which is the opposite of an identity."
+        ));
+    }
+
+    if !log.lines().any(|line| line.starts_with(SELECTED_LINE)) {
+        return Err(format!("{what} said nothing about which generation it is"));
+    }
+    // By content and not by position — [`SELECTED_LINE`] says why there is more
+    // than one line to choose from. A boot that selected nothing has a line here
+    // too (`none selected, so no root is published`), and it carries no
+    // sixty-four-character word, which is how *no root* stays distinguishable
+    // from *a root this reader failed to find*.
+    let root = log
+        .lines()
+        .filter_map(|line| line.strip_prefix(SELECTED_LINE))
+        .find_map(|rest| rest.split_whitespace().next().filter(|word| word.len() == 64))
+        .map(str::to_string);
+
+    Ok(Attested { root, frame: measured, covered })
+}
+
+/// The digest a boot log line carries, or a refusal naming the line that was
+/// not there.
+fn attest_line(log: &str, prefix: &str, what: &str) -> Result<String, String> {
+    let digest = log
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .and_then(|rest| rest.split_whitespace().next())
+        .ok_or_else(|| {
+            format!(
+                "{what} printed no line beginning `{}`.\n\n\
+                 That line is where the frame says what it measured, and this command\n\
+                 reads it. A change to the wording in kernel/src/main.rs needs the same\n\
+                 change to `MEASURED_LINE` in xtask/src/main.rs.",
+                prefix.trim_end()
+            )
+        })?;
+    if digest.len() != 64
+        || !digest.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(format!(
+            "{what} printed `{digest}` where sixty-four lower-case hexadecimal characters\n\
+             were expected."
+        ));
+    }
+    Ok(digest.to_string())
 }
 
 /// Where the checker's crate is.
@@ -6215,6 +7258,152 @@ fn proof_schedule() -> Result<usize, String> {
 /// The schedule E1-P07's exit names.
 const NIGHTLY: &str = ".github/workflows/nightly.yml";
 
+/// The schedule E2-P06's exit names.
+const WEEKLY: &str = ".github/workflows/weekly.yml";
+
+/// The build configuration the generation root's reproducibility rests on.
+const CARGO_CONFIG: &str = ".cargo/config.toml";
+
+/// The flag, written once here so that three places cannot drift apart in four.
+const REMAP: &str = "-Zremap-cwd-prefix=.";
+
+/// The checkout path still cannot reach a build product, and the weekly job is
+/// still there to notice if it does.
+///
+/// # Why a lint and not a test
+///
+/// Because the thing being defended is a *configuration file*, and the only
+/// cheap failure mode it has is somebody editing it. The expensive failure mode
+/// — the remap not actually working — is decided by `cargo xtask generation
+/// --elsewhere`, which builds the tree twice at two paths and costs minutes.
+/// Running that per commit would be paying a build for a question whose answer
+/// changes when one file changes, so the split is: the demonstration is a verb
+/// and a weekly job, and the reading is here.
+///
+/// # The three places, and why three
+///
+/// Cargo does not merge `build.rustflags` with `target.<triple>.rustflags`: the
+/// more specific list *replaces* the other one. So a remap written only under
+/// `[build]` covers every crate in this tree except the one image whose hash is
+/// the generation root's frame leaf — which is the leaf the whole check is
+/// about, and a silent hole of exactly the wrong shape. And
+/// `component_image` sets `RUSTFLAGS` in the environment, which replaces both.
+/// Three copies of one flag is worse than one copy in every way except the one
+/// that matters, which is that the other arrangements do not work.
+///
+/// A component image reproduces across two paths today *without* the flag,
+/// measured — `[profile.init]` carries `debug = false` — so the third copy is
+/// buying a property rather than fixing a fault. That is why it is checked here:
+/// nothing would notice it going away until somebody turned debug information on
+/// for one investigation.
+///
+/// # What it cannot see
+///
+/// [`REPRODUCE_RUN_GAP`].
+fn lint_remap() -> Result<(), String> {
+    let config = std::fs::read_to_string(root().join(CARGO_CONFIG))
+        .map_err(|e| format!("reading {CARGO_CONFIG}: {e}"))?;
+
+    // Counted rather than merely found, because the failure this is written
+    // against is one of the two lists losing it while the other keeps it — and a
+    // `contains` would be green on exactly that.
+    let occurrences = config.matches(REMAP).count();
+    if occurrences < 2 {
+        return Err(format!(
+            "{CARGO_CONFIG} carries `{REMAP}` {occurrences} time(s), and it needs two.\n\n\
+             Cargo replaces `build.rustflags` with `target.<triple>.rustflags` rather than\n\
+             merging them, so the flag has to be in both lists or the kernel — the one\n\
+             image the generation root's frame leaf is taken over — is built without it.\n\
+             That is a hole of exactly the wrong shape: every leaf but the one that\n\
+             matters. `cargo xtask generation --elsewhere` is what demonstrates the\n\
+             difference, and E2-P06 is why."
+        ));
+    }
+    if !config.contains("[target.x86_64-unknown-none]") {
+        return Err(format!(
+            "{CARGO_CONFIG} no longer has a `[target.x86_64-unknown-none]` section, so the\n\
+             count above is not evidence that the kernel's build carries the remap."
+        ));
+    }
+
+    let source = std::fs::read_to_string(root().join("xtask/src/main.rs"))
+        .map_err(|e| format!("reading xtask/src/main.rs: {e}"))?;
+    if !source.contains("\"-Zremap-cwd-prefix=. -C relocation-model=static") {
+        return Err(format!(
+            "the component build's `RUSTFLAGS` no longer begins with `{REMAP}`.\n\n\
+             That string replaces `{CARGO_CONFIG}`'s flags wholesale rather than adding to\n\
+             them — `component_image` says so where it sets it — so a remap removed there\n\
+             is a remap that does not apply to any of the four component leaves. They\n\
+             reproduce across two paths without it today, because `[profile.init]` carries\n\
+             `debug = false`; that is an accident of a profile and not a property, and this\n\
+             is the line that keeps it from becoming one silently."
+        ));
+    }
+
+    let weekly = std::fs::read_to_string(root().join(WEEKLY)).map_err(|e| {
+        format!(
+            "reading {WEEKLY}: {e}\n\n\
+             E2-P06's exit is *checked weekly*, and nothing in this tree can watch GitHub\n\
+             run a schedule. What it can read is that the file still exists and still says\n\
+             what it must, and it no longer does."
+        )
+    })?;
+    for (needle, what) in [
+        ("cron:", "a schedule at all"),
+        ("--compare", "the comparison the job exists to make"),
+        ("--mutate", "the harness that says a green comparison means something"),
+    ] {
+        if !weekly.contains(needle) {
+            return Err(format!(
+                "{WEEKLY} no longer contains `{needle}`, which is {what}.\n\n\
+                 If the job moved, move this check with it. If it went, E2-P06's line in\n\
+                 TODO.md now describes a cadence that does not exist."
+            ));
+        }
+    }
+
+    println!(
+        "lint-remap: ok  (`{REMAP}` in both of {CARGO_CONFIG}'s lists and in the component \
+         build's RUSTFLAGS; {WEEKLY} still holds a schedule, the comparison and its harness)"
+    );
+    println!(
+        "            What this cannot decide, and `cargo xtask generation --elsewhere` \
+         can:\n            whether the flag still works. What neither can:"
+    );
+    for gap in REPRODUCE_RUN_GAP {
+        println!("              - {gap}");
+    }
+    Ok(())
+}
+
+/// What no command in this tree can observe about E2-P06's exit, as a set
+/// rather than a sentence.
+///
+/// `PROVE_RUN_GAP` is the precedent and the argument is the same one. The exit
+/// has two clauses. *A non-reproducible input fails the job and names itself* is
+/// decided by running something, so it is decided here, by `cargo xtask
+/// generation --mutate`. *Identical generation root hash, checked weekly* is
+/// decided by GitHub and by the calendar, and nothing in this repository can
+/// watch either — so rather than write "CI covers it" and move on, the honest
+/// move is to name exactly what is unobserved and to check the part that is not.
+///
+/// The list is longer than `PROVE_RUN_GAP`'s and that is not a defect in this
+/// task; it is what *two machines and two dates* costs when the machine running
+/// the check is one machine on one date.
+const REPRODUCE_RUN_GAP: &[&str] = &[
+    "two physical machines. `--elsewhere` separates the checkout path out of the bundle a \
+     second machine differs by, and says nothing about the rest of it — core count, host \
+     load, filesystem, kernel, uid. The two-runner half is the `root` matrix in the weekly \
+     job, and it is a job for the reason E0-R01's `address` job is one",
+    "two dates. A second date is a second run of the same commit a week later, so the job \
+     compares against the previous week's artefact and can only do so when both weeks \
+     landed on one commit — which on a moving branch is the exception. The job prints that \
+     as a gap rather than reporting a comparison it did not make",
+    "that GitHub runs the job at all. The schedule, the container pull and the runner's own \
+     two cores are outside anything this tree can execute, so a green `--elsewhere` here is \
+     evidence about the *remap* and not about the cadence",
+];
+
 /// What the local loop cannot observe about the scheduled proofs, as a set
 /// rather than a sentence.
 ///
@@ -6670,7 +7859,18 @@ fn manifests() -> Result<Vec<PathBuf>, String> {
             let path = entry?.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if path.is_dir() {
-                if !matches!(name, "target" | ".git" | "third_party" | "docs") && path != build {
+                // `.claude` for the reason written out at [`rust_sources`]'s
+                // own skip: an agent harness puts git worktrees under
+                // `.claude/worktrees/`, so other checkouts of this repository
+                // sit inside this one, and a walker that reads them reports
+                // findings that name paths in this tree and are about a
+                // different one. That skip was added to the source walker when
+                // it was found; this is the same tree and the same argument,
+                // and a walker left out of it is how the finding comes back
+                // wearing a different lint's name.
+                if !matches!(name, "target" | ".git" | ".claude" | "third_party" | "docs")
+                    && path != build
+                {
                     walk(&path, build, out)?;
                 }
             } else if name == "Cargo.toml" {
@@ -6934,6 +8134,7 @@ fn iommu(kind: Option<&str>) -> Result<(), String> {
             BOOT_TIMEOUT,
             BOOT_MEMORY,
             DMA_DEVICE,
+            &[],
         )?;
         match ending {
             Ending::Exited(33) => {}
@@ -7060,6 +8261,7 @@ fn blk(kind: Option<&str>) -> Result<(), String> {
             BOOT_TIMEOUT,
             BOOT_MEMORY,
             &borrowed,
+            &[],
         )?;
         match ending {
             Ending::Exited(33) => {}
@@ -7181,6 +8383,7 @@ fn net(kind: Option<&str>) -> Result<(), String> {
             BOOT_TIMEOUT,
             BOOT_MEMORY,
             NET_DEVICE,
+            &[],
         )?;
         match ending {
             Ending::Exited(33) => {}
@@ -7567,7 +8770,7 @@ fn watched_boot(append: &str, shot: &Path) -> Result<Watched, String> {
     devices.push("-qmp");
     devices.push(&monitor);
 
-    let mut qemu = emulator(Some(append), &[], BOOT_MEMORY, &devices)?;
+    let mut qemu = emulator(Some(append), &[], BOOT_MEMORY, &devices, &[])?;
     qemu.stdout(Stdio::piped());
     // The other direction, which no other boot in this file needs: the byte that
     // says the capture has been taken.
@@ -8044,6 +9247,7 @@ fn deadline(kind: Option<&str>) -> Result<(), String> {
             BOOT_TIMEOUT,
             BOOT_MEMORY,
             &borrowed,
+            &[],
         )?;
         match ending {
             Ending::Exited(33) => {}
@@ -8386,6 +9590,8 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-ring", host: None, bare: None },
     Portability { krate: "f-hash", host: None, bare: None },
     Portability { krate: "f-blob", host: None, bare: None },
+    Portability { krate: "f-zone", host: None, bare: None },
+    Portability { krate: "f-index", host: None, bare: None },
     Portability { krate: "f-generation", host: None, bare: None },
     Portability {
         krate: "f-kernel",
@@ -8408,6 +9614,19 @@ const PORTABILITY: &[Portability] = &[
         ),
     },
     Portability { krate: "f-init", host: None, bare: None },
+    // `E2-B08`'s read path. Both answers are `None` and that is the whole row:
+    // it is a `no_std` library above the frame with no architecture in it at
+    // all, and the AArch64 compile is worth more here than in most crates
+    // because the record decode borrows a `&[u8; N]` out of a device's bytes —
+    // alignment and endianness are exactly what a second architecture is for.
+    Portability { krate: "f-objects", host: None, bare: None },
+    // `E2-B05`'s assembler. Both answers are `None`, and the AArch64 compile
+    // earns its place for `f-objects`'s reason one row up and one more of its
+    // own: this crate decodes a boot module, a record tree and a component
+    // record out of bytes somebody else laid down, so endianness and alignment
+    // are precisely what a second architecture checks — and one of the two ways
+    // it reads a record exists *because* those bytes are not always aligned.
+    Portability { krate: "f-assembler", host: None, bare: None },
     Portability { krate: "f-store", host: None, bare: None },
     Portability { krate: "f-virtio-blk", host: None, bare: None },
     Portability { krate: "f-virtio-net", host: None, bare: None },
@@ -9447,6 +10666,16 @@ fn verify() -> Result<(), String> {
     // the cost of the claim being about the kernel's own behaviour rather than
     // about a directory listing.
     sim_join()?;
+    // The same two questions asked of a *tree* rather than of a log. `trace` and
+    // `sim` establish that one run reproduces; this establishes that two runs
+    // which do not can be told apart *by name*, which is a different claim and
+    // is E2-P05's exit. It is in the loop rather than beside it for
+    // `sim_check`'s reason: the failure it catches is one nothing else here can
+    // see — a fold that has stopped reading what a run publishes agrees with
+    // itself forever, and every other check in this file is green on it. Three
+    // simulated runs and no boot, and it reads no component file, so it costs a
+    // few seconds and needs nothing built ahead of it.
+    compare::compare()?;
     // And gate G1's own sentence, which is here rather than in CI alone because
     // `claims/0005` says `status = "gating"` and a gating claim that nothing in
     // the local loop runs is a claim that gates nothing. It costs a few seconds:
@@ -9454,6 +10683,13 @@ fn verify() -> Result<(), String> {
     // and no reason to defer it — which is the whole argument for splitting the
     // latency half into `claims/0006` rather than making both wait.
     chaos()?;
+    // E2-P08's exit, and in the loop for the reason `chaos` is one line up: the
+    // clause *no client observes a dropped operation* is checkable in a
+    // container — every metric it produces is a count — and a check that only CI
+    // runs is a check a contributor finds out about after pushing. It costs a
+    // few seconds and it is the only thing in this loop that replaces a running
+    // component. RFC 0063.
+    swap_gate()?;
     // Gate G1's other sentence, and the half of it that says a sweep can fail.
     // `sim_check` above proves that a scenario reproduces; this proves that a
     // simulator with a defect in it is *found*, minimised and reported as a
@@ -9530,6 +10766,12 @@ fn verify() -> Result<(), String> {
     // properties hold on this tree, and this proves that a tree where one of
     // them did not would be caught. It leaves a clean build behind it.
     mutate()?;
+    // E2-B07, and here for `mutate`'s reason one line up: the two are the same
+    // shape of evidence — a property, and a build in which the property would
+    // fail. Four boots, and it is in the loop rather than beside it because a
+    // machine identity nothing local checks is an identity that stays right
+    // until somebody edits the linker script. RFC 0012.
+    attest()?;
     println!("\nverify: all green");
     println!(
         "         Local only. The AArch64 tests and the litmus job run in CI and\n         \
@@ -9605,6 +10847,12 @@ fn lint_all() -> Result<(), String> {
     // outside the workspace, so the two invocations below reach it and neither
     // does the `fmt --all` above. Under fifteen seconds, and no checker.
     lint_proofs()?;
+    // The half of E2-P06 the local loop *can* decide. The two-path
+    // demonstration costs two builds and is `cargo xtask generation
+    // --elsewhere`; what belongs in the per-commit loop is the reading that
+    // nothing has quietly deleted the remap out from under it, which is one
+    // file read and is the way this check would rot.
+    lint_remap()?;
     // The same check the CI policy job runs — and it runs it by *calling this*,
     // which is the half that was missing. It lives here because a local `lint`
     // that is a subset of the gate teaches people the gate is passing when it is
@@ -9679,7 +10927,25 @@ fn rust_sources() -> Result<Vec<PathBuf>, String> {
                 // something inside the tree, the output directory is not
                 // called `target` and every lint in this file would otherwise
                 // read generated sources and report findings against them.
-                if !matches!(name, "target" | ".git" | "third_party" | "docs") && path != build {
+                //
+                // `.claude` is here for the same reason and was found the
+                // expensive way: an agent harness puts git worktrees under
+                // `.claude/worktrees/`, so a second and third checkout of this
+                // repository sat inside it. The walker read them as if they
+                // were this tree — 51 determinism findings against files that
+                // are copies of files it had already passed, and a manifest
+                // test failing against a schema the other checkout had not
+                // caught up to. The failures name paths in this tree and are
+                // about a different one, which is the worst shape a lint
+                // finding can have.
+                //
+                // *Reversal:* something under `.claude` that is genuinely this
+                // tree's source and wants linting. Today it is configuration,
+                // prose and other people's checkouts, none of which this
+                // walker has any business compiling.
+                if !matches!(name, "target" | ".git" | ".claude" | "third_party" | "docs")
+                    && path != build
+                {
                     walk(&path, build, out)?;
                 }
             } else if path.extension().is_some_and(|e| e == "rs") {
@@ -9855,7 +11121,27 @@ fn claim_owner_findings(rel: &str, text: &str) -> Vec<String> {
 /// The set is a constant rather than a condition written twice: the two crates
 /// arrived from two directions on the same afternoon and each had widened its
 /// own copy of the condition, which is how the two disagree a year later.
-const UNIT_SCOPE: &[&str] = &["abi/", "blob/", "generation/"];
+///
+/// `zone/` joined at `E2-B02` under the rule the spec states for a new crate
+/// carrying wire quantities, and it is the clearest case yet: a block index is
+/// logical in one struct and device-absolute in the next, a byte count is a
+/// zone's capacity in one field and its reachable bytes in another, and a count
+/// of device operations is the whole of one invariant. Every one of those is a
+/// number somebody will compare against a number from the other side of a ring.
+///
+/// `index/` joined on the same grounds as `blob/`: its log entry is a record on
+/// a device, its region is a block index and a block count, and its mount cost
+/// is a number the design is argued about with — every one of which is a
+/// quantity whose unit is obvious only to whoever wrote it down.
+///
+/// `user/objects/` joined at `E2-B08` on grounds narrower than the four above
+/// and worth stating for that reason: this crate exists to publish two numbers
+/// — bytes moved through an unregistered buffer, and resident bytes per unit of
+/// work — and both of them are public fields whose unit is the whole of what
+/// they mean. A `held_bytes` with no unit beside it is precisely the field a
+/// later reader divides by the wrong thing.
+const UNIT_SCOPE: &[&str] =
+    &["abi/", "blob/", "index/", "generation/", "zone/", "user/objects/", "user/assembler/"];
 
 /// R03, over the trees whose public quantities cross something.
 fn lint_units() -> Result<(), String> {
@@ -9961,6 +11247,12 @@ fn lint_manifests() -> Result<(), String> {
     let mut findings = Vec::new();
     let mut pending = Vec::new();
     let mut names: BTreeMap<String, String> = BTreeMap::new();
+    // Which manifest has already claimed a part. RFC 0067: two drivers matching
+    // one device is refused *here*, at compile time, because the only things
+    // available to resolve it at boot are a bus scan's order and the topology's
+    // — and a topology decided by either is not a function of the generation
+    // root, which is what `E2-B05` claims it is.
+    let mut claimed: BTreeMap<(u64, u64), String> = BTreeMap::new();
 
     for path in &files {
         let rel = relative(path);
@@ -9978,6 +11270,18 @@ fn lint_manifests() -> Result<(), String> {
                 checked.name
             ));
         }
+        for part in &checked.devices {
+            if let Some(other) = claimed.insert(*part, rel.clone()) {
+                findings.push(format!(
+                    "  {rel}  `[[device]] vendor = {:#x}, device = {:#x}` is also declared in \
+                     {other}; two drivers may not claim one part. Whichever bound it at boot \
+                     would have been chosen by a bus scan's order or by the topology's, and a \
+                     topology decided by either is not a function of the generation root — \
+                     RFC 0067",
+                    part.0, part.1
+                ));
+            }
+        }
         match manifest::image_state(&root(), &checked) {
             manifest::Image::Present | manifest::Image::ByHash => {}
             manifest::Image::NotYet => pending.push(format!("{} ({rel})", checked.image)),
@@ -9991,7 +11295,12 @@ fn lint_manifests() -> Result<(), String> {
         } else {
             format!("; not yet built: {}", pending.join(", "))
         };
-        println!("lint-manifests: ok  ({} manifest(s) fit the schema{not_yet})", files.len());
+        println!(
+            "lint-manifests: ok  ({} manifest(s) fit the schema; {} device(s) claimed, none \
+             twice{not_yet})",
+            files.len(),
+            claimed.len()
+        );
         return Ok(());
     }
     Err(format!(
@@ -12582,19 +13891,203 @@ enum Route {
     /// has a denominator.
     ///
     /// The argument is a test-name filter, and it exists because the two claims
-    /// this route serves are in different states inside one test binary: the
-    /// size distribution passes while the resynchronisation bound is red under
-    /// RFC 0061's open reversal. A claim whose reproduction ran the whole binary
-    /// would report the wrong red for one of them, which is how a check gets
-    /// muted. An empty filter runs everything.
+    /// this route serves were in different states inside one test binary: the
+    /// size distribution passed while the resynchronisation bound was red under
+    /// RFC 0061's open reversal, which RFC 0062 has since closed. A claim whose
+    /// reproduction ran the whole binary would report the wrong red for one of
+    /// them, which is how a check gets muted — and that is a reason to keep the
+    /// filter now that both are green rather than a reason it was added. An
+    /// empty filter runs everything.
     ///
-    /// It is a test rather than a benchmark because the store this number will
-    /// finally be taken against does not exist. `bench/src/bin/rechunk.rs` is
-    /// `intent/0006-state/plan.md` step 8 and `E2-B09`'s, and the day it lands
-    /// `bytes-rechunked-per-byte` moves to `Route::Bench("rechunk")` — the
-    /// claim's `[workload] path` says so too, in the file a stranger reads.
-    /// E2-B01, E2-P02, RFC 0061.
+    /// It is a test rather than a benchmark because the store `claims/0018`'s
+    /// distribution is measured against does not exist. **The sentence that
+    /// stood here predicted the other half of that and predicted it wrongly**:
+    /// it said `bytes-rechunked-per-byte` would move to
+    /// `Route::Bench("rechunk")` the day `E2-B09` landed. It landed, and one
+    /// route that runs one binary is exactly what let a bench print
+    /// 1 138 541 against a published 786 432 with nothing comparing the two —
+    /// so that claim moved to [`Route::Rechunk`], which runs both workloads and
+    /// compares every threshold row. This route keeps `claims/0018`, whose rows
+    /// all come from the test.
+    /// E2-B01, E2-P02, RFC 0061, RFC 0064.
     Chunker(&'static str),
+    /// `E2-B01`'s exit run: a million blobs into a modelled device, every one
+    /// read back and verified, then one bit flipped inside one stored blob's
+    /// content and all million read again — exactly one refusal, and no blob
+    /// returning bytes that are not its own without one.
+    ///
+    /// `--release` and `--blobs 1000000` are both part of the claim rather than
+    /// conveniences. The blob count is where the published numbers come from:
+    /// `blob/tests/million.rs` asserts everything *relative to the count it was
+    /// given*, so `cargo xtask test` running the same binary at ten thousand
+    /// asserts the same shape and none of the scale, and the scale lives here.
+    /// Release, because a debug build hashes 217 MB slowly enough that a claim
+    /// nobody wants to wait for is a claim nobody runs.
+    ///
+    /// Output is not captured: `harness = false` means the binary is the test
+    /// and its report — blobs, records, blocks, refusals before and after the
+    /// flip — is printed rather than asserted row by row, which is what a reader
+    /// has to see to disagree with `claims/0023`.
+    /// E2-B01, RFC 0060.
+    Million,
+    /// `claims/0017`'s two workloads, run and then **compared against the
+    /// claim's own `[threshold]` table** — `bench/src/bin/rechunk.rs` for the
+    /// rows that need a write path, `blob/tests/chunker.rs` for the rows that
+    /// need thirty-two (seed, mixture) pairs.
+    ///
+    /// # Why this route exists rather than a second `Route::Bench`
+    ///
+    /// Because a threshold nobody compares against is not a threshold. Until
+    /// this landed, `bytes-rechunked-per-byte` routed to the chunker test alone:
+    /// `bench/src/bin/rechunk.rs` was unreachable from `cargo xtask claim`, and
+    /// the day it measured 1 138 541 bytes against a published 786 432 the
+    /// registry said nothing and `verify` was green — which is the same defect
+    /// an audit raised against `claims/0018` one wave earlier, in the same
+    /// directory, for the same reason. RFC 0064 is the entry that decides what
+    /// that measurement meant; this is the wiring that would have shown it
+    /// without anybody going looking.
+    ///
+    /// Every row of the `[threshold]` table is compared, and a row **neither**
+    /// workload prints is a failure rather than a silence: a published bound
+    /// whose number nothing emits is exactly the state this route was added to
+    /// end. Both workloads run even when the first is red, because one command
+    /// reporting every red row is worth more than one reporting the first.
+    /// E2-B09, RFC 0064.
+    Rechunk,
+    /// `E2-B02`'s fill-seal-copy-forward-reset cycle against a modelled zoned
+    /// device — `cargo test -p f-zone --test cycle`.
+    ///
+    /// Not a boot, and `claims/0016` is `pending` because of it: the exit's
+    /// *or its emulation* is satisfied by a model in the host, and the claim's
+    /// own `device_bytes_per_app_byte` is defined as a count taken by QEMU's
+    /// `query-blockstats` inside a guest. What this route reproduces is the
+    /// ratio's decomposition — fill, copy-forward, padding — which is a property
+    /// of the design rather than of a device. The day `user/objects` and QEMU 8
+    /// exist, this route gains the boot beside the cycle rather than instead of
+    /// it: two boundaries, two rows, and the claim says which is which.
+    /// E2-B02, RFC 0059.
+    ZoneCycle,
+    /// `E2-B03`'s comparison — `cargo test -p f-index --test query`: 4096 paths
+    /// resolved through the index and again by a tree walk over the same data on
+    /// the same modelled device, counting the device blocks each asks for.
+    ///
+    /// A count and not a time, which is why `claims/0024` gates in the
+    /// development container the way `claims/0005` does, and why the workload is
+    /// a test rather than a benchmark.
+    /// E2-B03.
+    IndexQuery,
+    /// `E2-P01`'s full sweep — `zone/tests/cut.rs` at 64 seeds and every
+    /// publish — compared against `claims/0025`'s own `[threshold]` table.
+    ///
+    /// The wide run and not `--quick`, because the four required observations
+    /// are what the claim publishes and the gate's four seeds reach three of
+    /// them by luck rather than by design. It is 120 s in release on the
+    /// development container, which is why this is a claim's command and the
+    /// gate is the same binary with a smaller number.
+    ///
+    /// The control is not here and is named in `claims/0025`'s `[baseline]`:
+    /// `cargo xtask cut --mutate` arms `mutate-root-before-blobs`, requires the
+    /// sweep to find it, and requires the reproduction line it printed to go
+    /// quiet without it. Two commands rather than one because the second builds
+    /// the tree with a defect in it, and a claim's reproduction that silently
+    /// rebuilt the workspace under a feature is a reproduction a reader cannot
+    /// trust to be measuring the tree they checked out.
+    /// E2-P01, RFC 0060.
+    Cut,
+    /// `E2-P03`'s interleaved run — `zone/tests/invariants.rs` — compared
+    /// against `claims/0026`'s `[threshold]` table.
+    ///
+    /// Every row in that table is one of the run's own vacuity checks written as
+    /// a number, which is the point: the run fails on the first invariant that
+    /// breaks and would then print no rows at all, so what the comparison adds
+    /// is the *other* failure — a green run that asserted nothing, because no
+    /// zone was reset or no hard-class entry ever had anything to overtake.
+    /// E2-P03, RFC 0059.
+    Invariants,
+    /// `E2-B08`'s read path — `user/objects/tests/reads.rs` — compared against
+    /// the `[threshold]` table of whichever of the two claims over it asked.
+    ///
+    /// Two claims and one workload, the shape four pairs in [`ROUTES`] already
+    /// have: `copies-per-read` is the count at the boundary and
+    /// `resident-bytes-per-unit-of-work` is what the component holds while it
+    /// takes it. They are separate claims rather than two rows of one because
+    /// they fail for different reasons and are reversed by different evidence —
+    /// a second copy on the datapath, against a component that started holding
+    /// what it read.
+    /// E2-B08.
+    Reads,
+    /// `E2-B05`'s two demonstrations over two topologies — the six-component
+    /// workload in `user/assembler/tests/assemble.rs`, and the module this tree
+    /// would actually boot, instantiated twice by `cargo xtask generation` —
+    /// compared against `claims/0027`'s `[threshold]` table.
+    ///
+    /// Two workloads rather than one because they fail differently. The test
+    /// reaches what a four-component tree has no cases for: a failed driver, an
+    /// absent card, a subtree, five refusals, and eight seeded bus orders. The
+    /// command reaches the only topology anybody boots, and reaches it through
+    /// the same reader the frame will use. A claim over the fixture alone would
+    /// be a claim about a fixture; a claim over the command alone would be a
+    /// claim with no bus in it at all, and *binding order cannot reach a
+    /// topology* is the half a build machine with no devices cannot test.
+    ///
+    /// A count and not a time, which is why `claims/0027` may gate in the
+    /// development container for `claims/0005`'s reason.
+    /// E2-B05, RFC 0066, RFC 0067.
+    Topology,
+    /// `E2-P06`'s two-path run and its control — `cargo xtask generation
+    /// --mutate` — compared against `claims/0028`'s `[threshold]` table.
+    ///
+    /// One command and four builds, because the honest half and the armed half
+    /// have to be one run: the armed run overwrites the artefacts the honest one
+    /// wrote, so a claim that took them from two invocations would be comparing
+    /// two states of one directory and would say nothing about either. What the
+    /// rows separate is the pair that must agree from the pair that must not.
+    ///
+    /// It is the most expensive route in this table — a second checkout and four
+    /// kernel builds, about five minutes cold — and that is the claim's own
+    /// cost rather than an accident: reproduction across paths is not observable
+    /// from one build tree, and a cheaper workload would be measuring something
+    /// else. `cargo xtask lint-remap` is the per-run half a checkout can decide.
+    /// E2-P06.
+    Roots,
+    /// `E2-P08`'s sweep — `cargo xtask swap` — compared against `claims/0029`'s
+    /// `[threshold]` table.
+    ///
+    /// One command and not two, although the negative controls that give its
+    /// zeros meaning live in `sim/src/swap.rs`'s tests: those controls are
+    /// *assertions* — `hasty` must lose operations, `garble` must be refused,
+    /// `amnesiac` must fail a client — and a test that asserts a number does not
+    /// print one. What this route compares is the sweep's own table, whose two
+    /// `operations_redone` rows carry a control inside the run: the in-place
+    /// zero is only worth reading beside the restart route's non-zero, and both
+    /// are taken from one client under one load.
+    /// E2-B06, E2-P08, RFC 0063.
+    Swap,
+    /// `E2-P07`'s six boots — `cargo xtask rollback` — compared against
+    /// `claims/0030`'s table.
+    ///
+    /// The most expensive route in this table after [`Route::Roots`]: three
+    /// generation builds and six boots. That is the claim's cost rather than an
+    /// accident — a rollback that did not boot the generation it selected would
+    /// be a comparison of two files on a host, which is the weaker experiment
+    /// `rollback::Reported` exists to refuse.
+    /// E2-P07, RFC 0012.
+    Rollback,
+    /// `E2-P05`'s three phases — `cargo xtask compare` — against `claims/0031`.
+    ///
+    /// Two of its rows are the command's own, taken across two *processes*, and
+    /// five are `f-sim --compare`'s, taken inside one. Both halves are printed by
+    /// the run that took them, and this route reads them out of one stream.
+    /// E2-P05, RFC 0013.
+    Compare,
+    /// `E2-B07`'s five boots — `cargo xtask attest` — against `claims/0032`.
+    ///
+    /// Every row is a count of *distinct* published hashes rather than a hash,
+    /// so the claim states the property and not the commit. What it cannot state
+    /// is what RFC 0012 lists as unproven, and the claim carries that list
+    /// rather than leaving a green run to imply otherwise.
+    /// E2-B07, RFC 0012.
+    Attest,
 }
 
 const ROUTES: &[(&str, Route)] = &[
@@ -12638,16 +14131,70 @@ const ROUTES: &[(&str, Route)] = &[
     ("unmap-churn-cost", Route::Churn),
     // Intent 0006's two chunker claims, sharing one workload the way the four
     // pairs above share theirs — but split by property rather than by count and
-    // time. `chunk-size-distribution` names the one property that holds, so its
-    // reproduction is green and its threshold gates; `bytes-rechunked-per-byte`
-    // runs all five, because its subject is the bound and the bound's own test
-    // is currently red. Both of those are the honest report of where the tree
-    // is, and neither is arranged to look better than it is.
-    ("bytes-rechunked-per-byte", Route::Chunker("")),
+    // time. `chunk-size-distribution` is one property and runs one, so a red
+    // result names the distribution and nothing else; `bytes-rechunked-per-byte`
+    // runs all five, because its subject is the bound and the bound is a
+    // statement about how the five fit together. Both have held since `18da1e2`
+    // — the split was made while property 4 was red under RFC 0061's open
+    // reversal, and it is kept because a claim whose reproduction runs a whole
+    // binary reports the wrong red the next time one of them goes.
+    // `E2-B09` landed the denominator, so this claim leaves `Route::Chunker`
+    // for the route that runs the bench beside the test and compares both
+    // against the claim's own thresholds. The `[workload] path` row moved in the
+    // same diff, and RFC 0064 says why one of those rows now means something
+    // narrower than it did.
+    ("bytes-rechunked-per-byte", Route::Rechunk),
     (
         "chunk-size-distribution",
         Route::Chunker("the_mean_chunk_is_within_a_factor_of_two_of_the_target"),
     ),
+    // `E2-B01`'s first exit clause, and the third claim in this table whose
+    // workload is a test rather than a benchmark. It is separated from the two
+    // above by scale rather than by property: the same binary is the per-commit
+    // gate at ten thousand blobs and this claim at a million, which is the whole
+    // reason `blob/tests/million.rs` is `harness = false`.
+    ("blob-verification-refusals", Route::Million),
+    // Wave 2's two, registered with the builds that took them. Both are counts
+    // taken by their own workload against a modelled device, so both may be run
+    // here for `claims/0005`'s reason; what separates them is that one of them
+    // is not yet measured at the boundary its claim defines, and `claims/0016`
+    // is `pending` and says so at length rather than gating on a number taken
+    // somewhere else and called the same thing.
+    ("write-amplification", Route::ZoneCycle),
+    ("index-blocks-per-query", Route::IndexQuery),
+    // Wave 3's four, registered with the capability each measures — R11 — and
+    // every one of them routed to a command that *compares*, because this
+    // branch has twice now published a threshold nothing could reach:
+    // `claims/0018` was audited for it and `claims/0017` spent a whole task
+    // green over a bench its own route did not run.
+    //
+    // `cut-outcomes` is gate G2's headline property and the only claim in this
+    // table whose primary is a count of states the system may not enter.
+    ("cut-outcomes", Route::Cut),
+    ("collector-invariants", Route::Invariants),
+    // The fifth pair sharing one workload, and the first split by *what is
+    // held* rather than by count against time: `copies-per-read` counts bytes
+    // that crossed into memory the caller did not register, and
+    // `resident-bytes-per-unit-of-work` counts what is resident while that
+    // number is being taken. Both are `pending` and say why at length.
+    ("copies-per-read", Route::Reads),
+    ("resident-bytes-per-unit-of-work", Route::Reads),
+    // Wave 4's two, and neither is a pair: each has one sentence and one
+    // workload set. `topology-renderings-per-root` is a count over two
+    // topologies; `generation-roots-across-paths` is a count over two checkout
+    // paths, with its own control in the same command.
+    ("topology-renderings-per-root", Route::Topology),
+    ("generation-roots-across-paths", Route::Roots),
+    // Wave 5's four, one per demonstration, and none of them a pair: each has
+    // one workload and one sentence. Every one is a **count** — operations,
+    // boots, distinct hashes, injections localised — which is why all four may
+    // gate in the development container for `claims/0005`'s reason, and why the
+    // one number of this wave that is a *time* is not here at all: the swap's
+    // pause is `claims/0021`, still a reservation, still owed a machine.
+    ("operations-across-a-place-swap", Route::Swap),
+    ("rollback-comparisons", Route::Rollback),
+    ("whole-system-divergences-localised", Route::Compare),
+    ("frame-identities-across-boots", Route::Attest),
 ];
 
 /// The registry file one claim name resolves to.
@@ -12755,6 +14302,22 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
             args.extend(["--", "--nocapture"]);
             sh("cargo", &args)?;
         }
+        Route::Million => sh(
+            "cargo",
+            &["test", "--release", "-p", "f-blob", "--test", "million", "--", "--blobs", "1000000"],
+        )?,
+        Route::Rechunk => claim_rechunk(&text, &relative(&file))?,
+        Route::ZoneCycle => sh("cargo", &["test", "-p", "f-zone", "--test", "cycle"])?,
+        Route::IndexQuery => sh("cargo", &["test", "-p", "f-index", "--test", "query"])?,
+        Route::Cut => claim_cut(&text, &relative(&file))?,
+        Route::Invariants => claim_invariants(&text, &relative(&file))?,
+        Route::Reads => claim_reads(&text, &relative(&file))?,
+        Route::Topology => claim_topology(&text, &relative(&file))?,
+        Route::Roots => claim_roots(&text, &relative(&file))?,
+        Route::Swap => claim_swap(&text, &relative(&file))?,
+        Route::Rollback => claim_rollback(&text, &relative(&file))?,
+        Route::Compare => claim_compare_run(&text, &relative(&file))?,
+        Route::Attest => claim_attest(&text, &relative(&file))?,
     }
 
     // The harness itself refuses in a non-measurement environment and says so
@@ -12786,6 +14349,486 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         }
         _ => Ok(()),
     }
+}
+
+/// One claim's `[threshold]` table, read out of its own file.
+///
+/// Read rather than restated, for [`hostile_thresholds`]' reason: two copies of
+/// a number are one number and one rumour, and the copy nobody reads is the one
+/// that rots. This is that function's body with the path taken as an argument,
+/// which is what makes it usable by a claim whose rows are not `claims/0008`'s.
+fn thresholds_in(text: &str) -> std::collections::BTreeMap<String, Bound> {
+    let value = |rest: &str, which: &str| -> Option<u64> {
+        let (_, after) = rest.split_once(which)?;
+        after
+            .trim_start()
+            .strip_prefix('=')?
+            .split_whitespace()
+            .next()?
+            .trim_end_matches([',', '}'])
+            .parse()
+            .ok()
+    };
+
+    let mut rows = std::collections::BTreeMap::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            inside = trimmed.trim_end().trim_end_matches('\r') == "[threshold]";
+            continue;
+        }
+        if !inside || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, rest)) = trimmed.split_once('=') else { continue };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        rows.insert(key.to_string(), Bound { min: value(rest, "min"), max: value(rest, "max") });
+    }
+    rows
+}
+
+/// Every `name value` row a workload printed.
+///
+/// The contract is one line, deliberately: a metric is its claim-registered
+/// name, whitespace, and a count. It is what `bench/src/bin/rechunk.rs` and
+/// `blob/tests/chunker.rs` already printed for a human, so nothing had to be
+/// reshaped into a format for a machine — and a workload that stops printing a
+/// row fails the comparison below rather than quietly dropping it.
+///
+/// A name printed twice with two values is recorded as a conflict rather than
+/// resolved here. Two workloads disagreeing about one row is a fact somebody has
+/// to look at, and taking the larger would hide it.
+fn measured_rows(
+    text: &str,
+    known: &std::collections::BTreeMap<String, Bound>,
+    into: &mut std::collections::BTreeMap<String, u64>,
+    conflicts: &mut Vec<String>,
+) {
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(name), Some(value)) = (fields.next(), fields.next()) else { continue };
+        if !known.contains_key(name) {
+            continue;
+        }
+        let Ok(value) = value.trim_end_matches(',').parse::<u64>() else { continue };
+        if let Some(&already) = into.get(name)
+            && already != value
+        {
+            conflicts.push(format!(
+                "  {name}: printed twice, as {already} and as {value}. Two workloads disagreeing \
+                 about one row is not something this command may average away"
+            ));
+            continue;
+        }
+        into.insert(name.to_string(), value);
+    }
+}
+
+/// A command whose output is both shown and kept.
+///
+/// [`capture`] swallows the output until the child exits and throws it away on
+/// failure; [`sh`] shows it and keeps nothing. A claim that runs for twenty
+/// minutes needs both — a reader watching a silent terminal concludes it has
+/// hung, and a comparison needs the rows — so this streams each line as it
+/// arrives and returns the whole of it. Standard error is inherited, so a
+/// panic's message and its backtrace land where they would have anyway.
+///
+/// The exit status is returned rather than turned into an error: a workload that
+/// failed still printed rows, and those rows are how the caller says *which* row
+/// was red.
+fn capture_echoing(program: &str, args: &[&str]) -> Result<(String, bool), String> {
+    use std::io::{BufRead, BufReader};
+
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(root())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run {program}: {e}"))?;
+    let stdout = child.stdout.take().ok_or_else(|| format!("{program} has no stdout"))?;
+    let mut collected = String::new();
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|e| format!("reading {program}'s output: {e}"))?;
+        println!("{line}");
+        collected.push_str(&line);
+        collected.push('\n');
+    }
+    let status = child.wait().map_err(|e| format!("waiting for {program}: {e}"))?;
+    Ok((collected, status.success()))
+}
+
+/// One workload, named for the report it heads.
+///
+/// A description a reader sees above the run, the program, and its arguments.
+/// It is a tuple rather than a struct because it is used at four call sites in
+/// one file and never crosses one.
+type Workload<'a> = (&'a str, &'a str, &'a [&'a str]);
+
+/// One claim's `[threshold]` table against every row its workloads printed.
+///
+/// # Why every claim registered since `E2-B09` routes through this
+///
+/// Because a threshold nobody compares against is not a threshold, and this
+/// branch has been caught by that twice. `claims/0017` published a bound its own
+/// reproduction command could not reach — the route ran the property test and
+/// the number that breached it came out of a bench — so a 1 138 541-byte
+/// measurement against a published 786 432 sat inside a green `verify` with
+/// nothing in the tree saying a word; RFC 0064 is the entry that came of it, and
+/// `claims/0018` had been audited for the same shape one wave earlier. What ends
+/// that is not care, it is arithmetic: the claim's own table is read out of the
+/// claim, the workload's rows are read out of its output, and **a row the
+/// workload did not print is a finding rather than a silence.**
+///
+/// Every workload runs even when an earlier one is red, because one command
+/// reporting every red row is worth more than one reporting the first.
+///
+/// # Errors
+///
+/// A list naming every row that is red, every row no workload printed, and every
+/// workload that failed. All of them at once: a claim run that stopped at the
+/// first red row would make the second one somebody's next afternoon.
+fn claim_compare(
+    claim: &str,
+    file: &str,
+    workloads: &[Workload],
+    closing: &str,
+) -> Result<(), String> {
+    let thresholds = thresholds_in(claim);
+    if thresholds.is_empty() {
+        return Err(format!("{file} has no `[threshold]` table, so this route compares nothing"));
+    }
+
+    let mut measured = std::collections::BTreeMap::new();
+    let mut findings = Vec::new();
+
+    for (what, program, args) in workloads {
+        println!("--- {what} ---\n");
+        let (output, ok) = capture_echoing(program, args)?;
+        measured_rows(&output, &thresholds, &mut measured, &mut findings);
+        if !ok {
+            findings.push(format!("  {what}: the workload failed; see its output above"));
+        }
+        println!();
+    }
+
+    println!("=== {file}'s [threshold] table against what the workload(s) printed ===\n");
+    for (name, bound) in &thresholds {
+        let Some(&value) = measured.get(name) else {
+            println!("    ?  {name}: no workload printed this row");
+            findings.push(format!(
+                "  {name}: a threshold no workload printed. A published bound whose number \
+                 nothing emits is a bound nothing checks, which is the state this route exists \
+                 to end — print the row or retire the threshold, and do not do the second to \
+                 make this green"
+            ));
+            continue;
+        };
+        let low = bound.min.is_some_and(|min| value < min);
+        let high = bound.max.is_some_and(|max| value > max);
+        let stated = match (bound.min, bound.max) {
+            (Some(min), Some(max)) => format!("min {min}, max {max}"),
+            (Some(min), None) => format!("min {min}"),
+            (None, Some(max)) => format!("max {max}"),
+            (None, None) => "no bound".to_string(),
+        };
+        let verdict = if low || high { "RED" } else { "green" };
+        println!("{verdict:>5}  {name} = {value}  ({stated})");
+        if low || high {
+            findings.push(format!("  {name} = {value}, against {stated}"));
+        }
+    }
+
+    if findings.is_empty() {
+        println!("\nevery row in {file}'s [threshold] table was printed and holds");
+        return Ok(());
+    }
+    Err(format!(
+        "{} finding(s) against {file}:\n{}\n\n{closing}",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// `claims/0017`'s two workloads, and its `[threshold]` table applied to what
+/// they printed.
+///
+/// The property test first and the bench second, because the test is seconds and
+/// the bench is minutes: a run that is going to be red on the cheap workload says
+/// so before the expensive one starts, and still runs it.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_rechunk(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[
+            (
+                "blob/tests/chunker.rs: the rows measured over 32 (seed, mixture) pairs",
+                "cargo",
+                &["test", "-p", "f-blob", "--test", "chunker", "--", "--nocapture"],
+            ),
+            (
+                "bench/src/bin/rechunk.rs: the rows measured through the write path",
+                "cargo",
+                &["run", "--release", "-p", "f-bench", "--bin", "rechunk"],
+            ),
+        ],
+        "A bound moves only by an RFC carrying the measurement that moved it —\n\
+         RFC 0061, RFC 0062 and RFC 0064 are the three that have looked, and every\n\
+         one of them left the 786 432 where it was. The `[diagnosis]` table in the\n\
+         claim says what each of these rows means before it says what to do.",
+    )
+}
+
+/// `claims/0025`'s sweep: every cut point of every publish, 64 seeds, both
+/// granularities and both modes, against the claim's own table.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_cut(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "zone/tests/cut.rs: every cut point of every publish, 64 seeds",
+            "cargo",
+            &["test", "--release", "-p", "f-zone", "--test", "cut", "--", "--seeds", "64", "--all"],
+        )],
+        "This is gate G2's headline property. `cuts_leaving_a_third_state` above 0 is\n\
+         the exit's own sentence failing, and every finding the sweep printed carries\n\
+         the one line that reproduces it; the observation rows going to 0 is the\n\
+         other failure, a sweep that has stopped reaching the cases it exists for.\n\
+         Neither is repaired by moving a number here: `cargo xtask cut --mutate` is\n\
+         the control that says the sweep can still fail, and it is the first thing to\n\
+         run when this goes green for a reason nobody expected.",
+    )
+}
+
+/// `claims/0026`'s interleaved run, against the claim's own table.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_invariants(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "zone/tests/invariants.rs: I1, I2 and I3 over four interleavings",
+            "cargo",
+            &["test", "--release", "-p", "f-zone", "--test", "invariants"],
+        )],
+        "RFC 0059's three invariants are predicates over named state, so a red row\n\
+         here is one of two things and the claim's `[diagnosis]` table says which:\n\
+         an invariant that no longer holds, or a run that stopped reaching the case\n\
+         it was asserted at. The second is the likelier and the more dangerous —\n\
+         every floor in that table is a way for a green run to have asserted nothing.",
+    )
+}
+
+/// `claims/0019` and `claims/0022`'s one workload, against whichever of the two
+/// asked.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_reads(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "user/objects/tests/reads.rs: 256 reads into the caller's registered buffers",
+            "cargo",
+            &["test", "--release", "-p", "f-objects", "--test", "reads"],
+        )],
+        "Both zeros in this run are counted twice, on opposite sides of the boundary,\n\
+         and neither reading derives from the other — so a red row is a real second\n\
+         copy or a real residency, not an accounting change. Read the two provocation\n\
+         rows first: if they are zero the tallies have stopped moving at all, and\n\
+         every zero above them is a default rather than a count.",
+    )
+}
+
+/// `claims/0027`'s two workloads: the fixture that has the cases, and the
+/// generation that has the reader.
+///
+/// The test first and the command second, because the test is seconds and the
+/// command builds a kernel and four component images: a run that is going to be
+/// red on the cheap workload says so before the expensive one starts, and still
+/// runs it. `claim_rechunk`'s ordering, for `claim_rechunk`'s reason.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_topology(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[
+            (
+                "user/assembler/tests/assemble.rs: eleven instantiations of one root, eight of \
+                 them from a shuffled bus",
+                "cargo",
+                &["test", "--release", "-p", "f-assembler", "--test", "assemble"],
+            ),
+            (
+                "cargo xtask generation: the module this tree would boot, instantiated twice",
+                "cargo",
+                &["xtask", "generation"],
+            ),
+        ],
+        "A `distinct_*` row above 1 is E2-B05's exit failing: one root produced two\n\
+         topologies, and the assembler is a function of something that is not the\n\
+         root. The likelier red is quieter and is what the floors are for — a run\n\
+         that stopped reaching a case still renders one topology and still\n\
+         publishes a 1. `bus_orders_distinct` is the first row to read: eight draws\n\
+         of one order leave every equality in that file true and the property it is\n\
+         about untested.",
+    )
+}
+
+/// `claims/0028`'s one command, which is honest run and control in a single
+/// invocation.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s. Note that a `--mutate` that fails — the armed build no
+/// longer diverging, or diverging and naming some leaf other than the frame —
+/// prints no rows at all, so the failure arrives twice: once as the workload's
+/// own report and once as five thresholds nothing printed.
+fn claim_roots(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "cargo xtask generation --mutate: two checkout paths honest, then with the build \
+             path compiled into the frame",
+            "cargo",
+            &["xtask", "generation", "--mutate"],
+        )],
+        "`generation_roots_across_two_checkout_paths` above 1 is the finding this job\n\
+         exists to produce, and the run has already named the leaf that moved —\n\
+         start there and not here. The armed rows going quiet is the other failure\n\
+         and the worse one: a control that can no longer fail makes every green run\n\
+         under it worth nothing. Neither is repaired by moving a number in the\n\
+         claim. What this command cannot decide at all is two machines and two\n\
+         dates; `.github/workflows/weekly.yml` is that half, and `REPRODUCE_RUN_GAP`\n\
+         is where the local loop prints what neither can.",
+    )
+}
+
+/// `claims/0029`'s sweep: four components replaced twice each under load, and
+/// the two `operations_redone` rows that make the in-place zero a comparison.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_swap(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "cargo xtask swap: every declared component replaced twice under sustained load, \
+             with a control run beside each",
+            "cargo",
+            &["xtask", "swap"],
+        )],
+        "A non-zero in any of the five observation rows is E2-P08's exit failing and\n\
+         the sweep has already said at which component and in which phase — read its\n\
+         table and not this file. The quieter red is a floor: `operations_settled`,\n\
+         `operations_in_flight_at_every_pause` and `operations_redone_by_restart`\n\
+         are how a green run says it had a client, a load and a route to compare\n\
+         against. A swap begun between operations observes nothing because there\n\
+         was nothing to observe, and that is a pass this claim refuses to report.",
+    )
+}
+
+/// `claims/0030`'s six boots, against the claim's own table.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s. A `rollback` that fails prints no rows at all — it
+/// refuses at the step that failed — so the failure arrives twice, once as the
+/// command's own report and once as ten thresholds nothing printed.
+fn claim_rollback(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "cargo xtask rollback: a generation broken with a real defect, the previous one \
+             selected out of a menu of two, and a module that folds honestly with one byte \
+             changed",
+            "cargo",
+            &["xtask", "rollback"],
+        )],
+        "`comparisons_matched` below 3 is E2-P07's strict clause failing, and the\n\
+         command names which of the three: the root, the module digest taken on the\n\
+         machine, or the generation rebuilt from source after the break. The rows to\n\
+         read first are the three `tampered_*` ones — they are the reason the digest\n\
+         comparison exists rather than being asserted to exist, and if they go quiet\n\
+         a rollback that compared roots alone would pass every remaining row.",
+    )
+}
+
+/// `claims/0031`'s two-process pair and its three in-process phases.
+///
+/// Named `claim_compare_run` because [`claim_compare`] is the comparison every
+/// route now goes through, and a second function called `claim_compare` would be
+/// the kind of near-collision this tree spends its comments avoiding.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_compare_run(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "cargo xtask compare: two processes at one seed, a second seed, and 64 injected \
+             divergences the descent must name by node",
+            "cargo",
+            &["xtask", "compare"],
+        )],
+        "`injections_localised_to_the_exact_node` below `injections_attempted` is\n\
+         E2-P05's exit failing, and the run has printed the first four misses with\n\
+         the node each was injected at. `whole_system_roots_across_two_seeds` at 1 is\n\
+         the worse red and the quiet one: a fold over something that does not vary\n\
+         agrees with itself forever, and every other row above it is then worth\n\
+         nothing. What this command does not reach at all is a *boot's* whole-system\n\
+         state, and `compare::WHOLE_SYSTEM_GAP` prints that on every green run.",
+    )
+}
+
+/// `claims/0032`'s five boots, against the claim's own table.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_attest(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "cargo xtask attest: one image booted twice, a modified image refused against the \
+             clean declaration and accepted against its own, and a machine told nothing",
+            "cargo",
+            &["xtask", "attest"],
+        )],
+        "`frame_hashes_across_two_clean_boots` above 1 means the measurement is\n\
+         reaching something outside the two ranges RFC 0012 names. The pair below it\n\
+         at 1 is the control failing, which is worse: sixteen bytes of rodata moved\n\
+         and the published hash did not, so every green run of this claim says only\n\
+         that a number was printed. Neither is repaired here. And no row in this\n\
+         table says anything about a *remote* verifier: there is no signature and no\n\
+         freshness, and the claim's statement carries RFC 0012's full list.",
+    )
 }
 
 fn bench(name: Option<&str>) -> Result<(), String> {

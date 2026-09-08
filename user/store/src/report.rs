@@ -14,6 +14,23 @@
 //! *Reversal:* a runtime that publishes a tree of its own, at which point the
 //! tallies are nodes and this module is one `code` field.
 //!
+//! **Half of that reversal is paid and the half that matters is not.** RFC 0065
+//! made a component's tree part of what its manifest declares, so
+//! `user/store/manifest.toml` now names the four nodes [`Tally`]'s fields would
+//! become — `work`, `notices`, `queued`, `status` — and the frame writes that
+//! schema into a page of this component's own address space at every spawn,
+//! before its first instruction. The shape exists and is checked on every boot.
+//!
+//! What is still owed is this module: the runtime still packs a word out
+//! through the door instead of storing into those nodes, because the path that
+//! *runs* a runtime — `kernel::runtime` — builds its process a different way
+//! and does not map that page. So the reversal condition above stands unchanged
+//! and is now one mapping away rather than one design away. The day it is paid,
+//! the four nodes stop being a declaration nothing fills, and this module keeps
+//! only [`Tally::code`] — which survives for the reason it always had: the
+//! frame reads a status *after* the component's address space is gone, and a
+//! tree cannot answer once the memory it lived in has been given back.
+//!
 //! # Why it lives in this crate rather than in `f_abi`
 //!
 //! Because it is not wire between peers. It is one component's report to the

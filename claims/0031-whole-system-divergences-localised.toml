@@ -1,0 +1,148 @@
+# `E2-P05` as a number: two whole-system states, two hashes, and how many
+# injected divergences the descent names by the exact node they were injected
+# into — 64 of 64, with nobody reading a log.
+#
+# **What this claim is about is the *descent*, not the hash.** Two roots
+# differing is a comparison any hash function performs; the exit says *localised
+# to a named subtree automatically*, and the number that can fail is how often
+# the answer to *where did these two runs part* is a name rather than a diff.
+# `Divergence` is deliberately not `Option<Node>`: that signature cannot express
+# two roots differing with every node standing still, so a `None` there would
+# report agreement about a pair that demonstrably does not agree.
+# `generation/src/diff.rs` made the same argument one layer up.
+#
+# **What it is not: a boot's whole-system state.** The frame publishes a tree and
+# mounts one region per component under it, and nothing writes a word into those
+# regions — the frame lays out the header and the schema from the manifest and
+# stops there (RFC 0065, `E1-B15`). So a boot's component subtrees are constants,
+# and a comparison over constants cannot diverge. Every number here is taken over
+# the *simulator's* components, whose counters live in the published region.
+# `compare::WHOLE_SYSTEM_GAP` prints that on every green run rather than leaving
+# it in a file, and whoever teaches a component to write into its own region
+# deletes the constant in the same diff.
+name       = "whole-system-divergences-localised"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E2"
+
+statement  = """
+Two runs of one `(seed, commit)` fold every component's RFC 0013 tree to one
+SHA-256 root and agree; a second seed produces a different root; and **64 of 64**
+divergences injected at nodes the seed picks are localised by the descent to the
+exact node that was disturbed — not to the component, not to a subtree
+containing it, to the node.
+
+Measured by `cargo xtask claim whole-system-divergences-localised` — one
+invocation of `cargo xtask compare`, which is two subprocesses at one seed, one
+at another, and then three phases inside one process.
+
+  whole-system roots at one seed                       1
+  whole-system roots across two seeds                  2
+  component trees folded                               2
+  component trees diverged when the class was disarmed 1
+  subtrees named by the descent                        1
+  injections attempted                                64
+  injections localised to the exact node              64
+
+**The first two rows are taken across two processes and the rest inside one, and
+that is not a detail.** Two runs in one process share an address space, an
+allocator and whatever a library left behind, so they can agree for reasons the
+seed does not own; the pair above is two subprocesses compared by their printed
+roots, which is the shape `cargo xtask trace` uses for a boot. The second row is
+the control: a root folded over something that does not vary agrees with itself
+forever, which is indistinguishable from a root that works.
+
+**The disarmed phase is where *localised* is asked of a real divergence rather
+than an injected one.** The same seed is run with `alloc`'s fault class
+disarmed, the roots differ, and the descent is required to return a **node
+inside a component** — every other variant of `Divergence` names a component and
+can name nothing finer. It names `app/2/app`: one of the two component trees,
+which is the scenario's own `clients: 2` argument being taken. *An allocation
+failure is one component's*, and `component_trees_diverged_when_the_class_was_
+disarmed` = 1 of 2 is that sentence as a number.
+
+**The 64 are injected through the format's own writer.** `Whole::disturb` writes
+through `f_abi::state::write_word` rather than into the bytes, so the state
+format keeps one writer, and it returns the site — the harness knows the answer
+before it asks the descent. The route was checked by breaking it twice: a fold
+that stops hashing the words makes both seeds give one root and the second row
+goes to 1; a descent that finds the divergence and names the wrong node passes
+every phase before this one and arrives here at 10 of 64, which is the failure
+this task is actually about and the one an exit code alone would not catch.
+"""
+
+[baseline]
+# The baseline is the same run with the property broken on purpose, and both of
+# those breakings are recorded in the statement rather than in a directory.
+system  = "none"
+notes   = "There is nothing to compare against: what is claimed is that *this* apparatus localises a divergence in its own state to a node, and another system's debugger either does something different or does it by having a human read a log, which is the thing the exit's word `automatically` excludes. The comparisons that do mean something are the two deliberate breakings described in the statement — a fold that stops covering the words, and a descent that names the wrong node — and they are the reason the `injections_attempted` floor sits beside the headline rather than being assumed."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "07"
+notes    = "Section 07's property is *boot is a pure function of one hash — the same root produces the same topology, which is what allows the deterministic simulator to start a run from a known system state*, and this claim is the other end of that sentence: whether two runs from one known state are still in one state, and where they parted if they are not. The subsystems that own the number are `sim/src/whole.rs` for the fold and the descent, `sim/src/state.rs` for why a component's counters live inside its published region, `abi/src/state.rs` for the format and its one writer, and `xtask/src/compare.rs` for the pair of processes and the refusal to believe a green comparison that could not have gone red. RFC 0013 is the decision this measures; its own reversal condition names this task, and `docs/rfc/README.md` records that the condition was read and not met."
+
+[workload]
+path        = "sim/src/whole.rs"
+second      = "xtask/src/compare.rs"
+scenario    = "alloc"
+injections  = 64
+processes   = 3
+notes       = "The `alloc` scenario, and the choice is the whole of what makes the third phase mean anything: it is the one shipped scenario that installs more than one client *and* arms a fault class. A single-client scenario would make *localised to a named subtree* a question with one possible answer, and a multi-client scenario that armed nothing would have no divergence to localise. Three subprocesses and one in-process run, about ten seconds in the development container, and no component file is read — `Peer::Blk` gives it an empty deployment — which is why this claim has no build ahead of it. — What stands in: the components are the simulator's. A boot's component subtrees are all zeros and cannot diverge, and that is a gap in the system rather than in the workload; `compare::WHOLE_SYSTEM_GAP` is the checked declaration and this row is its second half."
+
+[metrics]
+# Counts, every one of them. Nothing here is a time and nothing is a hash.
+primary   = "injections_localised_to_the_exact_node"
+secondary = [
+  "injections_attempted",
+  "whole_system_roots_at_one_seed",
+  "whole_system_roots_across_two_seeds",
+  "component_trees_folded",
+  "component_trees_diverged_when_the_class_was_disarmed",
+  "subtrees_named_by_the_descent",
+]
+
+[threshold]
+# The headline, and it is a floor at the attempt count rather than a percentage.
+# 63 of 64 is not a 98% success rate, it is one divergence a person has to go
+# and find, which is exactly what the exit refuses.
+injections_localised_to_the_exact_node               = { min = 64 }
+# The denominator, stated so that the row above cannot be satisfied by attempting
+# fewer. A run that injected nothing localises nothing perfectly.
+injections_attempted                                 = { min = 64, max = 64 }
+# Determinism, exact. Two processes at one (seed, commit) are one state or RFC
+# 0004's contract has failed underneath every other layer of this apparatus.
+whole_system_roots_at_one_seed                       = { min = 1, max = 1 }
+# The control, exact and in the other direction. At 1 the fold is over something
+# the run cannot move, and every agreement above it is worth nothing.
+whole_system_roots_across_two_seeds                  = { min = 2, max = 2 }
+# There is more than one component to be wrong about. At 1 *localised to a
+# component* would be a question with one possible answer, and at 0 the fold is
+# over nothing at all — which the run refuses before it gets here.
+component_trees_folded                               = { min = 2 }
+# Containment, and the reason the scenario is `alloc`: an allocation failure is
+# one component's, so a run in which every tree moved is not a localisation, it
+# is a global difference wearing one.
+component_trees_diverged_when_the_class_was_disarmed = { min = 1, max = 1 }
+# The descent reached a node inside a component rather than naming the component
+# and stopping. Every other `Divergence` variant is an honest answer to a
+# different question, and accepting one here would let this go green on a run in
+# which the descent never walked into a tree.
+subtrees_named_by_the_descent                        = { min = 1, max = 1 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "This claim does not need that machine, for `claims/0005`'s reason: every metric is a count of hashes, trees or injections taken by a seeded simulation, and nothing here is timed. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it."
+
+[reproduce]
+command = "cargo xtask claim whole-system-divergences-localised"
+
+[diagnosis]
+# Recorded while the system is understood rather than at 2 a.m. when it is not.
+injections_localised_to_the_exact_node_below_the_attempts = "the run has printed the first four misses, each with the node it was injected at and what the descent answered instead — read those and not this file. The shape to expect is a descent that finds *a* divergence and names a neighbour, which passes every phase before it; `sim/src/whole.rs`'s descent order is where that lives, and `generation/src/diff.rs` is the same argument one layer up if the two have drifted apart"
+whole_system_roots_across_two_seeds_is_one = "the quiet one and the worst: the fold is over something the run cannot move, so the agreement in the row above is a root agreeing with itself. Either the components have stopped publishing what they do — check `component_trees_folded` — or `Whole::root` has stopped hashing the words and is covering only the shape. Both make every other row here worth nothing, and neither is repaired by moving a number in this file"
+whole_system_roots_at_one_seed_above_one = "RFC 0004's contract failing where the rest of this apparatus rests on it: two processes at one (seed, commit) produced two states. Nothing else in this claim means anything until that is understood, and `cargo xtask sim` and `cargo xtask trace` are the two commands that narrow it — one for the scenario's own digest, one for a boot's"
+component_trees_diverged_when_the_class_was_disarmed_above_one = "the injection is no longer contained to one component, which is either a real finding about `alloc`'s fault class — an allocation failure reaching a component it did not happen in — or a scenario whose clients now share the state being folded. The first is worth more than this claim; read `sim/src/scenario.rs`'s entry for `alloc` and its `clients: 2` argument before assuming the second"
+subtrees_named_by_the_descent_is_zero = "the roots differed and the descent named a component and nothing inside it, so nothing was localised. That is one of `Divergence`'s coarse variants — a tree that went missing, one that changed shape, one whose bytes are not a tree — and each is an honest answer to a different question. The run prints which, and the answer is usually that a component's published region stopped being a readable tree rather than that the descent failed"
+component_trees_folded_below_two = "the scenario is publishing fewer trees than it declares clients, so *localised to a subtree* is being asked of a system with one place to point. At zero the run refuses before it gets here — a whole-system state with nothing in it hashes to a constant and agrees with itself forever"
+a_threshold_no_workload_printed = "`cargo xtask compare` failed before the rows, which for this claim is the ordinary way a real finding arrives: each of its three phases refuses with a sentence naming what it expected. Read the workload's output above the table — and note that the two `whole_system_roots_*` rows are printed by the command while the other five come from `f-sim --compare`, so a table missing exactly one of those groups says which half did not run"

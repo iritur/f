@@ -764,7 +764,8 @@ claims/snapshot.json                        the sixteenth entry, written by
 
 The other five claims the spec names are registered when the capability they
 measure is built, which is the rule R11 states and this slice builds none of
-them: `write-amplification` (0016) with `E2-B02`; `copies-per-read` (0018),
+them: `write-amplification` (0016) with `E2-B02`; `copies-per-read` (0018,
+**LANDED elsewhere and re-reserved at 0022**, below),
 `resident-bytes-per-unit-of-work` (0019) and `read-path-latency` (0020) with
 `E2-B08`; `generation-swap-pause` (0021) with `E2-B06`. Two of those moved
 since this plan was first written — `resident-bytes-under-load` became
@@ -775,6 +776,23 @@ are fixed here so two branches cannot register one number under two names;
 their numbers are not, because E1 already learned that a number taken in a
 plan is a number a concurrent landing takes first (claim 0008 became 0014).
 Next free at landing, and the plan row is updated the way E1's was.
+
+**And that is exactly what happened to 0018, so this row is updated here rather
+than left to be discovered at `E2-B08`.** `claims/0018` landed on 2026-09-06 as
+`chunk-size-distribution` — `E2-P02`'s half of the chunker workload, a claim
+this plan's step 8 did not foresee splitting out of 0017 — while
+`copies-per-read` was still an unbuilt reservation. The file keeps the number by
+the rule one sentence up, and the reservation moves to **0022**. What follows
+from that, and is written down so the next landing does not have to work it out:
+a claim landing now takes the first number that is neither a registered file nor
+a reservation, which is why `claims/0023 blob-verification-refusals` — `E2-B01`'s
+first exit clause, registered on 2026-09-07 — is 0023 and not 0019.
+Reservations outrank landings here, because `claims/0017` already established
+that they do when it skipped 0016 for a claim that did not exist, and a rule
+applied once and abandoned once is not a rule. `intent/0006-state/spec.md`'s
+bullet for `copies-per-read` carries the same correction; nothing else in that
+file moves, because a spec that is renumbered wholesale to match a landing is a
+spec being rewritten to look prescient.
 
 ### Release, and the list
 

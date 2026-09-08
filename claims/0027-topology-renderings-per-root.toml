@@ -1,0 +1,185 @@
+# `E2-B05`'s first sentence as a number, and the vacuity refusals that make the
+# number mean something.
+#
+# **Why an equality needs a claim at all.** Because the interesting failure of
+# *the same root produces a byte-identical topology* is not a red run. It is a
+# green one over a comparison that could not have differed: two instantiations
+# of one input are equal by construction if what is compared is the input, and a
+# rendering that covered nothing would be equal to itself forever. So the
+# headline row is the size of a **set** of renderings rather than a pair of
+# equalities, `user/assembler/src/render.rs` is where what the set is taken over
+# is written down in bytes, and every other row below is one of the two
+# workloads' own vacuity refusals published as a count.
+#
+# **0027 and not a reserved number.** `intent/0006-state/spec.md`'s registry
+# list reserves 0019 through 0022 (`resident-bytes-per-unit-of-work`,
+# `read-path-latency`, `generation-swap-pause`, `copies-per-read`); 0023, 0024,
+# 0025 and 0026 are registered files. A reservation outranks a landing —
+# `claims/0017` established that when it skipped 0016 — so this takes the first
+# number that is neither, and `generation-roots-across-paths` takes 0028 in the
+# same diff.
+name       = "topology-renderings-per-root"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E2"
+
+statement  = """
+A generation root instantiates to one topology and not to two — measured over
+two roots and thirteen instantiations, with each run reaching the cases that
+make an equality evidence rather than an identity.
+
+Measured by `cargo xtask claim topology-renderings-per-root`, over two
+workloads:
+
+  user/assembler/tests/assemble.rs — six components, four routes, seven devices
+
+  distinct topology renderings per root            1   the headline
+  instantiations rendered into that set           11
+  rendered topology bytes                        732
+  bus permutations drawn                           8
+  of those, distinct device orders                 8
+  refusals demonstrated                            5
+  components failed on purpose                     1
+  components left unstarted                        2
+  components started outside the subtree           3
+  subtree membership mismatches                    0
+  components unstarted for an absent card          2
+
+  cargo xtask generation — the module this tree would boot
+
+  distinct renderings of the packed module         1
+  packed module instantiations                     2
+  rendered topology bytes on this tree           508
+
+**What byte-identical is taken over, because that is the whole claim.**
+`f_assembler::render::topology` renders every decision the assembler made: the
+root, each member in canonical order with its recomputed content address and
+the five record fields the topology acts on, what each member *declared* it
+would bind and what it *was* bound to, each route in canonical order, the start
+order, and each member's final state with a zero-extended payload so that two
+topologies cannot differ in length before they differ in content. It
+deliberately does not render the boot module, which is the **input**: a
+comparison over the input would be a hash comparison wearing an assembler's
+clothes, and it would be equal on an assembler that had stopped deciding
+anything.
+
+**The eight bus orders are what make the one distinct rendering a property.**
+A driver declares the *part* it binds as a `(vendor, device)` property and never
+an address (RFC 0067), the assembler keys devices by identity in a `BTreeMap`,
+and the test hands the same bus over in eight seeded Fisher-Yates permutations.
+All eight were distinct orders and all eight rendered to one blob. Without that
+row a machine whose scan order never changed would publish the same 1 while the
+scan order reached the topology.
+
+**Two workloads, because each is blind where the other sees.** The fixture has
+the cases a four-component tree does not have — a failed driver, an absent card,
+a subtree two routes deep, five refusals, a bus. The command has the only
+topology anybody boots and reads it through the same `f_abi::boot::Module`
+reader the frame will use, on the real generation rather than on a fixture. The
+row names are deliberately different in the two: they are two measurements of
+one property over two topologies, and one averaged row would hide whichever of
+them moved.
+"""
+
+[baseline]
+# No other system, and the comparison that would matter is not against one.
+system  = "none"
+notes   = "The honest baseline for a determinism property is the same run with the mechanism that produces it removed, and that comparison is in the tree rather than in a directory: `bus_orders_distinct` is the row that says the shuffle shuffles, and `a_bus_in_any_order_produces_one_topology` is what would go red if `bind` ever keyed devices by arrival instead of by identity. `cargo xtask lint-manifests` is the compile-time half of the same refusal — two manifests declaring one part — and the test provokes the run-time half beside it, so the refusal exists on both sides of the boundary rather than only where it is convenient. What has no control here and says so: nothing in this tree yet builds an assembler *wrong* on purpose the way `MUTATIONS` builds the frame wrong, because nothing boots the assembler at all (RFC 0066)."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "07"
+notes    = "Section 07 is *Boot and the component topology*, and its second bullet is the sentence this claim is a number for: the frame starts one component, hands it the root of the system generation, and everything else follows from that hash. The subsystems that own the number are `user/assembler/src/topology.rs` for instantiation and the fold recomputation, `user/assembler/src/bind.rs` for the `BTreeMap` keyed by device identity, `user/assembler/src/start.rs` for the subtree a failure costs, and `user/assembler/src/render.rs` for what the equality is taken over. RFC 0066 records that the assembler has no caller at boot yet, which is what keeps this a claim about the assembly and not yet about the frame's boot path."
+
+[workload]
+path        = "user/assembler/tests/assemble.rs"
+second      = "xtask/src/generation.rs"
+components  = 6
+routes      = 4
+devices     = 7
+seeds       = 1
+notes       = "One seed, and it is written in the file: `SEED` = 0x0000_00E0_2B05_0001, split at the identity `bus` and again at the run number under RFC 0026, so a draw site added anywhere else cannot move these eight permutations. One is enough because the eight draws are the sample — the property is over the class of orders, and the seed is what makes a failure a reproduction rather than an anecdote. — What stands in: the devices are a written-down list rather than a PCI scan, so nothing here is evidence about what a real bus reports or in what order; what is modelled is the *ordering*, which is the whole of what the property is about. The second workload has no bus at all and says so in its own output: a build machine is not the machine the generation runs on, so an assembly taken there may say *this topology, these routes, this order* and must not pretend to say which card was bound."
+
+[metrics]
+# Counts, every one of them, and no duration anywhere. The order is the order
+# the two workloads print them in.
+primary   = "distinct_topology_renderings_per_root"
+secondary = [
+  "topology_instantiations_rendered",
+  "rendered_topology_bytes",
+  "bus_orders_drawn",
+  "bus_orders_distinct",
+  "refusals_demonstrated",
+  "components_failed_on_purpose",
+  "components_left_unstarted",
+  "components_started_outside_the_subtree",
+  "subtree_membership_mismatches",
+  "components_unstarted_for_an_absent_card",
+  "distinct_renderings_of_the_packed_module",
+  "packed_module_instantiations",
+  "rendered_topology_bytes_on_this_tree",
+]
+
+[threshold]
+# The two headlines, exact in both directions. One is the exit's own sentence
+# over a fixture with a bus in it; the other is the same sentence over the
+# module this tree would boot. Above 1 the exit is false; there is no reading
+# under which a root that produces two topologies is 99% pure.
+distinct_topology_renderings_per_root   = { min = 1, max = 1 }
+distinct_renderings_of_the_packed_module = { min = 1, max = 1 }
+# The sample behind each headline. A set of one is trivially of size one, so
+# these are what say the set was fed: eleven instantiations in the fixture — two
+# from the first demonstration and nine from the second — and two from the
+# command.
+topology_instantiations_rendered        = { min = 11 }
+packed_module_instantiations            = { min = 2 }
+# The width of what was compared. A rendering that covered nothing would be
+# equal to itself, so a zero here makes both headlines meaningless; these are
+# floors and not exact widths, because the rendering gains a field when a
+# decision gains one and that is a change to argue about rather than a
+# regression to fail on.
+rendered_topology_bytes                 = { min = 1 }
+rendered_topology_bytes_on_this_tree    = { min = 1 }
+# The row that says the shuffle shuffles. Eight draws of one order would leave
+# every equality in the test true and the property untested — a topology that
+# was a function of the scan would pass, on a machine whose scan never varied.
+bus_orders_drawn                        = { min = 8 }
+bus_orders_distinct                     = { min = 2 }
+# The second half of the exit: a driver that fails leaves its subtree unstarted
+# rather than failing the boot. Exact, because each is a statement about this
+# topology and not a rate: one driver failed, its two dependants stopped, the
+# three components outside the subtree started, and the same shape reached the
+# other way — the card taken out of the machine — stopped the same two.
+components_failed_on_purpose            = { min = 1, max = 1 }
+components_left_unstarted               = { min = 2, max = 2 }
+components_started_outside_the_subtree  = { min = 3, max = 3 }
+components_unstarted_for_an_absent_card = { min = 2, max = 2 }
+# The symmetric difference between what stopped and what the topology says the
+# failed driver's subtree is, counted in both directions. The only ceiling here,
+# and it is zero: a member stopped that is not in the subtree is a failure that
+# cost more than its subtree, and a member of the subtree that started anyway is
+# a failure that cost less than it should have.
+subtree_membership_mismatches           = { max = 0 }
+# Five refusals reached rather than argued: a root the module does not fold to,
+# a component file that is not the bytes its leaf names, a route handing over a
+# capability nothing declared, a required need the topology routes nothing, and
+# two components declaring one part. Counted off the assertions rather than
+# written as a literal, so a demonstration deleted moves the row.
+refusals_demonstrated                   = { min = 5 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "This claim does not need that machine, for `claims/0026`'s reason. Every metric is a count taken by the run itself from a stated seed over a written-down bus; there is no clock in `user/assembler/` — which is `lint-determinism` finding nothing there rather than an oversight — and `f_bench::Environment` has nothing to refuse. The second workload builds a kernel image and four component images, and its two rows are counts over the module that build produced rather than anything timed while producing it. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it."
+
+[reproduce]
+command = "cargo xtask claim topology-renderings-per-root"
+
+[diagnosis]
+# Recorded while the system is understood rather than at 2 a.m. when it is not.
+distinct_topology_renderings_per_root_above_one = "E2-B05's exit is false: one root instantiated to more than one topology. Read `user/assembler/src/render.rs` first and not the assembler — it is the file that says what the comparison is over, and the cheapest way to reach this row is to render something that legitimately differs between two runs. If the rendering is right, the next suspect is `bind.rs`: a device collection that stopped being keyed by identity puts the bus's arrival order into the blob, and `bus_orders_distinct` in the same output will still read 8 while this reads 2 or more. It is not repaired by widening this row; there is no rate of impure boots that is acceptable"
+distinct_topology_renderings_per_root_is_one_with_a_low_sample = "read `topology_instantiations_rendered` beside it. A set of one rendering is of size one whatever the assembler does, so a run that instantiated once — a demonstration removed, a loop shortened — publishes a green headline having compared nothing at all. That is the failure this claim's floors exist for, and it is quieter than the one above"
+bus_orders_distinct_is_one = "the shuffle stopped shuffling. Eight draws of the scan order leave every equality in `assemble.rs` true, `distinct_topology_renderings_per_root` at 1, and the property those numbers are supposed to be about entirely untested — a topology that was a function of the discovery order would pass. Read `Workload::permutation` and `f_env::split::Stream` first: the Fisher-Yates loop draws from a stream split at `bus` and again at the run number, and a stream that returns a constant is the likeliest cause. Note the row is a floor of 2 rather than of 8, because two orders is enough to falsify order-dependence and eight identical draws from a *working* stream would be a fact about the seed"
+subtree_membership_mismatches_above_zero = "a failure cost the wrong set. Above zero in the outward direction, a component outside the failed driver's subtree was left unstarted, which is a failure spreading past what the routes justify; in the inward direction, a member of the subtree started anyway, which is a component running without the capability it declared it needs. `user/assembler/src/start.rs` computes the subtree from the topology and this row compares it against what actually stopped, so a disagreement is between two readings of one graph. Do not read the three `components_*` rows as the check — they name a count and this names the set"
+components_started_outside_the_subtree_below_three = "the boot did not survive the failure. The exit's words are *rather than failing the boot*, and the three components outside blk's subtree are the whole of what says the boot is still alive; a drop here means a failed driver took something with it that its subtree does not contain, and the run above will show which. Check `report.started` against `print_states`' output in the same block before anything else"
+distinct_renderings_of_the_packed_module_above_one = "the same failure as the headline, on this tree's real generation rather than on a fixture — and it is the more serious of the two, because it is the module somebody is about to boot. Note that this workload has no bus, so a divergence here cannot be a discovery order and must be either the rendering or the instantiation itself. `cargo xtask generation` prints the root and every leaf immediately above these rows: if the root also moved between the two runs of one command, the problem is upstream of the assembler entirely and `claims/0028` is the claim that is about it"
+a_threshold_no_workload_printed = "the run failed before it reached its summary block, or a row was renamed on one side of the pair. `claim_compare` treats this as a finding rather than a silence for `claims/0017`'s reason — a published bound whose number nothing emits is a bound nothing checks — so read the workload's own output above the table before touching this file. Renaming a row here to match a workload that stopped printing the old one is the one repair that is never right"

@@ -11,6 +11,43 @@ f-abi.workspace = true
 f-env.workspace = true
 f-ring.workspace = true
 
+# SHA-256, for the frame to measure itself with. RFC 0012 makes the frame hash
+# the thing a swap compares to decide whether it needs a reboot, and a frame that
+# could not recompute its own would be carrying a field nothing checks.
+#
+# One of the two dependencies in this list the frame calls *code* from rather
+# than sharing a vocabulary with — `f-generation` below is the other, and it
+# links this one — and it is worth saying why that is acceptable for a library
+# and is refused further down for the drivers. `f-hash` is `no_std`, has no
+# allocator, no arch-specific path and no dependencies of its own, and it forbids
+# `unsafe` — so linking it adds nothing to the surface `lint-unsafe` measures.
+# The alternative was a second SHA-256 inside `kernel/`, which is the one shape
+# of duplication a content-addressed system cannot afford: two implementations of
+# one hash are two answers to *what are you running*.
+#
+# *Reversal:* a measurement taken before the frame runs — E5's TPM — at which
+# point the frame is handed a digest rather than computing one, and this line
+# goes with the self-hash it exists for.
+f-hash.workspace = true
+
+# `E2-P07`. The frame reads `f.root=` and has to be able to say which of the
+# modules the loader offered folds to it, which is the fold used as an identity
+# — the *same* function `cargo xtask generation` produced the root with, in the
+# same crate, which is what makes the check at boot arithmetic rather than a
+# second opinion about the format. `f-generation` is `no_std`, has no allocator
+# and pulls in only `f-abi` and `f-hash`, so this costs the frame two leaf
+# crates and no capability it did not have.
+#
+# It is a *library* dependency and not a component crate: unlike the three
+# driver lines below, the frame calls this code, and there is no `image`
+# feature and no `#[panic_handler]` in it to keep off.
+#
+# *Reversal:* the frame gaining a supervisor that calls `f-assembler`, at which
+# point selection and instantiation are one reader above the frame and this line
+# goes with the rest of the boot path's knowledge of the format. RFC 0066 is
+# where that day is described.
+f-generation.workspace = true
+
 # The block driver, which is a component and not part of the frame — it inherits
 # `unsafe_code = "forbid"` like every other `user/` crate and `cargo xtask
 # lint-unsafe` holds it to that.
@@ -84,7 +121,7 @@ multiple_unsafe_ops_per_block = "deny"
 
 # Deliberate defects, off by default and never on in anything that ships.
 #
-# There is exactly one, and it exists because property five of the capability
+# The first of them exists because property five of the capability
 # negative suite — *a process cannot make the kernel panic by trying* — cannot
 # have a fixture of the shape the other four have. A table that panics takes the
 # machine down rather than being caught, so the mutation has to be a build
@@ -102,6 +139,26 @@ mutate-unchecked-index = []
 # runs of the same commit differ, which nothing but a reproduction check
 # would ever notice.
 mutate-unseeded-time = []
+# The defect E2-P06 exists to catch, and the sibling of the one above: it does
+# not make two runs on one machine differ, it makes two *checkouts* differ. The
+# image compiles the absolute path it was built at into itself, so the frame
+# leaf — and therefore the generation root — becomes a function of where the
+# tree happens to sit. `cargo xtask generation --mutate` arms it, requires the
+# two-path comparison to go red and to name the frame, disarms it and requires
+# the same comparison to go green. Everything else in this tree is green on it,
+# which is the point.
+mutate-path-in-image = []
+# `E2-B07`'s, and the only defect in this list that breaks nothing. It changes
+# sixteen bytes of `kernel/src/measure.rs`'s `MARK`, which nothing reads, no
+# branch depends on and no log line mentions — so the *only* thing in the system
+# that can notice this build is different from the clean one is the frame's
+# measurement of its own rodata. That is the point: a modification which also
+# broke something would have demonstrated that the broken thing goes red, not
+# that the identity moved. `cargo xtask attest` boots it twice, once with the
+# clean build's declared hash — where the frame must refuse to publish a root —
+# and once with its own, where the published root and frame hash must both differ
+# from the clean boot's.
+mutate-modified-frame = []
 
 [[bin]]
 name = "f-kernel"

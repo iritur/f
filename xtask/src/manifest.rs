@@ -52,7 +52,20 @@ use std::path::{Path, PathBuf};
 /// carry. A manifest written to a later schema is refused rather than read
 /// approximately; a reader that guesses at fields it was not written for is
 /// two readers with different beliefs about one file.
-pub const SCHEMA: u64 = 1;
+///
+/// Two since RFC 0063, which added the required `[transfer]` table. A schema-1
+/// manifest is silent about whether its component can be updated in place, and
+/// reading that silence as `restart_only` would be a component acquiring a
+/// property nobody chose — so it is refused and edited, not defaulted.
+///
+/// Three since RFC 0065 and RFC 0067, which were written in parallel and land
+/// in one bump. A schema-2 manifest declares no state tree, and a supervisor
+/// reading that silence as *this component has nothing to say about itself* is
+/// the tolerance RFC 0013 was written against; a schema-2 manifest also names
+/// no part, and a driver bound by the order a bus scan reported is a topology
+/// that is not a function of its root. Both are refused and edited, not
+/// defaulted.
+pub const SCHEMA: u64 = 3;
 
 /// The longest component, capability or ring name, in bytes. Names are
 /// `[a-z0-9-]`, so bytes are characters. Thirty-two is what a fixed-layout
@@ -72,6 +85,14 @@ pub const CAPABILITIES_MAX: usize = 16;
 /// The most data rings a manifest may declare. The control ring is not one of
 /// them: it is implicit, exactly one, and refused if declared (RFC 0008).
 pub const RINGS_MAX: usize = 8;
+
+/// The most `[[device]]` entries a manifest may declare.
+/// `abi::manifest::DEVICES_MAX`, mirrored here for [`CAP_TYPES`]'s reason.
+pub const DEVICES_MAX: usize = 4;
+
+/// The vendor identifier a bus returns when nothing answered at an address.
+/// `abi::manifest::Binding::NO_VENDOR`, mirrored here for the same reason.
+pub const NO_VENDOR: u64 = 0xFFFF;
 
 /// Bounds on a data ring's `entries`. A power of two, as `ChannelHeader::
 /// ring_size` requires; at least two because a ring with one slot cannot have a
@@ -128,6 +149,21 @@ pub const RESTART_POLICIES: &[&str] = &["never", "on_fault", "always"];
 /// RFC 0007's two classes.
 pub const CLASSES: &[&str] = &["soft", "hard"];
 
+/// What a component declares about being updated in place. `abi::transfer::
+/// mode`, one word per wire value, in wire order.
+///
+/// Two and not three. RFC 0063 refuses a third value meaning *transferable only
+/// from a named quiescent point*, because that is what `in_place` already
+/// means: RFC 0018's cursors show the rings empty and cannot show the occupant
+/// empty, so every in-place transfer waits for a point the occupant asserts.
+pub const TRANSFER_MODES: &[&str] = &["restart_only", "in_place"];
+
+/// The alignment one state record is required to have, in bytes. The window is
+/// records laid end to end and read in place, so a width that is not a multiple
+/// of this puts every other record on an odd boundary. `abi::transfer::
+/// RECORD_ALIGN`.
+pub const RECORD_ALIGN: u64 = 8;
+
 /// How a data ring's payload reaches the peer. `inline` is in the entry;
 /// `registered` is a registered buffer set (`ring-scene-boot` section 04, the
 /// zero-copy path E1-B02's exit counts); `shared_virtual` is the device walking
@@ -136,6 +172,48 @@ pub const PAYLOADS: &[&str] = &["inline", "registered", "shared_virtual"];
 
 /// Which end of a data ring the component occupies.
 pub const ROLES: &[&str] = &["server", "client"];
+
+/// The most `[[state]]` nodes a manifest may declare, its root included.
+/// `abi::manifest::STATE_NODES_MAX`, and the reason for the number is there:
+/// a component's published region is one frame.
+pub const STATE_NODES_MAX: usize = 16;
+
+/// The longest name a declared state node may carry, in bytes.
+///
+/// Sixteen and not [`NAME_MAX`], because this name goes on the wire as
+/// `abi::state::SchemaEntry::name`, which is sixteen bytes — and RFC 0013 says
+/// why: a label longer than that is a description, and descriptions belong in
+/// the document that owns the node rather than in a mapping every reader pays
+/// to carry.
+pub const NODE_NAME_MAX: usize = 16;
+
+/// `abi::state::kind`, one word per wire value, in wire order and starting at
+/// one. Zero is not a kind, so the position in this list is the value.
+///
+/// Closed, unlike [`NODE_UNITS`], and the asymmetry is the point: the kind says
+/// whether the word is a count, a level or an address — which is the arithmetic
+/// a reader will do to it — while the unit says what to print beside it. RFC
+/// 0013 lets a reader skip a node whose *kind* it cannot name; it does not let
+/// a publisher declare one nobody has defined.
+pub const NODE_KINDS: &[&str] = &["subtree", "counter", "gauge", "mount"];
+
+/// `abi::state::unit`, one word per wire value, in wire order and starting at
+/// zero — `none` is a real answer and not a missing one, because an identifier
+/// is not a quantity.
+pub const NODE_UNITS: &[&str] = &[
+    "none",
+    "nanoseconds",
+    "bytes",
+    "frames",
+    "entries",
+    "calls",
+    "cores",
+    "slots",
+    "events",
+    "address",
+    "trees",
+    "nodes",
+];
 
 /// The header every manifest starts with. A manifest is authored source that
 /// names an image and is hashed into a component's identity, so its licence is
@@ -163,6 +241,17 @@ pub struct Manifest {
     pub rings: usize,
     /// `[restart] policy`.
     pub restart: String,
+    /// The `[[device]]` entries, as `(vendor, device)` in canonical order.
+    ///
+    /// Carried out of the check rather than counted, because the thing the lint
+    /// has to decide is a question *between* manifests — whether two drivers
+    /// claim one part — and a count cannot answer it. RFC 0067.
+    /// Unit: entries; each pair is two PCI identifiers and neither is a
+    /// quantity.
+    pub devices: Vec<(u64, u64)>,
+    /// How many `[[state]]` nodes, this component's tree root included. Never
+    /// zero on a manifest that passed: RFC 0065.
+    pub state_nodes: usize,
 }
 
 impl Manifest {
@@ -230,7 +319,18 @@ pub fn files(root: &Path, build: &Path) -> Result<Vec<PathBuf>, String> {
             let path = entry?.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if path.is_dir() {
-                if !matches!(name, "target" | ".git" | "third_party" | "docs") && path != build {
+                // `.claude` for the reason written out at `main::rust_sources`'s
+                // own skip: an agent harness puts git worktrees under
+                // `.claude/worktrees/`, so other checkouts of this repository
+                // sit inside this one, and a walker that reads them reports
+                // findings that name paths in this tree and are about a
+                // different one. That skip was added to the source walker when
+                // it was found; this is the same tree and the same argument,
+                // and a walker left out of it is how the finding comes back
+                // wearing a different lint's name.
+                if !matches!(name, "target" | ".git" | ".claude" | "third_party" | "docs")
+                    && path != build
+                {
                     walk(&path, build, out)?;
                 }
             } else if name == FILE_NAME {
@@ -293,15 +393,38 @@ pub fn check(rel: &str, text: &str) -> Result<Manifest, Vec<String>> {
 /// boot that goes red naming the field, not a component carrying a wrong number.
 mod record {
     /// Bytes in a whole record.
-    pub const BYTES: usize = 2216;
+    /// Bytes in a whole record.
+    ///
+    /// Derived and not typed. Schema 3 landed two arrays from two parallel
+    /// worktrees — `[[device]]` and `[[state]]` — and each was sized without
+    /// the other, so a number carried over from either would have been wrong
+    /// by the other's width. The sum below is the one the record actually has:
+    /// 2696 = 104 + 16 + 4 * 4 + 16 * 80 + 8 * 104 + 16 * 28, and
+    /// `the_record_layout_matches_the_abi` compares it against the assertion
+    /// `abi/src/manifest.rs` compiles.
+    pub const BYTES: usize = STATE_AT + super::STATE_NODES_MAX * NODE;
     /// Bytes in one `[[capability]]` slot.
     pub const NEED: usize = 80;
     /// Bytes in one `[[ring]]` slot.
     pub const RING: usize = 104;
+    /// Bytes in the `[transfer]` declaration — `abi::transfer::Declaration`.
+    pub const TRANSFER: usize = 16;
+    /// Bytes in one `[[device]]` slot — `abi::manifest::Binding`.
+    pub const BINDING: usize = 4;
+    /// The first byte of the transfer declaration, which is where the fixed
+    /// head of the record ends.
+    pub const TRANSFER_AT: usize = 104;
+    /// The first byte of the binding array.
+    pub const BINDINGS_AT: usize = TRANSFER_AT + TRANSFER;
     /// The first byte of the capability array.
-    pub const CAPS_AT: usize = 104;
+    pub const CAPS_AT: usize = BINDINGS_AT + super::DEVICES_MAX * BINDING;
     /// The first byte of the ring array.
     pub const RINGS_AT: usize = CAPS_AT + super::CAPABILITIES_MAX * NEED;
+    /// Bytes in one `[[state]]` slot — `abi::manifest::Node`.
+    pub const NODE: usize = 28;
+    /// The first byte of the state array. Last in the record, because putting
+    /// it anywhere else would move every slot the three offsets above name.
+    pub const STATE_AT: usize = RINGS_AT + super::RINGS_MAX * RING;
     /// `abi::manifest::MAGIC`.
     pub const MAGIC: u64 = 0x465f_4d41_4e00_0001;
     /// `abi::manifest::NO_CAPABILITY`, which is not zero because zero is a
@@ -389,6 +512,37 @@ pub fn compile(rel: &str, text: &str, image: &[u8]) -> Result<Vec<u8>, Vec<Strin
         put64(&mut out, 24, reservation.map_or(0, |table| int(table, "cpu_budget_ns")));
     }
 
+    // `[transfer]`. RFC 0063. Under `restart_only` the three quantities are
+    // absent and the record carries zero for each, which is the same refusal
+    // seen from the other side: `Record::read` refuses a non-zero one there.
+    let transfer = doc.tables.get("transfer").map(|(_, table)| table);
+    let mode = transfer.map_or_else(String::new, |table| string(table, "mode"));
+    put8(&mut out, record::TRANSFER_AT + 12, index_of(TRANSFER_MODES, &mode));
+    if mode == "in_place" {
+        put32(&mut out, record::TRANSFER_AT, narrow(transfer.map_or(0, |t| int(t, "schema"))));
+        put32(
+            &mut out,
+            record::TRANSFER_AT + 4,
+            narrow(transfer.map_or(0, |t| int(t, "record_bytes"))),
+        );
+        put32(
+            &mut out,
+            record::TRANSFER_AT + 8,
+            narrow(transfer.map_or(0, |t| int(t, "records_max"))),
+        );
+    }
+
+    // `[[device]]`, in file order — which the checker has already required to
+    // be canonical order, so this writes what it read rather than sorting.
+    // RFC 0067.
+    let devices: &[(usize, Table)] = doc.arrays.get("device").map_or(&[], Vec::as_slice);
+    put8(&mut out, 101, narrow8(devices.len()));
+    for (index, (_, table)) in devices.iter().enumerate() {
+        let at = record::BINDINGS_AT + index * record::BINDING;
+        put16(&mut out, at, narrow16(int(table, "vendor")));
+        put16(&mut out, at + 2, narrow16(int(table, "device")));
+    }
+
     // `[[capability]]`, in file order — which is the order the supervisor's
     // spawn entry supplies them and the order the granted notices arrive.
     let caps: &[(usize, Table)] = doc.arrays.get("capability").map_or(&[], Vec::as_slice);
@@ -449,10 +603,64 @@ pub fn compile(rel: &str, text: &str, image: &[u8]) -> Result<Vec<u8>, Vec<Strin
         put8(&mut out, at + 98, through);
     }
 
+    // `[[state]]`, in file order — which is the order the words tile the data
+    // block, so the offset a node's word lives at is its index here and is
+    // never written down. RFC 0065; `abi::manifest::Node::entry` is the other
+    // half of that arithmetic and the only other place it appears.
+    let nodes: &[(usize, Table)] = doc.arrays.get("state").map_or(&[], Vec::as_slice);
+    put8(&mut out, 102, narrow8(nodes.len()));
+    for (index, (_, table)) in nodes.iter().enumerate() {
+        let at = record::STATE_AT + index * record::NODE;
+        let name = string(table, "name");
+        put32(&mut out, at, narrow(int(table, "id")));
+        // The root's `parent` is absent rather than zero, because zero is a
+        // node identifier everywhere else in this file and a manifest that
+        // wrote `parent = 0` would be naming a node rather than naming none.
+        // The checker has already refused a `parent` that names nothing.
+        let parent = names_to_id(nodes, &string(table, "parent"));
+        put32(&mut out, at + 4, parent);
+        // Position in the list is the wire value, and `kind` starts at one
+        // because zero is not a kind; `unit` starts at zero because `none` is
+        // a real unit.
+        put8(&mut out, at + 8, index_of(NODE_KINDS, &string(table, "kind")));
+        put8(&mut out, at + 9, unit_of(&string(table, "unit")));
+        let len = name.len().min(NODE_NAME_MAX);
+        put8(&mut out, at + 10, narrow8(len));
+        if let Some(slot) = out.get_mut(at + 12..at + 12 + len) {
+            slot.copy_from_slice(&name.as_bytes()[..len]);
+        }
+    }
+
     if let Some(tail) = out.get_mut(record::BYTES..) {
         tail.copy_from_slice(image);
     }
     if findings.is_empty() { Ok(out) } else { Err(findings) }
+}
+
+/// The id a node's `parent` names, or zero for the root.
+///
+/// A manifest names a parent by *name* and the record carries an *id*, and the
+/// resolution happens here rather than in the frame for the reason a ring's
+/// `to` field is resolved here: two resolutions of one name is how two readers
+/// come to disagree about which node was meant. The checker has already refused
+/// a name that no earlier node carries.
+fn names_to_id(nodes: &[(usize, Table)], parent: &str) -> u32 {
+    if parent.is_empty() {
+        return 0;
+    }
+    nodes
+        .iter()
+        .find(|(_, table)| string(table, "name") == parent)
+        .map_or(0, |(_, table)| narrow(int(table, "id")))
+}
+
+/// The wire value of a unit word.
+///
+/// Zero-based, because `none` is a real unit and not a missing one — which is
+/// the one place this differs from [`index_of`], and the reason it is a
+/// function rather than a call to that one with an adjustment nobody would see.
+fn unit_of(unit: &str) -> u8 {
+    NODE_UNITS.iter().position(|known| *known == unit).map_or(0, narrow8)
 }
 
 /// The identity of a component file: one hash over the record and the image
@@ -555,6 +763,13 @@ fn put8(out: &mut [u8], at: usize, value: u8) {
     }
 }
 
+/// A little-endian `u16` at an offset.
+fn put16(out: &mut [u8], at: usize, value: u16) {
+    if let Some(slot) = out.get_mut(at..at + 2) {
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
+}
+
 /// A little-endian `u32` at an offset. Little-endian because the record is read
 /// by the frame through a pointer cast, and both ends of that are this machine.
 fn put32(out: &mut [u8], at: usize, value: u32) {
@@ -584,6 +799,16 @@ fn narrow(value: u64) -> u32 {
 /// As [`narrow`], one byte wide.
 fn narrow8(value: usize) -> u8 {
     u8::try_from(value).unwrap_or(u8::MAX)
+}
+
+/// As [`narrow`], two bytes wide.
+///
+/// The saturation is unreachable for the same reason: a `vendor` or a `device`
+/// above sixteen bits is refused by the checker, so `u16::MAX` reaching a record
+/// is the checker having stopped bounding it — and `u16::MAX` is exactly the
+/// value `Record::read` refuses as a vendor, which is the direction to fail in.
+fn narrow16(value: u64) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
 }
 
 // ---------------------------------------------------------------------------
@@ -719,6 +944,34 @@ fn parse_value(raw: &str) -> Result<Value, String> {
         "true" => return Ok(Value::Bool(true)),
         "false" => return Ok(Value::Bool(false)),
         _ => {}
+    }
+    // Hexadecimal, and it is TOML's own spelling so the subset is still a
+    // subset. It is here for `[[device]]`: a PCI identifier is a bit pattern a
+    // bus reports and every datasheet, every specification and every constant in
+    // `kernel::arch::x86_64::virtio` writes it in hex, so `vendor = 6900` would
+    // be a number a reviewer has to convert before they can check it against the
+    // thing it names. Lower case only, for `f_abi::boot::Selection`'s reason:
+    // two spellings of one identifier are two things a person compares by eye
+    // and gets wrong, and a canonical form is only canonical if there is one.
+    if let Some(body) = raw.strip_prefix("0x") {
+        if body.is_empty() {
+            return Err("`0x` with no digits after it is not a number".into());
+        }
+        if !body.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || b == b'_') {
+            return Err(
+                "a hexadecimal integer is `0x` and lower-case digits; upper case is refused \
+                 rather than accepted, because two spellings of one identifier are two things a \
+                 reader compares by eye"
+                    .into(),
+            );
+        }
+        if body.starts_with('_') || body.ends_with('_') || body.contains("__") {
+            return Err("an integer's underscores sit between digits".into());
+        }
+        let digits: String = body.chars().filter(|c| *c != '_').collect();
+        return u64::from_str_radix(&digits, 16)
+            .map(Value::Int)
+            .map_err(|_| "an integer fits in sixty-four unsigned bits".to_string());
     }
     if raw.bytes().all(|b| b.is_ascii_digit() || b == b'_') {
         if raw.starts_with('_') || raw.ends_with('_') || raw.contains("__") {
@@ -1297,15 +1550,22 @@ impl Checker<'_> {
             }
         };
 
-        // Reservation.
-        match tables.remove("reservation") {
-            None => self.note(1, "no `[reservation]` table; admission control refuses what was not declared — RFC 0007, E1-B07"),
+        // Reservation. The account it declares is carried past this block
+        // because `[transfer]` is arithmetic against it: RFC 0063 buys the
+        // transfer window out of the component's own `Untyped`, so a window
+        // larger than the account is a swap admission could never grant.
+        let declared_memory = match tables.remove("reservation") {
+            None => {
+                self.note(1, "no `[reservation]` table; admission control refuses what was not declared — RFC 0007, E1-B07");
+                None
+            }
             Some((line, table)) => {
                 let mut f = self.fields("[reservation]".into(), line, table);
                 let class = f.one_of("class", CLASSES).map(|(_, c)| c);
                 let memory = f.int("memory_bytes", true);
                 if let Some((line, bytes)) = memory {
-                    let grain = if class.as_deref() == Some("hard") { HUGE_BYTES } else { FRAME_BYTES };
+                    let grain =
+                        if class.as_deref() == Some("hard") { HUGE_BYTES } else { FRAME_BYTES };
                     if bytes == 0 || bytes % grain != 0 {
                         f.refuse(line, &format!("`memory_bytes = {bytes}` is not a positive multiple of {grain}; the {} class is granted in that grain", class.as_deref().unwrap_or("declared")));
                     }
@@ -1315,19 +1575,27 @@ impl Checker<'_> {
                         if let Some((line, cores)) = f.int("cores", true)
                             && cores == 0
                         {
-                                f.refuse(line, "`cores = 0` reserves no core, and the hard class holds whole physical cores — RFC 0007");
+                            f.refuse(line, "`cores = 0` reserves no core, and the hard class holds whole physical cores — RFC 0007");
                         }
                         let period = f.int("cpu_period_ns", true);
                         let budget = f.int("cpu_budget_ns", true);
                         if let Some((line, p)) = period
                             && p == 0
                         {
-                                f.refuse(line, "`cpu_period_ns = 0`; a period is what admission tests against");
+                            f.refuse(
+                                line,
+                                "`cpu_period_ns = 0`; a period is what admission tests against",
+                            );
                         }
                         if let (Some((_, p)), Some((line, b))) = (period, budget)
                             && (b == 0 || b > p)
                         {
-                                f.refuse(line, &format!("`cpu_budget_ns = {b}` is not between 1 and the period {p}"));
+                            f.refuse(
+                                line,
+                                &format!(
+                                    "`cpu_budget_ns = {b}` is not between 1 and the period {p}"
+                                ),
+                            );
                         }
                     }
                     Some(_) => {
@@ -1339,6 +1607,185 @@ impl Checker<'_> {
                     None => {}
                 }
                 f.finish();
+                memory.map(|(_, bytes)| bytes)
+            }
+        };
+
+        // The state tree. RFC 0065: what this component publishes about itself,
+        // declared here so that the schema block exists before the component's
+        // first instruction and so that a component publishing nothing can be
+        // refused before a frame is spent on it.
+        //
+        // Required, and required *non-empty*, which is the same thing said
+        // twice on purpose: an empty `[[state]]` array and no array at all are
+        // one component — one nobody can read — and a lint that accepted the
+        // first would be a lint somebody satisfies with a header.
+        let node_items = arrays.remove("state").unwrap_or_default();
+        let node_count = node_items.len();
+        if node_items.is_empty() {
+            self.note(1, "no `[[state]]` node; every component publishes a state tree and a supervisor refuses one that does not — RFC 0013, RFC 0065. The smallest honest tree is a root and one counter");
+        }
+        if node_items.len() > STATE_NODES_MAX {
+            self.note(node_items[STATE_NODES_MAX].0, &format!("more than {STATE_NODES_MAX} state nodes; a component's published region is one frame, and a tree that does not fit it is a component publishing its heap one node at a time"));
+        }
+        // Name to id, in declaration order, so a `parent` can only name a node
+        // already declared — which is what makes the hierarchy a tree in one
+        // pass rather than possibly a cycle.
+        let mut node_names: BTreeMap<String, u64> = BTreeMap::new();
+        let mut node_ids: BTreeSet<u64> = BTreeSet::new();
+        let mut highest = 0u64;
+        for (index, (line, table)) in node_items.into_iter().enumerate() {
+            let place = format!("[[state]] #{}", index + 1);
+            let mut f = self.fields(place, line, table);
+            if let Some((line, id)) = f.int("id", true) {
+                if id == 0 {
+                    f.refuse(line, "`id = 0` is not a node; a node id counts from one and is never reused — RFC 0013");
+                } else if id > u64::from(u32::MAX) {
+                    f.refuse(
+                        line,
+                        &format!("`id = {id}` is more than the record's field can carry"),
+                    );
+                } else if !node_ids.insert(id) {
+                    f.refuse(line, &format!("a second node with `id = {id}`; an id is what makes two readings of this component across time comparable at all"));
+                } else if id <= highest {
+                    f.refuse(line, &format!("`id = {id}` does not ascend past {highest}; the record requires ascending ids, which is what makes the one-pass parent check sound"));
+                } else {
+                    highest = id;
+                }
+            }
+            let this = f.string("name", true).and_then(|(line, n)| {
+                if n.is_empty() || n.len() > NODE_NAME_MAX || !is_name(&n) {
+                    f.refuse(line, &format!("`name = \"{n}\"` is not `[a-z0-9-]`, at most {NODE_NAME_MAX} bytes, with no edge hyphen; a longer label is a description, and a description belongs in the document that owns the node — RFC 0013"));
+                    return None;
+                }
+                Some(n)
+            });
+            f.one_of("kind", NODE_KINDS);
+            f.one_of("unit", NODE_UNITS);
+            // The root is the first node and the only one without a parent.
+            // Two parentless nodes is two trees at one mount address, with the
+            // second reachable only by whoever went looking.
+            if index == 0 {
+                f.forbid("parent", "the first node is this tree's root and has no parent; every node after it names one");
+            } else if let Some((line, parent)) = f.string("parent", true)
+                && !node_names.contains_key(&parent)
+            {
+                f.refuse(line, &format!("`parent = \"{parent}\"` names no node declared above this one; a parent is named before its child, which is what makes this a tree rather than possibly a cycle"));
+            }
+            f.finish();
+            if let (Some(name), Some(id)) = (this, node_ids.last().copied()) {
+                node_names.insert(name, id);
+            }
+        }
+
+        // Transfer. RFC 0063: what this component declares about being updated
+        // in place, and what it declares when it cannot.
+        //
+        // Required, for the reason `[restart]` is required one table up: a
+        // manifest that says nothing has not chosen `restart_only`, it has left
+        // the decision to whoever reads it next, and a place refilled from a
+        // newer manifest is exactly where two readers disagreeing is expensive.
+        match tables.remove("transfer") {
+            None => self.note(1, "no `[transfer]` table; whether a component can be updated in place is declared, never assumed — RFC 0063. `mode = \"restart_only\"` is the honest answer and costs one line"),
+            Some((line, table)) => {
+                let mut f = self.fields("[transfer]".into(), line, table);
+                let mode = f.one_of("mode", TRANSFER_MODES).map(|(_, m)| m);
+                match mode.as_deref() {
+                    Some("in_place") => {
+                        // The state-record schema is the component's own
+                        // ordinal, compared only against another build of the
+                        // same component. Zero would be a build that declares
+                        // it can be transferred and names no agreement to
+                        // transfer under.
+                        if let Some((line, schema)) = f.int("schema", true)
+                            && schema == 0
+                        {
+                            f.refuse(line, "`schema = 0` names no agreement between two builds of this component; a state-record schema counts from one");
+                        }
+                        let width = f.int("record_bytes", true);
+                        if let Some((line, bytes)) = width
+                            && (bytes == 0 || !bytes.is_multiple_of(RECORD_ALIGN))
+                        {
+                            f.refuse(line, &format!("`record_bytes = {bytes}` is not a positive multiple of {RECORD_ALIGN}; the window is records laid end to end and read in place"));
+                        }
+                        let count = f.int("records_max", true);
+                        if let Some((line, records)) = count
+                            && records == 0
+                        {
+                            f.refuse(line, "`records_max = 0` hands nothing over, which is `mode = \"restart_only\"` under another name; say that instead");
+                        }
+                        // The window is bought out of this component's own
+                        // `Untyped` account — RFC 0063, so that a transfer is
+                        // paid for by something revocable and never by the
+                        // frame. A window larger than the account is a swap no
+                        // admission can grant, and it is refused here rather
+                        // than at the swap, where a client's submissions are
+                        // already held.
+                        if let (Some((_, bytes)), Some((line, records))) = (width, count) {
+                            let window = bytes.saturating_mul(records);
+                            if let Some(account) = declared_memory
+                                && window > account
+                            {
+                                f.refuse(line, &format!("`record_bytes * records_max = {window}` is more than `[reservation] memory_bytes = {account}`; the transfer window is bought out of this component's own account, so a swap this large can never be admitted"));
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        let why = "`mode = \"restart_only\"` hands nothing over, so a schema, a width or a bound would be read and never applied";
+                        f.forbid("schema", why);
+                        f.forbid("record_bytes", why);
+                        f.forbid("records_max", why);
+                    }
+                    None => {}
+                }
+                f.finish();
+            }
+        }
+
+        // `[[device]]`. RFC 0067: what part this component drives, declared as
+        // a property and never as an address — `docs/manifest.md` has refused
+        // an address since schema 1 and still does.
+        //
+        // Zero entries is the common and correct answer and is not a finding: a
+        // component that drives no device declares none, and `Record::devices`
+        // carries the zero. What is refused is a *wrong* entry, and the order,
+        // because two entries swapped are two component files with different
+        // content hashes naming one driver.
+        let mut devices: Vec<(u64, u64)> = Vec::new();
+        let device_items = arrays.remove("device").unwrap_or_default();
+        if device_items.len() > DEVICES_MAX {
+            self.note(
+                device_items[DEVICES_MAX].0,
+                &format!(
+                    "more than {DEVICES_MAX} `[[device]]` entries; a driver declares the parts it \
+                     drives and a manifest that needs more than {DEVICES_MAX} is binding a bus"
+                ),
+            );
+        }
+        for (index, (line, table)) in device_items.into_iter().enumerate() {
+            let place = format!("[[device]] #{}", index + 1);
+            let mut f = self.fields(place, line, table);
+            let vendor = f.int("vendor", true);
+            let device = f.int("device", true);
+            if let Some((line, vendor)) = vendor
+                && (vendor == 0 || vendor > 0xFFFF || vendor == NO_VENDOR)
+            {
+                f.refuse(line, &format!("`vendor = {vendor:#x}` is not a PCI vendor identifier: zero is not one, {NO_VENDOR:#x} is how a bus says nothing answered and would match every empty slot on the machine, and neither is anything above sixteen bits"));
+            }
+            if let Some((line, device)) = device
+                && (device == 0 || device > 0xFFFF)
+            {
+                f.refuse(line, &format!("`device = {device:#x}` is not a PCI device identifier; zero is not one and neither is anything above sixteen bits. There is no wildcard here — a driver that binds a class rather than a part is RFC 0067's stated reversal and needs a wider record"));
+            }
+            f.finish();
+            if let (Some((_, vendor)), Some((line, device))) = (vendor, device) {
+                if devices.contains(&(vendor, device)) {
+                    self.note(line, &format!("`vendor = {vendor:#x}, device = {device:#x}` is declared twice; that is an author with two beliefs about one part, not a list to be de-duplicated"));
+                } else if devices.last().is_some_and(|last| *last > (vendor, device)) {
+                    self.note(line, &format!("`[[device]]` entries are out of order: {vendor:#x}:{device:#x} sorts before the entry above it. They are checked and never sorted, for `f_generation::record`'s reason one level up — a reader that reordered would let two different files carry one meaning, and then a content address names two things"));
+                } else {
+                    devices.push((vendor, device));
+                }
             }
         }
 
@@ -1367,6 +1814,8 @@ impl Checker<'_> {
             capabilities: caps.len(),
             rings: ring_count,
             restart: restart?,
+            devices,
+            state_nodes: node_count,
         })
     }
 }
@@ -1413,7 +1862,7 @@ mod tests {
     /// test can break a single line of it.
     const SOUND: &str = "\
 # SPDX-License-Identifier: Apache-2.0 OR MIT
-schema = 1
+schema = 3
 name   = \"example\"
 image  = \"user/example\"
 domain = \"shared\"
@@ -1447,6 +1896,22 @@ policy = \"never\"
 [reservation]
 class        = \"soft\"
 memory_bytes = 65536
+
+[transfer]
+mode = \"restart_only\"
+
+[[state]]
+id   = 1
+name = \"example\"
+kind = \"subtree\"
+unit = \"none\"
+
+[[state]]
+id     = 2
+parent = \"example\"
+name   = \"served\"
+kind   = \"counter\"
+unit   = \"entries\"
 ";
 
     fn findings(text: &str) -> Vec<String> {
@@ -1515,7 +1980,7 @@ memory_bytes = 65536
 
     #[test]
     fn a_later_schema_is_refused() {
-        refused_for(&edit("schema = 1", "schema = 2"), "knows schema 1");
+        refused_for(&edit("schema = 3", "schema = 4"), "knows schema 3");
     }
 
     #[test]
@@ -1813,12 +2278,232 @@ memory_bytes = 65536
         check("user/example/manifest.toml", &hard).unwrap_or_else(|f| panic!("{}", f.join("\n")));
     }
 
+    /// RFC 0063's table, refused the way `[restart]` is: the mode is closed,
+    /// the three quantities belong to one mode only, and the window is
+    /// arithmetic against the account that buys it.
+    #[test]
+    fn a_transfer_is_declared_and_its_fields_match_its_mode() {
+        refused_for(&edit("\n[transfer]\nmode = \"restart_only\"\n", ""), "no `[transfer]`");
+        refused_for(&edit("mode = \"restart_only\"", "mode = \"in_place_sometimes\""), "one of");
+        // The three quantities mean nothing when nothing is handed over.
+        refused_for(
+            &edit("mode = \"restart_only\"", "mode = \"restart_only\"\nrecord_bytes = 32"),
+            "read and never applied",
+        );
+        // And they are required when something is.
+        for missing in ["schema = 1\n", "record_bytes = 32\n", "records_max = 16\n"] {
+            let full = in_place("schema = 1\nrecord_bytes = 32\nrecords_max = 16\n");
+            refused_for(&full.replacen(missing, "", 1), "is required");
+        }
+        refused_for(
+            &in_place("schema = 0\nrecord_bytes = 32\nrecords_max = 16\n"),
+            "names no agreement",
+        );
+        refused_for(
+            &in_place("schema = 1\nrecord_bytes = 12\nrecords_max = 16\n"),
+            "not a positive multiple of 8",
+        );
+        refused_for(
+            &in_place("schema = 1\nrecord_bytes = 32\nrecords_max = 0\n"),
+            "under another name",
+        );
+        // `SOUND` declares a 65 536-byte account, so 4096 records of 32 bytes
+        // is a window it cannot hold — refused here rather than at the swap,
+        // where a client's submissions are already being held.
+        refused_for(
+            &in_place("schema = 1\nrecord_bytes = 32\nrecords_max = 4096\n"),
+            "bought out of this component's own account",
+        );
+        check(
+            "user/example/manifest.toml",
+            &in_place("schema = 1\nrecord_bytes = 32\nrecords_max = 16\n"),
+        )
+        .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+    }
+
+    /// [`SOUND`] with its `[transfer]` table replaced by an `in_place` one
+    /// carrying `fields`.
+    fn in_place(fields: &str) -> String {
+        edit("mode = \"restart_only\"\n", &format!("mode = \"in_place\"\n{fields}"))
+    }
+
+    /// [`SOUND`] with `entries` appended as `[[device]]` tables.
+    fn with_devices(entries: &[(&str, &str)]) -> String {
+        let mut text = SOUND.to_string();
+        for (vendor, device) in entries {
+            text.push_str(&format!("\n[[device]]\nvendor = {vendor}\ndevice = {device}\n"));
+        }
+        text
+    }
+
+    #[test]
+    fn a_declared_device_is_a_part_and_the_list_is_canonical() {
+        // None is the common answer and is not a finding: `SOUND` declares no
+        // device and passes, which `the_sound_fixture_passes` already says.
+        let checked = check("user/example/manifest.toml", SOUND)
+            .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+        assert!(checked.devices.is_empty());
+
+        // Two parts, in order, is the accepting case — the shape a virtio
+        // driver with a modern and a transitional id would have.
+        let text = with_devices(&[("0x1af4", "0x1041"), ("0x1af4", "0x1042")]);
+        let checked = check("user/example/manifest.toml", &text)
+            .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+        assert_eq!(checked.devices, vec![(0x1af4, 0x1041), (0x1af4, 0x1042)]);
+
+        // Out of order is refused and never sorted, and a part twice is an
+        // author with two beliefs about one thing.
+        refused_for(&with_devices(&[("0x1af4", "0x1042"), ("0x1af4", "0x1041")]), "out of order");
+        refused_for(&with_devices(&[("0x1af4", "0x1041"), ("0x1af4", "0x1041")]), "declared twice");
+
+        // Neither zero nor the value a bus returns when nothing answered.
+        refused_for(&with_devices(&[("0", "0x1041")]), "not a PCI vendor identifier");
+        refused_for(&with_devices(&[("0xffff", "0x1041")]), "not a PCI vendor identifier");
+        refused_for(&with_devices(&[("0x1af4", "0")]), "not a PCI device identifier");
+        refused_for(&with_devices(&[("0x1af4", "0x10000")]), "not a PCI device identifier");
+
+        // A field this table does not have, and one it needs and lacks.
+        refused_for(
+            &with_devices(&[("0x1af4", "0x1041")]).replace("device = 0x1041", "class = 1"),
+            "is required and missing",
+        );
+
+        // Five is more than a driver binding parts and is a manifest binding a
+        // bus.
+        let five: Vec<(&str, &str)> = vec![
+            ("0x1af4", "0x1041"),
+            ("0x1af4", "0x1042"),
+            ("0x1af4", "0x1043"),
+            ("0x1af4", "0x1044"),
+            ("0x1af4", "0x1045"),
+        ];
+        refused_for(&with_devices(&five), "binding a bus");
+    }
+
+    #[test]
+    fn a_hexadecimal_integer_is_read_and_only_in_its_canonical_spelling() {
+        // In the subset because a PCI identifier is a bit pattern, and refused
+        // in upper case because a canonical form is only canonical if there is
+        // one of it.
+        let text = with_devices(&[("0x1_af4", "0x1041")]);
+        let checked = check("user/example/manifest.toml", &text)
+            .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+        assert_eq!(checked.devices, vec![(0x1af4, 0x1041)]);
+
+        refused_for(&with_devices(&[("0x1AF4", "0x1041")]), "upper case is refused");
+        refused_for(&with_devices(&[("0x", "0x1041")]), "no digits after it");
+        refused_for(&with_devices(&[("0x_1af4", "0x1041")]), "underscores sit between digits");
+    }
+
+    /// Every way a `[[state]]` declaration can fail to be a tree, and the one
+    /// way it can fail to be there at all.
+    ///
+    /// The last is the one this task exists for: a manifest that declares no
+    /// tree is a component nobody can read, and RFC 0065 refuses it here so
+    /// that the supervisor's `ADMISSION/NO_STATE_TREE` is a check that has
+    /// already been made rather than the first time anybody looked.
+    #[test]
+    fn a_state_tree_is_declared_and_is_one_tree() {
+        // The whole array removed, which is what a schema-2 manifest looks like
+        // to this checker.
+        let mute = SOUND.split_once("\n[[state]]").map(|(head, _)| head).unwrap().to_string();
+        refused_for(&mute, "no `[[state]]` node");
+
+        refused_for(&edit("id   = 1\n", "id   = 0\n"), "is not a node");
+        refused_for(&edit("id     = 2", "id     = 1"), "a second node with");
+        refused_for(&edit("kind = \"subtree\"", "kind = \"histogram\""), "one of");
+        refused_for(&edit("unit = \"none\"", "unit = \"furlongs\""), "one of");
+        refused_for(
+            &edit("name = \"example\"\nkind", "name = \"Example\"\nkind"),
+            "is not `[a-z0-9-]`",
+        );
+        refused_for(
+            &edit("name = \"example\"\nkind", "name = \"a-name-far-too-long-for-the-field\"\nkind"),
+            "is not `[a-z0-9-]`",
+        );
+        // The root has no parent, and nothing after it may be a second one.
+        refused_for(
+            &edit(
+                "id   = 1\nname = \"example\"",
+                "id   = 1\nparent = \"example\"\nname = \"example\"",
+            ),
+            "is this tree's root",
+        );
+        refused_for(
+            &edit("parent = \"example\"", "parent = \"served\""),
+            "names no node declared above this one",
+        );
+        // And a parent naming a node declared *below* is the cycle case, which
+        // is the same refusal seen from the other side.
+        refused_for(
+            &edit("parent = \"example\"", "parent = \"nowhere\""),
+            "names no node declared above this one",
+        );
+
+        let m = check("user/example/manifest.toml", SOUND)
+            .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+        assert_eq!(m.state_nodes, 2, "the sound fixture's tree was not counted");
+    }
+
+    /// The declaration reaches the record at the offsets the frame reads it
+    /// from, with the parent resolved from a name to an id.
+    ///
+    /// The resolution is what this checks and it is the part that could be
+    /// wrong silently: a manifest names a parent and the record carries an id,
+    /// and a writer that stamped a zero there would produce a forest of roots
+    /// that `Record::read` refuses at the next boot rather than here.
+    #[test]
+    fn a_declared_tree_reaches_the_record_with_its_parents_resolved() {
+        let bytes = compile("user/example/manifest.toml", SOUND, b"image")
+            .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+        // 102 and not 101: `[[device]]` took the first of the record's spare
+        // count bytes and `[[state]]` took the second, and a writer that
+        // stamped both at one offset would publish a node count over a device
+        // count with no reader ever the wiser.
+        assert_eq!(bytes[102], 2, "the node count is not where the record carries it");
+
+        let node = |index: usize, at: usize| bytes[record::STATE_AT + index * record::NODE + at];
+        let id = |index: usize| {
+            u32::from_le_bytes(
+                bytes[record::STATE_AT + index * record::NODE
+                    ..record::STATE_AT + index * record::NODE + 4]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        let parent = |index: usize| {
+            u32::from_le_bytes(
+                bytes[record::STATE_AT + index * record::NODE + 4
+                    ..record::STATE_AT + index * record::NODE + 8]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        assert_eq!((id(0), parent(0)), (1, 0), "the root is not parentless");
+        assert_eq!((id(1), parent(1)), (2, 1), "the child's parent was not resolved to an id");
+        // `subtree` is one and `counter` is two, because zero is not a kind;
+        // `none` is zero and `entries` is four, because `none` is a real unit.
+        assert_eq!((node(0, 8), node(0, 9)), (1, 0), "the root's kind or unit is wrong");
+        assert_eq!((node(1, 8), node(1, 9)), (2, 4), "the counter's kind or unit is wrong");
+        assert_eq!(node(1, 10), 6, "the name length is not the name's");
+        assert_eq!(
+            &bytes[record::STATE_AT + record::NODE + 12..record::STATE_AT + record::NODE + 18],
+            b"served"
+        );
+        // Everything past the count is zero, because the record is hashed whole
+        // and a byte nobody judges is a byte two files can differ in.
+        assert!(
+            bytes[record::STATE_AT + 2 * record::NODE..record::BYTES].iter().all(|b| *b == 0),
+            "a slot past the count carries something"
+        );
+    }
+
     #[test]
     fn the_syntax_is_the_subset_and_nothing_else() {
         refused_for(&edit("name   = \"example\"", "name   = \"\"\"example\"\"\""), "no quote");
         refused_for(&edit("name   = \"example\"", "name   = \"ex\\nample\""), "backslash");
-        refused_for(&edit("schema = 1", "schema = -1"), "signed");
-        refused_for(&edit("schema = 1", "schema = 1\nschema = 1"), "appears twice");
+        refused_for(&edit("schema = 3", "schema = -1"), "signed");
+        refused_for(&edit("schema = 3", "schema = 3\nschema = 3"), "appears twice");
         refused_for(&edit("[restart]", "[restart]\n[restart]"), "appears twice");
         refused_for(
             &edit("memory_bytes = 65536", "memory_bytes = { min = 65536 }"),
@@ -1830,7 +2515,7 @@ memory_bytes = 65536
             "same line",
         );
         refused_for(&edit("memory_bytes = 65536", "memory_bytes = 65_536_"), "between digits");
-        refused_for(&edit("schema = 1", "just some words"), "`key = value`");
+        refused_for(&edit("schema = 3", "just some words"), "`key = value`");
         // Underscores between digits are TOML and are read.
         let m = check(
             "user/example/manifest.toml",
@@ -1849,7 +2534,7 @@ memory_bytes = 65536
     fn a_syntax_error_stops_before_the_fields_are_judged() {
         // Otherwise a file with one broken line reports every field after it
         // as missing, which is noise wearing a finding's clothes.
-        let f = findings(&edit("schema = 1", "schema = 1\n[[capability"));
+        let f = findings(&edit("schema = 3", "schema = 3\n[[capability"));
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].contains("array header"));
     }
@@ -1858,9 +2543,13 @@ memory_bytes = 65536
     fn a_manifest_may_declare_no_capabilities_and_no_rings() {
         // `init` today holds three grants and speaks on nothing; a manifest for
         // it has empty lists and is complete.
+        //
+        // It may not declare no *tree*, and the asymmetry is RFC 0065's whole
+        // argument: a component with no needs asks for nothing, and a component
+        // with no tree is one nobody can read.
         let text = "\
 # SPDX-License-Identifier: Apache-2.0 OR MIT
-schema = 1
+schema = 3
 name   = \"init\"
 image  = \"user/init\"
 domain = \"shared\"
@@ -1871,6 +2560,15 @@ policy = \"never\"
 [reservation]
 class        = \"soft\"
 memory_bytes = 8192
+
+[transfer]
+mode = \"restart_only\"
+
+[[state]]
+id   = 1
+name = \"init\"
+kind = \"subtree\"
+unit = \"none\"
 ";
         let m =
             check("user/init/manifest.toml", text).unwrap_or_else(|f| panic!("{}", f.join("\n")));
@@ -1963,6 +2661,8 @@ memory_bytes = 8192
         assert_eq!(size_of("Record"), record::BYTES, "the record has changed size");
         assert_eq!(size_of("Need"), record::NEED, "a capability slot has changed size");
         assert_eq!(size_of("Ring"), record::RING, "a ring slot has changed size");
+        assert_eq!(size_of("Node"), record::NODE, "a state node slot has changed size");
+        assert_eq!(size_of("Binding"), record::BINDING, "a device slot has changed size");
 
         let konst = |name: &str, ty: &str| -> String {
             let needle = format!("pub const {name}: {ty} = ");
@@ -1995,6 +2695,100 @@ memory_bytes = 8192
             konst("RINGS_MAX", "usize").parse::<usize>().unwrap(),
             RINGS_MAX,
             "abi::manifest::RINGS_MAX has drifted from this checker's"
+        );
+        assert_eq!(
+            konst("STATE_NODES_MAX", "usize").parse::<usize>().unwrap(),
+            STATE_NODES_MAX,
+            "abi::manifest::STATE_NODES_MAX has drifted from this checker's"
+        );
+        assert_eq!(
+            konst("DEVICES_MAX", "usize").parse::<usize>().unwrap(),
+            DEVICES_MAX,
+            "abi::manifest::DEVICES_MAX has drifted from this checker's"
+        );
+
+        // The transfer declaration is a second file's assertion, because the
+        // type is `abi/src/transfer.rs`'s and only the field sits in the
+        // record. Its width is what moves `CAPS_AT` and therefore every
+        // capability and every ring the writer stamps, so it is mirrored here
+        // rather than trusted.
+        let transfer =
+            std::fs::read_to_string(root.join("abi/src/transfer.rs")).expect("abi/src/transfer.rs");
+        let declaration = transfer
+            .lines()
+            .find_map(|line| line.split_once("core::mem::size_of::<Declaration>() == "))
+            .and_then(|(_, rest)| rest.trim().trim_end_matches([';', ')']).parse::<usize>().ok())
+            .expect("no size assertion for Declaration in abi/src/transfer.rs");
+        assert_eq!(
+            declaration,
+            record::TRANSFER,
+            "abi::transfer::Declaration has changed size, which moves every offset after it"
+        );
+        // The offsets themselves, not only the sizes. A field inserted before
+        // the arrays can keep the total and move every slot, which is a
+        // component file this writer and the frame's reader disagree about in
+        // a way summing sizes cannot see.
+        let offset = |field: &str| -> usize {
+            let needle = format!("core::mem::offset_of!(Record, {field}) == ");
+            abi.lines()
+                .find_map(|line| line.split_once(&needle))
+                .and_then(|(_, rest)| rest.trim().trim_end_matches([';', ')']).parse().ok())
+                .unwrap_or_else(|| panic!("no offset assertion for {field} in abi/src/manifest.rs"))
+        };
+        assert_eq!(offset("transfer"), record::TRANSFER_AT, "the transfer field has moved");
+        assert_eq!(offset("binding"), record::BINDINGS_AT, "the device array has moved");
+        assert_eq!(offset("capability"), record::CAPS_AT, "the capability array has moved");
+        assert_eq!(offset("ring"), record::RINGS_AT, "the ring array has moved");
+        assert_eq!(offset("state"), record::STATE_AT, "the state array has moved");
+
+        // The two closed vocabularies a `[[state]]` node is judged against,
+        // read out of `abi/src/state.rs` and compared word for word and in wire
+        // order. A table nothing checks is a table that is wrong within a
+        // milestone, which is the sentence this whole test was written under.
+        let state =
+            std::fs::read_to_string(root.join("abi/src/state.rs")).expect("abi/src/state.rs");
+        let words = |after: &str| -> Vec<String> {
+            state
+                .split_once(after)
+                .map(|(_, rest)| rest)
+                .unwrap_or_default()
+                .lines()
+                .take_while(|line| *line != "}")
+                .filter_map(|line| line.split_once("    pub const "))
+                .filter_map(|(_, rest)| rest.split_once(": u8 = "))
+                .map(|(name, _)| name.to_lowercase())
+                .collect()
+        };
+        assert_eq!(
+            words("pub mod kind {"),
+            NODE_KINDS,
+            "abi::state::kind has drifted from this checker's spelling or wire order"
+        );
+        assert_eq!(
+            words("pub mod unit {"),
+            NODE_UNITS,
+            "abi::state::unit has drifted from this checker's spelling or wire order"
+        );
+        let modes: Vec<&str> = transfer
+            .lines()
+            .filter_map(|line| line.split_once("    pub const "))
+            .filter_map(|(_, rest)| rest.split_once(": u8 = "))
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            modes,
+            TRANSFER_MODES.iter().map(|m| m.to_uppercase()).collect::<Vec<_>>(),
+            "abi::transfer::mode has drifted from this checker's spelling or wire order"
+        );
+        let align = transfer
+            .lines()
+            .find_map(|line| line.split_once("pub const RECORD_ALIGN: u32 = "))
+            .map(|(_, rest)| rest.trim().trim_end_matches(';').replace('_', ""))
+            .expect("no RECORD_ALIGN in abi/src/transfer.rs");
+        assert_eq!(
+            align.parse::<u64>().unwrap(),
+            RECORD_ALIGN,
+            "abi::transfer::RECORD_ALIGN has drifted from this checker's"
         );
     }
 

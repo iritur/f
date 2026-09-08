@@ -1,0 +1,173 @@
+# `E2-P07` as a number: how many comparisons a rollback makes before it is
+# allowed to say *the restored generation is what it was*, and what the module
+# that passes one of them and fails another costs to build.
+#
+# **What this claim is not.** It is not a claim that a root hash identifies a
+# machine's files. It is the opposite: the whole reason there are three
+# comparisons instead of one is that a matching root is **not** a matching
+# machine. The generation fold covers the record tree — each leaf's name and the
+# content address it names — and covers none of the component files travelling
+# in the same boot module. Put a correct tree beside a file that is not the one
+# its leaf names and the module folds to the same root. `tampered_modules_*`
+# below are that module, built on purpose, and they are the rows that make the
+# other three worth reading.
+#
+# It is also not a claim about a boot menu on hardware. The menu here is the
+# loader's: `f.root=<64 hex>` beside `f.frame=<64 hex>` on a multiboot command
+# line, offered a list of modules under QEMU, and the `menuentry` block
+# `cargo xtask generation --install` writes for a GRUB that this repository does
+# not contain and does not import — GRUB is GPLv3 and a demonstration does not
+# cross the licence boundary. Nothing here has been booted from a physical disk;
+# `docs/booting-on-hardware.md` is where that gap is written down.
+name       = "rollback-comparisons"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E2"
+
+statement  = """
+A generation is broken with a real defect, the machine goes down on the
+provocation that defect answers to, the previous generation is selected out of a
+menu of two by its root, and what came back is compared **three** ways — the
+root the machine folded, the digest of every byte the loader delivered taken on
+the machine, and the generation rebuilt from source after the break. All three
+matched. A fourth module, whose record tree is untouched and one byte of whose
+component image is not, folds to the honest root, is selected by the frame under
+that root, and is caught by the digest and named at member 0 by `f-assembler`.
+
+Measured by `cargo xtask claim rollback-comparisons` — one invocation of
+`cargo xtask rollback`, which is three generation builds and six boots.
+
+  boots                                        6
+  generations offered on the menu              2
+  comparisons matched                          3
+  module bytes delivered                   65348
+  component files in the module                4
+  leaves moved by the break                    1
+  unknown roots refused                        1
+  tampered modules folding to the honest root  1
+  tampered modules caught by the digest        1
+  tampered members named by the assembler      1
+
+**The break is a real defect and not a byte this command flipped.**
+`mutate-unchecked-index` is `cargo xtask mutate`'s own — it removes a bounds
+check in the capability table, so a machine built with it dies on `cap=forge`
+and is green on everything else. Reusing it is the point: the thing being rolled
+back from has to be a defect somebody argued for in the place it lives, and it
+lands in exactly one leaf, which is what lets `leaves_moved_by_the_break` = 1
+assert that the frame is the only thing that moved. `f_generation::divergence`
+names that leaf rather than this command spelling `"kernel"`.
+
+**`unknown_roots_refused` is the other half of *the token selects*.** A machine
+that fell back to whatever module it happened to have would pass every other row
+here while booting something nobody asked for — the operator believes they
+rolled back and the evidence says nothing. So a root no offered module carries
+is booted on purpose and the frame is required to refuse it by name.
+
+**The tamper was found rather than designed, and the claim keeps the finding.**
+Filling a component file with a run of one byte made it stop being a manifest,
+and `f-assembler` answered `NotAManifest` — a shape refusal from a codec that
+was never in doubt, before the content check this is about could run. The
+corruption worth being able to catch is the quiet one: a file whose record still
+reads, whose name still matches its leaf, and whose *image* is not the image
+that leaf's address names. That is one byte at the end of the image, and it is
+what a device that lied about a barrier leaves behind.
+
+**What this does not demonstrate.** No generation was swapped: the machine
+reboots into the generation it was told to be, which is what `f.root=` selects,
+and RFC 0012's *one generation swap, and a reboot only when the frame changed*
+is `claims/0029`'s half and is measured in a process rather than on a machine.
+The frame here changed, so a reboot is the correct outcome and not a limitation
+— but a rollback that did **not** change the frame would still be a reboot in
+this tree, and that is a limitation, owned by `SWAP_GAP`.
+"""
+
+[baseline]
+# The baseline is the same command with the module tampered with, and it is in
+# the command rather than in a directory.
+system  = "none"
+notes   = "There is nothing else to compare against: what is claimed is that this tree's rollback makes three comparisons where a system comparing roots would make one, and another system's rollback either does something different or is not verified at all. The comparison that does mean something is the tampered module, and it is the second half of the same command — `tampered_modules_folding_to_the_honest_root` = 1 with `tampered_modules_caught_by_the_digest` = 1 is that baseline written as rows rather than as prose: a module that a root comparison accepts and a byte comparison does not."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "07"
+notes    = "Section 07's own sentence is *what makes \"roll back one generation\" a complete, verified statement rather than a hope about what got restored*, and this claim is the word `verified` made countable. The subsystems that own the number are `abi/src/boot.rs` for the token's grammar and `Selection::find`, `generation/src/select.rs` for the rule that picks a module out of what the loader offered — written there and not in the frame, because `kernel/` is `test = false` and a refusal only a boot can reach is a refusal nothing checks — `kernel/src/generation.rs` for the loop and the report, `abi/src/boot::Module` for the layout, and `user/assembler/` for the content check that names the member. `xtask/src/rollback.rs` is the harness and `xtask/src/generation.rs` writes the menu."
+
+[workload]
+path        = "xtask/src/rollback.rs"
+second      = "xtask/src/generation.rs"
+builds      = 3
+boots       = 6
+notes       = "Three generation builds — the honest one, the broken one, and the honest one again after the break — and six boots: the broken generation dying on its provocation, the intact one surviving it, two selections out of a two-module menu, one refusal of a root nothing carries, and one boot of the tampered module. About five minutes in the development container. That is the claim's own cost and it is why this workload is not in `cargo xtask verify`, which runs `attest` and `swap`, and not in the pull-request gate either: neither is a place to spend five minutes on a property that moves when a *format* moves rather than when a line of code does. **It is on a schedule instead, which is the thing this note used to say was missing.** `.github/workflows/nightly.yml`'s `rollback` job runs `cargo xtask claim rollback-comparisons` — the reproduction line below, so the thresholds are compared and not only the workload run — every night at 03:11 UTC. Of the two candidates this note named, the nightly was taken and `E2-R01`'s release gate was not: a release gate would run this once per release, and a claim checked once per release is a claim that goes red at the worst moment. The residual is the one every scheduled job has and `nightly.yml`'s own header states: a red cross on a schedule is the easiest thing in a repository to stop seeing, and this job opens no issue. — What stands in, and it is most of the exit's setting: this is QEMU with `-kernel` and `-initrd`, not a machine with a disk and a boot loader. `cargo xtask generation --install` writes the `menuentry` fragment and nothing in this tree boots it; `docs/booting-on-hardware.md` and `docs/second-boot-outside-qemu.md` carry that gap."
+
+[metrics]
+# Counts, every one of them. No hash appears as a row: a threshold carrying a
+# digest would be a claim about this commit rather than about the property, and
+# every commit that moved a byte of the frame would have to rewrite it.
+primary   = "comparisons_matched"
+secondary = [
+  "boots",
+  "generations_offered_on_the_menu",
+  "module_bytes_delivered",
+  "component_files_in_the_module",
+  "leaves_moved_by_the_break",
+  "unknown_roots_refused",
+  "tampered_modules_folding_to_the_honest_root",
+  "tampered_modules_caught_by_the_digest",
+  "tampered_members_named_by_the_assembler",
+]
+
+[threshold]
+# The headline, exact in both directions. Three: the root, the module digest
+# taken on the machine, and the generation rebuilt from source. Two of three is
+# not a weaker rollback, it is a different statement — and four means something
+# was added that this file does not describe.
+comparisons_matched                         = { min = 3, max = 3 }
+# The demonstration happened on a machine. At five the command returned early
+# somewhere; at zero it compared two files on a host, which is the experiment
+# `Reported` exists to refuse.
+boots                                       = { min = 6 }
+# Both generations in front of the frame at once. At one the token is not what
+# selected anything, because there was nothing to select between.
+generations_offered_on_the_menu             = { min = 2 }
+# The break moved the frame leaf and nothing else, named by
+# `f_generation::divergence` rather than asserted. At two the defect is leaking
+# into a component build and step six's *bit-identical* would be over a
+# generation this command cannot reason about.
+leaves_moved_by_the_break                   = { min = 1, max = 1 }
+# The token selects rather than defaults. At zero a machine offered a root no
+# module carries booted to success, and every row above is then a statement
+# about a machine that would have booted whatever it had.
+unknown_roots_refused                       = { min = 1 }
+# The three rows that make the digest comparison earn its place. The first says
+# the tamper is the quiet kind — a module a root comparison accepts; the second
+# says the digest sees it; the third says something in this system can still name
+# *which member* was wrong, which is the only answer an operator can act on.
+tampered_modules_folding_to_the_honest_root = { min = 1, max = 1 }
+tampered_modules_caught_by_the_digest       = { min = 1, max = 1 }
+tampered_members_named_by_the_assembler     = { min = 1, max = 1 }
+# What was actually delivered. A floor rather than the measured 65 348, because
+# the number moves whenever a component image does and a claim that pinned it
+# would go red on every unrelated build; what it rules out is a module that has
+# lost its files — at which point the digest above covers a tree and some
+# framing, and `component_files_in_the_module` says the same thing more sharply.
+module_bytes_delivered                      = { min = 4096 }
+# Every component `user/generation.toml` names. The floor moves up when a
+# component is added, and that is a diff naming the component.
+component_files_in_the_module               = { min = 4 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "This claim does not need that machine, for `claims/0005`'s reason: every metric is a count of boots, comparisons or refusals, and nothing here is timed — `f_bench::Environment` has nothing to refuse. What the claim needs and cannot have from any runner in this project is a machine that boots from a disk through a boot loader's menu, which is where `unknown_roots_refused` and `generations_offered_on_the_menu` would mean what an operator means by them. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it."
+
+[reproduce]
+command = "cargo xtask claim rollback-comparisons"
+
+[diagnosis]
+# Recorded while the system is understood rather than at 2 a.m. when it is not.
+comparisons_matched_below_three = "the command refuses at the comparison that failed and names it, so read its output first. The root failing means the frame folded something other than what was packed — `generation/src/fold.rs` against `abi/src/boot::Module`. The module digest failing with the root matching is the case this whole claim is about and means the bytes that arrived are not the bytes that were packed: suspect the emulator's module list before suspecting the fold. The rebuild failing is not a rollback failure at all — it is a reproducibility failure and belongs to `E2-P06` and `claims/0028`, and the command says so in as many words"
+tampered_modules_caught_by_the_digest_is_zero = "the digest comparison has stopped seeing a module whose image changed, which makes the second of the three comparisons a check that cannot fail — and the rollback is then a root comparison wearing three names. Read `tampered_modules_folding_to_the_honest_root` beside it: if that is also zero the tamper has stopped being the quiet kind, most likely because the flipped byte is landing in the record tree rather than in the image, and the demonstration is refuting a corruption nobody was worried about"
+tampered_members_named_by_the_assembler_is_zero = "the assembler refused the tampered module for something other than its content — `NotAManifest` is the refusal that shadows this one — or accepted it. The first is a shape refusal from a codec that was never in doubt and proves nothing about the content check; the second is worse, because recomputing every file's SHA-256 against the address its leaf names is the only thing in this system that catches a swapped file by *name*"
+unknown_roots_refused_is_zero = "a machine handed a root no module carries booted to success, so `f.root=` is a decoration rather than a selection. `kernel/src/generation.rs`'s `report` is where the refusal is, and it ends the boot on purpose: a machine that quietly booted a different generation is the exact failure a rollback test exists to catch. This boot used to publish an all-zero root as generation 1 *before* refusing, which was an open question against RFC 0012; it is answered — the frame now selects before it publishes anything, so the refusal boot publishes no identity at all — and it was never what this row is about"
+leaves_moved_by_the_break_is_not_one = "at zero the defect is not reaching the frame image and there is nothing to roll back from — check that `mutate-unchecked-index` is still declared in `kernel/Cargo.toml` and still changes the artefact. At two or more it has reached a component leaf as well, which means the build is leaking a feature into the component images and step six would be restoring more than the frame"
+boots_below_six = "the command returned before it had run every boot, which it normally does by refusing — so this row going red with no refusal above it means a step was skipped rather than failed. `BOOTS` in `xtask/src/main.rs` counts emulator processes actually started, so a five here is a boot that did not happen and not a boot that failed"
+a_threshold_no_workload_printed = "`cargo xtask rollback` failed before its summary block, which for this claim is the ordinary way a real finding arrives — the seven steps each refuse with what they expected and what they got. Read the workload's own output above the table; the rows are the last thing it prints and their absence is a symptom rather than the disease"

@@ -1,0 +1,154 @@
+# `E2-B08`'s exit as a number: bytes that reached a destination the caller did
+# not register, per read.
+#
+# **Why the zero is counted twice and neither reading derives from the other.**
+# The exit's words are *counted rather than asserted*, and the reason those
+# words are there is that RFC 0024's typestate is an argument by construction:
+# it publishes the same zero whether the property holds or the mechanism behind
+# it was deleted. So `f_objects::read::Counters::staged_bytes` is the driver's
+# tally, taken at submission, and `f_objects::dma::Landed::unregistered_bytes`
+# is the device model's, taken inside the crate's one byte-mover;
+# `ReadPath::readings_agree` requires them equal. That is `claims/0012`'s
+# discipline — count the same event on both sides of a boundary — and the reason
+# for it is that a zero one component publishes is a zero that component can
+# produce by writing it.
+#
+# **0022 and not 0018, which is a correction rather than a preference.**
+# `intent/0006-state/spec.md` reserved 0018 for this claim while nothing was
+# built; `claims/0018` then landed on 2026-09-06 as `chunk-size-distribution`,
+# `E2-P02`'s half of the chunker workload. `intent/0006-state/plan.md` states
+# the rule that decides which of the two moves — a number taken in a plan is a
+# number a concurrent landing takes first (claim 0008 became 0014) — so the file
+# kept 0018 and the reservation moved here, where the plan and the spec both now
+# record it. This is that reservation landing.
+name       = "copies-per-read"
+status     = "pending"          # pending | tracked | gating
+milestone  = "E2"
+
+statement  = """
+A read lands in the caller's own registered buffer. Nothing is staged on the way
+— not by the driver, and not by the device — and the zero is a count taken by
+two tallies on opposite sides of the boundary that are required to agree.
+
+Measured by `cargo xtask claim copies-per-read` — `user/objects/tests/reads.rs`,
+seed `0x00000000e2b08000`, 256 reads of a 16 000-byte blob over a modelled zoned
+device of 4 KiB blocks and 1 MiB zones, records landing in 4 of them, into a set
+of 8 registered buffers of one block:
+
+  reads completed                                     256
+  copies_per_read                                       0
+  driver: bytes to an unregistered destination          0
+  device: bytes through an unregistered buffer          0
+  device: bytes into the caller's buffer        4 194 304   over 1 024 transfers
+  application bytes delivered                   4 096 000
+  the provocation: both readings then               4 096
+
+**The header is borrowed and not copied, which is the load-bearing line.** The
+blob header is decoded by `f_abi::store::Header::from_bytes` out of a
+`&[u8; 52]` pointing into the caller's own buffer, so the record is read from
+the memory the device just wrote — not a `repr(C)` cast, which RFC 0001 puts
+inside the frame, and not a fifty-two-byte copy either, which would have been a
+copy nobody counted. The content is hashed in that same buffer and is
+deliberately not slid down to offset zero for the same reason: `Read` answers
+*where* the content is.
+
+**The registration is the real one.** `f_ring::registry::Table` is `E1-B10`'s
+service-side table, unchanged, so *was this destination one the caller
+registered* is answered here by the code that would answer it under a real
+driver. A count over an inline buffer would have been the copy nobody counted,
+which is the parenthesis `TODO.md` attaches to this task's `needs:` line.
+
+**Why this is `pending` and what would make it gate.** The count is taken at a
+modelled device boundary and not across the blk ring in a boot. `user/objects`
+is not yet a component — a component image linking `f-blob` needs a
+`#[global_allocator]`, that is an `unsafe impl GlobalAlloc`, and RFC 0001
+forbids `unsafe` above the frame, so the spec's decision 4 puts that heap in
+`ring/` and it does not exist — and `user/virtio-blk` answers two of RFC 0060's
+seven opcodes, so there is no ring under these transfers. **A count taken at a
+different boundary is a different count however similar it looks**, which is the
+sentence `claims/0016` already carries about its own modelled rows. What makes
+this gate is the boot: `user/objects` as a component over the blk driver's ring,
+with the same two tallies taken across it.
+"""
+
+[baseline]
+# The comparison is inside the run, and it is the only comparison that answers
+# the question. What a page cache costs is not a fact about Linux to be looked
+# up; it is what *this* read path costs when it stages, and the run measures
+# that by staging.
+system  = "none"
+notes   = "The provocation is the baseline: `ReadPath::provoke_second_copy` reads a record the way a page cache would — into memory this component owns, then on into the caller's buffer — and both readings must go non-zero by the same bytes and must still agree. It moved 4 096 bytes, which is one block, and it is the row that says the zeros above are counts and not defaults. The stronger version of the same control was run before this landed and reverted: `ReadPath::read` was made to stage every record, and the run went red at `copies_per_read is 4096, over 0` with the two readings moving together to 1 048 576 bytes — 256 reads of one 4 KiB block, which is what this workload costs if the exit's sentence is false. A tuned Linux filesystem read on the same device is the peer a reader will reach for and it answers a different question: it measures a cache's hit rate, and this counts bytes that crossed into memory the caller did not name."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "04"
+notes    = "Section 04 is where the read path is argued and where *no page cache second copy* is the claim being priced. The subsystems that own the number are `user/objects/src/read.rs` for the driver's tally at submission, `user/objects/src/dma.rs` for the device model's tally inside the one byte-mover, and `f_ring::registry::Table` for the question both of them are asking. `cargo xtask lint-datapath` is the second check beside the threshold, and it catches a different failure: it counts calls to the named byte-mover, so a crate that grew a bare `copy_from_slice` on the read path would pass it and fail this row instead."
+
+[workload]
+path        = "user/objects/tests/reads.rs"
+reads       = 256
+blob_bytes  = 16000
+block_bytes = 4096
+buffers     = 8
+notes       = "The blob is 16 000 bytes so that a record — this plus a 52-byte header — needs four whole blocks and leaves 332 bytes of padding in the last one: a blob sized to a block boundary would never exercise the tail, and the tail is where a reader that hashed the padding along with the content goes wrong. Eight buffers of one block is a set a four-block record fits in with room left over, and it is what makes the short-run control reachable — a read starting at buffer five has nowhere to put its fourth block. The records land in 4 zones, which is asserted rather than observed: a run in which every record landed in one zone is a run in which the mapping was never asked a question. — What stands in: no boot, no ring and no component, which the statement above says at length; and `Memory` under `ZonedMemory` is a model that cannot lose or misdirect a write, so this is evidence about where bytes go and not about what a device does with them."
+
+[metrics]
+# Counts, and no duration anywhere: `read-path-latency` is claim 0020 and is
+# `pending` on `E0-D10`'s machine, which is the split `intent/0006-state/spec.md`
+# makes between a count that gates and a timing that waits.
+primary   = "copies_per_read"
+secondary = [
+  "driver_bytes_to_an_unregistered_destination",
+  "device_bytes_through_an_unregistered_buffer",
+  "device_bytes_into_the_callers_buffer",
+  "device_transfers_into_the_callers_buffer",
+  "reads_completed",
+  "application_bytes_delivered",
+  "zones_the_records_landed_in",
+  "provoked_unregistered_bytes",
+]
+
+[threshold]
+# The exit, and one of the two thresholds in this epoch with a natural zero —
+# claim 0005's precedent — so it needed no derivation and gets none. There is no
+# version of *no page cache second copy* that admits a small number.
+copies_per_read                             = { min = 0, max = 0 }
+# The same zero from each side, separately, because the primary above is a
+# quotient of the first of them and would be zero if the second were never
+# taken. Two readings that must agree are two rows.
+driver_bytes_to_an_unregistered_destination = { min = 0, max = 0 }
+device_bytes_through_an_unregistered_buffer = { min = 0, max = 0 }
+# The denominator, and the row without which every zero above is a zero about
+# nothing: 1 024 transfers of one 4 KiB block is 4 194 304 bytes the device put
+# straight into the caller's buffer. Exact in both directions, because it is a
+# function of the reads, the blob and the block and of nothing else — a run
+# where it moved is a run whose geometry moved, and the numbers above are then
+# about a different workload.
+device_bytes_into_the_callers_buffer        = { min = 4194304, max = 4194304 }
+device_transfers_into_the_callers_buffer    = { min = 1024, max = 1024 }
+reads_completed                             = { min = 256, max = 256 }
+application_bytes_delivered                 = { min = 4096000, max = 4096000 }
+# The mapping was asked a question. One zone is a run in which hash-to-zone
+# resolution could have been a constant.
+zones_the_records_landed_in                 = { min = 2 }
+# The control, and the row that fails the day the counting is deleted while
+# every zero above stays green. A floor rather than an exact value: what is
+# claimed is that the tally can move, and how far it moves is the provocation's
+# block size rather than the design's.
+provoked_unregistered_bytes                 = { min = 1 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "This claim does not need that machine and says so rather than pretending, which is the note `claims/0023` and `claims/0024` carry. Every metric is a count of bytes a design moved through a modelled device from a stated seed, byte-identical on any host that runs the binary; there is no clock in the workload and `f_bench::Environment` has nothing to refuse. The machine it *does* need is the one that does not exist yet, and it is not a runner class: it is a boot of `user/objects` as a component over the blk driver's ring, which is what this claim's `pending` is about."
+
+[reproduce]
+command = "cargo xtask claim copies-per-read"
+
+[diagnosis]
+# Recorded while the system is understood rather than at 2 a.m. when it is not.
+copies_per_read_above_zero = "a read staged bytes somewhere the caller did not register, which is the page cache this design refuses. Read the two side rows first: if both moved together the copy is real and `user/objects/src/read.rs` is where it was introduced — the likely shape is a record staged in order to decode or hash it, which buys safety with exactly this number. If only one moved, that is worse and is the next row"
+readings_that_disagree = "`driver_bytes_to_an_unregistered_destination` and `device_bytes_through_an_unregistered_buffer` are two readings of one event taken on opposite sides, and the run fails when they differ. A disagreement is not a copy, it is an accounting bug, and it invalidates the zero rather than reporting a number: either the driver stopped tallying a path the device sees, or the device model stopped seeing one the driver takes. Do not average them and do not pick one"
+provoked_unregistered_bytes_is_zero = "the provocation moved nothing, so both tallies are defaults rather than counts and every zero in this file is worth what an uninitialised field is worth. Look at `ReadPath::provoke_second_copy` and `f_objects::dma`'s one byte-mover before anything else; `cargo xtask lint-datapath` is the check that says the mover is called from where it should be, and it is the second half of this row"
+device_bytes_into_the_callers_buffer_moved = "the denominator moved, so the geometry moved: the blob, the block, the read count or the padding is no longer what this claim publishes, and every ratio above is about a different workload. It is not a failure of the read path — it is this claim describing a run nobody performed, which is `claims/0023`'s geometry row and the same failure"
+zones_the_records_landed_in_is_one = "every record landed in one zone, so the hash-to-zone-and-offset half of `E2-B08` was never exercised: a mapping that returned a constant would pass every other row in this file. Check the zone size against the workload's total bytes before looking at `f-zone`"

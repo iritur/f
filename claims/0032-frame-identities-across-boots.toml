@@ -1,0 +1,167 @@
+# `E2-B07` as a number: how many different answers five boots give to *what are
+# you running* — one where the image did not change, two where sixteen bytes of
+# it did, and none invented by a machine nobody told.
+#
+# **What this claim does not prove, written before the number and not after it,
+# because the number is the kind that gets quoted.** RFC 0012 lists five
+# residuals and every one of them survives this measurement:
+#
+#   - there is **no signature and no verifier**, so the value means nothing over
+#     a network and this is not remote attestation;
+#   - there is **no freshness** — nothing here distinguishes a hash published
+#     now from the same hash replayed;
+#   - the measurement is taken **once, at boot**, so a frame compromised at run
+#     time publishes the digest it computed before it was;
+#   - it says **nothing about mutable data**, only about the artefacts the
+#     machine was assembled from;
+#   - and an **image modified to report the old digest defeats it entirely**,
+#     because a self-hash is a claim by the thing being measured. What boot 3
+#     catches is a modified image booted *honestly*.
+#
+# The claim is therefore narrow on purpose: a machine can answer *what are you
+# running* with one hash to a **local** reader and to somebody who can recompile,
+# and any modification to the measured ranges changes the answer. E5's hardware
+# root of trust is what would widen it, and nothing in this file may be read as
+# though it already had.
+name       = "frame-identities-across-boots"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E2"
+
+statement  = """
+Five boots of the same tree. Two of one image publish **one** frame hash and one
+generation root between them; the same image with sixteen bytes of its `.rodata`
+changed — bytes nothing reads, so nothing else in the system could notice —
+publishes a **different** frame hash and a different root; that modified image
+handed the clean build's declaration **refuses to publish a root at all**; and a
+machine told no generation publishes the reserved zero rather than inventing
+one, while measuring the same frame hash as boot 1.
+
+Measured by `cargo xtask claim frame-identities-across-boots` — one invocation
+of `cargo xtask attest`.
+
+  boots                                        5
+  bytes measured                         1114112
+  measured ranges                              2
+  frame hashes across two clean boots          1
+  frame hashes across the modification         2
+  generation roots across the modification     2
+  roots published when told nothing            0
+  refusals when the declaration disagrees      1
+
+**Every row is a count of distinct values and none of them is a hash.** A
+threshold carrying a digest would be a claim about this commit, and every commit
+that changed a byte of the frame would have to rewrite it. What is being claimed
+is the shape: *one hash* is a 1 where the image did not move, and *a different
+one* is a 2 where it did.
+
+**The two are computed by two implementations over two views of the same
+bytes.** `xtask/src/measure.rs` reads the linked ELF on a host — taking the
+bytes from the `.text` and `.rodata` section headers, the interval from the four
+linker-exported symbols, and **requiring them to agree**, so that a linker-script
+edit that decoupled them is a refusal naming both intervals rather than a hash
+that quietly covers a different range. `kernel/src/measure.rs` reads its own
+mapped image on the machine. One implementation shared between them would agree
+with itself and say nothing, and `bytes_measured` = 1 114 112 is the row where
+the two are required to agree about the *extent* as well as the digest: two
+digests that differ over two intervals would refuse with no line saying which of
+them was wrong.
+
+**Boot 3 is the only arrangement in which the comparison can fail.** A
+declaration computed from the image it is handed to agrees by construction,
+which is a check that cannot fail; so the modified image is handed the *clean*
+build's declaration, measures itself, disagrees, and refuses to publish a root —
+RFC 0012's *disagreement is a refusal to publish a root, not a warning line*.
+Boot 4 then hands the same image its own declaration and requires it to come up
+**green and different**, because a modification is a different machine and not a
+broken one. The pair is the sentence; either boot alone is half of it.
+
+**Boot 5 costs one boot and buys a reserved value nobody had ever produced.** A
+machine told nothing publishes generation counter zero — the format's word for
+*no root describes this machine* — and the same frame hash as boot 1, because
+the command line is outside the ranges being hashed and a measurement that moved
+with it would be reaching somewhere RFC 0012 says it does not.
+"""
+
+[baseline]
+# The baseline is the same image with sixteen bytes changed, and it is in the
+# command rather than in a directory.
+system  = "none"
+notes   = "There is no other system to compare against: what is claimed is that this frame's published identity is a function of this frame's own text and rodata, and another system's attestation — a TPM quote, a secure-boot chain — answers a question this one explicitly does not, which is *can a stranger believe it*. The comparison that does mean something is the same image modified, and it is inside the same command: `frame_hashes_across_the_modification` = 2 and `refusals_when_the_declaration_disagrees` = 1 are that baseline written as rows. `mutate-modified-frame` is the defect, it is sixteen bytes of `.rodata` that nothing reads, and `MARK`'s self-test requires it to land inside the measured range — a mark that had drifted into `.data` would make the control invisible while looking correct."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "07"
+notes    = "Section 07 opens with *measured boot to a root of trust, then the frame*, and this claim is the first half of that clause with its scope stated. The subsystems that own the number are `kernel/src/measure.rs` for the frame's measurement of itself, the two-token declaration and the four refusals — `HalfADeclaration`, `Malformed`, `FrameDisagrees`, `MarkOutside` — `xtask/src/measure.rs` for the independent ELF reader and the section-against-symbol agreement, `kernel/linker.ld` for the four exported boundaries the interval is defined by, and `kernel/src/state.rs`'s `publish_identity` for the order the nine words are stored in so that RFC 0012's reader protocol is sound. RFC 0012 is the decision; E5's TPM is the residual and is named in the release 0.3 attestation story rather than here."
+
+[workload]
+path        = "xtask/src/main.rs"
+second      = "kernel/src/measure.rs"
+boots       = 5
+ranges      = 2
+notes       = "Five boots and one kernel build with a feature flag, about two minutes in the development container — which is why this one, unlike `claims/0030`, is inside `cargo xtask verify`. Five rather than two because the two obvious boots are each worthless without a control: a published hash proves nothing about stability until a second boot of the same image publishes the same one, and a different hash after a modification proves nothing about *checking* until something refuses. — What stands in: the ranges are `.text` and `.rodata` and nothing else. `.boot`, `.data`, `.got`, `.bss` and `.stacks` are outside the measurement by RFC 0012's decision, so a frame change confined to a writable initial value is invisible to every row here. That is a stated residual and not a gap in the workload."
+
+[metrics]
+# Counts of distinct published values, and one byte count. No duration.
+primary   = "frame_hashes_across_the_modification"
+secondary = [
+  "boots",
+  "bytes_measured",
+  "measured_ranges",
+  "frame_hashes_across_two_clean_boots",
+  "generation_roots_across_the_modification",
+  "roots_published_when_told_nothing",
+  "refusals_when_the_declaration_disagrees",
+]
+
+[threshold]
+# The headline, exact in both directions: sixteen bytes of rodata moved and the
+# published hash moved with them. At 1 this is RFC 0012's own reversal condition
+# in as many words — *a frame mutation that boots with the published `frame`
+# unchanged* — and every green run of this claim would be saying only that a
+# number was printed.
+frame_hashes_across_the_modification     = { min = 2, max = 2 }
+# Stability, exact and in the other direction. Above 1 the measurement is
+# reaching something that varies between runs, which means it is reaching outside
+# the two ranges RFC 0012 names.
+frame_hashes_across_two_clean_boots      = { min = 1, max = 1 }
+# The root is a fold over the frame leaf and the topology. A frame hash that
+# moved without moving the root above it means the generation is folding
+# something other than what the frame measured.
+generation_roots_across_the_modification = { min = 2, max = 2 }
+# The reserved zero is a state a boot can reach, and a machine that invented a
+# root would be answering a question nobody answered for it.
+roots_published_when_told_nothing        = { min = 0, max = 0 }
+# The refusal, exact. At zero a modified image booted green while holding another
+# build's declaration, which is the comparison not happening at all.
+refusals_when_the_declaration_disagrees  = { min = 1, max = 1 }
+# All five boots happened. Read out of the harness's own counter rather than
+# written here, so a command that stopped booting cannot publish a five.
+boots                                    = { min = 5 }
+# Both ranges, and both non-empty — required by the command before it compares
+# anything, because a digest over an empty section is a perfectly stable number
+# that says nothing.
+measured_ranges                          = { min = 2, max = 2 }
+# What was actually covered, as a floor rather than the measured 1 114 112: the
+# number moves with every commit that changes the frame's size, and a claim that
+# pinned it would go red on unrelated work. What the floor rules out is a
+# measurement that has collapsed to one section or to nothing — at which point
+# the two rows above it would still read 1 and 2 and mean nothing.
+bytes_measured                           = { min = 262144 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "This claim does not need that machine, for `claims/0005`'s reason: every metric is a count of distinct published values or of bytes covered, taken by boots under an emulator, and nothing here is timed. What it does need and this project cannot yet supply is a hardware root of trust — the residual RFC 0012 names and E5 owns — and no runner in `claims/` has one, which is why the statement puts that first rather than in a footnote. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it."
+
+[reproduce]
+command = "cargo xtask claim frame-identities-across-boots"
+
+[diagnosis]
+# Recorded while the system is understood rather than at 2 a.m. when it is not.
+frame_hashes_across_the_modification_is_one = "RFC 0012's reversal condition: a frame mutation that boots with the published `frame` unchanged. Either `MARK` in `kernel/src/measure.rs` has left the measured range — its own self-test says it has not, so read that first — or the range being hashed is not the range `kernel/linker.ld` exports. Do not repair this by relaxing the row; a control that cannot fail makes every other row in this table worth nothing"
+frame_hashes_across_two_clean_boots_above_one = "one image answered *what are you running* two ways, so the measurement depends on the run. It cannot: a hash over text and rodata has nothing in it that varies. Suspect the ranges before the hash — `xtask/src/measure.rs` reads them from the section headers and the symbols and requires the two to agree, so a mismatch there is a refusal rather than this, and this is what is left"
+generation_roots_across_the_modification_is_one = "the frame hash moved and the generation root did not, which means `xtask/src/generation.rs` is folding a frame leaf that is not the frame it measured. RFC 0012 makes the root record's `frame` field a duplicate of the leaf under the root precisely so that these two cannot drift, and this row is where the drift shows"
+roots_published_when_told_nothing_above_zero = "a machine that was given no `f.root=` published one anyway. Zero is the format's word for *no root describes this machine*, and a frame that invented a value there would make the counter unreadable in the one case RFC 0012's reader protocol depends on — a swap in progress. `Identity::generation` in `kernel/src/measure.rs` is the two-line function that decides it"
+refusals_when_the_declaration_disagrees_is_zero = "a kernel built with `mutate-modified-frame` booted green while holding the clean build's frame hash, so the frame either did not measure itself or did not compare what it measured. RFC 0012: *disagreement is a refusal to publish a root, not a warning line*. This is the only arrangement in which that comparison can fail at all, so a zero here means the check is untested rather than passing"
+bytes_measured_below_the_floor = "the measurement has collapsed to less than a quarter of a megabyte, which for this kernel means one of the two ranges is empty or the interval is wrong. The command refuses on an empty range before it compares digests, so a row that got here is a real image that shrank — read it beside `measured_ranges`, and check `kernel/linker.ld` before anything in `xtask`"
+a_threshold_no_workload_printed = "`cargo xtask attest` failed before its rows, which for this claim is the ordinary way a real finding arrives: each of the five boots refuses with what it expected and what it got, including the extent comparison between the two implementations. Read the workload's output above the table; the rows are the last thing it prints and their absence is a symptom rather than the disease"

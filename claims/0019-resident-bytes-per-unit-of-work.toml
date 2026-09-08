@@ -1,0 +1,159 @@
+# The other half of `E2-B08`'s exit: what is resident while the read path takes
+# its zero, per byte of work it did.
+#
+# **Why this is a count and gates rather than a timing that waits.** An earlier
+# draft of `intent/0006-state/spec.md` had this as a timing `pending` on
+# `E0-D10`'s machine, and calls that a misclassification in its own words: a
+# byte count is the same number on a fast host and a slow one,
+# `bench::Environment::classify` refuses timings, and this is not one. So the
+# classification is by the shape of the number and not by where it was taken —
+# which is what puts `read-path-latency` (claim 0020) on the machine and this
+# here. It is nevertheless `pending`, for a different reason, and the statement
+# says which.
+#
+# **Three numbers rather than one, because there are three.** What this
+# component holds, what the system holds, and what the mount cost. The spec's
+# threshold is on the second: `resident_bytes_per_read_byte` ≤ 1.0, against the
+# sentence it is testing — *a page cache holding a second copy would make it at
+# least 2*.
+#
+# **0019 was reserved for this and this is that reservation landing.**
+# `intent/0006-state/spec.md` reserves 0019 through 0022 against `E2-B08` and
+# `E2-B06`, and RFC 0059 cites this claim by number; `claims/0023` and
+# `claims/0024` were both registered against reserved-but-unbuilt numbers and
+# each says so in its own head, under `claims/0017`'s precedent that a
+# reservation outranks a landing. Two of the four claims registered in this diff
+# take reserved numbers and two take the next free ones, which is that rule
+# applied in both directions on one afternoon.
+name       = "resident-bytes-per-unit-of-work"
+status     = "pending"          # pending | tracked | gating
+milestone  = "E2"
+
+statement  = """
+Reading a byte costs one resident byte — the caller's own buffer — and nothing
+else. The component holds nothing across a read, and the mount is priced rather
+than assumed free.
+
+Measured by `cargo xtask claim resident-bytes-per-unit-of-work` —
+`user/objects/tests/reads.rs`, seed `0x00000000e2b08000`, 256 reads delivering
+4 096 000 application bytes over a modelled zoned device:
+
+  resident_bytes_per_read_byte (system)          1.000000
+  held_bytes_per_read_byte (this component)      0.000000
+  mount_bytes_per_read_byte                      0.004562
+  component held, peak                                  0 bytes
+  mount payload (index map + store map)            18 688 bytes
+
+  the provocation: the system figure then        1.001000
+
+**The three are three different questions and the design answers them
+differently.** *System* is the caller's registered buffers, which is the memory
+the bytes were asked to be put in and is the one the spec's threshold is about.
+*Held* is what `user/objects` keeps for itself across a read, and it is zero
+because the read path decodes the header in the caller's buffer and hashes the
+content there — there is nothing to hold. *Mount* is the resident cost of the
+index's in-memory `BTreeMap` and the store's hash-to-block map, amortised over
+the work: `claims/0024` records that a query reads no device block *because*
+those maps exist, calls that a true sentence with an unpriced denominator, and
+names this claim as the one that prices it. 18 688 bytes is the price, stated as
+payload bytes rather than as pages, and it is an understatement of the resident
+cost rather than a guess at it — a page-granular figure needs a frame state tree
+to read and there is not one.
+
+**The zero and the one are both provoked before they are published.** A read
+done the way a page cache would do it moves the system figure to 1.001000 and
+the held figure off zero, in the same run: a residency figure that cannot move
+is not a measurement, and the ratio is what it is because nothing is held rather
+than because nothing could be.
+
+**Why this is `pending`.** Two boundaries, both named rather than left to be
+inferred. The count is taken at a modelled device boundary and not across the
+blk ring in a boot, for `claims/0022`'s reason — `user/objects` is not yet a
+component, because a component image linking `f-blob` needs a
+`#[global_allocator]` and RFC 0001 forbids `unsafe` above the frame. And the
+spec defines this number as *resident pages of `user/objects` per N reads, read
+from the frame's state tree*; it is read here from the component's own
+accounting instead, because `E1-B15` has not landed and no component publishes a
+subtree yet. Pages are what an operating system charges and payload bytes are
+what this run can count, so the published figure is the smaller of the two
+readings and says so. What makes this gate is the boot and the state tree, and
+the number will move upward when it arrives.
+"""
+
+[baseline]
+# The comparison is inside the run and it is the sentence being tested. A page
+# cache holding a second copy makes this at least 2; the provocation is that
+# alternative design, run on the same data in the same run.
+system  = "none"
+notes   = "`ReadPath::provoke_second_copy` reads a record into memory this component owns and then on into the caller's buffer, which is what a page cache does, and the system figure moves from 1.000000 to 1.001000 on one block of one read out of 256 — the direction is the whole of the comparison and the size of the step is the workload's. A tuned Linux filesystem's resident footprint on the same read is the peer a reader will reach for and it answers a different question: it measures how much of a page cache the kernel chose to keep, which is a policy, against a design that has none. What is here instead is the alternative *design*, measured on the same bytes in the same run."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "04"
+notes    = "Section 04 is where the read path is argued and where the absence of a page cache is the design being priced. The subsystem that owns the number is `user/objects/src/resident.rs`, which reports the three figures and states the unit of each; `user/objects/src/read.rs` is why the held figure is zero, and `index/src/index.rs`'s in-memory map plus `blob/src/store.rs`'s hash-to-block map are what the mount figure prices. `claims/0024` is the claim that named this one as its missing denominator."
+
+[workload]
+path        = "user/objects/tests/reads.rs"
+reads       = 256
+blob_bytes  = 16000
+block_bytes = 4096
+notes       = "One workload and two claims, which is the shape four pairs in `xtask`'s `ROUTES` table already have — `copies-per-read` counts the bytes that crossed, and this counts what is resident while it happens. *Per unit of work* is why the read count is stated with the number: a residency divided by the work it was held against is meaningless without the work, and 256 reads of 16 000 bytes is 4 096 000 application bytes. — What stands in: the figures are payload bytes and not resident pages, for the reason the statement gives; the device is a model; and the mount figure is a function of this workload's 256 entries, so it amortises differently on a store with a million. That last one is the number a reader should attack, and `claims/0024`'s break-even is the same trade counted in device blocks instead of bytes."
+
+[metrics]
+# Ratios in millionths and counts of bytes. No duration anywhere: the timing
+# beside this one is `read-path-latency`, claim 0020, `pending` on the machine.
+primary   = "resident_bytes_per_read_byte_micro"
+secondary = [
+  "held_bytes_per_read_byte_micro",
+  "mount_bytes_per_read_byte_micro",
+  "mount_payload_bytes",
+  "application_bytes_delivered",
+  "reads_completed",
+  "resident_bytes_per_read_byte_micro_provoked",
+]
+
+[threshold]
+# The spec's `resident_bytes_per_read_byte` ≤ 1.0, in millionths because a
+# threshold table holds integers. One resident byte per delivered byte is the
+# caller's own buffer and nothing else; the sentence being tested is that a page
+# cache holding a second copy would make it at least 2.
+resident_bytes_per_read_byte_micro          = { max = 1000000 }
+# Zero, and exact, because the component holding nothing is a structural claim
+# and not a small number: the header is decoded in the caller's buffer and the
+# content is hashed there, so there is nothing to hold. A component that held
+# one block per read would report 1 000 here and would still pass the row above,
+# which is why this is its own row.
+held_bytes_per_read_byte_micro              = { min = 0, max = 0 }
+# The mount, thresholded where it is honest to threshold it: an order of
+# magnitude above the 4 562 measured, which is `claims/0024`'s practice of
+# putting a bound well away from the measurement so that an honest change to
+# either side does not fail it. What it refuses is the mount growing tenfold
+# with nobody noticing what it costs a client that reads a little and leaves —
+# which is the same trade `claims/0024`'s break-even row states in blocks.
+mount_bytes_per_read_byte_micro             = { max = 50000 }
+# The denominator, exact in both directions for `claims/0022`'s reason: a run
+# whose delivered bytes moved is a run whose geometry moved, and every ratio
+# above is then about a different workload.
+application_bytes_delivered                 = { min = 4096000, max = 4096000 }
+reads_completed                             = { min = 256, max = 256 }
+# The control. Strictly above the unprovoked figure, and stated as a floor one
+# millionth above 1.0 rather than as an equality, because what is claimed is
+# that the figure moves when this component holds a block — not how far. A
+# residency that cannot move is not a measurement, and without this row the
+# 1.000000 above is a constant.
+resident_bytes_per_read_byte_micro_provoked = { min = 1000001 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "This claim does not need that machine, and the reason is the one `intent/0006-state/spec.md` gives for reclassifying it from a timing to a count: a byte count is the same number on a fast host and a slow one. `f_bench::Environment` has nothing to refuse here — the workload reads no clock — so it would gate in the development container the way `claims/0005` does, and what keeps it `pending` is a boundary rather than a machine. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it."
+
+[reproduce]
+command = "cargo xtask claim resident-bytes-per-unit-of-work"
+
+[diagnosis]
+# Recorded while the system is understood rather than at 2 a.m. when it is not.
+resident_bytes_per_read_byte_micro_above_one_million = "more than one byte is resident per byte delivered, which is the second copy this design exists to refuse — and at 2.0 it is a page cache by another name. Read `held_bytes_per_read_byte_micro` in the same output first: if it moved, this component started holding what it read and `user/objects/src/read.rs` is where; if it did not, the extra residency is in the registered set itself, which means the caller is being given more buffers than the read needs and the arithmetic is in `user/objects/src/dma.rs`"
+held_bytes_per_read_byte_micro_above_zero = "`user/objects` is holding memory across a read. It is not necessarily a correctness failure and it is certainly a design change: the whole argument for decoding the header in the caller's buffer and hashing the content there is that there is nothing left to hold, so a non-zero here says that argument no longer describes the code. Check for a staging buffer added to decode or verify with, which is the same change `claims/0022`'s primary would catch from the other side"
+mount_bytes_per_read_byte_micro_above_the_ceiling = "the mount got more expensive per byte of work, and the client that pays most for it is the one that reads a little and leaves. The number is the index's in-memory map plus the store's hash-to-block map over the delivered bytes, so read `mount_payload_bytes` beside it: an entry format that grew a field, a log that stopped being compacted at mount, or a map that started holding what it used to compute. `claims/0024`'s break-even row is the same trade in device blocks and moves with it"
+resident_bytes_per_read_byte_micro_provoked_not_above_the_figure = "the residency figure did not move when this component deliberately held a block, so the number above is a constant and not a measurement. That is the same failure `claims/0022`'s provocation row catches on the other tally, and it invalidates this claim rather than reporting a worse number — look at `user/objects/src/resident.rs`'s accounting before anything else"

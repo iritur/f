@@ -16,7 +16,7 @@
 # compiles it into the record the frame actually reads. RFC 0030 is why those
 # are three different things.
 
-schema = 1
+schema = 3
 name   = "store"
 image  = "user/store"
 
@@ -29,6 +29,18 @@ image  = "user/store"
 # on every crossing and can be relaxed by a diff somebody has to write; starting
 # at `shared` cannot be tightened by anything except noticing.
 domain = "private"
+
+# --- Device: none, and the absence is the declaration -------------------------
+
+# There is no `[[device]]` table here, and that is a statement rather than a
+# gap: this component drives nothing, so it binds nothing, and the compiled
+# record carries `devices = 0`. RFC 0067 deliberately did *not* make the table
+# required the way RFC 0063 made `[transfer]` required, and the difference is
+# worth stating because the two look alike from a distance. A transfer mode has
+# two answers and silence would pick one of them; a device list has a natural
+# empty, and an empty list is not a default that was never chosen — it is the
+# list. What the lint refuses is a manifest that declares a *part somebody else
+# has already declared*, which is a question no single file can answer.
 
 # --- Needs: routed at spawn, in this order, one handle each -------------------
 
@@ -73,6 +85,42 @@ name   = "self"
 type   = "endpoint"
 rights = ["write", "grant"]
 from   = "supervisor"
+
+# The two capabilities `user/generation.toml` routes to this component, and the
+# other half of a sentence that file has carried since the compiler landed: the
+# routes are *declared there and checked against the manifests by `E2-B05`*.
+# `f-assembler` performs that check now, in both directions, so a route naming a
+# capability nothing declared is refused before anything is started — and these
+# two lines are what make the tree's own generation satisfy it rather than be
+# the first thing it refuses.
+#
+# **`optional = true`, and it is a declaration rather than a way of passing.**
+# A sibling handle arrives from a supervisor holding an endpoint to the named
+# component, and there is no supervisor: `kernel/src/component.rs` says so at
+# length and `cargo xtask lint-owed` holds the sentence. So the honest statement
+# today is *the topology says where this comes from, and an empty slot is not a
+# refusal until something can fill it* — which is exactly what `optional` means
+# and is why the frame's spawn skips these two rather than refusing this
+# component. Writing `optional = false` now would be declaring a supplier that
+# does not exist, and every boot would be refused for it.
+#
+# *What removes the word:* `E1-B05` moving restart and routing above the frame,
+# at which point a supervisor holds the two endpoints and can supply them. On
+# that day these become required, `f-assembler`'s second direction starts
+# refusing a topology that routes them nothing, and the change is one word each.
+[[capability]]
+name     = "block"
+type     = "endpoint"
+rights   = ["write"]
+from     = "sibling:virtio-blk"
+optional = true
+
+[[capability]]
+name     = "net"
+type     = "endpoint"
+rights   = ["write"]
+from     = "sibling:virtio-net"
+optional = true
 
 # --- Rings: the control ring is implicit; this is the data ring ---------------
 
@@ -126,3 +174,84 @@ budget_window_ms = 3_000
 [reservation]
 class        = "soft"
 memory_bytes = 65_536
+
+# --- Transfer: what this component declares about being updated in place ------
+
+# `restart_only`, and it is a decision rather than a gap. RFC 0063 requires this
+# table for the reason `[restart]` is required: a manifest that says nothing has
+# not chosen, it has left the choice to whoever reads it next, and a place
+# refilled from a newer manifest is where two readers disagreeing costs a
+# client. This component is a fixture with nothing behind its ring that
+# outlives one boot, so there is no state a second instance would be poorer
+# without. The day it holds one — a registration, a cursor, a lease — that is a
+# `mode = "in_place"` here and a state record in the crate, and the cost of not
+# doing it now is one restart at a swap.
+[transfer]
+mode = "restart_only"
+
+# --- State: what this component publishes about itself ------------------------
+
+# RFC 0013 puts a state tree in every component and RFC 0065 is what makes
+# "every" mean every: this array is the declaration, the frame writes the schema
+# block out of it before this component's first instruction, and a manifest that
+# declared nothing would be refused `ADMISSION/NO_STATE_TREE` at the spawn.
+#
+# The nodes are `f_store::report::Tally`, which is the reversal that module's
+# own comment names — *a runtime that publishes a tree of its own, at which
+# point the tallies are nodes and this module is one `code` field*. Declaring
+# them here is the half of that reversal a manifest can pay: the shape the
+# tallies take as nodes exists now and is checked on every boot. What is still
+# owed is the runtime writing into them instead of packing a word out through
+# the door, and `user/store/src/report.rs` still says so.
+#
+# Ids are permanent and are never reused, for the reason `TODO.md` never reuses
+# a task id: the id is the only thing that makes two readings of this component
+# across time comparable at all. A retired node takes its id with it.
+
+[[state]]
+id   = 1
+name = "store"
+kind = "subtree"
+unit = "none"
+
+# Work items this component's own executor completed. A counter and not a gauge
+# because it only goes up, and `events` and not `calls` because nobody asked for
+# them: a work item is something the runtime did to itself.
+[[state]]
+id     = 2
+parent = "store"
+name   = "work"
+kind   = "counter"
+unit   = "events"
+
+# Notices drained off the control ring at a polling point. R05's other half,
+# published: a component that received nothing and a component that never
+# drained are two different states, and a count of what was posted cannot tell
+# them apart.
+[[state]]
+id     = 3
+parent = "store"
+name   = "notices"
+kind   = "counter"
+unit   = "events"
+
+# Work items still on its own queue. A gauge, because it goes both ways, and it
+# is the node that says whether this component is quiescent — which is the
+# question `[transfer]` above will have to answer the day this component holds
+# anything worth carrying across a swap.
+[[state]]
+id     = 4
+parent = "store"
+name   = "queued"
+kind   = "gauge"
+unit   = "events"
+
+# How this component last ended, as `f_store::report`'s status ordinal. `none`
+# is the unit because a status is not a quantity: a reader that averaged two of
+# these would be averaging two sentences.
+[[state]]
+id     = 5
+parent = "store"
+name   = "status"
+kind   = "gauge"
+unit   = "none"

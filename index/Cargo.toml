@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "f-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Paths, metadata and declared attributes to hashes. A library the caller links, not a service it calls."
+
+[dependencies]
+# The refusals and the schema a caller compares against. This crate defines its
+# own log entry rather than putting one in `abi/`, and the line is drawn where
+# `abi/src/store.rs` already draws it: the superblock, the blob header and the
+# root record are there because `blob/`, `f-zone` and the mount must be held to
+# one definition of them, and two crates that decode one record are exactly the
+# situation a shared crate exists for. The index log is written and read by this
+# crate alone. What is taken from `abi/` is the vocabulary that does cross — a
+# refusal here has to be the same integer a refusal from the store is, or a
+# caller ends up holding two error tables for one device.
+f-abi.workspace = true
+
+# For `device::Device`, and for nothing else. A second block-device trait in
+# this tree would be a second thing to keep agreeing with the first about what a
+# block is and what a barrier promises, which is the defect `blob/src/device.rs`
+# argues against one level down. The chunker comes along with the dependency and
+# is not used here; that is the price of one trait, and it is cheaper than two.
+f-blob.workspace = true
+
+[dev-dependencies]
+# The measurement's workload names each object by SHA-256 over its path, so the
+# value the index answers with and the value the tree walk answers with are
+# derived rather than written down twice. Two tables of the same four thousand
+# hashes can differ, and then the comparison is measuring a typo.
+f-hash.workspace = true
+
+[lints]
+workspace = true
+
+# `E2-B03`'s exit is a *measurement*, so the run has to print it. A libtest
+# harness captures output, and the two counts that are the exit would then be
+# visible only to somebody who knew to pass `--nocapture` — which makes the exit
+# a thing the log does not contain. `blob/tests/million.rs` took a target of its
+# own for a neighbouring reason under RFC 0046, and this is the same shape: the
+# binary is the test, it prints the workload and both counts, and it fails on
+# the bounds stated beneath them.
+[[test]]
+name = "query"
+path = "tests/query.rs"
+harness = false

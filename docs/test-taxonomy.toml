@@ -894,6 +894,26 @@ cadence = ["every-pr"]
 status  = "catches"
 
 [[row]]
+id      = "generation-root-path-dependent"
+group   = "I"
+class   = "A generation root that is a function of where the tree was checked out"
+layers  = ["X"]
+check   = "-Zremap-cwd-prefix in both of .cargo/config.toml's rustflags lists and in the component build's RUSTFLAGS; cargo xtask lint-remap reads that it is still there, cargo xtask generation --elsewhere builds at two paths and requires one root, and --mutate compiles the build path into the frame and requires that comparison to go red and name the frame"
+cadence = ["every-verify", "weekly"]
+status  = "catches"
+notes   = "Measured before the remap existed: /work and /tmp/a-second-checkout-path, same commit and same image, gave frame leaves c76453507cb0126b and d03b72f8ca82a289 and roots b142e37c0d250736 and 65494a4f5b8ec18b. Four component leaves and the topology hash were identical in both, so the divergence was one leaf and it named itself."
+
+[[row]]
+id      = "generation-root-machine-or-date"
+group   = "I"
+class   = "A generation root that is a function of which machine or which week built it"
+layers  = ["X"]
+check   = "the root matrix and the runners job in .github/workflows/weekly.yml; the dates job compares against the previous successful run"
+cadence = ["weekly"]
+status  = "partially"
+notes   = "Partially, and the missing half is the date. A root is a function of the commit, so two weeks can only be compared when both landed on one commit — on a moving branch that is the exception, and the job prints it as a gap rather than reporting a comparison it did not make. E2-P06's REPRODUCE_RUN_GAP in xtask/src/main.rs is the same statement where a person running the local loop will see it."
+
+[[row]]
 id      = "release-unnamed-tree"
 group   = "I"
 class   = "A release that cannot name its own tree"

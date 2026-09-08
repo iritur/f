@@ -297,6 +297,83 @@ is what `E0-P06` needs on `runner-class-A`, and the reason this page exists at
 all. `fault=pf|ud|df|nx|wx|stack` provokes a deliberate fault. Both are read by
 `kernel/src/main.rs` from the same `BootInfo`.
 
+### Telling the machine what it is
+
+Two more, and they travel together. RFC 0012 makes the generation root the
+answer to *what are you running*, and the frame is told it here:
+
+```
+multiboot /boot/f/f-kernel.elf32 f.root=<64 hex> f.frame=<64 hex>
+```
+
+`f.root=` **selects**: it names the generation, and on hardware the menu these
+entries live in is written by `cargo xtask generation --install`. `f.frame=`
+**declares**: it is the frame hash that generation was compiled against, and the
+frame compares it against SHA-256 over its own `__text_start .. __text_end` and
+`__rodata_start .. __rodata_end` after the mapper has made both read-only. A
+disagreement is a refusal to publish a root and ends the boot; the log carries
+both numbers, so what a refusal says is which two hashes differed.
+
+Neither is authentication. Anyone who can set the command line can select
+anything the loader offered, and a self-hash is a claim by the thing being
+measured — RFC 0012 lists in full what this proves and what it does not, and an
+image modified to report the old digest defeats it entirely. What it catches is
+a modified image booted honestly, and `cargo xtask attest` is the five boots
+that demonstrate that rather than assert it.
+
+Omit both and the machine still measures itself and still publishes the frame
+hash in its state tree; the generation counter is then **zero**, which is the
+format's word for *no root describes this machine*. Passing one without the
+other is refused, because half of a two-part statement is a different statement
+rather than a weaker one.
+
+#### `f.root=<64 hex>` — which generation this machine is
+
+`f.root=` is also the half that makes a rollback possible. It names a **boot
+module** by the root hash `cargo xtask generation` printed for it, and the frame
+selects the module whose record tree folds to that root — the same fold, in the
+same crate, that produced the root on the build host. The grammar is
+`abi/src/boot.rs`; the reader is `kernel/src/generation.rs`; the rule it calls
+is `generation/src/select.rs`.
+
+A boot module is a `<root>.fcm` file and travels as a `module` line like any
+other. **Every generation you want to be able to select has to be on the entry's
+module list** — a token can only choose from what the loader placed — and the
+loader hands the frame at most eight modules, of which `init.bin` and the
+component files already take five. So three generations per entry, which is what
+`cargo xtask generation --install` writes and refuses to exceed.
+
+```
+menuentry "F — generation 8b08fdea33bd197f" {
+    multiboot /boot/f/f-kernel.elf32 f.root=8b08fdea…c1c8a38a f.frame=4e1d0c77…9a35b1f2
+    module    /boot/f/init.bin
+    module    /boot/f/store.fc          # …and the other three component files
+    module    /boot/f/8b08fdea….fcm     # every generation on offer, so the
+    module    /boot/f/139a401f….fcm     # token has something to choose from
+}
+```
+
+`cargo xtask generation --install` writes that whole fragment — one `menuentry`
+per installed generation — into `target/generation/45_f_generations`, ready to
+copy to `/etc/grub.d/`. It writes a file under the build directory rather than
+under `/etc` on purpose: a command that rewrote a bootloader configuration as a
+side effect of a build is a command nobody could run twice on a machine they
+cared about. `tools/f-on-metal.sh` is what installs, and it is the half with the
+backups.
+
+Sixty-four lower-case hexadecimal characters, and only lower case — for both
+tokens: a hash printed one way and parsed another is a hash two people compare
+by eye and disagree about. A machine handed a root that no offered module
+carries **refuses the boot** and says so, rather than quietly booting something
+else — the whole value of a rollback is that the operator can tell whether it
+happened.
+
+What the frame does *not* do with the answer is instantiate a topology from it;
+RFC 0066 is that decision, and `user/assembler` is where instantiation lives
+until there is a supervisor above the frame to call it. What the frame does is
+select, refold, and report the root and a SHA-256 over every byte of the module
+it was handed — which is what `cargo xtask rollback` compares.
+
 ## The boot log will not match CI, and that is not a regression
 
 `xtask` pins `-m 128M` and `-smp 2` deliberately, because the kernel prints the
@@ -319,7 +396,7 @@ These are four different sorts of number and it is worth not confusing them.
 | `-m 128M`, `-smp 2` | | **Fixture pins.** Not kernel limits at all — QEMU launch parameters chosen so the boot log is reproducible. Irrelevant on hardware. |
 | `MAX_REGIONS` | 256 | **A bound on untrusted input.** The memory map is length-prefixed and a corrupt length is a loop that never ends. "QEMU reports a handful of regions; a real machine reports tens." |
 | `MAX_MODULES` | 8 | **A bound on untrusted input**, and a ninth module is *reported* as dropped rather than ignored — because a module nobody reserved is one the frame allocator hands out from under its owner. |
-| `CMDLINE_MAX` | 128 | Same kind. A longer command line is truncated rather than rejected, on the grounds that a parameter that does not take effect is visible and a refusal to boot is not. |
+| `CMDLINE_MAX` | 320 | Same kind. A longer command line is truncated rather than rejected, on the grounds that a parameter that does not take effect is visible and a refusal to boot is not. It was 128 until `f.root=` and `f.frame=` — 71 and 72 bytes — made 128 the wrong number; the arithmetic is in `kernel/src/arch/x86_64/multiboot.rs` beside the constant. |
 | `MAX_CPUS` | 8 | **A real capacity choice with a real cost**, and the one to watch. |
 
 ### `MAX_CPUS` is logical processors, per socket

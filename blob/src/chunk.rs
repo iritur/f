@@ -52,14 +52,19 @@
 //! *phase-lock*: acceptance no longer carries an offset forward from the
 //! previous boundary, so two streams displaced by an insertion take the same
 //! decision at every position 16 448 bytes past the edit, which is what
-//! `E2-P02` measured on 32 of 32 pairs. It does **not** repair *starvation*,
-//! and no rule of this shape can. Past the first sixty-four bytes the register
-//! on exactly `p`-periodic content is a function of `i mod p`, so the candidate
-//! set `B` of any predicate over a bounded window of content satisfies
-//! `B + p = B` away from the object's ends: if `B` holds a position it holds
-//! one `p` bytes behind it, and with `p < CHUNK_MIN_BYTES` that candidate is
-//! never accepted. The object gets no content boundary at all, every cut is
-//! forced at [`CHUNK_MAX_BYTES`], and an edit re-chunks everything after it.
+//! `E2-P02` measured on 32 of 32 pairs — 18 of which could have come out
+//! otherwise, the other 14 being pairs whose starved allowance reaches past the
+//! object's own end and cannot be exceeded. `claims/0017` carries that count as
+//! a row, because a bound reported over a sample it was not exercised on is a
+//! bound reported larger than it was measured. It does **not** repair
+//! *starvation*, and no rule of this shape can. Past the first sixty-four bytes
+//! the register on exactly `p`-periodic content is a function of `i mod p`, so
+//! the candidate set `B` of any predicate over a bounded window of content
+//! satisfies `B + p = B` away from the object's ends: if `B` holds a position
+//! it holds one `p` bytes behind it, and with `p < CHUNK_MIN_BYTES` that
+//! candidate is never accepted. The object gets no content boundary at all,
+//! every cut is forced at [`CHUNK_MAX_BYTES`], and an edit re-chunks everything
+//! after it.
 //! The knob is therefore [`CHUNK_MIN_BYTES`] and not [`MASK_BITS`]: a mask
 //! width moves how often a period *has* a candidate and cannot move whether one
 //! is ever accepted, and a rule with a larger minimum — local-maximum chunking,

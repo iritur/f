@@ -13,7 +13,7 @@
 # whose payload never passes through the ring; restarted on a fault and not on
 # an exit; in the soft class, with two mebibytes for everything it is made of.
 
-schema = 1
+schema = 3
 name   = "virtio-blk"
 image  = "user/virtio-blk"
 
@@ -29,6 +29,24 @@ image  = "user/virtio-blk"
 # the peer; if it dominates the datapath claims, the remedy is in that RFC and
 # not a quiet edit here.
 domain = "private"
+
+# --- Device: what part this driver binds, as a property -----------------------
+
+# RFC 0067. A *property* and never an address: which slot the card is in is the
+# machine's business and the assembler's to discover, and a manifest that named
+# a slot would be a manifest bound to one machine — the sentence
+# `docs/manifest.md` has carried since schema 1, unchanged by this table.
+#
+# One entry, and the absence of a second is a decision. `kernel::arch::x86_64::
+# virtio` also knows `VIRTIO_BLK_TRANSITIONAL` = 0x1001, and it knows it *in
+# order to refuse it*: a transitional device is one this build cannot isolate,
+# and recognising the id is what turns "no device found" into a log line
+# somebody can act on. Declaring it here would say the opposite — that this
+# driver binds it — and the assembler would then hand the driver a device the
+# frame is about to refuse. A refusal is not a binding.
+[[device]]
+vendor = 0x1af4
+device = 0x1042
 
 # --- Needs: routed at spawn, in this order, one handle each -------------------
 
@@ -152,3 +170,121 @@ budget_window_ms = 60_000
 [reservation]
 class        = "soft"
 memory_bytes = 2_097_152
+
+# --- Transfer: what this component declares about being updated in place ------
+
+# `in_place`, and this is the declaration `E2-D04` exists for. RFC 0063.
+#
+# What a client would lose to a restart is the reason. A registration is an
+# operation (RFC 0028) and a `SetId` names a slot in *this instance's* table; a
+# fresh instance's table has never been filled, so every id a client still holds
+# is answered `NO_SUCH_CAP` and every buffer set has to be registered again
+# before a single read can be submitted. Nothing is corrupted by that and no
+# operation is lost — but a driver that can be updated without its clients
+# noticing is the whole of what RFC 0012 changed the rollback metric to claim,
+# and re-registration is the cost that claim would otherwise be hiding.
+#
+# **Why this driver can declare it without being rewritten**, which is the
+# question `E2-D04` had to answer before the word was worth writing. Quiescence
+# is asserted by the occupant and not read off RFC 0018's cursors — the cursors
+# say the rings are empty and cannot say the driver is — so the driver needs a
+# point in its own loop where it holds nothing. It has one already:
+# `component::serve` takes the control ring, drains the data ring into
+# `Pending`, and picks; at the top of that loop `Pending::is_empty()` is the
+# whole of what this component has accepted and not answered, because
+# `pending::IN_FLIGHT` is one and `Driver::execute` polls its chain back out of
+# the device before it returns. No new state machine, no second flag.
+#
+# *Reversal, and it has an owner:* `E1-B09` waits on the interrupt instead of
+# spinning and raises `IN_FLIGHT` above one. On that day an empty `Pending` is
+# no longer an empty driver — chains are outstanding inside the device — and the
+# assertion grows a second term over the used ring. The declaration here does
+# not change; what changes is what the component asserts before it writes a
+# record, and `claims/0012`'s `in_flight` row is the number that moves with it.
+#
+# The two quantities are the registration table and nothing else.
+# `record_bytes = 32` is one registration slot as `f_ring::registry` holds one —
+# a generation, a live bit, the memory capability, the device address, the
+# stride and the buffer count, with the lent bitmap — rounded up to the
+# eight-byte alignment RFC 0063 requires so that records lie end to end and are
+# read in place. `records_max = 16` is `driver::SETS`, which is this component's
+# whole table: eight clients and a client with two geometries. The window is
+# therefore 512 bytes, bought out of the incoming instance's own `Untyped`
+# account, which is the two mebibytes declared above.
+#
+# *What is not settled here, deliberately:* the byte layout of one record. It is
+# `E2-B06`'s, because a layout with no reader is a format nobody has disagreed
+# with yet, and `schema = 1` is the ordinal that makes the two builds agree when
+# it exists. If that layout does not fit thirty-two bytes, the width here moves
+# and the schema does not — a wider record is a different reading of the same
+# bytes and `E2-B06` refuses the swap on the mismatch rather than guessing.
+[transfer]
+mode         = "in_place"
+schema       = 1
+record_bytes = 32
+records_max  = 16
+
+# --- State: what this component publishes about itself ------------------------
+
+# RFC 0013 puts a state tree in every component and RFC 0065 is what makes
+# "every" mean every: this array is the declaration, the frame writes the schema
+# block out of it before this component's first instruction, and a manifest that
+# declared nothing would be refused `ADMISSION/NO_STATE_TREE` at the spawn.
+#
+# The nodes are this driver's own `Counters`, one for one, and that is the whole
+# of what makes the declaration honest rather than decorative: every word here
+# is a number the crate already keeps, so publishing it is the store the driver
+# was already going to make and there is no collect step, no sampling interval
+# and no second copy that can disagree with the first. A node with no counter
+# behind it would be a serialisation with extra steps wearing RFC 0013's name.
+#
+# Ids are permanent and are never reused, for the reason `TODO.md` never reuses
+# a task id: the id is the only thing that makes two readings of this component
+# across time comparable at all.
+
+[[state]]
+id   = 1
+name = "blk"
+kind = "subtree"
+unit = "none"
+
+# Entries answered without a refusal.
+[[state]]
+id     = 2
+parent = "blk"
+name   = "served"
+kind   = "counter"
+unit   = "entries"
+
+# Entries refused. Published beside the one above and never alone: *nothing was
+# refused* is a claim about a driver, and a driver that answered nothing refused
+# nothing either.
+[[state]]
+id     = 3
+parent = "blk"
+name   = "refused"
+kind   = "counter"
+unit   = "entries"
+
+# Bytes the device moved on behalf of clients. The number the one below is zero
+# beside — and a zero beside a zero says nothing, which is why this node is not
+# optional and is why the two are declared together.
+[[state]]
+id     = 4
+parent = "blk"
+name   = "bytes"
+kind   = "counter"
+unit   = "bytes"
+
+# Bytes this component copied on the data path. **Required to be zero**, and it
+# is a structural property published as a number: nothing on the data path can
+# move it, which is the claim `cargo xtask lint-datapath` turns from prose into
+# a check. Publishing it under one root with the frame's own `blk copies` node
+# is what lets a reader compare the two counts of one event that RFC 0013 says
+# a claim and a live reading should be.
+[[state]]
+id     = 5
+parent = "blk"
+name   = "copies"
+kind   = "counter"
+unit   = "bytes"

@@ -15,6 +15,24 @@
 # inside `cargo xtask test`, which `cargo xtask verify` runs, and property 2 is
 # where these thresholds are asserted. A gating claim that nothing in the local
 # loop runs is a claim that gates nothing; this one is run twice per verify.
+#
+# **Every threshold below is asserted by that property, and until 2026-09-06
+# most were not.** The paragraph above was written as though the whole
+# `[threshold]` table had teeth. Counted exactly: one row was asserted, the
+# aggregate band; `zero_filled_chunks_forced_at_the_maximum` was asserted in the
+# form *forced equals the mixture's own chunk count*, which is the ratio and not
+# this row's `min = 87`, and which implied `chunk_bytes_mean_zero_filled`
+# without anything writing it down. The other eight rows — the three per-mixture
+# means, the three forced-cut ceilings, the zero-filled positive control and the
+# geometry row — were printed by the test and compared by whoever read the
+# output, including `forced_cuts_per_ten_thousand_uniform`, which is RFC 0061's
+# third reversal condition and could therefore have fired inside a green
+# `cargo xtask verify` with nothing in the tree saying so. `CONTRIBUTING.md`'s
+# rule is that a check listed as mechanised and not mechanised is worse than one
+# honestly listed as review, *"because it is a check somebody believes is
+# happening"*. The rows did not move to fit the assertions; the assertions were
+# written to the rows, and each names the constant in `blob/tests/chunker.rs` it
+# is taken against.
 name       = "chunk-size-distribution"
 status     = "gating"           # pending | tracked | gating
 milestone  = "E2"

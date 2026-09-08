@@ -1,0 +1,139 @@
+# `E2-B03`'s exit as a number: device blocks read per query, against device
+# blocks read per tree walk over the same data.
+#
+# **Why the count is device blocks and not ring crossings.** The exit's words
+# are *a query returns a hash without crossing a component boundary, measured
+# against a tree walk over the same data*, and `intent/0006-state/spec.md` says
+# in as many words why the obvious count cannot be the count: inside one
+# component a tree walk crosses zero boundaries too, so zero against zero makes
+# the exit vacuous. The measurement has to be something that can differ, and the
+# thing that differs is what each design asks the *device* for. That is the
+# reading this claim registers, and the spec flags it as **weaker than the
+# exit's own words** rather than burying it — the exit says *without crossing a
+# component boundary* and this reads it as *the index is not a service*: the
+# query crosses the client's boundary into `user/objects` and none between the
+# index and the store.
+#
+# **0024 and not 0019.** `intent/0006-state/spec.md` reserves 0019 through 0022
+# — `resident-bytes-per-unit-of-work`, `read-path-latency`,
+# `generation-swap-pause` and `copies-per-read` — and 0023 is
+# `blob-verification-refusals`. This claim was not reserved at all, because the
+# spec's registry list has six entries and none of them is `E2-B03`'s; that is
+# recorded here rather than fixed by renumbering somebody else, since a number
+# taken in a plan is a number a concurrent landing takes first.
+name       = "index-blocks-per-query"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E2"
+
+statement  = """
+A query reads no device block. The tree walk it is measured against reads one
+per path component.
+
+Measured by `cargo test -p f-index --test query` against the modelled device,
+over 4096 paths at fanout 8 and depth 4, 8-byte components, 512-byte blocks:
+
+  index log        683 blocks written
+  index mount      684 blocks read, once
+  index queries      0 blocks read over 4096 queries      0 per query
+  tree walk     16 384 blocks read over 4096 walks        4 per walk
+  totals           index 684 against walk 16 384, 24.0x
+  tree on device   585 blocks
+
+**Zero is a structural claim and not a small number.** The index is a
+log-structured store on the device with a `BTreeMap` in memory: the mount reads
+the log once and every query after it is answered from memory, so the count is
+zero for the same reason a hash lookup is not a disk seek — there is nothing on
+the device to read. The tree walk's 4 is `DEPTH`, one block per component
+resolved, and it is the number that would not change if the tree were cached
+better, because the count is of blocks the walk *asks for*.
+
+**What the pair costs, which is the part a reader should attack.** The index
+pays 684 blocks once, at mount, against a walk that pays 4 per query — so the
+two cross at **171 queries**, and below that the tree walk reads fewer blocks in
+total. A workload that mounts a store, asks one question and unmounts is a
+workload this design is worse at by a factor of 171, and that is the honest
+statement of the trade rather than the 24.0x, which is what it looks like at
+4096 queries. The 24.0x moves with the query count and the break-even does not,
+which is why both are recorded and why the break-even is the one with a
+threshold under it.
+
+The mount cost is also a *resident* cost, and this claim does not measure it.
+`claims/0019` is `resident-bytes-per-unit-of-work` and is reserved against
+`E2-B08`; the in-memory `BTreeMap` this claim's zero rests on is exactly the
+thing that claim would price, and until it does, *a query reads no device block*
+is a true sentence with an unpriced denominator.
+"""
+
+[baseline]
+# The comparison is inside the run: the same 4096 paths resolved twice, once
+# through the index and once through a tree walk over the same data on the same
+# modelled device. That is a baseline in the sense that matters — an alternative
+# design answering the *same* question on the same data — and it is in the
+# workload rather than in a directory because it is thirty lines of test rather
+# than a configured system.
+system  = "none"
+notes   = "A tuned Linux filesystem's directory lookup is the peer a reader will reach for, and it answers a different question: it resolves a path to an inode against a page cache whose hit rate is the whole of the number, and this counts blocks a design asks a device for with no cache between them. A comparison against it would be a comparison of cache configurations. What is here instead is the walk, which is the design this index replaces, measured on the same device in the same run."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "04"
+notes    = "Section 04 is where the store's naming layer is argued and where *the index is embedded rather than a service* is the claim being priced. The subsystem that owns the number is `index/`: `index/src/index.rs` for the log and the in-memory map, `index/src/record.rs` for the entry format. RFC 0059 is why the index carries a pin namespace, which is what makes a query's answer a durable name rather than a convenience."
+
+[workload]
+path      = "index/tests/query.rs"
+paths     = 4096
+fanout    = 8
+depth     = 4
+notes     = "Synthetic paths, and the shape is the geometry rather than a detail: fanout 8 and depth 4 make 4096 leaves, 8-byte components keep an entry inside one block, and the 512-byte block is the modelled device's. Depth is what the walk's per-query count *is*, so a run at a different depth reports a different comparison and says so in its own output. — What stands in: the paths are generated and not a corpus, so the mount cost is a function of this draw's entry sizes. What the draw is chosen to make visible is the break-even, which needs both halves measured on one device in one run — and that is a property of the two designs rather than of the names."
+
+[metrics]
+primary   = "blocks_read_per_query"
+secondary = [
+  "blocks_read_per_tree_walk",
+  "index_mount_blocks",
+  "index_log_blocks",
+  "tree_on_device_blocks",
+  "break_even_queries",
+  "total_blocks_advantage",
+]
+
+[threshold]
+# Zero, and exact rather than a ceiling: a query that reads one block is a query
+# answered from the device, which is a different design from the one this claim
+# describes. There is no version of *reads no device block* that admits a small
+# number.
+blocks_read_per_query                  = { min = 0, max = 0 }
+# The positive control, and the row without which the one above is a statement
+# about nothing: the alternative has to actually read blocks, or *zero against
+# zero* is the vacuity `intent/0006-state/spec.md` names when it refuses ring
+# crossings as the count. Four is `DEPTH` and is exact for the same reason.
+blocks_read_per_tree_walk              = { min = 4, max = 4 }
+# The trade, thresholded where it is honest to threshold it. The break-even is
+# `index_mount_blocks / DEPTH` and it is the number that says whether
+# *amortised* is a description or a hope; a ceiling on it says the mount may not
+# grow without somebody noticing what it costs a short-lived client. Both rows
+# below are `index/tests/query.rs`'s own constants, read out of the file rather
+# than invented here — `BREAK_EVEN_MAX` and `TOTAL_ADVANTAGE_MIN` — and both are
+# deliberately far from the measurement, which is the test's stated reason: a
+# bound set at the measurement fails on the first honest change to either side.
+# Measured 171 against 256, and 24.0x against 8x.
+break_even_queries                     = { max = 256 }
+# The whole-run comparison, as a floor on the ratio rather than a record of it.
+# Eight is what the design promises — a log whose density halved twice against a
+# walk one level shallower would still be inside it — and 24.0x is what this
+# geometry measured.
+total_blocks_advantage                 = { min = 8 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "This claim does not need that machine and says so rather than pretending, which is the note `claims/0014`, `claims/0016` and `claims/0017` carry. Every number is a count of blocks a design asked a modelled device for, taken by the workload itself, and it is the same count on a fast host and a slow one; `f_bench::Environment` refuses to record a timing and this records none, which is why it gates in the development container the way `claims/0005` does. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it."
+
+[reproduce]
+command = "cargo xtask claim index-blocks-per-query"
+
+[diagnosis]
+# Recorded while the system is understood rather than at 2 a.m. when it is not.
+blocks_read_per_query_above_0 = "a query reached the device, so the in-memory map is no longer answering — either the mount stopped loading the whole log, or a query path falls through to a device read for a case the map does not hold. The second is the interesting one and the likely one: a miss, a stale entry, or an attribute the map indexes lazily. Read `index/src/index.rs`'s query path before the log format, because the log format changing would break the mount rather than the query"
+blocks_read_per_tree_walk_below_4 = "the control has stopped controlling. The walk reads one block per component by construction, so a lower number means the walk is being served from something — a cache in the modelled device, or a walk implementation that hoisted a lookup out of its loop — and the comparison has become index-against-index. Look at the walk, not at the index: this row failing says nothing about the index and everything about whether the claim measured anything"
+break_even_queries_above_256 = "the mount got more expensive, and a client that asks a few questions and leaves now pays for it. The number is `index_mount_blocks / 4`, so read the mount blocks beside it: entries that stopped packing, an entry format that grew a field, or a log that stopped being compacted at mount. It is not a correctness failure and it is the row most likely to drift, which is why it has a ceiling"

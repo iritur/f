@@ -29,11 +29,16 @@ pub mod churn;
 pub mod component;
 pub mod doorbell;
 pub mod env;
+// `E2-P07`. The frame's whole share of `f.root=`: read the token, hand the
+// loader's modules to `f-generation`, print what came back. Every branch that
+// could be wrong is in that library, where a host test can reach it.
+pub mod generation;
 // The third driver's supervisor. Beside `blk` and `net` and deliberately not
 // merged with them; `kernel/src/gpu.rs` says why and RFC 0054 argues it.
 pub mod gpu;
 pub mod iommu;
 pub mod jitter;
+pub mod measure;
 pub mod mem;
 pub mod net;
 pub mod percpu;
@@ -53,6 +58,34 @@ use f_env::{Env, SeededEnv};
 // places them at the crate root — so they are already in scope here, and
 // importing them again is a redefinition rather than a clarification. Do not
 // re-add the `use`; the export is what makes the ordering non-fragile.
+
+/// A deliberate defect, off by default, and the one `E2-P06` is built around:
+/// the absolute path this image was built at, compiled into the image.
+///
+/// # Why a defect of this shape
+///
+/// Because the property `cargo xtask generation --elsewhere` asserts is that the
+/// checkout path cannot reach the generation root, and a check that has only
+/// ever passed is one nobody knows can fail. This is the smallest thing that
+/// makes it fail for the reason it is about: no behaviour changes, the boot is
+/// byte-identical to itself at one path, every other check in this tree is green
+/// on it, and the *only* observable is that the same commit compiled in two
+/// directories produces two frame leaves and two roots. That is the shape of the
+/// bug the weekly job exists for, and RFC 0017 is where living in the shipped
+/// source behind a feature is argued.
+///
+/// `CARGO_MANIFEST_DIR` and not `file!()`, deliberately. `file!()` is remapped
+/// by `-Zremap-cwd-prefix` and would therefore demonstrate nothing — a defect
+/// the fix already covers is a defect that proves the check is asleep. Cargo
+/// sets this variable itself and no rustc flag touches it, so this is a genuine
+/// second route by which a path reaches an artefact, and the job that catches it
+/// is catching a class rather than a flag.
+///
+/// `#[used]` because nothing reads it: without that the linker is free to drop
+/// the symbol and the defect would quietly build a byte-identical image.
+#[cfg(feature = "mutate-path-in-image")]
+#[used]
+static BUILT_AT: &[u8] = env!("CARGO_MANIFEST_DIR").as_bytes();
 
 /// The seed this build runs under.
 ///
@@ -284,6 +317,61 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         paging::PHYS_OFFSET
     );
 
+    // RFC 0012, and `E2-B07`. The frame measures its own text and rodata *here*
+    // and not earlier or later, and both bounds are load-bearing. Earlier and
+    // the pages being hashed are still writable by the code hashing them — the
+    // measurement would be of memory that could still change. Later and
+    // something could already have been published under a root this image has
+    // not yet earned the right to publish.
+    //
+    // A disagreement is a refusal to publish a root and not a warning line, so
+    // this ends the boot. What it catches is a modified image booted honestly;
+    // what it cannot catch is an image modified to report the old digest, and
+    // `kernel/src/measure.rs` carries RFC 0012's full list of five rather than
+    // leaving a reader to infer the scope from the fact that a hash was printed.
+    let identity = match measure::identity(boot.cmdline()) {
+        Ok(identity) => identity,
+        Err(why) => {
+            kprintln!("FAIL: the frame's measurement: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+    kprintln!(
+        "  frame         {} over {} bytes of text and rodata",
+        measure::hex(&identity.measured),
+        identity.covered,
+    );
+    match identity.root {
+        // What the loader asked this machine to be, printed before the frame has
+        // decided whether it may be it. The verdict is the next paragraph, and
+        // keeping the two apart is what stops this line from claiming agreement
+        // on a boot that is about to refuse.
+        Some(root) => kprintln!(
+            "  generation    {} selected as publish {}",
+            measure::hex(&root),
+            identity.generation(),
+        ),
+        // Zero is the format's word for *no root describes this machine*, and a
+        // boot the loader named no generation for is exactly that. Printed
+        // rather than left silent: a machine that cannot say which generation it
+        // is has answered half the question, and the half it answered is above.
+        None => kprintln!("  generation    none selected, so no root is published"),
+    }
+    // The comparison, after both numbers are in the log and not before. RFC
+    // 0012: *disagreement is a refusal to publish a root, not a warning line* —
+    // so this ends the boot, and it ends it with the measurement above it rather
+    // than with a sentence a reader has to take on trust.
+    if !identity.agrees() {
+        if let Some(declared) = identity.declared {
+            kprintln!("  declared      {}", measure::hex(&declared));
+        }
+        kprintln!("FAIL: the frame's measurement: {}", measure::Refusal::FrameDisagrees.message());
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+    if identity.declared.is_some() {
+        kprintln!("  measurement   agrees with the frame hash the generation declares");
+    }
+
     // Memory the identity window could not reach is now reachable. Nothing was
     // skipped on this machine; the pass exists so that the first machine with
     // more than a gibibyte does not quietly lose the rest of it.
@@ -512,6 +600,43 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         }
     }
 
+    // `E2-P07`. Which generation this machine was asked to be, if it was asked
+    // at all — and it runs *here*, before the tree below exists, because
+    // everything below this line is a publish and this is the only thing that
+    // has checked the answer.
+    //
+    // It used to run three hundred lines further down, after the tree, the
+    // identity, the ring and a process. The consequence was a real one and is
+    // `docs/postmortem/0001`'s: `measure::identity` returns generation counter
+    // 1 for any *well-formed* `f.root=`, so `cargo xtask rollback`'s refusal
+    // boot — which selects a root no offered module carries — published counter
+    // 1 beside four zeroed root words and only then refused. A reader following
+    // RFC 0012's protocol (counter, eight words, counter again) would have
+    // accepted that: a machine attesting to a generation nothing can produce.
+    // Ordering is the whole fix — the frame already knew, it just said so too
+    // late.
+    //
+    // It is sound this early because `f.root=` decides nothing above it: RFC
+    // 0066 keeps instantiation out of the frame, so this is a fold over bytes
+    // the loader delivered and a block of `kprintln!`. What it does need is
+    // every module reserved and reachable, and that is `populate` and the
+    // rebind, both far above.
+    //
+    // The two readers of the token now agree by construction — both call
+    // `f_abi::boot::Selection::find` — which is what makes *this* root the one
+    // `measure::identity` put in `identity.root`. Before that they were two
+    // scans with opposite tie-breaking, and this ordering would have been a
+    // check on a different root from the one published.
+    //
+    // SAFETY: the boot processor, past the point where `reserved_ranges` put
+    // every module in the reserved list and the allocator was populated from
+    // it, with the direct map live and `frames` rebound onto it. That is
+    // `multiboot::Module::bytes`'s obligation, discharged here rather than by
+    // `component::demonstrate`, which now discharges it later for itself.
+    if !generation::report(unsafe { generation::selected(&boot) }) {
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+
     // RFC 0013, and E0-B14. Published *before* the subsystems that fill it,
     // because a node names a live word rather than a value copied in later —
     // the tree has to exist for the store to have somewhere to go.
@@ -529,6 +654,25 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     };
     tree.set(state::node::TOPOLOGY_STARTED, smp::started() as u64);
     tree.set(state::node::CAPS_SLOTS, cap::TABLE_SLOTS as u64);
+
+    // What the machine is running, into the tree a reader can map. RFC 0012 and
+    // `E2-B07`: the boot log above says it once to whoever is watching a serial
+    // port, and this says it to a component, which is the difference between a
+    // machine that printed a hash and a machine that answers a question about
+    // itself. RFC 0013 is why that is a node and not a new channel.
+    //
+    // A `false` here is a build whose schema lost one of the nine nodes, and it
+    // ends the boot for the reason a failed mount does: a machine that cannot
+    // say what it is running has not answered the question, and a boot that
+    // carried on would be publishing a tree with the answer missing from it.
+    //
+    // Reached only by a machine that *is* the generation it names: the selection
+    // above ends the boot otherwise, which is what makes the counter this
+    // publishes an attestation rather than a restatement of the command line.
+    if !tree.publish_identity(identity.generation(), identity.root.as_ref(), &identity.measured) {
+        kprintln!("FAIL: the state tree has no node for what this machine is running");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
 
     // M5, the first piece of it. One channel laid out by `f_abi::layout` in a
     // real frame, a batch of four published with one store, and both opcodes
@@ -688,6 +832,76 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // the three stages above, and printing nothing on a default boot.
     admission_demonstration(&boot);
 
+    // E1-B05. The component lifecycle, end to end, against real memory: a place
+    // built from a manifest the loader carried, a component spawned into it, a
+    // client connected, the component killed, the place refilled under its
+    // declared policy, and the client's connect pending across the gap and
+    // resuming at the higher epoch.
+    //
+    // Before the timer window and not inside it, for the reason `timed_window`
+    // gives about its own contents: this builds address spaces and writes
+    // serial lines, and a window that logged what happened inside it would be a
+    // measurement of the logging. Nothing here is a measurement — every number
+    // it prints is a count — so it has no window to be inside.
+    //
+    // And **before the tree is rendered**, which is where it moved to at
+    // E1-B15 and is the same fix `dma_provocation` and `runtime_demonstration`
+    // already record above: everything this does is something the tree
+    // publishes — RFC 0065 mounts a subtree per component under the frame's
+    // root and counts what it refused — and a tree rendered first would
+    // publish the state of a machine this boot had not finished being. It
+    // used to run after the render, and the four mount nodes it fills were
+    // therefore printed as empty on every boot.
+    //
+    // The tick count the restart budget's window is measured against is read
+    // here, from the hardware `Env`, and converted once. RFC 0004 permits no
+    // other route to a clock, and RFC 0008 states the window in timer ticks
+    // because a supervisor compares it against a count the frame keeps rather
+    // than against a duration. Only the *epoch* comes from the machine: the
+    // demonstration advances its own count by the backoff it was told to wait,
+    // which is what a supervisor does, so nothing it prints moves between a
+    // fast host and a slow one.
+    let now = hardware.now().as_nanos() / (1_000_000_000 / u64::from(TIMER_HZ));
+    // SAFETY: the boot processor, once, with the kernel's address space in
+    // `CR3`, `frames` rebound onto its direct map, and no process running. The
+    // direct map covers every module: `reserved_ranges` put them all in the
+    // reserved list before the allocator was populated.
+    match unsafe { component::demonstrate(&mut frames, &space, features, &boot, now, &tree) } {
+        Ok(report) => kprintln!(
+            "  supervisor    ok — {} place(s), {} spawn(s), {} fault(s), {} restart(s), \
+             {} resumed, {} client(s) lost, {} probe(s) refused, {} retired, \
+             {} need(s) bound to nothing, {} tree(s) mounted carrying {} node(s), \
+             {} refused for declaring none",
+            report.places,
+            report.spawns,
+            report.faults,
+            report.restarts,
+            report.resumed,
+            report.lost,
+            report.probed,
+            report.retired,
+            report.unbound,
+            report.mounted,
+            report.nodes,
+            report.mute,
+        ),
+        // A machine that carried no component file is not a broken machine.
+        // `docs/booting-on-hardware.md` makes every component file optional and
+        // the first boot outside QEMU carried none at all, so a demonstration
+        // the milestone does not require must not be the thing that stops it.
+        // The same shape `discover` uses for a machine with no DMAR, and for the
+        // same reason: a boot log line is what a machine missing something
+        // optional earns, and an exit is what a machine that has it and got it
+        // wrong earns. Every other `Failure` below is the second case.
+        Err(component::Failure::NoComponent) => {
+            kprintln!("  supervisor    no component file among the boot modules; no place to fill");
+        }
+        Err(why) => {
+            kprintln!("FAIL: the component lifecycle: {}", why.message());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
+
     // Last of the frame's own numbers, because the allocator is still handing
     // out frames until the line above. The self-test is what says the hash
     // works: two readings with nothing in between must agree, and a reading
@@ -780,63 +994,6 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         }
     }
     tree.render();
-
-    // E1-B05. The component lifecycle, end to end, against real memory: a place
-    // built from a manifest the loader carried, a component spawned into it, a
-    // client connected, the component killed, the place refilled under its
-    // declared policy, and the client's connect pending across the gap and
-    // resuming at the higher epoch.
-    //
-    // Before the timer window and not inside it, for the reason `timed_window`
-    // gives about its own contents: this builds address spaces and writes
-    // serial lines, and a window that logged what happened inside it would be a
-    // measurement of the logging. Nothing here is a measurement — every number
-    // it prints is a count — so it has no window to be inside.
-    //
-    // The tick count the restart budget's window is measured against is read
-    // here, from the hardware `Env`, and converted once. RFC 0004 permits no
-    // other route to a clock, and RFC 0008 states the window in timer ticks
-    // because a supervisor compares it against a count the frame keeps rather
-    // than against a duration. Only the *epoch* comes from the machine: the
-    // demonstration advances its own count by the backoff it was told to wait,
-    // which is what a supervisor does, so nothing it prints moves between a
-    // fast host and a slow one.
-    let now = hardware.now().as_nanos() / (1_000_000_000 / u64::from(TIMER_HZ));
-    // SAFETY: the boot processor, once, with the kernel's address space in
-    // `CR3`, `frames` rebound onto its direct map, and no process running. The
-    // direct map covers every module: `reserved_ranges` put them all in the
-    // reserved list before the allocator was populated.
-    match unsafe { component::demonstrate(&mut frames, &space, features, &boot, now) } {
-        Ok(report) => kprintln!(
-            "  supervisor    ok — {} place(s), {} spawn(s), {} fault(s), {} restart(s), \
-             {} resumed, {} client(s) lost, {} probe(s) refused, {} retired, \
-             {} need(s) bound to nothing",
-            report.places,
-            report.spawns,
-            report.faults,
-            report.restarts,
-            report.resumed,
-            report.lost,
-            report.probed,
-            report.retired,
-            report.unbound,
-        ),
-        // A machine that carried no component file is not a broken machine.
-        // `docs/booting-on-hardware.md` makes every component file optional and
-        // the first boot outside QEMU carried none at all, so a demonstration
-        // the milestone does not require must not be the thing that stops it.
-        // The same shape `discover` uses for a machine with no DMAR, and for the
-        // same reason: a boot log line is what a machine missing something
-        // optional earns, and an exit is what a machine that has it and got it
-        // wrong earns. Every other `Failure` below is the second case.
-        Err(component::Failure::NoComponent) => {
-            kprintln!("  supervisor    no component file among the boot modules; no place to fill");
-        }
-        Err(why) => {
-            kprintln!("FAIL: the component lifecycle: {}", why.message());
-            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
-        }
-    }
 
     // M3. The other privilege level, and the first thing in this system that is
     // not the kernel. It runs inside a timer window on purpose: the milestone's

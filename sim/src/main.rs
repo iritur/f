@@ -208,6 +208,13 @@ enum What {
     /// The same, reduced to one digest so that two processes can be compared
     /// without parsing a report.
     ChaosHash,
+    /// Every component in the deployment, replaced under sustained load and
+    /// again with nothing replaced. Exit status is the verdict. `E2-P08`,
+    /// RFC 0063.
+    Swap,
+    /// The same, reduced to one digest so that two processes can be compared
+    /// without parsing a report.
+    SwapHash,
     /// Run a scenario once, writing a snapshot every `--every` simulated
     /// minutes. `E1-P08`, RFC 0043.
     Scan,
@@ -217,6 +224,13 @@ enum What {
     /// The same, reduced to one digest so that two processes can be compared
     /// without parsing a report.
     AdmissionHash,
+    /// Two whole-system states, two hashes, and the descent that names the
+    /// subtree they differ in. Exit status is the verdict. `E2-P05`, RFC 0013.
+    Compare,
+    /// One whole-system root and nothing else, so that two *processes* can be
+    /// compared without parsing a report — the same argument `--hash` makes
+    /// about a trace, asked of a tree instead of a log.
+    CompareHash,
 }
 
 fn main() -> ExitCode {
@@ -339,6 +353,10 @@ fn parse(args: &[String]) -> Result<Asked, String> {
             // would be a command line with a bug in it. R04, applied to this
             // tool's own argument parser.
             "--chaos-hash" => asked.what = What::ChaosHash,
+            "--swap" => asked.what = What::Swap,
+            // Its own flag rather than `--swap --hash`, for `--chaos-hash`'s
+            // reason one line up.
+            "--swap-hash" => asked.what = What::SwapHash,
             "--scan" => asked.what = What::Scan,
             "--admission" => asked.what = What::Admission,
             // Its own flag rather than `--admission --hash`, for the reason
@@ -346,6 +364,12 @@ fn parse(args: &[String]) -> Result<Asked, String> {
             // whose meaning depended on their order would be a command line
             // with a bug in it.
             "--admission-hash" => asked.what = What::AdmissionHash,
+            "--compare" => asked.what = What::Compare,
+            // Its own flag rather than `--compare --hash`, for the reason
+            // `--chaos-hash` above gives: `what` is one value, and a pair of
+            // flags whose meaning depended on their order is a command line
+            // with a bug in it.
+            "--compare-hash" => asked.what = What::CompareHash,
             // A *source*, not a `what`. `--resume file --trace` and `--trace
             // --resume file` mean the same thing, which they did not when this
             // set `what`: one order printed a usage banner and the other
@@ -497,6 +521,8 @@ fn usage() -> String {
         \x20        [--terse] [--after <minutes>] [--seed <n>] <scenario>\n\
          f-sim --resume <file.snap> [--commit <sha>] [--check|--trace|--hash]\n\
          f-sim --chaos | --chaos-hash [--seed <n>] [--components <dir>]\n\
+         f-sim --swap | --swap-hash [--seed <n>] [--components <dir>]\n\
+         f-sim --compare | --compare-hash [--seed <n>] <scenario>\n\
          f-sim --deployment [--components <dir>]\n\
          f-sim --list\n\n\
          The deterministic simulator. One scenario, one seed, one artefact —\n\
@@ -785,8 +811,12 @@ fn run(asked: Asked) -> Result<bool, String> {
         What::Scan => return scan(&asked),
         What::Chaos => return chaos(&asked, false),
         What::ChaosHash => return chaos(&asked, true),
+        What::Swap => return swap(&asked, false),
+        What::SwapHash => return swap(&asked, true),
         What::Admission => return admission(&asked, false),
         What::AdmissionHash => return admission(&asked, true),
+        What::Compare => return compare(&asked, false),
+        What::CompareHash => return compare(&asked, true),
         What::Hash | What::Trace | What::Check | What::Report => {}
     }
 
@@ -1061,6 +1091,201 @@ fn chaos(asked: &Asked, hash_only: bool) -> Result<bool, String> {
     let blast: u32 = pairs.iter().map(|pair| pair.killed.clients_failed).sum();
     println!("\nblast radius  {blast} client(s) observed anything except added latency");
     println!("digest        {:#018x}", chaos::digest(&pairs));
+    Ok(true)
+}
+
+/// Replace every component in the deployment under load, and judge each pair.
+///
+/// **`E2-P08`.** One pair per component — a run with replacements in it and the
+/// same run with none — because a survival with no control beside it establishes
+/// that nothing went wrong rather than that anything was under test.
+/// `f_sim::swap` is where the mechanism and the verdict live; this prints what
+/// they produced and turns a failure into an exit status.
+///
+/// `Ok(false)` is *the command worked and found something*, the convention
+/// `--check`, `--sweep` and `--chaos` use.
+fn swap(asked: &Asked, hash_only: bool) -> Result<bool, String> {
+    use f_sim::swap;
+
+    let deployment = read_components(asked.components.as_deref())?;
+    let pairs = match swap::sweep(&deployment, asked.seed, swap::SWAPS) {
+        Ok(pairs) => pairs,
+        Err(why) => {
+            println!("swap       FAILED\n\n{why}");
+            return Ok(false);
+        }
+    };
+    if hash_only {
+        println!("{:#018x}", swap::digest(&pairs));
+        return Ok(true);
+    }
+
+    println!("seed       {:#018x}", asked.seed);
+    println!("components {}", pairs.len());
+    println!("swaps      {} per component, under sustained load", swap::SWAPS);
+    println!();
+    // `mode` first, because it is what decides which question every column after
+    // it is asked. `flying` is the fewest operations outstanding at any pause,
+    // which is what stops the zeros beside it being about a quiescent system;
+    // `sets` is the two live-registration counts, taken on opposite sides
+    // through two real tables; and `redone` is the number RFC 0063 says
+    // `in_place` exists to make zero, printed for both modes so that the zero is
+    // a comparison rather than an assertion.
+    println!(
+        "  {:<20} {:<12} {:>7} {:>5} {:>5} {:>6} {:>6} {:>4} {:>5} {:>5} {:>5} {:>6} {:>7} {:>6}",
+        "component",
+        "mode",
+        "settled",
+        "swap",
+        "rstrt",
+        "abandn",
+        "flying",
+        "lost",
+        "twice",
+        "stale",
+        "wrong",
+        "refusd",
+        "sets",
+        "redone",
+    );
+    for pair in &pairs {
+        println!(
+            "  {:<20} {:<12} {:>7} {:>5} {:>5} {:>6} {:>6} {:>4} {:>5} {:>5} {:>5} {:>6} {:>7} \
+             {:>6}",
+            pair.swap.name,
+            f_abi::transfer::mode::label(pair.swap.declared.mode),
+            pair.moved.settled,
+            pair.moved.swapped,
+            pair.moved.restarted,
+            pair.moved.abandoned,
+            pair.moved.flying_min,
+            pair.moved.lost,
+            pair.moved.twice,
+            pair.moved.stale,
+            pair.moved.wrong,
+            pair.moved.failed,
+            format!("{}/{}", pair.moved.sets_out, pair.moved.sets_in),
+            pair.moved.redone,
+        );
+    }
+
+    println!();
+    // The transfer itself, in its own block because *a replacement happened* and
+    // *state crossed* are two claims and a reader should be able to see the
+    // second without reading the first's columns. A `restart_only` row printing
+    // zeros here is the declaration working rather than a gap.
+    //
+    // The read-back is on its own line under each of them: it is the comparison
+    // of what crossed against what should have crossed, and it answers a
+    // different question from every count beside it — not *how much moved* but
+    // *is what arrived the thing that was sent*.
+    for pair in &pairs {
+        println!(
+            "  {:<20} {} record(s) written into a window and {} replayed out of one; {} \
+             submission(s) pended, {} rang for, {} discarded",
+            pair.swap.name,
+            pair.moved.handed,
+            pair.moved.adopted,
+            pair.moved.pended,
+            pair.moved.resumed,
+            pair.moved.voided,
+        );
+        println!(
+            "  {:<20} {} record(s) read back through the incoming instance and compared \
+             against what the outgoing one handed over; {} differed",
+            "", pair.moved.read_back, pair.moved.differed,
+        );
+    }
+
+    println!();
+    for pair in &pairs {
+        println!(
+            "  {:<20} control {} of {} answered, worst {} ns; replacing cost {} ns more, \
+             against a declared ladder of {} ns",
+            pair.swap.name,
+            pair.calm.settled,
+            pair.calm.owed,
+            pair.calm.worst_ns,
+            pair.added_ns(),
+            pair.swap.policy.ladder_ns(swap::SWAPS),
+        );
+    }
+
+    // The two numbers a reader takes away, and they are counts rather than
+    // times — which is why this command may gate in a container while three
+    // claims wait for a machine. `bench/src/lib.rs` is where that rule is
+    // decided.
+    let blast: u32 = pairs.iter().map(|pair| pair.moved.clients_failed).sum();
+    let redone: u32 =
+        pairs.iter().filter(|pair| pair.swap.transfers()).map(|pair| pair.moved.redone).sum();
+    println!("\nblast radius  {blast} client(s) observed anything except added latency");
+    println!("redone        {redone} operation(s) redone across every in-place swap");
+    println!("digest        {:#018x}", swap::digest(&pairs));
+
+    // `claims/0029`'s rows, summed out of the same per-component table printed
+    // above rather than recounted from the run — a second traversal would be a
+    // second opinion about what the columns say.
+    //
+    // **Four of the names are RFC 0012's own** — `places_swapped`,
+    // `places_restarted`, `operations_dropped` and the two `operations_redone`
+    // halves — because that RFC writes the rollback metric as a named set and a
+    // claim that renamed them would be a second vocabulary for one measurement.
+    // Its other three, `generation_swaps`, `reboots` and `frame_changed`, are
+    // deliberately **not** here: they are counts over a whole machine changing
+    // generation, this sweep replaces occupants one place at a time inside one
+    // process, and a zero printed under those names would read as *this ran and
+    // found none* rather than as *this cannot run at all yet*. `SWAP_GAP` in
+    // xtask is where that is said, and the claim says it again.
+    //
+    // `operations_redone_by_restart` is the control and not a decoration: RFC
+    // 0063's whole justification for `in_place` is that a client re-registers
+    // nothing, and a zero beside three components that redid eight operations
+    // each is that sentence measured. A zero beside three other zeros would be
+    // a harness that never made anybody redo anything.
+    let settled: u64 = pairs.iter().map(|pair| u64::from(pair.moved.settled)).sum();
+    let flying = pairs.iter().map(|pair| pair.moved.flying_min).min().unwrap_or(0);
+    let sum = |get: fn(&f_sim::swap::Report) -> u32| -> u64 {
+        pairs.iter().map(|pair| u64::from(get(&pair.moved))).sum()
+    };
+    let redone_by_restart: u64 = pairs
+        .iter()
+        .filter(|pair| !pair.swap.transfers())
+        .map(|pair| u64::from(pair.moved.redone))
+        .sum();
+    println!(
+        "\n  components_replaced                      {}\n  \
+         places_swapped                           {}\n  \
+         places_restarted                         {}\n  \
+         operations_settled_under_load            {settled}\n  \
+         operations_in_flight_at_every_pause      {flying}\n  \
+         operations_dropped                       {}\n  \
+         operations_answered_twice                {}\n  \
+         operations_answered_from_a_stale_place   {}\n  \
+         operations_answered_wrongly              {}\n  \
+         operations_refused                       {}\n  \
+         clients_observing_anything_but_latency   {blast}\n  \
+         operations_redone_in_place               {redone}\n  \
+         operations_redone_by_restart             {redone_by_restart}\n  \
+         registration_sets_replayed               {}\n  \
+         state_records_read_back                  {}\n  \
+         state_records_that_differed              {}",
+        pairs.len(),
+        sum(|report| report.swapped),
+        sum(|report| report.restarted),
+        sum(|report| report.lost),
+        sum(|report| report.twice),
+        sum(|report| report.stale),
+        sum(|report| report.wrong),
+        sum(|report| report.failed),
+        sum(|report| report.sets_in),
+        // Two rows `claims/0029` does not carry a threshold for, printed because
+        // a number the harness now decides on has to be visible to whoever reads
+        // the run rather than only to the verdict. The first is the coverage of
+        // the comparison — at zero the transfer was verified by nothing that
+        // looked at what arrived — and the second is its finding.
+        sum(|report| report.read_back),
+        sum(|report| report.differed),
+    );
     Ok(true)
 }
 
@@ -1620,6 +1845,210 @@ fn read_components(dir: Option<&Path>) -> Result<Deployment, String> {
 /// without needing a build to have happened first.
 fn deployment_for(scenario: &Scenario, dir: Option<&Path>) -> Result<Deployment, String> {
     if scenario.needs_components() { read_components(dir) } else { Ok(Deployment::default()) }
+}
+
+/// How many seeded injections `--compare` requires the descent to name.
+///
+/// Sixty-four, which is [`DEFAULT_SEEDS`]'s number and is chosen for its
+/// argument rather than by coincidence: a localisation checked at one node is a
+/// localisation checked at one node, and what is being claimed here is about
+/// *every* node in every component tree — of which the shipped scenarios
+/// publish seven each. Unit: injections.
+const COMPARE_TRIALS: u64 = 64;
+
+/// Two whole-system states, two hashes, and the subtree they differ in.
+///
+/// # What this command is evidence for
+///
+/// `E2-P05`'s exit is *an injected divergence is localised to a named subtree
+/// automatically, with no human reading a log*. So the output of the second and
+/// last two phases below is a **name** — a path from a component's key down to the
+/// node — and not a diff a person is expected to read. The exit status is the
+/// verdict, which is what `automatically` means for a caller.
+///
+/// # Why three phases and not one
+///
+/// Because a comparison that reports a divergence has said nothing until it is
+/// known that it *can* report agreement, and a comparison that reports agreement
+/// has said nothing until it is known that it can fail. That is the argument
+/// `trace_check` makes with a deliberately broken kernel and `sim_check` makes
+/// with a second seed, and it is the same argument here:
+///
+/// - **[a]** the same run twice, in this process — the roots must agree, and
+///   the descent must name nothing.
+/// - **[b]** the same scenario at the same seed with its fault class
+///   disarmed — the roots must differ, and the descent must *name where*. This
+///   is a real divergence produced by a real injection, and the localisation is
+///   whatever the run makes it.
+/// - **[c]** a divergence injected at a node the seed picks, [`COMPARE_TRIALS`]
+///   times — and the descent must name **exactly** the node that was disturbed.
+///   This is the phase in which the harness knows the answer before it asks, and
+///   it is what makes [b]'s name mean *this subtree* rather than *a subtree*.
+///
+/// # Why the whole system and not one component
+///
+/// RFC 0013 publishes a tree per component and the frame mounts them under one
+/// root; a comparison of one component's tree would be a comparison of one
+/// component. `Outcome::trees` is every component that published, read when
+/// virtual time has stopped and nothing is in flight — the one configuration
+/// that document says a reading across a whole tree is meaningful in.
+fn compare(asked: &Asked, hash_only: bool) -> Result<bool, String> {
+    use f_sim::whole::{self, Divergence, Whole};
+
+    let armed = trial(asked)?;
+    let deployment = deployment_for(armed.base(), asked.components.as_deref())?;
+    let state = |trial: &Trial| -> Result<Whole, String> {
+        Ok(Whole::of(&trial.run(&deployment).map_err(Trouble::message)?))
+    };
+
+    if hash_only {
+        println!("{}", whole::hex(&state(&armed)?.root()));
+        return Ok(true);
+    }
+
+    println!(
+        "whole-system state comparison — scenario {}, seed {:#018x}",
+        armed.scenario, armed.seed
+    );
+    println!("  every component's RFC 0013 tree, read quiesced, folded to one SHA-256 root\n");
+
+    println!("[a] the same run twice, in this process — the roots must agree");
+    let first = state(&armed)?;
+    let second = state(&armed)?;
+    println!("  run 1     {}", whole::hex(&first.root()));
+    println!("  run 2     {}", whole::hex(&second.root()));
+    println!("  trees     {} component tree(s)", first.parts());
+    if first.parts() == 0 {
+        // Fail closed. A whole-system state with nothing in it hashes to a
+        // constant, agrees with itself forever, and would carry every phase
+        // below it for the wrong reason — the same result `Trouble::Deployment`
+        // refuses one layer down.
+        return Err(format!(
+            "scenario `{}` published no component tree at all, so there is no\n\
+             whole-system state to compare. A comparison over nothing agrees with\n\
+             itself forever, which is the one result this check must never report\n\
+             as a pass.",
+            armed.scenario
+        ));
+    }
+    let settled = first.diff(&second);
+    if settled != Divergence::Agree {
+        println!("  FAILED    {}", settled.describe());
+        println!(
+            "\nTwo runs of one (seed, commit) produced two states. That is RFC 0004's\n\
+             contract failing above the simulator's own digest, and it makes every\n\
+             comparison below meaningless."
+        );
+        return Ok(false);
+    }
+    println!("  agreed    the descent named nothing, which is what agreement is\n");
+
+    println!("[b] the same seed with the class disarmed — the roots must differ, and");
+    println!("    the descent must name where");
+    if armed.injects.is_empty() {
+        return Err(format!(
+            "scenario `{}` arms no fault class, so there is nothing to disarm and\n\
+             no divergence to inject. `--compare` needs a scenario that arms one —\n\
+             `f-sim --list` says which do.",
+            armed.scenario
+        ));
+    }
+    let mut clean = armed;
+    clean.injects = &[];
+    let quiet = state(&clean)?;
+    println!("  armed     {}", whole::hex(&first.root()));
+    println!("  disarmed  {}", whole::hex(&quiet.root()));
+    let found = first.diff(&quiet);
+    let spread = first.divergences(&quiet).len();
+    if first.root() == quiet.root() || found == Divergence::Agree {
+        println!("  FAILED    arming the class changed no component's published state");
+        println!(
+            "\nThe injection reached nothing this comparison can see, so a green result\n\
+             here would say only that two identical states are identical."
+        );
+        return Ok(false);
+    }
+    // A `Node` and nothing else, deliberately. The exit's word is *descends*,
+    // and every other variant names a component and can name nothing inside it:
+    // a tree that went missing, one that changed shape, one whose bytes are not
+    // a tree. Those are honest answers to different questions, and accepting one
+    // here would let this check go green on a run in which the descent never
+    // walked into a tree at all.
+    let named = match &found {
+        Divergence::Node { component, subtree, .. } if subtree != component => subtree.clone(),
+        other => {
+            println!("  FAILED    {}", other.describe());
+            println!(
+                "\nThe roots differ and the descent did not reach a node inside a component's\n\
+                 tree. E2-P05's exit is *localised to a named subtree*, and a finding that\n\
+                 names only the component it is in has not localised anything."
+            );
+            return Ok(false);
+        }
+    };
+    println!("  subtree   {named}");
+    println!("  where     {}", found.describe());
+    println!("  diverged  {spread} of {} component tree(s)\n", first.parts());
+
+    println!("[c] a divergence injected at a node the seed picks — the descent must");
+    println!("    name exactly the node it was injected into");
+    let mut named_exactly = 0u64;
+    let mut wrong: Vec<String> = Vec::new();
+    for occurrence in 0..COMPARE_TRIALS {
+        let Some((component, index)) = first.pick(clean.seed, occurrence) else {
+            wrong.push(format!("trial {occurrence}: no node to disturb"));
+            continue;
+        };
+        let mut hurt = first.clone();
+        let Some(site) = hurt.disturb(&component, index) else {
+            wrong.push(format!("trial {occurrence}: {component}[{index}] could not be disturbed"));
+            continue;
+        };
+        match first.diff(&hurt) {
+            Divergence::Node { path, id, .. } if path == site.path && id == site.id => {
+                named_exactly += 1;
+            }
+            other => wrong.push(format!(
+                "trial {occurrence}: injected at {} and the descent answered `{}`",
+                site.path,
+                other.describe()
+            )),
+        }
+    }
+    println!("  named     {named_exactly} of {COMPARE_TRIALS} injections, by exact node");
+    for line in wrong.iter().take(4) {
+        println!("  MISSED    {line}");
+    }
+    if named_exactly != COMPARE_TRIALS {
+        println!(
+            "\nA divergence the comparison found but could not name is a divergence a\n\
+             person has to go and find, which is exactly what E2-P05's exit refuses."
+        );
+        return Ok(false);
+    }
+
+    // `claims/0031`'s rows, printed by the run that took them rather than
+    // inferred by the command that called it. `cargo xtask compare` echoes this
+    // output, so the claim's comparison reads the same lines a person does.
+    //
+    // The floors matter more than the headline here: `injections_attempted` and
+    // `component_trees_folded` are how a green run says it had something to
+    // localise. A descent that named every node correctly over zero injections
+    // into one tree would print a perfect `64 of 64` above with nothing behind
+    // it, which is the failure `[a]`'s `parts() == 0` refusal is about, one
+    // phase earlier and in the same spirit.
+    println!(
+        "\n  component_trees_folded                              {}\n  \
+         component_trees_diverged_when_the_class_was_disarmed {spread}\n  \
+         subtrees_named_by_the_descent                       {}\n  \
+         injections_attempted                                {COMPARE_TRIALS}\n  \
+         injections_localised_to_the_exact_node              {named_exactly}",
+        first.parts(),
+        u64::from(!named.is_empty()),
+    );
+
+    println!("\nlocalised: `{named}` — every phase held");
+    Ok(true)
 }
 
 #[cfg(test)]

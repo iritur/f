@@ -92,6 +92,12 @@ pub mod queue;
 // offsets that existed in only one of the two builds would be a layout with two
 // definitions. RFC 0047.
 pub mod routing;
+// The state record this build hands to the one that replaces it, and outside the
+// `image` gate for `routing`'s reason one line up: it is a layout *two builds*
+// read, so a definition that existed in only one of them would be a format with
+// two opinions. `user/virtio-blk/manifest.toml` declares its three numbers and
+// says the layout is `E2-B06`'s; this is that layout. RFC 0063.
+pub mod state;
 pub mod transport;
 
 // The component half is x86-64's, and only because the door is. Nothing in

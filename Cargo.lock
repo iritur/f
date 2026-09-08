@@ -7,11 +7,23 @@ name = "f-abi"
 version = "0.0.1"
 
 [[package]]
-name = "f-bench"
+name = "f-assembler"
 version = "0.0.1"
 dependencies = [
  "f-abi",
  "f-env",
+ "f-generation",
+ "f-hash",
+]
+
+[[package]]
+name = "f-bench"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-blob",
+ "f-env",
+ "f-hash",
  "f-ring",
 ]
 
@@ -19,6 +31,7 @@ dependencies = [
 name = "f-blob"
 version = "0.0.1"
 dependencies = [
+ "f-abi",
  "f-env",
  "f-hash",
 ]
@@ -40,6 +53,15 @@ name = "f-hash"
 version = "0.0.1"
 
 [[package]]
+name = "f-index"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-blob",
+ "f-hash",
+]
+
+[[package]]
 name = "f-init"
 version = "0.0.1"
 dependencies = [
@@ -54,11 +76,26 @@ version = "0.0.1"
 dependencies = [
  "f-abi",
  "f-env",
+ "f-generation",
+ "f-hash",
  "f-ring",
  "f-store",
  "f-virtio-blk",
  "f-virtio-gpu",
  "f-virtio-net",
+]
+
+[[package]]
+name = "f-objects"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-blob",
+ "f-env",
+ "f-hash",
+ "f-index",
+ "f-ring",
+ "f-zone",
 ]
 
 [[package]]
@@ -75,7 +112,9 @@ version = "0.0.1"
 dependencies = [
  "f-abi",
  "f-env",
+ "f-hash",
  "f-ring",
+ "f-virtio-blk",
 ]
 
 [[package]]
@@ -111,10 +150,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "f-zone"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-blob",
+ "f-env",
+ "f-hash",
+]
+
+[[package]]
 name = "xtask"
 version = "0.0.1"
 dependencies = [
  "f-abi",
+ "f-assembler",
  "f-bench",
  "f-generation",
  "f-hash",

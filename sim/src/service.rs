@@ -38,9 +38,13 @@
 //! one would pass for the wrong reason — the same failure `dma.rs` records
 //! about the legacy transport, one layer up.
 
-use f_abi::buf::{Name, SetId};
+use f_abi::buf::{Name, Request, SetId};
 use f_abi::{Cqe, Sqe, error};
 use f_ring::registry::{Domains, Reach, Refusal, Table};
+// The block driver's own state record, taken rather than reimplemented. See
+// [`Service::handover`] and `sim/Cargo.toml`'s row for why the harness reads the
+// component's format instead of inventing a parallel one.
+use f_virtio_blk::state::Record as State;
 
 /// Registrations one peer's table holds.
 ///
@@ -424,6 +428,87 @@ impl Service {
             input.refuse(crate::snap::Broken::Diverged("a peer's IOMMU domain, after replay"));
         }
         service
+    }
+
+    /// This peer's registration state as the state records a swap hands over,
+    /// or `None` when it has nothing it can honestly hand over.
+    ///
+    /// # Why this is the journal again, and not a second mechanism
+    ///
+    /// [`Service::deeds`] already says why a table travels as the operations
+    /// that made it rather than as its slots, and `E1-P08`'s snapshot arrived at
+    /// that first. A generation swap wants the same thing for a different
+    /// reason — RFC 0063's `in_place` exists so that a client's `SetId` survives
+    /// the occupant that issued it — and the two are the same reconstruction, so
+    /// they are the same journal. What differs is the format: a snapshot writes
+    /// whatever `snap::Writer` holds, and a transfer window is
+    /// `f_virtio_blk::state::RECORD_BYTES` wide because a *component's manifest*
+    /// declared it.
+    ///
+    /// # The one deed that cannot cross, and why it refuses rather than lies
+    ///
+    /// A registration executed while the domain was starved is journalled and
+    /// changed nothing: `Table::register` refuses when `Domains::map` declines,
+    /// and a refused registration leaves no slot and no generation spent.
+    /// Replaying that deed into a domain that is *not* starved would succeed —
+    /// so the rebuilt table would hold a set the outgoing one never issued, and
+    /// the client would be answered about memory nobody registered. There is no
+    /// room in the record for the flag and there should not be: a swap that
+    /// cannot reproduce its own table refuses, the place restarts, and the
+    /// client pays one re-registration. `None` is that refusal.
+    pub(crate) fn handover(&self) -> Option<Vec<State>> {
+        let mut out = Vec::with_capacity(self.deeds.len());
+        for deed in &self.deeds {
+            out.push(match deed {
+                Deed::Executed { starved: true, .. } => return None,
+                Deed::Executed { entry, .. } => match Request::read(entry) {
+                    Ok(Request::Register { cap, len, buffers }) => {
+                        State::registered(entry.user_data, cap, len, buffers)
+                    }
+                    Ok(Request::Unregister { set }) => {
+                        State::unregistered(entry.user_data, set.bits())
+                    }
+                    // An entry the registry itself refuses to read is not a deed
+                    // that changed anything, and a record for it would be a
+                    // record the far side has to have an opinion about. R04:
+                    // refuse rather than encode something nobody can act on.
+                    Err(_) => return None,
+                },
+                Deed::RetiredAll => State::retired_all(),
+            });
+        }
+        Some(out)
+    }
+
+    /// Rebuild this peer's table out of the records a swap handed it.
+    ///
+    /// Called on a **fresh** service — the incoming instance's own — and it
+    /// replays through the same `Table::execute` the live path uses, which is
+    /// what makes the identifiers it issues the identifiers the client already
+    /// holds rather than identifiers this function asserted. The deeds are
+    /// journalled as they are applied, so an instance that was itself swapped
+    /// into a place can be swapped out of it again.
+    ///
+    /// Answers `false` for a record that did not cross intact — an unknown deed
+    /// kind, a non-zero reserved byte, a check word that disagrees — and applies
+    /// nothing further. The caller's answer is `f_abi::swap::Abandoned::Refused`
+    /// and the outgoing occupant is still alive, which is the whole reason phase
+    /// A is reversible.
+    pub(crate) fn adopt(&mut self, records: &[State]) -> bool {
+        for record in records {
+            if !record.intact() {
+                return false;
+            }
+            match record.replay() {
+                Some(entry) => {
+                    let _ = self.register(&entry, 0);
+                }
+                None => {
+                    let _ = self.retire_all();
+                }
+            }
+        }
+        true
     }
 
     /// Say that the device holds `index` of `set` again, for `len` bytes.

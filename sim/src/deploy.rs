@@ -52,6 +52,7 @@ use std::fs;
 use std::path::Path;
 
 use f_abi::manifest::{ContentId, Record, Refusal as Malformed, restart};
+use f_abi::transfer::Declaration;
 
 use crate::scenario::Peer;
 
@@ -61,7 +62,7 @@ pub const EXTENSION: &str = "fc";
 
 /// The largest component file this reader will hold. Unit: bytes.
 ///
-/// A record is 2 216 bytes and the frame reserves
+/// A record is 2 232 bytes and the frame reserves
 /// `kernel::process::TEXT_PAGES` — sixteen — for a component's text, so a
 /// component file is at most 67 752 and this is the next power of two above it.
 /// It is a bound on a *buffer whose alignment is part of its type*, which is the
@@ -325,6 +326,17 @@ pub struct Component {
     pub budget_window_ticks: u32,
     /// Bytes of image after the record. Unit: bytes.
     pub image_bytes: u32,
+    /// What the manifest declares about being updated in place.
+    ///
+    /// Here for the same reason the four policy numbers above are: a manifest is
+    /// the reviewable statement of what a component is, and a swap harness that
+    /// chose a transfer mode of its own would leave
+    /// `user/virtio-blk/manifest.toml`'s `[transfer]` table as decoration.
+    /// `crate::swap` is what reads it; nothing else does yet, and saying so is
+    /// cheaper than a reader wondering. RFC 0063.
+    /// Unit: none — an `f_abi::transfer::Declaration`, every field of which
+    /// states its own.
+    pub transfer: Declaration,
     /// What the simulator puts under it, from [`MODELS`].
     pub peer: Peer,
 }
@@ -371,6 +383,7 @@ impl Component {
             max_restarts: record.max_restarts,
             budget_window_ticks: record.budget_window_ticks,
             image_bytes: record.image_bytes,
+            transfer: record.transfer,
             peer,
         })
     }
@@ -531,6 +544,7 @@ pub(crate) mod fixture {
         FRAME_BYTES, NO_CAPABILITY, Need, Record, Ring, class, domain, encode, name_bytes, payload,
         protocol_bytes, restart, role, route,
     };
+    use f_abi::transfer::Declaration;
 
     /// A well-formed record: one untyped need, one server ring, soft class,
     /// restarted on a fault.
@@ -542,6 +556,10 @@ pub(crate) mod fixture {
         record.restart = restart::ON_FAULT;
         record.class = class::SOFT;
         record.memory_bytes = 16 * FRAME_BYTES;
+        // The honest declaration, which is what a fixture not testing RFC
+        // 0063's field should carry: this fixture holds no state a second
+        // instance would be poorer without.
+        record.transfer = Declaration::RESTART_ONLY;
         record.backoff_first_ticks = 8;
         record.backoff_max_ticks = 64;
         record.max_restarts = 3;

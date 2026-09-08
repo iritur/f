@@ -1,0 +1,164 @@
+# Gate G2's headline property, as a number: cut the power at every write
+# boundary in a publish and count the states the machine came up in.
+#
+# **Why this claim's primary is a zero and not a percentage.** The exit of
+# `E2-P01` is *every cut leaves either the old root or the new one, never a
+# third thing*. That is not a rate and cannot be one: a design that produced a
+# third state on one cut in a hundred thousand would not be a design that is
+# 99.999% atomic, it would be a design whose publish is not atomic, and the
+# hundred thousand would be the measure of how long somebody's afternoon is
+# before they find out. So the row this claim is about is
+# `cuts_leaving_a_third_state`, bounded at zero in both directions by the only
+# threshold the sentence admits, and every other row in the table exists to stop
+# that zero being the zero of a sweep that swept nothing.
+#
+# **0025 and not 0019.** `intent/0006-state/spec.md` reserves 0019 through 0022
+# — `resident-bytes-per-unit-of-work`, `read-path-latency`,
+# `generation-swap-pause` and `copies-per-read`, the last of those moved from
+# 0018 by `intent/0006-state/plan.md` when `chunk-size-distribution` landed on
+# the number first — and 0023 and 0024 are registered files. `E2-P01` was
+# reserved no number at all, because the spec's registry list has six entries
+# and none of them is a crash-consistency count; that is recorded here rather
+# than fixed by renumbering somebody else, under the plan's own rule that a
+# number taken in a plan is a number a concurrent landing takes first, and under
+# `claims/0017`'s precedent that a reservation outranks a landing. Two of the
+# four claims registered in this diff take reserved numbers and two take the
+# next free ones, which is that rule applied in both directions on one
+# afternoon.
+name       = "cut-outcomes"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E2"
+
+statement  = """
+A publish is atomic. Cut at every boundary of every write in it, replay what a
+device may have kept, mount, and the machine answers the old root or the new
+one — never a third thing.
+
+Measured by `cargo xtask claim cut-outcomes` — `zone/tests/cut.rs` at 64 seeds
+over all 28 publishes, both granularities and both modes, on a modelled zoned
+device of 17 zones of 40 blocks of 512 bytes with the first root-zone wrap at
+generation 26:
+
+  cuts swept                             108 280
+  device operations replayed             483 841
+  cuts leaving the old root              103 158
+  cuts leaving the new root                5 122
+  cuts leaving a third state                   0
+  cuts inside a wrapping publish           8 232
+  torn root records refused                  847   byte granularity
+  roots refused unresolved                 3 234   lying mode
+  distinct mount outcomes                      2
+
+**Every cut is replayed onto a device rebuilt from scratch.** The publish is
+recorded once as a sequence of device operations; each cut point then lands
+every operation a completed `FLUSH` covers plus a drawn subset of the rest, in a
+drawn order, with the cut falling inside the last operation at block or byte
+granularity — and the resulting media is mounted and required to answer exactly
+one of the two intended root hashes at exactly the expected generation. The
+re-run key is `(seed, target, cut, granularity, mode)` and every draw derives
+from it, so a finding reproduces from the line the failure prints.
+
+**The reading is strict, and that is what makes the 0 worth reading.** A root
+record whose `check` field verifies over a generation tree that is not on the
+device is a third thing wearing the new root's name: it names a state the
+machine cannot produce, and the first read after it answers *not found*, which
+is indistinguishable from *collected*. So the answer is taken from
+`f_zone::mount::mount` — the highest generation whose check verifies **and**
+whose generation tree fully resolves — and the 3 234 roots refused by resolution
+in `lying` mode are cuts that would have been third things under the weaker
+reading.
+
+**The two failure modes this table can distinguish.** A third state is the
+property failing. Any of the observation rows falling to zero is the sweep
+failing — a run that never tore a record, never made a lying device produce an
+unresolvable root, never crossed a root-zone wrap or only ever saw one outcome
+is a sweep of the model, and its zero would mean nothing at all.
+"""
+
+[baseline]
+# There is no other system to compare against, and the comparison that matters
+# is not against one. What is being claimed is a property of this format under a
+# device model, and the only meaningful control is the same sweep against a
+# build in which the property is false.
+system  = "none"
+notes   = "The control is a command and not a directory: `cargo xtask cut --mutate` builds the tree with `mutate-root-before-blobs` armed — the root record appended without waiting for the blobs it names, which is RFC 0060's first barrier removed — requires the sweep to find it, then runs the reproduction line the red half printed both armed and disarmed and requires that pair. It was found at generation 1, cut 11 of 12, block granularity, honest mode. **The headline property cannot see that defect and that is the design working**, not a gap: a root over missing blobs is refused by resolution and the mount rolls back to the previous generation, which is exactly what verify-before-accept promises. What catches it is the property the barrier is actually about — in honest mode no root is ever refused for non-resolution — so the control and the claim are two different sentences and the claim says which is which. It is a separate command because it rebuilds the workspace under a cargo feature, and a reproduction that silently did that would not be measuring the tree the reader checked out."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/deadline-all-the-way-down.html"
+section  = "04"
+notes    = "Section 04 is where a publish is argued, and the sentence this claim prices is the one RFC 0060 reversed there: *atomicity is free because a root is a single write*. It is not free — it is bought with two barriers — and this number is what the purchase is worth. The subsystems that own it are `zone/src/publish.rs` for the barrier sequence, `zone/src/mount.rs` for verify-before-accept (the highest generation whose check verifies and whose tree resolves), and `abi/src/store.rs` for the root record's `check` field, without which a torn record names a hash that does not exist and *not found* is indistinguishable from *collected*."
+
+[workload]
+path        = "zone/tests/cut.rs"
+seeds       = 64
+publishes   = 28
+block_bytes = 512
+zone_blocks = 40
+notes       = "Sixty-four seeds and every publish, against the four seeds and four publishes `cargo test --workspace` pays — the gate and the exit differ by a number and by nothing else, which is why this target is `harness = false` rather than a `#[test]`. The geometry is small on purpose: 40-block zones make the root zones wrap at generation 26 inside a 28-publish run, and the third required observation is a cut inside a publish that crosses that wrap. A run at a larger zone would be a longer run that never reached the case. — What stands in, said rather than left to be found: `ZonedMemory` under a recorder is a model and not a disk. It cannot lose a write the model did not draw, misdirect one, or return a block that was never written, so this is evidence about the *format's* response to a cut and not about any device's behaviour during one. What the model does carry is the thing the format's correctness rests on — a subset of the uncovered operations, in any order, with a torn tail — which is what a write cache does on the way down and what a prefix model could not produce."
+
+[metrics]
+# Counts, all of them, and no duration anywhere: the sweep reads no clock and
+# `f_bench::Environment` has nothing to refuse. The order is the order the run
+# prints them in.
+primary   = "cuts_leaving_a_third_state"
+secondary = [
+  "cuts_swept",
+  "device_operations_replayed",
+  "cuts_leaving_the_old_root",
+  "cuts_leaving_the_new_root",
+  "cuts_inside_a_wrapping_publish",
+  "torn_root_records_refused",
+  "roots_refused_unresolved_lying",
+  "distinct_mount_outcomes",
+]
+
+[threshold]
+# The exit, and the only threshold its sentence admits. Both bounds, because
+# there is no small number of third states that is not the property being false.
+cuts_leaving_a_third_state     = { min = 0, max = 0 }
+# Exactly two, and exact rather than a ceiling for the same reason: one outcome
+# is a sweep that only ever cut in one place, and three is the primary above
+# already red. `zone/tests/cut.rs` asserts this itself; it is here because a
+# claim whose primary is a zero has to publish the row that says the run could
+# have produced something else.
+distinct_mount_outcomes        = { min = 2, max = 2 }
+# The two outcomes, each required to occur. Floors of one and not of their
+# measured values: what is claimed is that both states are reachable, and the
+# 103 158/5 122 split is a property of where the cut points fall in a publish
+# rather than of the design — most of a publish's operations precede the root
+# record, so most cuts leave the old root, and a threshold on that ratio would
+# be a threshold on the workload's shape.
+cuts_leaving_the_old_root      = { min = 1 }
+cuts_leaving_the_new_root      = { min = 1 }
+# The three required observations `intent/0006-state/spec.md` names, each a
+# floor of one and each a way for a green sweep to have swept nothing. A torn
+# record is only reachable at byte granularity, an unresolvable root only in
+# lying mode, and a wrap only in a run long enough to reach one — so a zero in
+# any of these is a sweep that stopped covering a mode, a granularity or the
+# root zone's wrap, which is a finding about this file and not about the format.
+torn_root_records_refused      = { min = 1 }
+roots_refused_unresolved_lying = { min = 1 }
+cuts_inside_a_wrapping_publish = { min = 1 }
+# The geometry row, and a floor rather than an exact count. It is what stops
+# every row above being satisfied by a four-seed run: 108 280 is what 64 seeds
+# over 28 publishes at both granularities and both modes comes to, and the gate
+# runs the same binary at 4 and 4. A floor and not an equality because widening
+# the sweep is a change nobody should have to move a threshold for, and
+# narrowing it is exactly what this row exists to refuse.
+cuts_swept                     = { min = 108280 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "This claim does not need that machine, for `claims/0023`'s reason. Every metric is a count of cuts and of mount outcomes over a modelled device; there is no clock in the sweep, `f_bench::Environment` has nothing to refuse, and the numbers are byte-identical on any host that runs the binary — which is why it gates in the development container the way `claims/0005` does. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it. What the run genuinely costs is about two minutes of one core in release; the debug build of the same binary is the per-commit gate at a smaller seed count."
+
+[reproduce]
+command = "cargo xtask claim cut-outcomes"
+
+[diagnosis]
+# Recorded while the system is understood rather than at 2 a.m. when it is not.
+cuts_leaving_a_third_state_above_zero = "the publish is not atomic, and this is the finding gate G2 exists to prevent shipping. Do not start in this file: the sweep prints up to eight findings and every one of them carries a reproduction line naming `(seed, target, cut, granularity, mode)`, so run that line first and get one cut instead of a hundred thousand. Then read `zone/src/mount.rs` before `zone/src/publish.rs` — a third state is either a root the mount accepted that it should have refused (resolution, or the `check` field) or a barrier that did not order what it promised, and the mode the finding was found in says which: a finding in `honest` mode is the barrier, a finding only in `lying` mode is the format resting on a promise it may not rest on"
+torn_root_records_refused_is_zero = "no cut left a partially written root record, which at byte granularity over 108 280 cuts is not luck. Either the granularity stopped being swept — check that `--all` and both granularities are still reaching `one_cut` — or a root record stopped being one block, in which case a torn record is now a different shape and the count is looking for something that no longer happens. The second is a format change and it moves this row's meaning, not its value"
+roots_refused_unresolved_lying_is_zero = "in `lying` mode the model ignores `FLUSH` entirely, so a root record landing over blobs that did not is meant to be common. Zero means either that mode is no longer swept, or that resolution stopped being checked at mount and every root now verifies on its `check` field alone — which is the weaker reading `intent/0006-state/spec.md` refuses and would make the primary above a zero about nothing"
+cuts_inside_a_wrapping_publish_is_zero = "no publish in the run crossed a root-zone wrap, so the case `ROOT_CARRY` exists for was never cut. The sweep fails on its own before reaching this row when no wrap happens at all; a zero here with a wrap reported means the wrapping publish stopped being among the targets. Check `first_wrap` and the target selection, and do not repair it by lowering this floor — a design whose rollback depth after a wrap is sixteen generations is a design whose wrap is exactly where a cut is most expensive"
+cuts_swept_below_the_floor = "the run swept fewer cuts than this claim publishes, which is a workload that has stopped measuring rather than a format that has stopped working — `claims/0023`'s geometry row and the same failure. `[reproduce]` passes `--seeds 64 --all`; a run reporting the gate's numbers is the per-commit gate and is not this claim"

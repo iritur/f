@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["abi", "env", "ring", "hash", "blob", "generation", "kernel", "user/init", "user/store", "user/virtio-blk", "user/virtio-net", "user/virtio-gpu", "bench", "sim", "xtask"]
+members = ["abi", "env", "ring", "hash", "blob", "zone", "index", "generation", "kernel", "user/assembler", "user/init", "user/objects", "user/store", "user/virtio-blk", "user/virtio-net", "user/virtio-gpu", "bench", "sim", "xtask"]
 
 # The checker's crate, and it is excluded rather than absent for the reason RFC
 # 0022 gave the last one: a verification tool's toolchain is the tool's
@@ -48,7 +48,42 @@ f-hash = { path = "hash" }
 # `f-env` already had a row and gains nothing from this; what changed is who
 # takes it, and `blob/Cargo.toml` is where that is argued.
 f-blob = { path = "blob" }
+# The zoned mapping and the collector, on the same terms as the two rows above:
+# a library and not a component, so no `image` feature and no `default-features`
+# line. What is worth saying here rather than in that crate is why it is not a
+# module of `blob/`: a store that knew about zones would be a second thing that
+# could disagree with `f-zone` about an offset, and `blob/src/store.rs` says so
+# in its own first paragraph. Two crates and one opinion.
+f-zone = { path = "zone" }
+# The index, on the same terms as the two rows above and taking the one above it:
+# it needs `f_blob::device::Device` and nothing else from that crate, because a
+# second block-device trait would be a second thing to keep agreeing about what a
+# block is. The row is here before anything outside the workspace root takes it,
+# for the reason the three driver rows below give — a workspace row fixes the
+# path for everybody who inherits it, and `E2-B08`'s `user/objects` is the
+# consumer this was written for.
+f-index = { path = "index" }
+# The read path, and the row that consumes the four above it. There is no
+# `default-features = false` and no `image` feature, because this is not yet a
+# component: an image linking `f-blob` needs a `#[global_allocator]`, that is an
+# `unsafe impl GlobalAlloc`, and RFC 0001 forbids `unsafe` above the frame — so
+# it waits for the heap `intent/0006-state/spec.md`'s decision 4 puts in
+# `ring/`, and `user/objects/src/lib.rs` records the debt rather than leaving it
+# to be inferred from an absent `manifest.toml`. The row is here now for the
+# reason the three driver rows below give: a workspace row fixes the path for
+# everybody who inherits it, and adding the feature later is a smaller diff than
+# moving the path.
+f-objects = { path = "user/objects" }
 f-generation = { path = "generation" }
+# The assembler, and the row is short for `f-hash`'s reason: a library and not a
+# component, so no `image` feature and no `default-features` line. What is worth
+# saying here rather than in that crate is why it is above `user/` and not
+# beside `generation/`: it is written as the parent of a supervisor at ring 3,
+# `intent/0006-state/spec.md` puts it there, and a library that lives where the
+# components live is a library nobody has to move on the day it acquires a
+# `manifest.toml`. That day is the heap in `ring/`, and `user/assembler/src/
+# lib.rs` records the debt rather than leaving it to be inferred.
+f-assembler = { path = "user/assembler" }
 # `default-features = false` here rather than at the one consumer, because a
 # workspace dependency fixes it for everybody who inherits it and cargo refuses
 # to let a member override it. The feature turned off is `image`, which carries

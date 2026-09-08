@@ -15,7 +15,20 @@
     { "name": "deadline-overtake-latency", "status": "pending", "milestone": "E1", "file": "claims/0013-deadline-overtake-latency.toml" },
     { "name": "unmap-churn", "status": "gating", "milestone": "E1", "file": "claims/0014-unmap-churn.toml" },
     { "name": "unmap-churn-cost", "status": "pending", "milestone": "E1", "file": "claims/0015-unmap-churn-cost.toml" },
+    { "name": "write-amplification", "status": "pending", "milestone": "E2", "file": "claims/0016-write-amplification.toml" },
     { "name": "bytes-rechunked-per-byte", "status": "pending", "milestone": "E2", "file": "claims/0017-bytes-rechunked-per-byte.toml" },
-    { "name": "chunk-size-distribution", "status": "gating", "milestone": "E2", "file": "claims/0018-chunk-size-distribution.toml" }
+    { "name": "chunk-size-distribution", "status": "gating", "milestone": "E2", "file": "claims/0018-chunk-size-distribution.toml" },
+    { "name": "resident-bytes-per-unit-of-work", "status": "pending", "milestone": "E2", "file": "claims/0019-resident-bytes-per-unit-of-work.toml" },
+    { "name": "copies-per-read", "status": "pending", "milestone": "E2", "file": "claims/0022-copies-per-read.toml" },
+    { "name": "blob-verification-refusals", "status": "gating", "milestone": "E2", "file": "claims/0023-blob-verification-refusals.toml" },
+    { "name": "index-blocks-per-query", "status": "gating", "milestone": "E2", "file": "claims/0024-index-blocks-per-query.toml" },
+    { "name": "cut-outcomes", "status": "gating", "milestone": "E2", "file": "claims/0025-cut-outcomes.toml" },
+    { "name": "collector-invariants", "status": "gating", "milestone": "E2", "file": "claims/0026-collector-invariants.toml" },
+    { "name": "topology-renderings-per-root", "status": "gating", "milestone": "E2", "file": "claims/0027-topology-renderings-per-root.toml" },
+    { "name": "generation-roots-across-paths", "status": "gating", "milestone": "E2", "file": "claims/0028-generation-roots-across-paths.toml" },
+    { "name": "operations-across-a-place-swap", "status": "gating", "milestone": "E2", "file": "claims/0029-operations-across-a-place-swap.toml" },
+    { "name": "rollback-comparisons", "status": "gating", "milestone": "E2", "file": "claims/0030-rollback-comparisons.toml" },
+    { "name": "whole-system-divergences-localised", "status": "gating", "milestone": "E2", "file": "claims/0031-whole-system-divergences-localised.toml" },
+    { "name": "frame-identities-across-boots", "status": "gating", "milestone": "E2", "file": "claims/0032-frame-identities-across-boots.toml" }
   ]
 }
