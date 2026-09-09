@@ -634,12 +634,17 @@ load-bearing.*
   That is a weaker criterion than the one this task was written with, and it is the one the evidence supports. The stronger criterion did not go unmet through lack of effort; it was asked of CI twice and answered twice, and both answers are above. What is owed now is a model check, and `E0-P16` owns it with the two fixtures already built and waiting — which is a better position than this task started in, where the exit named a defect that did not exist.
   *needs:* E0-B12
 
-- [>] **E0-R01** `M` `cargo xtask release` produces the full package: source tag, claims snapshot, content-addressed QEMU image, seed corpus, baseline configurations, and a dependency manifest.
+- [x] **E0-R01** `M` `cargo xtask release` produces the full package: source tag, claims snapshot, content-addressed QEMU image, seed corpus, baseline configurations, and a dependency manifest.
   It builds: one `.tar`, a `MANIFEST` naming every file and its SHA-256, and one content address over the archive. Twenty-four files and one address, from `cargo xtask release`.
   **The crux was the two contents no E0 task produces**, and getting it wrong in either direction was easy. Shipping the package with them missing makes the contract advisory, and shortening the list to fit the work is the silent scope cut `A-07` stands against and `E0-D08` already caught once. So the requirement is a **predicate over the registry**: a content is owed when the claim that needs it publishes a number. The baseline and the seed corpus both serve `ring-submit-latency`, which is `pending`; the day it is not, the packager refuses and names `E1-D06`. A scope cut becomes a gate with a known trigger, and the trigger is a status change in `claims/` rather than an edit to the tool. RFC 0021, which also states the consequence rather than leaving it to be found: `E0-R04` needs `E0-P05`, `E0-P05` makes 0001 gating, and a gating 0001 publishes `ratio_vs_baseline` against `linux-6.x-tuned` — so release 0.1 pulls `E1-D06` forward or does not publish that ratio.
   **SHA-256 and the archive writer are in the tree, and that is the contract's own rule rather than taste.** `release --dry-run` computed hashes by shelling out to `sha256sum`, so the content address of a release depended on which coreutils the machine had — and on a machine without it the manifest simply printed no hash column. An address that is sometimes absent is not an address. `xtask/src/pack.rs` is both, checked against FIPS 180-4's published vectors, in a file whose whole subject is that it has no variable fields: no mtime, no uid, no user name, no directory order, and no compression, because a deflate stream carries its encoder's version into the bytes.
   The source is `git archive` of the commit rather than a walk of the working tree — it takes its file list from the tree object and its mtimes from the commit, so it cannot pick up an untracked file and cannot vary with when the checkout happened.
-  *exit:* **half met, and the other half is now asked rather than deferred.** `cargo xtask release --twice` packages the same tree twice and requires one address; it passes, and the command says in its own output why that is the weaker half — directory order, uid, path and clock are all constant within one machine. The real question needs two runners at one commit, and `cargo xtask release --address` plus the `package` and `address` jobs are what ask it: one line per runner, compared by a third job. Still `[>]`, because a workflow that has not run is a wrapper that has not run, and `E0-B16` is this file's scar for treating those as the same thing.
+  *exit:* **met, and what was owed was a run rather than a change.** `cargo xtask release --twice` packages the same tree twice and requires one address; it passes, and the command says in its own output why that is the weaker half — directory order, uid, path and clock are all constant within one machine. The real question needs two runners at one commit, and `cargo xtask release --address` plus the `package` and `address` jobs are what ask it: one line per runner, compared by a third job. Still `[>]`, because a workflow that has not run is a wrapper that has not run, and `E0-B16` is this file's scar for treating those as the same thing. **The wrapper has now run, and that was the whole of what was left.** The sentence immediately above it — *still `[>]`, because a workflow that has not run is a wrapper that has not run* — was right when it was written and is discharged rather than withdrawn: nothing in this tree was edited to close this line, a runner simply did the thing the wrapper wraps. On **run 34370629685**, the merge of #31 into `main` on 2026-09-09, `package address (runner a)` and `package address (runner b)` each printed one address and the path it was built at, and `the content address check` printed `agreed`:
+  ```
+  runner a  b197ec06dbec7414feafbc21baabd5bd7d251547a62536d184680c905b2e3824  at /__w/f/f
+  runner b  b197ec06dbec7414feafbc21baabd5bd7d251547a62536d184680c905b2e3824  at /__w/f/f
+  ```
+  Two machines, one commit, one address. The workspace-path precondition held by construction on both, as the job's own comment said it would, so the comparison never had to tell a path difference from a finding. **That address is evidence of an agreement and not a constant to check against**, for exactly the reason the two numbers below are evidence of a difference: the line recording it is inside the source archive the address is taken over, so writing it down changed it. The next run's number will differ from this one and that is not a regression.
   **The same-path precondition was stated here as an argument and is now a measurement**, which matters because the whole job is built on it. The same tree, same image, same commit, packaged at two paths:
   ```
   /work        e544abc2009007758433d33c51e00650190b045d060f09677be29c4be76cbc13
@@ -842,6 +847,18 @@ everything after this cheap to debug.*
   **The builder's own caveat, kept rather than rounded up: every published word is currently zero.** Nothing yet schedules the four components through the path that would write them. The tree is readable, its shape is the component's, and its numbers are not yet anybody's — which is exactly the state the design intends for a component that has not run, and is not yet evidence about a component that has.
   **The schema-3 collision, recorded here because this is the line that kept the number.** `E2-B05` and `E1-B15` were built in parallel worktrees, neither able to see the other, and both needed the manifest: both bumped `schema` 2 → 3 and both wrote an RFC 0065. Nothing warned them, because the only thing that would have is a number allocated somewhere both could read, and a worktree is by construction not that place. Neither declaration supersedes the other, so schema 3 carries `[[device]]` *and* `[[state]]` with both bounds and both doc paragraphs, and `Record::BYTES` is 2696 — neither worktree's number, because 2248 and 2680 were each computed without the other's fields. **The merge found that both writers had stamped their count at byte 101**: a silent corruption neither branch could have seen alone, and the reason this is a paragraph rather than a footnote. `devices` keeps 101, `state_nodes` takes 102, two of the record's three reserved bytes are spent and one is left, and `every_structural_lie_is_refused` now breaks byte 0 because that is the only reserved index there is. The doubled RFC number was fixed rather than preserved — 0065 stays with the state tree, which had twenty-seven citations against the driver entry's sixteen, and the driver entry became 0067; `docs/rfc/README.md` carries the reasoning, the rows and the lesson, which is that two parallel worktrees touching one numbered registry will both take the same number and the only defences are to allocate the number before the branch or to expect the merge to resolve it. **No line was added to `CLAUDE.md`'s *Common mistakes*, and the judgement is written down rather than left implicit:** that section's rule is *added when the same mistake happens twice*, and two agents making one mistake simultaneously — neither able to learn from the other — is one occurrence with two symptoms rather than two occurrences. A line saying *do not take a registry number in a worktree* would also not have prevented it: both agents did check the tree they could see. If it happens again, that is the second time and the line is earned.
   *exit:* partly met, three clauses of four, and the fourth was deliberately not faked. *Every component the supervisor starts publishes a tree of its own under RFC 0013's rules, mounted under one root*: met, with the caveat above — the shape is published and mounted for all five spawns, and every word in it is zero. *At least one scenario in the `E1-P02` sweep asserts its system response by reading a component's subtree rather than the serial log*: met, `fault.rs`'s `peergone`. *A component that publishes nothing is refused at spawn rather than tolerated*: met, in `admit`, and provoked on every boot rather than only in a test. **What is not met is the reversal clause.** `user/store/src/report.rs` still packs a tally through the door and RFC 0038 still reads a component's ring cursor out of the frame, because `kernel::runtime` builds a runtime's process a different way and does not map this page. Half of that reversal is paid — `user/store/manifest.toml` now names the four nodes `Tally`'s fields would become, and the frame writes that schema into the component's own address space at every spawn — so the debt is one mapping away rather than one design away, and both sentences that state it stand unchanged where they were written. Whoever closes this line pays that mapping; nothing else on it is owed.
+
+  **"One mapping away" was measured on 2026-09-09, and it is one mapping and a text page.** The mapping half is small and it works. `kernel::process` gains an `OWN_TREE` page after `WORK`; `prepare_runtime` allocates and maps it as a fifth part, which `PARTS_MAX` was written as a maximum precisely to make a one-constant change; and `kernel::runtime` publishes the manifest's schema into it through `component::publish_tree` — the same function the spawn path uses, answering the packed refusal rather than that module's error so it can have two callers — then reads the words back before `reap` takes the page. **Mapped rather than granted, and that is not a preference:** the four grants a runtime is given are load-bearing, because `door::Entry::granted` computes the nth handle from the first at the first's generation, and the comment on the fourth grant already records what a fifth cost the last time two shapes disagreed. A page in the map loop costs no grant, which is also how `SPAWN_TREE` arrives.
+  **What it runs into is the component's side, and the number is the finding.** A component may not write `unsafe`, so the store path has to live in `abi` as a `state::Writer` beside `Reader` — and every byte of it is compiled *into* the component, because a component links as one library and `f_abi`'s functions are `#[inline]` for exactly that reason. On this tree at this commit:
+  ```
+  store image as it stands                        3904 bytes
+  what the runtime shape maps for text            4096 bytes
+  slack                                            192 bytes
+  with a Writer that validates the schema         4632 bytes
+  with a header-only bind and one schema pass     4440 bytes
+  ```
+  So the write path costs about 536 bytes against 192 of headroom. Trimming it to fit means hard-coding the data offset in the component, which is the second copy of the arithmetic `abi/src/state.rs` exists to prevent, and leaves the next edit to `user/store` to break the boot with no slack left. The close this task actually needs is the one `xtask`'s own refusal names — *widening it means widening `kernel::process`'s own reservation in the same diff* — and that moves `GUARD` and everything derived from it, so the addresses `user/init` and `user/store` hold as constants move with it, and `prepare_runtime` needs a second text frame to copy an image across. That is a layout change with its own blast radius rather than a line in this one.
+  The attempt is not in the tree and was reverted deliberately: a `Writer` shaped by a 192-byte budget is the wrong API to leave behind for a frame that is about to stop having one. What is in the tree is this paragraph, so that the next person starts from the measurement rather than from the sentence above it, which is now withdrawn.
   *needs:* E0-B14, E1-B05
 
 ### Prove — this is the epoch where the testing environment becomes real
@@ -909,10 +926,10 @@ everything after this cheap to debug.*
 - [ ] **E1-P10** `M` Claims for the datapath: ring submit under load, doorbells per operation, copies per operation, kernel entries per operation.
   *exit:* four claims, gating, each with a tuned-Linux baseline where one exists.
   *needs:* E1-B09
-- [>] **E1-P11** `M` Cross-architecture CI: the AArch64 job builds and runs the same suite under emulation.
+- [x] **E1-P11** `M` Cross-architecture CI: the AArch64 job builds and runs the same suite under emulation.
   **The architecture list is derived from the workspace** (RFC 0045), which removes the failure this task existed to remove: `cargo xtask test` cross-compiled a hand-written list of crates, and a hand-written list stops matching the workspace silently — `xtask` already carried a comment recording that exact thing happening once, to `f-bench` and `f-init`. Every crate is now either built for AArch64 or excluded with its reason in the source, and a new crate is included by default.
   **Then the review found the gap the crate list leaves**, and it is the difference between the two halves of this exit: a crate can be on both runners with an architecture `cfg` on a test *inside* it, so the job stays green while one machine collects fewer tests — and a test count is not an assertion. `cargo xtask lint-arch-tests` reads the gate where it is written, including on a `mod` declaration and everything that file declares in turn, because `user/init/src/component.rs` carries no trace of the gate that excludes it.
-  *exit:* **half met, and the other half is not observable from here.** No test is skipped on AArch64 without a recorded reason, and that is now checked rather than reviewed. *Green* is a statement about a job that runs only on an arm runner; no such runner and no way to execute an AArch64 hosted binary exists on this machine or in the container, so nothing local can observe it. It is the same honest gap `CLAUDE.md` already records — the AArch64 job is where the ring's ordering means anything, and nothing local substitutes for it.
+  *exit:* **met, and what changed is where somebody looked rather than anything in the tree.** No test is skipped on AArch64 without a recorded reason, and that is now checked rather than reviewed. *Green* is a statement about a job that runs only on an arm runner; no such runner and no way to execute an AArch64 hosted binary exists on this machine or in the container, so nothing local can observe it. It is the same honest gap `CLAUDE.md` already records — the AArch64 job is where the ring's ordering means anything, and nothing local substitutes for it. **Every sentence above is still true, and not one of them was a verdict on this task** — *not observable from here* is not *not observed*, and the observation was one `gh run view` away for as long as the sentence stood unread. **Run 34370629685**, the merge of #31 into `main` on 2026-09-09, carries `tests (AArch64, weak memory)` and `memory-ordering litmus (AArch64, weak memory)`, both green, on `ubuntu-24.04-arm`. **The counts came out equal too**, which this task's own paragraph says a green job does not establish: 48 test binaries and 862 tests on x86-64, 48 and 862 on AArch64, in that run. `cargo xtask lint-arch-tests` is still what asserts it and the equality is only corroboration — but the failure that paragraph predicts, green on both runners while one collects fewer tests, is the one thing an equal count rules out, and it is ruled out. **The title keeps *under emulation* rather than being edited to match the runner.** RFC 0045 already resolved that phrase to the arm runner rather than to a local command, and `ci.yml` states the reason at the job: TCG serialises rather than reordering, so an emulated run would be green whatever the ordering said. Native silicon is the stronger check and not the equal one, so the word stays and this paragraph is what a reader comparing the two should find. `ARCH_RUN_GAP` is untouched and stays true: it is a statement about *this machine*, which has not changed, and closing this line on a runner is precisely what it was written to permit.
 - [>] **E1-P12** `M` Kani on the ring's validation paths: panic-freedom proved, not sampled.
   `E1-P07` proves the capability properties; the same tooling reaches the other structure a hostile peer feeds bytes to. `pop`, `take`, `Layout::adopt` and `execute` each promise that nothing a peer writes produces a panic, and today that promise rests on fuzzing that samples and a clippy wall that guards this crate's own code. A bounded proof over arbitrary header bytes, cursors and entries is cheap for code this small, and it is the difference between "no fuzzer found one" and "there is none".
   **The fixture is a region of bytes, not a struct of fields**, and `ring/src/mapping.rs` had already named that trap: a channel assembled from fields a harness owns can only ever be laid out correctly. So the proof hands 640 symbolic bytes to the real `adopt`, and the header, both cursor pairs, the flags word, the index ring, both entry arrays and the arena are then *the same bytes*. Cursors and index-ring slot numbers are unbounded. That is what makes the unchecked index a proof obligation rather than a fuzzing target.
@@ -1171,6 +1188,43 @@ accordingly and narrow early rather than late.*
 
 **Effort:** 4–10 person-years · **Risk:** high · **Ends at:** gate G3, release 0.4
 
+*Where the tree stands against this epoch, checked 2026-09-09.* Nothing in it
+is done and nothing in it is started, and until this paragraph every line below
+carried no `needs:` outside the epoch, so `cargo xtask todo E3` ranked thirteen
+of twenty tasks as ready to start — the same reading E2 corrected for itself on
+2026-09-06, and the tool's answer is only ever the graph's. What the graph now
+says. Gates G0, G1 and G2 are all unpassed, with eight, nine and ten tasks `[>]`
+behind them and releases 0.1, 0.2 and 0.3 unshipped; a release that precedes
+this one is on `E3-R01`'s line for the reason `E2-R01` gave. Every timing claim
+in the registry — fifteen of thirty — is `pending` because `runner-class-A`
+(`E0-D10`) is a name and not a machine and F has booted twice in a VM and never
+on metal (`E0-P18`), and gate G3 is a time: input to photon at p99, taken by a
+photodiode, under load. So every prove task in this epoch but one is a
+measurement on hardware nobody owns yet, and the one that is not (`E3-P05`)
+replaces a UI suite that does not exist. The frame is still moving:
+`cargo xtask lint-owed` reports five reversals fallen due and unpaid, four of
+them in the frame, and the ring and doorbell the scene graph would ride
+(`E0-B12`, `E0-B15`) and the tree a component owns that the degradation policy
+would write into (`E1-B15`) are `[>]`. Three intents filed from the E2 audit on
+2026-09-07 — `intent/0007` through `0009` — are drafts with no task behind
+them, and `0008`'s finding is that E2's storage story is argued rather than
+measured; opening a fourth epoch on top of that repeats what the audit named.
+What this epoch has to stand on: virtio-gpu in user space (`E1-B04`), which
+`intent/0005` says carries nothing until there is a compositor to put on it;
+the tuned-Linux baseline as configuration (`E1-D06`), which `E3-P07`'s
+compositor comparison reuses rather than re-argues; and `ring-scene-boot`
+parts II and III, which are the reasoning and are ahead of every line below by
+design. What can honestly start, because it needs no hardware and produces
+information: `E3-00`, whose deliverable is an `intent/` entry and not an edit
+to this file, because `docs/sdlc.md` puts an intent before a spec before a diff
+and E2 had `intent/0006`; and the four decisions, whose exits are paper — three
+interfaces expressed, a ladder written, a hostile theme refused. Ordering rule
+3 says a decision sits immediately before the work it protects, and none of
+that work can start, so the decisions are the epoch's whole available surface.
+`E3-P01` is deliberately not blocked on `E0-D10`: the rig is calibrated against
+a conventional machine on purpose, and blocking the instrument on the thing it
+will measure would be blocking a ruler on a wall.
+
 - [ ] **E3-00** `M` **Decompose this epoch before starting it.** Everything below is coarse on purpose; each task becomes five to fifteen tasks with exits when the epoch opens.
   *exit:* E3 contains no `XL` task without a decomposition.
 
@@ -1189,10 +1243,10 @@ accordingly and narrow early rather than late.*
 
 - [ ] **E3-B01** `XL` Retained scene graph for the whole machine; deltas in, no pixel buffers.
   *exit:* boundary crossings per UI frame under 10, counted rather than estimated.
-  *needs:* E3-00
+  *needs:* E3-00, E0-B12, E0-B15 (the ring and doorbell the deltas arrive over, both still `[>]`), E1-B05 (the compositor is a component, and the supervisor that spawns it still owes RFC 0008's restart policy to the frame)
 - [ ] **E3-B02** `XL` GPU compute path rasterisation over the chosen backend.
   *exit:* the CPU raster segment of the budget is zero, measured; the fallback ladder is exercised on hardware that cannot run the top rung.
-  *needs:* E3-D04
+  *needs:* E3-D04, E1-B04 (the backend it is chosen over — done, and named so the graph says which driver this rides)
 - [ ] **E3-B03** `XL` Text: shaping, bidirectional layout, and the parts of this that are always underestimated.
   *exit:* a corpus of scripts and directions renders correctly against reference images, in CI.
 - [ ] **E3-B04** `L` Input path: timestamped at the driver, predicted forward to the next scanout.
@@ -1200,11 +1254,13 @@ accordingly and narrow early rather than late.*
   *needs:* E3-P01
 - [ ] **E3-B05** `L` Explicit synchronisation throughout — timeline semaphores, never implicit driver waits.
   *exit:* no implicit wait appears in a frame trace; frame time is bounded rather than typical.
+  *needs:* E3-B01 (there is no frame trace without a compositor producing frames)
 - [ ] **E3-B06** `XL` The semantic layer and its projections: display, remote, screen reader, agent.
   *exit:* E3-P04 passes.
-  *needs:* E3-D01
+  *needs:* E3-D01, E3-B01 (the display projection emits scene deltas into part II's retained graph, which has to exist to receive them)
 - [ ] **E3-B07** `L` Degradation policy: miss quality rather than the frame, and record which was chosen.
   *exit:* under 2x overload the frame rate holds and the quality reduction is visible in the state tree, per frame.
+  *needs:* E3-B01, E1-B15 (the tree the choice is recorded in is the one each component owns, and that is still `[>]`)
 
 ### Prove
 
@@ -1212,24 +1268,28 @@ accordingly and narrow early rather than late.*
   *exit:* the rig reproduces a known measurement on a conventional machine within its own error bar — the instrument is calibrated before it is trusted.
 - [ ] **E3-P02** `M` The latency claim: input to photon, p99 under 14 ms, on the rig, under load.
   *exit:* recorded as gating, with the load stated and any firmware-jitter observation reported beside it.
-  *needs:* E3-P01
+  *needs:* E3-P01, E3-B01 (something between the input and the photon to measure), E0-D10, E0-P18 (a time gates on `runner-class-A` with F on it, and every timing claim in the registry is `pending` until both exist)
 - [ ] **E3-P03** `M` The parity claim: a derived scene graph costs no more than an authored one.
   *exit:* published either way. A negative result invalidates the pillar and is reported as such rather than re-scoped.
-  *needs:* E3-B06
+  *needs:* E3-B06, E0-D10, E0-P18 ("within noise" is a time on a named machine, and TCG's noise is the emulator's)
 - [ ] **E3-P04** `M` Four projections from one application with no projection-specific application code.
   *exit:* local display, a remote client at different density and refresh rate, a screen reader, and an agent driving declared intents — all from one unmodified application.
   *needs:* E3-B06
 - [ ] **E3-P05** `M` Semantic-tree assertions replace screenshot diffing across the whole UI suite.
   *exit:* no test in the tree compares images; node identity survives a deliberate visual redesign.
+  *needs:* E3-B06 (node identity is the semantic layer's; there is no UI suite to convert until there is a UI)
 - [ ] **E3-P06** `M` Frame-drop behaviour under adversarial load, with the degradation choice recorded per frame.
   *exit:* a sweep of load profiles produces no missed frame, only recorded quality reductions.
+  *needs:* E3-B07 (the sweep asserts the policy's recorded choice, so the policy and its record come first)
 - [ ] **E3-P07** `M` Energy per frame, external meter rather than a model.
   *exit:* joules per frame against a tuned Linux compositor, same hardware, same content.
+  *needs:* E3-B01, E0-D10 (same hardware means the named machine), E1-D06 (the tuned compositor is a baseline, and a baseline is configuration in the tree or it is prose that decays)
 
 ### Release
 
 - [ ] **E3-R01** `S` **Release 0.4.** The latency claim, the four-projection demonstration, and the parity result whichever way it lands.
   *exit:* the rig's method is documented well enough for a third party to build one.
+  *needs:* E3-P02, E3-P03, E3-P04 (its own three contents, named so this line stops ranking as ready before the epoch has a task done, which is the reading `E2-R01` corrected), E2-R01 (release 0.4 follows 0.3)
 
 > ### Gate G3
 > Input to photon under 14 ms at p99, measured by photodiode under load, and one
