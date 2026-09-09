@@ -118,6 +118,33 @@ env:
     0x510e527fade682d1
     0x1f83d9abfb41bd6b
 
+# Every `run:` below is bash, said once here rather than six times downstream.
+#
+# A step in a `container:` job gets `/bin/sh`, and this image's `/bin/sh` is
+# dash. `set -o pipefail` is bash and not POSIX, so dash exits 2 on line 1 —
+# before the command underneath it runs at all. Six of the nine jobs that run
+# in the container open with that line, and all six have therefore failed every
+# night since this file was written: five scheduled runs, five red crosses, and
+# not one green night ever. What each of them reported was `No files were found
+# with the provided path` from the artifact step, because the report the step
+# would have written is downstream of the line that refused — so the visible
+# failure named the artifact and not the shell.
+#
+# The cost landed exactly where this file's header says it would. `sweep` is
+# the job that opens the issue, and `sweep` was one of the six: the one part of
+# the apparatus built to reach a person was itself broken, so five nights of
+# red produced no issue, no artifact and no reader. A nightly that fails
+# silently for a month was the failure this file was written to prevent, and it
+# is the failure this file had.
+#
+# Named here rather than on six steps, because the seventh occurrence is
+# otherwise somebody writing `set -o pipefail` into a new job in six months and
+# finding out the same way. A step that genuinely wants POSIX `sh` says so on
+# itself; none does today.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # The environment, computed and built exactly as ci.yml does it. Duplicated
   # rather than shared, and the duplication is deliberate: a nightly that
@@ -232,8 +259,19 @@ jobs:
     needs: [environment, image, harness]
     runs-on: ubuntu-latest
     container: ${{ needs.environment.outputs.image }}
+    # A job that names `permissions:` *replaces* the default set rather than
+    # adding to it. Naming `issues: write` for the step at the bottom therefore
+    # dropped `packages: read`, which is what pulls the image named two lines
+    # above — so this job, alone among the nine, failed at `Initialize
+    # containers` with `Error response from daemon: denied`, before any step of
+    # its own ran. That is why the sweep's own report and corpus artifacts were
+    # missing rather than empty, and why the `open an issue for it` step below
+    # never fired on five consecutive red nights: `if: failure()` cannot run in
+    # a container that does not exist. The other eight container jobs name no
+    # permissions, inherit `packages: read`, and pull the same tag fine.
     permissions:
       contents: read
+      packages: read
       issues: write
     steps:
       - uses: actions/checkout@v7
