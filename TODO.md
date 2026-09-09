@@ -1171,6 +1171,43 @@ accordingly and narrow early rather than late.*
 
 **Effort:** 4–10 person-years · **Risk:** high · **Ends at:** gate G3, release 0.4
 
+*Where the tree stands against this epoch, checked 2026-09-09.* Nothing in it
+is done and nothing in it is started, and until this paragraph every line below
+carried no `needs:` outside the epoch, so `cargo xtask todo E3` ranked thirteen
+of twenty tasks as ready to start — the same reading E2 corrected for itself on
+2026-09-06, and the tool's answer is only ever the graph's. What the graph now
+says. Gates G0, G1 and G2 are all unpassed, with eight, nine and ten tasks `[>]`
+behind them and releases 0.1, 0.2 and 0.3 unshipped; a release that precedes
+this one is on `E3-R01`'s line for the reason `E2-R01` gave. Every timing claim
+in the registry — fifteen of thirty — is `pending` because `runner-class-A`
+(`E0-D10`) is a name and not a machine and F has booted twice in a VM and never
+on metal (`E0-P18`), and gate G3 is a time: input to photon at p99, taken by a
+photodiode, under load. So every prove task in this epoch but one is a
+measurement on hardware nobody owns yet, and the one that is not (`E3-P05`)
+replaces a UI suite that does not exist. The frame is still moving:
+`cargo xtask lint-owed` reports five reversals fallen due and unpaid, four of
+them in the frame, and the ring and doorbell the scene graph would ride
+(`E0-B12`, `E0-B15`) and the tree a component owns that the degradation policy
+would write into (`E1-B15`) are `[>]`. Three intents filed from the E2 audit on
+2026-09-07 — `intent/0007` through `0009` — are drafts with no task behind
+them, and `0008`'s finding is that E2's storage story is argued rather than
+measured; opening a fourth epoch on top of that repeats what the audit named.
+What this epoch has to stand on: virtio-gpu in user space (`E1-B04`), which
+`intent/0005` says carries nothing until there is a compositor to put on it;
+the tuned-Linux baseline as configuration (`E1-D06`), which `E3-P07`'s
+compositor comparison reuses rather than re-argues; and `ring-scene-boot`
+parts II and III, which are the reasoning and are ahead of every line below by
+design. What can honestly start, because it needs no hardware and produces
+information: `E3-00`, whose deliverable is an `intent/` entry and not an edit
+to this file, because `docs/sdlc.md` puts an intent before a spec before a diff
+and E2 had `intent/0006`; and the four decisions, whose exits are paper — three
+interfaces expressed, a ladder written, a hostile theme refused. Ordering rule
+3 says a decision sits immediately before the work it protects, and none of
+that work can start, so the decisions are the epoch's whole available surface.
+`E3-P01` is deliberately not blocked on `E0-D10`: the rig is calibrated against
+a conventional machine on purpose, and blocking the instrument on the thing it
+will measure would be blocking a ruler on a wall.
+
 - [ ] **E3-00** `M` **Decompose this epoch before starting it.** Everything below is coarse on purpose; each task becomes five to fifteen tasks with exits when the epoch opens.
   *exit:* E3 contains no `XL` task without a decomposition.
 
@@ -1189,10 +1226,10 @@ accordingly and narrow early rather than late.*
 
 - [ ] **E3-B01** `XL` Retained scene graph for the whole machine; deltas in, no pixel buffers.
   *exit:* boundary crossings per UI frame under 10, counted rather than estimated.
-  *needs:* E3-00
+  *needs:* E3-00, E0-B12, E0-B15 (the ring and doorbell the deltas arrive over, both still `[>]`), E1-B05 (the compositor is a component, and the supervisor that spawns it still owes RFC 0008's restart policy to the frame)
 - [ ] **E3-B02** `XL` GPU compute path rasterisation over the chosen backend.
   *exit:* the CPU raster segment of the budget is zero, measured; the fallback ladder is exercised on hardware that cannot run the top rung.
-  *needs:* E3-D04
+  *needs:* E3-D04, E1-B04 (the backend it is chosen over — done, and named so the graph says which driver this rides)
 - [ ] **E3-B03** `XL` Text: shaping, bidirectional layout, and the parts of this that are always underestimated.
   *exit:* a corpus of scripts and directions renders correctly against reference images, in CI.
 - [ ] **E3-B04** `L` Input path: timestamped at the driver, predicted forward to the next scanout.
@@ -1200,11 +1237,13 @@ accordingly and narrow early rather than late.*
   *needs:* E3-P01
 - [ ] **E3-B05** `L` Explicit synchronisation throughout — timeline semaphores, never implicit driver waits.
   *exit:* no implicit wait appears in a frame trace; frame time is bounded rather than typical.
+  *needs:* E3-B01 (there is no frame trace without a compositor producing frames)
 - [ ] **E3-B06** `XL` The semantic layer and its projections: display, remote, screen reader, agent.
   *exit:* E3-P04 passes.
-  *needs:* E3-D01
+  *needs:* E3-D01, E3-B01 (the display projection emits scene deltas into part II's retained graph, which has to exist to receive them)
 - [ ] **E3-B07** `L` Degradation policy: miss quality rather than the frame, and record which was chosen.
   *exit:* under 2x overload the frame rate holds and the quality reduction is visible in the state tree, per frame.
+  *needs:* E3-B01, E1-B15 (the tree the choice is recorded in is the one each component owns, and that is still `[>]`)
 
 ### Prove
 
@@ -1212,24 +1251,28 @@ accordingly and narrow early rather than late.*
   *exit:* the rig reproduces a known measurement on a conventional machine within its own error bar — the instrument is calibrated before it is trusted.
 - [ ] **E3-P02** `M` The latency claim: input to photon, p99 under 14 ms, on the rig, under load.
   *exit:* recorded as gating, with the load stated and any firmware-jitter observation reported beside it.
-  *needs:* E3-P01
+  *needs:* E3-P01, E3-B01 (something between the input and the photon to measure), E0-D10, E0-P18 (a time gates on `runner-class-A` with F on it, and every timing claim in the registry is `pending` until both exist)
 - [ ] **E3-P03** `M` The parity claim: a derived scene graph costs no more than an authored one.
   *exit:* published either way. A negative result invalidates the pillar and is reported as such rather than re-scoped.
-  *needs:* E3-B06
+  *needs:* E3-B06, E0-D10, E0-P18 ("within noise" is a time on a named machine, and TCG's noise is the emulator's)
 - [ ] **E3-P04** `M` Four projections from one application with no projection-specific application code.
   *exit:* local display, a remote client at different density and refresh rate, a screen reader, and an agent driving declared intents — all from one unmodified application.
   *needs:* E3-B06
 - [ ] **E3-P05** `M` Semantic-tree assertions replace screenshot diffing across the whole UI suite.
   *exit:* no test in the tree compares images; node identity survives a deliberate visual redesign.
+  *needs:* E3-B06 (node identity is the semantic layer's; there is no UI suite to convert until there is a UI)
 - [ ] **E3-P06** `M` Frame-drop behaviour under adversarial load, with the degradation choice recorded per frame.
   *exit:* a sweep of load profiles produces no missed frame, only recorded quality reductions.
+  *needs:* E3-B07 (the sweep asserts the policy's recorded choice, so the policy and its record come first)
 - [ ] **E3-P07** `M` Energy per frame, external meter rather than a model.
   *exit:* joules per frame against a tuned Linux compositor, same hardware, same content.
+  *needs:* E3-B01, E0-D10 (same hardware means the named machine), E1-D06 (the tuned compositor is a baseline, and a baseline is configuration in the tree or it is prose that decays)
 
 ### Release
 
 - [ ] **E3-R01** `S` **Release 0.4.** The latency claim, the four-projection demonstration, and the parity result whichever way it lands.
   *exit:* the rig's method is documented well enough for a third party to build one.
+  *needs:* E3-P02, E3-P03, E3-P04 (its own three contents, named so this line stops ranking as ready before the epoch has a task done, which is the reading `E2-R01` corrected), E2-R01 (release 0.4 follows 0.3)
 
 > ### Gate G3
 > Input to photon under 14 ms at p99, measured by photodiode under load, and one
