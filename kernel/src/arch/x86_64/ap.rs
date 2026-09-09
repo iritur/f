@@ -335,6 +335,36 @@ pub unsafe fn wake(apic: u64, tsc_khz: u64, cpu: usize, stack_top: u64) {
     spin_micros(tsc_khz, 200);
 }
 
+/// Put a core the boot processor has given up on back where it started.
+///
+/// An `INIT` with no startup interrupt after it. The destination resets and
+/// waits for a vector that is not coming, which is the state every core on this
+/// machine was in before [`wake`] was called on it.
+///
+/// # Why giving up needs an action at all
+///
+/// [`crate::smp::start`] declares a core absent when it has not answered inside
+/// its give-up bound, and then starts the *next* core — which rewrites the one
+/// stack pointer in the trampoline page. A core that was merely slow rather
+/// than absent would arrive after that write and run on its successor's stack,
+/// which is the two-cores-on-one-stack failure the serial bring-up exists to
+/// prevent. So a core that is given up on is not left alone; it is held, and
+/// the assumption "it is not going to arrive" becomes something this kernel
+/// enforces rather than something it hopes for. RFC 0068.
+///
+/// A destination that was never there ignores this, which is the ordinary case
+/// and the reason it costs one register write.
+///
+/// # Safety
+///
+/// `apic` must be this core's mapped register window, and `cpu` must be a core
+/// this kernel has not accepted as running — resetting a core that is executing
+/// kernel code loses whatever it was doing.
+pub unsafe fn hold(apic: u64, cpu: usize) {
+    // SAFETY: the caller's guarantee that `apic` is this core's window.
+    unsafe { icr(apic, (cpu as u32) << 24, INIT_ASSERT) };
+}
+
 /// Send an ordinary inter-processor interrupt to one core.
 ///
 /// # Safety

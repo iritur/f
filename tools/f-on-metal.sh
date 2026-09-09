@@ -324,6 +324,10 @@ cmd_check() {
         echo "                That is not a fault. docs/booting-on-hardware.md has the cost"
         echo "                curve and why the ceiling is $MAX_CPUS."
     fi
+    echo "                If the boot stops after the \`bring-up\` line, that stage is where"
+    echo "                it died and it cannot report from there. The menu this script"
+    echo "                writes carries an \`f.cores=1\` entry for exactly that: it skips"
+    echo "                the stage and gives you a whole log. RFC 0068."
 
     # -- artefacts -----------------------------------------------------------
     echo
@@ -625,7 +629,7 @@ cmd_install() {
     install -m 0644 "$kernel" "$DEST/f-kernel.elf32"
     install -m 0644 "$init"   "$DEST/init.bin"
     # One module line per component file, or nothing at all. Built as a single
-    # string so the two menu entries below cannot disagree about what is there.
+    # string so the three menu entries below cannot disagree about what is there.
     local module_component="" count=0 f base
     while IFS= read -r f; do
         [ -n "$f" ] || continue
@@ -669,6 +673,18 @@ menuentry "F — milestone M0 (serial ${BAUD} 8N1)" --class f {
     insmod multiboot
     search --no-floppy --file --set=root ${gp}/f-kernel.elf32
     multiboot ${gp}/f-kernel.elf32
+    module ${gp}/init.bin${module_component}
+}
+
+menuentry "F — milestone M0, one core (f.cores=1)" --class f {
+    echo "F: loading with f.cores=1. Output on COM1 at ${BAUD} 8N1."
+    insmod part_gpt
+    insmod part_msdos
+    insmod fat
+    insmod ext2
+    insmod multiboot
+    search --no-floppy --file --set=root ${gp}/f-kernel.elf32
+    multiboot ${gp}/f-kernel.elf32 f.cores=1
     module ${gp}/init.bin${module_component}
 }
 

@@ -168,11 +168,15 @@ pub enum StartError {
     Geometry(&'static str),
     /// The on-ramp page could not be mapped.
     OnRamp(paging::BuildError),
-    /// A core was sent the startup sequence and never reached kernel code.
-    NeverArrived(usize),
     /// A core reached kernel code and could not finish bringing itself up.
     /// What went wrong is on that core, and it could not print it.
     ArrivedBroken(usize),
+    /// A core answered in the window between being given up on and being held,
+    /// so this kernel has reset a core that was working. Refused rather than
+    /// carried on past: the alternative is a core counted as running that is
+    /// sitting in wait-for-startup, which is a core a process would be handed
+    /// to and never come back from.
+    ArrivedHeld(usize),
 }
 
 impl StartError {
@@ -182,8 +186,8 @@ impl StartError {
         match self {
             Self::Geometry(why) => why,
             Self::OnRamp(inner) => inner.message(),
-            Self::NeverArrived(_) => "a core was started and never reached kernel code",
             Self::ArrivedBroken(_) => "a core reached kernel code and could not bring itself up",
+            Self::ArrivedHeld(_) => "a core answered after it had been given up on and reset",
         }
     }
 
@@ -191,7 +195,7 @@ impl StartError {
     #[must_use]
     pub const fn core(self) -> Option<usize> {
         match self {
-            Self::NeverArrived(cpu) | Self::ArrivedBroken(cpu) => Some(cpu),
+            Self::ArrivedBroken(cpu) | Self::ArrivedHeld(cpu) => Some(cpu),
             _ => None,
         }
     }
@@ -275,6 +279,16 @@ pub struct Started {
     /// which is what makes the kernel correct on it — but a boot log that said
     /// only "2 cores" on a sixteen-core machine would be hiding it.
     pub present: usize,
+    /// How many of those were started and did not answer, and are now held.
+    ///
+    /// A separate number from the difference between the two above, because the
+    /// two absences have different causes and only one of them is this kernel's
+    /// choice. `present - cores` past [`MAX_CPUS`] is a ceiling this kernel set;
+    /// this is the machine disagreeing with itself — a processor that reported
+    /// more logical processors than answered a startup interrupt. The first is a
+    /// limitation, the second is a thing worth reading a log over, and a single
+    /// count would have made them the same sentence. RFC 0068.
+    pub held: usize,
 }
 
 /// Bring up every core this machine has, and leave each of them waiting.
@@ -286,11 +300,40 @@ pub struct Started {
 ///
 /// Returns how many cores are running, including this one.
 ///
+/// # A core that does not answer is not an error, and used to be
+///
+/// This function used to refuse the boot over any core that was started and did
+/// not arrive, on the argument that a kernel which cannot start the cores it can
+/// see has misread the machine and would next hand a process to a core that is
+/// not there. The second half of that is not true and never was:
+/// [`first_worker`] chooses among cores whose mailbox says [`READY`], and a core
+/// that never arrived never wrote one. So the refusal protected nothing, and it
+/// cost the only thing it could — every machine whose processor reports more
+/// logical processors than answer. That is not a rare shape. It is what
+/// [`logical_processors`]'s own fallback describes, it is a hypervisor rounding
+/// a topology up, and it is any machine whose apic ids are not dense.
+///
+/// So an absent core is now held, counted, and stepped over, and the boot log
+/// says how many. RFC 0068, which also carries what would reverse it.
+///
 /// # Errors
 ///
-/// [`StartError`]. Fatal: a kernel that cannot start the cores it can see is
-/// running on a machine it has misread, and the next thing it would do is hand
-/// a process to a core that is not there.
+/// [`StartError`]. The two variants that name a core are now both about a core
+/// that *did* answer: one that reached kernel code and could not bring itself
+/// up, and one that answered in the window between being given up on and being
+/// reset. A machine that produces either is a machine this kernel has misread,
+/// which is the case the refusal was always for.
+///
+/// # The ceiling, and what it is for
+///
+/// `ceiling` is how many cores this boot may use at most, and every ordinary
+/// boot passes [`MAX_CPUS`], which changes nothing. It exists because bring-up
+/// is the stage a machine dies in without being able to say so, and a machine
+/// that dies there is a machine with no way to get a log at all — so the boot
+/// line can say `f.cores=1` and skip the stage entirely. That is a lever for the
+/// person holding a serial cable, not a tuning knob: a boot that took it says so
+/// in the log, and the cores it did not start are not counted as absent, because
+/// nothing asked them anything.
 ///
 /// # Safety
 ///
@@ -301,6 +344,7 @@ pub unsafe fn start(
     frames: &mut crate::mem::FrameAllocator,
     space: &AddressSpace,
     clocks: Clocks,
+    ceiling: usize,
 ) -> Result<Started, StartError> {
     ap::self_test().map_err(StartError::Geometry)?;
 
@@ -316,9 +360,9 @@ pub unsafe fn start(
     // as a shard index, so a core past the end has nowhere to keep its state and
     // starting it would panic in `PerCpu::at`. The number is carried out of here
     // so the boot log can say what was left.
-    let count = present.min(MAX_CPUS);
+    let count = present.min(MAX_CPUS).min(ceiling.max(1));
     if count <= 1 {
-        return Ok(Started { cores: 1, present });
+        return Ok(Started { cores: 1, present, held: 0 });
     }
 
     // SAFETY: the caller's guarantee that the space is active and `frames` is
@@ -331,7 +375,34 @@ pub unsafe fn start(
     unsafe { ap::install(space.root(), arrive as *const () as u64) };
 
     let window = apic::window();
+    let mut held = 0;
+    let me = current_cpu();
     for cpu in 1..count {
+        // The boot processor is not always apic id zero. Firmware chooses which
+        // core comes out of reset running, and nothing in the architecture says
+        // it has to be the first one — so a loop that starts at 1 because the
+        // boot processor is 0 is a loop that will one day send an `INIT` to the
+        // core it is running on, and a core that resets itself between two
+        // instructions takes the machine down with nothing in the log. It has
+        // not happened here: every machine this kernel has booted on reported
+        // zero, which is exactly why the assumption survived this long. RFC
+        // 0068 is about the same thing one level up — bring-up assuming a dense
+        // topology numbered from zero — and this is the half of it that costs a
+        // comparison.
+        //
+        // What this does *not* do is start apic id 0 on such a machine: the
+        // stack blocks are indexed by apic id and `ap::block` gives index zero
+        // none, because the boot processor's pair is the linker script's other
+        // one. So a machine whose firmware started a core other than zero boots
+        // on one fewer core than it has, and says so by arithmetic rather than
+        // by a sentence — `bring-up` reports what the processor claimed, `cores`
+        // reports what started, and nothing is held to account for the
+        // difference. Fixing it properly means the trampoline computing its own
+        // stack from its apic id, which is the same change RFC 0068's reversal
+        // section already names and is not owed until a machine asks for it.
+        if cpu == me {
+            continue;
+        }
         let Some(stack_top) = ap::stack_top(cpu) else {
             // Unreachable: `count` is clamped to `MAX_CPUS` above and
             // `self_test` has already checked that the linker reserved a block
@@ -357,7 +428,21 @@ pub unsafe fn start(
         match wait_for(cpu, clocks.tsc_khz, ARRIVAL_MICROS) {
             READY => {}
             FAILED => return Err(StartError::ArrivedBroken(cpu)),
-            _ => return Err(StartError::NeverArrived(cpu)),
+            // Nothing answered, so there is nothing there — the count this
+            // loop runs to is an upper bound on the machine's apic ids and not
+            // a census of them, and RFC 0068 is why that is now survivable.
+            _ => {
+                // SAFETY: `window` is this core's mapped register window, and
+                // the destination has not been accepted as running — the
+                // mailbox check below is what makes that true rather than
+                // likely, and it is why the hold comes first: a core reset
+                // between the two reads is one this kernel refuses to count.
+                unsafe { ap::hold(window, cpu) };
+                if peek(cpu) != NOT_STARTED {
+                    return Err(StartError::ArrivedHeld(cpu));
+                }
+                held += 1;
+            }
         }
     }
 
@@ -378,7 +463,7 @@ pub unsafe fn start(
     // enabled — `arrive` turns them on before it reports ready.
     let _ = unsafe { shootdown(ramp.page()) };
 
-    Ok(Started { cores: started(), present })
+    Ok(Started { cores: started(), present, held })
 }
 
 /// Where a started core arrives.

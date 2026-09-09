@@ -36,6 +36,7 @@ row per entry that needs one, and an entry that needs none does not get a row.
 | 0065 | `E1-B15` | A component declares its state tree, and a spawn refuses one that does not | accepted |
 | 0066 | `E2-B05` | The assembler lands above the frame with no caller, rather than inside it with one | accepted |
 | 0067 | `E2-B05` | A driver declares the part it binds, and the topology never inherits a scan order | accepted; written as 0065 in its own worktree and renumbered here at the merge |
+| 0068 | `E0-P18` | A core that does not answer is held, and not fatal | accepted |
 
 **0012 is why this directory runs 0011, 0013.** `TODO.md` reserved the number
 for the generation swap when the E2 line was written, and then E0 and E1 wrote

@@ -508,12 +508,58 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // log is a fixture, so a started core records what it found in its own
     // shards and this is where the count is said.
     //
+    // Said before the cores are touched, and that ordering is the whole reason
+    // this line exists. Bring-up is the one stage of this boot that can end the
+    // machine without being able to report anything: an arriving core has no
+    // serial port of its own, and until it has installed a descriptor table a
+    // fault on it is a triple fault and a silent reset. So the last line a
+    // broken bring-up leaves in the log used to be `env contract`, and the two
+    // numbers a reader would then want — what the processor claimed, and how
+    // many of those this kernel was about to poke — were nowhere. Now they are
+    // ahead of the stage rather than after it. RFC 0068, and
+    // `docs/booting-on-hardware.md` is where a reader with a dead machine and a
+    // serial log is sent.
+    //
+    // `f.cores=<n>` caps it, and is the other half of the same argument. A
+    // machine that dies in bring-up is a machine that cannot produce a log at
+    // all, and a person standing in front of one with a serial cable has no way
+    // to ask this kernel for anything — so there is one boot parameter that
+    // skips the stage. `f.cores=1` boots the machine on the core the firmware
+    // started and touches no other, which is a whole log instead of none.
+    //
+    // It is read with `parameter_u32`, the same mechanism `timer=` uses, and it
+    // is deliberately *not* part of `f_abi::boot`'s grammar. That grammar exists
+    // because a generation's root hash is written by one tool and read by
+    // another and must not be spelled twice; this is a frame option nothing else
+    // writes, and putting it there would make the on-disk format's definition
+    // the place people go to add debug switches.
+    let ceiling = boot
+        .parameter_u32(b"f.cores=")
+        .map_or(percpu::MAX_CPUS, |asked| (asked as usize).clamp(1, percpu::MAX_CPUS));
+    let reported = smp::logical_processors();
+    kprintln!(
+        "  bring-up      {reported} logical processor(s) reported, {} to start beside this one",
+        reported.min(percpu::MAX_CPUS).min(ceiling) - 1
+    );
+    // Only when it is doing something. A line on every boot saying the ceiling
+    // is the ceiling is a line nobody reads, and this one has to be read.
+    if ceiling < percpu::MAX_CPUS {
+        kprintln!(
+            "  note          f.cores={ceiling} on the command line — no more will be started"
+        );
+    }
+
     // SAFETY: the boot processor, once, with the kernel's address space active,
     // `frames` rebound onto its direct map, after `apic::init` and
     // `apic::calibrate` on this core, and with interrupts disabled.
-    match unsafe { smp::start(&mut frames, &space, clocks) } {
+    match unsafe { smp::start(&mut frames, &space, clocks, ceiling) } {
         Ok(found) => {
-            if found.cores == 1 {
+            // The one-core sentence is about a *machine* with one core, so it
+            // is conditioned on the machine and not on the count this boot
+            // reached. A boot capped by `f.cores=1` on an eight-core machine
+            // reaching "this machine has no other" would be the log stating
+            // something false about the hardware, which is worse than terse.
+            if found.cores == 1 && found.present <= 1 {
                 kprintln!("  cores         1 — this machine has no other, and nothing waits");
             } else {
                 kprintln!(
@@ -526,11 +572,21 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             // this kernel shards for runs correctly on the ones it started and
             // leaves the rest asleep, and a log that reported only the number
             // started would be hiding which of those two it was.
-            if found.present > found.cores {
+            //
+            // Two sentences and not one, because there are two ways to be
+            // asleep and only one of them is this kernel's decision. `Started`
+            // says why they are counted apart.
+            let past = found.present.saturating_sub(percpu::MAX_CPUS);
+            if past > 0 {
                 kprintln!(
-                    "  note          the processor reports {} — {} left asleep, past MAX_CPUS",
+                    "  note          the processor reports {} — {past} left asleep, past MAX_CPUS",
                     found.present,
-                    found.present - found.cores
+                );
+            }
+            if found.held > 0 {
+                kprintln!(
+                    "  note          {} core(s) the processor reported did not answer and are held",
+                    found.held,
                 );
             }
         }
