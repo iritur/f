@@ -44,6 +44,21 @@ and then falls into a halt loop. `exit_qemu` says so at the call site.
 after printing `M0 ok`.** There is no reboot and no exit code. The exit code is
 an emulator convenience, and on hardware the serial log is the whole result.
 
+### When the log stops in the middle, read the last line before it
+
+Every failure this kernel *can* report is a `FAIL:` line and then a halt, so a
+log that simply stops is a fault the machine could not report. There is exactly
+one stage where that is expected rather than surprising, and it is bring-up: an
+arriving core has no serial port of its own, and until it has installed a
+descriptor table a fault on it is a triple fault and a silent reset. A hypervisor
+will usually say so in its own words — VMware calls it *a virtual CPU has entered
+the shutdown state*.
+
+So a log whose last line is `bring-up` died starting the other cores, and the
+two numbers on that line are what to send with the report. A log whose last line
+is `env contract` is from a kernel built before 2026-09-09, which printed nothing
+at all before that stage; see `E0-P18` and RFC 0068.
+
 ## The two files, and the optional rest
 
 ```
@@ -297,6 +312,25 @@ is what `E0-P06` needs on `runner-class-A`, and the reason this page exists at
 all. `fault=pf|ud|df|nx|wx|stack` provokes a deliberate fault. Both are read by
 `kernel/src/main.rs` from the same `BootInfo`.
 
+### `f.cores=<n>` — when the machine dies during bring-up
+
+```
+multiboot /boot/f/f-kernel.elf32 f.cores=1
+```
+
+Caps how many cores this boot uses, clamped to `MAX_CPUS`. **This is a lever for
+somebody holding a serial cable, not a tuning knob.** Bring-up is the one stage
+that can take a machine down with nothing left in the log, and a machine that
+dies there produces no log at all — so `f.cores=1` skips the stage and boots on
+the core the firmware started, which is a whole log instead of none. Everything
+after bring-up runs; what you lose is the second core, so the process that would
+have run on one runs on this one and the log says so.
+
+A boot that took the cap says so on a `note` line, and the cores it did not start
+are **not** counted as absent, because nothing asked them anything. `cargo xtask
+cores` boots it on every run of `verify`, so it is a parameter that is exercised
+rather than one that used to work.
+
 ### Telling the machine what it is
 
 Two more, and they travel together. RFC 0012 makes the generation root the
@@ -412,13 +446,45 @@ which is what you will see on any machine worth measuring on. On a 64-thread
 part:
 
 ```
+  bring-up      64 logical processor(s) reported, 7 to start beside this one
   cores         8 of 8 shards, each with its own tables and stacks
   note          the processor reports 64 — 56 left asleep, past MAX_CPUS
 ```
 
 **That `note` is correct behaviour, not a fault.** It appears only when
-`present > cores`, because a log that reported just the number started would be
-hiding which of the two it was.
+`present > MAX_CPUS`, because a log that reported just the number started would
+be hiding which of the two it was.
+
+The `bring-up` line above it is the census, and it is printed **before** the
+cores are touched rather than after. Bring-up is the one stage of this boot that
+can take the machine down with nothing left in the log — an arriving core has no
+serial port of its own, and until it has installed a descriptor table a fault on
+it is a triple fault and a silent reset — so the two numbers a reader with a dead
+machine wants are ahead of the stage rather than behind it. RFC 0068.
+
+### A second `note`: cores that were reported and did not answer
+
+```
+  bring-up      8 logical processor(s) reported, 7 to start beside this one
+  cores         2 of 8 shards, each with its own tables and stacks
+  note          6 core(s) the processor reported did not answer and are held
+```
+
+This is a machine disagreeing with itself: the processor reported eight logical
+processors and six of them did not respond to a startup interrupt. Each of those
+is reset — an `INIT` with no startup interrupt behind it, so it is held rather
+than merely assumed absent — counted, and stepped over.
+
+**This is also correct behaviour**, and it is worth reading the log over anyway,
+because it is the machine telling you its topology enumeration is a bound rather
+than a census. A hypervisor rounding a core count up to a power of two produces
+it; so does any machine whose local-APIC ids are not dense. It is a separate
+`note` from the one above because only one of the two absences is a decision this
+kernel made.
+
+Until 2026-09-09 this shape did not boot at all — a core that did not arrive
+ended the boot — and the machine that found it is in `E0-P18`. `cargo xtask
+cores` is the regression, in `verify` and in CI.
 
 ### Why it is eight, and what raising it would cost
 

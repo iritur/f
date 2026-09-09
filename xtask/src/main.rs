@@ -577,6 +577,11 @@ fn main() -> ExitCode {
         // simulator can replace and what a boot can. RFC 0063.
         "swap" => swap_gate(),
         "mutate" => mutate(),
+        // E0-P18's third machine. A processor that reports more logical
+        // processors than answer a startup interrupt, which is what a
+        // hypervisor rounding a topology up produces and what this tree's own
+        // emulator never does. RFC 0068.
+        "cores" => cores(),
         // E2-B07. What this machine is running, whether two boots of one image
         // agree about it, and whether a modification to the frame moves it. RFC
         // 0012 is the decision and is explicit about what the answer does not
@@ -819,6 +824,11 @@ cargo xtask <command>
   mutate             Build the kernel with a deliberate defect, boot it, and
                      require the boot to go red — then require the same boot to
                      go green without it
+  cores              Three boots. A machine that reports eight logical
+                     processors and answers with two must still reach M0 ok,
+                     holding the six that are not there; the same machine with
+                     all eight present must start all eight and hold none; and
+                     `f.cores=1` on the boot line must start one of the eight
   attest             Five boots. What is this machine running, is the answer the
                      same twice, does a modification to the frame move it, does
                      the frame refuse to publish a root it cannot measure its way
@@ -5803,6 +5813,120 @@ const MUTATIONS: &[(&str, &str, &str, &str)] = &[(
     "the capability table subscripts a handle's index instead of checking it",
 )];
 
+/// Boot a machine that reports more logical processors than answer, and require
+/// it to reach `M0 ok` anyway.
+///
+/// # What this is a regression for
+///
+/// `kernel::smp::start` used to refuse the boot over any core it started that
+/// did not arrive. On this tree's own emulator that never happens — QEMU is told
+/// two cores and has two — so the refusal was never once exercised against a
+/// machine that disagrees with itself, and it took a VMware guest on a
+/// Threadripper host to run it: the boot stopped after `env contract` and the
+/// machine went down inside bring-up with nothing else in the log. RFC 0068 is
+/// the decision; this is the thing that would go red if it were reversed by
+/// accident.
+///
+/// `-smp cpus=2,maxcpus=8` is the whole provocation. QEMU sizes the guest's
+/// topology from `maxcpus` and populates `cpus` of it, so the processor reports
+/// eight logical processors and six of them are not there — which is the shape a
+/// hypervisor rounding a topology up produces, and the shape
+/// `smp::logical_processors`'s own fallback describes when it says the older
+/// answer is a power of two that may be more than the count.
+///
+/// # Why both halves
+///
+/// The provocation alone is satisfied by a kernel that starts no cores at all.
+/// The control is the same machine with the cores actually present: eight
+/// reported, eight started, and *no* held note — which is what makes the first
+/// boot's held count a measurement of absent cores rather than of a bring-up
+/// that has quietly stopped working.
+///
+/// # Errors
+///
+/// A boot that did not reach `M0 ok`, or reached it having found the wrong
+/// number of cores.
+fn cores() -> Result<(), String> {
+    // The core count is passed as this command's own machine options: a second
+    // `-smp` overrides the one `emulator` pins, so this needs no parameter of
+    // its own and the pinned `-smp 2` stays exactly where it is — every other
+    // boot in this tree is unaffected by the one command that exists to change
+    // it.
+    const HELD: &str =
+        "  note          6 core(s) the processor reported did not answer and are held";
+    for (what, smp, append, expected, held) in [
+        (
+            "eight reported, two there — the machine disagrees with itself",
+            "cpus=2,maxcpus=8",
+            None,
+            "  cores         2 of 8 shards",
+            Some(HELD),
+        ),
+        (
+            "eight reported, eight there — the control",
+            "8",
+            None,
+            "  cores         8 of 8 shards",
+            None,
+        ),
+        // The lever, and it is here rather than only in a document because a
+        // parameter nothing exercises is a parameter that has stopped working by
+        // the time somebody with a dead machine reaches for it. Eight cores are
+        // there and one is started, which also pins the sentence the log must
+        // *not* reach: `this machine has no other` is about the hardware.
+        (
+            "eight there, and the boot line says use one",
+            "8",
+            Some("f.cores=1"),
+            "  cores         1 of 8 shards",
+            None,
+        ),
+    ] {
+        println!("\n--- {what}");
+        let smp = ["-smp", smp];
+        let (ending, log) =
+            machine_devices(append, &[], Capture::Printed, BOOT_TIMEOUT, BOOT_MEMORY, &smp, &[])?;
+        match ending.code() {
+            Some(33) => {}
+            Some(other) => {
+                return Err(format!(
+                    "qemu exited {other}; expected 33.\n\n                     A machine that reports more logical processors than answer must still\n                     boot: the cores that answered have shards and the ones that did not\n                     are held. RFC 0068. The serial log is above."
+                ));
+            }
+            None => return Err(format!("the boot did not report an exit code: {ending}")),
+        }
+        if !log.contains(expected) {
+            return Err(format!(
+                "the boot reached `M0 ok` and found the wrong cores: the log does not\n                 contain `{expected}`.\n\n                 An exit code alone is satisfied by a kernel that started none of them."
+            ));
+        }
+        match held {
+            Some(note) if !log.contains(note) => {
+                return Err(format!(
+                    "the boot survived and did not say what it survived: the log does not\n                     contain `{note}`.\n\n                     A machine that steps over a core without reporting it is a machine\n                     whose log cannot be read afterwards, which is the failure this whole\n                     command is about."
+                ));
+            }
+            // The control, and it is the half that makes the other half mean
+            // something: eight are reported and eight are there, so a held core
+            // means bring-up is failing for a reason this command is not about
+            // — and it would mean the provocation's six above were counting
+            // that failure rather than the cores that are absent.
+            None if log.contains("did not answer and are held") => {
+                return Err("the control held a core, so bring-up is failing for a reason this\n                     command is not about — and the provocation's held count above is\n                     measuring that failure rather than the absent cores."
+                    .into());
+            }
+            _ => {}
+        }
+        println!("\n{what}: ok");
+    }
+
+    println!(
+        "\nall three boots reached M0 ok: a core that does not answer is held rather than\n\
+         fatal, and `f.cores=` skips the stage for somebody holding a serial cable"
+    );
+    Ok(())
+}
+
 /// Build the kernel with one defect in it, boot it, and require the boot to go
 /// red — then build it without and require the same boot to go green.
 ///
@@ -10643,6 +10767,12 @@ fn verify() -> Result<(), String> {
     // The half of the allocator the fixture is too small to reach. A second
     // boot rather than a bigger one, and `orders` says why.
     orders()?;
+    // The half of *bring-up* the fixture cannot reach, and for the same reason:
+    // every other boot in this loop is told two cores and has two, so the one
+    // machine shape this kernel has actually died on — a processor reporting
+    // more logical processors than answer — is not exercised anywhere above
+    // this line. Two boots, and the second is the control. RFC 0068.
+    cores()?;
     // Before `mutate`, and for the same reason `mutate` is in the loop at all.
     // Everything above this line establishes that the tree is green; these two
     // establish that a tree which was not would be *noticed*. This one covers
