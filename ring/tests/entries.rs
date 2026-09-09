@@ -1187,7 +1187,13 @@ impl Trial<'_> {
         let mut domains = Pinned::new();
         let mut table: Table<SLOTS> = Table::new();
         let mut issued = Issued::default();
-        let prepared = prepare(world, &mut table, &mut domains, &mut issued);
+        let staged = prepare(world, &mut table, &mut domains, &mut issued);
+        // Split rather than threaded as a pair: `stale_is_refused` and
+        // `lent_by` ask *which* set was prepared and never where it lives.
+        let (prepared, prepared_at) = match staged {
+            Some((set, at)) => (Some(set), Some(at)),
+            None => (None, None),
+        };
 
         // The ledger, on the state the world was put into. `World::Spent` is
         // where this bites: sixty-five thousand registrations of one slot, and
@@ -1336,7 +1342,7 @@ impl Trial<'_> {
                 match outcome {
                     Ok(reach) => {
                         self.reached.resolved += 1;
-                        self.reach_is_inside(prepared, name, &reach, sqe.len);
+                        self.reach_is_inside(prepared, prepared_at, name, &reach, sqe.len);
                     }
                     Err((packed, _)) => {
                         if let Some((domain, code)) = error::unpack(packed) {
@@ -1382,17 +1388,28 @@ impl Trial<'_> {
     }
 
     /// A reach a service answered is inside the set the client registered.
-    fn reach_is_inside(&mut self, prepared: Option<SetId>, name: Name, reach: &Reach, len: u32) {
+    ///
+    /// `at` is where the harness's own translation put that set, which is not
+    /// `DEVICE_BASE` in any world that registers more than one. See `prepare`.
+    fn reach_is_inside(
+        &mut self,
+        prepared: Option<SetId>,
+        at: Option<u64>,
+        name: Name,
+        reach: &Reach,
+        len: u32,
+    ) {
         // The virtual path answers the address the entry named, and the page
         // walk is what said it was reachable — there is no set for it to be
         // inside of, which is the concession RFC 0024 states rather than hides.
         let Name::Registered { set, index } = name else { return };
         let Some(prepared) = prepared else { return };
+        let Some(at) = at else { return };
         if set != prepared {
             return;
         }
         let stride = SET_LEN / BUFFERS;
-        let want = DEVICE_BASE + u64::from(index) * u64::from(stride);
+        let want = at + u64::from(index) * u64::from(stride);
         self.require(
             reach.address == want && reach.len == len && len <= stride && index < BUFFERS,
             "a resolved buffer is the one the entry named, inside its own set",
@@ -1629,25 +1646,46 @@ fn prepare(
     table: &mut Table<SLOTS>,
     domains: &mut Pinned,
     issued: &mut Issued,
-) -> Option<SetId> {
+) -> Option<(SetId, u64)> {
+    // The address as well as the id, and the pair is the point. `Pinned::map`
+    // hands out a fresh page per mapping — as any translation must, or two sets
+    // would alias — so in a world that registers more than one set the set this
+    // returns is *not* at `DEVICE_BASE`. `Reached::reach_is_inside` assumed it
+    // was, which made the oracle wrong in exactly one world and right in the
+    // other six.
+    //
+    // The nightly of 2026-09-09 found it at base `0x510e527fade682d1`, and the
+    // shape of the finding is worth keeping: the ring resolved `0x430a0`, which
+    // is correct — `World::Full` registers `SLOTS` sets, so the fourth is three
+    // pages above the base — and the oracle wanted `0x400a0`, which is the
+    // first. A wrong oracle reports a correct ring as a defect, which costs the
+    // reader the same afternoon a real finding does and spends it on nothing.
+    // RFC 0048.
     let register = |table: &mut Table<SLOTS>, domains: &mut Pinned, issued: &mut Issued| {
         let set = table.register(SET_CAP, SET_LEN, BUFFERS, domains).ok()?;
         issued.note_cheaply(set);
-        Some(set)
+        // What `Pinned::map` answered for this registration. It increments on
+        // every mapping and `Table::register` maps exactly once, so the address
+        // this set took is the one the counter has just moved past. Read from
+        // the harness's own translation rather than from the table, because an
+        // oracle that asks the code under test where it put something is not an
+        // oracle.
+        let at = DEVICE_BASE + (domains.mapped - 1) * 0x1000;
+        Some((set, at))
     };
 
     match world {
         World::Frame | World::Fresh | World::Svm => None,
         World::Live => register(table, domains, issued),
         World::Lent => {
-            let set = register(table, domains, issued)?;
+            let (set, at) = register(table, domains, issued)?;
             let _ = table.resolve(set, 0, 1);
-            Some(set)
+            Some((set, at))
         }
         World::Revoked => {
-            let set = register(table, domains, issued)?;
+            let (set, at) = register(table, domains, issued)?;
             let _ = table.unregister(set, domains);
-            Some(set)
+            Some((set, at))
         }
         World::Full => {
             let mut last = None;
@@ -1669,13 +1707,13 @@ fn prepare(
             // forever instead of reporting the defect it was written to find.
             let mut set = None;
             for _ in 0..u32::from(u16::MAX) + 4 {
-                let Some(fresh) = register(table, domains, issued) else { break };
+                let Some((fresh, at)) = register(table, domains, issued) else { break };
                 if fresh.index() != 0 {
                     // Slot zero is spent; put this one back and stop.
                     let _ = table.unregister(fresh, domains);
                     break;
                 }
-                set = Some(fresh);
+                set = Some((fresh, at));
                 let _ = table.unregister(fresh, domains);
                 if issued.repeat.is_some() {
                     break;
