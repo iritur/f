@@ -40,10 +40,10 @@ f-abi = { path = ".." }
 mutate-overlapping-grant = ["f-abi/mutate-overlapping-grant"]
 
 # Run the harnesses over a machine of up to sixty-four physical cores rather
-# than eight. See `proofs::CORES`: the small machine is what makes the walking
-# proofs finish, and a proof whose cost does not depend on the core count costs
-# the same either way — so those are run at both sizes and the reduction is not
-# load-bearing for them.
+# than eight. See `proofs::CORES`: the small machine is what makes the proofs
+# finish, and `xtask`'s `ABI_PROOF_HARNESSES` names the two that are run at
+# both sizes — the two whose sentences are about the walk — and what the other
+# two cost at the wide bound.
 wide-machine = []
 
 [lints.rust]

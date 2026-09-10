@@ -45,9 +45,12 @@
 //! * **The machine's size is bounded.** [`proofs::CORES`] caps the physical
 //!   core count at eight, because `Table::admit` walks the cores looking for a
 //!   free run and a bounded checker unrolls a loop rather than summarising it.
-//!   `wide-machine` is what stops that being an argument: the harnesses are
-//!   run again at sixty-four, which is [`f_abi::reserve::CORES_MAX`] and the
-//!   whole of what the bitmaps can name.
+//!   `wide-machine` is what stops that being an argument: the two harnesses
+//!   whose sentences are about the walk are run again at sixty-four, which is
+//!   [`f_abi::reserve::CORES_MAX`] and the whole of what the bitmaps can name.
+//!   The other two are not, and `xtask`'s `ABI_PROOF_HARNESSES` says what
+//!   that costs — two hours for one, the checker's memory for the other — and
+//!   why it concedes nothing about the walk.
 //! * **The history is bounded, and by construction.** A harness builds its
 //!   table by running real grants with symbolic demands — at most two of them
 //!   — and never writes a slot. Every state a proof holds for is a state the

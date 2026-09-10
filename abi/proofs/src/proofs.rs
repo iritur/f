@@ -55,10 +55,13 @@ use crate::kani;
 /// are stated inside.** `Table::admit` searches for the lowest free run of
 /// cores one step at a time, and `Grant::with_split` walks the run bit by bit;
 /// a bounded model checker unrolls both. At eight cores the unrolling is a
-/// formula the solver finishes in seconds; at sixty-four it is one it finishes
-/// eventually, which is what `wide-machine` is for — the same harnesses, run
-/// again at the full width, so that *the bound binds only the cost* is a check
-/// rather than an argument.
+/// formula the solver finishes in seconds; at sixty-four it is one the solver
+/// finishes in minutes for a harness that admits once or twice, in hours for
+/// one that admits four times, and not at all for the release round trip,
+/// which ran the checker out of memory. `wide-machine` reruns the two whose
+/// sentences are about the walk at the full width, so that *the bound binds
+/// only the cost* is a check rather than an argument for exactly the
+/// properties where the walk is the subject.
 ///
 /// What eight reaches, which is the reason it is eight and not four: a frame
 /// core, a cache domain of up to four that the frame's own domain makes
