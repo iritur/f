@@ -467,8 +467,9 @@ jobs:
       # over-reports is exercised by nothing else here — and that is the one
       # machine shape this kernel has been observed to die on, on a VMware guest
       # in September 2026. The control is the second boot the command runs, and
-      # the third exercises `f.cores=`, which is the lever a person with a dead
-      # machine and a serial cable reaches for. RFC 0068.
+      # the third and fourth exercise `f.cores=` and `f.bringup`, which are the
+      # two levers a person with a dead machine and a serial cable reaches for.
+      # RFC 0068, RFC 0070.
       - run: cargo xtask cores
       # The negative half, and the reason it is in the gate rather than in
       # somebody's habits: seven boots, each one a process deliberately doing

@@ -871,6 +871,31 @@ pub(crate) fn pack(defects: &[&str]) -> Result<Packed, String> {
 /// machine.
 const FRAGMENT: &str = "45_f_generations";
 
+/// The same generations as data, for a writer that knows the machine.
+///
+/// # Why a second output and not a second reader of the first
+///
+/// [`FRAGMENT`] hardcodes `/boot/f/`, and it has to: this command runs on a
+/// build host and cannot know where GRUB will see those files. On a machine
+/// whose `/boot` is its own partition GRUB's own path is `/f/`, so that fragment
+/// names a menu that boots nothing there — the same failure
+/// `docs/postmortem/0001` records `--install` already having shipped once, in a
+/// different disguise.
+///
+/// `tools/f-on-metal.sh` is the writer that *does* know: it resolves the path
+/// against the running machine and writes every other entry on it. What it
+/// cannot do is read a `.fcm`'s record tree in shell, which is where `f.frame=`
+/// comes from. So the two halves are split along that line and no further —
+/// this file carries the numbers and no layout, the script carries the layout
+/// and computes no numbers, and neither has a copy of the other's half.
+///
+/// One line per generation, tab separated, `root frame module bytes`. Written
+/// beside the fragment rather than instead of it: the fragment is still the
+/// answer for the manual procedure on an ordinary machine, and
+/// `docs/booting-on-hardware.md` says which is which.
+/// Unit: none — a filename.
+const MENU_DATA: &str = "generations.tsv";
+
 /// The most generations one `menuentry` can offer.
 ///
 /// `kernel::arch::x86_64::multiboot::MAX_MODULES` is eight and the entry
@@ -1008,6 +1033,16 @@ fn install(into: Option<&str>) -> Result<(), String> {
     let text = fragment(&modules);
     std::fs::write(&out, &text).map_err(|e| format!("writing {}: {e}", out.display()))?;
 
+    // The same set as data, argued at `MENU_DATA`. Written unconditionally and
+    // beside the fragment, because a file that appears only when somebody
+    // passed a flag is a file the script that needs it will one day not find.
+    let data = out.with_file_name(MENU_DATA);
+    let mut rows = String::new();
+    for (root, module) in &modules {
+        rows.push_str(&format!("{root}\t{}\t{root}.fcm\t{}\n", hex(&module.frame), module.size));
+    }
+    std::fs::write(&data, &rows).map_err(|e| format!("writing {}: {e}", data.display()))?;
+
     println!("generation --install\n");
     for (root, module) in &modules {
         println!(
@@ -1017,13 +1052,21 @@ fn install(into: Option<&str>) -> Result<(), String> {
         );
     }
     println!(
-        "\n  fragment   {}  ({} entries, {} bytes)\n\n  \
-         Copy it to /etc/grub.d/{FRAGMENT}, chmod 0755, and regenerate grub.cfg —\n  \
-         `docs/booting-on-hardware.md` is the whole procedure and \
-         `tools/f-on-metal.sh`\n  is what does it with the backups.",
+        "\n  fragment   {}  ({} entries, {} bytes)\n  \
+         data       {}  ({} row(s))\n\n  \
+         Two outputs, and which you want depends on where GRUB sees /boot. The\n  \
+         fragment names `/boot/f/` and is the manual answer on a machine whose\n  \
+         /boot is a directory: copy it to /etc/grub.d/{FRAGMENT}, chmod 0755, and\n  \
+         regenerate grub.cfg. Where /boot is its own partition that path is wrong\n  \
+         and the entries boot nothing, so there `tools/f-on-metal.sh install\n  \
+         --generations` is the answer: it reads the data file, resolves the path\n  \
+         against the running machine, and writes the entries itself with the\n  \
+         backups. `docs/booting-on-hardware.md` is the whole procedure.",
         crate::relative(&out),
         modules.len(),
-        text.len()
+        text.len(),
+        crate::relative(&data),
+        modules.len(),
     );
     Ok(())
 }

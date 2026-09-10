@@ -51,6 +51,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::arch::x86_64::apic::Clocks;
 use crate::arch::x86_64::paging::AddressSpace;
 use crate::arch::x86_64::{ap, apic, current_cpu, gdt, idt, paging, read_tsc, ring3};
+use crate::kprintln;
 use crate::percpu::{MAX_CPUS, PerCpu};
 
 /// What one core has been asked for, and what it has answered.
@@ -345,6 +346,7 @@ pub unsafe fn start(
     space: &AddressSpace,
     clocks: Clocks,
     ceiling: usize,
+    verbose: bool,
 ) -> Result<Started, StartError> {
     ap::self_test().map_err(StartError::Geometry)?;
 
@@ -425,7 +427,7 @@ pub unsafe fn start(
         // not been started.
         unsafe { ap::wake(window, clocks.tsc_khz, cpu, stack_top) };
 
-        match wait_for(cpu, clocks.tsc_khz, ARRIVAL_MICROS) {
+        match watch(cpu, clocks.tsc_khz, ARRIVAL_MICROS, verbose) {
             READY => {}
             FAILED => return Err(StartError::ArrivedBroken(cpu)),
             // Nothing answered, so there is nothing there — the count this
@@ -441,6 +443,18 @@ pub unsafe fn start(
                 if peek(cpu) != NOT_STARTED {
                     return Err(StartError::ArrivedHeld(cpu));
                 }
+                // Where it got to before it stopped. Printed after the fact, so
+                // it costs a healthy boot nothing — and it is the whole answer
+                // when a core simply was not there. It is *not* the answer when
+                // the core died taking the machine with it, which is what
+                // `f.bringup` and `watch` are for.
+                // SAFETY: the direct map is live and the core has been held, so
+                // nothing is writing the byte this reads.
+                let reached = unsafe { ap::stage() };
+                kprintln!(
+                    "  core {cpu}        did not answer; reached stage {reached}, {}",
+                    ap::stage_name(reached)
+                );
                 held += 1;
             }
         }
@@ -483,6 +497,10 @@ extern "C" fn arrive() -> ! {
         // Nothing can be recorded — this core has no slot to record it in.
         crate::arch::x86_64::halt_forever();
     }
+    // SAFETY: the direct map is live — this core is running in the kernel's
+    // address space — and this is the core being started, which is the whole of
+    // what `record` asks for. The same holds for the three calls below it.
+    unsafe { ap::record(ap::STAGE_ARRIVED) };
 
     // SAFETY: this core's slot, written by the boot processor before it started
     // this core, and published by the `Release` store it is waiting on.
@@ -494,6 +512,8 @@ extern "C" fn arrive() -> ! {
     unsafe { gdt::init() };
     // SAFETY: as above, and after the code selector its gates name exists.
     unsafe { idt::init() };
+    // SAFETY: as at `STAGE_ARRIVED`.
+    unsafe { ap::record(ap::STAGE_TABLES) };
 
     // SAFETY: once on this core, interrupts disabled, after `idt::init` on it,
     // and `handoff.apic` is the window the boot processor mapped — which is the
@@ -502,10 +522,14 @@ extern "C" fn arrive() -> ! {
         post(me, FAILED);
         crate::arch::x86_64::halt_forever();
     }
+    // SAFETY: as at `STAGE_ARRIVED`.
+    unsafe { ap::record(ap::STAGE_APIC) };
 
     // SAFETY: once on this core, after `gdt::init` on it, and before anything
     // enters ring 3 on it.
     unsafe { ring3::init() };
+    // SAFETY: as at `STAGE_ARRIVED`.
+    unsafe { ap::record(ap::STAGE_RING3) };
 
     // Last, and the ordering is the point: everything above has to have
     // happened before another core is allowed to believe it has. The `Release`
@@ -901,6 +925,48 @@ pub(crate) unsafe fn answer() {
     // SAFETY: this core, inside the handler for the interrupt being
     // acknowledged.
     unsafe { apic::end_of_interrupt() };
+}
+
+/// [`wait_for`], printing the arriving core's progress as it happens.
+///
+/// # Why printing *as it happens* is the whole point
+///
+/// A core that dies in the trampoline dies with no descriptor table and no
+/// handler, which is a triple fault; on a hypervisor that stops the virtual
+/// machine, this core included. So anything printed *afterwards* is never
+/// printed at all — the machine is gone — and the only report that survives is
+/// one already on the wire when the fault happens. That is what this does: it
+/// watches [`ap::stage`] while it waits and prints each new value as it
+/// appears, so the last line in the log is the last thing the dead core did.
+///
+/// Off unless `f.bringup` is on the command line, because a healthy boot would
+/// otherwise gain a dozen lines saying that a core did what every core does,
+/// and the boot log is a fixture. The give-up path prints the last stage either
+/// way.
+fn watch(cpu: usize, tsc_khz: u64, micros: u64, verbose: bool) -> u64 {
+    if !verbose {
+        return wait_for(cpu, tsc_khz, micros);
+    }
+    let deadline = read_tsc().saturating_add(tsc_khz.saturating_mul(micros) / 1_000);
+    let mut last = 0;
+    loop {
+        // SAFETY: the direct map is live — `start` runs with the kernel's
+        // address space active — and this reads the one byte the core being
+        // started writes.
+        let stage = unsafe { ap::stage() };
+        if stage != last {
+            last = stage;
+            kprintln!("  core {cpu}        stage {stage}, {}", ap::stage_name(stage));
+        }
+        let state = peek(cpu);
+        if state == READY || state == DONE || state == FAILED {
+            return state;
+        }
+        if read_tsc() > deadline {
+            return state;
+        }
+        core::hint::spin_loop();
+    }
 }
 
 /// Wait for a core's mailbox to say something other than what it says now.

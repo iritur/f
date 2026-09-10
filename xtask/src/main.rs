@@ -824,11 +824,12 @@ cargo xtask <command>
   mutate             Build the kernel with a deliberate defect, boot it, and
                      require the boot to go red — then require the same boot to
                      go green without it
-  cores              Three boots. A machine that reports eight logical
-                     processors and answers with two must still reach M0 ok,
-                     holding the six that are not there; the same machine with
-                     all eight present must start all eight and hold none; and
-                     `f.cores=1` on the boot line must start one of the eight
+  cores              Four boots. A machine that reports eight logical processors
+                     and answers with two must still reach M0 ok, holding the six
+                     that are not there and saying how far each got; the same
+                     machine with all eight present must start all eight and hold
+                     none; `f.cores=1` must start one of the eight; and
+                     `f.bringup` must trace the arriving cores and change nothing
   attest             Five boots. What is this machine running, is the answer the
                      same twice, does a modification to the frame move it, does
                      the frame refuse to publish a root it cannot measure its way
@@ -5854,6 +5855,12 @@ fn cores() -> Result<(), String> {
     // it.
     const HELD: &str =
         "  note          6 core(s) the processor reported did not answer and are held";
+    // What each of those six reached before it was given up on. Zero, because
+    // there is nothing there to reach anything — and that is why it is worth
+    // asserting: the same line on a machine where a core does start and then
+    // dies carries the stage it died at, and that is the only report such a
+    // failure has. RFC 0070.
+    const STAGE: &str = "did not answer; reached stage 0, nothing; it never executed";
     for (what, smp, append, expected, held) in [
         (
             "eight reported, two there — the machine disagrees with itself",
@@ -5881,6 +5888,22 @@ fn cores() -> Result<(), String> {
             "  cores         1 of 8 shards",
             None,
         ),
+        // The trace, and what it deliberately does not assert. *Which* stage a
+        // core is caught at is a race between the boot processor's poll and the
+        // core's own progress — the run that wrote this comment caught seven
+        // cores at five different stages — so requiring a particular one, or
+        // even requiring that any line appears at all, would be a test that
+        // fails on a fast machine for no reason. What is asserted is that the
+        // parameter parses, the watch loop runs and the boot still reaches the
+        // same eight cores; that the stage byte is *read and named* correctly is
+        // asserted deterministically by the first boot's give-up line. RFC 0070.
+        (
+            "eight there, traced stage by stage",
+            "8",
+            Some("f.bringup"),
+            "  cores         8 of 8 shards",
+            None,
+        ),
     ] {
         println!("\n--- {what}");
         let smp = ["-smp", smp];
@@ -5898,6 +5921,15 @@ fn cores() -> Result<(), String> {
         if !log.contains(expected) {
             return Err(format!(
                 "the boot reached `M0 ok` and found the wrong cores: the log does not\n                 contain `{expected}`.\n\n                 An exit code alone is satisfied by a kernel that started none of them."
+            ));
+        }
+        if held.is_some() && !log.contains(STAGE) {
+            return Err(format!(
+                "the boot held cores and did not say how far any of them got: the log\n  \
+                 does not contain `{STAGE}`.\n\n  \
+                 That line is the whole of what a core dying during bring-up can\n  \
+                 report, and a tree where it has stopped being printed is a tree whose\n  \
+                 next bring-up failure is undiagnosable."
             ));
         }
         match held {
@@ -5921,8 +5953,9 @@ fn cores() -> Result<(), String> {
     }
 
     println!(
-        "\nall three boots reached M0 ok: a core that does not answer is held rather than\n\
-         fatal, and `f.cores=` skips the stage for somebody holding a serial cable"
+        "\nall four boots reached M0 ok: a core that does not answer is held rather than\n\
+         fatal, `f.cores=` skips the stage and `f.bringup` traces it, and the stage a\n\
+         core that never answered reached is in the log either way"
     );
     Ok(())
 }

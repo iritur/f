@@ -9,7 +9,7 @@ assumed closed.
 | **L0** Determinism substrate | **Built** | `env/src/lib.rs`, `env/src/contract.rs`, `xtask lint-determinism`, and a boot that runs the contract against the seeded and the hardware `Env` on the same run — `kernel/src/env.rs`, `kernel/src/main.rs` |
 | **L1** Deterministic simulation | **Built, above the frame** | `sim/` — virtual time, seeded ordering, device models for blk, net and gpu on the real ring types, component substitution, snapshot and restore, and nineteen scenarios that must each reproduce from their seed and move when the seed moves (`xtask sim`). Seven fault classes, each asserting a response rather than printing one (`sim/src/fault.rs`, RFC 0039). Seed sweeps with automatic minimisation to a pasteable reproduction (`xtask sweep`, RFC 0040). **The scope is the thing to read, not the status:** RFC 0032 decided the simulator runs the *components* and not the frame's instructions, so it will never catch a bug inside the frame's own algorithms — the boot half is `xtask trace --hash`, and `xtask sim --join` requires the two halves to be about one component set. |
 | **L2** Concurrency and memory model | **Stress tests, and now bounded proof beside them** | `ring/tests/litmus.rs` plus an AArch64 CI job, unchanged. RustMC is still E0-P16 and still open, for the reason it always was. What is new is not a substitute for it: L3's proofs cover the ring's *validation* paths against arbitrary bytes, which is a different question from what the memory model permits. Two instruments, two questions. |
-| **L3** Proof | **Built, and narrow on purpose** | `kernel/proofs` and `ring/proofs`, run by `cargo xtask prove` — 27 Kani harnesses in about 46 minutes, on a nightly schedule. The five capability properties are proved over the file the kernel ships (compiled a second time through `#[path]` against three stand-ins, RFC 0053), with handles unbounded across all 2³² and rights across the whole 256×256 lattice; table contents are bounded *by construction*, because a harness never writes a slot — it runs the real operations with symbolic operands, so no proof holds for a state the table cannot reach. The ring's peer-facing paths are proved against a region of 640 symbolic bytes handed to the real `adopt`, rather than a struct of fields a harness owns, which `ring/src/mapping.rs` names as the trap (RFC 0057). **Six deliberate defects each fail the harness stating the property they break** — a proof that passes on a build with a known defect proves nothing. Verus on the frame is still phase 02. |
+| **L3** Proof | **Built, and narrow on purpose** | `kernel/proofs`, `ring/proofs` and `abi/proofs`, run by `cargo xtask prove` — 31 Kani harnesses, on a nightly schedule; the first 27 in about 46 minutes, the four newest not yet timed on the schedule. The five capability properties are proved over the file the kernel ships (compiled a second time through `#[path]` against three stand-ins, RFC 0053), with handles unbounded across all 2³² and rights across the whole 256×256 lattice; table contents are bounded *by construction*, because a harness never writes a slot — it runs the real operations with symbolic operands, so no proof holds for a state the table cannot reach. The ring's peer-facing paths are proved against a region of 640 symbolic bytes handed to the real `adopt`, rather than a struct of fields a harness owns, which `ring/src/mapping.rs` names as the trap (RFC 0057). The admission arithmetic RFC 0050 put in `abi/src/reserve.rs` is proved over every demand and every machine shape up to eight physical cores, then again at sixty-four — four sentences, one of which `mutate-overlapping-grant` has to break — because that RFC made it one implementation on purpose and one implementation has nothing independent to disagree with it. **Seven deliberate defects each fail the harness stating the property they break** — a proof that passes on a build with a known defect proves nothing. Verus on the frame is still phase 02. |
 | **L4** Fuzzing | **Built, with two committed corpora** | `xtask hostile` — a hostile peer generated from a seed, a billion operations in about 49 s with no panic, no memory unsafety and no hang, where a run is episodes derived by identity so a finding at operation 999 999 999 replays in a millisecond (RFC 0046). A hang is a *count*, never a wall-clock timeout. `xtask entries` — a structure-aware submission-entry generator with coverage feedback, 87.5 % structure-aware because an entry's first check is a zero word and random bytes fail it with probability 1 − 2⁻³² (RFC 0048). `ring/corpus.txt` and `sim/corpus.txt` are in the tree and in the release package. Miri covers the memory-unsafety property at a much smaller count, and both numbers are reported rather than one being quoted. |
 | **L5** Performance regression | **Harness only** | `bench/` records distributions with p50/p99/p99.9 and marks the counters it cannot read as absent. No change-point detection — that needs commit history to reason about, phase 02. |
 | **L6** Hardware in the loop | **Absent** | Photodiode rig at phase 03, when there is a compositor to measure. Correctly deferred. |
@@ -99,7 +99,18 @@ and it is the mechanism this page would otherwise have to describe in prose.
   fails closed and says so, which is R04 working rather than a defect, so
   nothing goes red — which is exactly why it belongs on this page. `E5-D03`
   owns it; `docs/second-boot-outside-qemu.md` has the reasoning and the three
-  candidate protocols.
+  candidate protocols, and the third boot reproduced it exactly.
+
+- **Selection and the declaration comparison have never run on hardware.** Three
+  boots outside QEMU, and every one of them printed `generation none selected, so
+  no root is published`: the entries `tools/f-on-metal.sh` wrote carried no
+  `f.root=`, so the frame measured itself and had nothing to compare against.
+  Under QEMU both tokens are on every command line, so RFC 0012's other half is
+  exercised constantly on an emulator and had been exercised nowhere else. Found
+  by the third boot and fixed in the same change — `f-on-metal.sh install
+  --generations` now writes entries that carry both — but **the fix is tested
+  under QEMU and staged, not booted**: no machine has yet started from an entry
+  carrying `f.root=`. `docs/third-boot-outside-qemu.md` is the record.
 
 - **The state tree publishes thirty-two nodes and nothing that varies with time.**
   Frame counts, cores, ring tallies, capability slots, and since E1 the
@@ -111,10 +122,13 @@ and it is the mechanism this page would otherwise have to describe in prose.
   is a decision with a reversal condition, not a gap: it lifts when the boot log
   stops being the reproduction artefact.
 - **This kernel has never run on bare metal.** It has run outside QEMU exactly
-  twice, both on VMware machines: 2026-09-01, recorded in
-  `docs/first-boot-outside-qemu.md`, and 2026-09-05 carrying all of E1, in
-  `docs/second-boot-outside-qemu.md`. The first says in its own opening that a
-  hypervisor is not the machine `E0-P18` is about, and the second says it again.
+  three times, all on VMware machines: 2026-09-01, recorded in
+  `docs/first-boot-outside-qemu.md`; 2026-09-05 carrying all of E1, in
+  `docs/second-boot-outside-qemu.md`; and 2026-09-09 carrying E2, in
+  `docs/third-boot-outside-qemu.md`. A fourth attempt the same day, on a
+  Threadripper host, did not reach `M0 ok` at all — it died inside core bring-up
+  and RFC 0068 is what came of it. Each record says in its own opening that a
+  hypervisor is not the machine `E0-P18` is about.
   Everything else this page
   reports is an assertion about an emulator: the APIC enumeration, the memory
   map, the UART, the application-processor startup, `M0 ok`, and now every

@@ -64,11 +64,18 @@ if [ -f "$REPO/kernel/Cargo.toml" ] && [ -f "$REPO/rust-toolchain.toml" ]; then
     # checkout that has not run one has an empty directory here and the entries
     # are generated with no module lines past `init.bin`.
     COMPONENT_DIR_DEFAULT="$REPO/target/component"
+    # Optional and off by default, because a generation is a statement about
+    # what this machine is and installing one is a decision rather than a step.
+    # `cargo xtask generation --install` writes both the modules and the
+    # `generations.tsv` this reads; see cmd_install for why the numbers come
+    # from there and the layout does not.
+    GENERATION_DIR_DEFAULT="$REPO/target/generation"
 else
     IN_REPO=0
     KERNEL_DEFAULT="./f-kernel.elf32"
     INIT_DEFAULT="./init.bin"
     COMPONENT_DIR_DEFAULT="."
+    GENERATION_DIR_DEFAULT="."
 fi
 
 # Every component file in a directory, sorted, newline separated.
@@ -103,6 +110,11 @@ component_files() {
 DESTDIR="${DESTDIR:-}"
 DEST="$DESTDIR/boot/f"
 GRUB_D="$DESTDIR/etc/grub.d/45_f"
+# A second file rather than more entries in the first, for the reason the first
+# is its own file: the generation entries come and go with `--generations` and
+# the plain M0 entries do not, so a run that installs without generations has to
+# be able to remove them without rewriting anything else.
+GRUB_D_GEN="$DESTDIR/etc/grub.d/45_f_generations"
 
 BAUD=38400          # kernel/src/arch/x86_64/serial.rs, divisor 3. Not 115200.
 MAX_CPUS=8          # kernel/src/percpu.rs, for the topology note below.
@@ -326,8 +338,9 @@ cmd_check() {
     fi
     echo "                If the boot stops after the \`bring-up\` line, that stage is where"
     echo "                it died and it cannot report from there. The menu this script"
-    echo "                writes carries an \`f.cores=1\` entry for exactly that: it skips"
-    echo "                the stage and gives you a whole log. RFC 0068."
+    echo "                writes carries two entries for exactly that: \`f.bringup\` traces"
+    echo "                the arriving core stage by stage as it happens, and \`f.cores=1\`"
+    echo "                skips the stage and gives you a whole log. RFC 0068, RFC 0070."
 
     # -- artefacts -----------------------------------------------------------
     echo
@@ -346,6 +359,33 @@ cmd_check() {
             warn=$((warn + 1))
         fi
     done
+
+    # Not a warning either way. A machine with no generation installed boots and
+    # reaches M0 ok; what it cannot do is say *which* generation it is, and the
+    # difference is worth naming here rather than being discovered by reading a
+    # log and wondering why one line says none.
+    if [ -s "$GENERATION_DIR_DEFAULT/generations.tsv" ]; then
+        local rows packed
+        rows=$(grep -c . "$GENERATION_DIR_DEFAULT/generations.tsv")
+        packed=$(find "$GENERATION_DIR_DEFAULT" -maxdepth 1 -name '*.fcm' -type f 2>/dev/null | wc -l)
+        echo "generations     $rows in generations.tsv, $packed packed in $GENERATION_DIR_DEFAULT"
+        echo "                pass --generations to install to carry them, and the boot"
+        echo "                will publish a root instead of 'none selected'"
+        # The two numbers are written by one command and read by another, so
+        # they drift exactly when somebody packs a generation and does not run
+        # `--install` again. The menu is built from the rows, so a bigger
+        # directory means a generation that exists and cannot be selected.
+        if [ "$rows" -ne "$packed" ]; then
+            ylw "                the two disagree: the menu is built from the rows, so $((packed - rows))"
+            ylw "                packed generation(s) would not be offered. Re-run"
+            ylw "                'cargo xtask generation --install' to rewrite the rows."
+        fi
+    else
+        echo "generations     none packed. The M0 entries name no generation, so the boot"
+        echo "                prints 'generation none selected, so no root is published':"
+        echo "                the frame measures itself and has nothing to compare against."
+        echo "                'cargo xtask generation' then '--install' is what packs one."
+    fi
 
     echo
     if [ "$fail" -gt 0 ]; then
@@ -590,11 +630,24 @@ cmd_install() {
 
     local kernel="$KERNEL_DEFAULT" init="$INIT_DEFAULT" serial=0
     local components="$COMPONENT_DIR_DEFAULT" want_components=0
+    local generations="" gen_dir="$GENERATION_DIR_DEFAULT"
     while [ $# -gt 0 ]; do
         case "$1" in
             --kernel)     kernel="$2"; shift 2 ;;
             --init)       init="$2";   shift 2 ;;
             --components) components="$2"; want_components=1; shift 2 ;;
+            # Opt-in, with an optional directory after it. Unlike a missing
+            # component directory, a missing generation is never a quietly
+            # smaller topology: an entry naming a root that no module on the
+            # same line carries is a boot-ending refusal, so this either
+            # finds everything it needs or writes no generation entry at all.
+            --generations)
+                generations=1
+                case "${2:-}" in
+                    ""|--*) ;;
+                    *) gen_dir="$2"; shift ;;
+                esac
+                shift ;;
             --serial)     serial=1;    shift ;;
             *) die "unknown option for install: $1" ;;
         esac
@@ -609,6 +662,14 @@ cmd_install() {
         [ -d "$components" ] || die "component directory not found: $components"
         [ -n "$(component_files "$components")" ] \
             || die "no *.fc component files in: $components"
+    fi
+    if [ -n "$generations" ]; then
+        [ -d "$gen_dir" ] || die "generation directory not found: $gen_dir"
+        [ -s "$gen_dir/generations.tsv" ] || die "no generations.tsv in: $gen_dir
+       'cargo xtask generation --install' is what writes it, beside the modules it
+       describes. This script does not read a .fcm itself: the frame hash a
+       menuentry has to carry comes out of the module's own record tree, and that
+       is a format rather than a filename."
     fi
 
     # Validate before touching the bootloader. An entry that points at the wrong
@@ -629,7 +690,7 @@ cmd_install() {
     install -m 0644 "$kernel" "$DEST/f-kernel.elf32"
     install -m 0644 "$init"   "$DEST/init.bin"
     # One module line per component file, or nothing at all. Built as a single
-    # string so the three menu entries below cannot disagree about what is there.
+    # string so the four menu entries below cannot disagree about what is there.
     local module_component="" count=0 f base
     while IFS= read -r f; do
         [ -n "$f" ] || continue
@@ -676,6 +737,18 @@ menuentry "F — milestone M0 (serial ${BAUD} 8N1)" --class f {
     module ${gp}/init.bin${module_component}
 }
 
+menuentry "F — milestone M0, bring-up traced (f.bringup)" --class f {
+    echo "F: loading with f.bringup. Output on COM1 at ${BAUD} 8N1."
+    insmod part_gpt
+    insmod part_msdos
+    insmod fat
+    insmod ext2
+    insmod multiboot
+    search --no-floppy --file --set=root ${gp}/f-kernel.elf32
+    multiboot ${gp}/f-kernel.elf32 f.bringup
+    module ${gp}/init.bin${module_component}
+}
+
 menuentry "F — milestone M0, one core (f.cores=1)" --class f {
     echo "F: loading with f.cores=1. Output on COM1 at ${BAUD} 8N1."
     insmod part_gpt
@@ -703,6 +776,112 @@ MENU
 EOF
     chmod 0755 "$GRUB_D"
     echo "menu entries    $GRUB_D"
+
+    # ------------------------------------------------------------------------
+    # The generation entries, and why this script writes them rather than
+    # deploying the fragment `cargo xtask generation --install` already emits.
+    #
+    # That fragment hardcodes /boot/f/. It has to: it runs on a build host and
+    # cannot know where GRUB will see those files. On this machine `grub_path`
+    # is the answer and it is "/f" when /boot is its own partition — so copying
+    # that fragment here would install, on exactly the machines this script
+    # exists for, a menu that boots nothing. `docs/postmortem/0001` is the
+    # record of `--install` having shipped that failure once already.
+    #
+    # What this cannot do is compute `f.frame=`, which comes out of a module's
+    # own record tree. So the split is along that line and no further: xtask
+    # carries the numbers and no layout, this carries the layout and computes no
+    # numbers, and neither holds a copy of the other's half.
+    #
+    # Both tokens or neither, never one. `HalfADeclaration` in
+    # kernel/src/measure.rs: an entry naming a generation and not the frame it
+    # was compiled against is not a weaker statement, it is a different one, and
+    # the frame refuses the boot over it.
+    if [ -n "$generations" ]; then
+        local module_offered="" gen_entries=0 root frame fcm bytes
+        # Five modules go to init.bin and the component files, and a loader
+        # hands the frame eight. The same arithmetic as GENERATIONS_MAX in
+        # xtask/src/generation.rs, checked here too because this script can be
+        # pointed at a directory that command did not write — and checked before
+        # anything is copied, so a refusal leaves the disk as it found it.
+        gen_entries=$(grep -c . "$gen_dir/generations.tsv")
+        if [ "$((gen_entries + count + 1))" -gt 8 ]; then
+            die "$gen_entries generation(s) and $count component(s) need $((gen_entries + count + 1)) modules; a loader hands the frame 8.
+       Remove the generations you are not keeping from $gen_dir and run this again.
+       Truncating the list here would write a menu quietly missing the generation
+       somebody meant to roll back to, which is the whole failure it exists to prevent."
+        fi
+        gen_entries=0
+        # Every module on offer goes on every entry, because `f.root=` selects
+        # from what the loader handed over — an entry offering only its own
+        # generation is an entry you cannot roll back *from*.
+        while IFS="$(printf '	')" read -r root frame fcm bytes; do
+            [ -n "$root" ] || continue
+            [ -f "$gen_dir/$fcm" ] || die "generations.tsv names $fcm and $gen_dir does not have it.
+       The row and the module are written by one command; a directory holding one
+       without the other has been edited by hand, and an entry naming a root that
+       nothing carries is a boot that refuses itself."
+            install -m 0644 "$gen_dir/$fcm" "$DEST/$fcm"
+            module_offered="${module_offered}
+    module ${gp}/${fcm}"
+            gen_entries=$((gen_entries + 1))
+            echo "generation      $DEST/$fcm  ($bytes bytes)"
+        done < "$gen_dir/generations.tsv"
+
+        install -d -m 0755 "$(dirname "$GRUB_D_GEN")"
+        {
+            echo "#!/bin/sh"
+            echo "# SPDX-License-Identifier: Apache-2.0 OR MIT"
+            echo "#"
+            echo "# Generated by tools/f-on-metal.sh. Remove with: f-on-metal.sh uninstall"
+            echo "#"
+            echo "# One entry per generation. Each carries f.root= — which generation this"
+            echo "# machine is to be — and f.frame=, the frame hash that generation was"
+            echo "# compiled against, which the frame compares against its measurement of its"
+            echo "# own text and rodata. A disagreement is a refusal to publish a root and"
+            echo "# ends the boot. RFC 0012."
+            echo "#"
+            echo "# Entries are in the order generations.tsv lists them, which is ascending"
+            echo "# root order: arbitrary and stable. There is no clock in that tree and a"
+            echo "# record carries no ordinal, so there is no in-band answer to which"
+            echo "# generation is newer. GRUB_DEFAULT is yours and nothing here touches it."
+            echo "cat <<'MENU'"
+            while IFS="$(printf '	')" read -r root frame fcm bytes; do
+                [ -n "$root" ] || continue
+                cat <<EOG
+menuentry "F — generation $(echo "$root" | cut -c1-16)" --class f {
+    echo "F: loading generation $(echo "$root" | cut -c1-16). Output on COM1 at ${BAUD} 8N1."
+    insmod part_gpt
+    insmod part_msdos
+    insmod fat
+    insmod ext2
+    insmod multiboot
+    search --no-floppy --file --set=root ${gp}/f-kernel.elf32
+    multiboot ${gp}/f-kernel.elf32 f.root=${root} f.frame=${frame}
+    module ${gp}/init.bin${module_component}${module_offered}
+}
+
+EOG
+            done < "$gen_dir/generations.tsv"
+            echo "MENU"
+        } > "$GRUB_D_GEN"
+        chmod 0755 "$GRUB_D_GEN"
+        echo "generations     $GRUB_D_GEN  ($gen_entries offered on every entry)"
+    else
+        # Removed rather than left, so that installing without generations after
+        # installing with them does not leave a menu offering roots whose modules
+        # are no longer on the disk. Every one of those is a boot that refuses
+        # itself, and the person at the console has no way to tell that from F
+        # being broken.
+        if [ -f "$GRUB_D_GEN" ]; then
+            rm -f "$GRUB_D_GEN"
+            echo "generations     none — removed the entries a previous run installed"
+        else
+            echo "generations     none. The M0 entries publish no root: the frame measures"
+            echo "                itself and has nothing to compare against. --generations"
+            echo "                is what makes a hardware boot answer *which* generation."
+        fi
+    fi
 
     if [ "$serial" -eq 1 ]; then
         # Opt-in, because it changes where *Arch's* menu goes too. Worth it: a
@@ -760,6 +939,7 @@ EOF
 cmd_uninstall() {
     need_root
     rm -f "$GRUB_D"
+    rm -f "$GRUB_D_GEN"
     rm -rf "$DEST"
     if [ -f "$DESTDIR/etc/default/grub.f-backup" ]; then
         mv "$DESTDIR/etc/default/grub.f-backup" "$DESTDIR/etc/default/grub"
@@ -807,6 +987,13 @@ install options:
                     Every *.fc in it is carried, sorted, and the frame fills one
                     place per file (RFC 0044); with none the kernel says so and
                     carries on
+  --generations [d] also install the packed generations in <d>, default
+                    $GENERATION_DIR_DEFAULT, and add one menu entry per
+                    generation carrying f.root= and f.frame=. Without this the
+                    M0 entries name no generation, so the frame measures itself
+                    and has nothing to compare against — which is the half of
+                    RFC 0012 a hardware boot otherwise never runs.
+                    \`cargo xtask generation --install\` writes what this reads
   --serial          also send GRUB's own menu to serial at $BAUD
 
 The procedure is docs/booting-on-hardware.md. Read the two facts that cost an
