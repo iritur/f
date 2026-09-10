@@ -55,6 +55,12 @@ case_ 2 determinism-guard.sh '{"tool_input":{"file_path":"env/src/sim.rs","new_s
 case_ 0 determinism-guard.sh '{"tool_input":{"file_path":"bench/src/lib.rs","new_string":"Instant::now()"}}'
 case_ 0 determinism-guard.sh '{"tool_input":{"file_path":"ring/src/lib.rs","new_string":"BTreeMap::new()"}}'
 case_ 0 determinism-guard.sh '{"tool_input":{"file_path":"docs/rfc/0004.md","new_string":"HashMap::new()"}}'
+case_ 2 determinism-guard.sh '{"tool_input":{"file_path":"zone/src/lib.rs","new_string":"let share = hit as f64 / total as f64;"}}'
+case_ 0 determinism-guard.sh '{"tool_input":{"file_path":"zone/src/lib.rs","new_string":"let share = hit * 1000 / total;"}}'
+case_ 0 determinism-guard.sh '{"tool_input":{"file_path":"xtask/src/main.rs","new_string":"fn kernel_elf32() {}"}}'
+case_ 0 determinism-guard.sh '{"tool_input":{"file_path":"ring/src/lib.rs","old_string":"HashMap::new()","new_string":"BTreeMap::new()"}}'
+case_ 0 determinism-guard.sh '{"tool_input":{"file_path":"zone/tests/cycle.rs","old_string":"x as f64","new_string":"x * 100"}}'
+case_ 2 determinism-guard.sh '{"tool_input":{"file_path":"zone/src/lib.rs","new_string":"let s = \"quoted \\\" here\"; let y = a as f64;"}}'
 
 echo
 echo "tests hold"

@@ -294,7 +294,10 @@ impl Measured {
     /// `f/(1 − f)` for copy-forward, and the root records. A single figure
     /// hides which term moved.
     fn report(&self) {
-        let per = |bytes: u64| bytes as f64 / self.app_bytes as f64;
+        // Ten-thousandths, as integers, so that the three ratios are printed
+        // from counts and the report is byte-identical wherever it ran.
+        // `lint-determinism` refuses a float here.
+        let per = |bytes: u64| (bytes / self.app_bytes, bytes * 10_000 / self.app_bytes % 10_000);
         println!("  application bytes submitted            {:>14}", self.app_bytes);
         println!("  device bytes, fill phase               {:>14}", self.fill_bytes);
         println!(
@@ -305,8 +308,10 @@ impl Measured {
         println!("    of which ZONE_APPEND                 {:>14}", self.counted.appended_bytes);
         println!("    of which positioned WRITE            {:>14}", self.counted.written_bytes);
         println!();
-        println!("  fill bytes per app byte                {:>14.4}", per(self.fill_bytes));
-        println!("  copy-forward bytes per app byte        {:>14.4}", per(self.copied_bytes));
+        let (fill, fill_frac) = per(self.fill_bytes);
+        println!("  fill bytes per app byte                {fill:>9}.{fill_frac:04}");
+        let (copied, copied_frac) = per(self.copied_bytes);
+        println!("  copy-forward bytes per app byte        {copied:>9}.{copied_frac:04}");
         // The claim's `modelled_*` name and not the row above it in
         // `claims/0016`. `device_bytes_per_app_byte` is that claim's headline and
         // is defined as a count taken by QEMU's `query-blockstats` in a guest;
@@ -315,7 +320,8 @@ impl Measured {
         // gating row's name is how a modelled number gets read as a measured one,
         // which is the worst mistake the registry can make — so the name it is
         // printed under is the name it is registered under.
-        println!("  modelled_device_bytes_per_app_byte     {:>14.4}", per(self.total_bytes));
+        let (total, total_frac) = per(self.total_bytes);
+        println!("  modelled_device_bytes_per_app_byte     {total:>9}.{total_frac:04}");
         println!();
         println!(
             "  zones reset by the collector           {:>14}  of {} data zones",

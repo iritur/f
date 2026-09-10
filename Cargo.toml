@@ -17,7 +17,13 @@ members = ["abi", "env", "ring", "hash", "blob", "zone", "index", "generation", 
 # out of it. The exclusion is still needed — the checker's rustc is still not
 # the pinned one — and `cargo xtask prove` is still the only thing that builds
 # it. RFC 0057.
-exclude = ["kernel/proofs", "ring/proofs"]
+#
+# `abi/proofs` is the third, on `ring/proofs`' terms exactly: `f-abi` builds for
+# the host, so the crate links it and proves the admission arithmetic RFC 0050
+# put there. Three directories that differ only in what they link is a shape
+# rather than a finding, and a fourth would be the moment to ask whether the
+# shared half wants a name.
+exclude = ["kernel/proofs", "ring/proofs", "abi/proofs"]
 
 [workspace.package]
 version = "0.0.1"

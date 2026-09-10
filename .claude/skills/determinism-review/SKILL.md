@@ -23,6 +23,7 @@ on any of them outside an allow-listed path:
 | `SystemTime::now`, `Instant::now` | read time through `Env` |
 | `thread_rng`, `random()` | draw from `Env` |
 | `HashMap::new`, `HashSet::new` | `BTreeMap`, `BTreeSet` — hash iteration order is seeded per process |
+| `f32`, `f64` | an integer, or a fixed point with its scale in the name — IEEE 754 fixes the four operations and nothing else, so `libm`, fused multiply-add and NaN payloads differ between the x86-64 and AArch64 jobs |
 
 ## When you are about to add an allow-list entry
 
