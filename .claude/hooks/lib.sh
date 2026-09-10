@@ -12,8 +12,10 @@
 # matching tool call and has to stay under a few milliseconds. The consequences
 # are stated where they matter: `json_field` stops at the first unescaped quote,
 # so it is used only for short scalar fields such as `file_path`. Anything that
-# has to look at file *content* greps the whole payload instead, which cannot be
-# fooled by escaping and costs nothing.
+# has to look at file *content* either greps the whole payload, which cannot be
+# fooled by escaping and costs nothing, or — where what matters is what an edit
+# *adds* rather than what it touches — reads one field with `json_text`, which
+# follows the JSON string grammar and so is not fooled either.
 
 set -u
 
@@ -29,6 +31,25 @@ json_field() {
 	printf '%s' "$2" |
 		sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" |
 		sed 's|\\\\|/|g; s|\\|/|g' |
+		head -n 1
+}
+
+# json_text <key> <payload> — the string value for <key>, escapes and all.
+#
+# The one place a hook may read a *content* field by name rather than grepping
+# the whole payload, and the reason it can: the pattern is the JSON string
+# grammar itself — any character but a quote or a backslash, or a backslash and
+# whatever follows it — so an escaped quote inside the value does not end it.
+# What comes back still carries its JSON escapes, which is fine for a needle
+# search and wrong for anything that wants the bytes.
+#
+# It exists so that `determinism-guard.sh` can look at what an edit *adds* and
+# not at what it removes: an `Edit` whose `old_string` holds the needle and
+# whose `new_string` does not is the edit the policy most wants, and grepping
+# the whole payload blocked it.
+json_text() {
+	printf '%s' "$2" |
+		sed -E -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)".*/\1/p' |
 		head -n 1
 }
 

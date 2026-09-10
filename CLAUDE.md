@@ -47,8 +47,9 @@ made executable, `third_party` imported drivers behind a licence boundary.
 - **Determinism.** Nothing observes time, randomness or ordering except through
   `f_env::Env`. No `Instant::now`, no `rdtsc`, no `thread_rng`, no `HashMap` or
   `HashSet` — iteration order is seeded per process, so use `BTreeMap` and
-  `BTreeSet`. New call sites need an allow-list entry with a reason in
-  `xtask/src/main.rs`. RFC 0004.
+  `BTreeSet`. No `f32` or `f64` — the two architectures do not agree on them;
+  use an integer or a fixed point with its scale in the name. New call sites
+  need an allow-list entry with a reason in `xtask/src/main.rs`. RFC 0004.
 - **The frame.** `unsafe` is permitted in `abi/`, `ring/`, `kernel/` and nowhere
   else; the workspace forbids it everywhere else at compile time. Every
   `unsafe` block carries a `// SAFETY:` comment discharging the obligations the

@@ -2647,11 +2647,19 @@ fn report(reached: &Reached, cases: u64) {
         .sum();
     let drawn = structural + bytes;
     if drawn > 0 {
+        // Tenths of a percent, as integers: the share is a count over a count
+        // and is printed as one, so the line is the same on every machine that
+        // draws the same corpus. A floating division here was the one float in
+        // the tree above the harness, and `lint-determinism` now refuses it.
+        let tenths = |part: u64| part * 1000 / drawn;
+        let (s, b) = (tenths(structural), tenths(bytes));
         println!(
-            "  {:<26}{:>11.1}% structural, {:.1}% bytes",
+            "  {:<26}{:>9}.{}% structural, {}.{}% bytes",
             "the split",
-            structural as f64 * 100.0 / drawn as f64,
-            bytes as f64 * 100.0 / drawn as f64
+            s / 10,
+            s % 10,
+            b / 10,
+            b % 10
         );
     }
 
