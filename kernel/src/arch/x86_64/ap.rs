@@ -434,12 +434,38 @@ unsafe fn write_param(offset: u64, value: u64) {
 /// sequence the manual sets out, and the delays are what makes it that sequence
 /// rather than a race.
 ///
+/// # Why the caller is given something to do during them
+///
+/// Those delays are four hundred microseconds of the boot processor doing
+/// nothing, and they begin *before* the arriving core executes its first
+/// instruction — the startup interrupt is inside them. A core that walks the
+/// whole trampoline does so in a few microseconds, so by the time this function
+/// returns the byte [`stage`] reads has already reached its last value, and a
+/// caller that only starts looking afterwards can never see a stage before the
+/// end. On a hypervisor that is slow enough to deliver a startup interrupt the
+/// difference does not show, which is why it did not show here: QEMU catches
+/// intermediate stages and the second machine this kernel booted on caught
+/// exactly one.
+///
+/// So `watching` is called while the delays run. It can make the wait *longer*,
+/// which is always safe — the second startup interrupt is ignored by a core
+/// that has begun executing and welcome to one that has not — and it cannot
+/// make it shorter, because the deadline is taken before the first call. What
+/// it must not do is touch the trampoline page, which the core being started is
+/// executing out of.
+///
 /// # Safety
 ///
 /// `apic` must be this core's mapped register window, `tsc_khz` must be a
 /// measured rate for this machine's timestamp counter, [`install`] must have
 /// run, and `cpu` must not be a core that is already running.
-pub unsafe fn wake(apic: u64, tsc_khz: u64, cpu: usize, stack_top: u64) {
+pub unsafe fn wake(
+    apic: u64,
+    tsc_khz: u64,
+    cpu: usize,
+    stack_top: u64,
+    watching: &mut dyn FnMut(),
+) {
     // SAFETY: the trampoline is installed and nothing is executing it — the
     // core about to read it has not been started.
     unsafe { write_param(PARAM_RSP, stack_top) };
@@ -453,13 +479,13 @@ pub unsafe fn wake(apic: u64, tsc_khz: u64, cpu: usize, stack_top: u64) {
 
     // SAFETY: the caller's guarantee that `apic` is this core's window.
     unsafe { icr(apic, dest, INIT_ASSERT) };
-    spin_micros(tsc_khz, 10_000);
+    spin_micros(tsc_khz, 10_000, watching);
     // SAFETY: as above.
     unsafe { icr(apic, dest, STARTUP | vector) };
-    spin_micros(tsc_khz, 200);
+    spin_micros(tsc_khz, 200, watching);
     // SAFETY: as above.
     unsafe { icr(apic, dest, STARTUP | vector) };
-    spin_micros(tsc_khz, 200);
+    spin_micros(tsc_khz, 200, watching);
 }
 
 /// Put a core the boot processor has given up on back where it started.
@@ -547,17 +573,23 @@ unsafe fn wait_idle(apic: u64) {
     }
 }
 
-/// Wait, in microseconds, by watching the timestamp counter.
+/// Wait, in microseconds, by watching the timestamp counter, and call
+/// `watching` while waiting.
 ///
 /// The only clock available here. `Env` is the substrate every *observation* of
 /// time goes through, and this is not one: nothing is recorded, nothing is
 /// reported, and the value never reaches a decision the seed could reproduce
 /// differently. It is a delay the architecture requires between two writes to
 /// a hardware register, in the same way `pit` counts a calibration interval.
-fn spin_micros(tsc_khz: u64, micros: u64) {
+///
+/// The deadline is taken before the first call to `watching`, so what the
+/// caller does in there can only lengthen the wait. [`wake`] is where that
+/// matters and says why it is safe in both directions.
+fn spin_micros(tsc_khz: u64, micros: u64, watching: &mut dyn FnMut()) {
     let ticks = tsc_khz.saturating_mul(micros) / 1_000;
     let deadline = super::read_tsc().saturating_add(ticks);
     while super::read_tsc() < deadline {
+        watching();
         core::hint::spin_loop();
     }
 }
