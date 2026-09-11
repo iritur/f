@@ -329,7 +329,9 @@ added later is a flag added by somebody who has to rediscover the argument.
 **One page of stack, and this driver does not reach it.** RFC 0051 measured the
 wall by hitting it: the network driver's posted-buffer table overran the frame's
 one page of stack by fifty-six bytes at eight receive slots, and
-`RECEIVE_SLOTS_STACK_BOUND` is the declared, unpaid deviation that records it.
+`RECEIVE_SLOTS_STACK_BOUND` was the declared, unpaid deviation that recorded it
+— paid on 2026-09-11, when `kernel::process::SPAWN_STACK_PAGES` became four; see
+RFC 0051's reversal section.
 This driver holds no per-buffer table at all — a display command is a request the
 device answers, so nothing is outstanding between entries — and its `Driver` is
 smaller than either of the other two. That is a **negative result worth

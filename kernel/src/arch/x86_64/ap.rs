@@ -89,8 +89,119 @@ const PARAM_RSP: u64 = 0x18;
 /// The sixty-four-bit address it jumps to once it is in the higher half.
 const PARAM_ENTRY: u64 = 0x20;
 
+/// How far the arriving core has got, written by the core itself.
+///
+/// # Why a byte in a page rather than a mailbox word
+///
+/// [`crate::smp`]'s mailbox is how a core reports that it *arrived*, and it is
+/// written in Rust, from `arrive`, after the trampoline has finished. Nothing
+/// reports the trampoline, and the trampoline is where a core that never
+/// arrives has died — with no descriptor table, no handler and nothing to
+/// report with, which is a triple fault and, on a hypervisor, the whole virtual
+/// machine stopping. A post-mortem line printed by the boot processor never
+/// runs on that machine, because the boot processor is gone too.
+///
+/// So the core writes a number here as it passes each point, and the boot
+/// processor *watches* while it waits — see `smp::start`. The evidence reaches
+/// the serial port before the fault rather than after it, which is the only
+/// ordering that survives the failure it exists to describe.
+///
+/// One byte, and the values are [`STAGE_*`](STAGE_REAL_MODE). Written with a
+/// plain store because the only two cores that touch it are the one writing its
+/// own progress and the one reading it, a byte is atomic on this architecture,
+/// and nothing is ordered against it — a stage read late is a stage printed
+/// late, which costs a reader nothing.
+const PARAM_STAGE: u64 = 0x28;
+
 /// One past the last byte of the parameter block.
-const PARAMS_END: u64 = PARAM_ENTRY + 8;
+const PARAMS_END: u64 = PARAM_STAGE + 8;
+
+/// The core is executing the trampoline with a zero segment base.
+pub const STAGE_REAL_MODE: u8 = 1;
+/// It has loaded the descriptor table the boot processor left for it.
+pub const STAGE_DESCRIPTORS: u8 = 2;
+/// It is in thirty-two-bit protected mode.
+pub const STAGE_PROTECTED: u8 = 3;
+/// It has loaded `CR4`.
+pub const STAGE_CR4: u8 = 4;
+/// It has loaded `CR3` — the kernel's address space, paging still off.
+pub const STAGE_CR3: u8 = 5;
+/// It has written `IA32_EFER`. **The last stage before paging**, and the one a
+/// core that dies writing a read-only bit stops at. [`EFER_TO_ARRIVE_WITH`].
+const STAGE_EFER: u8 = 6;
+/// It is in sixty-four-bit mode, in the kernel's address space.
+const STAGE_LONG_MODE: u8 = 7;
+/// It is about to leave the on-ramp for `arrive`.
+const STAGE_LEAVING: u8 = 8;
+/// Reached `arrive`: its shard index is its own and within `MAX_CPUS`.
+pub const STAGE_ARRIVED: u8 = 9;
+/// Its descriptor tables are its own.
+pub const STAGE_TABLES: u8 = 10;
+/// Its local APIC is adopted.
+pub const STAGE_APIC: u8 = 11;
+/// Its system-call entry is installed. The next thing it does is report ready.
+pub const STAGE_RING3: u8 = 12;
+
+/// What each stage is called, for the boot processor's log.
+#[must_use]
+pub fn stage_name(stage: u8) -> &'static str {
+    match stage {
+        STAGE_REAL_MODE => "executing the trampoline",
+        STAGE_DESCRIPTORS => "descriptor table loaded",
+        STAGE_PROTECTED => "thirty-two-bit protected mode",
+        STAGE_CR4 => "cr4 loaded",
+        STAGE_CR3 => "cr3 loaded, paging still off",
+        STAGE_EFER => "efer written",
+        STAGE_LONG_MODE => "sixty-four-bit mode",
+        STAGE_LEAVING => "leaving the on-ramp",
+        STAGE_ARRIVED => "in the kernel, shard index taken",
+        STAGE_TABLES => "its own descriptor tables",
+        STAGE_APIC => "local apic adopted",
+        STAGE_RING3 => "system-call entry installed",
+        // Not "unknown": zero is what `wake` writes before it starts a core,
+        // so a core still at zero is a core that never executed an instruction
+        // of the trampoline. That is a different finding from dying inside it,
+        // and it is the one a machine with fewer cores than it reports produces.
+        0 => "nothing; it never executed",
+        _ => "not a stage this build names",
+    }
+}
+
+/// Where the arriving core writes [`PARAM_STAGE`], as this core can reach it.
+///
+/// The direct map, because the trampoline page is mapped read-only into the
+/// kernel's own space — deliberately, and the module comment says why — so the
+/// physical address is reachable for writing only through the map that covers
+/// all of memory.
+#[must_use]
+pub const fn stage_address() -> u64 {
+    PHYS_OFFSET + TRAMPOLINE_PHYS + PARAMS_OFFSET + PARAM_STAGE
+}
+
+/// How far the core being started has got. See [`PARAM_STAGE`].
+///
+/// # Safety
+///
+/// The direct map must be live.
+#[must_use]
+pub unsafe fn stage() -> u8 {
+    let at = stage_address() as *const u8;
+    // SAFETY: the caller's guarantee. One byte inside the trampoline page,
+    // reachable through the direct map, written by the core being started.
+    unsafe { at.read_volatile() }
+}
+
+/// Record that this core has reached `stage`. Called from `arrive`, which is
+/// past the point where the trampoline can write it.
+///
+/// # Safety
+///
+/// The direct map must be live, and this must be the core being started.
+pub unsafe fn record(stage: u8) {
+    let at = stage_address() as *mut u8;
+    // SAFETY: the caller's guarantee. As [`stage`], and the only writer.
+    unsafe { at.write_volatile(stage) };
+}
 
 /// The four descriptors the trampoline needs, with the accessed bit set.
 ///
@@ -210,6 +321,18 @@ pub fn self_test() -> Result<(), &'static str> {
     if program().len() as u64 > GDT_OFFSET {
         return Err("the trampoline is longer than the space reserved before its descriptors");
     }
+    // The two addresses the assembly writes its progress to are literals there —
+    // it is copied to one address and assembled at another, so it can be neither
+    // `rip`-relative nor link-time absolute — and this is the check that keeps
+    // them equal to the constants above. Getting either wrong is a store into
+    // somebody else's page, which is the class of bug that does not announce
+    // itself.
+    if TRAMPOLINE_PHYS + PARAMS_OFFSET + PARAM_STAGE != 0x8F28 {
+        return Err("the trampoline's physical stage literal and the constants disagree");
+    }
+    if stage_address() != 0xffff_8000_0000_8f28 {
+        return Err("the trampoline's direct-map stage literal and the constants disagree");
+    }
     Ok(())
 }
 
@@ -320,6 +443,10 @@ pub unsafe fn wake(apic: u64, tsc_khz: u64, cpu: usize, stack_top: u64) {
     // SAFETY: the trampoline is installed and nothing is executing it — the
     // core about to read it has not been started.
     unsafe { write_param(PARAM_RSP, stack_top) };
+    // Cleared per core rather than once, so that a stage read while starting
+    // the third core is the third core's and not a leftover from the second.
+    // SAFETY: as above.
+    unsafe { record(0) };
 
     let dest = (cpu as u32) << 24;
     let vector = u32::try_from(TRAMPOLINE_PHYS / FRAME_SIZE).unwrap_or(0);
@@ -450,14 +577,44 @@ fn read_cr4() -> u64 {
     value
 }
 
-/// This core's `IA32_EFER`, for the same reason as [`read_cr4`]: long-mode
-/// enable and the no-execute switch are both in it, and a core that arrives
-/// without no-execute enabled faults on the first kernel page that has the bit
-/// set — which is most of them.
+/// The bits of `IA32_EFER` an arriving core is given.
+///
+/// System-call enable, long-mode enable, no-execute enable — bits 0, 8 and 11.
+/// Everything else the boot processor happens to have is dropped, and the
+/// dropped bit that matters is **`LMA`, bit 10**.
+///
+/// # Why a mask and not the register
+///
+/// `LMA` is *long mode active*, and it is a status bit the processor maintains:
+/// it reads back as 1 on the boot processor because long mode is on. The core
+/// reading this parameter is in thirty-two-bit protected mode with paging off,
+/// where long mode is by definition **not** active, so handing it the boot
+/// processor's value means writing a 1 to a read-only bit that currently reads
+/// 0. Some processors ignore that. Some raise `#GP`, and a `#GP` in the
+/// trampoline is taken with no descriptor table, no handler and nowhere to
+/// report it — which is a triple fault and a silent reset, and from outside
+/// looks exactly like a core that was started and never arrived.
+///
+/// The three bits kept are the three the arriving core cannot do without.
+/// `LME` is what the far jump below depends on. `NXE` has to match the boot
+/// processor's or the no-execute bit in the page tables it is about to load
+/// becomes a reserved bit, and every kernel page that sets it faults. `SCE` is
+/// `syscall`, which `ring3::init` would otherwise have to set again.
+///
+/// *Reversal:* a bit outside these three that a core has to arrive with. It
+/// belongs in the mask with its own sentence, not in a copy of the whole
+/// register — the register is what this function exists to stop copying.
+const EFER_TO_ARRIVE_WITH: u64 = (1 << 0) | (1 << 8) | (1 << 11);
+
+/// This core's `IA32_EFER`, masked to [`EFER_TO_ARRIVE_WITH`].
+///
+/// Read rather than composed, for the same reason as [`read_cr4`]: the arriving
+/// core has to agree with this one about no-execute, and reading is how that
+/// stays true when this one changes.
 fn read_msr_efer() -> u64 {
     // SAFETY: `IA32_EFER` exists on every processor that can be in long mode,
     // which this one is.
-    unsafe { super::read_msr(0xC000_0080) }
+    unsafe { super::read_msr(0xC000_0080) & EFER_TO_ARRIVE_WITH }
 }
 
 /// Read one APIC register. Same contract as the copy in [`super::apic`]; it is
@@ -535,10 +692,18 @@ ap_trampoline_start:
     movw %ax, %fs
     movw %ax, %gs
 
+    // Every `movb` to 0x8F28 below is one number written to one byte, and the
+    // boot processor is watching it while it waits. `PARAM_STAGE` says why the
+    // progress of this code is reported by the code itself rather than by
+    // whoever is waiting for it. Paging is off until the far jump at the end,
+    // so these are plain physical stores into a page nothing else is using.
+    movb $1, 0x8F28
+
     // The descriptor table the boot processor left in this page. `lgdtl` and
     // not `lgdt`: the sixteen-bit form truncates the base to twenty-four bits,
     // which is a table at an address that is almost right.
     lgdtl 0x8E20
+    movb $2, 0x8F28
 
     movl %cr0, %eax
     orl $1, %eax
@@ -554,6 +719,7 @@ ap_trampoline_start:
     movw %ax, %ss
     movw %ax, %fs
     movw %ax, %gs
+    movb $3, 0x8F28
 
     // Physical address extension and whatever else the boot processor turned
     // on, then the address space it is running in. Order matters: `CR4.PAE`
@@ -561,17 +727,26 @@ ap_trampoline_start:
     // table before paging is.
     movl 0x8F08, %eax
     movl %eax, %cr4
+    movb $4, 0x8F28
 
     movl 0x8F00, %eax
     movl %eax, %cr3
+    movb $5, 0x8F28
 
-    // Long-mode enable, and the no-execute switch, copied whole from the boot
-    // processor. Assigned rather than merged, because what is being assigned is
-    // the other core's value for this exact register.
+    // Long-mode enable, the no-execute switch and system-call enable, taken
+    // from the boot processor and masked to those three — `EFER_TO_ARRIVE_WITH`
+    // is where the mask is argued, and the bit it exists to drop is `LMA`.
+    // Assigned rather than merged, because what is being assigned is the other
+    // core's value for these exact bits.
     movl $0xC0000080, %ecx
     movl 0x8F10, %eax
     movl 0x8F14, %edx
     wrmsr
+    // The last store before paging: the on-ramp page is mapped read-only into
+    // the address space `CR3` now names, so from the far jump onwards this
+    // progress goes through the direct map instead. A core that stops at 6 is a
+    // core the `wrmsr` above killed; one that stops at 5 was killed by it.
+    movb $6, 0x8F28
 
     // Paging. The instruction after this one executes at this same low address
     // through the kernel's page tables, which is what the on-ramp page is for.
@@ -592,12 +767,21 @@ ap_trampoline_start:
     movw %ax, %fs
     movw %ax, %gs
 
+    // Through the direct map from here: the page this instruction is fetched
+    // from is read-only in the space now loaded, and its physical address is
+    // writable only through the map that covers all of memory.
+    movabsq $0xffff800000008F28, %rax
+    movb $7, (%rax)
+
     // Loaded through a register rather than as an absolute memory operand:
     // sixty-four-bit addressing has no plain absolute form for a destination
     // other than the accumulator, and spelling it this way is unambiguous.
     movl $0x8F18, %eax
     movq (%rax), %rsp
     xorq %rbp, %rbp
+
+    movabsq $0xffff800000008F28, %rax
+    movb $8, (%rax)
 
     movl $0x8F20, %eax
     movq (%rax), %rax

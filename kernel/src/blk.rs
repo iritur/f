@@ -126,8 +126,6 @@
 )]
 
 use f_abi::cap::{CapType, rights};
-use f_abi::control;
-use f_abi::manifest::{self, ContentId, Record, route};
 use f_abi::{ABI_VERSION, Negotiated, cflags, class, error, feature};
 use f_ring::device::Window;
 use f_ring::registry::{Domains, registration};
@@ -138,14 +136,14 @@ use f_virtio_blk::routing;
 use f_virtio_blk::transport::SECTOR_BYTES;
 
 use crate::arch::x86_64::multiboot::BootInfo;
-use crate::arch::x86_64::paging::{self, AddressSpace, Features};
+use crate::arch::x86_64::paging::{AddressSpace, Features};
 use crate::arch::x86_64::pci::{self, Bdf, Survey};
 use crate::arch::x86_64::virtio;
 use crate::arch::x86_64::vtd::{Fault, Unit};
 use crate::cap::Table;
-use crate::component;
 use crate::iommu;
 use crate::mem::{FRAME_SIZE, Frame, FrameAllocator, Order};
+use crate::supervisor::{Declared, Registers, Supervising, declared, order_for};
 
 /// The one address a driver component holds as a constant, agreed.
 ///
@@ -271,12 +269,6 @@ const FLOOR_NS: u64 = 10_000;
 /// component files by magic rather than by position for exactly that reason.
 /// The bytes are what `manifest.toml`'s `name` compiles to.
 const DRIVER: &[u8] = b"virtio-blk";
-
-/// The need in that manifest that names the register pages.
-const NEED_MMIO: &[u8] = b"mmio";
-
-/// The need that names the untyped region the driver splits into its queues.
-const NEED_QUEUES: &[u8] = b"queues";
 
 /// The rights a component holds over memory it means to hand to a device.
 ///
@@ -415,89 +407,22 @@ impl Trouble {
     }
 }
 
-/// What the driver's manifest says it must be given.
+/// The shared half's refusals, in this file's words.
 ///
-/// Read out of the record `cargo xtask component` compiled, on every run,
-/// rather than repeated as constants here. That is the whole point of the
-/// detour: `user/virtio-blk/manifest.toml` was written before the driver *and
-/// before this file*, and a datapath that routed numbers of its own choosing
-/// would leave the manifest as decoration — a document describing a component
-/// nobody had checked against it.
-#[derive(Clone, Copy, Debug)]
-pub struct Declared {
-    /// The content hash a spawn would name: one hash over the record and the
-    /// image together. Unit: none — an identity.
-    pub id: ContentId,
-    /// Register pages the manifest routes. Unit: pages.
-    pub frames: u32,
-    /// Untyped bytes it routes for the queues. Unit: bytes.
-    pub bytes: u64,
-    /// The reservation class the manifest declares, as
-    /// `f_abi::class` reads it — the ceiling this component is admitted for and
-    /// therefore the most urgent class it can serve anything at.
-    ///
-    /// Read out of the record like everything else here and never written down
-    /// in the frame, for the reason RFC 0025 bound 2 gives about ceilings: a
-    /// ceiling somebody restated is a ceiling that can drift from the manifest
-    /// it was declared in, and the drift is invisible until a hard-class client
-    /// is quietly served as batch. Unit: none — an `f_abi::class` ordinal.
-    pub admitted: u16,
-    /// The component's own image, out of the same component file.
-    ///
-    /// Read here rather than found again later, because it is the same
-    /// module: a datapath that read a *manifest* from one place and an *image*
-    /// from another would be a datapath whose content hash named neither.
-    pub image: &'static [u8],
-}
-
-/// Find the driver's component file and read what it declares.
-///
-/// # Errors
-///
-/// [`Trouble::NoManifest`] when no module carries it, [`Trouble::Manifest`]
-/// when the record is not one this build can read or does not declare both
-/// needs this datapath routes.
-///
-/// # Safety
-///
-/// The direct map must be live and `frames` must already have been rebound onto
-/// it, which is `component::modules`' obligation.
-pub unsafe fn declared(boot: &BootInfo) -> Result<Declared, Trouble> {
-    // SAFETY: the caller's guarantee, passed down.
-    let (modules, count) = unsafe { component::modules(boot) };
-    for module in modules.iter().take(count) {
-        let Ok(record) = Record::read(module) else { continue };
-        if record.label() != DRIVER {
-            continue;
+/// One arm per variant and **no message changes**, which is the whole point:
+/// `kernel/src/supervisor.rs` answers its own four-variant `Trouble` because
+/// the three drivers' enums are not one enum, and a conversion that reworded
+/// anything would change a boot log this merge is required to leave byte for
+/// byte as it was.
+impl From<crate::supervisor::Trouble> for Trouble {
+    fn from(trouble: crate::supervisor::Trouble) -> Self {
+        match trouble {
+            crate::supervisor::Trouble::NoManifest => Self::NoManifest,
+            crate::supervisor::Trouble::Manifest => Self::Manifest,
+            crate::supervisor::Trouble::Channel(refusal) => Self::Channel(refusal),
+            crate::supervisor::Trouble::NoAnswer(micros) => Self::NoAnswer(micros),
         }
-        let mut frames = None;
-        let mut bytes = None;
-        for need in record.needs() {
-            // An ask is not routed at spawn, so a need routed through the
-            // powerbox is not one this datapath supplies. The manifest's
-            // `powerbox` endpoint is exactly that, and skipping it here is the
-            // same rule `component::check_needs` applies.
-            if need.route == route::POWERBOX {
-                continue;
-            }
-            match need.label() {
-                NEED_MMIO => frames = Some(need.frames),
-                NEED_QUEUES => bytes = Some(need.bytes),
-                _ => {}
-            }
-        }
-        let (Some(frames), Some(bytes)) = (frames, bytes) else { return Err(Trouble::Manifest) };
-        let Ok(image) = record.image(module) else { return Err(Trouble::Manifest) };
-        // R04 at a byte the frame did not write: a class this build cannot name
-        // is a record from a schema this build cannot read, and reading it as
-        // the nearest class would admit a component at a ceiling nobody
-        // declared.
-        let Some(admitted) = manifest::class::admitted(record.class) else {
-            return Err(Trouble::Manifest);
-        };
-        return Ok(Declared { id: ContentId::of(module), frames, bytes, image, admitted });
     }
-    Err(Trouble::NoManifest)
 }
 
 /// How far past a registration's answer the `escape` half points the device.
@@ -1109,7 +1034,7 @@ pub unsafe fn demonstrate(
     // afterwards would be a datapath whose numbers were its own.
     // SAFETY: the caller's guarantee that the direct map is live and covers
     // every module.
-    let declared = unsafe { declared(boot) }?;
+    let declared = unsafe { declared(boot, DRIVER) }?;
 
     // SAFETY: the caller's guarantee, passed down.
     let found = unsafe {
@@ -1244,277 +1169,8 @@ struct Setup<'a> {
     scheduling: Scheduling,
 }
 
-/// How long the frame waits for one completion from a driver it is a client of.
-///
-/// Five seconds, the same bound `main::run_one` and `runtime::demonstrate` use
-/// and for the same reason: it is the answer to a component that is wedged
-/// rather than a schedule for one that is working. Generous under an emulator
-/// that compiles each block of guest code the first time it reaches it, which
-/// is what the first transfer of a run pays for.
-/// Unit: microseconds.
-const ANSWER_MICROS: u64 = 5_000_000;
-
 /// How long it waits for the core afterwards. Unit: microseconds.
 const EXIT_MICROS: u64 = 5_000_000;
-
-/// The register window as a *component* sees it: one base and four offsets.
-///
-/// # Why this is computed rather than routed structure by structure
-///
-/// Because a component may not be told four unrelated addresses. A modern
-/// virtio transport publishes its four structures inside one base-address
-/// register, and what the manifest declares is *four register frames* — one
-/// window, whole, which the driver narrows with `Window::slice`. Narrowing only
-/// ever goes inwards, so a driver that got an offset wrong reads its own
-/// registers wrongly and cannot read anybody else's; four separate mappings
-/// would have given it four chances to be handed something it did not declare.
-///
-/// The span is taken from the pages the structures actually fall in rather than
-/// assumed to start at the register's own base, because a device that put its
-/// common configuration at a non-zero offset is a device this has to route and
-/// not one it may refuse.
-#[derive(Clone, Copy)]
-struct Registers {
-    /// The first page of the span, physical. Unit: bytes, physical.
-    base: u64,
-    /// How many pages it covers. Unit: pages.
-    pages: u32,
-    /// Each structure's offset into the span and its length, in the order
-    /// common, notify, ISR, device configuration. Unit: bytes.
-    each: [(u32, u32); 4],
-}
-
-impl Registers {
-    /// Work out the span from what the device published.
-    ///
-    /// # Errors
-    ///
-    /// [`Trouble::Manifest`] for a span wider than the manifest declares or
-    /// than the driver's address space reserves — which is the direction
-    /// `user/virtio-blk/manifest.toml` insists on: *a device whose window is
-    /// larger is a different device and a different manifest, not a bigger
-    /// number.*
-    fn of(found: &virtio::Found, declared: &Declared) -> Result<Self, Trouble> {
-        let structures = [found.common, found.notify, found.isr, found.device];
-        let mut low = u64::MAX;
-        let mut high = 0;
-        for structure in structures {
-            let physical = Self::physical(&structure)?;
-            let end = physical.checked_add(u64::from(structure.len)).ok_or(Trouble::Manifest)?;
-            low = low.min(physical & !(FRAME_SIZE - 1));
-            high = high.max(end.div_ceil(FRAME_SIZE).saturating_mul(FRAME_SIZE));
-        }
-        let span = high.checked_sub(low).ok_or(Trouble::Manifest)?;
-        let pages = u32::try_from(span / FRAME_SIZE).map_err(|_| Trouble::Manifest)?;
-        if pages > declared.frames || pages as usize > crate::process::BLK_REGISTER_PAGES {
-            return Err(Trouble::Manifest);
-        }
-        let mut each = [(0, 0); 4];
-        for (slot, structure) in each.iter_mut().zip(structures) {
-            let offset = u32::try_from(Self::physical(&structure)?.wrapping_sub(low))
-                .map_err(|_| Trouble::Manifest)?;
-            *slot = (offset, structure.len);
-        }
-        Ok(Self { base: low, pages, each })
-    }
-
-    /// Where a structure is in physical memory.
-    ///
-    /// `Structure::at` is where the *frame* reads it, which is the physical
-    /// address plus the direct device window's offset. The component is mapped
-    /// the physical page, so the offset comes back off here — and a value it
-    /// cannot come off is a structure this build did not map through that
-    /// window, which is refused rather than wrapped.
-    fn physical(structure: &virtio::Structure) -> Result<u64, Trouble> {
-        structure.at.checked_sub(paging::DEVICE_OFFSET).ok_or(Trouble::Manifest)
-    }
-}
-
-/// The frame's half of a scheduled driver's run: the client's ring, the
-/// driver's control ring, and the authority behind both.
-///
-/// # Why one struct and not six arguments
-///
-/// Because the six belong together and are used together at every polling
-/// point. What is here is exactly what a *supervisor* holds and a driver does
-/// not: the remapping unit, the domain the device is attached to, the
-/// allocator, and the client's capability table. The driver holds none of them
-/// and that is the whole architecture — RFC 0047 — so a type that names them as
-/// one thing is the type that says so.
-struct Supervising<'a, 'm> {
-    /// What the driver asked for.
-    asks: &'a Consumer<'m>,
-    /// Where its answers go, and where the frame's notices go.
-    answers: &'a Poster<'m>,
-    /// The client's end of the data ring, on the frame's side.
-    reaper: &'a Collector<'m>,
-    unit: &'a mut Unit,
-    domain: &'a mut crate::arch::x86_64::vtd::Domain,
-    frames: &'a mut FrameAllocator,
-    /// The **client's** table. Every handle a driver names in a translation
-    /// request is resolved against this one, which is what makes a driver
-    /// unable to grant itself anything: it is asking about somebody else's
-    /// capability, and the answer is somebody else's rights.
-    table: &'a Table,
-    /// The device address the last translation answered.
-    ///
-    /// Kept here because it is the frame's knowledge and the client's need:
-    /// nothing in the completion a *client* reaps carries an address — RFC 0024
-    /// — so a client that needs to know where the device sees its buffer, in
-    /// order to say where a refused transaction should have faulted, asks the
-    /// frame that answered it. A client on the far side of a boundary could not
-    /// ask this and would not be entitled to; this one is the frame.
-    /// Unit: bytes, in the device's address space.
-    answered_at: u64,
-    /// How many operations this has answered on the driver's control ring.
-    ///
-    /// **The frame's own evidence that the driver asked**, and it is what makes
-    /// RFC 0047's third clause a measurement rather than a design note: a build
-    /// in which the translation route had quietly stopped being used — because
-    /// somebody put the answers somewhere the component could read them, which
-    /// is the alternative that RFC rejects by name — would publish zero here
-    /// and fail the verdict. Counted on this side of the boundary, because the
-    /// other side's tally is the other side's.
-    /// Unit: operations.
-    answered: u32,
-}
-
-impl Supervising<'_, '_> {
-    /// Where the last translation this served put the memory it was asked
-    /// about. Unit: bytes, in the device's address space.
-    const fn answered_at(&self) -> u64 {
-        self.answered_at
-    }
-
-    /// Answer everything the driver has asked for, and nothing else.
-    ///
-    /// **This is the frame's polling point.** R05: nothing is delivered
-    /// asynchronously, and what happens here is this core looking at a ring in
-    /// its own loop while another core is inside a component.
-    ///
-    /// # Errors
-    ///
-    /// [`Trouble::Channel`] for a ring that stopped validating — a driver that
-    /// scribbled its own control ring, which RFC 0008 treats as a component
-    /// that has stopped speaking.
-    fn serve(&mut self) -> Result<u32, Trouble> {
-        let mut answered = 0;
-        loop {
-            let Some(entry) = self.asks.pop().map_err(|_| Trouble::Channel(0))? else {
-                return Ok(answered);
-            };
-            // Room before the entry is acted on, because an operation performed
-            // and then not answered is a driver waiting forever for a reply
-            // that was dropped on the floor — and for a translation that would
-            // be a device left holding a mapping nobody knows about.
-            if self.answers.free().map_err(|_| Trouble::Channel(0))? == 0 {
-                return Err(Trouble::Channel(0));
-            }
-            let answer = self.execute(&entry);
-            self.answers.post(answer).map_err(|_| Trouble::Channel(0))?;
-            answered += 1;
-            self.answered = self.answered.saturating_add(1);
-        }
-    }
-
-    /// One control-ring operation.
-    ///
-    /// R04 at the bottom: an opcode this build does not implement is refused
-    /// and never ignored. The two it does implement are the ones a driver
-    /// cannot perform for itself, and both go through the same
-    /// [`iommu::Grant`] the frame used when it called the driver's code
-    /// directly — so the check that stands between a component's clients and
-    /// each other's memory is the same check, on the same table, with the same
-    /// refusal.
-    fn execute(&mut self, entry: &f_abi::Sqe) -> f_abi::Cqe {
-        let mut asking = iommu::Grant {
-            unit: &mut *self.unit,
-            domain: &mut *self.domain,
-            frames: &mut *self.frames,
-            table: self.table,
-        };
-        match entry.opcode {
-            control::op::DEVICE_MAP => match asking.map(entry.cap, entry.len) {
-                Ok(address) => {
-                    self.answered_at = address;
-                    f_abi::Cqe {
-                        user_data: entry.user_data,
-                        result: 0,
-                        flags: 0,
-                        timestamp: 0,
-                        ext: address,
-                    }
-                }
-                Err((packed, detail)) => f_ring::refusal(entry.user_data, packed, detail, 0),
-            },
-            control::op::DEVICE_UNMAP => {
-                asking.unmap(entry.cap, entry.offset, entry.len);
-                f_ring::completion(entry.user_data, 0, 0)
-            }
-            other => f_ring::refusal(
-                entry.user_data,
-                error::pack(error::ARGUMENT, error::argument::UNKNOWN_OPCODE),
-                u64::from(other),
-                0,
-            ),
-        }
-    }
-
-    /// Take the client's next completion, serving the driver until it arrives.
-    ///
-    /// # Errors
-    ///
-    /// [`Trouble::NoAnswer`] for a driver that did not answer inside
-    /// [`ANSWER_MICROS`] — a wedge, or a machine slower than that bound, and
-    /// this cannot tell those apart, which is what [`Trouble::bound`] exists to
-    /// say in the boot log; otherwise whatever [`Supervising::serve`]
-    /// refuses.
-    fn awaited(&mut self, tsc_khz: u64) -> Result<f_abi::Cqe, Trouble> {
-        let deadline = crate::smp::deadline_after(tsc_khz, ANSWER_MICROS);
-        loop {
-            self.serve()?;
-            if let Some(answer) = self.reaper.take().map_err(|_| Trouble::Channel(0))? {
-                return Ok(answer);
-            }
-            if crate::smp::past(deadline) {
-                return Err(Trouble::NoAnswer(ANSWER_MICROS));
-            }
-            core::hint::spin_loop();
-        }
-    }
-
-    /// Take a translation away, on the frame's own initiative.
-    ///
-    /// The `outside` half, and it is deliberately not an operation the driver
-    /// asked for: RFC 0024 says *the memory is the client's and it is entitled
-    /// to take it back*, so what happens here happens under a driver that holds
-    /// a live registration and is doing nothing wrong.
-    fn withdraw(&mut self, cap: u32, address: u64, len: u32) {
-        let mut asking = iommu::Grant {
-            unit: &mut *self.unit,
-            domain: &mut *self.domain,
-            frames: &mut *self.frames,
-            table: self.table,
-        };
-        asking.unmap(cap, address, len);
-    }
-
-    /// Tell the driver to stop.
-    ///
-    /// RFC 0008's stop, as the one notice this run posts: a component ends
-    /// because its supervisor said so, on the ring, drained at the same polling
-    /// point as everything else.
-    ///
-    /// # Errors
-    ///
-    /// [`Trouble::Channel`] for a control ring with no room left, which is a
-    /// driver that stopped draining.
-    fn stop(&self) -> Result<(), Trouble> {
-        self.answers
-            .post(control::entry(control::notice::STOP, 0, 0, 0))
-            .map_err(|_| Trouble::Channel(0))
-    }
-}
 
 /// The datapath proper, with every allocation already made.
 ///
@@ -2315,26 +1971,6 @@ fn taken<'m>(
     answer: &f_abi::Cqe,
 ) -> Result<f_ring::Idle<'m, Fixed>, Trouble> {
     lent.complete(answer).map_err(|_| Trouble::Transfer(0))
-}
-
-/// The allocator order that covers `bytes`, exactly.
-///
-/// Exactly, and not the next order up: a manifest declaring a quantity that is
-/// not a whole number of frames at some order is a manifest that cannot be
-/// satisfied by one allocation, and rounding up would hand a component more
-/// than it declared — which is the same fault as handing it less, pointing the
-/// other way. `docs/manifest.md` already requires `bytes` to be a positive
-/// multiple of a frame; this is the second half of that arithmetic.
-fn order_for(bytes: u64) -> Option<Order> {
-    if bytes == 0 || !bytes.is_multiple_of(FRAME_SIZE) {
-        return None;
-    }
-    let pages = bytes / FRAME_SIZE;
-    if !pages.is_power_of_two() {
-        return None;
-    }
-    let order = u8::try_from(pages.trailing_zeros()).ok()?;
-    Order::new(order)
 }
 
 /// The byte the pattern puts at one position.

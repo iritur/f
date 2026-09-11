@@ -291,6 +291,31 @@ mod tests {
         text_end: u64,
     }
 
+    /// A counter, so that no two fixtures choose one path.
+    ///
+    /// The name used to be the fixture's own shape — the two lengths and
+    /// `__text_end` — which is a perfectly good name right up until two
+    /// fixtures agree on it. Three of the four below do: `b"TTTT"` with
+    /// `b"RRRRRRRR"` is built twice, and `b"RRRRRRRS"` has the same two lengths
+    /// and the same `__text_end`, so all three named one file.
+    ///
+    /// The tests run in parallel threads of one process, so the pid half of the
+    /// name is shared by construction and the shape was the only thing keeping
+    /// them apart. When it stopped keeping them apart, one test's
+    /// `remove_file` landed between another's write and its read, and the
+    /// reader was told the file does not exist. **Nothing about that is
+    /// architecture-specific** — it is a race, and the AArch64 job is simply
+    /// where it was scheduled. A name derived from content is a name that
+    /// collides exactly when two tests are about the same content, which is
+    /// when they are most likely to run together.
+    ///
+    /// `Relaxed`, and the ordering is named at the access because this tree
+    /// requires that: what is wanted is that no two `fetch_add`s answer one
+    /// number, which is what the operation being atomic gives on its own. No
+    /// happens-before relationship is claimed and none is needed, because the
+    /// number reaches nothing but a file name.
+    static FIXTURES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
     impl Fixture {
         fn new(text: &[u8], rodata: &[u8]) -> Self {
             Self {
@@ -375,7 +400,7 @@ mod tests {
             let dir = std::env::temp_dir().join(format!(
                 "f-measure-{}-{}",
                 std::process::id(),
-                self.text.len() * 31 + self.rodata.len() * 7 + self.text_end as usize
+                FIXTURES.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
             ));
             std::fs::write(&dir, self.build()).expect("a fixture this test wrote");
             let out = frame(&dir);

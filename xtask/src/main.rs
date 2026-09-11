@@ -425,38 +425,31 @@ const OWED_REVERSALS: &[Gap] = &[
         "TODO.md E1-B05; docs/rfc/0015; abi/src/door.rs's module comment; the four \
          unimplemented opcodes in abi/src/control.rs",
     ),
-    // `E1-B03`'s, and the first entry here that was found by *running out* of
-    // something rather than by reading a document. The frame's driver shape maps
-    // one page of stack; a component has no allocator, so everything a driver
-    // holds lives in it; and the second driver overran it by fifty-six bytes at
-    // eight receive slots — a page fault at the guard, observed. The number in
-    // that crate is therefore a bound on the frame and not on the protocol, and
-    // it is declared here so that the day the frame gives a driver a stack, the
-    // build says which documents describe a wall that is gone.
-    (
-        "user/virtio-net/src/driver.rs",
-        "RECEIVE_SLOTS_STACK_BOUND",
-        "RFC 0051: a scheduled driver gets one page of stack, so the network driver posts four \
-         receive buffers rather than as many as its clients would give it",
-        "docs/rfc/0051; user/virtio-net/src/driver.rs's RECEIVE_SLOTS_STACK_BOUND; \
-         kernel/src/net.rs's module comment; kernel/src/process.rs's SPAWN_STACK",
-    ),
-    // `E1-B04`'s, and it is a promise rather than a wall: RFC 0051 said *what
-    // would merge them is a third driver, at which point the shared half moves
-    // out of both and neither is closed evidence any more*. There are three
-    // drivers now and the half has not moved. RFC 0054 argues why — the move
-    // rewrites `kernel/src/blk.rs`, which is the evidence a closed task's exit
-    // rests on, in a task whose own evidence is a picture on a screen — and this
-    // row is what stops that argument from quietly becoming permanent. The
-    // needle is the type the three supervisors duplicate; the day it leaves
-    // `blk.rs` the build names every document that says it is still there.
+    // `E1-B04`'s, and what is left of it after `E1-B16`. The shared half has
+    // moved: `Registers`, `Supervising`, `declared`, `order_for` and the two
+    // need names are in `kernel/src/supervisor.rs` now, and the three driver
+    // files are 960 lines lighter between them. **`Reported` did not move,
+    // because it is not one type** — `blk`'s carries `capacity`, `overtaken`,
+    // `queued_max` and `in_flight`, which the other two have no counterpart
+    // for, because a block request has a depth and an order and a display
+    // command does not.
+    //
+    // Its *mechanism* is shared, and that is the trap rather than the
+    // opportunity: a merged type behind a common prefix moves four of `blk`'s
+    // fields by eight bytes, every writer uses the symbolic name so a full
+    // rebuild is safe, a partial one is not, and the magic word written to
+    // catch exactly that still passes on a stale component image reading
+    // shifted fields.
+    //
+    // So this row is narrowed rather than emptied, which is what a partial
+    // payment looks like when it is stated. RFC 0071 names what would make the
+    // rest of it safe: a compile-time offset assertion written *before* the
+    // offsets move, not after.
     (
         "kernel/src/blk.rs",
-        "struct Supervising",
-        "RFC 0051: three driver supervisors hold one `Registers`, `Supervising`, `Reported`, \
-         `declared` and `order_for` between them, and the third driver was to have merged them",
-        "docs/rfc/0051; docs/rfc/0054; the module comments of kernel/src/blk.rs, \
-         kernel/src/net.rs and kernel/src/gpu.rs; kernel/src/gpu.rs's Registers",
+        "struct Reported",
+        "RFC 0051: `Reported` is still three types sharing a name and a mechanism, and a merge behind a common prefix would move four of blk's fields past a check that would still pass",
+        "docs/rfc/0051; docs/rfc/0054; docs/rfc/0071's section on why it stayed; kernel/src/supervisor.rs's module comment",
     ),
 ];
 
@@ -885,11 +878,12 @@ cargo xtask <command>
   mutate             Build the kernel with a deliberate defect, boot it, and
                      require the boot to go red — then require the same boot to
                      go green without it
-  cores              Three boots. A machine that reports eight logical
-                     processors and answers with two must still reach M0 ok,
-                     holding the six that are not there; the same machine with
-                     all eight present must start all eight and hold none; and
-                     `f.cores=1` on the boot line must start one of the eight
+  cores              Four boots. A machine that reports eight logical processors
+                     and answers with two must still reach M0 ok, holding the six
+                     that are not there and saying how far each got; the same
+                     machine with all eight present must start all eight and hold
+                     none; `f.cores=1` must start one of the eight; and
+                     `f.bringup` must trace the arriving cores and change nothing
   attest             Five boots. What is this machine running, is the answer the
                      same twice, does a modification to the frame move it, does
                      the frame refuse to publish a root it cannot measure its way
@@ -5924,6 +5918,12 @@ fn cores() -> Result<(), String> {
     // it.
     const HELD: &str =
         "  note          6 core(s) the processor reported did not answer and are held";
+    // What each of those six reached before it was given up on. Zero, because
+    // there is nothing there to reach anything — and that is why it is worth
+    // asserting: the same line on a machine where a core does start and then
+    // dies carries the stage it died at, and that is the only report such a
+    // failure has. RFC 0070.
+    const STAGE: &str = "did not answer; reached stage 0, nothing; it never executed";
     for (what, smp, append, expected, held) in [
         (
             "eight reported, two there — the machine disagrees with itself",
@@ -5951,6 +5951,22 @@ fn cores() -> Result<(), String> {
             "  cores         1 of 8 shards",
             None,
         ),
+        // The trace, and what it deliberately does not assert. *Which* stage a
+        // core is caught at is a race between the boot processor's poll and the
+        // core's own progress — the run that wrote this comment caught seven
+        // cores at five different stages — so requiring a particular one, or
+        // even requiring that any line appears at all, would be a test that
+        // fails on a fast machine for no reason. What is asserted is that the
+        // parameter parses, the watch loop runs and the boot still reaches the
+        // same eight cores; that the stage byte is *read and named* correctly is
+        // asserted deterministically by the first boot's give-up line. RFC 0070.
+        (
+            "eight there, traced stage by stage",
+            "8",
+            Some("f.bringup"),
+            "  cores         8 of 8 shards",
+            None,
+        ),
     ] {
         println!("\n--- {what}");
         let smp = ["-smp", smp];
@@ -5968,6 +5984,15 @@ fn cores() -> Result<(), String> {
         if !log.contains(expected) {
             return Err(format!(
                 "the boot reached `M0 ok` and found the wrong cores: the log does not\n                 contain `{expected}`.\n\n                 An exit code alone is satisfied by a kernel that started none of them."
+            ));
+        }
+        if held.is_some() && !log.contains(STAGE) {
+            return Err(format!(
+                "the boot held cores and did not say how far any of them got: the log\n  \
+                 does not contain `{STAGE}`.\n\n  \
+                 That line is the whole of what a core dying during bring-up can\n  \
+                 report, and a tree where it has stopped being printed is a tree whose\n  \
+                 next bring-up failure is undiagnosable."
             ));
         }
         match held {
@@ -5991,8 +6016,9 @@ fn cores() -> Result<(), String> {
     }
 
     println!(
-        "\nall three boots reached M0 ok: a core that does not answer is held rather than\n\
-         fatal, and `f.cores=` skips the stage for somebody holding a serial cable"
+        "\nall four boots reached M0 ok: a core that does not answer is held rather than\n\
+         fatal, `f.cores=` skips the stage and `f.bringup` traces it, and the stage a\n\
+         core that never answered reached is in the log either way"
     );
     Ok(())
 }

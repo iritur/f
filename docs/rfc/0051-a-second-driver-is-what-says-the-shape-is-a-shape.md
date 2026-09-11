@@ -203,7 +203,16 @@ slots fit.
 So `RECEIVE_SLOTS_STACK_BOUND` is a constant in a driver crate that is a bound on
 the *frame*, and `cargo xtask lint-owed` carries it as a declared unpaid
 deviation so that the day the frame gives a driver a stack, the build says which
-documents describe a wall that is gone. The number that matters beside it is the
+documents describe a wall that is gone.
+
+> **Paid on 2026-09-11, and this paragraph is kept rather than edited away
+> because the mechanism it describes is what produced the payment.**
+> `kernel::process::SPAWN_STACK_PAGES` is four, both shapes that map a driver's
+> stack map four pages of it, and `f_virtio_net::driver::RECEIVE_SLOTS` is now
+> `QUEUE_SIZE / 2` — half the receive queue, which is the protocol's number.
+> Thirty-two slots boots where eight faulted the guard. The constant is gone,
+> its `OWED_REVERSALS` row is gone, and the reversal condition below fired
+> exactly as written. The number that matters beside it is the
 one nobody had: `user/virtio-blk` was already close to the same wall and nothing
 had measured it.
 
@@ -306,9 +315,20 @@ the address the driver invented, and neither of those is a device's word.
   two needed — a second live IOMMU domain, an interrupt rather than a poll, a
   device whose register window is not four pages — turns one of the *carried over
   unchanged* rows above into a change, and the row is where to look first.
+- **The supervisor merge.** Done in part on 2026-09-11, by `E1-B16` and
+  RFC 0071. `Registers`, `Supervising`, `declared`, `order_for` and the two
+  need names are one module now; `Reported` is not, because it turned out not
+  to be one type — `blk`'s carries four fields the other two have no
+  counterpart for. The `OWED_REVERSALS` row was narrowed to name `Reported`
+  alone rather than deleted, which is what a partial payment looks like when
+  somebody states it.
 - **The frame giving a driver a stack.** `RECEIVE_SLOTS_STACK_BOUND` goes,
   `lint-owed` goes red, and the number in this driver becomes a protocol decision
-  instead of a frame one.
+  instead of a frame one. **This happened on 2026-09-11.** All three clauses
+  held: the constant is gone, `lint-owed` went red until its row was deleted
+  with it, and `RECEIVE_SLOTS` is `QUEUE_SIZE / 2`. A reversal condition that
+  fired in the shape it was written in is the strongest thing this section can
+  report, so it is left standing rather than struck out.
 - **A client that reads past a received frame.** The gap in RFC 0024's typestate
   is recorded here on the argument that a type change with one user has no
   evidence behind it. The first client that gets it wrong is that evidence, and

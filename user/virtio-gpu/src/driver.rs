@@ -580,8 +580,9 @@ impl Rect {
 /// against a driver that has to keep a table of posted buffers, and had to
 /// shrink that table to four entries to fit. There is no such table here: a
 /// display command is a request the device answers, so nothing is outstanding
-/// between entries and there is nothing per-buffer to remember. The wall is
-/// still there and this driver simply does not reach it, which says the wall
+/// between entries and there is nothing per-buffer to remember. The wall has
+/// since moved — the frame gives four pages now — and this driver still does
+/// not reach it, which says the wall
 /// belongs to the receive direction rather than to drivers.
 pub struct Driver {
     transport: Transport,
