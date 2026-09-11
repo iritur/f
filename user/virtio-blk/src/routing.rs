@@ -75,7 +75,7 @@ pub mod life {
 /// artefact that links both definitions and a comment is not a check.
 ///
 /// Unit: bytes, in the component's own address space.
-pub const AT: u64 = 0x0041_5000;
+pub const AT: u64 = 0x0041_8000;
 
 /// How many bytes the page is. One frame.
 /// Unit: bytes.

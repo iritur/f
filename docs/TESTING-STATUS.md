@@ -77,11 +77,13 @@ own instructions observable to anything but QEMU.** RFC 0032 states that as the
 simulator's scope rather than as a limitation discovered later, and the boot
 suite, the mutation harness and L3's proofs are what cover the frame instead.
 
-Five gaps in this tree are *declared quantities* rather than sentences —
-`JOIN_GAP`, `CHAOS_GAP`, `DEADLINE_GAP`, `OWED_REVERSALS` and
-`RECEIVE_SLOTS_STACK_BOUND`. Each is a constant a lint compares against the
-tree, so each goes red both when it grows and when the reason for it stops being
-true. `cargo xtask lint-owed` is the sharpest of them: it lists reversal
+Four gaps in this tree are *declared quantities* rather than sentences —
+`JOIN_GAP`, `CHAOS_GAP`, `DEADLINE_GAP` and `OWED_REVERSALS`. Each is a constant
+a lint compares against the tree, so each goes red both when it grows and when
+the reason for it stops being true. There were five: `RECEIVE_SLOTS_STACK_BOUND`
+was the fifth and was paid on 2026-09-11, which is the mechanism working rather
+than the list shrinking — the frame gave a driver four pages of stack and the
+constant, its `OWED_REVERSALS` row and the wall it described all went together. `cargo xtask lint-owed` is the sharpest of them: it lists reversal
 conditions that have fallen due and are unpaid, and it fails the day one is paid
 and nobody updates the list. That is the difference between a debt and a wish,
 and it is the mechanism this page would otherwise have to describe in prose.

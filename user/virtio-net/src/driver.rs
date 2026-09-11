@@ -192,61 +192,42 @@ const HEADER_SLOT: u32 = 16;
 /// Where the receive header slots start. Unit: bytes.
 const RX_HEADERS_AT: u32 = 64;
 
-/// How many receive slots the frame's driver shape leaves room for.
+/// Receive buffers this driver holds on the device's behalf at once.
 ///
-/// **This is a bound on this driver's *stack*, and it is the largest single
-/// thing E1-B03 found that the frame owes a second driver.** It is a separate
-/// constant from [`RECEIVE_SLOTS`] so that it can be named, greppable and
-/// checked: `cargo xtask lint-owed` carries it as a declared, unpaid deviation,
-/// and the day the frame gives a driver a stack this constant goes and that
-/// check goes red naming every document that describes the deviation.
+/// **Half the receive queue, and for the first time that is the *protocol's*
+/// number rather than the frame's.** Each slot is a descriptor pair — slot `i`
+/// is descriptors `2i` and `2i+1` and header slot `i` — so `QUEUE_SIZE / 2` is
+/// every descriptor the receive virtqueue has, which is what a receive queue is
+/// for: a buffer that is not posted is a frame that is dropped.
 ///
-/// # The measurement
+/// A fixed assignment rather than a free list, for `crate::queue`'s reason — a
+/// free list is an allocation order, and an allocation order a component chose
+/// is a place a seeded run stops reproducing.
 ///
-/// `kernel::process` maps a scheduled driver **one page** of stack —
-/// `SPAWN_STACK`, four kibibytes, with a guard page below it. A component has no
-/// allocator, so everything a driver holds lives in that page: the registration
-/// [`Table`], this array, the transport, two queues and the control region, in
-/// [`Driver`], on the stack of [`crate::component::serve`], while
-/// [`Driver::start`] is still building one.
+/// # What this constant used to be
 ///
-/// At eight slots and sixteen registration sets, this driver's deepest frame
-/// overran that page by **fifty-six bytes** — a page fault at the guard,
-/// observed rather than reasoned about, `vector 14, error 0x6, address
-/// 0x0000000000410fc8`. Four slots fit. That is how much headroom the shape
-/// actually has, and it says something about the first driver as much as the
-/// second: `user/virtio-blk` was already close to the same wall and nothing had
-/// measured it.
-///
-/// # Why the number moved here rather than the page moving in the frame
-///
-/// Because moving the page moves `kernel::process::BLK_BOARD`, which is *the one
-/// address a driver holds as a constant*, in two crates that cannot see each
-/// other — and it changes the stack every other component shape is given, in a
-/// file this task has no business rewriting. RFC 0051 argues the fix and names
-/// its owner. What is refused is doing it quietly: a driver that shrank to fit
-/// and said nothing would leave the next one to find the same wall from the
+/// It was four, and four was a bound on this driver's **stack**. RFC 0051
+/// records the measurement: `kernel::process` mapped a scheduled driver one
+/// page, a component has no allocator so everything a driver holds lives in it,
+/// and at eight slots with sixteen registration sets this driver's deepest
+/// frame overran that page by **fifty-six bytes** — `vector 14, error 0x6,
+/// address 0x0000000000410fc8`, a fault at the guard, observed rather than
+/// reasoned about. The number lived in a second constant,
+/// `RECEIVE_SLOTS_STACK_BOUND`, so that it could be named and greppable and so
+/// that `cargo xtask lint-owed` could carry it as a declared, unpaid deviation.
+/// What that arrangement refused was the quiet repair: a driver shrinking to
+/// fit and saying nothing leaves the next one to find the same wall from the
 /// same distance.
 ///
-/// Unit: buffers.
-pub const RECEIVE_SLOTS_STACK_BOUND: usize = 4;
-
-/// Receive buffers this driver will hold on the device's behalf at once.
-///
-/// Not an allocation and not a policy: it is the number of descriptor pairs the
-/// layout reserves at the bottom of the receive queue, so slot `i` is
-/// descriptors `2i` and `2i+1` and header slot `i`. A fixed assignment rather
-/// than a free list, for `crate::queue`'s reason — a free list is an allocation
-/// order, and an allocation order a component chose is a place a seeded run
-/// stops reproducing.
-///
-/// **What decides the number is [`RECEIVE_SLOTS_STACK_BOUND`] and not this
-/// protocol.** A network driver wants as many receive buffers posted as its
-/// clients will give it, because a buffer that is not posted is a frame that is
-/// dropped; four is what fits, and the constant above says what it fits *in*.
+/// **The frame has now given a driver a stack** —
+/// `kernel::process::SPAWN_STACK_PAGES` is four pages — so the deviation is
+/// paid and the constant that declared it is gone, along with its row in
+/// `xtask`'s `OWED_REVERSALS`. Thirty-two slots boots; the stack is no longer
+/// what decides this number, and the two assertions below are. If a future
+/// driver finds the wall again, the fix is that constant and not this one.
 ///
 /// Unit: buffers.
-pub const RECEIVE_SLOTS: usize = RECEIVE_SLOTS_STACK_BOUND;
+pub const RECEIVE_SLOTS: usize = QUEUE_SIZE as usize / 2;
 
 /// Where [`Driver::provoke_copy`] moves bytes from. Unit: bytes.
 const SCRATCH_FROM: u32 = 1024;
@@ -407,7 +388,8 @@ pub struct Counters {
     /// component faulted its guard page eight bytes past the end. Here it fills
     /// padding this structure already had, and a number a boot can require to be
     /// zero is worth more than a flag it cannot see.
-    /// `RECEIVE_SLOTS_STACK_BOUND` is the rest of that story.
+    /// [`RECEIVE_SLOTS`] is the rest of that story, and it now ends with the
+    /// frame giving this shape four pages instead of one.
     pub halted: u32,
 }
 
@@ -572,9 +554,11 @@ pub enum Answered {
 // faulted its guard page eight bytes past the end, `vector 14, error 0x6,
 // address 0x0000000000410ff8`. So did the `bool` that replaced it, which is why
 // the flag is now [`Counters::halted`] — a `u32` in padding this driver was
-// already paying for. `RECEIVE_SLOTS_STACK_BOUND` says what the page costs and
-// RFC 0051 names who owes the fix; until then, a question asked once a turn is
-// cheaper than an answer carried in every return.
+// already paying for. [`RECEIVE_SLOTS`] says what that page cost and RFC 0051
+// named who owed the fix; it has since been paid —
+// `kernel::process::SPAWN_STACK_PAGES` — and this stays as written because a
+// question asked once a turn is still cheaper than an answer carried in every
+// return, which was always the better half of the argument.
 
 /// The network driver.
 ///
@@ -926,8 +910,11 @@ impl Driver {
         // Whether either of the two methods above put the device in reset is
         // [`Driver::stopped`]'s to answer, asked by the caller once a turn. Not
         // carried out of here on this value, for the reason stated beside
-        // [`Answered`]: this component has one page of stack and the widening
-        // cost more of it than the driver had.
+        // [`Answered`]: when this was written the component had one page of
+        // stack and the widening cost more of it than the driver had. It has
+        // four now, so the reason is no longer the stack — what stands is the
+        // shape, which is that a caller asking once a turn is cheaper than a
+        // value carried out of every return.
     }
 
     /// Mark a completion with what the request lost on the way.

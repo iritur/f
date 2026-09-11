@@ -425,22 +425,6 @@ const OWED_REVERSALS: &[Gap] = &[
         "TODO.md E1-B05; docs/rfc/0015; abi/src/door.rs's module comment; the four \
          unimplemented opcodes in abi/src/control.rs",
     ),
-    // `E1-B03`'s, and the first entry here that was found by *running out* of
-    // something rather than by reading a document. The frame's driver shape maps
-    // one page of stack; a component has no allocator, so everything a driver
-    // holds lives in it; and the second driver overran it by fifty-six bytes at
-    // eight receive slots — a page fault at the guard, observed. The number in
-    // that crate is therefore a bound on the frame and not on the protocol, and
-    // it is declared here so that the day the frame gives a driver a stack, the
-    // build says which documents describe a wall that is gone.
-    (
-        "user/virtio-net/src/driver.rs",
-        "RECEIVE_SLOTS_STACK_BOUND",
-        "RFC 0051: a scheduled driver gets one page of stack, so the network driver posts four \
-         receive buffers rather than as many as its clients would give it",
-        "docs/rfc/0051; user/virtio-net/src/driver.rs's RECEIVE_SLOTS_STACK_BOUND; \
-         kernel/src/net.rs's module comment; kernel/src/process.rs's SPAWN_STACK",
-    ),
     // `E1-B04`'s, and it is a promise rather than a wall: RFC 0051 said *what
     // would merge them is a third driver, at which point the shared half moves
     // out of both and neither is closed evidence any more*. There are three
