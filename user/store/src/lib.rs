@@ -43,6 +43,29 @@
 
 pub mod report;
 
+// The allocator, and it is the *image's* rather than the crate's. Host tests use
+// `std`'s and never see this; `f_ring::heap::Heap::COMPONENT` names one address,
+// and that address means something only inside a component the frame built and
+// granted a `heap` need to.
+//
+// The `unsafe impl GlobalAlloc` behind it is in `f_ring`, which is the whole
+// reason the heap lives there: RFC 0001 forbids `unsafe` above the frame and
+// this crate declares `unsafe_code = "forbid"`, so the line below is the most a
+// component can write — a static naming an allocator somebody else implemented.
+// `target_os = "none"` and not `target_arch`, and the difference is the whole
+// gate. The host runs this crate's tests on x86-64 too, and a `#[global_allocator]`
+// is not like the `component` module beside it: a module that is compiled and
+// never called costs nothing, while an allocator that is merely *present* takes
+// every allocation the test harness makes — to `Heap::COMPONENT`, which names an
+// address that exists inside a component the frame built and nowhere else. The
+// test binary then dies before it runs a test, which is exactly what it did.
+#[cfg(all(target_os = "none", feature = "image"))]
+extern crate alloc;
+
+#[cfg(all(target_os = "none", feature = "image"))]
+#[global_allocator]
+static HEAP: f_ring::heap::Heap = f_ring::heap::Heap::COMPONENT;
+
 // The component half is x86-64's, and only because the door is. Nothing in
 // `component.rs` is architecture-specific; the one instruction underneath it is,
 // and `f_abi::door::call` is compiled only where there is a frame to call. The

@@ -933,7 +933,7 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             "  supervisor    ok — {} place(s), {} spawn(s), {} fault(s), {} restart(s), \
              {} resumed, {} client(s) lost, {} probe(s) refused, {} retired, \
              {} need(s) bound to nothing, {} tree(s) mounted carrying {} node(s), \
-             {} refused for declaring none",
+             {} refused for declaring none; heap {} B described, peak {} byte(s), starved {}",
             report.places,
             report.spawns,
             report.faults,
@@ -946,6 +946,9 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             report.mounted,
             report.nodes,
             report.mute,
+            report.heap_bytes,
+            report.heap_peak,
+            report.heap_starved,
         ),
         // A machine that carried no component file is not a broken machine.
         // `docs/booting-on-hardware.md` makes every component file optional and

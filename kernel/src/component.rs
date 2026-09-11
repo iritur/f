@@ -446,6 +446,13 @@ struct Instance {
     /// Unit: nodes. Never zero — a spawn that would have made it zero was
     /// refused `ADMISSION/NO_STATE_TREE` before this instance existed.
     tree_nodes: u32,
+    /// Where its heap is, as a kernel address, or zero for a component that
+    /// declared no `heap` need.
+    ///
+    /// Kept so the frame can read the region's own prologue after the component
+    /// has run — which is how a boot says an allocation happened, rather than
+    /// taking the component's word for it. Unit: bytes.
+    heap: u64,
     /// The snapshot the frame read back off that tree the moment it published
     /// it, through `f_abi::state::Reader` and not from what it had just
     /// written.
@@ -485,6 +492,28 @@ struct Instance {
 /// would charge for less than it mapped, and the frame would hand back fewer
 /// frames than it took at every teardown.
 const FIXED_PARTS: usize = crate::process::SPAWN_STACK_PAGES + 2;
+
+/// The need a component declares when it wants a heap.
+///
+/// The frame maps this one rather than only granting it, which is why the name
+/// is load-bearing rather than a label — see the mapping in `spawn`. A component
+/// that declares no such need gets no heap and no mapping, and its image is the
+/// same bytes it was.
+const NEED_HEAP: &[u8] = b"heap";
+
+/// Does this need carry `wanted` as its whole name?
+///
+/// The field is NUL-padded to a fixed width, so a prefix match on its own would
+/// make `heap` and `heaps` the same need. What follows the prefix has to be the
+/// padding, which is the half a `starts_with` would have got wrong quietly.
+fn named(need: &f_abi::manifest::Need, wanted: &[u8]) -> bool {
+    need.name.len() >= wanted.len()
+        && &need.name[..wanted.len()] == wanted
+        && match need.name.get(wanted.len()) {
+            Some(byte) => *byte == 0,
+            None => true,
+        }
+}
 
 /// How many frames one instance of an image this long is made of.
 /// Unit: frames.
@@ -755,6 +784,22 @@ pub struct Report {
     /// *four trees were mounted* is a claim about a mechanism and says nothing
     /// about whether any of them had anything in it.
     pub nodes: u32,
+    /// The most any component had allocated at once, read out of its heap's own
+    /// prologue after it had run. Unit: bytes.
+    ///
+    /// A **peak** and not a live figure, because a component that allocated and
+    /// freed has a live figure of zero and is exactly the case this is evidence
+    /// for. Zero here means no component allocated anything, which on a tree
+    /// where one declares a `heap` need is a finding rather than a default.
+    pub heap_peak: u32,
+    /// Whether any component was ever refused an allocation for want of room.
+    ///
+    /// Read from the same prologue, and never cleared once set: what a reader
+    /// wants is *did this ever fail*, and a component that recovered from one
+    /// refusal and failed later was not fine.
+    pub heap_starved: bool,
+    /// How large the largest heap the frame described was. Unit: bytes.
+    pub heap_bytes: u32,
     /// Spawns refused because the manifest declared no state tree.
     /// Unit: refusals.
     ///
@@ -1910,6 +1955,9 @@ unsafe fn spawn(
     table.owes_notices();
     let mut satisfied = 0;
     let mut index = 0;
+    // Where this component's heap landed, for the instance below. Zero when it
+    // declared no `heap` need, which is every component but one today.
+    let mut heap_at = 0u64;
     for need in record.needs() {
         // An ask is not supplied at spawn. It arrives later, through the
         // powerbox, as a grant naming this component's endpoint.
@@ -1933,6 +1981,52 @@ unsafe fn spawn(
             Failure::Capability(error::pack(error::RESOURCE, error::resource::QUOTA_EXHAUSTED))
         })?;
         satisfied += 1;
+
+        // The heap, and it is the one need the frame *maps* rather than merely
+        // granting. A `#[global_allocator]` answers its first allocation before
+        // the component has run a line of its own, so there is no moment at
+        // which the component could ask for this to be mapped — and asking would
+        // be a capability call, which a component that forbids `unsafe` cannot
+        // make. The capability is granted above as well, so the component holds
+        // authority over the memory it is using; what the frame adds is that the
+        // memory is already there when the allocator first looks.
+        if named(need, NEED_HEAP) {
+            if found.extent > crate::process::HEAP_MAX {
+                return Err(Failure::Capability(error::pack(
+                    error::RESOURCE,
+                    error::resource::QUOTA_EXHAUSTED,
+                )));
+            }
+            let pages = found.extent / FRAME_SIZE;
+            for page in 0..pages {
+                // SAFETY: as the fixed parts above — `space` is this component's
+                // and is not in `CR3`, and `found.object` names a contiguous run
+                // of `found.extent` bytes the supervisor carved out of this
+                // component's own account.
+                unsafe {
+                    paging::map_user(
+                        frames,
+                        &mut space,
+                        crate::process::SPAWN_HEAP + page * FRAME_SIZE,
+                        found.object + page * FRAME_SIZE,
+                        UserPage::Data,
+                        features,
+                    )
+                }
+                .map_err(Failure::Space)?;
+            }
+            // Described through the frame's own direct map, before the first
+            // instruction, for `publish_tree`'s reason: the component writes the
+            // numbers and never the shape, and a region nobody described is one
+            // the allocator refuses rather than allocates out of.
+            let at = frames.virt(Frame::from_addr(found.object)) as u64;
+            heap_at = at;
+            // SAFETY: `at` is the direct-map address of a run the supervisor just
+            // carved and nobody else holds, frame-aligned and longer than the
+            // prologue — `charge` zeroed it and the bound above kept it inside
+            // `HEAP_MAX`.
+            unsafe { f_ring::heap::describe(at, u32::try_from(found.extent).unwrap_or(0)) };
+        }
     }
 
     // The state tree, written before the component's first instruction. RFC
@@ -1976,6 +2070,7 @@ unsafe fn spawn(
         table,
         tree: tree_at as u64,
         tree_physical: published,
+        heap: heap_at,
         tree_nodes,
         tree_snapshot: reader.snapshot(),
     });
@@ -2914,6 +3009,25 @@ fn tear_down(
     report: &mut Report,
     tree: &crate::state::Tree,
 ) -> Result<(u32, u32, u32, u32), Failure> {
+    // The heap, read before the region goes back to the account. This is the
+    // evidence that a component allocated: the numbers are in the region's own
+    // prologue, written by the allocator, and read here by the frame — the same
+    // arrangement as a state tree, and for the same reason. A component's word
+    // for whether it allocated would be worth nothing.
+    if let Some(occupant) = place.occupant.as_ref()
+        && occupant.heap != 0
+    {
+        // SAFETY: `occupant.heap` is the direct-map address of a region this
+        // frame mapped and described at spawn, and the occupant has ended — the
+        // teardown below is what gives it back, and it has not run yet.
+        let heap = unsafe { f_ring::heap::Heap::over(occupant.heap) };
+        if heap.valid() {
+            report.heap_peak = report.heap_peak.max(heap.peak());
+            report.heap_starved |= heap.starved();
+            report.heap_bytes = report.heap_bytes.max(heap.bytes());
+        }
+    }
+
     let mut withdrawn = (0, 0, 0, 0);
     // 0. Take the mount out of the frame's root, and take it out *first*. The
     //    frame this place's occupant published into is about to go back to the
