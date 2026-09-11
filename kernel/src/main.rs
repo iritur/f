@@ -2475,6 +2475,26 @@ fn runtime_demonstration(
         report.entries.interrupts,
         report.entries.total(),
     );
+    // The component's own tree, read by the frame out of the page it published
+    // the schema into, before `reap` took the page back. The two snapshots are
+    // the evidence and neither is worth anything alone: the first is this tree
+    // with nothing but zeros in it, taken before the component's first
+    // instruction, and *moved* is what says the component stored something
+    // rather than that this frame happened to hold something already.
+    //
+    // This is E1-B15's reversal paid. Before it the four nodes were declared in
+    // `user/store/manifest.toml`, given a schema at every spawn, and filled by
+    // nobody on the path that actually runs a runtime — so the numbers left
+    // packed into the door's exit word. A status still leaves that way, which
+    // is the half that has to survive the address space it was computed in.
+    kprintln!(
+        "  own tree      {} node(s), snapshot {:#018x} -> {:#018x} ({}), {} written",
+        report.tree_nodes,
+        report.tree_blank,
+        report.tree_snapshot,
+        if report.tree_snapshot == report.tree_blank { "UNMOVED" } else { "moved" },
+        report.tree_written,
+    );
     // A run that never adopted a ring completed no work, and the two fields
     // that would say how much carry the refusal instead — so the work line
     // would be reporting an `f_abi::error` domain as a number of work items.

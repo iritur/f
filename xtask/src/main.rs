@@ -1470,8 +1470,19 @@ const IMAGE_MAX: &[(&str, u64)] =
     &[("virtio-blk", 16 * 4096), ("virtio-net", 16 * 4096), ("virtio-gpu", 16 * 4096)];
 
 /// What a component whose shape [`IMAGE_MAX`] does not name may be.
+///
+/// Four pages, and it was one until `E1-B15`. One was never a number anybody
+/// chose — it is what the init and runtime shapes happened to have when the
+/// only thing above the frame was an announcement — and `user/store` had **192
+/// bytes** of room left under it, 3904 against 4096, which is why that task
+/// could not be paid by the one mapping its own line said it needed.
+///
+/// This and `kernel::process::INIT_TEXT_PAGES` are **one number written
+/// twice**, which is what the refusal below says when an image outgrows it.
+/// The ceiling on both is seven: everything from `TEXT` to `OWN_TREE` is that
+/// many text pages plus nine, and it has to stay below `SPAWN_GUARD`.
 /// Unit: bytes.
-const INIT_MAX: u64 = 4096;
+const INIT_MAX: u64 = 4 * 4096;
 
 /// The bound for one component, by directory name.
 ///

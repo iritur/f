@@ -21,15 +21,21 @@
 //! schema into a page of this component's own address space at every spawn,
 //! before its first instruction. The shape exists and is checked on every boot.
 //!
-//! What is still owed is this module: the runtime still packs a word out
-//! through the door instead of storing into those nodes, because the path that
-//! *runs* a runtime — `kernel::runtime` — builds its process a different way
-//! and does not map that page. So the reversal condition above stands unchanged
-//! and is now one mapping away rather than one design away. The day it is paid,
-//! the four nodes stop being a declaration nothing fills, and this module keeps
-//! only [`Tally::code`] — which survives for the reason it always had: the
-//! frame reads a status *after* the component's address space is gone, and a
-//! tree cannot answer once the memory it lived in has been given back.
+//! **Paid on 2026-09-11, and it was not one mapping.** `kernel::runtime` maps
+//! [`TREE_AT`] now and publishes the manifest's schema into it before the
+//! component's first instruction, and `crate::runtime` stores the four words
+//! there on its way out. What it cost besides the mapping was the text
+//! reservation: this component's image had 192 bytes of room under the one page
+//! the runtime shape gave it, against a write path of about 536, so
+//! `kernel::process::INIT_TEXT_PAGES` is four pages and `xtask`'s `INIT_MAX` is
+//! the same number written twice. `TODO.md`'s E1-B15 line carries the
+//! measurement; RFC 0072 carries the decision.
+//!
+//! **[`Tally::code`] survives, for the reason it always had.** The frame reads
+//! a status *after* the component's address space is gone, and a tree cannot
+//! answer once the memory it lived in has been given back. So the numbers stop
+//! travelling through the door and the status does not — which is the shape the
+//! reversal above asked for, and the reason this module still exists.
 //!
 //! # Why it lives in this crate rather than in `f_abi`
 //!
@@ -259,6 +265,53 @@ pub const fn label(code: u8) -> &'static str {
         _ => "a status this build does not name",
     }
 }
+
+/// Where the frame maps this runtime's control ring.
+///
+/// # Why the frame's layout is written down twice
+///
+/// RFC 0008 says a component's first instruction runs with the address of its
+/// control ring in a register, and `f_abi::door::Entry` carries a selector and
+/// a handle instead — so until that word grows a third field, a runtime holds
+/// this as a constant and the frame holds it as another.
+///
+/// # Why it lives here and not beside the code that uses it
+///
+/// Because this module is the only part of this crate the **frame** links.
+/// `runtime` and `component` are gated on `feature = "image"`, which the kernel
+/// does not enable, so a constant in there is invisible to
+/// `kernel/src/runtime.rs` and cannot be checked against
+/// `kernel::process::RING`. A disagreement was therefore a page fault at the
+/// first adoption, reported as an ordinary ring-3 fault with nothing in it
+/// naming the cause.
+///
+/// The three driver crates have had the other arrangement since RFC 0047:
+/// `kernel/src/blk.rs` carries `const _: () = assert!(process::BLK_BOARD ==
+/// routing::AT)`, and a half-done move does not link. This is that, for the
+/// shape that did not have it.
+/// Unit: bytes, in this component's address space.
+pub const CONTROL_AT: u64 = 0x0040_A000;
+
+/// Where the frame maps this runtime's own work ring.
+///
+/// Must equal `kernel::process::WORK`. See [`CONTROL_AT`].
+/// Unit: bytes, in this component's address space.
+pub const WORK_AT: u64 = 0x0040_B000;
+
+/// Where the frame maps this runtime's own state tree.
+///
+/// Must equal `kernel::process::OWN_TREE`. See [`CONTROL_AT`].
+///
+/// This is the page RFC 0013's *every component publishes a state tree* needed
+/// and the runtime shape did not have: the four nodes `user/store`'s manifest
+/// declares have had a schema written into them at every *spawn* since RFC
+/// 0065 and nowhere to live on the path that actually runs a runtime.
+/// Unit: bytes, in this component's address space.
+pub const TREE_AT: u64 = 0x0040_C000;
+
+/// How many bytes each of those regions is. One frame, which is what the
+/// account paid for. Unit: bytes.
+pub const REGION_BYTES: u32 = 4096;
 
 #[cfg(test)]
 mod tests {

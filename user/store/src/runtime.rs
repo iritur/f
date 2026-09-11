@@ -57,26 +57,13 @@ use crate::report::{self, Tally};
 
 /// Where the frame maps this runtime's control ring.
 ///
-/// A constant, for the reason `user/init/src/component.rs` gives about its own
-/// two: there is no way to be told yet. RFC 0008 says a component's first
-/// instruction runs with the address of its control ring in a register, and
-/// `f_abi::door::Entry` carries a selector and a handle instead — so until that
-/// word grows a third field, this is the frame's layout written down twice and
-/// checked by the machine. It must equal `kernel::process::RING`, and a build
-/// where it does not is a page fault at the first adoption, reported by the
-/// frame as an ordinary ring-3 fault.
-/// Unit: bytes, in this component's address space.
-const CONTROL_AT: u64 = 0x0040_7000;
-
-/// Where the frame maps this runtime's own work ring.
-///
-/// Must equal `kernel::process::WORK`. See [`CONTROL_AT`].
-/// Unit: bytes, in this component's address space.
-const WORK_AT: u64 = 0x0040_8000;
-
-/// How many bytes each of them is. One frame, which is what the account paid
-/// for. Unit: bytes.
-const REGION_BYTES: u32 = 4096;
+// The three addresses and the region size live in `crate::report`, which is the
+// one module of this crate the frame links — so `kernel/src/runtime.rs` asserts
+// they agree with `kernel::process` at compile time, and a build where they do
+// not fails to link rather than page-faulting at the first adoption. That is the
+// arrangement the three driver crates have had since RFC 0047 and this shape did
+// not.
+use crate::report::{CONTROL_AT, REGION_BYTES, TREE_AT, WORK_AT};
 
 /// The call the provocation makes.
 ///
@@ -210,7 +197,62 @@ pub fn run(selector: u32) -> ! {
     } else {
         tally.code = report::NOT_QUIET;
     }
+    // The numbers go into this component's own tree, where a reader can have
+    // them; the status goes out through the door, where it survives the address
+    // space. RFC 0013, RFC 0065, and the reversal `crate::report` has stated
+    // since it was written.
+    publish(&tally, submitted);
     end(report::pack(tally))
+}
+
+/// The nodes `manifest.toml` declares, by the ids it declares them at.
+///
+/// Ids and not names: a name lookup is a string compare per store and the id is
+/// what the wire carries. A build where these and the manifest disagree stores
+/// into nothing and the frame says so — `f_abi::state::Writer::set` answers
+/// `false` for an id the published schema does not have, and the snapshot the
+/// frame reads afterwards will not have moved.
+mod node {
+    /// Work items this component's executor completed.
+    pub const WORK: u32 = 2;
+    /// Notices drained off the control ring.
+    pub const NOTICES: u32 = 3;
+    /// Work items still on its own queue.
+    pub const QUEUED: u32 = 4;
+    /// How it last ended, as a `crate::report` status ordinal.
+    pub const STATUS: u32 = 5;
+}
+
+/// Store what this run did into the tree the frame published for it.
+///
+/// It returns rather than reporting when the tree will not bind, and that is
+/// not a silent skip — it is a skip the **frame** sees. The frame takes a
+/// reading of this page before this component's first instruction and another
+/// after the run, and a component that stored nothing leaves the two equal. So
+/// the failure mode of this function is a snapshot that did not move, reported
+/// by the reader on the other side of the boundary rather than claimed by the
+/// writer on this one, which is the arrangement RFC 0013 asks for everywhere
+/// else. Reporting it from here would be this component's word for whether this
+/// component published, which is worth nothing.
+///
+/// Nothing here is `unsafe` and nothing here could be: `CLAUDE.md` forbids it
+/// outside `abi`, `ring` and `kernel`, which is why `f_abi::state::Writer`
+/// exists at all.
+fn publish(tally: &Tally, submitted: u64) {
+    let Ok(tree) = f_abi::state::Writer::at(TREE_AT, REGION_BYTES) else { return };
+    tree.set(node::WORK, u64::from(tally.completed));
+    tree.set(node::NOTICES, u64::from(tally.notices));
+    // `queued` is the one computed rather than counted, and it is a gauge
+    // because it goes both ways. What is still on the queue is what was
+    // submitted and has not come back — zero on a quiescent run, by the same
+    // arithmetic the `QUIESCENT` flag above is set by, so the node and the flag
+    // cannot disagree without one of them being wrong.
+    //
+    // Not `tally.parked`, which is a different number: that is what this
+    // runtime never *started* because it parked first, and a run that parked
+    // with an empty queue has a large `parked` and nothing queued at all.
+    tree.set(node::QUEUED, submitted.saturating_sub(u64::from(tally.completed)));
+    tree.set(node::STATUS, u64::from(tally.code));
 }
 
 /// Drain the control ring, and answer whether a core is being taken back.
