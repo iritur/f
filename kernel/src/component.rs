@@ -2079,7 +2079,7 @@ fn unmount(tree: &crate::state::Tree, place: &Place) {
 /// build cannot turn into a readable tree — which after [`admit`] and
 /// `Record::read` means a bound this function got wrong rather than a manifest
 /// that is wrong.
-fn publish_tree(base: *mut u8, record: &Record) -> Result<u32, Failure> {
+pub(crate) fn publish_tree(base: *mut u8, record: &Record) -> Result<u32, Failure> {
     let malformed = error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER);
     let declared = record.state_nodes();
     let nodes = u32::try_from(declared.len()).map_err(|_| Failure::StateTree(malformed))?;

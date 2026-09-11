@@ -89,12 +89,12 @@ const TREE: u16 = 3;
 /// One unmapped page above the top of the stack, which is the frame's layout
 /// and not this component's choice. It is a constant here for the same reason
 /// the handles are: there is no way to be told it yet.
-const GRANT: u64 = 0x0040_4000;
+const GRANT: u64 = 0x0040_7000;
 
 /// Where the state tree is mapped: two pages above that, and still inside the
 /// two mebibytes one page table covers, so reading the frame's counters costs
 /// no allocation.
-const TREE_AT: u64 = 0x0040_6000;
+const TREE_AT: u64 = 0x0040_9000;
 
 /// How large the tree's mapping is. One frame, which is what was granted.
 const TREE_BYTES: u32 = 4096;

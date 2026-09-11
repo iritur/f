@@ -104,6 +104,17 @@ use f_abi::{Cqe, error, feature};
 use f_ring::{Collector, Consumer, Mapping, Poster};
 use f_store::report::{self, Tally};
 
+// The frame's layout and the component's, required to agree by the machine
+// rather than by two comments. `f_store::report` is the one module of that
+// crate the kernel links — `runtime` and `component` are gated on
+// `feature = "image"` — so before those constants moved there, a disagreement
+// was a page fault at the component's first adoption, reported as an ordinary
+// ring-3 fault with nothing in it naming the cause. The three driver crates
+// have had this since RFC 0047; this shape did not.
+const _: () = assert!(crate::process::RING == report::CONTROL_AT);
+const _: () = assert!(crate::process::WORK == report::WORK_AT);
+const _: () = assert!(crate::process::OWN_TREE == report::TREE_AT);
+
 use crate::arch::x86_64::multiboot::BootInfo;
 use crate::arch::x86_64::paging::{self, Features};
 use crate::mem::{FRAME_SIZE, FrameAllocator};
@@ -373,6 +384,9 @@ pub enum Trouble {
     Allocation(i32),
     /// The core given the runtime never reported finished.
     NoAnswer(usize),
+    /// The runtime's own state tree could not be published, or could not be
+    /// read back, carrying the packed refusal.
+    StateTree(i32),
 }
 
 impl Trouble {
@@ -386,6 +400,7 @@ impl Trouble {
             Self::Ring(_) => "a ring this build wrote it cannot read back",
             Self::Allocation(_) => "the allocation refused a core",
             Self::NoAnswer(_) => "the core given the runtime never reported finished",
+            Self::StateTree(_) => "the runtime's own state tree could not be published or read",
         }
     }
 }
@@ -443,6 +458,26 @@ pub struct Report {
     /// or does not. [`u32::MAX`] when the ring no longer validates at all.
     /// Unit: entries.
     pub left_behind: u32,
+    /// How many nodes the component's manifest declared for its own tree.
+    /// Unit: nodes.
+    pub tree_nodes: u32,
+    /// The snapshot of that tree before the component's first instruction.
+    ///
+    /// Kept beside [`Report::tree_snapshot`] rather than dropped, because the
+    /// pair is the evidence and neither half is evidence alone: a snapshot that
+    /// moved says the component stored something, and only the reading taken
+    /// before it ran says the words it stored were not already there.
+    pub tree_blank: u64,
+    /// The snapshot of that tree after the run.
+    pub tree_snapshot: u64,
+    /// How many declared nodes carry a non-zero word after the run.
+    ///
+    /// A count rather than a value, because which id means what is the
+    /// component's to declare. Zero beside a moved snapshot would be a
+    /// contradiction; zero beside an unmoved one is a component that never got
+    /// as far as publishing, which is what the hostile half looks like.
+    /// Unit: nodes.
+    pub tree_written: u32,
 }
 
 impl Report {
@@ -894,6 +929,29 @@ pub unsafe fn demonstrate(
         unsafe { crate::process::prepare_runtime(frames, kernel, features, plan) }
             .map_err(Trouble::Process)?;
 
+    // The runtime's own tree, written before its first instruction, out of the
+    // same manifest and through the same function the spawn path uses. RFC
+    // 0065: the schema is the frame's and the words are the component's, so a
+    // runtime that is prepared and never scheduled still reads as *this
+    // component has done nothing* rather than as *this component cannot be
+    // read*.
+    //
+    // This is the half of `f_store::report`'s reversal that was owed. The four
+    // nodes that manifest declares have had a schema at every spawn since RFC
+    // 0065 and nowhere to live on the path that actually runs a runtime, so the
+    // runtime packed them into a word and carried it out through `door::EXIT`.
+    // `process::OWN_TREE` is where they live now.
+    let tree_nodes = crate::component::publish_tree(rings.own_tree as *mut u8, record)
+        .map_err(|_| Trouble::StateTree(0))?;
+    // The reading taken before anything could have written a word, kept so that
+    // the reading afterwards means something. A snapshot that moved would
+    // otherwise be evidence only that two readings differ, and one that had
+    // *not* moved would be indistinguishable from a component that stored the
+    // zeros already there.
+    let tree_blank = f_abi::state::Reader::at(rings.own_tree, FRAME_SIZE as u32)
+        .map_err(Trouble::StateTree)?
+        .snapshot();
+
     // The frame is the grantor, so the frame writes the headers. The runtime
     // adopts them and believes nothing, which is what it would do if the peer
     // were hostile — and on one of these halves it is.
@@ -940,6 +998,25 @@ pub unsafe fn demonstrate(
     // taken from the runtime's word for it.
     let left_behind = leftovers(&work);
 
+    // The component's own tree, read before `reap` gives the page back. Read
+    // rather than asked for: this is RFC 0013's *read, never delivered* with
+    // the frame on the reading end, and it is the first thing in this tree that
+    // makes a component's own state tree observable from a boot rather than
+    // declared in a manifest.
+    let tree =
+        f_abi::state::Reader::at(rings.own_tree, FRAME_SIZE as u32).map_err(Trouble::StateTree)?;
+    let tree_snapshot = tree.snapshot();
+    // How many of the declared nodes carry a word this component put there.
+    //
+    // A count and not one node's value, because the frame reads a manifest for
+    // *shape* and not for meaning: which id is `work` is `user/store`'s to
+    // choose, and a frame that printed "work" would be naming a node it does
+    // not know the meaning of. The first node is the subtree the other four
+    // hang under and never carries a word at all, which is what reporting by
+    // position got wrong before this line said so.
+    let tree_written =
+        tree.schema().iter().filter(|entry| tree.value(entry.id).unwrap_or(0) != 0).count() as u32;
+
     // SAFETY: on the core that prepared it, after the core that ran it reported
     // finished — which is what `run_on` returning `Ok` means.
     let report = unsafe { crate::process::reap(frames, prepared) }.map_err(Trouble::Process)?;
@@ -970,6 +1047,10 @@ pub unsafe fn demonstrate(
         exited,
         tally: report::unpack(status),
         left_behind,
+        tree_nodes,
+        tree_blank,
+        tree_snapshot,
+        tree_written,
     })
 }
 

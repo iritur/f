@@ -571,6 +571,124 @@ impl Reader {
     }
 }
 
+/// A component storing into the tree the frame published for it.
+///
+/// # Why the write side is here and not in the component
+///
+/// Because a component may not write `unsafe` and a mapped page can only be
+/// reached through a raw pointer. `CLAUDE.md` permits `unsafe` in `abi`, `ring`
+/// and `kernel` and forbids it everywhere else at compile time, so a component
+/// that stored into its own tree by hand could not be built — the rule would
+/// have made RFC 0013's *every component publishes a state tree* something no
+/// component could do. One writer here, with the pointer arithmetic argued
+/// once, is what makes the policy and the RFC hold at the same time.
+///
+/// It is the same bargain [`Reader`] states and the reasons carry over
+/// unchanged: the address is the caller's claim, a wrong one faults in ring 3,
+/// and the alternative is that same `unsafe` block copied into every component
+/// slightly differently.
+///
+/// # What it does not do
+///
+/// It does not publish. The schema is the frame's, written before the
+/// component's first instruction and never rewritten by the component — which
+/// is what `generation` staying zero means. This stores words into slots that
+/// already exist, and nothing else.
+pub struct Writer {
+    /// The reader over the same tree. Every lookup this type needs is one
+    /// [`Reader`] already does correctly, so it holds one rather than growing a
+    /// second copy of *where does node `id` live* beside it.
+    reader: Reader,
+}
+
+impl Writer {
+    /// Bind to a tree the frame published into this component's address space.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Reader::at`]'s, and for its reasons: this validates by reading
+    /// the header and the schema back, so a mapping that is not a tree is
+    /// refused here rather than discovered at the first store.
+    ///
+    /// `#[inline]` for [`Reader::at`]'s reason.
+    #[inline]
+    pub fn at(base: u64, len: u32) -> Result<Self, i32> {
+        Ok(Self { reader: Reader::at(base, len)? })
+    }
+
+    /// The tree as a reader, for a component that wants to read back what it
+    /// stored or read a node it does not write.
+    #[must_use]
+    #[inline]
+    pub const fn reader(&self) -> &Reader {
+        &self.reader
+    }
+
+    /// Where the word for node `id` lives, or `None` if this tree has no such
+    /// node.
+    #[inline]
+    fn word_at(&self, id: u32) -> Option<u64> {
+        let index = self.reader.schema().iter().position(|entry| entry.id == id)?;
+        Some(
+            self.reader.base
+                + u64::from(self.reader.header.data_offset)
+                + index as u64 * u64::from(WORD),
+        )
+    }
+
+    /// Store `value` into the node `id`, and answer whether there was one.
+    ///
+    /// `false` for an id this tree does not carry, which is the position
+    /// [`Reader::value`] takes and for the same reason: two builds of a
+    /// component differ in exactly this way, and a store into a node the
+    /// frame's schema does not have is a no-op rather than a fault.
+    ///
+    /// Written volatilely and one word at a time, so a reader sees each store
+    /// whole. That is atomic per node and promises nothing about two nodes
+    /// being from one instant — RFC 0013's decision, stated on [`Reader`]. The
+    /// write side has to make the same promise or the read side's is worth
+    /// nothing.
+    ///
+    /// Takes `&self` rather than `&mut self` on purpose. The word is behind a
+    /// raw pointer and not behind a Rust reference, so there is no aliasing
+    /// claim to make, and a component that had to thread a mutable borrow of
+    /// its whole tree through every function that counts something would thread
+    /// it through every function it has.
+    #[inline]
+    pub fn set(&self, id: u32, value: u64) -> bool {
+        let Some(at) = self.word_at(id) else { return false };
+        // SAFETY: `word_at` answers an address only for an index inside the
+        // validated schema, and `Reader::at` established that `nodes`
+        // eight-byte aligned words at `data_offset` are inside the mapping the
+        // caller claimed. The mapping is this component's own, written by the
+        // frame before its first instruction, so nothing else holds a Rust
+        // reference to it.
+        unsafe { (at as *mut u64).write_volatile(value) };
+        true
+    }
+
+    /// Add `delta` to the node `id`, saturating, and answer whether there was
+    /// one.
+    ///
+    /// Saturating and not wrapping: a counter that wraps reports a *fall*, and
+    /// a reader watching for a fall to mean *something restarted* would be told
+    /// so by arithmetic. No rate this machine can produce reaches the bound, so
+    /// the saturation is an argument about what the type means rather than a
+    /// case anybody will hit.
+    ///
+    /// Not atomic against another writer, and it does not need to be: there is
+    /// exactly one writer of a component's tree, which is the component.
+    #[inline]
+    pub fn add(&self, id: u32, delta: u64) -> bool {
+        let Some(at) = self.word_at(id) else { return false };
+        // SAFETY: as `set`.
+        let word = unsafe { (at as *const u64).read_volatile() };
+        // SAFETY: as `set`.
+        unsafe { (at as *mut u64).write_volatile(word.saturating_add(delta)) };
+        true
+    }
+}
+
 /// Lay a header and a schema block out in a region a caller owns, and answer
 /// how many bytes the whole tree occupies.
 ///

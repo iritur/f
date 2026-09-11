@@ -40,6 +40,7 @@ row per entry that needs one, and an entry that needs none does not get a row.
 | 0069 | — | A claim states the kind of evidence behind it, and a kind may not stand in for another | draft; no task line owns it, which is the reason for the row — written from a reading of another project's validation rule on 2026-09-10, ahead of the lint that would make it mechanical |
 | 0070 | `E0-P18` | An arriving core is given the bits it needs, not the register | accepted |
 | 0071 | `E1-B16` | The shared half of three supervisors is one module, and `Reported` is not in it | accepted; the number was allocated on a commit of its own before the diff, because six separate plans for separate work each computed 0071 as next free — `docs/postmortem/0001`'s first failure waiting to happen again. The entry keeps the two sentences the implementation proved wrong |
+| 0072 | `E1-B15` | A runtime is a component, so it publishes a tree, so it needs the pages to do it in | accepted; the entry carries the ceiling — the init and runtime chain is its text reservation plus nine pages and has to stay below `SPAWN_GUARD`, so four is what it is and seven is the most it could be |
 
 **0012 is why this directory runs 0011, 0013.** `TODO.md` reserved the number
 for the generation swap when the E2 line was written, and then E0 and E1 wrote

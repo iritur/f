@@ -96,12 +96,32 @@ use crate::percpu::PerCpu;
 /// arrives with its own idea of where its text goes.
 pub const TEXT: u64 = 0x0000_0000_0040_0000;
 
+/// How many pages of text the init and runtime shapes are given.
+///
+/// Four. It was one, and one was the same kind of number
+/// [`SPAWN_STACK_PAGES`] was: what the shape happened to have when the only
+/// thing above the frame was an announcement. `user/store`'s image had **192
+/// bytes** of room left under it — 3904 against 4096 — which `TODO.md`'s
+/// E1-B15 line records as a measurement rather than an estimate, and which is
+/// why that task could not be paid by the one mapping its own text said it
+/// needed.
+///
+/// **What the ceiling is, and it is not this number.** Everything from [`TEXT`]
+/// to [`OWN_TREE`] has to stay inside the two mebibytes one page table covers,
+/// and it has to stay below [`SPAWN_GUARD`], which is `TEXT` plus
+/// [`TEXT_PAGES`] — sixteen. The chain is this many text pages plus nine, so
+/// seven is the most this may be. Four leaves three pages spare, which is the
+/// margin the next thing to land in this region spends rather than reopening
+/// the question.
+/// Unit: pages.
+pub const INIT_TEXT_PAGES: usize = 4;
+
 /// One page, deliberately unmapped, between the text and the stack.
 ///
 /// The same guard the kernel gives its own stacks, for the same reason: a stack
 /// that grows past its end should hit nothing rather than hit the text of the
 /// program that is running on it.
-pub const GUARD: u64 = TEXT + FRAME_SIZE;
+pub const GUARD: u64 = TEXT + INIT_TEXT_PAGES as u64 * FRAME_SIZE;
 
 /// Where a process's stack is mapped.
 pub const STACK: u64 = GUARD + FRAME_SIZE;
@@ -151,8 +171,47 @@ pub const RING: u64 = TREE + FRAME_SIZE;
 /// it is the frame's memory only in the sense that the frame charged an account
 /// for it. Nothing in the frame reads it while the runtime runs.
 ///
-/// Must equal `f_store::runtime`'s `WORK_AT`. See [`RING`].
+/// Must equal `f_store::report::WORK_AT`. See [`RING`].
 pub const WORK: u64 = RING + FRAME_SIZE;
+
+/// Where a runtime's *own* state tree is mapped.
+///
+/// The sixth page of this region, and the only one in it a runtime writes for
+/// somebody else to read. [`TREE`] above is the **frame's** tree, mapped so a
+/// process can read the frame's counters; this one runs the other way.
+///
+/// **Why the runtime shape needed a page of its own.** A component spawned into
+/// a place gets [`SPAWN_TREE`], published from its manifest before its first
+/// instruction, and `kernel::runtime` builds its process a different way and
+/// mapped no such page. That was the unpaid half of the reversal
+/// `f_store::report` has stated since it was written: the four nodes
+/// `user/store`'s manifest declares have had a schema at every *spawn* since
+/// RFC 0065 and nowhere to live on the path that actually runs a runtime, so
+/// the runtime packed its tallies into a word and carried them out through
+/// `door::EXIT` — the one path that still works after the address space is
+/// gone, and the wrong one for everything before that.
+///
+/// **Mapped rather than granted, and that is not a preference.** The four
+/// grants a runtime is given are load-bearing: `f_abi::door::Entry::granted`
+/// computes the nth handle from the first, at the first's generation, and that
+/// arithmetic holds only while every process shape grants the same number. The
+/// comment on the fourth grant in [`prepare_runtime`] records what a fifth cost
+/// the last time two shapes disagreed. A page in the map loop costs no grant,
+/// which is also how [`SPAWN_TREE`] arrives.
+///
+/// Must equal `f_store::report::TREE_AT`. See [`RING`] for what a disagreement
+/// looks like from the outside — and note that unlike `RING` and `WORK` before
+/// this landed, all three are now checked at compile time in
+/// `kernel/src/runtime.rs`, because the constants moved into the one module of
+/// that crate the frame links.
+pub const OWN_TREE: u64 = WORK + FRAME_SIZE;
+
+// The whole region is inside the two mebibytes one page table covers, and below
+// the spawn shape's own base. A build that widened `INIT_TEXT_PAGES` past what
+// fits would fail here rather than at a runtime's first store into a page that
+// belongs to somebody else.
+const _: () = assert!(OWN_TREE + FRAME_SIZE <= TEXT + 2 * 1024 * 1024);
+const _: () = assert!(OWN_TREE + FRAME_SIZE <= SPAWN_GUARD);
 
 /// How many pages of text the frame reserves for a component it builds from a
 /// component file.
@@ -1422,7 +1481,7 @@ pub struct Prepared {
 /// padding the list with two null frames to fill it, so the constant, the
 /// sentence beside it and the code disagreed about what was being reserved and
 /// why. A ceiling nobody reaches teaches a reader the wrong number.
-const PARTS_MAX: usize = 4;
+const PARTS_MAX: usize = 5;
 
 /// Build a process on `cpu`'s behalf: an address space, four pages, a table of
 /// capabilities and a job.
@@ -1604,7 +1663,9 @@ pub unsafe fn prepare(
 
     Ok(Prepared {
         space,
-        pages: [text, stack, granted, untyped],
+        // Four real and one unused: `PARTS_MAX` is the runtime shape's five and
+        // `parts` is what says how much of this is real. `reap` slices to it.
+        pages: [text, stack, granted, untyped, Frame::from_addr(0)],
         parts: 4,
         before,
         granted: granted_count,
@@ -1653,6 +1714,16 @@ pub struct Rings {
     /// The runtime's own work ring, as the frame sees it.
     /// Unit: bytes, kernel-virtual.
     pub work: u64,
+    /// The page the runtime publishes its own state tree in, as the frame sees
+    /// it.
+    ///
+    /// Answered here for the same reason the two rings are: the frame has to
+    /// reach it *before* the runtime does. The schema goes in before the first
+    /// instruction — `component::publish_tree`, the same function the spawn
+    /// path uses — and the words come back out after the run and before `reap`
+    /// takes the page.
+    /// Unit: bytes, kernel-virtual.
+    pub own_tree: u64,
 }
 
 /// Build a runtime on `cpu`'s behalf: an address space, four pages, a table
@@ -1692,7 +1763,8 @@ pub unsafe fn prepare_runtime(
     if image.is_empty() {
         return Err(Error::NoProgram);
     }
-    if image.len() as u64 > FRAME_SIZE {
+    let text_pages = (image.len() as u64).div_ceil(FRAME_SIZE) as usize;
+    if text_pages > INIT_TEXT_PAGES {
         return Err(Error::TooLarge);
     }
 
@@ -1702,13 +1774,24 @@ pub unsafe fn prepare_runtime(
     // frames are addressable through its direct map.
     let mut space = unsafe { paging::user_space(frames, kernel) }.map_err(Error::Space)?;
 
-    let text = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
+    // One block for the text, on `prepare_driver`'s argument: a flat image is
+    // contiguous by definition, the frame copies it in one `memcpy`, and the
+    // component's own calls are relative.
+    let text_order = Order::new(u8::try_from(INIT_TEXT_PAGES.trailing_zeros()).unwrap_or(u8::MAX))
+        .ok_or(Error::NoFrames)?;
+    let text = frames.alloc_zeroed(text_order).ok_or(Error::NoFrames)?;
     let stack = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
     // Zeroed, and it is a real obligation rather than tidiness: `Mapping`'s
     // cursors, index ring and both entry arrays are reinterpreted in place, and
     // all-zero is the one bit pattern every one of those types is valid at.
     let control = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
     let work = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
+    // The page this runtime publishes its own state tree in. Zeroed for a
+    // reason of its own beside the rings': a published word nobody has written
+    // is zero, so a runtime prepared and never scheduled reads as *this
+    // component has done nothing* rather than as *this component cannot be
+    // read*, which is RFC 0065's distinction.
+    let own_tree = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
 
     let into = frames.virt(text);
     // SAFETY: `text` was just allocated and nothing else holds it; it is one
@@ -1716,11 +1799,26 @@ pub unsafe fn prepare_runtime(
     // one — checked above rather than assumed.
     unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), into, image.len()) };
 
+    for page in 0..text_pages as u64 {
+        // SAFETY: as `user_space`, and `space` is not in `CR3`.
+        unsafe {
+            paging::map_user(
+                frames,
+                &mut space,
+                TEXT + page * FRAME_SIZE,
+                text.addr().wrapping_add(page * FRAME_SIZE),
+                paging::UserPage::Text,
+                features,
+            )
+        }
+        .map_err(Error::Space)?;
+    }
+
     for (virt, frame, kind) in [
-        (TEXT, text, paging::UserPage::Text),
         (STACK, stack, paging::UserPage::Data),
         (RING, control, paging::UserPage::Data),
         (WORK, work, paging::UserPage::Data),
+        (OWN_TREE, own_tree, paging::UserPage::Data),
     ] {
         // SAFETY: as `user_space`, and `space` is not in `CR3` — it has never
         // been.
@@ -1728,7 +1826,11 @@ pub unsafe fn prepare_runtime(
             .map_err(Error::Space)?;
     }
 
-    let rings = Rings { control: frames.virt(control) as u64, work: frames.virt(work) as u64 };
+    let rings = Rings {
+        control: frames.virt(control) as u64,
+        work: frames.virt(work) as u64,
+        own_tree: frames.virt(own_tree) as u64,
+    };
 
     let table = crate::cap::of(cpu);
     // SAFETY: the table of a core that is idle, with no process running on it,
@@ -1835,8 +1937,8 @@ pub unsafe fn prepare_runtime(
     Ok((
         Prepared {
             space,
-            pages: [text, stack, control, work],
-            parts: 4,
+            pages: [text, stack, control, work, own_tree],
+            parts: 5,
             before,
             granted: granted_count,
             generation: first.generation(),
@@ -2155,7 +2257,8 @@ pub unsafe fn prepare_driver(
             // the queue memory and the data ring are the caller's and are
             // deliberately absent: a list that held them would free memory this
             // function never took, which is a corruption rather than a leak.
-            pages: [text, stack, control, board],
+            // Four real, one filler, as the ordinary shape above.
+            pages: [text, stack, control, board, Frame::from_addr(0)],
             parts: 4,
             before,
             granted: granted_count,
@@ -2785,9 +2888,13 @@ pub unsafe fn kill(frame: &mut crate::arch::x86_64::idt::Frame, address: u64) ->
 /// either.
 ///
 /// Two things, and the second is the one that cannot be debugged afterwards.
-/// The layout: text, guard and stack are three consecutive pages in the lower
-/// half, inside one two-mebibyte region, which is what makes a process's
-/// address space four tables rather than six. And the selectors: `sysret`
+/// The layout: the text reservation, then the guard, then the stack, in that
+/// order and with nothing between them, in the lower half and inside one
+/// two-mebibyte region — which is what makes a process's address space four
+/// tables rather than six. It was *three consecutive pages* until `E1-B15`
+/// gave the text [`INIT_TEXT_PAGES`] of them; what the check is about is the
+/// order and the absence of gaps, and the text being one page was never the
+/// part that mattered. And the selectors: `sysret`
 /// computes both of the ones it loads by adding fixed offsets to a field of
 /// `IA32_STAR`, so a table laid out any other way returns to ring 3 through
 /// whatever descriptor happened to be there — which is not a fault, it is a
@@ -2799,9 +2906,11 @@ pub unsafe fn kill(frame: &mut crate::arch::x86_64::idt::Frame, address: u64) ->
 pub fn self_test() -> Result<(), &'static str> {
     use crate::arch::x86_64::gdt;
 
-    if !TEXT.is_multiple_of(FRAME_SIZE) || GUARD != TEXT + FRAME_SIZE || STACK != GUARD + FRAME_SIZE
+    if !TEXT.is_multiple_of(FRAME_SIZE)
+        || GUARD != TEXT + INIT_TEXT_PAGES as u64 * FRAME_SIZE
+        || STACK != GUARD + FRAME_SIZE
     {
-        return Err("the process layout is not three consecutive pages");
+        return Err("the process layout is not text, then guard, then stack, without gaps");
     }
     if STACK_TOP != STACK + FRAME_SIZE {
         return Err("the process's stack pointer is not one past its stack");
