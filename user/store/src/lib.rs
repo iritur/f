@@ -52,10 +52,17 @@ pub mod report;
 // reason the heap lives there: RFC 0001 forbids `unsafe` above the frame and
 // this crate declares `unsafe_code = "forbid"`, so the line below is the most a
 // component can write — a static naming an allocator somebody else implemented.
-#[cfg(all(target_arch = "x86_64", feature = "image"))]
+// `target_os = "none"` and not `target_arch`, and the difference is the whole
+// gate. The host runs this crate's tests on x86-64 too, and a `#[global_allocator]`
+// is not like the `component` module beside it: a module that is compiled and
+// never called costs nothing, while an allocator that is merely *present* takes
+// every allocation the test harness makes — to `Heap::COMPONENT`, which names an
+// address that exists inside a component the frame built and nowhere else. The
+// test binary then dies before it runs a test, which is exactly what it did.
+#[cfg(all(target_os = "none", feature = "image"))]
 extern crate alloc;
 
-#[cfg(all(target_arch = "x86_64", feature = "image"))]
+#[cfg(all(target_os = "none", feature = "image"))]
 #[global_allocator]
 static HEAP: f_ring::heap::Heap = f_ring::heap::Heap::COMPONENT;
 

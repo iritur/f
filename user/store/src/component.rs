@@ -93,7 +93,7 @@ pub fn start(argument: u64) -> ! {
     // only read from is a box that may never have been allocated. Observing
     // where it landed is what makes the allocation something the optimiser has
     // to perform.
-    #[cfg(all(target_arch = "x86_64", feature = "image"))]
+    #[cfg(all(target_os = "none", feature = "image"))]
     {
         let taken = alloc::boxed::Box::new([7u8; 64]);
         let at = core::ptr::from_ref::<[u8; 64]>(taken.as_ref()) as u64;
