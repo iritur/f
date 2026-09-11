@@ -2430,16 +2430,68 @@ fn machine_devices(
 }
 
 fn run() -> Result<(), String> {
+    // Captured rather than discarded, because an exit code is satisfied by a
+    // kernel that described no heap and by one that described a heap nothing
+    // could reach. `HEAP_GAP` is what that log is read for.
+    let (code, log) = boot_captured(None, &[])?;
     // QEMU reports (value << 1) | 1, so Success(0x10) arrives as 33.
-    match boot(None)? {
-        Some(33) => {
-            println!("\nM0 ok");
-            Ok(())
-        }
-        Some(35) => Err("kernel reported failure — see the serial log above".into()),
-        Some(other) => Err(format!("qemu exited {other}; expected 33 or 35")),
-        None => Err("qemu terminated by signal".into()),
+    match code {
+        Some(33) => {}
+        Some(35) => return Err("kernel reported failure — see the serial log above".into()),
+        Some(other) => return Err(format!("qemu exited {other}; expected 33 or 35")),
+        None => return Err("qemu terminated by signal".into()),
     }
+
+    let (described, peak, starved) = heap_reading(&log)?;
+    // The frame's half, and it is the half that works: a component declares a
+    // `heap` need, the frame charges it to that component's own account, maps
+    // it and writes the prologue before the first instruction. A zero here is
+    // that path gone, and it would otherwise be invisible.
+    if described < PAGE_BYTES {
+        return Err(format!(
+            "the boot described {described} B of component heap, and one page is the\n\
+             least a declared `heap` need can be granted.\n\n\
+             `user/store/manifest.toml` declares two pages. A boot that described\n\
+             fewer has lost the grant, the mapping or the manifest's need, and every\n\
+             one of those is silent from the exit code."
+        ));
+    }
+    if starved {
+        return Err("a component was refused an allocation for want of room.\n\n\
+             `starved` is never cleared once set, so this is *did this ever fail*\n\
+             and not *is it failing now*. Either the region granted is too small\n\
+             for what the component asks, or something asks for more than it\n\
+             declared."
+            .into());
+    }
+    // The component's half, and it is the half that has never run. Required to
+    // be zero rather than tolerated: the reason is in `HEAP_GAP`, and the needle
+    // going is what turns this red.
+    gap_holds("HEAP_GAP", HEAP_GAP)?;
+    if peak != 0 {
+        return Err(format!(
+            "a component allocated {peak} byte(s), and `HEAP_GAP` says none can.\n\n\
+             That gap's needle is still in kernel/src/runtime.rs, so a component is\n\
+             still spawned into a place and never handed a core — and yet something\n\
+             allocated out of a described region. Either the needle has stopped\n\
+             describing the tree, or a heap is being reached by something that is\n\
+             not the occupant it was charged to. Both are worth stopping for.\n\n\
+             If a supervisor now schedules an occupant, this is the good ending:\n\
+             delete the `HEAP_GAP` row, and re-read `E2-B10`'s exit — it asks for a\n\
+             boot in which a component allocates, and this is the first boot that\n\
+             could be one."
+        ));
+    }
+    println!(
+        "\nheap          {described} B described, peak {peak}, starved {starved} — \
+         the frame's half of E2-B10"
+    );
+    for (file, _, why, _) in HEAP_GAP {
+        println!("  {file:<24} {why}");
+    }
+
+    println!("\nM0 ok");
+    Ok(())
 }
 
 /// The largest block the allocator can hand out, on a machine that has one.
@@ -2953,6 +3005,101 @@ fn sim_scenarios() -> Result<Vec<String>, String> {
 /// and it goes when a supervisor spawns and schedules in one act — which is
 /// E1-B05's remaining half and RFC 0008's *restart is the supervisor's*.
 /// RFC 0041 states the shape of the gap; RFC 0047 states what is left of it.
+/// Why the heap peak every boot reports is zero, as data.
+///
+/// # Why a zero needed a declared quantity of its own
+///
+/// Because it has been printing since `E2-B10` landed and nothing read it. The
+/// supervisor line ends `heap 8192 B described, peak 0 byte(s), starved false`,
+/// and `kernel/src/component.rs`'s `heap_peak` field says in as many words that
+/// *zero here means no component allocated anything, which on a tree where one
+/// declares a `heap` need is a finding rather than a default*. It was a finding
+/// nobody was told about: on QEMU, on the second machine and on the third, the
+/// same zero, inside a green `verify`.
+///
+/// The frame's half of `E2-B10` is real and this does not say otherwise. The
+/// region is charged, mapped and described before the component's first
+/// instruction, `describe` has a caller at `kernel/src/component.rs`, the
+/// prologue is read back at teardown through `f_ring::heap::Heap::over`, and
+/// `described` being 8192 rather than 0 is that whole path working. What has
+/// never happened is the other half: `user/store` allocates a 64-byte box under
+/// `#[cfg(all(target_os = "none", feature = "image"))]`, and that code has never
+/// executed, because **a component spawned into a place is never handed a
+/// core**. `kernel/src/runtime.rs` is where the tree says so, and it is the same
+/// sentence [`CHAOS_GAP`] is one half of — there, the occupant a boot can kill
+/// is not the occupant serving the datapath; here, the occupant a boot describes
+/// a heap for is not an occupant that runs.
+///
+/// So the needle is that sentence, and the check beside it requires the zero
+/// rather than tolerating it. A zero that is *asserted* is evidence; a zero that
+/// is merely printed is the `claims/0017` shape this tree has already been
+/// bitten by twice. The day a supervisor hands an occupant a core, the needle
+/// goes, the build goes red on purpose, and whoever closed it re-reads the exit
+/// of `E2-B10` — which asks for a boot in which a component allocates — against
+/// a boot that finally can.
+const HEAP_GAP: &[Gap] = &[(
+    "kernel/src/runtime.rs",
+    "a component is spawned into a place and never scheduled",
+    "no component with a `heap` need has ever run, so the peak a boot reports is \
+     the frame's reading of a region nothing has allocated out of",
+    "TODO.md E2-B10, E1-B05 and E1-P06; kernel/src/component.rs's `heap_peak` field \
+     comment; kernel/src/runtime.rs's module comment and its stated reversal; \
+     docs/second-boot-outside-qemu.md and docs/third-boot-outside-qemu.md, which \
+     both record the zero as observed",
+)];
+
+/// One page, in bytes, as the least a granted `heap` need can come to.
+///
+/// Here rather than taken from the kernel because `xtask` does not link it, and
+/// a second copy of a number this stable is cheaper than the dependency.
+const PAGE_BYTES: u32 = 4096;
+
+/// The three figures the supervisor line reports about component heaps.
+///
+/// Returned rather than asserted here so the caller states what it requires:
+/// this is the reading, and `run` is where the requirement lives.
+///
+/// # Errors
+///
+/// A sentence naming what the line did not contain. A boot that printed no
+/// supervisor line at all is that error too, because the alternative is a check
+/// that passes on a boot which never got far enough to fail it.
+fn heap_reading(log: &str) -> Result<(u32, u32, bool), String> {
+    let missing = |what: &str| {
+        format!(
+            "the boot reached `M0 ok` and its supervisor line had no {what}.\n\n\
+             The line is expected to end `heap <n> B described, peak <n> byte(s),\n\
+             starved <bool>`. An exit code alone is satisfied by a kernel that\n\
+             described no heap at all, which is the reading `HEAP_GAP` exists to\n\
+             make somebody state."
+        )
+    };
+    let tail = log.split("heap ").nth(1).ok_or_else(|| missing("heap reading"))?;
+    let number = |at: &str, what: &str| -> Result<u32, String> {
+        tail.split(at)
+            .next()
+            .and_then(|s| s.rsplit(|c: char| !c.is_ascii_digit()).next())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| missing(what))?
+            .parse::<u32>()
+            .map_err(|_| missing(what))
+    };
+    let described = number(" B described", "described figure")?;
+    let peak = tail
+        .split("peak ")
+        .nth(1)
+        .and_then(|s| s.split(' ').next())
+        .ok_or_else(|| missing("peak figure"))?
+        .parse::<u32>()
+        .map_err(|_| missing("peak figure"))?;
+    let starved = tail
+        .split("starved ")
+        .nth(1)
+        .map(|s| s.starts_with("true"))
+        .ok_or_else(|| missing("starved flag"))?;
+    Ok((described, peak, starved))
+}
+
 const CHAOS_GAP: &[Gap] = &[(
     "kernel/src/blk.rs",
     "prepare_driver(",
@@ -15710,9 +15857,18 @@ fn eval_run(filter: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        JOIN_GAP, MINTS, code_mentions, datapath_findings, declared_fn, frame_findings,
-        gap_holds_under, hold_the_gap, toml_field, toml_multiline, trace_hash, unspawned,
+        HEAP_GAP, JOIN_GAP, MINTS, code_mentions, datapath_findings, declared_fn, frame_findings,
+        gap_holds, gap_holds_under, heap_reading, hold_the_gap, toml_field, toml_multiline,
+        trace_hash, unspawned,
     };
+
+    /// The supervisor line as a boot actually prints it, trimmed to the tail
+    /// this reads. Taken from a real `cargo xtask run` rather than invented, so
+    /// that a change to the kernel's format fails here and not in the field.
+    const SUPERVISOR_LINE: &str = "  supervisor    ok — 4 place(s), 5 spawn(s), 1 fault(s), \
+         1 restart(s), 1 resumed, 0 client(s) lost, 9 probe(s) refused, 1 retired, 3 need(s) \
+         bound to nothing, 5 tree(s) mounted carrying 25 node(s), 1 refused for declaring none; \
+         heap 8192 B described, peak 0 byte(s), starved false\nM0 ok\n";
 
     /// A component set shaped like the one this tree builds: two records, the
     /// hashes standing in for content ids.
@@ -15941,6 +16097,48 @@ mod tests {
         let refused = gap_holds_under(&base, "FIXTURE", gap).expect_err("a missing file is not ok");
         assert!(refused.contains("nobody can check"), "{refused}");
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The heap figures are read out of the line, and a boot that printed no
+    /// line is a failure rather than a zero.
+    ///
+    /// # Why this test exists at all
+    ///
+    /// Because the check it covers asserts a **zero**, and a parser that
+    /// silently yields zero on a log it did not understand would pass that
+    /// assertion on every boot including the broken ones. So the case that
+    /// matters most here is the absent line, not the present one.
+    #[test]
+    fn a_heap_reading_is_taken_from_the_line_and_never_defaulted() {
+        let (described, peak, starved) =
+            heap_reading(SUPERVISOR_LINE).expect("the real line must parse");
+        assert_eq!(described, 8192, "two pages, which is what store's manifest declares");
+        assert_eq!(peak, 0, "no component has run, so nothing has allocated");
+        assert!(!starved, "nothing asked, so nothing was refused");
+
+        // A boot that never reached the supervisor line. The zero this would
+        // otherwise hand back is indistinguishable from the zero the check
+        // requires, which is the whole reason it is an error.
+        let refused =
+            heap_reading("M0 ok\n").expect_err("a log with no heap reading is not a pass");
+        assert!(refused.contains("no heap reading"), "{refused}");
+        assert!(refused.contains("exit code alone"), "the refusal does not say why it matters");
+
+        // And the flag is read rather than assumed: `starved` is the one figure
+        // whose bad value is `true`, so a parser that always said `false` would
+        // hide exactly the failure it is there to report.
+        let (_, _, starved) = heap_reading("heap 8192 B described, peak 64 byte(s), starved true")
+            .expect("a starved line parses");
+        assert!(starved, "a line saying `starved true` must read as starved");
+    }
+
+    /// The declared gap names a sentence that is really in the tree.
+    ///
+    /// A row whose needle never matched would be a gap that cannot close, which
+    /// is the same failure as a check that cannot fail — one row over.
+    #[test]
+    fn the_heap_gap_names_a_sentence_the_kernel_still_carries() {
+        gap_holds("HEAP_GAP", HEAP_GAP).expect("the needle must be in kernel/src/runtime.rs");
     }
 
     #[test]
