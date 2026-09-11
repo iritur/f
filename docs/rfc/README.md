@@ -37,6 +37,7 @@ row per entry that needs one, and an entry that needs none does not get a row.
 | 0066 | `E2-B05` | The assembler lands above the frame with no caller, rather than inside it with one | accepted |
 | 0067 | `E2-B05` | A driver declares the part it binds, and the topology never inherits a scan order | accepted; written as 0065 in its own worktree and renumbered here at the merge |
 | 0068 | `E0-P18` | A core that does not answer is held, and not fatal | accepted |
+| 0069 | — | A claim states the kind of evidence behind it, and a kind may not stand in for another | draft; no task line owns it, which is the reason for the row — written from a reading of another project's validation rule on 2026-09-10, ahead of the lint that would make it mechanical |
 | 0070 | `E0-P18` | An arriving core is given the bits it needs, not the register | accepted |
 
 **0012 is why this directory runs 0011, 0013.** `TODO.md` reserved the number

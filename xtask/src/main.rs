@@ -87,6 +87,67 @@ const FORBIDDEN: &[(&str, &str)] = &[
     ("HashSet::new", "iteration order is seeded per process; use BTreeSet"),
 ];
 
+/// Types whose arithmetic is not the same on both architectures this tree
+/// tests, matched at identifier boundaries rather than as substrings.
+///
+/// A float is not a clock and not a die, so it is not in [`FORBIDDEN`]'s list
+/// of things `Env` hands out — but it breaks the same contract by a different
+/// route. RFC 0004's sentence is `(seed, commit_hash)` reproduces a run byte
+/// for byte, and `cargo xtask test` runs on x86-64 and AArch64: IEEE 754 fixes
+/// the four operations and nothing else. `sin`, `powf` and their kin come from
+/// whichever libm the target links; a fused multiply-add is one rounding on a
+/// part that has the instruction and two on one that does not; and the bit
+/// pattern of a NaN produced by an operation is, in the language's own
+/// reference, not something the same program is promised to produce twice.
+/// Every one of those is a trace that hashes differently on the arm runner and
+/// nowhere else, which is the exact class of bug `CLAUDE.md` records finding
+/// from that job twice already. Under `kernel/` there is a second reason: a
+/// float touches vector state the frame does not save across an entry, so the
+/// first one that compiles is the first silent corruption of a process's
+/// registers.
+///
+/// The answer is integers, and where a fraction is wanted, a fixed point with
+/// its scale in the name — which is what every duration and every byte count
+/// in `abi/` already is. A percentage is a count of tenths, and
+/// `ring/tests/entries.rs` prints one that way.
+///
+/// Matched at word boundaries because the two spellings are short: `elf32`
+/// and `buf64` are identifiers this tree has, and a substring match would
+/// have to allow-list them one at a time.
+const FORBIDDEN_TYPES: &[(&str, &str)] = &[
+    (
+        "f32",
+        "not reproducible across the two architectures the tree tests; use an integer or a fixed point with its scale in the name",
+    ),
+    (
+        "f64",
+        "not reproducible across the two architectures the tree tests; use an integer or a fixed point with its scale in the name",
+    ),
+];
+
+/// Does `code` mention `word` as a whole identifier?
+///
+/// `f64` in `as f64`, `0f64`, `f64::MAX` and `Vec<f64>`, and not in `buf64`
+/// or `elf32`. A numeric literal's suffix is deliberately a match — `1.0f64`
+/// is a float however it is spelled — so the character before the word may be
+/// a digit.
+fn names_type(code: &str, word: &str) -> bool {
+    let bytes = code.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut from = 0;
+    while let Some(at) = code[from..].find(word) {
+        let start = from + at;
+        let end = start + word.len();
+        let before_ok = start == 0 || !ident(bytes[start - 1]) || bytes[start - 1].is_ascii_digit();
+        let after_ok = end == bytes.len() || !ident(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
 /// Paths permitted to contain a forbidden construct, each for a stated reason.
 /// Adding an entry here is a reviewable diff, which is the point.
 const DETERMINISM_ALLOW: &[(&str, &str)] = &[
@@ -2581,6 +2642,15 @@ const DEFECTS: &[&str] = &[
     // every functional test on x86-64 because total store order hides it. RFC
     // 0063, RFC 0016, RFC 0020.
     "mutate-relaxed-routing",
+    // The second in `abi/`, and the first there a sequential checker can see:
+    // `reserve::Table::lowest_free` stops consulting `taken`, so a second
+    // hard-class reservation is granted the first one's cores. `abi/proofs` is
+    // its harness — `cargo xtask prove` arms it and requires
+    // `two_grants_never_share_a_core` to fail — because RFC 0050's one
+    // arithmetic has no second implementation to disagree with it, and a proof
+    // that could not tell this build from the shipped one would be a proof of
+    // nothing.
+    "mutate-overlapping-grant",
     // E2-B07's, and the only defect in this list that breaks nothing at all. It
     // changes sixteen bytes of read-only data nothing reads, so the only thing
     // in the system that can notice it is the frame's measurement of its own
@@ -6663,6 +6733,57 @@ const RING_PROOF_HARNESSES: &[(&str, bool, &str)] = &[
     ),
 ];
 
+/// Where the admission arithmetic's proofs are.
+///
+/// A third crate, on `ring/proofs`' terms exactly: `f-abi` builds for the
+/// host, so the crate links it and proves `f_abi::reserve::Table::admit` over
+/// every machine and every demand. RFC 0050 put the whole schedulability test
+/// in one function so that no second implementation could disagree with it;
+/// the cost is that nothing independent checks the one, and `claims/0010`
+/// gates on the count of refusals a simulator produces, which says the
+/// function refuses and nothing about what it grants. A solver is the
+/// instrument that reaches every input, and this is where it is asked.
+const ABI_PROOFS: &str = "abi/proofs";
+
+/// The bound the admission proofs are stated inside, widened.
+///
+/// `abi/proofs/src/proofs.rs` sets `CORES` to eight, because `Table::admit`
+/// walks the cores looking for a free run and `Grant::with_split` walks the
+/// run bit by bit, and a bounded checker unrolls both. This is the same
+/// fixture at sixty-four, which is everything the bitmaps can name. Same role
+/// as [`PROOF_WIDE`] two crates over.
+const ABI_PROOF_WIDE: &str = "wide-machine";
+
+/// Every harness the admission proofs require, and the sentence each one is.
+///
+/// All four walk the machine, so all four are run again at the wider bound:
+/// there is no harness here whose cost is independent of the core count, and
+/// a harness that never reached `lowest_free` would be one about a table with
+/// nothing in it.
+const ABI_PROOF_HARNESSES: &[(&str, bool, &str)] = &[
+    (
+        "admitting_an_arbitrary_demand",
+        true,
+        "RFC 0007's four components, over every machine and every demand; the soft class is \
+         refused nothing but memory",
+    ),
+    (
+        "two_grants_never_share_a_core",
+        true,
+        "the whole-core rule across two reservations, and `reserved` answers for exactly them",
+    ),
+    (
+        "a_refusal_leaves_the_table_as_it_was",
+        true,
+        "a refused demand changes the count of refusals and nothing else",
+    ),
+    (
+        "a_release_gives_back_what_was_granted",
+        true,
+        "grant, release, admit again is the same grant; a second release is refused",
+    ),
+];
+
 /// One harness: its name, whether the wide pass runs it again, and the sentence
 /// it is.
 ///
@@ -6731,11 +6852,13 @@ struct Armed {
     what: &'static str,
 }
 
-/// The two crates, in the order `prove` runs them.
+/// The three crates, in the order `prove` runs them.
 ///
 /// The kernel's first, because it is E1-P07's and the exit clause about a
 /// schedule is stated against it; the ring's second, because E1-P12 needed the
-/// apparatus to exist before it could use it.
+/// apparatus to exist before it could use it; the admission arithmetic's
+/// third, because it is the newest and the cheapest, and a red run should
+/// reach the two the schedule was written against before it reaches this one.
 const PROOF_CRATES: &[ProofCrate] = &[
     ProofCrate {
         dir: PROOFS,
@@ -6818,6 +6941,31 @@ const PROOF_CRATES: &[ProofCrate] = &[
                        oracle, and this is the same oracle over every index at once",
             },
         ],
+    },
+    ProofCrate {
+        dir: ABI_PROOFS,
+        about: "the admission arithmetic, over every machine and every demand",
+        wide: ABI_PROOF_WIDE,
+        wide_says: "a machine of sixty-four physical cores — all four, since all four walk it",
+        harnesses: ABI_PROOF_HARNESSES,
+        // Every harness here draws an arbitrary `Machine` and then assumes it
+        // checks out, which is one over-tight `assume` away from a machine
+        // nothing can be admitted to — and that harness verifies instantly and
+        // proves nothing. So the covers are owed, and read.
+        covered: true,
+        // One defect, on the one harness that states the property it breaks.
+        // The site is the *description* and not a location, for the reason
+        // `kani_failure_sites` gives: a second grant landing on the first's
+        // cores faults nothing, so what fails is the harness's own assertion
+        // and what identifies it is the sentence that assertion carries.
+        armed: &[Armed {
+            feature: "mutate-overlapping-grant",
+            harness: "two_grants_never_share_a_core",
+            site: "two grants hold one core",
+            what: "the sentence `two_grants_never_share_a_core` asserts after its second \
+                   grant, in `abi/proofs/src/proofs.rs`; the defect makes `lowest_free` in \
+                   the shipped `abi/src/reserve.rs` stop consulting `taken`",
+        }],
     },
 ];
 
@@ -7874,31 +8022,47 @@ VERIFICATION:- SUCCESSFUL
         );
     }
 
-    /// Every harness in `ring/proofs` carries at least one `kani::cover!`.
+    /// Every harness in a crate that owes covers carries at least one
+    /// `kani::cover!`.
     ///
     /// The other direction of the same rule. `cover_check` refuses a report
     /// with no summary in it, but that is a twenty-minute run away; a harness
     /// added with no cover at all is findable here in a second, and it is the
-    /// cheapest way this proof goes quietly vacuous.
+    /// cheapest way this proof goes quietly vacuous. Over every crate with
+    /// `covered` set rather than the ring's alone, because the admission
+    /// proofs owe theirs for the same reason and a test that read one crate
+    /// while the table it checks against covers two would be the shape the
+    /// forged slot that was never read had.
     #[test]
-    fn every_ring_harness_states_something_it_can_reach() {
-        let path = super::root().join(super::RING_PROOFS).join("src/proofs.rs");
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return;
-        };
-        for (harness, _, _) in super::RING_PROOF_HARNESSES {
-            let start = text
-                .find(&format!("fn {harness}()"))
-                .unwrap_or_else(|| panic!("`{harness}` is in the table and not in the file"));
-            let body = &text[start..];
-            let end = body.find("\n}").map_or(body.len(), |at| at + 2);
-            assert!(
-                body[..end].contains("kani::cover!"),
-                "`{harness}` states no cover, so nothing says its fixture reaches the\n\
-                 code it is about. A harness over arbitrary bytes whose first check\n\
-                 refuses everything verifies instantly and proves nothing."
-            );
+    fn every_covered_harness_states_something_it_can_reach() {
+        let mut checked = 0usize;
+        for krate in super::PROOF_CRATES.iter().filter(|krate| krate.covered) {
+            let path = super::root().join(krate.dir).join("src/proofs.rs");
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for (harness, _, _) in krate.harnesses {
+                let start = text.find(&format!("fn {harness}()")).unwrap_or_else(|| {
+                    panic!("`{harness}` is in the table and not in {}", krate.dir)
+                });
+                let body = &text[start..];
+                let end = body
+                    .find(
+                        "
+}",
+                    )
+                    .map_or(body.len(), |at| at + 2);
+                assert!(
+                    body[..end].contains("kani::cover!"),
+                    "`{harness}` in {} states no cover, so nothing says its fixture reaches
+                     the code it is about. A harness over arbitrary input whose first check
+                     refuses everything verifies instantly and proves nothing.",
+                    krate.dir
+                );
+                checked += 1;
+            }
         }
+        assert!(checked > 0, "no covered harness was read, so nothing was checked");
     }
 
     /// Every deliberate defect in `ring/Cargo.toml` is either armed by a proof
@@ -11715,6 +11879,15 @@ fn lint_determinism() -> Result<(), String> {
                     findings.push(format!("  {}:{}  {needle} — {why}", rel, line_no + 1));
                 }
             }
+            // A string literal naming the type is a label, not arithmetic —
+            // `"f64"` in a format string is how a report says what it refused.
+            // Only the part of the line outside quotes is code here.
+            let outside_strings: String = code.split('"').step_by(2).collect();
+            for (word, why) in FORBIDDEN_TYPES {
+                if names_type(&outside_strings, word) {
+                    findings.push(format!("  {}:{}  {word} — {why}", rel, line_no + 1));
+                }
+            }
         }
     }
 
@@ -11724,12 +11897,37 @@ fn lint_determinism() -> Result<(), String> {
     }
     Err(format!(
         "determinism substrate violated in {} place(s):\n{}\n\n\
-         Every source of nondeterminism must reach the system through f_env::Env.\n\
+         Every source of nondeterminism must reach the system through f_env::Env,\n\
+         and every quantity must be one both architectures compute the same way.\n\
          If a new call site is genuinely legitimate, add it to DETERMINISM_ALLOW\n\
          in xtask with a reason — that is a reviewable diff, which is the point.",
         findings.len(),
         findings.join("\n")
     ))
+}
+
+#[cfg(test)]
+mod determinism_types {
+    use super::names_type;
+
+    #[test]
+    fn a_float_type_is_found_wherever_it_is_spelled() {
+        for code in
+            ["x as f64", "let y: f32 = 0.0;", "f64::MAX", "Vec<f32>", "1.0f64", "(a as f64)"]
+        {
+            assert!(names_type(code, "f64") || names_type(code, "f32"), "missed {code}");
+        }
+    }
+
+    #[test]
+    fn an_identifier_that_merely_contains_the_letters_is_not() {
+        for code in ["kernel_elf32()", "let buf64 = 0;", "f32x4", "_f64", "u64", "f6"] {
+            assert!(
+                !names_type(code, "f64") && !names_type(code, "f32"),
+                "false positive on {code}"
+            );
+        }
+    }
 }
 
 fn lint_licensing() -> Result<(), String> {

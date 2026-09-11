@@ -1,0 +1,64 @@
+[package]
+name = "f-abi-proofs"
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+description = "The admission arithmetic, as bounded proofs over arbitrary machines and arbitrary demands."
+
+# Deliberately outside the workspace, for RFC 0053's reason applied a third
+# time: the toolchain that builds this is Kani's, not the tree's. `Cargo.toml`'s
+# `exclude` at the root is the other half of saying so.
+[workspace]
+
+[lib]
+# Nothing here is a test and nothing here is a doctest. The harnesses are
+# `#[kani::proof]` functions, reachable only by a checker; under an ordinary
+# `cargo build` this crate is the fixture and `f-abi`, and building it is the
+# cheapest way to find out that the fixture still matches the crate.
+test = false
+bench = false
+doctest = false
+
+[dependencies]
+# A path dependency, on `ring/proofs`' terms and not `kernel/proofs`': `f-abi`
+# is an ordinary `no_std` library that builds for the host, so the proofs link
+# the shipped crate rather than recompiling a file out of it. RFC 0057.
+f-abi = { path = ".." }
+
+[features]
+# The one deliberate defect `abi/` carries that a sequential checker can see,
+# forwarded. Never on by default — `cargo xtask lint-mutations` reads this
+# manifest along with every other one — and armed by `cargo xtask prove` for
+# exactly one run, where it has to break the harness named beside it in
+# `xtask`'s `ABI_PROOF_HARNESSES`. `abi/Cargo.toml` says what it does.
+#
+# `mutate-relaxed-routing` is the other defect that manifest declares and it is
+# *not* forwarded: it weakens a memory ordering, and CBMC is a sequential
+# checker that is insensitive to one by construction. `ring/proofs` says the
+# same about its three.
+mutate-overlapping-grant = ["f-abi/mutate-overlapping-grant"]
+
+# Run the harnesses over a machine of up to sixty-four physical cores rather
+# than eight. See `proofs::CORES`: the small machine is what makes the walking
+# proofs finish, and a proof whose cost does not depend on the core count costs
+# the same either way — so those are run at both sizes and the reduction is not
+# load-bearing for them.
+wide-machine = []
+
+[lints.rust]
+# Nothing here is the frame. The crate is under `abi/`, where `cargo xtask
+# lint-unsafe` would permit `unsafe`, and it forbids it anyway: a harness that
+# needed one would be proving something about memory rather than about
+# arithmetic, and that is not what this crate is.
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+# `cfg(kani)` is set by the checker and by nothing else. Without this the
+# pinned compiler warns about a condition it has never heard of, and in this
+# tree a `warning:` line is a failure.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
