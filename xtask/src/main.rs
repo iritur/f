@@ -6756,10 +6756,17 @@ const ABI_PROOF_WIDE: &str = "wide-machine";
 
 /// Every harness the admission proofs require, and the sentence each one is.
 ///
-/// All four walk the machine, so all four are run again at the wider bound:
-/// there is no harness here whose cost is independent of the core count, and
-/// a harness that never reached `lowest_free` would be one about a table with
-/// nothing in it.
+/// The middle field is **run this one again at the wider bound**, and here it
+/// is the two harnesses whose sentences are about the walk itself: which cores
+/// a grant may name, and that two runs never overlap. The other two are about
+/// the table's bookkeeping — what a refusal leaves, what a release gives back —
+/// and at sixty-four cores they are the cost of three and four admissions
+/// unrolled over the whole machine. Measured once, on 2026-09-10 in the `full`
+/// image: the refusal harness verified after two hours and seven minutes, and
+/// the release harness ran CBMC out of memory. What either would add over the
+/// first two at the wide bound is the bookkeeping, which does not read the
+/// core count, so they are stated at eight and the reason is here rather than
+/// left as an absence somebody has to notice.
 const ABI_PROOF_HARNESSES: &[(&str, bool, &str)] = &[
     (
         "admitting_an_arbitrary_demand",
@@ -6774,12 +6781,12 @@ const ABI_PROOF_HARNESSES: &[(&str, bool, &str)] = &[
     ),
     (
         "a_refusal_leaves_the_table_as_it_was",
-        true,
+        false,
         "a refused demand changes the count of refusals and nothing else",
     ),
     (
         "a_release_gives_back_what_was_granted",
-        true,
+        false,
         "grant, release, admit again is the same grant; a second release is refused",
     ),
 ];
@@ -6946,7 +6953,7 @@ const PROOF_CRATES: &[ProofCrate] = &[
         dir: ABI_PROOFS,
         about: "the admission arithmetic, over every machine and every demand",
         wide: ABI_PROOF_WIDE,
-        wide_says: "a machine of sixty-four physical cores — all four, since all four walk it",
+        wide_says: "a machine of sixty-four physical cores — the two whose sentences are about the walk",
         harnesses: ABI_PROOF_HARNESSES,
         // Every harness here draws an arbitrary `Machine` and then assumes it
         // checks out, which is one over-tight `assume` away from a machine
@@ -7357,7 +7364,14 @@ fn kani_findings(log: &str) -> String {
     let mut lines: Vec<&str> = Vec::new();
     let mut carry = 0usize;
     for line in log.lines() {
-        if line.contains("Status: FAILURE") || line.starts_with("VERIFICATION") {
+        // The memory line is a verdict with no check behind it: CBMC prints it
+        // after `VERIFICATION:- FAILED` and lists nothing as failing, so a
+        // report that carried only the verdict looked like a counterexample
+        // that had lost its location. `abi/proofs` found that at its wide bound.
+        if line.contains("Status: FAILURE")
+            || line.starts_with("VERIFICATION")
+            || line.contains("run out of memory")
+        {
             lines.push(line.trim_end());
             carry = 3;
         } else if carry > 0 && (line.contains("Description:") || line.contains("Location:")) {
