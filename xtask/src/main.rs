@@ -425,22 +425,31 @@ const OWED_REVERSALS: &[Gap] = &[
         "TODO.md E1-B05; docs/rfc/0015; abi/src/door.rs's module comment; the four \
          unimplemented opcodes in abi/src/control.rs",
     ),
-    // `E1-B04`'s, and it is a promise rather than a wall: RFC 0051 said *what
-    // would merge them is a third driver, at which point the shared half moves
-    // out of both and neither is closed evidence any more*. There are three
-    // drivers now and the half has not moved. RFC 0054 argues why — the move
-    // rewrites `kernel/src/blk.rs`, which is the evidence a closed task's exit
-    // rests on, in a task whose own evidence is a picture on a screen — and this
-    // row is what stops that argument from quietly becoming permanent. The
-    // needle is the type the three supervisors duplicate; the day it leaves
-    // `blk.rs` the build names every document that says it is still there.
+    // `E1-B04`'s, and what is left of it after `E1-B16`. The shared half has
+    // moved: `Registers`, `Supervising`, `declared`, `order_for` and the two
+    // need names are in `kernel/src/supervisor.rs` now, and the three driver
+    // files are 960 lines lighter between them. **`Reported` did not move,
+    // because it is not one type** — `blk`'s carries `capacity`, `overtaken`,
+    // `queued_max` and `in_flight`, which the other two have no counterpart
+    // for, because a block request has a depth and an order and a display
+    // command does not.
+    //
+    // Its *mechanism* is shared, and that is the trap rather than the
+    // opportunity: a merged type behind a common prefix moves four of `blk`'s
+    // fields by eight bytes, every writer uses the symbolic name so a full
+    // rebuild is safe, a partial one is not, and the magic word written to
+    // catch exactly that still passes on a stale component image reading
+    // shifted fields.
+    //
+    // So this row is narrowed rather than emptied, which is what a partial
+    // payment looks like when it is stated. RFC 0071 names what would make the
+    // rest of it safe: a compile-time offset assertion written *before* the
+    // offsets move, not after.
     (
         "kernel/src/blk.rs",
-        "struct Supervising",
-        "RFC 0051: three driver supervisors hold one `Registers`, `Supervising`, `Reported`, \
-         `declared` and `order_for` between them, and the third driver was to have merged them",
-        "docs/rfc/0051; docs/rfc/0054; the module comments of kernel/src/blk.rs, \
-         kernel/src/net.rs and kernel/src/gpu.rs; kernel/src/gpu.rs's Registers",
+        "struct Reported",
+        "RFC 0051: `Reported` is still three types sharing a name and a mechanism, and a merge behind a common prefix would move four of blk's fields past a check that would still pass",
+        "docs/rfc/0051; docs/rfc/0054; docs/rfc/0071's section on why it stayed; kernel/src/supervisor.rs's module comment",
     ),
 ];
 

@@ -315,6 +315,13 @@ the address the driver invented, and neither of those is a device's word.
   two needed — a second live IOMMU domain, an interrupt rather than a poll, a
   device whose register window is not four pages — turns one of the *carried over
   unchanged* rows above into a change, and the row is where to look first.
+- **The supervisor merge.** Done in part on 2026-09-11, by `E1-B16` and
+  RFC 0071. `Registers`, `Supervising`, `declared`, `order_for` and the two
+  need names are one module now; `Reported` is not, because it turned out not
+  to be one type — `blk`'s carries four fields the other two have no
+  counterpart for. The `OWED_REVERSALS` row was narrowed to name `Reported`
+  alone rather than deleted, which is what a partial payment looks like when
+  somebody states it.
 - **The frame giving a driver a stack.** `RECEIVE_SLOTS_STACK_BOUND` goes,
   `lint-owed` goes red, and the number in this driver becomes a protocol decision
   instead of a frame one. **This happened on 2026-09-11.** All three clauses

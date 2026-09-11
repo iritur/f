@@ -1,12 +1,13 @@
 # RFC 0071: The shared half of three supervisors is one module, and `Reported` is not in it
 
-- Status: draft
+- Status: accepted
 - Date: 2026-09-11
 - Affects: `kernel/src/blk.rs`, `kernel/src/net.rs`, `kernel/src/gpu.rs`, a new
   `kernel/src/supervisor.rs`, `xtask/src/main.rs` (`OWED_REVERSALS` and
   `CHAOS_GAP`), `docs/rfc/0051`, `docs/rfc/0054`, `TODO.md` (`E1-B16`)
-- Implements nothing yet. This entry records the decision and the measurement
-  behind it; the diff is `E1-B16` and this stays `draft` until that diff lands
+- Implemented by `E1-B16`, in the commit this entry landed with. What the diff
+  did differently from what this entry first said is recorded below, under
+  *What the implementation corrected*
 
 ## Decision
 
@@ -27,6 +28,23 @@ is, and this entry names which is which, measured rather than asserted.
 
 The first four move verbatim. `impl Supervising` moves with one repair, below.
 `Reported` does not move, and the rest of this entry is mostly about why.
+
+## What the implementation corrected
+
+Two sentences in the first draft of this entry were wrong, and they are left
+here with their corrections rather than edited away.
+
+**"Nothing here is parameterised for a caller."** `declared` takes the manifest
+name to look for. `kernel/src/net.rs` had predicted exactly this before any of
+it was written — the three copies were "adapted only in which manifest name
+they look for and which counters they read" — so the name is a parameter and
+the counters are `Reported`, which stayed. Nothing else takes anything from a
+caller.
+
+**"`blk` differs in one method."** It differs in two: `net` and `gpu` have
+`within` where `blk` has `awaited` inlined, *and* `blk` has a `withdraw` the
+other two lack. The merged implementation carries all six methods rather than
+the five any two of them shared.
 
 ## `Reported` is three types that share a name
 

@@ -47,6 +47,7 @@ pub mod ring;
 pub mod runtime;
 pub mod smp;
 pub mod state;
+pub mod supervisor;
 
 use core::panic::PanicInfo;
 
