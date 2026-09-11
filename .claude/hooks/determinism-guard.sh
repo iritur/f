@@ -30,9 +30,15 @@ case "$rel" in
 bench/* | kernel/src/arch/x86_64/mod.rs | xtask/*) exit 0 ;;
 esac
 
+# What the edit introduces: a `Write`'s `content`, or an `Edit`'s `new_string`.
+# Not the whole payload, because an `Edit` whose `old_string` carries the
+# needle and whose `new_string` does not is a *removal*, and blocking the one
+# edit the policy is asking for teaches an agent to route around the hook.
+added="$(json_text content "$payload")$(json_text new_string "$payload")"
+
 found=""
 check() {
-	if printf '%s' "$payload" | grep -Eq "$1"; then
+	if printf '%s' "$added" | grep -Eq "$1"; then
 		found="$found
   $2"
 	fi
@@ -44,6 +50,7 @@ check 'Instant::now' 'Instant::now — read time through f_env::Env'
 check 'thread_rng' 'thread_rng — draw randomness from f_env::Env'
 check 'HashMap::new|HashMap::with_capacity' 'HashMap — iteration order is seeded per process; use BTreeMap'
 check 'HashSet::new|HashSet::with_capacity' 'HashSet — iteration order is seeded per process; use BTreeSet'
+check '(^|[^A-Za-z_])f(32|64)([^A-Za-z0-9_]|$)' 'f32/f64 — not the same arithmetic on both architectures; use an integer or a fixed point with its scale in the name'
 
 if [ -n "$found" ]; then
 	deny "Blocked: this edit introduces a direct source of nondeterminism in $rel.$found" \

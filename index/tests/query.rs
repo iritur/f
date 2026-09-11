@@ -408,19 +408,28 @@ fn main() {
     );
     println!("  index log           {log_blocks} blocks written");
     println!("  index mount         {mount_blocks} blocks read, once");
+    // Hundredths and tenths, as integers: every ratio here is a count over a
+    // count and is printed as one, so the report is the same on every machine
+    // that ran the same workload. `lint-determinism` refuses a float here.
+    let hundredths = |num: u64, den: u64| (num / den, num * 100 / den % 100);
+    let (per_query, per_query_frac) = hundredths(query_blocks, PATHS as u64);
+    let (per_walk, per_walk_frac) = hundredths(walk_blocks, PATHS as u64);
+    // A mount that read nothing would divide by zero; the bounds below are
+    // what say whether that happened, and this line only has to print.
+    let advantage_tenths = walk_blocks * 10 / index_total.max(1);
     println!(
         "  index queries       {query_blocks} blocks read over {PATHS} queries \
-         ({} per query)",
-        query_blocks as f64 / PATHS as f64
+         ({per_query}.{per_query_frac:02} per query)"
     );
     println!(
-        "  tree walk           {walk_blocks} blocks read over {PATHS} walks ({} per walk)",
-        walk_blocks as f64 / PATHS as f64
+        "  tree walk           {walk_blocks} blocks read over {PATHS} walks \
+         ({per_walk}.{per_walk_frac:02} per walk)"
     );
     println!(
         "  totals              index {index_total} against walk {walk_blocks} \
-         ({:.1}x), break-even at {break_even} queries",
-        walk_blocks as f64 / index_total as f64
+         ({}.{}x), break-even at {break_even} queries",
+        advantage_tenths / 10,
+        advantage_tenths % 10
     );
     println!("  tree on device      {blocks} blocks");
 
