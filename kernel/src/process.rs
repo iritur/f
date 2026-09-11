@@ -194,8 +194,46 @@ pub const SPAWN_GUARD: u64 = TEXT + TEXT_PAGES as u64 * FRAME_SIZE;
 /// Where such a component's stack is mapped.
 pub const SPAWN_STACK: u64 = SPAWN_GUARD + FRAME_SIZE;
 
+/// How many pages of stack a component spawned into a place is given.
+///
+/// Four. It was one, and one was never a number anybody chose — it is what the
+/// shape happened to have when the only thing above the frame was an
+/// announcement, and it stayed while two drivers grew into it.
+///
+/// RFC 0051 is the entry that found the wall and named this file as the place
+/// the repair belongs. `user/virtio-net` at eight receive slots and sixteen
+/// registration sets overran the single page by **fifty-six bytes** — observed
+/// as `vector 14, error 0x6, address 0x0000000000410fc8`, a fault at
+/// [`SPAWN_GUARD`] and not a number anybody reasoned to. What that RFC refused
+/// was the quiet repair: a driver shrinking to fit and saying nothing leaves
+/// the next one to find the same wall from the same distance, which is why
+/// `RECEIVE_SLOTS_STACK_BOUND` existed at all. It is gone now, and
+/// `f_virtio_net::driver::RECEIVE_SLOTS` is half the receive queue — the
+/// protocol's number, which is what it should have been.
+///
+/// **Four rather than two, and the two extra are not slack for its own sake.**
+/// A component has no allocator, so everything a driver holds lives on this
+/// stack: the number is not *how deep does today's call chain go* but *how much
+/// state may a future driver have at once*. Two pages would have paid RFC 0051
+/// and left the next driver to reopen it.
+///
+/// What it costs, stated because it is charged to somebody: three more frames
+/// per spawned component, out of that component's own account exactly as the
+/// first was, and three pages of address space below [`SPAWN_CONTROL`] — which
+/// moves [`BLK_BOARD`], the one address a driver holds as a constant, and its
+/// two siblings. The three driver crates are edited in the same commit;
+/// `kernel/src/blk.rs` asserts the agreement at compile time, so a half-done
+/// move does not link.
+/// Unit: pages.
+pub const SPAWN_STACK_PAGES: usize = 4;
+
+// A power of two, because two shapes allocate this stack as one block and the
+// allocator takes an order. A three would round to four and put a frame of
+// slack somewhere nobody is looking for it.
+const _: () = assert!(SPAWN_STACK_PAGES.is_power_of_two());
+
 /// The stack pointer it starts with: one past its stack.
-pub const SPAWN_STACK_TOP: u64 = SPAWN_STACK + FRAME_SIZE;
+pub const SPAWN_STACK_TOP: u64 = SPAWN_STACK + SPAWN_STACK_PAGES as u64 * FRAME_SIZE;
 
 /// Where the frame maps such a component's control ring.
 ///
@@ -1938,7 +1976,14 @@ pub unsafe fn prepare_driver(
     )
     .ok_or(Error::NoFrames)?;
     let text = frames.alloc_zeroed(order).ok_or(Error::NoFrames)?;
-    let stack = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
+    // One block, for the text's reason and one of its own: a stack is
+    // contiguous by definition, and a stack with a hole in it faults in the
+    // middle of a call rather than at its guard. `SPAWN_STACK_PAGES` is a power
+    // of two, so this order is exact and the free count shows no slack.
+    let stack_order =
+        Order::new(u8::try_from(SPAWN_STACK_PAGES.trailing_zeros()).unwrap_or(u8::MAX))
+            .ok_or(Error::NoFrames)?;
+    let stack = frames.alloc_zeroed(stack_order).ok_or(Error::NoFrames)?;
     // Zeroed, and it is an obligation rather than tidiness: a channel's cursors
     // and entry arrays are reinterpreted in place and all-zero is the one bit
     // pattern every one of those types is valid at.
@@ -1969,8 +2014,23 @@ pub unsafe fn prepare_driver(
         .map_err(Error::Space)?;
     }
 
+    for page in 0..SPAWN_STACK_PAGES as u64 {
+        let at = stack.addr().wrapping_add(page * FRAME_SIZE);
+        // SAFETY: as above.
+        unsafe {
+            paging::map_user(
+                frames,
+                &mut space,
+                SPAWN_STACK + page * FRAME_SIZE,
+                at,
+                paging::UserPage::Data,
+                features,
+            )
+        }
+        .map_err(Error::Space)?;
+    }
+
     for (virt, at, kind) in [
-        (SPAWN_STACK, stack.addr(), paging::UserPage::Data),
         (SPAWN_CONTROL, control.addr(), paging::UserPage::Data),
         (BLK_DATA, plan.data, paging::UserPage::Data),
         (BLK_BOARD, board.addr(), paging::UserPage::Data),

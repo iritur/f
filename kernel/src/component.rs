@@ -478,7 +478,13 @@ struct Instance {
 /// switched off. Every manifest in this tree already names it — *address space,
 /// page tables, text, stack, control ring, state tree, capability table* — so
 /// what changed is that the sentence is now a frame.
-const FIXED_PARTS: usize = 3;
+/// The stack is [`crate::process::SPAWN_STACK_PAGES`] of these and the other
+/// two are the control ring and the state tree, so this moves when the stack
+/// does. It was the literal 3 while the stack was one page, which is the form
+/// that goes quietly wrong: a shape that grew a page and left the count alone
+/// would charge for less than it mapped, and the frame would hand back fewer
+/// frames than it took at every teardown.
+const FIXED_PARTS: usize = crate::process::SPAWN_STACK_PAGES + 2;
 
 /// How many frames one instance of an image this long is made of.
 /// Unit: frames.
@@ -1812,8 +1818,9 @@ unsafe fn spawn(
         .map_err(Failure::Space)?;
     }
 
-    // The two fixed parts, after the text and in that order, because the order
-    // is what a teardown gives them back in.
+    // The fixed parts, after the text and in that order, because the order is
+    // what a teardown gives them back in: the stack's pages lowest-first, then
+    // the control ring, then the state tree.
     let mut fixed = [0u64; FIXED_PARTS];
     for slot in &mut fixed {
         let (handle, object) = charge(supervisor, account, frames)?;
@@ -1822,14 +1829,37 @@ unsafe fn spawn(
         charges += 1;
         *slot = object;
     }
-    let (Some(&stack), Some(&control), Some(&published)) =
-        (fixed.first(), fixed.get(1), fixed.get(2))
+    let stack_pages = crate::process::SPAWN_STACK_PAGES;
+    let (Some(&control), Some(&published)) = (fixed.get(stack_pages), fixed.get(stack_pages + 1))
     else {
         return Err(Failure::Account);
     };
 
+    // The stack, one mapping per page. The frames need not be contiguous in
+    // physical memory and the *pages* must be contiguous in the component's,
+    // because a stack with a hole in it faults in the middle of a call rather
+    // than at its guard — and a fault in the middle of a call is the one this
+    // shape spent eleven months not having a name for. Lowest address first, so
+    // the order here is the order `fixed` was charged in and the order a
+    // teardown walks.
+    for page in 0..stack_pages {
+        let Some(&phys) = fixed.get(page) else { return Err(Failure::Account) };
+        // SAFETY: as `user_space`, and `space` is not in `CR3` — it has never
+        // been.
+        unsafe {
+            paging::map_user(
+                frames,
+                &mut space,
+                crate::process::SPAWN_STACK + page as u64 * FRAME_SIZE,
+                phys,
+                UserPage::Data,
+                features,
+            )
+        }
+        .map_err(Failure::Space)?;
+    }
+
     for (virt, phys, kind) in [
-        (crate::process::SPAWN_STACK, stack, UserPage::Data),
         (crate::process::SPAWN_CONTROL, control, UserPage::Data),
         // Writable, and that is the one thing about this mapping worth arguing.
         // RFC 0013's *read, never delivered* is about the **reader**: a tree is
