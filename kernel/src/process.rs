@@ -357,6 +357,43 @@ pub const BLK_QUEUES: u64 = BLK_REGISTERS + BLK_REGISTER_PAGES as u64 * FRAME_SI
 /// is the constant that says so first.
 pub const SPAWN_TREE: u64 = BLK_QUEUES + 16 * FRAME_SIZE;
 
+/// Where the frame maps a spawned component's heap.
+///
+/// Above [`SPAWN_TREE`] for the reason that constant gives about its own
+/// position: the addresses between [`SPAWN_CONTROL`] and [`BLK_QUEUES`] are
+/// constants a driver holds, and a page inserted among them would move every one
+/// of them for a reason that has nothing to do with any of them.
+///
+/// **Mapped by the frame rather than by the component**, and that is forced
+/// rather than chosen. A `#[global_allocator]` answers its first allocation
+/// before the component has run a line of its own, so there is no moment at
+/// which a component could ask for its heap to be mapped — and asking would be a
+/// capability call, which a component that forbids `unsafe` cannot make. The
+/// frame therefore maps the need named `heap` here and describes it, exactly as
+/// it writes a state tree's schema, before the first instruction.
+///
+/// The *size* is not here. It is the `bytes` a component's manifest declares for
+/// that need, charged to its own account like everything else it is made of, and
+/// recorded in the region's own prologue where the allocator reads it.
+///
+/// Must equal `f_ring::heap::AT`, asserted below so that a disagreement fails to
+/// link rather than handing a component an allocator pointed at somebody else's
+/// memory.
+pub const SPAWN_HEAP: u64 = SPAWN_TREE + FRAME_SIZE;
+
+/// The most heap one component may declare.
+///
+/// Two hundred and fifty-six kibibytes. It is a bound on the *address space*
+/// this region may occupy rather than a judgement about what a component needs:
+/// what a component gets is what its manifest declares and its account pays for,
+/// and this is only the point past which the region would start crowding the two
+/// mebibytes one page table covers.
+/// Unit: bytes.
+pub const HEAP_MAX: u64 = 64 * FRAME_SIZE;
+
+// The frame's address and the component's, required to agree by the machine.
+const _: () = assert!(SPAWN_HEAP == f_ring::heap::AT);
+
 // One page table covers two mebibytes, and every address above has to be inside
 // the one that covers `TEXT` — otherwise a component mapping its own tree costs
 // the frame a page table it did not budget for, which is the sentence
@@ -367,6 +404,8 @@ const _: () = assert!(SPAWN_TREE + FRAME_SIZE <= TEXT + 2 * 1024 * 1024);
 // half of that argument an arithmetic mistake would break silently: a tree
 // mapped over a virtqueue is a driver whose descriptors a reader overwrites.
 const _: () = assert!(SPAWN_TREE >= BLK_QUEUES + 64 * 1024);
+// And the heap is above the tree and inside the same table.
+const _: () = assert!(SPAWN_HEAP + HEAP_MAX <= TEXT + 2 * 1024 * 1024);
 
 /// A second address in the same region, used only by provocations whose mapping
 /// is supposed to be refused.

@@ -75,6 +75,33 @@ SECTIONS {
 
     __image_end = .;
 
+    /* `alloc`'s one undefined byte, and why it is provided here rather than
+     * defined in a crate.
+     *
+     * When `alloc` grows a vector it emits a volatile one-byte read of
+     * `__rust_no_alloc_shim_is_unstable_v2` — a marker rustc uses to make an
+     * unstable dependency visible at link time. The byte itself is defined by
+     * the codegen-side allocator module, which rustc generates only for a crate
+     * whose types are not all-rlib. A component here is built to an rlib and
+     * hand-linked, so that module is never generated and the symbol is simply
+     * undefined, which is an error at this link rather than a warning.
+     *
+     * It cannot be defined in `f_ring` with `#[unsafe(no_mangle)]`, because the
+     * name is v0-mangled and carries `alloc`'s own crate hash. So the script
+     * provides it, pointed at the image's first byte: the read is one byte from
+     * a page mapped read-only and executable, which is a page the component can
+     * always read. `PROVIDE` and not `=`, so an image that does not link `alloc`
+     * gains no symbol at all.
+     *
+     * An absolute symbol is `llvm-nm` class `a`, which is not among the eight
+     * classes `cargo xtask component` rejects, so nothing here becomes writable.
+     *
+     * *Reversal:* the hash changes when the toolchain pin moves, and the link
+     * then fails naming this symbol — which is the right failure, loud and at
+     * build time, and `rust-toolchain.toml` says a pin bump is a reviewable
+     * commit rather than an ambient change. */
+    PROVIDE(_RNvCskfAWsVLpDif_7___rustc35___rust_no_alloc_shim_is_unstable_v2 = __image_start);
+
     /DISCARD/ : {
         *(.eh_frame)
         *(.eh_frame_hdr)

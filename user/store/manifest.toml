@@ -47,10 +47,14 @@ domain = "private"
 # The account. RFC 0008: everything a component is made of — address space,
 # page tables, text, stack, control ring, state tree and the capability table
 # itself — is retyped from one supplied `Untyped`, so revoking this ends the
-# component. Eight pages is what two of this component's instances fit in with
-# room for the frame's own bookkeeping; a component that needs more is refused
-# `RESOURCE/QUOTA_EXHAUSTED` at the derive that could not pay, which is the
-# refusal `cap=quota` already boots.
+# component. Sixteen pages, and the number has moved twice for reasons worth
+# keeping: it was eight, which was two instances with room for the frame's own
+# bookkeeping when the stack was one page and there was no heap. `E1-B16` gave a
+# scheduled component four pages of stack and `E2-B10` gave this one two pages of
+# heap, and an account is what pays for both. A component that needs more than it
+# declared is refused `RESOURCE/QUOTA_EXHAUSTED` at the derive that could not
+# pay, which is the refusal `cap=quota` already boots — so this number failing to
+# keep up is a red boot rather than a silent shortfall.
 #
 # `derive` because retyping *is* deriving, and `revoke` because an account you
 # cannot take back is not an account. No `grant`: this component hands nothing
@@ -60,7 +64,7 @@ name   = "account"
 type   = "untyped"
 rights = ["read", "write", "derive", "revoke"]
 from   = "supervisor"
-bytes  = 32_768
+bytes  = 65_536
 
 # One page of scratch. It exists so that this manifest declares a `frame` as
 # well as an `untyped` — the two kinds a spawn has to retype differently, and a
@@ -73,6 +77,28 @@ type   = "frame"
 rights = ["read", "write"]
 from   = "supervisor"
 frames = 1
+
+# The heap. Two pages, which is what this component's one allocation needs with
+# room to spare, and the only need in this file the **frame maps** rather than
+# only granting.
+#
+# It maps it because a `#[global_allocator]` answers its first allocation before
+# this component has run a line of its own: there is no moment at which it could
+# ask, and asking would be a capability call, which a crate that forbids `unsafe`
+# cannot make. So `kernel::process::SPAWN_HEAP` is where it lands, the frame
+# describes it before the first instruction the way it writes a state tree's
+# schema, and `f_ring::heap` is the allocator that reads it. The name is
+# load-bearing rather than a label: `kernel/src/component.rs` matches on it.
+#
+# Read and write and nothing else. A component that could derive from its own
+# heap could hand a piece of it on, and an allocator whose memory has left is an
+# allocator that will hand it out again.
+[[capability]]
+name   = "heap"
+type   = "untyped"
+rights = ["read", "write"]
+from   = "supervisor"
+bytes  = 8_192
 
 # The place's own endpoint, routed back to it. `write` is the right to connect
 # and `grant` is the right to hand the endpoint on, which together are what a

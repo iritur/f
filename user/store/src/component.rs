@@ -75,6 +75,32 @@ pub fn start(argument: u64) -> ! {
     let entry = door::Entry::from_bits(argument);
     let _ = entry.granted(0);
 
+    // An allocation, which is the first one any component in this tree has made.
+    //
+    // It is here rather than in the runtime because this is the life the frame
+    // spawns into a place, and a place is what carries the `heap` need the frame
+    // maps. What it proves is not that a vector works: it is that a
+    // `#[global_allocator]` in a crate that forbids `unsafe`, over a region the
+    // frame granted and described before this instruction, hands out memory that
+    // is there. The frame reads the region's own prologue afterwards and reports
+    // what was taken, so the evidence is a number on the other side of the
+    // boundary rather than this component's word for it.
+    //
+    // Dropped immediately, so `live` returns to zero and `peak` does not — which
+    // is the pair that says the allocation happened *and* came back.
+    // The *address* is what is black-boxed, and that is not incidental: Rust is
+    // allowed to elide an allocation whose value never escapes, so a box that is
+    // only read from is a box that may never have been allocated. Observing
+    // where it landed is what makes the allocation something the optimiser has
+    // to perform.
+    #[cfg(all(target_arch = "x86_64", feature = "image"))]
+    {
+        let taken = alloc::boxed::Box::new([7u8; 64]);
+        let at = core::ptr::from_ref::<[u8; 64]>(taken.as_ref()) as u64;
+        core::hint::black_box(at);
+        drop(taken);
+    }
+
     // "I am here." The one thing the frame cannot observe from outside.
     let _ = door::call0(door::ANNOUNCE);
 
