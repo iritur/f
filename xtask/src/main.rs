@@ -14894,19 +14894,21 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
 /// that rots. This is that function's body with the path taken as an argument,
 /// which is what makes it usable by a claim whose rows are not `claims/0008`'s.
 fn thresholds_in(text: &str) -> std::collections::BTreeMap<String, Bound> {
-    let value = |rest: &str, which: &str| -> Option<u64> {
-        let (_, after) = rest.split_once(which)?;
-        after
-            .trim_start()
-            .strip_prefix('=')?
-            .split_whitespace()
-            .next()?
-            .trim_end_matches([',', '}'])
-            .parse()
-            .ok()
-    };
-
     let mut rows = std::collections::BTreeMap::new();
+    for (key, rest) in threshold_rows(text) {
+        rows.insert(key, Bound { min: stated(&rest, "min").0, max: stated(&rest, "max").0 });
+    }
+    rows
+}
+
+/// The `(key, rest)` of every row inside a claim's `[threshold]` table.
+///
+/// Split out so that [`thresholds_in`] and [`unreadable_bounds_in`] walk one
+/// table rather than two copies of one walk. They disagree about exactly one
+/// thing — what an unreadable number means — and a second copy of the walk is a
+/// second place for that disagreement to drift.
+fn threshold_rows(text: &str) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
     let mut inside = false;
     for line in text.lines() {
         let trimmed = line.trim_start();
@@ -14922,7 +14924,107 @@ fn thresholds_in(text: &str) -> std::collections::BTreeMap<String, Bound> {
         if key.is_empty() {
             continue;
         }
-        rows.insert(key.to_string(), Bound { min: value(rest, "min"), max: value(rest, "max") });
+        rows.push((key.to_string(), rest.to_string()));
+    }
+    rows
+}
+
+/// One `min` or `max` as the row spells it: the number if it reads as a `u64`,
+/// and the spelling itself when the row states one this cannot read.
+///
+/// The second half of the tuple is the whole point. `.parse().ok()` on its own
+/// cannot tell *this row states no maximum* from *this row states a maximum I
+/// could not read*, and those two produce the same `None`.
+fn stated(rest: &str, which: &str) -> (Option<u64>, Option<String>) {
+    let Some((_, after)) = rest.split_once(which) else { return (None, None) };
+    let Some(after) = after.trim_start().strip_prefix('=') else { return (None, None) };
+    let Some(word) = after.split_whitespace().next() else { return (None, None) };
+    let word = word.trim_end_matches([',', '}']);
+    // Underscores are stripped because TOML says `5_000` *is* 5000, and Rust's
+    // `u64::from_str` refuses them. That is this parser failing to read TOML
+    // rather than the registry spelling a number oddly, and it was silent:
+    // `claims/0002`'s `ns_late_p99 = { max = 5_000 }` — the timer-jitter gate
+    // `E0-P06` makes gating from M2 onward, and one of the two numbers release
+    // 0.1 cannot ship without — parsed as *no bound at all*. A digit separator
+    // is the readable spelling, so the parser meets the registry here rather
+    // than the registry meeting the parser.
+    match word.replace('_', "").parse() {
+        Ok(number) => (Some(number), None),
+        Err(_) => (None, Some(format!("{which} = {word}"))),
+    }
+}
+
+/// Every published bound this parser cannot read, by the row that states it.
+///
+/// # Why an unreadable bound is worse than an absent one
+///
+/// Because it reports itself green. [`thresholds_in`] parses a bound as a
+/// `u64`, so a row spelled `max = 1.5` fails to parse, becomes `None`, and
+/// [`claim_compare`] then prints it as `green  <name> = <value>  (no bound)` —
+/// the words *no bound* next to a claim file that plainly states one. Nothing
+/// was comparing it and nothing said so.
+///
+/// Five rows in this registry are spelled that way today, across `claims/0001`,
+/// `claims/0004` and `claims/0016`. All three are `pending`, so none of them
+/// gates and no number in this tree is wrong because of it. The one that will
+/// matter is `claims/0016`'s `device_bytes_per_app_byte` — the
+/// write-amplification headline `E2-P10` owes — whose bound would not have
+/// applied on the day the number was finally taken, with a green row to say so.
+///
+/// This reports them. It deliberately does **not** respell them: a published
+/// bound is a number this project has stated, spelling one as an integer with
+/// its scale in its name is a registry convention, and changing a convention
+/// already written down needs an RFC rather than a commit. `intent/0007`'s spec
+/// carries that as the decision it owes.
+/// Published bounds nothing in this tree can read, as `(claim file, row)`.
+///
+/// Declared for [`CHAOS_GAP`]'s reason, one registry over: an absence stated in
+/// prose stops being true and goes on being read, so the set is data and the
+/// build goes red the day it changes in either direction. Sorted, because the
+/// comparison is against a sorted walk of `claims/`.
+///
+/// All five rows are in `pending` claims, so **no number in this tree is wrong
+/// because of them**. The one that will matter is `claims/0016`'s
+/// `device_bytes_per_app_byte`, the write-amplification figure `E2-P10` owes.
+const UNREADABLE_BOUNDS: &[(&str, &str)] = &[
+    ("0001-ring-submit-latency.toml", "ratio_vs_baseline"),
+    ("0004-buffer-registration-cost.toml", "ratio_resolve_virtual_vs_fixed"),
+    ("0016-write-amplification.toml", "device_bytes_per_app_byte"),
+    ("0016-write-amplification.toml", "modelled_device_bytes_per_app_byte"),
+    ("0016-write-amplification.toml", "ratio_vs_baseline"),
+];
+
+/// Every unreadable bound the registry actually carries, sorted.
+///
+/// # Errors
+///
+/// If a claim file cannot be read.
+fn unreadable_bounds_found() -> Result<Vec<(String, String)>, String> {
+    let mut found = Vec::new();
+    for file in claim_files()? {
+        let name = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("a claim file with no name: {}", file.display()))?
+            .to_string();
+        let text = std::fs::read_to_string(&file)
+            .map_err(|e| format!("reading {}: {e}", relative(&file)))?;
+        for row in unreadable_bounds_in(&text).into_keys() {
+            found.push((name.clone(), row));
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+fn unreadable_bounds_in(text: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut rows = std::collections::BTreeMap::new();
+    for (key, rest) in threshold_rows(text) {
+        let unreadable: Vec<String> =
+            ["min", "max"].iter().filter_map(|which| stated(&rest, which).1).collect();
+        if !unreadable.is_empty() {
+            rows.insert(key, unreadable);
+        }
     }
     rows
 }
@@ -15040,6 +15142,23 @@ fn claim_compare(
 
     let mut measured = std::collections::BTreeMap::new();
     let mut findings = Vec::new();
+
+    // Before anything is measured, because a bound this cannot read is a bound
+    // that would otherwise print `green ... (no bound)` further down and be
+    // counted as a row that passed.
+    for (name, spellings) in unreadable_bounds_in(claim) {
+        findings.push(format!(
+            "  {name}: this claim states {} and nothing here can read {}. A bound parsed \
+             as a `u64` that fails to parse becomes no bound at all, and the row then \
+             reports itself green against a claim file that plainly states one — which is \
+             worse than an absent bound, because an absent one is visible. Spelling a \
+             published bound as an integer with its scale in its name is a registry \
+             convention, so respelling this is an RFC and not a commit: `intent/0007`'s \
+             spec carries the decision it owes.",
+            spellings.join(" and "),
+            if spellings.len() == 1 { "it" } else { "them" },
+        ));
+    }
 
     for (what, program, args) in workloads {
         println!("--- {what} ---\n");
@@ -15858,8 +15977,8 @@ fn eval_run(filter: Option<&str>) -> Result<(), String> {
 mod tests {
     use super::{
         HEAP_GAP, JOIN_GAP, MINTS, code_mentions, datapath_findings, declared_fn, frame_findings,
-        gap_holds, gap_holds_under, heap_reading, hold_the_gap, toml_field, toml_multiline,
-        trace_hash, unspawned,
+        gap_holds, gap_holds_under, heap_reading, hold_the_gap, thresholds_in, toml_field,
+        toml_multiline, trace_hash, unreadable_bounds_in, unspawned,
     };
 
     /// The supervisor line as a boot actually prints it, trimmed to the tail
@@ -16139,6 +16258,78 @@ mod tests {
     #[test]
     fn the_heap_gap_names_a_sentence_the_kernel_still_carries() {
         gap_holds("HEAP_GAP", HEAP_GAP).expect("the needle must be in kernel/src/runtime.rs");
+    }
+
+    /// A bound that states a number this cannot read is reported, and a row
+    /// that states no bound at all is not.
+    ///
+    /// Those two produce the same `None` and mean opposite things, which is the
+    /// whole reason [`super::stated`] returns a pair.
+    #[test]
+    fn a_bound_nothing_can_read_is_not_a_row_with_no_bound() {
+        let table = "[threshold]\n\
+                     counted          = { max = 1024 }\n\
+                     one_sided        = { min = 2 }\n\
+                     separated        = { max = 5_000 }\n\
+                     wide             = { max = 50_000_000 }\n\
+                     a_ratio          = { max = 1.5 }\n\
+                     both_unreadable  = { min = 0.5, max = 1.5 }\n";
+
+        // The readable rows are read, and one-sided rows stay one-sided.
+        let thresholds = thresholds_in(table);
+        assert_eq!(thresholds["counted"].max, Some(1024));
+        assert_eq!(thresholds["one_sided"].min, Some(2));
+        assert_eq!(thresholds["one_sided"].max, None);
+
+        // TOML's digit separator. `u64::from_str` refuses it, so this read as
+        // *no bound at all* until the parser started stripping it — eight rows
+        // across five claims, including `claims/0002`'s timer-jitter gate.
+        // This is the assertion that fails if the strip is ever removed.
+        assert_eq!(thresholds["separated"].max, Some(5000), "`5_000` is 5000 in TOML");
+        assert_eq!(thresholds["wide"].max, Some(50_000_000));
+        assert!(!unreadable_bounds_in(table).contains_key("separated"));
+
+        let unreadable = unreadable_bounds_in(table);
+        // A row stating no maximum is not a finding. If this ever fires, every
+        // one-sided bound in the registry becomes a false positive and the
+        // check gets switched off, which is how a check stops meaning anything.
+        assert!(!unreadable.contains_key("counted"), "a readable bound is not a finding");
+        assert!(!unreadable.contains_key("one_sided"), "an absent bound is not an unreadable one");
+        // And the float rows are, with the spelling carried so the report can
+        // show what it could not read rather than only that it could not.
+        assert_eq!(unreadable["a_ratio"], vec!["max = 1.5"]);
+        assert_eq!(unreadable["both_unreadable"], vec!["min = 0.5", "max = 1.5"]);
+    }
+
+    /// The registry's own float rows are found, because the fixture above
+    /// proves the parser and this proves the parser is pointed at something.
+    ///
+    /// Deliberately asserts *at least* the count rather than exactly it: a claim
+    /// gaining a row spelled the same way should not fail here, it should be
+    /// reported by the route that compares it.
+    #[test]
+    fn the_registry_still_carries_the_bounds_this_cannot_read() {
+        let mut found = Vec::new();
+        for claim in ["0001", "0004", "0016"] {
+            let dir = super::root().join("claims");
+            let file = std::fs::read_dir(&dir)
+                .expect("claims/")
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .find(|p| {
+                    p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(claim))
+                })
+                .unwrap_or_else(|| panic!("no claim file starting {claim}"));
+            let text = std::fs::read_to_string(&file).expect("a claim file");
+            for (name, spellings) in unreadable_bounds_in(&text) {
+                found.push(format!("{claim} {name}: {}", spellings.join(", ")));
+            }
+        }
+        assert!(
+            found.len() >= 5,
+            "five rows were spelled as floats when this was written; found {}: {found:#?}",
+            found.len()
+        );
     }
 
     #[test]
@@ -16724,11 +16915,46 @@ fn lint_reproduce() -> Result<(), String> {
         }
     }
 
+    let unreadable = unreadable_bounds_found()?;
+    let declared: Vec<(String, String)> = UNREADABLE_BOUNDS
+        .iter()
+        .map(|(file, row)| ((*file).to_string(), (*row).to_string()))
+        .collect();
+    if unreadable != declared {
+        let shown = |set: &[(String, String)]| {
+            set.iter().map(|(f, r)| format!("    {f}  {r}")).collect::<Vec<_>>().join("\n")
+        };
+        return Err(format!(
+            "the set of published bounds nothing can read has changed.\n\n\
+             declared in UNREADABLE_BOUNDS:\n{}\n\n\
+             found in claims/:\n{}\n\n\
+             A bound spelled so that this tree's `u64` parser cannot read it becomes no\n\
+             bound at all, and the row then reports itself *green* against a claim file\n\
+             that plainly states one. That is worse than an absent bound, because an\n\
+             absent one is visible.\n\n\
+             If a row was added: do not add it to the constant to make this green. Spell\n\
+             the bound as an integer with its scale in its name.\n\
+             If a row was fixed: good news and a red build on purpose — take it out of\n\
+             the constant, and `intent/0007-a-bound-nothing-compares/spec.md` and\n\
+             `claims/README.md` now describe a registry that has moved.",
+            shown(&declared),
+            shown(&unreadable),
+        ));
+    }
+
     if findings.is_empty() {
         println!(
             "lint-reproduce: ok  ({} claim(s) reproduce from this tree)",
             reproductions()?.len()
         );
+        println!(
+            "  {} published bound(s) nothing can read, declared rather than checked \
+             (UNREADABLE_BOUNDS); all in `pending` claims, so none gates today:",
+            declared.len()
+        );
+        for (file, row) in &declared {
+            println!("  {file:<34} {row}");
+        }
         return Ok(());
     }
     Err(format!(
