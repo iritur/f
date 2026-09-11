@@ -995,7 +995,18 @@ impl Table {
         let mut base = round_up(self.machine.frame_cores, step);
         while base + count <= self.machine.physical_cores {
             let mask = run_mask(base, count);
-            if self.taken & mask == 0 {
+            // The one test that makes `taken` a fact about the machine rather
+            // than a counter. `mutate-overlapping-grant` removes it, so that a
+            // second reservation lands on the first's cores and every other
+            // line of the arithmetic still passes — which is what
+            // `abi/proofs`' `two_grants_never_share_a_core` has to notice, and
+            // what `a_second_reservation_cannot_have_the_first_ones_cores`
+            // below notices for the one pair of demands it tries.
+            #[cfg(not(feature = "mutate-overlapping-grant"))]
+            let free = self.taken & mask == 0;
+            #[cfg(feature = "mutate-overlapping-grant")]
+            let free = true;
+            if free {
                 return Some(mask);
             }
             base += step;

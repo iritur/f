@@ -2581,6 +2581,15 @@ const DEFECTS: &[&str] = &[
     // every functional test on x86-64 because total store order hides it. RFC
     // 0063, RFC 0016, RFC 0020.
     "mutate-relaxed-routing",
+    // The second in `abi/`, and the first there a sequential checker can see:
+    // `reserve::Table::lowest_free` stops consulting `taken`, so a second
+    // hard-class reservation is granted the first one's cores. `abi/proofs` is
+    // its harness — `cargo xtask prove` arms it and requires
+    // `two_grants_never_share_a_core` to fail — because RFC 0050's one
+    // arithmetic has no second implementation to disagree with it, and a proof
+    // that could not tell this build from the shipped one would be a proof of
+    // nothing.
+    "mutate-overlapping-grant",
     // E2-B07's, and the only defect in this list that breaks nothing at all. It
     // changes sixteen bytes of read-only data nothing reads, so the only thing
     // in the system that can notice it is the frame's measurement of its own
@@ -6663,6 +6672,64 @@ const RING_PROOF_HARNESSES: &[(&str, bool, &str)] = &[
     ),
 ];
 
+/// Where the admission arithmetic's proofs are.
+///
+/// A third crate, on `ring/proofs`' terms exactly: `f-abi` builds for the
+/// host, so the crate links it and proves `f_abi::reserve::Table::admit` over
+/// every machine and every demand. RFC 0050 put the whole schedulability test
+/// in one function so that no second implementation could disagree with it;
+/// the cost is that nothing independent checks the one, and `claims/0010`
+/// gates on the count of refusals a simulator produces, which says the
+/// function refuses and nothing about what it grants. A solver is the
+/// instrument that reaches every input, and this is where it is asked.
+const ABI_PROOFS: &str = "abi/proofs";
+
+/// The bound the admission proofs are stated inside, widened.
+///
+/// `abi/proofs/src/proofs.rs` sets `CORES` to eight, because `Table::admit`
+/// walks the cores looking for a free run and `Grant::with_split` walks the
+/// run bit by bit, and a bounded checker unrolls both. This is the same
+/// fixture at sixty-four, which is everything the bitmaps can name. Same role
+/// as [`PROOF_WIDE`] two crates over.
+const ABI_PROOF_WIDE: &str = "wide-machine";
+
+/// Every harness the admission proofs require, and the sentence each one is.
+///
+/// The middle field is **run this one again at the wider bound**, and here it
+/// is the two harnesses whose sentences are about the walk itself: which cores
+/// a grant may name, and that two runs never overlap. The other two are about
+/// the table's bookkeeping — what a refusal leaves, what a release gives back —
+/// and at sixty-four cores they are the cost of three and four admissions
+/// unrolled over the whole machine. Measured once, on 2026-09-10 in the `full`
+/// image: the refusal harness verified after two hours and seven minutes, and
+/// the release harness ran CBMC out of memory. What either would add over the
+/// first two at the wide bound is the bookkeeping, which does not read the
+/// core count, so they are stated at eight and the reason is here rather than
+/// left as an absence somebody has to notice.
+const ABI_PROOF_HARNESSES: &[(&str, bool, &str)] = &[
+    (
+        "admitting_an_arbitrary_demand",
+        true,
+        "RFC 0007's four components, over every machine and every demand; the soft class is \
+         refused nothing but memory",
+    ),
+    (
+        "two_grants_never_share_a_core",
+        true,
+        "the whole-core rule across two reservations, and `reserved` answers for exactly them",
+    ),
+    (
+        "a_refusal_leaves_the_table_as_it_was",
+        false,
+        "a refused demand changes the count of refusals and nothing else",
+    ),
+    (
+        "a_release_gives_back_what_was_granted",
+        false,
+        "grant, release, admit again is the same grant; a second release is refused",
+    ),
+];
+
 /// One harness: its name, whether the wide pass runs it again, and the sentence
 /// it is.
 ///
@@ -6731,11 +6798,13 @@ struct Armed {
     what: &'static str,
 }
 
-/// The two crates, in the order `prove` runs them.
+/// The three crates, in the order `prove` runs them.
 ///
 /// The kernel's first, because it is E1-P07's and the exit clause about a
 /// schedule is stated against it; the ring's second, because E1-P12 needed the
-/// apparatus to exist before it could use it.
+/// apparatus to exist before it could use it; the admission arithmetic's
+/// third, because it is the newest and the cheapest, and a red run should
+/// reach the two the schedule was written against before it reaches this one.
 const PROOF_CRATES: &[ProofCrate] = &[
     ProofCrate {
         dir: PROOFS,
@@ -6818,6 +6887,31 @@ const PROOF_CRATES: &[ProofCrate] = &[
                        oracle, and this is the same oracle over every index at once",
             },
         ],
+    },
+    ProofCrate {
+        dir: ABI_PROOFS,
+        about: "the admission arithmetic, over every machine and every demand",
+        wide: ABI_PROOF_WIDE,
+        wide_says: "a machine of sixty-four physical cores — the two whose sentences are about the walk",
+        harnesses: ABI_PROOF_HARNESSES,
+        // Every harness here draws an arbitrary `Machine` and then assumes it
+        // checks out, which is one over-tight `assume` away from a machine
+        // nothing can be admitted to — and that harness verifies instantly and
+        // proves nothing. So the covers are owed, and read.
+        covered: true,
+        // One defect, on the one harness that states the property it breaks.
+        // The site is the *description* and not a location, for the reason
+        // `kani_failure_sites` gives: a second grant landing on the first's
+        // cores faults nothing, so what fails is the harness's own assertion
+        // and what identifies it is the sentence that assertion carries.
+        armed: &[Armed {
+            feature: "mutate-overlapping-grant",
+            harness: "two_grants_never_share_a_core",
+            site: "two grants hold one core",
+            what: "the sentence `two_grants_never_share_a_core` asserts after its second \
+                   grant, in `abi/proofs/src/proofs.rs`; the defect makes `lowest_free` in \
+                   the shipped `abi/src/reserve.rs` stop consulting `taken`",
+        }],
     },
 ];
 
@@ -7209,7 +7303,14 @@ fn kani_findings(log: &str) -> String {
     let mut lines: Vec<&str> = Vec::new();
     let mut carry = 0usize;
     for line in log.lines() {
-        if line.contains("Status: FAILURE") || line.starts_with("VERIFICATION") {
+        // The memory line is a verdict with no check behind it: CBMC prints it
+        // after `VERIFICATION:- FAILED` and lists nothing as failing, so a
+        // report that carried only the verdict looked like a counterexample
+        // that had lost its location. `abi/proofs` found that at its wide bound.
+        if line.contains("Status: FAILURE")
+            || line.starts_with("VERIFICATION")
+            || line.contains("run out of memory")
+        {
             lines.push(line.trim_end());
             carry = 3;
         } else if carry > 0 && (line.contains("Description:") || line.contains("Location:")) {
@@ -7874,31 +7975,47 @@ VERIFICATION:- SUCCESSFUL
         );
     }
 
-    /// Every harness in `ring/proofs` carries at least one `kani::cover!`.
+    /// Every harness in a crate that owes covers carries at least one
+    /// `kani::cover!`.
     ///
     /// The other direction of the same rule. `cover_check` refuses a report
     /// with no summary in it, but that is a twenty-minute run away; a harness
     /// added with no cover at all is findable here in a second, and it is the
-    /// cheapest way this proof goes quietly vacuous.
+    /// cheapest way this proof goes quietly vacuous. Over every crate with
+    /// `covered` set rather than the ring's alone, because the admission
+    /// proofs owe theirs for the same reason and a test that read one crate
+    /// while the table it checks against covers two would be the shape the
+    /// forged slot that was never read had.
     #[test]
-    fn every_ring_harness_states_something_it_can_reach() {
-        let path = super::root().join(super::RING_PROOFS).join("src/proofs.rs");
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return;
-        };
-        for (harness, _, _) in super::RING_PROOF_HARNESSES {
-            let start = text
-                .find(&format!("fn {harness}()"))
-                .unwrap_or_else(|| panic!("`{harness}` is in the table and not in the file"));
-            let body = &text[start..];
-            let end = body.find("\n}").map_or(body.len(), |at| at + 2);
-            assert!(
-                body[..end].contains("kani::cover!"),
-                "`{harness}` states no cover, so nothing says its fixture reaches the\n\
-                 code it is about. A harness over arbitrary bytes whose first check\n\
-                 refuses everything verifies instantly and proves nothing."
-            );
+    fn every_covered_harness_states_something_it_can_reach() {
+        let mut checked = 0usize;
+        for krate in super::PROOF_CRATES.iter().filter(|krate| krate.covered) {
+            let path = super::root().join(krate.dir).join("src/proofs.rs");
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for (harness, _, _) in krate.harnesses {
+                let start = text.find(&format!("fn {harness}()")).unwrap_or_else(|| {
+                    panic!("`{harness}` is in the table and not in {}", krate.dir)
+                });
+                let body = &text[start..];
+                let end = body
+                    .find(
+                        "
+}",
+                    )
+                    .map_or(body.len(), |at| at + 2);
+                assert!(
+                    body[..end].contains("kani::cover!"),
+                    "`{harness}` in {} states no cover, so nothing says its fixture reaches
+                     the code it is about. A harness over arbitrary input whose first check
+                     refuses everything verifies instantly and proves nothing.",
+                    krate.dir
+                );
+                checked += 1;
+            }
         }
+        assert!(checked > 0, "no covered harness was read, so nothing was checked");
     }
 
     /// Every deliberate defect in `ring/Cargo.toml` is either armed by a proof

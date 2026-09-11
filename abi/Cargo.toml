@@ -23,6 +23,17 @@ description = "Wire types crossing a trust boundary. repr(C), fixed-width, no ge
 [features]
 mutate-relaxed-routing = []
 
+# The second, and the first in this crate that a sequential checker can see.
+# `reserve::Table::lowest_free` stops consulting what is already taken, so a
+# second hard-class reservation is granted the first one's cores and every
+# other line of RFC 0050's arithmetic still passes. `abi/proofs` is the
+# harness: `cargo xtask prove` arms this for one run and requires
+# `two_grants_never_share_a_core` to fail on it, because a proof over the
+# admission arithmetic that could not tell this build from the shipped one
+# would be a proof of nothing. `reserve.rs`'s own host test catches it too, for
+# the one pair of demands it tries; the proof is what says *no* pair.
+mutate-overlapping-grant = []
+
 [lints.rust]
 # The frame. Overrides the workspace forbid — see the note in the root Cargo.toml.
 unsafe_code = "allow"

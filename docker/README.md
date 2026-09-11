@@ -78,7 +78,7 @@ older than the first and looks like a mistake until you know what it is for.
 | | Which | Who chose it | What it builds |
 |---|---|---|---|
 | The pin | `rust-toolchain.toml` | this repository | everything in the workspace, and every number in `claims/` |
-| The checker's | `nightly-2025-11-21`, installed by `cargo kani setup` into `/opt/kani` and `/opt/rustup` | Kani | `kernel/proofs` and `ring/proofs` only, and only when `cargo xtask prove` runs |
+| The checker's | `nightly-2025-11-21`, installed by `cargo kani setup` into `/opt/kani` and `/opt/rustup` | Kani | `kernel/proofs`, `ring/proofs` and `abi/proofs` only, and only when `cargo xtask prove` runs |
 
 **A verification tool's toolchain requirement is the tool's business.** Kani
 pins a specific nightly because its compiler plugin is built against a specific
