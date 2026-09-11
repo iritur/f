@@ -422,12 +422,17 @@ pub unsafe fn start(
         // the core that will.
         unsafe { slot.write(Handoff { kernel_root: space.root(), apic: window, clocks }) };
 
+        // One watcher for the whole of starting this core, because `wake`'s own
+        // delays are where the early stages happen and `Progress` says why.
+        let mut progress = Progress { cpu, last: 0, verbose };
+
         // SAFETY: `window` is this core's mapped register window, the rate was
         // measured on this machine, the trampoline is installed, and `cpu` has
-        // not been started.
-        unsafe { ap::wake(window, clocks.tsc_khz, cpu, stack_top) };
+        // not been started. The observer reads one byte through the direct map
+        // and writes the serial port, and touches nothing `wake` is using.
+        unsafe { ap::wake(window, clocks.tsc_khz, cpu, stack_top, &mut || progress.sample()) };
 
-        match watch(cpu, clocks.tsc_khz, ARRIVAL_MICROS, verbose) {
+        match watch(cpu, clocks.tsc_khz, ARRIVAL_MICROS, &mut progress) {
             READY => {}
             FAILED => return Err(StartError::ArrivedBroken(cpu)),
             // Nothing answered, so there is nothing there — the count this
@@ -927,7 +932,7 @@ pub(crate) unsafe fn answer() {
     unsafe { apic::end_of_interrupt() };
 }
 
-/// [`wait_for`], printing the arriving core's progress as it happens.
+/// One arriving core's progress, as the core that started it sees it.
 ///
 /// # Why printing *as it happens* is the whole point
 ///
@@ -935,29 +940,71 @@ pub(crate) unsafe fn answer() {
 /// handler, which is a triple fault; on a hypervisor that stops the virtual
 /// machine, this core included. So anything printed *afterwards* is never
 /// printed at all — the machine is gone — and the only report that survives is
-/// one already on the wire when the fault happens. That is what this does: it
-/// watches [`ap::stage`] while it waits and prints each new value as it
-/// appears, so the last line in the log is the last thing the dead core did.
+/// one already on the wire when the fault happens. That is what this is for: it
+/// reads [`ap::stage`] and prints each new value as it appears, so the last
+/// line in the log is the last thing the dead core did.
+///
+/// # Why it is a value that outlives the wait
+///
+/// Because the watching has to begin *inside* [`ap::wake`] and carry on after
+/// it, and those are two loops. `wake` spends ten milliseconds and then twice
+/// two hundred microseconds between register writes the architecture requires
+/// spacing, and the arriving core starts executing at the startup interrupt in
+/// the middle of them — so a core that walks the trampoline in a few
+/// microseconds has finished before `wake` returns, and a watcher that only
+/// starts afterwards reads one value that is already the last one. That is what
+/// the second machine this kernel booted on printed: a single `stage 12` line
+/// where the two stages worth having, 5 and 6, had come and gone. QEMU
+/// delivers a startup interrupt slowly enough to hide it, which is why the run
+/// that wrote `xtask`'s `cores` comment caught seven cores at five stages.
+///
+/// So `last` is carried across both halves: one observation of one core, made
+/// from two places, printing each stage once.
 ///
 /// Off unless `f.bringup` is on the command line, because a healthy boot would
 /// otherwise gain a dozen lines saying that a core did what every core does,
 /// and the boot log is a fixture. The give-up path prints the last stage either
 /// way.
-fn watch(cpu: usize, tsc_khz: u64, micros: u64, verbose: bool) -> u64 {
-    if !verbose {
-        return wait_for(cpu, tsc_khz, micros);
-    }
-    let deadline = read_tsc().saturating_add(tsc_khz.saturating_mul(micros) / 1_000);
-    let mut last = 0;
-    loop {
+struct Progress {
+    /// The core being watched. Only for the line; nothing is read from it.
+    cpu: usize,
+    /// The last stage printed, so that each is printed once across both halves.
+    last: u8,
+    /// Whether `f.bringup` asked for any of this.
+    verbose: bool,
+}
+
+impl Progress {
+    /// Read the byte the arriving core writes, and print it if it has moved.
+    ///
+    /// Called from a spin loop, including the one inside [`ap::wake`], so the
+    /// cost when nobody asked has to be a branch and not a read.
+    fn sample(&mut self) {
+        if !self.verbose {
+            return;
+        }
         // SAFETY: the direct map is live — `start` runs with the kernel's
         // address space active — and this reads the one byte the core being
         // started writes.
         let stage = unsafe { ap::stage() };
-        if stage != last {
-            last = stage;
-            kprintln!("  core {cpu}        stage {stage}, {}", ap::stage_name(stage));
+        if stage != self.last {
+            self.last = stage;
+            let (cpu, name) = (self.cpu, ap::stage_name(stage));
+            kprintln!("  core {cpu}        stage {stage}, {name}");
         }
+    }
+}
+
+/// [`wait_for`], sampling `progress` while it waits.
+///
+/// The loop is [`wait_for`]'s with one call added rather than a wrapper around
+/// it, because the sample has to happen between two checks of the mailbox: a
+/// core that arrives is a core that has stopped writing stages, and reading the
+/// byte after the answer would print a stage the core had already left.
+fn watch(cpu: usize, tsc_khz: u64, micros: u64, progress: &mut Progress) -> u64 {
+    let deadline = read_tsc().saturating_add(tsc_khz.saturating_mul(micros) / 1_000);
+    loop {
+        progress.sample();
         let state = peek(cpu);
         if state == READY || state == DONE || state == FAILED {
             return state;
