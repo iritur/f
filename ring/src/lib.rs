@@ -35,12 +35,6 @@ pub mod adopt;
 pub mod buffers;
 pub mod device;
 mod doorbell;
-/// The allocator a component gets when it wants `alloc`, over a region the frame
-/// granted it. A heap is a window with a policy — RFC 0033's shape one level up,
-/// and the reason it is in this crate rather than in the component is that a
-/// `#[global_allocator]` is an `unsafe impl` and RFC 0001 forbids `unsafe` above
-/// the frame.
-pub mod heap;
 mod mapping;
 pub mod registry;
 

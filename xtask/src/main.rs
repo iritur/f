@@ -1622,17 +1622,7 @@ fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
             // like the entry point having moved.
             "--profile",
             "init",
-            // `alloc` beside the other two, and it is the line `E2-B10` could
-            // not have been evidenced without. `extern crate alloc` did not
-            // resolve for this target at all, so no component that allocates
-            // compiled — which is why `user/objects` and `user/assembler` both
-            // carry the declaration and neither is a component image.
-            //
-            // Building it costs the image nothing it does not reach:
-            // `--gc-sections` at the link step takes back what the entry does
-            // not use, so a component that never allocates links the same bytes
-            // it linked before.
-            "-Zbuild-std=core,compiler_builtins,alloc",
+            "-Zbuild-std=core,compiler_builtins",
             "--target-dir",
             &target,
             "--message-format=json",
