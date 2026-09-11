@@ -549,10 +549,15 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         );
     }
 
+    // `f.bringup` turns the stage-by-stage report on. Off by default and argued
+    // at `smp::watch`: it exists for a machine that dies bringing a core up,
+    // where the only report that survives is one already on the wire.
+    let verbose = boot.has_parameter(b"f.bringup");
+
     // SAFETY: the boot processor, once, with the kernel's address space active,
     // `frames` rebound onto its direct map, after `apic::init` and
     // `apic::calibrate` on this core, and with interrupts disabled.
-    match unsafe { smp::start(&mut frames, &space, clocks, ceiling) } {
+    match unsafe { smp::start(&mut frames, &space, clocks, ceiling, verbose) } {
         Ok(found) => {
             // The one-core sentence is about a *machine* with one core, so it
             // is conditioned on the machine and not on the count this boot

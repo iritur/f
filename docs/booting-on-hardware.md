@@ -153,6 +153,47 @@ sudo ./tools/f-on-metal.sh install    # add the entries beside Arch
 sudo ./tools/f-on-metal.sh uninstall  # and take them away again
 ```
 
+### Telling that machine which generation it is
+
+The entries above name **no** generation, and a boot that was told none prints
+
+```
+  frame         7c44ec09…  over 364544 bytes of text and rodata
+  generation    none selected, so no root is published
+```
+
+which is the frame measuring itself and having nothing to compare against. Half
+of RFC 0012 — the selection and the declaration — therefore does not run on a
+machine installed this way, and until 2026-09-09 it had never run on hardware at
+all.
+
+```sh
+cargo xtask generation                # pack this build as a boot module
+cargo xtask generation --install      # write the modules' roots and frame hashes
+sudo ./tools/f-on-metal.sh install --components . --generations
+```
+
+That adds one entry per packed generation, each carrying `f.root=` and
+`f.frame=`, and offers every packed generation as a module on **every** entry —
+an entry offering only its own generation is an entry you cannot roll back
+*from*. Boot one and the log says `generation … selected as publish 1` and
+`measurement agrees with the frame hash the generation declares`.
+
+**Which of the two writers to use.** `generation --install` emits two things: a
+`45_f_generations` fragment naming `/boot/f/`, and a `generations.tsv` holding
+the numbers and no layout. The fragment is the manual answer on a machine whose
+`/boot` is a directory. **On a machine whose `/boot` is its own partition that
+path is wrong** — GRUB sees those files at `/f/` — so there the script is the
+answer: it reads the rows, resolves the path against the running machine the way
+every other entry it writes does, and keeps the backups. Neither holds a copy of
+the other's half: the script computes no hashes, and `xtask` writes no layout it
+cannot verify.
+
+Three generations is the ceiling with four components, and both writers refuse
+past it rather than truncating: a loader hands the frame eight modules, five go
+to `init.bin` and the component files, and a menu quietly missing the generation
+you meant to roll back to is the failure the whole mechanism exists to prevent.
+
 It refuses an ELF64 image — the easiest mistake, since cargo leaves one beside
 the `.elf32` — backs up `grub.cfg` before regenerating, never touches
 `GRUB_DEFAULT`, and writes `/etc/grub.d/45_f` rather than appending to
@@ -271,7 +312,8 @@ what there was to learn.
 legacy windows exist and multiboot 1 is enough. `E5-D03` owns the real fix —
 naming a boot protocol that carries the pointer — and
 `docs/second-boot-outside-qemu.md` is where this was found and what each
-candidate costs.
+candidate costs. `docs/third-boot-outside-qemu.md` is the boot that reproduced
+it, which is what makes it structural rather than one machine's firmware.
 
 ### On UEFI, `grub-install` changes what boots by default
 
@@ -330,6 +372,38 @@ A boot that took the cap says so on a `note` line, and the cores it did not star
 are **not** counted as absent, because nothing asked them anything. `cargo xtask
 cores` boots it on every run of `verify`, so it is a parameter that is exercised
 rather than one that used to work.
+
+### `f.bringup` — when a core dies and takes the machine with it
+
+```
+multiboot /boot/f/f-kernel.elf32 f.bringup
+```
+
+Prints the arriving core's progress **as it happens**, one line per stage:
+
+```
+  core 1        stage 5, cr3 loaded, paging still off
+  core 1        stage 6, efer written
+```
+
+The ordering is the whole point. A core that dies in the trampoline dies before
+it has a descriptor table, so the fault has nowhere to be reported: it is a
+triple fault, and on a hypervisor the *whole virtual machine* stops — the boot
+processor with it. Anything printed after the fact is never printed at all. So
+the boot processor watches a byte the arriving core writes and prints each new
+value while it waits, which puts the evidence on the wire before the fault.
+
+**A core that stops at a stage died at the step after it.** The stages are named
+in `kernel/src/arch/x86_64/ap.rs`; the two worth knowing here are 5 (`cr3`
+loaded, paging still off) and 6 (`efer` written), because the step between them
+is a `wrmsr` and RFC 0070 is the record of that instruction taking a machine
+down.
+
+Off by default, because a healthy boot would otherwise gain a dozen lines saying
+that a core did what every core does, and the boot log is a fixture. **The
+give-up line is printed either way** — a core that never answers is reported
+with the last stage it reached, and `stage 0, nothing; it never executed` is
+what a core that is not there looks like.
 
 ### Telling the machine what it is
 

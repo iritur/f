@@ -63,6 +63,13 @@ const BREAKPOINT: u64 = 3;
 /// The page fault, which is the one with an informative error code.
 const PAGE_FAULT: u64 = 14;
 
+/// The four faults whose error code is a *selector* rather than a set of flags.
+///
+/// Invalid task state segment, segment not present, stack fault and general
+/// protection. A non-zero error code on any of these names a descriptor, which
+/// is why [`report`] prints the descriptor beside the number.
+const SELECTOR_FAULTS: [u64; 4] = [10, 11, 12, 13];
+
 /// The bits of a saved code selector that hold a privilege level.
 const PRIVILEGE: u64 = 3;
 
@@ -265,6 +272,45 @@ pub unsafe fn init() {
 }
 
 /// The names the processor's manual uses, so a dump can be looked up.
+/// Is the instruction at this address an `iretq`?
+///
+/// `48 CF` — a `REX.W` prefix and the one-byte opcode. Asked by [`report`] so
+/// that it reads a stack only when the instruction that faulted is the one
+/// whose operand is that stack, rather than on every fault taken in the kernel.
+fn faulted_at_an_iretq(rip: u64) -> bool {
+    let byte = |offset: u64| -> u8 {
+        let at = rip.wrapping_add(offset) as *const u8;
+        // SAFETY: `rip` is inside the kernel's text — the caller checks the
+        // saved privilege level — and text is mapped and readable.
+        unsafe { at.read_volatile() }
+    };
+    byte(0) == 0x48 && byte(1) == 0xCF
+}
+
+/// Where this core's descriptor table is, and how long it is.
+///
+/// # Safety
+///
+/// None beyond the instruction: `sgdt` is unprivileged, has no effect on the
+/// processor, and writes only the ten bytes it is given.
+unsafe fn descriptor_table() -> (u64, u16) {
+    #[repr(C, packed)]
+    struct Pointer {
+        limit: u16,
+        base: u64,
+    }
+    let mut pointer = Pointer { limit: 0, base: 0 };
+    // SAFETY: the ten bytes written are the local this points at.
+    unsafe {
+        core::arch::asm!(
+            "sgdt [{ptr}]",
+            ptr = in(reg) &raw mut pointer,
+            options(nostack, preserves_flags),
+        );
+    }
+    (pointer.base, pointer.limit)
+}
+
 fn vector_name(vector: u64) -> &'static str {
     match vector {
         0 => "divide error",
@@ -450,6 +496,78 @@ fn report(frame: &Frame) {
     kprintln!("  rip           {:#018x}   cs {:#06x}", frame.rip, frame.cs);
     kprintln!("  rsp           {:#018x}   ss {:#06x}", frame.rsp, frame.ss);
     kprintln!("  rflags        {:#018x}", frame.rflags);
+
+    // What the processor objected to, when it said so. A `#GP`, `#SS`, `#NP` or
+    // `#TS` whose error code is not zero is naming a *descriptor*, and the
+    // number alone sends a reader to a table they then have to find. So the
+    // descriptor is printed beside it — the one the processor read, out of the
+    // table it was actually using, rather than the one this kernel believes it
+    // installed.
+    //
+    // That distinction is the whole reason this exists. On 2026-09-10 a machine
+    // refused the ring-3 stack selector at an `iretq` that had already worked
+    // once on the same boot, and every static reading of the tree said the
+    // descriptor was correct. A log that prints what the hardware read settles
+    // that in one boot instead of an afternoon. `docs/third-boot-outside-qemu.md`
+    // and `E0-P18`.
+    if frame.error != 0 && SELECTOR_FAULTS.contains(&frame.vector) {
+        let external = frame.error & 1 != 0;
+        let table = if frame.error & 2 != 0 {
+            "idt"
+        } else if frame.error & 4 != 0 {
+            "ldt"
+        } else {
+            "gdt"
+        };
+        let index = (frame.error >> 3) & 0x1FFF;
+        kprintln!(
+            "  selector      {table} entry {index} (selector {:#06x}){}",
+            index * 8,
+            if external { ", raised by an external event" } else { "" },
+        );
+        // SAFETY: reading the descriptor-table register is privileged, has no
+        // effect, and writes only the ten bytes named here.
+        let (base, limit) = unsafe { descriptor_table() };
+        kprintln!("  gdtr          base {base:#018x} limit {limit:#06x}");
+        let offset = index * 8;
+        if table == "gdt" && offset + 8 <= u64::from(limit) + 1 {
+            let at = (base + offset) as *const u64;
+            // SAFETY: inside the table the register names, which is mapped in
+            // the address space this fault was taken in — the processor read
+            // the same eight bytes a moment ago.
+            let descriptor = unsafe { at.read_unaligned() };
+            kprintln!("  descriptor    {descriptor:#018x}");
+        } else if table == "gdt" {
+            kprintln!("  descriptor    past the table's own limit — that is the fault");
+        }
+    }
+
+    // The five words an `iretq` is about to consume, when that is the
+    // instruction that faulted. A fault *at* an `iretq` is a fault about a
+    // frame, and the frame is at `rsp` — printing the fault's own selectors
+    // without it says which instruction and not what it was handed.
+    //
+    // Gated on the opcode rather than on the vector, so this reads a stack only
+    // when the instruction that faulted is the one whose operand is that stack.
+    if frame.cs & PRIVILEGE != USER_PRIVILEGE && faulted_at_an_iretq(frame.rip) {
+        // One word of the frame the instruction was reading. The address is
+        // computed outside the block, so each block is one read: the arithmetic
+        // is not the dangerous half.
+        let word = |index: u64| -> u64 {
+            let at = (frame.rsp.wrapping_add(index * 8)) as *const u64;
+            // SAFETY: the faulting instruction is `iretq`, so `rsp` is the base
+            // of the five-word frame it was reading — the processor read these
+            // same words a moment ago to raise this fault.
+            unsafe { at.read() }
+        };
+        kprintln!(
+            "  returning to  rip {:#018x}  cs {:#06x}  ss {:#06x}",
+            word(0),
+            word(1),
+            word(4)
+        );
+        kprintln!("                rsp {:#018x}  rflags {:#018x}", word(3), word(2));
+    }
     kprintln!();
 
     let registers: [(&str, u64); 15] = [

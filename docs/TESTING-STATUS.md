@@ -99,7 +99,18 @@ and it is the mechanism this page would otherwise have to describe in prose.
   fails closed and says so, which is R04 working rather than a defect, so
   nothing goes red — which is exactly why it belongs on this page. `E5-D03`
   owns it; `docs/second-boot-outside-qemu.md` has the reasoning and the three
-  candidate protocols.
+  candidate protocols, and the third boot reproduced it exactly.
+
+- **Selection and the declaration comparison have never run on hardware.** Three
+  boots outside QEMU, and every one of them printed `generation none selected, so
+  no root is published`: the entries `tools/f-on-metal.sh` wrote carried no
+  `f.root=`, so the frame measured itself and had nothing to compare against.
+  Under QEMU both tokens are on every command line, so RFC 0012's other half is
+  exercised constantly on an emulator and had been exercised nowhere else. Found
+  by the third boot and fixed in the same change — `f-on-metal.sh install
+  --generations` now writes entries that carry both — but **the fix is tested
+  under QEMU and staged, not booted**: no machine has yet started from an entry
+  carrying `f.root=`. `docs/third-boot-outside-qemu.md` is the record.
 
 - **The state tree publishes thirty-two nodes and nothing that varies with time.**
   Frame counts, cores, ring tallies, capability slots, and since E1 the
@@ -111,10 +122,13 @@ and it is the mechanism this page would otherwise have to describe in prose.
   is a decision with a reversal condition, not a gap: it lifts when the boot log
   stops being the reproduction artefact.
 - **This kernel has never run on bare metal.** It has run outside QEMU exactly
-  twice, both on VMware machines: 2026-09-01, recorded in
-  `docs/first-boot-outside-qemu.md`, and 2026-09-05 carrying all of E1, in
-  `docs/second-boot-outside-qemu.md`. The first says in its own opening that a
-  hypervisor is not the machine `E0-P18` is about, and the second says it again.
+  three times, all on VMware machines: 2026-09-01, recorded in
+  `docs/first-boot-outside-qemu.md`; 2026-09-05 carrying all of E1, in
+  `docs/second-boot-outside-qemu.md`; and 2026-09-09 carrying E2, in
+  `docs/third-boot-outside-qemu.md`. A fourth attempt the same day, on a
+  Threadripper host, did not reach `M0 ok` at all — it died inside core bring-up
+  and RFC 0068 is what came of it. Each record says in its own opening that a
+  hypervisor is not the machine `E0-P18` is about.
   Everything else this page
   reports is an assertion about an emulator: the APIC enumeration, the memory
   map, the UART, the application-processor startup, `M0 ok`, and now every
