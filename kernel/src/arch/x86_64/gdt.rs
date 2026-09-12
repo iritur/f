@@ -55,13 +55,13 @@ const TSS_SELECTOR: u16 = 0x18;
 /// Where the three ring-3 descriptors start.
 ///
 /// The order of the three is not a choice. `sysret` computes both selectors it
-/// loads from this one number: the stack segment is `USER_BASE + 8` and the
-/// 64-bit code segment is `USER_BASE + 16`, each with its requested privilege
-/// level forced to three. So the slot at `USER_BASE` itself has to be the
-/// 32-bit code segment, which this kernel never loads and cannot omit — a gap
-/// there would move the other two and `sysret` would land in whatever
-/// followed. `syscall` reads the other half of the same register and requires
-/// the same adjacency of the kernel pair, which slots one and two already have.
+/// loads from one field of `IA32_STAR`: the stack segment is that field plus
+/// eight and the 64-bit code segment is that field plus sixteen. So the slot at
+/// `USER_BASE` itself has to be the 32-bit code segment, which this kernel
+/// never loads and cannot omit — a gap there would move the other two and
+/// `sysret` would land in whatever followed. `syscall` reads the other half of
+/// the same register and requires the same adjacency of the kernel pair, which
+/// slots one and two already have.
 const USER_BASE: u16 = 0x28;
 
 /// Selector for the user data segment, which is also the ring-3 stack segment.
@@ -70,11 +70,39 @@ pub const USER_DATA: u16 = (USER_BASE + 8) | 3;
 /// Selector for the 64-bit user code segment.
 pub const USER_CODE: u16 = (USER_BASE + 16) | 3;
 
+/// The field `sysret` adds its offsets to, and it carries privilege level three.
+///
+/// The two low bits are not decoration. `sysret` forces the *code* selector's
+/// requested privilege level to three on every processor; what it does to the
+/// *stack* selector is where the vendors part. Intel forces that one to three
+/// as well. AMD adds eight to this field and loads the result as it is — so a
+/// field of `0x28` puts `0x30` in `SS`, a ring-3 process running with a stack
+/// selector that says ring 0. Nothing notices until the next interrupt: the
+/// `iretq` back into the process finds a stack selector whose level does not
+/// match the code selector's and refuses it, `#GP` with the stack selector as
+/// its error code, in kernel code, at a descriptor that is correct. That is
+/// what a VMware guest on a Threadripper 2990WX did on 2026-09-10 and again on
+/// 2026-09-12, and what QEMU cannot show: its `sysret` forces both, whichever
+/// vendor it is told to be. RFC 0074.
+///
+/// With the bits in the field the arithmetic gives `0x33` and `0x3B` on both
+/// readings, and the OR that Intel applies changes nothing. Written this way
+/// rather than as "the kernel is built for Intel": the field is what the
+/// architecture manual the weaker vendor publishes says to write, and the
+/// stronger vendor's forcing is a courtesy this kernel no longer depends on.
+///
+/// Under `mutate-sysret-base-without-privilege` the bits are dropped, which is
+/// the defect as it was, and `process::self_test` is required to refuse the
+/// boot before anything enters ring 3 — the only place the defect is visible
+/// on an emulator whose `sysret` would hide it.
+const SYSRET_BASE: u16 =
+    if cfg!(feature = "mutate-sysret-base-without-privilege") { USER_BASE } else { USER_BASE | 3 };
+
 /// What `IA32_STAR` holds: the two segment bases `syscall` and `sysret` use.
 ///
 /// Bits 47:32 are the kernel pair, bits 63:48 the user pair. The low half of
 /// the register is the 32-bit entry point and is meaningless in long mode.
-pub const STAR: u64 = ((USER_BASE as u64) << 48) | ((KERNEL_CODE as u64) << 32);
+pub const STAR: u64 = ((SYSRET_BASE as u64) << 48) | ((KERNEL_CODE as u64) << 32);
 
 /// The interrupt stack table slot the double-fault handler switches to.
 ///

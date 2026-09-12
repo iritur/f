@@ -159,6 +159,16 @@ mutate-path-in-image = []
 # and once with its own, where the published root and frame hash must both differ
 # from the clean boot's.
 mutate-modified-frame = []
+# `E0-P18`'s, and the first defect in this list that an emulator cannot see
+# happen. It writes the ring-3 field of `IA32_STAR` without its privilege bits,
+# which is what this kernel did until 2026-09-12: Intel's `sysret` — and QEMU's,
+# whatever vendor it is told to be — forces the stack selector to level three
+# and hides it, AMD's adds eight and loads what it gets, and the next `iretq`
+# into the process refuses the stack selector it was handed. So the check that
+# catches it is arithmetic rather than a boot: `process::self_test` must refuse
+# the field before anything enters ring 3, and `cargo xtask mutate` requires it
+# to. `kernel/src/arch/x86_64/gdt.rs` at `SYSRET_BASE`, and RFC 0074.
+mutate-sysret-base-without-privilege = []
 
 [[bin]]
 name = "f-kernel"
