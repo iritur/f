@@ -1017,20 +1017,50 @@ pub unsafe fn demonstrate(
     admitted_line(record, region.bytes());
 
     // ---------------------------------------------------------------- spawn
-    let offered = offer(&mut supervisor, &account, &place, record, frames)?;
-    // SAFETY: the caller's guarantee, passed down.
-    let spawned = unsafe {
-        spawn(
+    // Through the ring server, which is RFC 0073's subject. The entry is built
+    // here rather than submitted by a component because there is no supervisor
+    // component yet; what this buys is that the route exists and the boot walks
+    // it before anything depends on it.
+    let spawned = {
+        // Read before the server borrows the place, because the completion is
+        // checked against it after.
+        let expected_endpoint = u64::from(place.endpoint.bits());
+        let mut serving = Serving {
+            place: &mut place,
+            supervisor: &mut supervisor,
             frames,
+            account: &account,
             kernel,
             features,
-            &mut place,
-            &account,
-            &mut supervisor,
-            &reservations,
-            offered,
-        )
-    }?;
+            reservations: &reservations,
+            spawned: (0, 0, 0),
+            answered: 0,
+        };
+        let entry = f_abi::Sqe {
+            opcode: f_abi::control::op::SPAWN,
+            cap: account.handle.bits(),
+            ext: [ContentId::of(module).bits(), 0],
+            ..f_abi::Sqe::ZERO
+        };
+        // An `ext` naming a manifest this place does not hold is refused, and it
+        // is checked here rather than trusted to `spawn`'s own check for the
+        // reason the arm's comment gives: the two stop being the same question
+        // the moment a generation swap puts a newer image behind a place.
+        if serving.execute(&f_abi::Sqe { ext: [entry.ext[0] ^ 1, 0], ..entry }).result == 0 {
+            return Err(Failure::WrongPlace);
+        }
+        let answer = serving.execute(&entry);
+        if answer.result != 0 {
+            return Err(Failure::Admission(answer.result));
+        }
+        if answer.ext != expected_endpoint {
+            // `abi/src/control.rs` says a spawn completes with an endpoint to
+            // the place. A completion that carried something else would be a
+            // submitter holding a handle to the wrong thing.
+            return Err(Failure::WrongPlace);
+        }
+        serving.spawned
+    };
     report.spawns += 1;
     report.unbound += unbound_needs(record);
     spawned_line(record, &place, spawned);
@@ -1287,7 +1317,17 @@ pub unsafe fn demonstrate(
     // submitted by a component because there is no supervisor component yet to
     // submit them — that is the *next* increment, and what this one buys is that
     // the path exists and is exercised by the boot before anything depends on it.
-    let mut serving = Serving { place: &mut place, supervisor: &mut supervisor, answered: 0 };
+    let mut serving = Serving {
+        place: &mut place,
+        supervisor: &mut supervisor,
+        frames,
+        account: &account,
+        kernel,
+        features,
+        reservations: &reservations,
+        spawned: (0, 0, 0),
+        answered: 0,
+    };
     let stop_entry = |deadline: u64| f_abi::Sqe {
         opcode: f_abi::control::op::STOP,
         cap: endpoint.bits(),
@@ -3049,6 +3089,23 @@ struct Serving<'a> {
     /// `Supervising` carries a field of the same type meaning the opposite
     /// thing and a reader moving between them should trip over that.
     supervisor: &'a mut Table,
+    /// Where the frames a spawn charges come from.
+    frames: &'a mut FrameAllocator,
+    /// The account a spawn is charged to, and a teardown refunds into.
+    account: &'a Account,
+    /// The kernel's address space, which a new instance's tables are built
+    /// against.
+    kernel: &'a paging::AddressSpace,
+    /// What the processor offers the tables built here.
+    features: Features,
+    /// What a spawn's admission is tested against.
+    reservations: &'a Reservations,
+    /// What the last spawn produced: epoch, frames charged, needs supplied.
+    ///
+    /// Here rather than in the completion because a `Cqe` carries one `u64` and
+    /// this is three numbers the boot's log lines want. `Supervising` keeps
+    /// `answered_at` for the same reason and this is that idiom, not a new one.
+    spawned: (u32, usize, usize),
     /// How many entries this server has answered. Unit: entries.
     answered: u64,
 }
@@ -3064,6 +3121,7 @@ impl Serving<'_> {
     fn execute(&mut self, entry: &f_abi::Sqe) -> Cqe {
         self.answered = self.answered.saturating_add(1);
         match entry.opcode {
+            f_abi::control::op::SPAWN => self.spawn(entry),
             f_abi::control::op::STOP => self.stop(entry),
             other => f_ring::refusal(
                 entry.user_data,
@@ -3071,6 +3129,130 @@ impl Serving<'_> {
                 u64::from(other),
                 0,
             ),
+        }
+    }
+
+    /// `op::SPAWN`: create a component in this place.
+    ///
+    /// `abi/src/control.rs` fixes the shape: `cap` names the `Untyped` that
+    /// pays and `ext` names the manifest by content hash.
+    ///
+    /// # What this arm adds, and what it deliberately does not
+    ///
+    /// **No policy.** Every refusal a spawn owes is already implemented and
+    /// already exercised — `admit` and `check_needs` are what the boot's six
+    /// deliberate refusals go through — so this is a *route* to them and not a
+    /// second copy of them. The two checks here are the ones that are about the
+    /// entry rather than about the manifest: a `cap` that is not an `Untyped`
+    /// the submitter may spend, and an `ext` naming a manifest this place does
+    /// not hold. `spawn` checks the second again from the module itself, which
+    /// is not redundancy for the reason the boot's two `admit` calls are not:
+    /// this is checking what it was *asked*, and that one checks what is *there*.
+    ///
+    /// **The supply is still built by the frame.** RFC 0008 wants the
+    /// supervisor to charge its own account and hand the handles over in the
+    /// arena; there is no supervisor component yet to do it, and no arena here
+    /// because the boot builds these entries directly. So [`offer`] runs on this
+    /// side for now. That is the frame holding ground it does not want, exactly
+    /// as `policy` is, and it moves in the same increment `policy` does.
+    fn spawn(&mut self, entry: &f_abi::Sqe) -> Cqe {
+        // The account that pays. `GRANT` because spending an `Untyped` on
+        // somebody else's behalf is handing authority on, which is the right
+        // that names doing so.
+        if let Err(packed) =
+            self.supervisor.invoke(Handle::from_bits(entry.cap), CapType::Untyped, rights::GRANT)
+        {
+            return f_ring::refusal(entry.user_data, packed, u64::from(entry.cap), 0);
+        }
+        let record = match Record::read(self.place.module) {
+            Ok(record) => record,
+            // Unreadable here rather than in `spawn`, so that a place holding a
+            // module that no longer parses is refused with the manifest's own
+            // refusal rather than with a spawn failure the submitter cannot act
+            // on.
+            Err(_) => {
+                return f_ring::refusal(
+                    entry.user_data,
+                    error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER),
+                    entry.ext[0],
+                    0,
+                );
+            }
+        };
+        // A different manifest is a different place (RFC 0041). Refused against
+        // what the *place* holds rather than against what the module hashes to,
+        // because those are the same today and stop being so the moment a
+        // generation swap puts a newer image behind an existing place — which is
+        // `E2-B06`, and is the case this refusal has to still be right for.
+        if entry.ext[0] != self.place.manifest.bits() {
+            return f_ring::refusal(
+                entry.user_data,
+                error::pack(error::ARGUMENT, error::argument::BAD_ADDRESS),
+                entry.ext[0],
+                0,
+            );
+        }
+        let offered = match offer(self.supervisor, self.account, self.place, record, self.frames) {
+            Ok(offered) => offered,
+            Err(failure) => {
+                return f_ring::refusal(entry.user_data, Self::packed(failure), 0, 0);
+            }
+        };
+        // SAFETY: `demonstrate`'s guarantee, which this server is constructed
+        // inside: the direct map is live and covers every module, and the
+        // address space this builds tables against is the kernel's own.
+        let spawned = unsafe {
+            spawn(
+                self.frames,
+                self.kernel,
+                self.features,
+                self.place,
+                self.account,
+                self.supervisor,
+                self.reservations,
+                offered,
+            )
+        };
+        match spawned {
+            Ok(spawned) => {
+                self.spawned = spawned;
+                // The endpoint to the place, which `abi/src/control.rs` says a
+                // spawn completes with. It already exists in the submitter's
+                // table — a place is made before its first occupant — so this
+                // hands back the handle rather than minting a second one.
+                Cqe {
+                    user_data: entry.user_data,
+                    result: 0,
+                    flags: 0,
+                    timestamp: 0,
+                    ext: u64::from(self.place.endpoint.bits()),
+                }
+            }
+            Err(failure) => f_ring::refusal(entry.user_data, Self::packed(failure), 0, 0),
+        }
+    }
+
+    /// A [`Failure`] as the packed refusal a submitter gets back.
+    ///
+    /// The variants that already carry one hand it over unchanged — an
+    /// admission refusal is in the `ADMISSION` domain and a need refusal names
+    /// which of the five ways a supply can be wrong it was, and flattening
+    /// either into a generic error would throw away the only part a submitter
+    /// can act on. The rest are the frame failing at its own work rather than
+    /// refusing the caller's, so they are `RESOURCE/EXHAUSTED`: true of the
+    /// memory cases, and honest about the others in that the submitter cannot
+    /// fix them and should not be told it can.
+    const fn packed(failure: Failure) -> i32 {
+        match failure {
+            Failure::Admission(packed)
+            | Failure::Need(packed)
+            | Failure::Capability(packed)
+            | Failure::Ring(packed)
+            | Failure::Notice(packed)
+            | Failure::StateTree(packed) => packed,
+            Failure::Manifest(_) => error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER),
+            Failure::WrongPlace => error::pack(error::ARGUMENT, error::argument::BAD_ADDRESS),
+            _ => error::pack(error::RESOURCE, error::resource::QUOTA_EXHAUSTED),
         }
     }
 

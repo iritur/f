@@ -84,38 +84,55 @@ the two should then merge behind a router.
 allocated here, before any branch, because two worktrees both took RFC 0065 and
 both stamped a count at byte 101.
 
-### 2 — the server, answering nothing yet
+### 2 — the server, and `op::STOP` *(done: `77467f3`)*
 
 **Files:** `kernel/src/component.rs`.
 
-A `Serving` struct holding `&mut [Place]`, `&Account`, `&mut Table`,
-`&Reservations`, `&mut FrameAllocator`, `&paging::AddressSpace` and `Features`,
-with `execute(&Sqe) -> Cqe` refusing every opcode with `UNKNOWN_OPCODE`.
+**Amended after reading the code, and the original text is worth keeping because
+it was wrong in two ways a plan written from memory usually is.**
 
-**Gate:** a unit test in the frame's own test module submitting an unknown
-opcode and getting `ARGUMENT/UNKNOWN_OPCODE` back. Deliberately a server that
-answers nothing first, so the refusal path is the one with a test written
-against it before any success path exists to hide it.
+It said the gate was *a unit test in the frame's own test module*. `kernel/` is
+`test = false` and carries **zero** `#[cfg(test)]` blocks; the idiom here is a
+`self_test` run at boot and asserted from the log, which is what
+`cargo xtask run` reads. There is no test module to put a test in.
 
-### 3 — `op::SPAWN`
+And it put `op::SPAWN` before `op::STOP`. `STOP` needs only the place and a
+deadline; `SPAWN` needs the arena walked for a capability supply. `STOP` is
+therefore what makes the server real at the smallest size, and a server that
+answered *nothing* — the original increment 2 — could not be written at all
+without dead fields under `-D warnings`. So increments 2 and 4 are one.
+
+A `Serving` struct holding `&mut Place`, `&mut Table`, and what a spawn needs
+besides, with `execute(&Sqe) -> Cqe` answering `STOP` and refusing everything
+else with `UNKNOWN_OPCODE`.
+
+**Gate, met:** the boot's stop goes through the server, and two refusals are
+asserted rather than printed — a boot line per refusal would move the trace hash
+for a check. The teardown stays outside the arm so the boot log is byte-identical
+and an unmoved trace hash is the evidence that the path moved and the behaviour
+did not.
+
+### 3 — `op::SPAWN` *(done)*
 
 **Files:** `kernel/src/component.rs`.
 
-The arm resolves `entry.cap` to the paying `Untyped`, reads `entry.ext` as the
-manifest content hash, walks the arena for the handles satisfying the manifest's
-needs in declaration order, and calls the existing `spawn`. Every refusal is
-already implemented and tested — `check_needs` and `admit` are what the boot's
-six deliberate refusals exercise — so this arm adds no policy, only a route to
-it.
+The arm resolves `entry.cap` to the paying `Untyped`, reads `entry.ext[0]` as the
+manifest content hash, and calls the existing `spawn`. Every refusal is already
+implemented and tested — `check_needs` and `admit` are what the boot's six
+deliberate refusals exercise — so this arm adds no policy, only a route to it,
+plus the two checks that are about the *entry* rather than the manifest.
 
-**Gate:** the boot spawns a component *through the ring* and the existing
-`refusals 6 spawn(s) refused on purpose` line still reads 6. A spawn that
-refuses differently through the ring than through the direct call is the defect
-this gate exists to catch.
+**What the original text got wrong here too:** it said the arm *walks the arena*
+for the supplied handles. There is no arena to walk — the boot builds these
+entries directly, and `offer` still runs on the frame's side. That is the frame
+holding ground RFC 0008 says is the supervisor's, exactly as `policy` is, and it
+moves in increment 7 with `policy` rather than here.
 
-### 4 — `op::STOP`
+**Gate, met:** the boot spawns through the ring and the existing
+`refusals 6 spawn(s) refused on purpose` line still reads 6; the `spawn place
+store epoch 0` and `supervisor ok` lines are byte-identical.
 
-**Files:** `kernel/src/component.rs`.
+### 4 — *(folded into increment 2)*
 
 `abi/src/control.rs:99` already fixes the semantics: a stop with `NO_DEADLINE`
 is an `ARGUMENT` refusal, and a stop whose deadline has passed is a kill spelled
