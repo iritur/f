@@ -2430,16 +2430,68 @@ fn machine_devices(
 }
 
 fn run() -> Result<(), String> {
+    // Captured rather than discarded, because an exit code is satisfied by a
+    // kernel that described no heap and by one that described a heap nothing
+    // could reach. `HEAP_GAP` is what that log is read for.
+    let (code, log) = boot_captured(None, &[])?;
     // QEMU reports (value << 1) | 1, so Success(0x10) arrives as 33.
-    match boot(None)? {
-        Some(33) => {
-            println!("\nM0 ok");
-            Ok(())
-        }
-        Some(35) => Err("kernel reported failure — see the serial log above".into()),
-        Some(other) => Err(format!("qemu exited {other}; expected 33 or 35")),
-        None => Err("qemu terminated by signal".into()),
+    match code {
+        Some(33) => {}
+        Some(35) => return Err("kernel reported failure — see the serial log above".into()),
+        Some(other) => return Err(format!("qemu exited {other}; expected 33 or 35")),
+        None => return Err("qemu terminated by signal".into()),
     }
+
+    let (described, peak, starved) = heap_reading(&log)?;
+    // The frame's half, and it is the half that works: a component declares a
+    // `heap` need, the frame charges it to that component's own account, maps
+    // it and writes the prologue before the first instruction. A zero here is
+    // that path gone, and it would otherwise be invisible.
+    if described < PAGE_BYTES {
+        return Err(format!(
+            "the boot described {described} B of component heap, and one page is the\n\
+             least a declared `heap` need can be granted.\n\n\
+             `user/store/manifest.toml` declares two pages. A boot that described\n\
+             fewer has lost the grant, the mapping or the manifest's need, and every\n\
+             one of those is silent from the exit code."
+        ));
+    }
+    if starved {
+        return Err("a component was refused an allocation for want of room.\n\n\
+             `starved` is never cleared once set, so this is *did this ever fail*\n\
+             and not *is it failing now*. Either the region granted is too small\n\
+             for what the component asks, or something asks for more than it\n\
+             declared."
+            .into());
+    }
+    // The component's half, and it is the half that has never run. Required to
+    // be zero rather than tolerated: the reason is in `HEAP_GAP`, and the needle
+    // going is what turns this red.
+    gap_holds("HEAP_GAP", HEAP_GAP)?;
+    if peak != 0 {
+        return Err(format!(
+            "a component allocated {peak} byte(s), and `HEAP_GAP` says none can.\n\n\
+             That gap's needle is still in kernel/src/runtime.rs, so a component is\n\
+             still spawned into a place and never handed a core — and yet something\n\
+             allocated out of a described region. Either the needle has stopped\n\
+             describing the tree, or a heap is being reached by something that is\n\
+             not the occupant it was charged to. Both are worth stopping for.\n\n\
+             If a supervisor now schedules an occupant, this is the good ending:\n\
+             delete the `HEAP_GAP` row, and re-read `E2-B10`'s exit — it asks for a\n\
+             boot in which a component allocates, and this is the first boot that\n\
+             could be one."
+        ));
+    }
+    println!(
+        "\nheap          {described} B described, peak {peak}, starved {starved} — \
+         the frame's half of E2-B10"
+    );
+    for (file, _, why, _) in HEAP_GAP {
+        println!("  {file:<24} {why}");
+    }
+
+    println!("\nM0 ok");
+    Ok(())
 }
 
 /// The largest block the allocator can hand out, on a machine that has one.
@@ -2953,6 +3005,101 @@ fn sim_scenarios() -> Result<Vec<String>, String> {
 /// and it goes when a supervisor spawns and schedules in one act — which is
 /// E1-B05's remaining half and RFC 0008's *restart is the supervisor's*.
 /// RFC 0041 states the shape of the gap; RFC 0047 states what is left of it.
+/// Why the heap peak every boot reports is zero, as data.
+///
+/// # Why a zero needed a declared quantity of its own
+///
+/// Because it has been printing since `E2-B10` landed and nothing read it. The
+/// supervisor line ends `heap 8192 B described, peak 0 byte(s), starved false`,
+/// and `kernel/src/component.rs`'s `heap_peak` field says in as many words that
+/// *zero here means no component allocated anything, which on a tree where one
+/// declares a `heap` need is a finding rather than a default*. It was a finding
+/// nobody was told about: on QEMU, on the second machine and on the third, the
+/// same zero, inside a green `verify`.
+///
+/// The frame's half of `E2-B10` is real and this does not say otherwise. The
+/// region is charged, mapped and described before the component's first
+/// instruction, `describe` has a caller at `kernel/src/component.rs`, the
+/// prologue is read back at teardown through `f_ring::heap::Heap::over`, and
+/// `described` being 8192 rather than 0 is that whole path working. What has
+/// never happened is the other half: `user/store` allocates a 64-byte box under
+/// `#[cfg(all(target_os = "none", feature = "image"))]`, and that code has never
+/// executed, because **a component spawned into a place is never handed a
+/// core**. `kernel/src/runtime.rs` is where the tree says so, and it is the same
+/// sentence [`CHAOS_GAP`] is one half of — there, the occupant a boot can kill
+/// is not the occupant serving the datapath; here, the occupant a boot describes
+/// a heap for is not an occupant that runs.
+///
+/// So the needle is that sentence, and the check beside it requires the zero
+/// rather than tolerating it. A zero that is *asserted* is evidence; a zero that
+/// is merely printed is the `claims/0017` shape this tree has already been
+/// bitten by twice. The day a supervisor hands an occupant a core, the needle
+/// goes, the build goes red on purpose, and whoever closed it re-reads the exit
+/// of `E2-B10` — which asks for a boot in which a component allocates — against
+/// a boot that finally can.
+const HEAP_GAP: &[Gap] = &[(
+    "kernel/src/runtime.rs",
+    "a component is spawned into a place and never scheduled",
+    "no component with a `heap` need has ever run, so the peak a boot reports is \
+     the frame's reading of a region nothing has allocated out of",
+    "TODO.md E2-B10, E1-B05 and E1-P06; kernel/src/component.rs's `heap_peak` field \
+     comment; kernel/src/runtime.rs's module comment and its stated reversal; \
+     docs/second-boot-outside-qemu.md and docs/third-boot-outside-qemu.md, which \
+     both record the zero as observed",
+)];
+
+/// One page, in bytes, as the least a granted `heap` need can come to.
+///
+/// Here rather than taken from the kernel because `xtask` does not link it, and
+/// a second copy of a number this stable is cheaper than the dependency.
+const PAGE_BYTES: u32 = 4096;
+
+/// The three figures the supervisor line reports about component heaps.
+///
+/// Returned rather than asserted here so the caller states what it requires:
+/// this is the reading, and `run` is where the requirement lives.
+///
+/// # Errors
+///
+/// A sentence naming what the line did not contain. A boot that printed no
+/// supervisor line at all is that error too, because the alternative is a check
+/// that passes on a boot which never got far enough to fail it.
+fn heap_reading(log: &str) -> Result<(u32, u32, bool), String> {
+    let missing = |what: &str| {
+        format!(
+            "the boot reached `M0 ok` and its supervisor line had no {what}.\n\n\
+             The line is expected to end `heap <n> B described, peak <n> byte(s),\n\
+             starved <bool>`. An exit code alone is satisfied by a kernel that\n\
+             described no heap at all, which is the reading `HEAP_GAP` exists to\n\
+             make somebody state."
+        )
+    };
+    let tail = log.split("heap ").nth(1).ok_or_else(|| missing("heap reading"))?;
+    let number = |at: &str, what: &str| -> Result<u32, String> {
+        tail.split(at)
+            .next()
+            .and_then(|s| s.rsplit(|c: char| !c.is_ascii_digit()).next())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| missing(what))?
+            .parse::<u32>()
+            .map_err(|_| missing(what))
+    };
+    let described = number(" B described", "described figure")?;
+    let peak = tail
+        .split("peak ")
+        .nth(1)
+        .and_then(|s| s.split(' ').next())
+        .ok_or_else(|| missing("peak figure"))?
+        .parse::<u32>()
+        .map_err(|_| missing("peak figure"))?;
+    let starved = tail
+        .split("starved ")
+        .nth(1)
+        .map(|s| s.starts_with("true"))
+        .ok_or_else(|| missing("starved flag"))?;
+    Ok((described, peak, starved))
+}
+
 const CHAOS_GAP: &[Gap] = &[(
     "kernel/src/blk.rs",
     "prepare_driver(",
@@ -14747,19 +14894,21 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
 /// that rots. This is that function's body with the path taken as an argument,
 /// which is what makes it usable by a claim whose rows are not `claims/0008`'s.
 fn thresholds_in(text: &str) -> std::collections::BTreeMap<String, Bound> {
-    let value = |rest: &str, which: &str| -> Option<u64> {
-        let (_, after) = rest.split_once(which)?;
-        after
-            .trim_start()
-            .strip_prefix('=')?
-            .split_whitespace()
-            .next()?
-            .trim_end_matches([',', '}'])
-            .parse()
-            .ok()
-    };
-
     let mut rows = std::collections::BTreeMap::new();
+    for (key, rest) in threshold_rows(text) {
+        rows.insert(key, Bound { min: stated(&rest, "min").0, max: stated(&rest, "max").0 });
+    }
+    rows
+}
+
+/// The `(key, rest)` of every row inside a claim's `[threshold]` table.
+///
+/// Split out so that [`thresholds_in`] and [`unreadable_bounds_in`] walk one
+/// table rather than two copies of one walk. They disagree about exactly one
+/// thing — what an unreadable number means — and a second copy of the walk is a
+/// second place for that disagreement to drift.
+fn threshold_rows(text: &str) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
     let mut inside = false;
     for line in text.lines() {
         let trimmed = line.trim_start();
@@ -14775,7 +14924,107 @@ fn thresholds_in(text: &str) -> std::collections::BTreeMap<String, Bound> {
         if key.is_empty() {
             continue;
         }
-        rows.insert(key.to_string(), Bound { min: value(rest, "min"), max: value(rest, "max") });
+        rows.push((key.to_string(), rest.to_string()));
+    }
+    rows
+}
+
+/// One `min` or `max` as the row spells it: the number if it reads as a `u64`,
+/// and the spelling itself when the row states one this cannot read.
+///
+/// The second half of the tuple is the whole point. `.parse().ok()` on its own
+/// cannot tell *this row states no maximum* from *this row states a maximum I
+/// could not read*, and those two produce the same `None`.
+fn stated(rest: &str, which: &str) -> (Option<u64>, Option<String>) {
+    let Some((_, after)) = rest.split_once(which) else { return (None, None) };
+    let Some(after) = after.trim_start().strip_prefix('=') else { return (None, None) };
+    let Some(word) = after.split_whitespace().next() else { return (None, None) };
+    let word = word.trim_end_matches([',', '}']);
+    // Underscores are stripped because TOML says `5_000` *is* 5000, and Rust's
+    // `u64::from_str` refuses them. That is this parser failing to read TOML
+    // rather than the registry spelling a number oddly, and it was silent:
+    // `claims/0002`'s `ns_late_p99 = { max = 5_000 }` — the timer-jitter gate
+    // `E0-P06` makes gating from M2 onward, and one of the two numbers release
+    // 0.1 cannot ship without — parsed as *no bound at all*. A digit separator
+    // is the readable spelling, so the parser meets the registry here rather
+    // than the registry meeting the parser.
+    match word.replace('_', "").parse() {
+        Ok(number) => (Some(number), None),
+        Err(_) => (None, Some(format!("{which} = {word}"))),
+    }
+}
+
+/// Every published bound this parser cannot read, by the row that states it.
+///
+/// # Why an unreadable bound is worse than an absent one
+///
+/// Because it reports itself green. [`thresholds_in`] parses a bound as a
+/// `u64`, so a row spelled `max = 1.5` fails to parse, becomes `None`, and
+/// [`claim_compare`] then prints it as `green  <name> = <value>  (no bound)` —
+/// the words *no bound* next to a claim file that plainly states one. Nothing
+/// was comparing it and nothing said so.
+///
+/// Five rows in this registry are spelled that way today, across `claims/0001`,
+/// `claims/0004` and `claims/0016`. All three are `pending`, so none of them
+/// gates and no number in this tree is wrong because of it. The one that will
+/// matter is `claims/0016`'s `device_bytes_per_app_byte` — the
+/// write-amplification headline `E2-P10` owes — whose bound would not have
+/// applied on the day the number was finally taken, with a green row to say so.
+///
+/// This reports them. It deliberately does **not** respell them: a published
+/// bound is a number this project has stated, spelling one as an integer with
+/// its scale in its name is a registry convention, and changing a convention
+/// already written down needs an RFC rather than a commit. `intent/0007`'s spec
+/// carries that as the decision it owes.
+/// Published bounds nothing in this tree can read, as `(claim file, row)`.
+///
+/// Declared for [`CHAOS_GAP`]'s reason, one registry over: an absence stated in
+/// prose stops being true and goes on being read, so the set is data and the
+/// build goes red the day it changes in either direction. Sorted, because the
+/// comparison is against a sorted walk of `claims/`.
+///
+/// All five rows are in `pending` claims, so **no number in this tree is wrong
+/// because of them**. The one that will matter is `claims/0016`'s
+/// `device_bytes_per_app_byte`, the write-amplification figure `E2-P10` owes.
+const UNREADABLE_BOUNDS: &[(&str, &str)] = &[
+    ("0001-ring-submit-latency.toml", "ratio_vs_baseline"),
+    ("0004-buffer-registration-cost.toml", "ratio_resolve_virtual_vs_fixed"),
+    ("0016-write-amplification.toml", "device_bytes_per_app_byte"),
+    ("0016-write-amplification.toml", "modelled_device_bytes_per_app_byte"),
+    ("0016-write-amplification.toml", "ratio_vs_baseline"),
+];
+
+/// Every unreadable bound the registry actually carries, sorted.
+///
+/// # Errors
+///
+/// If a claim file cannot be read.
+fn unreadable_bounds_found() -> Result<Vec<(String, String)>, String> {
+    let mut found = Vec::new();
+    for file in claim_files()? {
+        let name = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("a claim file with no name: {}", file.display()))?
+            .to_string();
+        let text = std::fs::read_to_string(&file)
+            .map_err(|e| format!("reading {}: {e}", relative(&file)))?;
+        for row in unreadable_bounds_in(&text).into_keys() {
+            found.push((name.clone(), row));
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+fn unreadable_bounds_in(text: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut rows = std::collections::BTreeMap::new();
+    for (key, rest) in threshold_rows(text) {
+        let unreadable: Vec<String> =
+            ["min", "max"].iter().filter_map(|which| stated(&rest, which).1).collect();
+        if !unreadable.is_empty() {
+            rows.insert(key, unreadable);
+        }
     }
     rows
 }
@@ -14893,6 +15142,23 @@ fn claim_compare(
 
     let mut measured = std::collections::BTreeMap::new();
     let mut findings = Vec::new();
+
+    // Before anything is measured, because a bound this cannot read is a bound
+    // that would otherwise print `green ... (no bound)` further down and be
+    // counted as a row that passed.
+    for (name, spellings) in unreadable_bounds_in(claim) {
+        findings.push(format!(
+            "  {name}: this claim states {} and nothing here can read {}. A bound parsed \
+             as a `u64` that fails to parse becomes no bound at all, and the row then \
+             reports itself green against a claim file that plainly states one — which is \
+             worse than an absent bound, because an absent one is visible. Spelling a \
+             published bound as an integer with its scale in its name is a registry \
+             convention, so respelling this is an RFC and not a commit: `intent/0007`'s \
+             spec carries the decision it owes.",
+            spellings.join(" and "),
+            if spellings.len() == 1 { "it" } else { "them" },
+        ));
+    }
 
     for (what, program, args) in workloads {
         println!("--- {what} ---\n");
@@ -15710,9 +15976,18 @@ fn eval_run(filter: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        JOIN_GAP, MINTS, code_mentions, datapath_findings, declared_fn, frame_findings,
-        gap_holds_under, hold_the_gap, toml_field, toml_multiline, trace_hash, unspawned,
+        HEAP_GAP, JOIN_GAP, MINTS, code_mentions, datapath_findings, declared_fn, frame_findings,
+        gap_holds, gap_holds_under, heap_reading, hold_the_gap, thresholds_in, toml_field,
+        toml_multiline, trace_hash, unreadable_bounds_in, unspawned,
     };
+
+    /// The supervisor line as a boot actually prints it, trimmed to the tail
+    /// this reads. Taken from a real `cargo xtask run` rather than invented, so
+    /// that a change to the kernel's format fails here and not in the field.
+    const SUPERVISOR_LINE: &str = "  supervisor    ok — 4 place(s), 5 spawn(s), 1 fault(s), \
+         1 restart(s), 1 resumed, 0 client(s) lost, 9 probe(s) refused, 1 retired, 3 need(s) \
+         bound to nothing, 5 tree(s) mounted carrying 25 node(s), 1 refused for declaring none; \
+         heap 8192 B described, peak 0 byte(s), starved false\nM0 ok\n";
 
     /// A component set shaped like the one this tree builds: two records, the
     /// hashes standing in for content ids.
@@ -15941,6 +16216,120 @@ mod tests {
         let refused = gap_holds_under(&base, "FIXTURE", gap).expect_err("a missing file is not ok");
         assert!(refused.contains("nobody can check"), "{refused}");
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The heap figures are read out of the line, and a boot that printed no
+    /// line is a failure rather than a zero.
+    ///
+    /// # Why this test exists at all
+    ///
+    /// Because the check it covers asserts a **zero**, and a parser that
+    /// silently yields zero on a log it did not understand would pass that
+    /// assertion on every boot including the broken ones. So the case that
+    /// matters most here is the absent line, not the present one.
+    #[test]
+    fn a_heap_reading_is_taken_from_the_line_and_never_defaulted() {
+        let (described, peak, starved) =
+            heap_reading(SUPERVISOR_LINE).expect("the real line must parse");
+        assert_eq!(described, 8192, "two pages, which is what store's manifest declares");
+        assert_eq!(peak, 0, "no component has run, so nothing has allocated");
+        assert!(!starved, "nothing asked, so nothing was refused");
+
+        // A boot that never reached the supervisor line. The zero this would
+        // otherwise hand back is indistinguishable from the zero the check
+        // requires, which is the whole reason it is an error.
+        let refused =
+            heap_reading("M0 ok\n").expect_err("a log with no heap reading is not a pass");
+        assert!(refused.contains("no heap reading"), "{refused}");
+        assert!(refused.contains("exit code alone"), "the refusal does not say why it matters");
+
+        // And the flag is read rather than assumed: `starved` is the one figure
+        // whose bad value is `true`, so a parser that always said `false` would
+        // hide exactly the failure it is there to report.
+        let (_, _, starved) = heap_reading("heap 8192 B described, peak 64 byte(s), starved true")
+            .expect("a starved line parses");
+        assert!(starved, "a line saying `starved true` must read as starved");
+    }
+
+    /// The declared gap names a sentence that is really in the tree.
+    ///
+    /// A row whose needle never matched would be a gap that cannot close, which
+    /// is the same failure as a check that cannot fail — one row over.
+    #[test]
+    fn the_heap_gap_names_a_sentence_the_kernel_still_carries() {
+        gap_holds("HEAP_GAP", HEAP_GAP).expect("the needle must be in kernel/src/runtime.rs");
+    }
+
+    /// A bound that states a number this cannot read is reported, and a row
+    /// that states no bound at all is not.
+    ///
+    /// Those two produce the same `None` and mean opposite things, which is the
+    /// whole reason [`super::stated`] returns a pair.
+    #[test]
+    fn a_bound_nothing_can_read_is_not_a_row_with_no_bound() {
+        let table = "[threshold]\n\
+                     counted          = { max = 1024 }\n\
+                     one_sided        = { min = 2 }\n\
+                     separated        = { max = 5_000 }\n\
+                     wide             = { max = 50_000_000 }\n\
+                     a_ratio          = { max = 1.5 }\n\
+                     both_unreadable  = { min = 0.5, max = 1.5 }\n";
+
+        // The readable rows are read, and one-sided rows stay one-sided.
+        let thresholds = thresholds_in(table);
+        assert_eq!(thresholds["counted"].max, Some(1024));
+        assert_eq!(thresholds["one_sided"].min, Some(2));
+        assert_eq!(thresholds["one_sided"].max, None);
+
+        // TOML's digit separator. `u64::from_str` refuses it, so this read as
+        // *no bound at all* until the parser started stripping it — eight rows
+        // across five claims, including `claims/0002`'s timer-jitter gate.
+        // This is the assertion that fails if the strip is ever removed.
+        assert_eq!(thresholds["separated"].max, Some(5000), "`5_000` is 5000 in TOML");
+        assert_eq!(thresholds["wide"].max, Some(50_000_000));
+        assert!(!unreadable_bounds_in(table).contains_key("separated"));
+
+        let unreadable = unreadable_bounds_in(table);
+        // A row stating no maximum is not a finding. If this ever fires, every
+        // one-sided bound in the registry becomes a false positive and the
+        // check gets switched off, which is how a check stops meaning anything.
+        assert!(!unreadable.contains_key("counted"), "a readable bound is not a finding");
+        assert!(!unreadable.contains_key("one_sided"), "an absent bound is not an unreadable one");
+        // And the float rows are, with the spelling carried so the report can
+        // show what it could not read rather than only that it could not.
+        assert_eq!(unreadable["a_ratio"], vec!["max = 1.5"]);
+        assert_eq!(unreadable["both_unreadable"], vec!["min = 0.5", "max = 1.5"]);
+    }
+
+    /// The registry's own float rows are found, because the fixture above
+    /// proves the parser and this proves the parser is pointed at something.
+    ///
+    /// Deliberately asserts *at least* the count rather than exactly it: a claim
+    /// gaining a row spelled the same way should not fail here, it should be
+    /// reported by the route that compares it.
+    #[test]
+    fn the_registry_still_carries_the_bounds_this_cannot_read() {
+        let mut found = Vec::new();
+        for claim in ["0001", "0004", "0016"] {
+            let dir = super::root().join("claims");
+            let file = std::fs::read_dir(&dir)
+                .expect("claims/")
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .find(|p| {
+                    p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(claim))
+                })
+                .unwrap_or_else(|| panic!("no claim file starting {claim}"));
+            let text = std::fs::read_to_string(&file).expect("a claim file");
+            for (name, spellings) in unreadable_bounds_in(&text) {
+                found.push(format!("{claim} {name}: {}", spellings.join(", ")));
+            }
+        }
+        assert!(
+            found.len() >= 5,
+            "five rows were spelled as floats when this was written; found {}: {found:#?}",
+            found.len()
+        );
     }
 
     #[test]
@@ -16526,11 +16915,46 @@ fn lint_reproduce() -> Result<(), String> {
         }
     }
 
+    let unreadable = unreadable_bounds_found()?;
+    let declared: Vec<(String, String)> = UNREADABLE_BOUNDS
+        .iter()
+        .map(|(file, row)| ((*file).to_string(), (*row).to_string()))
+        .collect();
+    if unreadable != declared {
+        let shown = |set: &[(String, String)]| {
+            set.iter().map(|(f, r)| format!("    {f}  {r}")).collect::<Vec<_>>().join("\n")
+        };
+        return Err(format!(
+            "the set of published bounds nothing can read has changed.\n\n\
+             declared in UNREADABLE_BOUNDS:\n{}\n\n\
+             found in claims/:\n{}\n\n\
+             A bound spelled so that this tree's `u64` parser cannot read it becomes no\n\
+             bound at all, and the row then reports itself *green* against a claim file\n\
+             that plainly states one. That is worse than an absent bound, because an\n\
+             absent one is visible.\n\n\
+             If a row was added: do not add it to the constant to make this green. Spell\n\
+             the bound as an integer with its scale in its name.\n\
+             If a row was fixed: good news and a red build on purpose — take it out of\n\
+             the constant, and `intent/0007-a-bound-nothing-compares/spec.md` and\n\
+             `claims/README.md` now describe a registry that has moved.",
+            shown(&declared),
+            shown(&unreadable),
+        ));
+    }
+
     if findings.is_empty() {
         println!(
             "lint-reproduce: ok  ({} claim(s) reproduce from this tree)",
             reproductions()?.len()
         );
+        println!(
+            "  {} published bound(s) nothing can read, declared rather than checked \
+             (UNREADABLE_BOUNDS); all in `pending` claims, so none gates today:",
+            declared.len()
+        );
+        for (file, row) in &declared {
+            println!("  {file:<34} {row}");
+        }
         return Ok(());
     }
     Err(format!(
