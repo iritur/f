@@ -109,6 +109,25 @@ const MODELS: &[(&str, Peer)] = &[
     // models a component with a registration table and a service time and
     // nothing below, which is what that component is.
     ("store", Peer::Native),
+    // **A mapping and not a model**, which is the distinction this table's
+    // refusal asks the diff to state. `supervisor` has no device under it for
+    // the same reason `store` has none — it is a component that answers
+    // requests, not one that drives hardware — so `Native` is not an
+    // approximation here, it is the accurate peer: a registration table, a
+    // service time, and nothing below.
+    //
+    // What a supervisor does that `store` does not is submit
+    // `control::op::SPAWN` and `op::STOP` **upward**, on the control ring the
+    // frame gives every component, and that direction is not what a deployment
+    // scenario drives. This table is about the ring a *client* submits on, and
+    // on that ring the two components are the same shape.
+    //
+    // *Reversal:* the day this component is scheduled and starts answering
+    // spawn requests rather than only declaring that it could, a peer that
+    // models a request arriving and a place being filled would say more than
+    // `Native` does — and `E1-B05`'s remaining increments are what make that
+    // worth writing.
+    ("supervisor", Peer::Native),
 ];
 
 /// One component file, held where a [`Record`] may be read out of it.

@@ -94,6 +94,40 @@ type   = "endpoint"
 rights = ["write", "grant"]
 from   = "supervisor"
 
+# --- Ring: the one a client asks this component on ----------------------------
+
+# A supervisor is a thing you *ask*. `op::SPAWN` and `op::STOP` are what it
+# submits to the frame on the control ring the frame gives every component; this
+# is the other direction — the ring a client submits a request on, so that
+# "please start me one of those" is an entry rather than a privilege.
+#
+# The simulator is what made this a declaration rather than an oversight.
+# `cargo xtask sim --deployment` drives every compiled component with one client
+# over one declared ring, and it refused: *`supervisor` declares no data ring, so
+# there is nothing for a client to submit to. A component that legitimately has
+# none needs a scenario that says what it is doing instead.* That is the right
+# refusal — a supervisor with no ring is not a supervisor with nothing to say, it
+# is one nobody can reach — so the answer is the ring and not an exemption.
+#
+# `inline` and not `registered`, for `store`'s reason: a payload path would be a
+# claim about a datapath that does not exist here. What crosses this ring is a
+# request naming a manifest and an account, which is words rather than bytes.
+#
+# Four clients, matching `store`'s, and the number is deliberately not larger:
+# the set of things entitled to ask a supervisor to make a component is small by
+# design, and a ring sized for a crowd would be a ring that had stopped saying
+# so. RFC 0008's powerbox grant is what widens it if it ever should.
+[[ring]]
+name        = "data"
+role        = "server"
+protocol    = "supervisor"
+version_min = 1
+version     = 1
+entries     = 16
+payload     = "inline"
+clients     = 4
+features    = []
+
 # --- Restart: what happens when this component dies ---------------------------
 
 # `on_fault`, matching `store`, and the budget is deliberately the same three.
