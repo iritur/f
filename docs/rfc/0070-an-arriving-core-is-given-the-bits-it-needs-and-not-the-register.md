@@ -108,6 +108,11 @@ lands instead is the instrument that will name it: the next boot prints the
 descriptor the processor actually read and the frame the `iretq` was actually
 handed. `intent/0010` carries the finding for triage.
 
+*Named on 2026-09-12, by those instruments, on the next boot: the descriptor was
+correct and the selector in the frame was `0x30`, not `0x33` — `sysret` on an
+AMD host had loaded the `IA32_STAR` field plus eight as written, where Intel and
+QEMU force the privilege bits. RFC 0074 is the fix.*
+
 ## What would reverse this
 
 A machine where a core needs an `IA32_EFER` bit outside `SCE | LME | NXE` to

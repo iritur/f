@@ -2724,6 +2724,14 @@ const DEFECTS: &[&str] = &[
     // that also broke something would have demonstrated that the broken thing
     // goes red rather than that the identity moved.
     FRAME_DEFECT,
+    // `E0-P18`'s, and the one defect here whose *effect* no emulator in this
+    // tree can reproduce: it drops the privilege bits from the ring-3 field of
+    // `IA32_STAR`, which AMD's `sysret` loads as written and Intel's — and
+    // QEMU's, under any `-cpu` — forces to three. What `cargo xtask mutate`
+    // requires is therefore not the fault but the check ahead of it:
+    // `process::self_test` refuses the field before anything enters ring 3.
+    // RFC 0074.
+    SYSRET_DEFECT,
 ];
 
 /// The seed every reproduction run uses.
@@ -6038,12 +6046,32 @@ fn sweep_mutate() -> Result<(), String> {
     Ok(())
 }
 
-const MUTATIONS: &[(&str, &str, &str, &str)] = &[(
-    "mutate-unchecked-index",
-    "cap=forge",
-    "KERNEL PANIC",
-    "the capability table subscripts a handle's index instead of checking it",
-)];
+/// The defect `mutate` arms to prove the `sysret` selector check can go red.
+///
+/// Named here for the reason [`FRAME_DEFECT`] is: it is spelled in two places
+/// and belongs in [`DEFECTS`] so that `lint-mutations` refuses it in a default
+/// feature list.
+const SYSRET_DEFECT: &str = "mutate-sysret-base-without-privilege";
+
+const MUTATIONS: &[(&str, &str, &str, &str)] = &[
+    (
+        "mutate-unchecked-index",
+        "cap=forge",
+        "KERNEL PANIC",
+        "the capability table subscripts a handle's index instead of checking it",
+    ),
+    // The provocation is the one every boot runs, because the check under test
+    // runs before any provocation is chosen. The expected line is the
+    // self-test's refusal and not a fault: on this emulator the defect never
+    // faults, which is exactly why the refusal has to exist. RFC 0074.
+    (
+        SYSRET_DEFECT,
+        "user=exit",
+        "FAIL: process: IA32_STAR's ring-3 field does not carry privilege level three",
+        "the ring-3 field of IA32_STAR is written without its privilege bits, which AMD's sysret \
+         loads as a ring-0 stack selector",
+    ),
+];
 
 /// Boot a machine that reports more logical processors than answer, and require
 /// it to reach `M0 ok` anyway.

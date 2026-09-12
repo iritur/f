@@ -2970,10 +2970,18 @@ pub fn self_test() -> Result<(), &'static str> {
     }
 
     // What `sysret` loads: the other field, plus sixteen for code and eight for
-    // the stack, each with the requested privilege level forced to three.
+    // the stack. Checked by plain addition and *not* with the privilege bits
+    // forced, because forcing them is what Intel does and not what AMD does
+    // to the stack selector — a check that applied the OR here would pass a
+    // field whose `sysret` loads a ring-0 stack selector into a ring-3 process
+    // on the vendor that does not, which is the defect this line is the
+    // regression for. `gdt::SYSRET_BASE` and RFC 0074.
     let user_base = ((gdt::STAR >> 48) & 0xFFFF) as u16;
-    if (user_base + 16) | 3 != gdt::USER_CODE || (user_base + 8) | 3 != gdt::USER_DATA {
-        return Err("IA32_STAR does not name the ring-3 segments sysret would load");
+    if user_base + 16 != gdt::USER_CODE || user_base + 8 != gdt::USER_DATA {
+        return Err(
+            "IA32_STAR's ring-3 field does not carry privilege level three, so sysret on a \
+             processor that adds rather than forces would load a ring-0 stack selector",
+        );
     }
 
     if probe::program().len() as u64 > FRAME_SIZE {
