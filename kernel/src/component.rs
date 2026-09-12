@@ -1282,15 +1282,43 @@ pub unsafe fn demonstrate(
     // deadline. The two grades go on beside it for the same reason — the
     // publication order `f_abi::control::ORDER` fixes is only an order if
     // something is pending in more than one of its phases at once.
+    // Through the ring server rather than by reaching into the occupant, which
+    // is RFC 0073's whole subject. The entries are built here rather than
+    // submitted by a component because there is no supervisor component yet to
+    // submit them — that is the *next* increment, and what this one buys is that
+    // the path exists and is exercised by the boot before anything depends on it.
+    let mut serving = Serving { place: &mut place, supervisor: &mut supervisor, answered: 0 };
+    let stop_entry = |deadline: u64| f_abi::Sqe {
+        opcode: f_abi::control::op::STOP,
+        cap: endpoint.bits(),
+        deadline,
+        ..f_abi::Sqe::ZERO
+    };
+
+    // The refusals first, and they are checked rather than printed: a boot line
+    // per refusal would move the trace hash for a check, and a refusal nobody
+    // asserts is a refusal that can quietly stop happening.
+    //
+    // A promise nothing can refuse is one the frame will not make (RFC 0008).
+    if serving.execute(&stop_entry(f_abi::NO_DEADLINE)).result == 0 {
+        return Err(Failure::Connect(0));
+    }
+    // And an opcode this build does not implement is refused and never ignored,
+    // which is the arm every opcode that has not arrived yet lands in.
+    if serving.execute(&f_abi::Sqe { opcode: 0x7F, ..f_abi::Sqe::ZERO }).result == 0 {
+        return Err(Failure::Connect(0));
+    }
+
+    if serving.execute(&stop_entry(STOP_DEADLINE)).ext != STOP_DEADLINE {
+        return Err(Failure::Connect(0));
+    }
+    // A later deadline may not move an earlier one, which is the one thing a
+    // stop may never do — and the completion says which deadline is *kept*, so
+    // a submitter that asked for the later one is told it did not get it.
+    if serving.execute(&stop_entry(STOP_DEADLINE + 1)).ext != STOP_DEADLINE {
+        return Err(Failure::Connect(0));
+    }
     let occupant = place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
-    if !occupant.table.stop_by(STOP_DEADLINE) {
-        return Err(Failure::Connect(0));
-    }
-    if occupant.table.stop_by(STOP_DEADLINE + 1) {
-        // A later deadline moved an earlier one, which is the one thing a stop
-        // may never do.
-        return Err(Failure::Connect(0));
-    }
     // Latest wins, so setting a grade twice is one notice and the *second*
     // value — which is the whole difference between a grade and a queue, and
     // is worth driving rather than describing.
@@ -2983,6 +3011,113 @@ fn open_channel(frames: &mut FrameAllocator, epoch: u32) -> Result<u32, Failure>
         return Err(Failure::Ring(0));
     }
     Ok(opened)
+}
+
+/// The frame's second control-ring server: the opcodes a **supervisor**
+/// submits, as opposed to the ones a driver submits.
+///
+/// # Why this is not two more arms on `supervisor::Supervising`
+///
+/// RFC 0073, and the short version is that the two servers do not share a
+/// mechanism. `Supervising` is device-shaped by construction: it borrows a
+/// remapping `Unit`, a `vtd::Domain`, and — the detail that settles it — **the
+/// client's** capability table, deliberately, so that a driver asking for a
+/// translation is asking about somebody else's capability and gets somebody
+/// else's rights.
+///
+/// A supervisor's opcodes need the opposite table. Every handle in an entry here
+/// is resolved against the **submitter's** own table, because a stop is the
+/// holder of an endpoint exercising a right it holds rather than asking about
+/// anybody else's. Widening one struct to borrow both tables, for two opcodes
+/// that never touch a device, would put the capability path and the
+/// device-translation path behind one `match` — the merge RFC 0071 refused one
+/// file over, with more force here.
+///
+/// # What it deliberately does not do
+///
+/// **The teardown is not in here.** [`Serving::stop`] makes the promise and
+/// answers which deadline was kept; ending the occupant is the frame's
+/// follow-through and stays where it was. That split is not tidiness: it is what
+/// keeps the boot log byte-identical across this change, so `cargo xtask trace`
+/// hashing an unmoved log is the evidence that the *path* moved and the
+/// behaviour did not.
+struct Serving<'a> {
+    /// The place whose occupant these opcodes act on.
+    place: &'a mut Place,
+    /// The submitter's table, and the one every handle in an entry is resolved
+    /// against. Named for what it is rather than for its role here, because
+    /// `Supervising` carries a field of the same type meaning the opposite
+    /// thing and a reader moving between them should trip over that.
+    supervisor: &'a mut Table,
+    /// How many entries this server has answered. Unit: entries.
+    answered: u64,
+}
+
+impl Serving<'_> {
+    /// One control-ring operation.
+    ///
+    /// R04 at the bottom, the same as the driver server's: an opcode this build
+    /// does not implement is refused and never ignored. Today that is every
+    /// opcode but one, and the refusal is the arm with a test written against it
+    /// first — a success path landing beside an untested refusal is a refusal
+    /// nobody finds out about until a component depends on it.
+    fn execute(&mut self, entry: &f_abi::Sqe) -> Cqe {
+        self.answered = self.answered.saturating_add(1);
+        match entry.opcode {
+            f_abi::control::op::STOP => self.stop(entry),
+            other => f_ring::refusal(
+                entry.user_data,
+                error::pack(error::ARGUMENT, error::argument::UNKNOWN_OPCODE),
+                u64::from(other),
+                0,
+            ),
+        }
+    }
+
+    /// `op::STOP`: promise to end the occupant of an endpoint by a deadline.
+    ///
+    /// `abi/src/control.rs` fixes the semantics and this implements them.
+    /// A stop with [`f_abi::NO_DEADLINE`] is a promise nothing can refuse and
+    /// the frame refuses to make it. A stop whose deadline has already passed is
+    /// a kill, spelled the same way as a polite stop so that the simulator's
+    /// *kill this driver at a seeded moment* is one opcode rather than two paths
+    /// through the frame.
+    ///
+    /// The completion's `ext` is the deadline that was **kept**, which is not
+    /// always the one submitted: a second stop may only move a promise earlier,
+    /// so a submitter that asked for a later one has to be told what it actually
+    /// holds. A bare success there would be a number the submitter misreads.
+    fn stop(&mut self, entry: &f_abi::Sqe) -> Cqe {
+        // Resolved against the submitter's own table, and `REVOKE` because
+        // ending somebody is the same grade of authority as taking a capability
+        // back. `invoke` is the one call that checks kind and rights together;
+        // doing it in two steps is how a check that passes on the wrong type
+        // gets written.
+        if let Err(packed) =
+            self.supervisor.invoke(Handle::from_bits(entry.cap), CapType::Endpoint, rights::REVOKE)
+        {
+            return f_ring::refusal(entry.user_data, packed, u64::from(entry.cap), 0);
+        }
+        if entry.deadline == f_abi::NO_DEADLINE {
+            return f_ring::refusal(
+                entry.user_data,
+                error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER),
+                u64::from(entry.opcode),
+                0,
+            );
+        }
+        let Some(occupant) = self.place.occupant.as_mut() else {
+            return f_ring::refusal(
+                entry.user_data,
+                error::pack(error::PEER, error::peer::EMPTY),
+                u64::from(entry.cap),
+                0,
+            );
+        };
+        occupant.table.stop_by(entry.deadline);
+        let kept = occupant.table.stop_deadline().unwrap_or_default();
+        Cqe { user_data: entry.user_data, result: 0, flags: 0, timestamp: 0, ext: kept }
+    }
 }
 
 /// End the occupant of a place, whatever caused it, and give everything back.
