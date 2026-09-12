@@ -508,8 +508,12 @@ fn report(frame: &Frame) {
     // refused the ring-3 stack selector at an `iretq` that had already worked
     // once on the same boot, and every static reading of the tree said the
     // descriptor was correct. A log that prints what the hardware read settles
-    // that in one boot instead of an afternoon. `docs/third-boot-outside-qemu.md`
-    // and `E0-P18`.
+    // that in one boot instead of an afternoon — and on 2026-09-12 it did: the
+    // descriptor read back correct, and the frame below it showed the selector
+    // was `0x30` and not `0x33`. The table was never wrong; the *selector* had
+    // lost its privilege bits, at a `sysret` on a processor that adds to
+    // `IA32_STAR` where the emulator forces. `gdt::SYSRET_BASE`, RFC 0074, and
+    // `E0-P18`.
     if frame.error != 0 && SELECTOR_FAULTS.contains(&frame.vector) {
         let external = frame.error & 1 != 0;
         let table = if frame.error & 2 != 0 {

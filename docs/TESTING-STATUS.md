@@ -127,10 +127,15 @@ and it is the mechanism this page would otherwise have to describe in prose.
   three times, all on VMware machines: 2026-09-01, recorded in
   `docs/first-boot-outside-qemu.md`; 2026-09-05 carrying all of E1, in
   `docs/second-boot-outside-qemu.md`; and 2026-09-09 carrying E2, in
-  `docs/third-boot-outside-qemu.md`. A fourth attempt the same day, on a
-  Threadripper host, did not reach `M0 ok` at all — it died inside core bring-up
-  and RFC 0068 is what came of it. Each record says in its own opening that a
-  hypervisor is not the machine `E0-P18` is about.
+  `docs/third-boot-outside-qemu.md`. Three further attempts on a Threadripper
+  host, 2026-09-09 to 2026-09-12, did not reach `M0 ok` at all: the first died
+  inside core bring-up, and RFC 0068 and RFC 0070 are what came of it; the last
+  ran to ring 3 and refused its own stack selector at the first interrupt,
+  because `sysret` on an AMD host loads what `IA32_STAR` says and the emulator
+  had been forcing the privilege bits this kernel forgot — RFC 0074. That fix is
+  tested here only by a self-test that models the vendor QEMU is not; the boot
+  that demonstrates it has not happened yet. Each record says in its own opening
+  that a hypervisor is not the machine `E0-P18` is about.
   Everything else this page
   reports is an assertion about an emulator: the APIC enumeration, the memory
   map, the UART, the application-processor startup, `M0 ok`, and now every
