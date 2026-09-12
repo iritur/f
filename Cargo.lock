@@ -126,6 +126,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "f-supervisor"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-ring",
+]
+
+[[package]]
 name = "f-virtio-blk"
 version = "0.0.1"
 dependencies = [

@@ -1,0 +1,217 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# supervisor: the component that spawns and stops the others.
+#
+# `user/store/manifest.toml` is the worked example of what the lifecycle needs
+# and this is the shortest possible thing that can *drive* it: an account to be
+# made out of, a heap to decide in, and its own endpoint. RFC 0008 says restart
+# is the supervisor's act and the frame provides only the mechanism; RFC 0073
+# is the frame answering `control::op::SPAWN` and `op::STOP` on a ring, which is
+# the mechanism this component was waiting for.
+#
+# **The bootstrap is circular and the circle is cut here rather than hidden.**
+# A supervisor is spawned into a place like anything else, and the thing that
+# spawns it is the frame — not another supervisor. That is not a wart to be
+# designed away: somebody has to be first, and a frame that spawns exactly one
+# component and then answers that component's ring is a smaller privileged
+# surface than a frame that spawns all of them. What the frame keeps is *the
+# first spawn*; what moves here is every other one.
+#
+# `docs/manifest.md` is the schema field by field, `cargo xtask lint-manifests`
+# refuses this file when it stops fitting it, and `cargo xtask component`
+# compiles it into the record the frame reads. RFC 0030 is why those are three
+# different things.
+
+schema = 3
+name   = "supervisor"
+image  = "user/supervisor"
+
+# `private`, on `store`'s reasoning: RFC 0005 says nothing inherits a kind and a
+# spawner may only go more isolated, never less. The argument is stronger here
+# than anywhere else in this tree — a component that holds the authority to make
+# and end other components is the last one that should be co-resident with
+# anything, and a supervisor that started `shared` could only be tightened by
+# somebody noticing.
+domain = "private"
+
+# --- Device: none, and the absence is the declaration -------------------------
+
+# No `[[device]]` table: a supervisor drives nothing and binds nothing, so the
+# compiled record carries `devices = 0`. RFC 0067 deliberately did not make the
+# table required — a device list has a natural empty, and an empty list is the
+# list rather than a default nobody chose.
+
+# --- Needs: routed at spawn, in this order, one handle each -------------------
+
+# The account everything this component is made of is retyped from. RFC 0008:
+# revoking this ends the component. Sixteen pages, matching `store`'s, because
+# the footprint is the same shape — address space, page tables, text, stack,
+# control ring, state tree and the capability table — and this component's own
+# text is smaller rather than larger. It is deliberately *not* bigger than the
+# thing it supervises: the accounts a supervisor hands out come from capabilities
+# routed to it, not from its own, and a supervisor sized to hold every
+# component's memory at once would be a supervisor that could not be told no.
+#
+# `derive` because retyping is deriving, and `revoke` because an account you
+# cannot take back is not an account.
+[[capability]]
+name   = "account"
+type   = "untyped"
+rights = ["read", "write", "derive", "revoke"]
+from   = "supervisor"
+bytes  = 65_536
+
+# The heap. Two pages, for `store`'s reason and with a second one of its own: a
+# supervisor decides, and deciding needs somewhere to put a decision. The frame
+# maps this before the first instruction — a `#[global_allocator]` answers its
+# first allocation before this component has run a line, so there is no moment
+# at which it could ask — and `kernel/src/component.rs` matches on the name,
+# which makes `heap` load-bearing rather than a label.
+#
+# Read and write and nothing else: a component that could derive from its own
+# heap could hand a piece of it on, and an allocator whose memory has left is an
+# allocator that will hand it out again.
+[[capability]]
+name   = "heap"
+type   = "untyped"
+rights = ["read", "write"]
+from   = "supervisor"
+bytes  = 8_192
+
+# This place's own endpoint, routed back to it. `write` to connect and `grant`
+# to hand it on, which together let a supervisor introduce a client to itself
+# without the frame knowing every client.
+#
+# **Not `revoke`, and here that omission is the whole safety argument.** `revoke`
+# on an endpoint is the right `op::STOP` is checked against, so a supervisor
+# holding `revoke` on its *own* endpoint could stop itself — and a place whose
+# occupant ended it holds no one who can refill it. `store`'s manifest omits it
+# because nothing should refill its own place; this one omits it because nothing
+# should be able to end the only thing that can refill anything.
+[[capability]]
+name   = "self"
+type   = "endpoint"
+rights = ["write", "grant"]
+from   = "supervisor"
+
+# --- Ring: the one a client asks this component on ----------------------------
+
+# A supervisor is a thing you *ask*. `op::SPAWN` and `op::STOP` are what it
+# submits to the frame on the control ring the frame gives every component; this
+# is the other direction — the ring a client submits a request on, so that
+# "please start me one of those" is an entry rather than a privilege.
+#
+# The simulator is what made this a declaration rather than an oversight.
+# `cargo xtask sim --deployment` drives every compiled component with one client
+# over one declared ring, and it refused: *`supervisor` declares no data ring, so
+# there is nothing for a client to submit to. A component that legitimately has
+# none needs a scenario that says what it is doing instead.* That is the right
+# refusal — a supervisor with no ring is not a supervisor with nothing to say, it
+# is one nobody can reach — so the answer is the ring and not an exemption.
+#
+# `inline` and not `registered`, for `store`'s reason: a payload path would be a
+# claim about a datapath that does not exist here. What crosses this ring is a
+# request naming a manifest and an account, which is words rather than bytes.
+#
+# Four clients, matching `store`'s, and the number is deliberately not larger:
+# the set of things entitled to ask a supervisor to make a component is small by
+# design, and a ring sized for a crowd would be a ring that had stopped saying
+# so. RFC 0008's powerbox grant is what widens it if it ever should.
+[[ring]]
+name        = "data"
+role        = "server"
+protocol    = "supervisor"
+version_min = 1
+version     = 1
+entries     = 16
+payload     = "inline"
+clients     = 4
+features    = []
+
+# --- Restart: what happens when this component dies ---------------------------
+
+# `on_fault`, matching `store`, and the budget is deliberately the same three.
+# A supervisor that restarted forever would be a supervisor whose own failure
+# was invisible; three restarts inside a window and then retirement is a failure
+# a boot log states. What a retired supervisor means for the components it was
+# holding is a question this build does not have to answer yet, because nothing
+# is routed to it — and it is the first question increment 7 has to.
+[restart]
+policy           = "on_fault"
+backoff_first_ms = 8
+backoff_max_ms   = 64
+max_restarts     = 3
+budget_window_ms = 3_000
+
+# --- Reservation: what admission may refuse ----------------------------------
+
+# Soft class and no CPU fields, on `store`'s terms: `docs/manifest.md` refuses
+# CPU fields here rather than ignoring them, because a budget declared for a
+# class nothing schedules against is a number nobody reads. The day this
+# component is handed a core — the join, and the increment after the one that
+# adds this file — that sentence stops being true and this table is where the
+# change lands.
+[reservation]
+class        = "soft"
+memory_bytes = 65_536
+
+# --- Transfer: what this component declares about being updated in place ------
+
+# `restart_only`, and it is a decision rather than a gap. RFC 0063 requires this
+# table for the reason `[restart]` is required: a manifest that says nothing has
+# left the choice to whoever reads it next. This component holds nothing across
+# a boot today. The day it holds the set of places it is supervising, that is a
+# `mode = "in_place"` here and a state record in the crate — and the cost of not
+# doing it now is that a swap restarts every component this one was holding,
+# which is exactly the cost `E2-B06` exists to remove.
+[transfer]
+mode = "restart_only"
+
+# --- State: what this component publishes about itself ------------------------
+
+# RFC 0013 puts a state tree in every component and RFC 0065 makes "every" mean
+# every: the frame writes this schema out before the first instruction, and a
+# manifest declaring nothing is refused `ADMISSION/NO_STATE_TREE` at the spawn.
+#
+# Ids are permanent and never reused, for the reason `TODO.md` never reuses a
+# task id: the id is the only thing that makes two readings of this component
+# across time comparable. A retired node takes its id with it.
+#
+# The four counters are what a supervisor's own log line would say, declared as
+# nodes now so that the shape exists and is checked on every boot. What is owed
+# is this component writing into them, which needs it to be *scheduled* — so
+# these are zeros a reader can trust are zeros rather than absences, which is
+# exactly the distinction RFC 0065's schema-before-first-instruction buys.
+[[state]]
+id   = 1
+name = "supervisor"
+kind = "subtree"
+unit = "none"
+
+[[state]]
+id     = 2
+parent = "supervisor"
+name   = "spawned"
+kind   = "counter"
+unit   = "events"
+
+[[state]]
+id     = 3
+parent = "supervisor"
+name   = "stopped"
+kind   = "counter"
+unit   = "events"
+
+[[state]]
+id     = 4
+parent = "supervisor"
+name   = "refused"
+kind   = "counter"
+unit   = "events"
+
+[[state]]
+id     = 5
+parent = "supervisor"
+name   = "holding"
+kind   = "gauge"
+unit   = "slots"
