@@ -10124,6 +10124,14 @@ const PORTABILITY: &[Portability] = &[
     // it reads a record exists *because* those bytes are not always aligned.
     Portability { krate: "f-assembler", host: None, bare: None },
     Portability { krate: "f-store", host: None, bare: None },
+    // `E1-B05`'s supervisor. Both answers are `None` for `f-store`'s reason one
+    // row up: the architecture-specific half is the door, it is gated, and what
+    // is left is a manifest's worth of declaration and an entry point. The
+    // AArch64 compile is the check that keeps it that way — a supervisor that
+    // acquired something x86-64 in it would be a supervisor that had stopped
+    // being a component and started being part of the frame, which is the whole
+    // thing this task exists to prevent.
+    Portability { krate: "f-supervisor", host: None, bare: None },
     Portability { krate: "f-virtio-blk", host: None, bare: None },
     Portability { krate: "f-virtio-net", host: None, bare: None },
     Portability { krate: "f-virtio-gpu", host: None, bare: None },
