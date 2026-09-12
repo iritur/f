@@ -39,10 +39,10 @@ schema = 1
 # the moment the code changes and the moment somebody remembers.
 frame = "kernel"
 
-# The four components, in canonical order. This is exactly `COMPONENTS` in
+# The five components, in canonical order. This is exactly `COMPONENTS` in
 # `xtask/src/main.rs`, and the compiler refuses a name that list does not build
 # rather than emitting a leaf for a component file nothing produces.
-component = ["store", "virtio-blk", "virtio-gpu", "virtio-net"]
+component = ["store", "supervisor", "virtio-blk", "virtio-gpu", "virtio-net"]
 
 # The routes. Two of them, and they are the two the datapath already boots:
 # `cargo xtask blk` moves a sector from a client through `virtio-blk`, and

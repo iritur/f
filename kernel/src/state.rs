@@ -240,6 +240,21 @@ pub mod node {
     pub const COMPONENT_TREE_2: u32 = 39;
     /// The fourth place's.
     pub const COMPONENT_TREE_3: u32 = 40;
+    /// The fifth place's mounted tree.
+    ///
+    /// **51 and not 41, and the gap is the point.** Ids here are permanent and
+    /// never reused, so a fifth slot added after 41 through 50 were spent takes
+    /// the next free id rather than the next number in its own run. Renumbering
+    /// to keep the mount run contiguous would have changed what every node from
+    /// 41 up meant, in order to make one node look tidy.
+    ///
+    /// It is also the only id that works. `f_abi::state::validate` requires ids
+    /// to ascend in the schema's own array order, so a node's id and its
+    /// position are one decision rather than two: the fifth mount goes last
+    /// among the nodes that precede `RESERVED_KIND`, and 51 is what "last" means
+    /// there. `user/supervisor` is the fifth component file and `E1-B05` is why
+    /// there is one.
+    pub const COMPONENT_TREE_4: u32 = 51;
     /// What this machine is running. RFC 0012.
     ///
     /// The node the exit of `E2-B07` is about: *the machine answers "what are
@@ -335,9 +350,16 @@ pub mod node {
     ///
     /// A function rather than an array, because the ids are the wire and an
     /// array would make a *position* the wire — which is the mistake this
-    /// module's first paragraph is about. A build that grew a fifth place would
-    /// mint a fifth id here and find the `None` arm at the call site rather than
-    /// silently publishing into the fourth.
+    /// module's first paragraph is about.
+    ///
+    /// **This paragraph used to be a forecast and is now a record.** It said a
+    /// build that grew a fifth place would mint a fifth id here and find the
+    /// `None` arm at the call site rather than silently publishing into the
+    /// fourth. `E1-B05` grew one — `user/supervisor` is the fifth component
+    /// file — and that is exactly what happened: the boot refused with *a
+    /// component's state tree could not be published or read back* at the fifth
+    /// spawn, naming the failure instead of overwriting the fourth place's
+    /// mount. The design worked; this is the fifth id.
     #[must_use]
     pub const fn mount(slot: usize) -> Option<u32> {
         match slot {
@@ -345,6 +367,7 @@ pub mod node {
             1 => Some(COMPONENT_TREE_1),
             2 => Some(COMPONENT_TREE_2),
             3 => Some(COMPONENT_TREE_3),
+            4 => Some(COMPONENT_TREE_4),
             _ => None,
         }
     }
@@ -360,7 +383,7 @@ pub mod node {
 }
 
 /// How many nodes this build publishes.
-pub const NODES: usize = 51;
+pub const NODES: usize = 52;
 
 /// The schema, written once and never again for a generation.
 ///
@@ -706,7 +729,26 @@ const SCHEMA: [SchemaEntry; NODES] = [
         b"frame3",
     ),
     // Deliberately a kind nothing names. See `node::RESERVED_KIND`.
-    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 50 * WORD, 0xEE, unit::NONE, b"reserved"),
+    // The fifth place's mount, and it sits *here* rather than beside the other
+    // four because of two rules in `f_abi::state::validate` that pull in
+    // opposite directions: ids must strictly ascend in array order, and every
+    // offset must equal its index times `WORD` — the words tile the data block
+    // with no gap and no overlap.
+    //
+    // So an offset is a position and not an address a new node may pick, and a
+    // node inserted in the middle would renumber every offset after it *and*
+    // need an id between its neighbours'. Appending with the next free id is the
+    // only move that satisfies both, which is why `place4` is last among the
+    // mounts and `place0` through `place3` did not move.
+    SchemaEntry::new(
+        node::COMPONENT_TREE_4,
+        node::COMPONENTS,
+        50 * WORD,
+        kind::MOUNT,
+        unit::ADDRESS,
+        b"place4",
+    ),
+    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 51 * WORD, 0xEE, unit::NONE, b"reserved"),
 ];
 
 /// Where the schema block starts: immediately after the header, on the

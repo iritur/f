@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["abi", "env", "ring", "hash", "blob", "zone", "index", "generation", "kernel", "user/assembler", "user/init", "user/objects", "user/store", "user/virtio-blk", "user/virtio-net", "user/virtio-gpu", "bench", "sim", "xtask"]
+members = ["abi", "env", "ring", "hash", "blob", "zone", "index", "generation", "kernel", "user/assembler", "user/init", "user/objects", "user/store", "user/supervisor", "user/virtio-blk", "user/virtio-net", "user/virtio-gpu", "bench", "sim", "xtask"]
 
 # The checker's crate, and it is excluded rather than absent for the reason RFC
 # 0022 gave the last one: a verification tool's toolchain is the tool's
