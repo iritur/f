@@ -286,6 +286,33 @@ pub const SPAWN_STACK: u64 = SPAWN_GUARD + FRAME_SIZE;
 /// Unit: pages.
 pub const SPAWN_STACK_PAGES: usize = 4;
 
+/// **Four is not enough for a component that runs, and this is where that was
+/// found out.**
+///
+/// Nothing had ever executed through the spawn path — `user/init` is a flat
+/// image on another path and a runtime comes from [`prepare_runtime`] — so this
+/// number had never been tested by anything but arithmetic. The first occupant
+/// ever handed a core (RFC 0075) died on its first instruction:
+///
+/// ```text
+/// occupant  killed: exception 14 at 0x0000000000410ff8, error 0x6, rip 0x0000000000400000
+/// ```
+///
+/// `0x415000 - 0x410ff8` is `0x4008`: the whole four-page stack plus eight
+/// bytes, which is a frame's stack probe walking down and stepping one word
+/// past the end. The guard page caught it exactly as designed — the fault is at
+/// [`SPAWN_GUARD`] and not in somebody else's memory.
+///
+/// **Raising it is a cross-crate move rather than a constant.** Every spawn
+/// address above the stack is derived from this one, and three compile-time
+/// assertions pin them to constants owned elsewhere: `SPAWN_HEAP` against
+/// `f_ring::heap::AT`, and `BLK_BOARD` against `f_virtio_blk::routing::AT` from
+/// both the block and network drivers. Changing this number alone does not
+/// build, which is the tree refusing a layout change made in one place — so it
+/// moves with `f_ring` and the drivers in one diff, or the frame it is too small
+/// for shrinks instead.
+const _: () = assert!(SPAWN_STACK_PAGES == 4, "the paragraph above is about this number");
+
 // A power of two, because two shapes allocate this stack as one block and the
 // allocator takes an order. A three would round to four and put a frame of
 // slack somewhere nobody is looking for it.
@@ -1409,6 +1436,179 @@ struct Job {
 /// before it starts.
 static JOB: PerCpu<Job> =
     PerCpu::new(Job { root: 0, entry: 0, stack: 0, argument: 0, hz: 0, target: 0 });
+
+/// Tell `cpu` to run a place's occupant.
+///
+/// # Why this exists rather than an `Instance` becoming a [`Prepared`]
+///
+/// RFC 0075. [`Prepared`] is an *ownership* record: it holds the frames a
+/// process was built from and [`reap`] returns them to the [`FrameAllocator`],
+/// checking them against the free count it recorded before any were taken. A
+/// place's occupant owns nothing of the sort — every page of it was derived
+/// from one supplied `Untyped`, and `component::tear_down` refunds them to that
+/// account. An `Instance` that could become a `Prepared` would be a value whose
+/// only purpose is to be handed to a function that must never see it, and
+/// nothing here would say so.
+///
+/// So [`Job`] stays the one thing a core needs in order to run something, and
+/// this is its second construction site. The type stays private to this module
+/// because a caller that could build one could tell a core to enter an address
+/// space nobody checked.
+///
+/// `entry` and `stack` are the spawn layout's and not [`prepare_runtime`]'s:
+/// [`TEXT`] is shared, and the stack is [`SPAWN_STACK_TOP`], which is four
+/// pages rather than one and sits above [`SPAWN_GUARD`].
+///
+/// # What a core needs besides the job, which is the half this used to miss
+///
+/// Writing [`Job`] alone is not scheduling. A core entering ring 3 runs against
+/// five per-core shards, and a component given only a job runs against whatever
+/// the *previous* occupant of that core left behind — which is how the first
+/// version of this function handed the supervisor a core and watched it not
+/// execute. [`State`] carries the root the fault path compares against and the
+/// features a capability call is answered under; `IN_RING3` and the four
+/// [`arm_entries`] counters are the crossing tallies, which must start at zero
+/// or the run inherits somebody else's; [`Outcome`] is where the core writes
+/// what happened.
+///
+/// **And the capability table is per-core, not per-instance.** `cap::of(cpu)`
+/// is the table a running component's calls resolve against. An `Instance`
+/// holds its own `Table` while it is *not* running, so scheduling moves it in
+/// and [`reclaim_occupant_table`] moves it back out. That is a swap and not a
+/// copy, and the distinction is the one `cap::Table`'s own comment insists on —
+/// *a table copied by value would be a second authority that can drift from the
+/// first, and since `E1-B13` a second owner of the pages the first one bought*.
+/// There is never a moment when both are live: the instance's copy is dormant
+/// while the core holds it, and the core's is overwritten by the next job.
+///
+/// # Safety
+///
+/// `root` must be the top-level table of an address space this frame built for
+/// the occupant, live for as long as the core runs it, with the occupant's text
+/// mapped executable at [`TEXT`] and its stack writable below
+/// [`SPAWN_STACK_TOP`]. `cpu` must be a core this processor has started and
+/// which is not already running a job. `table` must be the occupant's own, and
+/// the caller must take it back with [`reclaim_occupant_table`] before the
+/// instance is used again.
+pub unsafe fn schedule_occupant(
+    cpu: usize,
+    root: u64,
+    features: paging::Features,
+    table: crate::cap::Table,
+    argument: u64,
+    hz: u32,
+    target: u64,
+) -> crate::cap::Table {
+    // What the core held before, handed back so the caller can put it back.
+    //
+    // **This is not tidiness, it is the generation arithmetic.** A table's slots
+    // carry generations that advance as they are cleared and refilled, and
+    // `f_abi::door::Entry::granted(nth)` resolves the nth handle at the *first*
+    // handle's generation — which holds only while every shape the frame builds
+    // grants the same number into the same table. An occupant granted three,
+    // imported wholesale onto a core that then runs a process granted four,
+    // leaves that fourth handle resolving to nothing; `prepare_runtime`'s own
+    // comment records that happening and how far the symptom sat from the cause.
+    //
+    // So the excursion is made invisible: the core's table is restored by
+    // [`reclaim_occupant_table`], and the only table that keeps what the
+    // occupant derived is the occupant's own.
+    // SAFETY: the caller's guarantee that `cpu` is started and idle, so neither
+    // the system-call path nor the fault path over there is holding it.
+    let previous = unsafe { crate::cap::of(cpu).read() };
+    // SAFETY: as above. This is the write `PerCpu::at` exists for.
+    unsafe { crate::cap::of(cpu).write(table) };
+
+    let state = STATE.at(cpu);
+    // SAFETY: as above.
+    unsafe {
+        state.write(State {
+            announced: false,
+            refused: 0,
+            death: Death::Running,
+            wanted: 0,
+            giveup: 0,
+            caps: Tally::ZERO,
+            root,
+            // Zero for a runtime's reason: an occupant holds no capability it
+            // could map with that the frame did not already map for it, so a
+            // call arriving from one is a refusal rather than a walk through a
+            // borrow — and the borrow on `frames` stays the boot processor's.
+            frames: 0,
+            features,
+        });
+    }
+
+    let ticks = IN_RING3.at(cpu);
+    // SAFETY: volatile through the raw pointer, into the slot of a core whose
+    // timer handler — the only other writer — has nothing to count yet.
+    unsafe { ticks.write_volatile(0) };
+    arm_entries(cpu);
+
+    let outcome = OUTCOME.at(cpu);
+    // SAFETY: as above; the core is idle and has not been given the job.
+    unsafe {
+        outcome.write(Outcome { ended: 0, ticks: 0, held: 0, entries: Entries::ZERO, failed: None })
+    };
+
+    let job = JOB.at(cpu);
+    // SAFETY: as above. Written last of the five, and published to the running
+    // core by the `Release` store `smp::run_on` makes after this returns —
+    // which is the same order `prepare_runtime` uses and the reason none of
+    // these writes needs a lock.
+    unsafe {
+        job.write(Job { root, entry: TEXT, stack: SPAWN_STACK_TOP, argument, hz, target });
+    }
+    previous
+}
+
+/// What a scheduled occupant's core recorded: whether it announced itself, how
+/// it ended, and how many ticks it spent in ring 3.
+///
+/// Read rather than asked for, and reported rather than asserted. A boot that
+/// hands an occupant a core and prints only that it did so cannot tell *the
+/// component ran* from *a core was told to run it* — which is the difference
+/// this exists to make visible, and it is the difference a heap peak of zero
+/// turned out to be about.
+///
+/// # Safety
+///
+/// Call after the core has reported finished, on the boot processor.
+#[must_use]
+pub unsafe fn occupant_outcome(cpu: usize) -> (bool, Death, u64) {
+    // SAFETY: the caller's guarantee that the core is finished, so its own
+    // shards have no writer over there.
+    let state = unsafe { STATE.at(cpu).read() };
+    // SAFETY: as above.
+    let outcome = unsafe { OUTCOME.at(cpu).read() };
+    (state.announced, state.death, outcome.ticks)
+}
+
+/// Take a scheduled occupant's capability table back off the core, and put back
+/// what the core held before it.
+///
+/// The other half of the swap [`schedule_occupant`] makes. What comes back is
+/// not what went in: a component may have derived, and those derivations are the
+/// occupant's to keep across the rest of its life.
+///
+/// `previous` is what [`schedule_occupant`] answered, and restoring it is what
+/// keeps the excursion invisible to whatever the frame runs on this core next —
+/// see that function for why the generation arithmetic makes that load-bearing
+/// rather than polite.
+///
+/// # Safety
+///
+/// Call after the core has reported finished — which is what `smp::run_on`
+/// returning `Ok` means — and before anything else is scheduled on `cpu`.
+#[must_use]
+pub unsafe fn reclaim_occupant_table(cpu: usize, previous: crate::cap::Table) -> crate::cap::Table {
+    // SAFETY: the caller's guarantee that the core is finished, so nothing over
+    // there is holding the table.
+    let occupant = unsafe { crate::cap::of(cpu).read() };
+    // SAFETY: as above.
+    unsafe { crate::cap::of(cpu).write(previous) };
+    occupant
+}
 
 /// What the core that ran a process found out, for the core that prepared it.
 ///

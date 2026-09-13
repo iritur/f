@@ -49,6 +49,32 @@ pub fn start(_argument: u64) -> ! {
     // parameter that disappears is a protocol two sides can stop agreeing about
     // without either of them changing.
 
+    // The heap this component's manifest declares, used rather than only asked
+    // for. A supervisor decides, and deciding needs somewhere to put a decision;
+    // this is the smallest honest version of that, and it is what makes the
+    // `heap` need a claim the boot can check instead of a line in a file.
+    //
+    // What it proves is not that a box works. It is that a `#[global_allocator]`
+    // in a crate that forbids `unsafe`, over a region the frame granted and
+    // described before this instruction, hands out memory that is there — and
+    // the frame reads the region's own prologue afterwards, so the evidence is a
+    // number on the other side of the boundary rather than this component's word
+    // for it.
+    //
+    // Dropped immediately, so `live` returns to zero and `peak` does not, which
+    // is the pair that says the allocation happened *and* came back. The
+    // *address* is black-boxed and that is not incidental: Rust may elide an
+    // allocation whose value never escapes, so a box that is only read from is a
+    // box that may never have been allocated. Observing where it landed is what
+    // makes the allocation something the optimiser has to perform.
+    #[cfg(all(target_os = "none", feature = "image"))]
+    {
+        let taken = alloc::boxed::Box::new([9u8; 64]);
+        let at = core::ptr::from_ref::<[u8; 64]>(taken.as_ref()) as u64;
+        core::hint::black_box(at);
+        drop(taken);
+    }
+
     // "I am here." The one thing the frame cannot observe from outside, and the
     // only claim this component is currently in a position to make.
     let _ = door::call0(door::ANNOUNCE);

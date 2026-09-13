@@ -3082,7 +3082,18 @@ fn heap_reading(log: &str) -> Result<(u32, u32, bool), String> {
              make somebody state."
         )
     };
-    let tail = log.split("heap ").nth(1).ok_or_else(|| missing("heap reading"))?;
+    // The *reading*, not the first line that happens to say "heap". This used to
+    // take the text after the first `heap ` in the whole log, which was the
+    // supervisor line until the boot grew a line about a component's heap ahead
+    // of it — at which point the parser read a sentence instead of a figure and
+    // reported the supervisor line as missing. Anchoring on the phrase that only
+    // the reading contains is what makes it a reading rather than a position.
+    let described_at = log.find(" B described").ok_or_else(|| missing("heap reading"))?;
+    let tail = log
+        .get(..described_at)
+        .and_then(|before| before.rfind("heap "))
+        .and_then(|at| log.get(at + "heap ".len()..))
+        .ok_or_else(|| missing("heap reading"))?;
     let number = |at: &str, what: &str| -> Result<u32, String> {
         tail.split(at)
             .next()
@@ -16285,6 +16296,23 @@ mod tests {
         let (_, _, starved) = heap_reading("heap 8192 B described, peak 64 byte(s), starved true")
             .expect("a starved line parses");
         assert!(starved, "a line saying `starved true` must read as starved");
+
+        // A boot line that says "heap" *before* the reading does. This is a
+        // regression and not a hypothetical: the boot grew a line about a
+        // component's heap ahead of the supervisor line, the parser took the
+        // text after the first `heap ` in the log, and it reported the reading
+        // as missing on a boot that had printed one. Anchoring on the phrase
+        // only the reading contains is the fix, and this is what would catch it
+        // coming undone.
+        let noisy = "  scheduled     place supervisor on core 1 — so its heap is a region \
+                     something has now allocated out of\n\
+                     \x20 supervisor    ok — 5 place(s); heap 8192 B described, peak 64 byte(s), \
+                     starved false\nM0 ok\n";
+        let (described, peak, starved) =
+            heap_reading(noisy).expect("a log that mentions a heap before reporting one");
+        assert_eq!(described, 8192, "the figure, not the sentence before it");
+        assert_eq!(peak, 64);
+        assert!(!starved);
     }
 
     /// The declared gap names a sentence that is really in the tree.

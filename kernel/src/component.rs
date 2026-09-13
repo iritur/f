@@ -185,6 +185,38 @@ fn account_bytes(record: &Record) -> u64 {
     bytes
 }
 
+/// The manifest name of the one component the frame starts itself.
+///
+/// A name and not a position, because the loader's order is the loader's. RFC
+/// 0073's bootstrap argument is what makes this one component rather than none
+/// or all of them: somebody has to be first, and a frame that starts exactly one
+/// and then answers that one's ring has a smaller privileged surface than a
+/// frame that starts every component there is.
+const SUPERVISOR: &[u8] = b"supervisor";
+
+/// The rate the core running an occupant arms its own timer at. Unit: hertz.
+///
+/// The same thousand the rest of this kernel uses, so that a component that
+/// looked at its own timer would not find a different clock depending on which
+/// path started it.
+const OCCUPANT_HZ: u32 = 1000;
+
+/// How many ticks that timer asks for. Unit: timer ticks.
+///
+/// A bound rather than a schedule, exactly as `RuntimePlan::target` is: the
+/// occupant ends itself long before this, and what this stops is a component
+/// that never does.
+const OCCUPANT_TICKS: u64 = 64;
+
+/// How long the boot processor waits for the core to report finished.
+/// Unit: microseconds.
+///
+/// Generous on purpose. This is not a measurement and nothing is timed against
+/// it — it is the bound past which *a core never answered* is a better
+/// conclusion than *keep waiting*, and a boot that hit it would be a red boot
+/// rather than a slow one.
+const OCCUPANT_MICROS: u64 = 500_000;
+
 /// How many places this build's supervisor can hold.
 ///
 /// **Five, and the fifth is the supervisor itself.** It was four — two component
@@ -266,6 +298,15 @@ pub enum Failure {
     /// component half-built is worse than no component, and one nobody can read
     /// is exactly what RFC 0013 says this mechanism exists to prevent.
     StateTree(i32),
+    /// A core was handed an occupant to run and did not report finished inside
+    /// the bound.
+    ///
+    /// Distinct from every variant above, all of which are the frame refusing
+    /// something before a core was involved. This one means the frame committed
+    /// — a job was published and a core was told — and then heard nothing, which
+    /// is the one failure here that leaves a core in a state the boot processor
+    /// cannot describe.
+    NoAnswer,
 }
 
 impl Failure {
@@ -288,6 +329,7 @@ impl Failure {
             Self::Notice(_) => "a notice could not be published on a control ring",
             Self::Leaked => "a component's frames did not all come back",
             Self::StateTree(_) => "a component's state tree could not be published or read back",
+            Self::NoAnswer => "a core was given a place's occupant to run and never reported back",
         }
     }
 }
@@ -474,6 +516,19 @@ struct Instance {
     /// component which has run is a tree nothing is writing into.
     /// Unit: none — a hash.
     tree_snapshot: u64,
+    /// The first capability in the occupant's **own** table.
+    ///
+    /// The word a component is entered with carries a selector and this handle
+    /// — `f_abi::door::Entry` — so that its first act can be a capability call
+    /// rather than a guess about which slot it was given. It is the manifest's
+    /// first non-powerbox need, which for every component in this tree is the
+    /// account it was made out of.
+    ///
+    /// `Handle::NULL` for a component whose every need was optional and
+    /// unsupplied, which is a component with nothing to be told. Recorded rather
+    /// than recomputed because the table is the child's and the frame does not
+    /// hold a second copy of it.
+    first: Handle,
 }
 
 /// What every instance is made of besides its text: a stack, a control ring and
@@ -801,6 +856,13 @@ pub struct Report {
     /// freed has a live figure of zero and is exactly the case this is evidence
     /// for. Zero here means no component allocated anything, which on a tree
     /// where one declares a `heap` need is a finding rather than a default.
+    ///
+    /// **It stopped being zero when an occupant was first handed a core.** Until
+    /// then a component spawned into a place was never scheduled, so no
+    /// component with a `heap` need had ever executed and the figure was the
+    /// frame's reading of a region nothing had allocated out of. `HEAP_GAP` in
+    /// `xtask` is the constant that declared that and the check that refuses the
+    /// change — which is how this increment is gated. RFC 0075.
     pub heap_peak: u32,
     /// Whether any component was ever refused an allocation for want of room.
     ///
@@ -818,6 +880,13 @@ pub struct Report {
     /// indistinguishable from one that cannot — the same argument
     /// `state::node::MEMORY_FORCED` makes about a counter.
     pub mute: u32,
+    /// How many of the places' occupants were handed a core. Unit: components.
+    ///
+    /// One, and the one is the supervisor. A count rather than a flag because
+    /// the number this should be is a decision — RFC 0073's bootstrap argument
+    /// says the frame starts exactly one — and a flag would record that it
+    /// happened without recording that it happened *once*.
+    pub scheduled: u32,
 }
 
 /// Build a place per component file the loader carried, put a component in each,
@@ -848,14 +917,26 @@ pub struct Report {
 /// Because every step of it is the mechanism E1-P06 will drive, running against
 /// real memory on the boot core: real records read out of real modules, real
 /// address spaces, real capability tables paying a real account, a real channel
-/// whose header carries a real epoch. What it is not is a *load* — nothing here
-/// is scheduled, because there is no scheduler until E1-B08 — and that is the
-/// one sentence separating this from gate G1.
+/// whose header carries a real epoch.
+///
+/// **The sentence that used to stand here said nothing here is scheduled,
+/// because there is no scheduler until `E1-B08`.** Both halves have since
+/// stopped being true. `E1-B08` landed, and RFC 0075 joined the two halves this
+/// tree had been carrying separately, so one occupant — the supervisor's — is
+/// handed a core below. What is still not here is a *load*: one component
+/// running once is not several running under contention, and that is the
+/// sentence still separating this from gate G1.
 ///
 /// The log it prints is a fixture: every number in it is a count rather than a
 /// duration, so two runs of one commit produce the same bytes on machines two
 /// orders of magnitude apart in speed. That is why the backoff below is stated
 /// in ticks and never in milliseconds, and why nothing here reads a clock.
+///
+/// `worker` is the core an occupant may be run on and that core's TSC rate, or
+/// `None` on a machine that started no second core. `None` is a boot that spawns
+/// every place and schedules none, which is what every boot before RFC 0075 was
+/// — so the path is exercised where there is a core for it and the boot is not
+/// failed where there is not.
 ///
 /// # Errors
 ///
@@ -874,6 +955,7 @@ pub unsafe fn demonstrate(
     boot: &BootInfo,
     now: u64,
     tree: &crate::state::Tree,
+    worker: Option<(usize, u64)>,
 ) -> Result<Report, Failure> {
     // SAFETY: the caller's guarantee that the direct map is live and covers
     // every module.
@@ -1126,6 +1208,73 @@ pub unsafe fn demonstrate(
         // a component holding capabilities it was never told about while the
         // counters said every notice had been delivered.
         publish(&mut extra.place, &mut supervisor, &ledger_ring, &mut report)?;
+
+        // ------------------------------------------------------------ the join
+        //
+        // `kernel/src/runtime.rs` has described this since RFC 0033: *there, a
+        // component is spawned into a place and never scheduled; here, a
+        // component is scheduled and never spawned into one.* This is the first
+        // occupant of a place ever handed a core.
+        //
+        // **One component and not all of them**, and the rule is the bootstrap
+        // argument `user/supervisor/manifest.toml` makes: somebody is first, the
+        // frame is what starts that one, and every other start moves above it.
+        // A frame that started all five would be a frame that had kept the job
+        // this task exists to move.
+        //
+        // RFC 0075 is why no `Prepared` appears here. The occupant's pages were
+        // derived from its account and are owed back to it by `tear_down`;
+        // handing them to `process::reap` would return them to the frame
+        // allocator instead, which is a double free the type system would not
+        // name.
+        if let Some((cpu, tsc_khz)) = worker
+            && Record::read(module).is_ok_and(|record| record.label() == SUPERVISOR)
+        {
+            let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
+            // Selector zero: the life every component has. `first` is the
+            // occupant's own handle for its account, so its first act can be a
+            // capability call rather than a guess about which slot it holds.
+            let argument = f_abi::door::Entry::new(0, occupant.first).bits();
+            let root = occupant.space.root();
+            // SAFETY: `root` is the address space this frame built for this
+            // occupant a few lines ago and nothing has torn it down; its text is
+            // mapped executable at `process::TEXT` and its stack is writable
+            // below `process::SPAWN_STACK_TOP`, both by `spawn`. `cpu` is a core
+            // the caller vouched is started and idle, and the table handed over
+            // is taken back below before this instance is touched again.
+            let previous = unsafe {
+                crate::process::schedule_occupant(
+                    cpu,
+                    root,
+                    features,
+                    occupant.table,
+                    argument,
+                    OCCUPANT_HZ,
+                    OCCUPANT_TICKS,
+                )
+            };
+            // SAFETY: the boot processor, with the kernel's space in `CR3` and
+            // the job published into `cpu`'s own shard above. `run_on` makes the
+            // `Release` store that publishes it.
+            let ran = unsafe { crate::smp::run_on(cpu, kernel.root(), tsc_khz, OCCUPANT_MICROS) };
+            ran.map_err(|_| Failure::NoAnswer)?;
+            // What the core recorded, read before the shards are reused. The
+            // boot prints it rather than asserting it: a boot that hands an
+            // occupant a core and says only that it did so cannot tell *the
+            // component ran* from *a core was told to run it*.
+            // SAFETY: the core reported finished, which is what `Ok` above means.
+            let (announced, death, ticks) = unsafe { crate::process::occupant_outcome(cpu) };
+            // The other half of the swap, and it is taken back *before* anything
+            // else looks at this instance. What comes back is not what went in:
+            // a component may have derived, and the teardown below has to revoke
+            // what the component ended holding rather than what it was handed.
+            // SAFETY: as above — the core is finished, so nothing over there is
+            // holding either table.
+            occupant.table = unsafe { crate::process::reclaim_occupant_table(cpu, previous) };
+            report.scheduled += 1;
+            scheduled_line(cpu, announced, death, ticks);
+        }
+
         let Some(slot) = extras.get_mut(index) else { return Err(Failure::WrongPlace) };
         *slot = Some(extra);
     }
@@ -1696,6 +1845,38 @@ unsafe fn fill(
     Ok(Extra { place, account, region })
 }
 
+/// The first occupant of a place ever handed a core.
+///
+/// A line of its own rather than a field on `supervisor ok`, because this is the
+/// sentence `kernel/src/runtime.rs` has carried since RFC 0033 becoming false,
+/// and a reader comparing two boots across the change should meet it where it
+/// happened rather than in a summary at the end.
+fn scheduled_line(cpu: usize, announced: bool, death: crate::process::Death, ticks: u64) {
+    crate::kprintln!(
+        "  scheduled     place supervisor on core {cpu} — the first occupant of a place given \
+         one; it {} itself after {ticks} tick(s) in ring 3",
+        if announced { "announced" } else { "never announced" },
+    );
+    // How it ended, named rather than coded. The first time an occupant was
+    // scheduled this said *killed*, and a status number alone would have left a
+    // reader guessing which of the ways a component can die it had been — which
+    // is the difference between a boot that reports and one that hints.
+    match death {
+        crate::process::Death::Exited(status) => {
+            crate::kprintln!("  occupant      ended itself with status {status}");
+        }
+        crate::process::Death::Killed { vector, error, address, rip } => {
+            crate::kprintln!(
+                "  occupant      killed: exception {vector} at {address:#018x}, error {error:#x}, \
+                 rip {rip:#018x}"
+            );
+        }
+        crate::process::Death::Running => {
+            crate::kprintln!("  occupant      never started, which the frame cannot explain");
+        }
+    }
+}
+
 /// What the manifest declares about a place, before anything has been spent on
 /// it.
 ///
@@ -2036,6 +2217,8 @@ unsafe fn spawn(
     // Where this component's heap landed, for the instance below. Zero when it
     // declared no `heap` need, which is every component but one today.
     let mut heap_at = 0u64;
+    // The first capability the child is given, for the word it is entered with.
+    let mut first = Handle::NULL;
     for need in record.needs() {
         // An ask is not supplied at spawn. It arrives later, through the
         // powerbox, as a grant naming this component's endpoint.
@@ -2055,9 +2238,17 @@ unsafe fn spawn(
         // supervisor added so that it could hand the capability on and give the
         // name up again afterwards, and neither of those is the child's
         // business — R06: the child receives exactly what was listed.
-        table.grant(found.kind, need.rights, found.object, found.extent).map_err(|_| {
-            Failure::Capability(error::pack(error::RESOURCE, error::resource::QUOTA_EXHAUSTED))
-        })?;
+        let granted =
+            table.grant(found.kind, need.rights, found.object, found.extent).map_err(|_| {
+                Failure::Capability(error::pack(error::RESOURCE, error::resource::QUOTA_EXHAUSTED))
+            })?;
+        // The first one, kept for the word the occupant is entered with. Taken
+        // here rather than derived afterwards because this is the only place the
+        // child's own handle exists — `offered` holds the *supervisor's* names
+        // for these objects, and the two tables number their slots separately.
+        if first == Handle::NULL {
+            first = granted;
+        }
         satisfied += 1;
 
         // The heap, and it is the one need the frame *maps* rather than merely
@@ -2151,6 +2342,7 @@ unsafe fn spawn(
         heap: heap_at,
         tree_nodes,
         tree_snapshot: reader.snapshot(),
+        first,
     });
     place.epoch += 1;
     Ok((epoch, satisfied, charges))

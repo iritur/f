@@ -924,11 +924,21 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // which is what a supervisor does, so nothing it prints moves between a
     // fast host and a slow one.
     let now = hardware.now().as_nanos() / (1_000_000_000 / u64::from(TIMER_HZ));
+    // The core an occupant may be given, and `None` on a machine that started
+    // no second one — RFC 0075. The boot processor cannot be the answer: it is
+    // the core running this function, and `smp::run_on` would run the occupant
+    // inline rather than beside it.
+    let occupant_core =
+        if smp::started() > 1 { Some((smp::first_worker(), clocks.tsc_khz)) } else { None };
     // SAFETY: the boot processor, once, with the kernel's address space in
     // `CR3`, `frames` rebound onto its direct map, and no process running. The
     // direct map covers every module: `reserved_ranges` put them all in the
-    // reserved list before the allocator was populated.
-    match unsafe { component::demonstrate(&mut frames, &space, features, &boot, now, &tree) } {
+    // reserved list before the allocator was populated. `occupant_core`, where
+    // it is `Some`, names a core `smp` reports started and which nothing else
+    // has been given.
+    match unsafe {
+        component::demonstrate(&mut frames, &space, features, &boot, now, &tree, occupant_core)
+    } {
         Ok(report) => kprintln!(
             "  supervisor    ok — {} place(s), {} spawn(s), {} fault(s), {} restart(s), \
              {} resumed, {} client(s) lost, {} probe(s) refused, {} retired, \
