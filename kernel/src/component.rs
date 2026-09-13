@@ -41,26 +41,40 @@
 //! safe code, submits operations on it, and is answered by the frame from a
 //! polling loop.
 //!
-//! Three things are missing and they are all one thing — **there is no
-//! supervisor component**:
+//! **Two of the three things that were missing are here now.** What this
+//! paragraph used to say is that there is no supervisor component, in three
+//! bullets; `user/supervisor` is that component, and the boot walks it:
 //!
-//! - Nothing implements `f_abi::control::op::SPAWN` or `op::STOP`. The opcodes
-//!   are named and the ring that would carry them works; what would submit them
-//!   does not exist.
-//! - A supervisor would have to be *told* its occupant died. The frame already
-//!   posts `notice::PEER_GONE` with a cause — [`tear_down`] does it on every
-//!   teardown — so the notice is there and the reader is not.
+//! - `f_abi::control::op::SPAWN` is implemented *and submitted*. The frame holds
+//!   one place open ([`held_open`]), schedules the supervisor on a worker core,
+//!   and answers the entry the supervisor puts on its own control ring — so a
+//!   boot contains a component that another component spawned. The `held` and
+//!   `supervised` lines are where a reader meets it.
 //! - A supervisor is a component, so it needs a place, an account and a
-//!   manifest, and the `Untyped` behind that account is what would replace
-//!   [`PLACES_MAX`] and [`SUPERVISOR_ORDER`]. RFC 0044 names all three as the
-//!   same deviation.
+//!   manifest, and it has all three. What it does **not** yet have is an
+//!   `Untyped` of its own standing in for [`PLACES_MAX`] and
+//!   [`SUPERVISOR_ORDER`]; RFC 0044 names that as one deviation with the other
+//!   two, and it is the one still outstanding.
 //!
-//! So [`policy`] is written as one function over a record and a tally, taking no
-//! kernel state at all, and moving it above the frame is a move rather than a
-//! rewrite. `cargo xtask lint-owed` is what keeps that honest: it holds
-//! `policy::decide(` in this file as a declared quantity and goes red the day
-//! the call goes, which is the day this paragraph and RFC 0008's status both
-//! have to change.
+//! The third is not here, and it is the one [`policy`] needs:
+//!
+//! - **A supervisor still cannot be *told* its occupant died.** The frame posts
+//!   `notice::PEER_GONE` with a cause — [`tear_down`] does it on every teardown
+//!   — so the notice is there and the reader is not, and the reason is not that
+//!   nobody wrote one. It is that this frame serves a supervisor's ring only
+//!   *after* the core has finished: a spawn names the submitter's `Untyped`, so
+//!   answering one while the component runs would be the boot processor
+//!   resolving handles in a table that core may be mutating, which RFC 0016 and
+//!   `CLAUDE.md` say is a fifth place two cores reach and needs an argument.
+//!   The join below carries that argument and its reversal condition.
+//!
+//! So [`policy`] stays here for one increment more, still written as one
+//! function over a record and a tally taking no kernel state at all, so that
+//! moving it is a move rather than a rewrite. `cargo xtask lint-owed` is what
+//! keeps that honest: it holds `policy::decide(` in this file as a declared
+//! quantity and goes red the day the call goes, which is the day this paragraph
+//! and RFC 0008's status both have to change. Its stated *reason* has now
+//! changed twice and got smaller both times, which is the mechanism working.
 //!
 //! # What a spawn checks, and what it does not
 //!
@@ -99,7 +113,7 @@ use f_abi::control::{cause, notice};
 use f_abi::manifest::{ContentId, Need, Record, Refusal, restart, route};
 use f_abi::reserve::{Demand, Grant, Table as Reservations};
 use f_abi::{Cqe, error};
-use f_ring::{Collector, Mapping, Poster, RingError};
+use f_ring::{Collector, Consumer, Mapping, Poster, RingError};
 
 use crate::arch::x86_64::multiboot::BootInfo;
 use crate::arch::x86_64::paging::{self, Features, UserPage, UserSpace};
@@ -193,6 +207,14 @@ fn account_bytes(record: &Record) -> u64 {
 /// and then answers that one's ring has a smaller privileged surface than a
 /// frame that starts every component there is.
 const SUPERVISOR: &[u8] = b"supervisor";
+
+/// The manifest name of the one component the frame does **not** start.
+///
+/// Its place is built, admitted and left empty for the supervisor to fill, which
+/// is RFC 0008's *restart is the supervisor's act* made into something a boot
+/// does rather than something a document says. [`held_open`] argues why it is
+/// this component.
+const SUPERVISED: &[u8] = b"virtio-gpu";
 
 /// The rate the core running an occupant arms its own timer at. Unit: hertz.
 ///
@@ -505,6 +527,15 @@ struct Instance {
     /// has run — which is how a boot says an allocation happened, rather than
     /// taking the component's word for it. Unit: bytes.
     heap: u64,
+    /// Where its board is, as a kernel address, or zero for a component that
+    /// declared no `board` need — which is every component but the supervisor.
+    ///
+    /// Written by the frame before the first instruction and read by it after
+    /// the last one, which is the two halves `f_supervisor::routing` describes.
+    /// A kernel address and not the component's, because the frame reaches it
+    /// through the direct map and never through the component's page tables.
+    /// Unit: bytes.
+    board: u64,
     /// The snapshot the frame read back off that tree the moment it published
     /// it, through `f_abi::state::Reader` and not from what it had just
     /// written.
@@ -565,6 +596,18 @@ const FIXED_PARTS: usize = crate::process::SPAWN_STACK_PAGES + 2;
 /// that declares no such need gets no heap and no mapping, and its image is the
 /// same bytes it was.
 const NEED_HEAP: &[u8] = b"heap";
+
+/// The need a supervisor declares when it wants to be told what it may do.
+///
+/// The frame maps this one too, and for the heap's reason one step earlier: the
+/// first thing a supervisor does is read it, so there is no moment at which it
+/// could have asked. `f_supervisor::routing` is the layout; this is the name the
+/// manifest calls it by.
+///
+/// One page, refused at any other size where it is mapped. A board is a fixed
+/// layout and a component that asked for two pages of one would be a component
+/// disagreeing with the crate that reads it.
+const NEED_BOARD: &[u8] = b"board";
 
 /// Does this need carry `wanted` as its whole name?
 ///
@@ -1124,8 +1167,14 @@ pub unsafe fn demonstrate(
         // Read before the server borrows the place, because the completion is
         // checked against it after.
         let expected_endpoint = u64::from(place.endpoint.bits());
+        // The frame is its own submitter here, so the two tables are one table —
+        // and this is the line that says so out loud rather than by sharing a
+        // field. A copy and not a borrow, because the server needs the other
+        // half exclusively; it is the same bytes, taken one statement earlier.
+        let submitted_from = supervisor;
         let mut serving = Serving {
             place: &mut place,
+            submitter: &submitted_from,
             supervisor: &mut supervisor,
             frames,
             account: &account,
@@ -1193,8 +1242,19 @@ pub unsafe fn demonstrate(
     // boot half of RFC 0035's pair covered `{store}` while the workload half
     // covered every record the build produced, and RFC 0036 made the difference
     // a set somebody had to write down rather than a sentence nobody re-read.
+    //
+    // **Which place is held open is decided before the loop and not inside it**,
+    // and that is not tidiness. The decision needs to know that a supervisor
+    // exists at all, and the loader's order is not this build's to choose:
+    // `docs/second-boot-outside-qemu.md` records the boot where places 2 and 3
+    // swapped on hardware because `tools/f-on-metal.sh` sorts what `xtask` hand
+    // orders. A loop that held a place open the moment it met one and hoped the
+    // supervisor came later would be a boot that depends on that sort.
+    let held = held_open(&modules, count, worker.is_some());
     for index in 1..count {
         let Some(module) = modules.get(index).copied() else { break };
+        let occupant =
+            if held == Some(index) { Occupant::ByTheSupervisor } else { Occupant::ByTheFrame };
         // SAFETY: the caller's guarantee, passed down; `module` came out of
         // `modules` above and is one of the boot modules the direct map covers.
         let mut extra = unsafe {
@@ -1208,6 +1268,7 @@ pub unsafe fn demonstrate(
                 &mut report,
                 tree,
                 index,
+                occupant,
             )
         }?;
         // This place's own polling point, not the first place's: what a spawn
@@ -1216,39 +1277,88 @@ pub unsafe fn demonstrate(
         // counters said every notice had been delivered.
         publish(&mut extra.place, &mut supervisor, &ledger_ring, &mut report)?;
 
-        // ------------------------------------------------------------ the join
-        //
-        // `kernel/src/runtime.rs` has described this since RFC 0033: *there, a
-        // component is spawned into a place and never scheduled; here, a
-        // component is scheduled and never spawned into one.* This is the first
-        // occupant of a place ever handed a core.
-        //
-        // **One component and not all of them**, and the rule is the bootstrap
-        // argument `user/supervisor/manifest.toml` makes: somebody is first, the
-        // frame is what starts that one, and every other start moves above it.
-        // A frame that started all five would be a frame that had kept the job
-        // this task exists to move.
-        //
-        // RFC 0075 is why no `Prepared` appears here. The occupant's pages were
-        // derived from its account and are owed back to it by `tear_down`;
-        // handing them to `process::reap` would return them to the frame
-        // allocator instead, which is a double free the type system would not
-        // name.
-        if let Some((cpu, tsc_khz)) = worker
-            && Record::read(module).is_ok_and(|record| record.label() == SUPERVISOR)
-        {
+        let Some(slot) = extras.get_mut(index) else { return Err(Failure::WrongPlace) };
+        *slot = Some(extra);
+    }
+
+    // ---------------------------------------------------------------- the join
+    //
+    // `kernel/src/runtime.rs` has described this since RFC 0033: *there, a
+    // component is spawned into a place and never scheduled; here, a component
+    // is scheduled and never spawned into one.* RFC 0075 ended that half; this
+    // is the other one, and it is the act E1-B05 is named after — **the
+    // supervisor spawns, and the frame answers.**
+    //
+    // After the loop rather than inside it, so that every place the supervisor
+    // may fill exists before it is given a core. Inside the loop this depended
+    // on the loader having placed the supervisor's module after the one it
+    // fills, which no part of this tree guarantees and one recorded hardware
+    // boot contradicts.
+    //
+    // **One component and not all of them**, and the rule is the bootstrap
+    // argument `user/supervisor/manifest.toml` makes: somebody is first, the
+    // frame is what starts that one, and every other start moves above it. A
+    // frame that started all five would be a frame that had kept the job this
+    // task exists to move.
+    //
+    // RFC 0075 is why no `Prepared` appears here. The occupant's pages were
+    // derived from its account and are owed back to it by `tear_down`; handing
+    // them to `process::reap` would return them to the frame allocator instead,
+    // which is a double free the type system would not name.
+    //
+    // Guarded on `held` and not only on the supervisor existing. A supervisor
+    // with nothing to fill would be a boot that scheduled a component and proved
+    // nothing about spawning — worse than not scheduling it, because the log
+    // would carry a `scheduled` line either way. The two conditions come from
+    // one function so they cannot drift: `held_open` answers `None` unless there
+    // is a supervisor *and* a worker *and* a place for it.
+    if let Some((cpu, tsc_khz)) = worker
+        && let Some(index) = held
+        && let Some(at) = supervising(&modules, count)
+    {
+        // Taken out of the array for the length of the run, because the ring
+        // server borrows the held-open place mutably while the supervisor's own
+        // occupant is being scheduled out of the same array. Two `&mut` into one
+        // array is what this avoids, and taking it out is the honest version:
+        // for as long as the supervisor is running, that place is the server's.
+        let Some(mut open) = extras.get_mut(index).and_then(Option::take) else {
+            return Err(Failure::WrongPlace);
+        };
+        let Some(mut extra) = extras.get_mut(at).and_then(Option::take) else {
+            return Err(Failure::WrongPlace);
+        };
+
+        let outcome = {
             let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
+            // Everything the component needs to know that is not a constant: its
+            // ring, its account, and what it may put where. `board` is the page
+            // `f_supervisor::routing` reads, and it is written *before* the core
+            // is told to run, which is the whole of why it may be believed.
+            // SAFETY: `occupant.board` is a frame this frame allocated for this
+            // instance and mapped into its address space and nobody else's; the
+            // direct map covers it and the core that will read it has not been
+            // started yet.
+            unsafe { write_board(frames, occupant, &open, &supervisor) }?;
+            // What the supervisor holds at the moment it is started, kept for
+            // the server below to resolve its entries against. Taken here — the
+            // statement after the grant that put the account in it, and before
+            // the core is told to run — because that is precisely the state the
+            // question *may the submitter spend this?* is about. The table the
+            // core hands back is not it: an occupant's table is cleared when the
+            // occupant ends.
+            let submitted_from = occupant.table;
+
             // Selector zero: the life every component has. `first` is the
             // occupant's own handle for its account, so its first act can be a
             // capability call rather than a guess about which slot it holds.
             let argument = f_abi::door::Entry::new(0, occupant.first).bits();
             let root = occupant.space.root();
             // SAFETY: `root` is the address space this frame built for this
-            // occupant a few lines ago and nothing has torn it down; its text is
-            // mapped executable at `process::TEXT` and its stack is writable
-            // below `process::SPAWN_STACK_TOP`, both by `spawn`. `cpu` is a core
-            // the caller vouched is started and idle, and the table handed over
-            // is taken back below before this instance is touched again.
+            // occupant and nothing has torn it down; its text is mapped
+            // executable at `process::TEXT` and its stack is writable below
+            // `process::SPAWN_STACK_TOP`, both by `spawn`. `cpu` is a core the
+            // caller vouched is started and idle, and the table handed over is
+            // taken back below before this instance is touched again.
             let previous = unsafe {
                 crate::process::schedule_occupant(
                     cpu,
@@ -1265,12 +1375,13 @@ pub unsafe fn demonstrate(
             // `Release` store that publishes it.
             let ran = unsafe { crate::smp::run_on(cpu, kernel.root(), tsc_khz, OCCUPANT_MICROS) };
             ran.map_err(|_| Failure::NoAnswer)?;
+
             // What the core recorded, read before the shards are reused. The
             // boot prints it rather than asserting it: a boot that hands an
             // occupant a core and says only that it did so cannot tell *the
             // component ran* from *a core was told to run it*.
             // SAFETY: the core reported finished, which is what `Ok` above means.
-            let (announced, death, ticks) = unsafe { crate::process::occupant_outcome(cpu) };
+            let (announced, death, _ticks) = unsafe { crate::process::occupant_outcome(cpu) };
             // The other half of the swap, and it is taken back *before* anything
             // else looks at this instance. What comes back is not what went in:
             // a component may have derived, and the teardown below has to revoke
@@ -1278,12 +1389,98 @@ pub unsafe fn demonstrate(
             // SAFETY: as above — the core is finished, so nothing over there is
             // holding either table.
             occupant.table = unsafe { crate::process::reclaim_occupant_table(cpu, previous) };
-            report.scheduled += 1;
-            scheduled_line(cpu, announced, death, ticks);
+            // SAFETY: as above, and the page is still mapped — the address space
+            // is torn down below and not here.
+            let said = unsafe { read_board(occupant) };
+
+            // --- what the supervisor asked for, answered now ------------------
+            //
+            // **After the core has finished, and that is the design rather than
+            // the order the code happened to end up in.** A driver's ring is
+            // served *while* its core runs (`kernel/src/smp.rs`'s
+            // `join_serviced`) because what a driver asks for is resolved
+            // against the frame's own tables. What a supervisor asks for is
+            // resolved against **its own** — a spawn names the `Untyped` the
+            // submitter may spend — and while the component is running, its
+            // table is the live one in `cap::of(cpu)`, which belongs to that
+            // core.
+            //
+            // Serving mid-run would therefore have been the boot processor
+            // reading and writing a table a running core may mutate with its own
+            // capability calls: a fifth place two cores reach, which
+            // `CLAUDE.md` and RFC 0016 say needs an argument rather than a
+            // convenience. The frame's kept copy is not a way out either — the
+            // grants `offer` mints would land in the copy and be discarded by
+            // the `reclaim` above, and the teardown would then revoke handles
+            // that were never in the table it walks.
+            //
+            // So the supervisor submits and ends, and the frame answers the ring
+            // it left behind, against the table it left behind. Everything the
+            // component said is still on the ring: entries are memory, not
+            // events, and nothing about a control ring requires its two ends to
+            // be moving at the same time.
+            //
+            // *What it costs, stated because somebody pays it:* this supervisor
+            // cannot act on its own completions — it does not learn whether a
+            // spawn was refused, and `user/supervisor` therefore submits without
+            // waiting. That is enough for a spawn and not enough for a restart
+            // policy, which has to read a notice.
+            //
+            // *Reversal:* a supervisor that must see its answers. The frame then
+            // needs either a per-core serving arrangement or RFC 0016's fifth
+            // word, and both are an RFC rather than an edit here.
+            let asks = Consumer::new(occupant.ring.channel()).ok_or(Failure::WrongPlace)?;
+            let answers = Poster::new(occupant.ring.completions()).ok_or(Failure::WrongPlace)?;
+            let mut serving = Serving {
+                place: &mut open.place,
+                // The supervisor's own table as it stood when it submitted.
+                submitter: &submitted_from,
+                supervisor: &mut supervisor,
+                frames,
+                account: &open.account,
+                kernel,
+                features,
+                reservations: &reservations,
+                spawned: (0, 0, 0),
+                answered: 0,
+            };
+            let (_, refusal) = serve(&asks, &answers, &mut serving)?;
+            let answered = serving.answered;
+            let spawned = serving.spawned;
+            (announced, death, (answered, refusal), spawned, said)
+        };
+        let (announced, death, answered, spawned, said) = outcome;
+        report.scheduled += 1;
+        scheduled_line(cpu, announced, death);
+        supervised_line(answered, u32::from(open.place.occupant.is_some()), said);
+
+        // The spawn the *supervisor* made, recorded on this side. Everything
+        // below is what `fill` does after its own spawn and for the same
+        // reasons — it is deliberately not inside `Serving::spawn`, because a
+        // ring server that mounted state trees would be a server that does the
+        // frame's bookkeeping on a submitter's schedule.
+        if open.place.occupant.is_some() {
+            let record = Record::read(open.place.module).map_err(Failure::Manifest)?;
+            report.spawns += 1;
+            report.unbound += unbound_needs(record);
+            spawned_line(record, &open.place, spawned);
+            mounted_line(record, &open.place, mount(tree, &open.place, &mut report)?);
+            open.place.reservation = Some(
+                reservations
+                    .grant(&Demand::of(record))
+                    .map_err(|why| Failure::Admission(why.code()))?,
+            );
+            publish(&mut open.place, &mut supervisor, &ledger_ring, &mut report)?;
         }
 
-        let Some(slot) = extras.get_mut(index) else { return Err(Failure::WrongPlace) };
+        // Both places go back where they came from. Separately, because they are
+        // two indices into one array and the borrow checker is right to insist:
+        // the whole reason they were taken out is that one of them was the
+        // server's and the other was the occupant's, at the same time.
+        let Some(slot) = extras.get_mut(at) else { return Err(Failure::WrongPlace) };
         *slot = Some(extra);
+        let Some(back) = extras.get_mut(index) else { return Err(Failure::WrongPlace) };
+        *back = Some(open);
     }
 
     // -------------------------------------------------------------- connect
@@ -1479,12 +1676,20 @@ pub unsafe fn demonstrate(
     // publication order `f_abi::control::ORDER` fixes is only an order if
     // something is pending in more than one of its phases at once.
     // Through the ring server rather than by reaching into the occupant, which
-    // is RFC 0073's whole subject. The entries are built here rather than
-    // submitted by a component because there is no supervisor component yet to
-    // submit them — that is the *next* increment, and what this one buys is that
-    // the path exists and is exercised by the boot before anything depends on it.
+    // is RFC 0073's whole subject. These entries are built here rather than
+    // submitted by a component, and that is now a statement about *this
+    // demonstration* rather than about the tree: `user/supervisor` submits a
+    // real `op::SPAWN` above. What the scripted stop keeps is a stop whose
+    // deadline the boot chooses, which a component cannot be asked to produce
+    // on cue.
+    //
+    // The frame is its own submitter here, as it was everywhere before there was
+    // a supervisor; `submitted_from` is the same bytes, copied one statement
+    // earlier so the server can hold the other half exclusively.
+    let submitted_from = supervisor;
     let mut serving = Serving {
         place: &mut place,
+        submitter: &submitted_from,
         supervisor: &mut supervisor,
         frames,
         account: &account,
@@ -1739,6 +1944,36 @@ struct Extra {
     region: Frame,
 }
 
+/// Who puts the first occupant into a place [`fill`] has just built.
+///
+/// # Why this is a parameter and not two functions
+///
+/// Because the *place* is identical either way and that is the claim being
+/// made. RFC 0041's place is a content hash, an endpoint and an account, and
+/// nothing about it knows who spawns into it; a second `fill` for the held-open
+/// case would be a second set of admissions, and `fill`'s own doc comment
+/// already says what happens when two bodies build one thing — the boot log
+/// says two places were filled and means two different things by it.
+///
+/// So the only difference is whether the spawn happens here, and it is one
+/// branch at the one line where it could differ.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Occupant {
+    /// The frame spawns, immediately, as it has since E1-B05 began. Every place
+    /// but one.
+    ByTheFrame,
+    /// The place is built, admitted and left **empty**, for `user/supervisor` to
+    /// fill from ring 3 over its control ring.
+    ///
+    /// This is the half of RFC 0008 the frame has been holding: *restart is the
+    /// supervisor's act and the frame provides only the mechanism.* A place in
+    /// this state is not a failure and is not a partial boot — it is a place
+    /// with no occupant, which is exactly the state RFC 0041 says a place
+    /// spends most of its life in and the state a connect is required to pend
+    /// against.
+    ByTheSupervisor,
+}
+
 /// Build a place from one component file, stake it with an account its own
 /// manifest sized, and put its first occupant in.
 ///
@@ -1775,6 +2010,7 @@ unsafe fn fill(
     report: &mut Report,
     tree: &crate::state::Tree,
     slot: usize,
+    occupant: Occupant,
 ) -> Result<Extra, Failure> {
     // `fill` keeps the table by value below; every call it makes downwards
     // takes a shared reference, because a spawn tests and does not keep.
@@ -1822,16 +2058,20 @@ unsafe fn fill(
     )?;
     admitted_line(record, region.bytes());
 
-    let offered = offer(supervisor, &account, &place, record, frames)?;
-    // SAFETY: the caller's guarantee, passed down. The place was built a few
-    // lines ago and is empty.
-    let spawned = unsafe {
-        spawn(frames, kernel, features, &mut place, &account, supervisor, reservations, offered)
-    }?;
-    report.spawns += 1;
-    report.unbound += unbound_needs(record);
-    spawned_line(record, &place, spawned);
-    mounted_line(record, &place, mount(tree, &place, report)?);
+    if occupant == Occupant::ByTheFrame {
+        let offered = offer(supervisor, &account, &place, record, frames)?;
+        // SAFETY: the caller's guarantee, passed down. The place was built a few
+        // lines ago and is empty.
+        let spawned = unsafe {
+            spawn(frames, kernel, features, &mut place, &account, supervisor, reservations, offered)
+        }?;
+        report.spawns += 1;
+        report.unbound += unbound_needs(record);
+        spawned_line(record, &place, spawned);
+        mounted_line(record, &place, mount(tree, &place, report)?);
+    } else {
+        held_line(record, region.bytes());
+    }
 
     // And the reservation the *place* holds, kept once and not per occupant.
     // RFC 0007's memory is never reclaimed for the life of the reservation and
@@ -1858,10 +2098,25 @@ unsafe fn fill(
 /// sentence `kernel/src/runtime.rs` has carried since RFC 0033 becoming false,
 /// and a reader comparing two boots across the change should meet it where it
 /// happened rather than in a summary at the end.
-fn scheduled_line(cpu: usize, announced: bool, death: crate::process::Death, ticks: u64) {
+/// # Why no tick count, having had one
+///
+/// Because it is time-derived and this line is in the log `cargo xtask trace`
+/// hashes. `kernel/src/state.rs` wrote the rule down at E0-B14 — *nothing
+/// time-derived is published, deliberately: a tick count would make two runs of
+/// one commit disagree for a reason that has nothing to do with the kernel* —
+/// and this line broke it from the day it was written.
+///
+/// It got away with it for exactly one increment. While the occupant announced
+/// itself and ended, the count was zero or one and two boots agreed by luck;
+/// the moment the occupant read a board, adopted a ring and submitted a spawn,
+/// it became a measurement of how busy the host was, and `trace` went red with
+/// two hashes that differed. That is the check working. The number it caught was
+/// never evidence of anything — *did it reach ring 3* is what this line is for,
+/// and `announced` answers that.
+fn scheduled_line(cpu: usize, announced: bool, death: crate::process::Death) {
     crate::kprintln!(
         "  scheduled     place supervisor on core {cpu} — the first occupant of a place given \
-         one; it {} itself after {ticks} tick(s) in ring 3",
+         one; it {} itself from ring 3",
         if announced { "announced" } else { "never announced" },
     );
     // How it ended, named rather than coded. The first time an occupant was
@@ -1917,6 +2172,278 @@ fn admitted_line(record: &Record, staked: u64) {
         f_abi::manifest::class::label(record.class),
         record.memory_bytes,
         account_bytes(record).saturating_sub(record.memory_bytes),
+        staked,
+    );
+}
+
+/// The layout of a supervisor's board is `f_supervisor::routing`'s, and this is
+/// where the two definitions are required to be one.
+///
+/// A comment would be a claim; this is a check, and the kernel is the artefact
+/// that links both definitions. The same arrangement `kernel/src/blk.rs` has for
+/// the three drivers and `ring/src/heap.rs` for the heap.
+const _: () = assert!(crate::process::BOARD == f_supervisor::routing::AT);
+const _: () = assert!(f_supervisor::routing::BYTES as u64 == FRAME_SIZE);
+
+/// Fill in the page the supervisor reads before it does anything else.
+///
+/// Written through the direct map, into a frame this instance's account paid for
+/// and this frame mapped at [`crate::process::BOARD`], **before the core is told
+/// to run**. That ordering is the whole reason the component may believe it, and
+/// it is why the magic goes in last: a supervisor that read a half-written board
+/// would be a supervisor spawning out of somebody else's arithmetic.
+///
+/// # Errors
+///
+/// [`Failure::WrongPlace`] for an occupant with no board — a component that
+/// declared no `board` need is not a supervisor, and filling in a page it never
+/// asked for would be a write into the direct map at offset zero.
+///
+/// # Safety
+///
+/// `occupant.board` must be the direct-map address of a frame this instance owns
+/// and nothing else references, and the core that will read it must not have
+/// been started yet.
+unsafe fn write_board(
+    frames: &FrameAllocator,
+    occupant: &mut Instance,
+    open: &Extra,
+    supervisor: &Table,
+) -> Result<(), Failure> {
+    use f_supervisor::routing::at;
+
+    if occupant.board == 0 {
+        return Err(Failure::WrongPlace);
+    }
+
+    // --- the powerbox grant -------------------------------------------------
+    //
+    // The account the held-open place was staked with, granted **into the
+    // supervisor's own table** so that the spawn it submits names a capability
+    // it holds. RFC 0008 calls this the powerbox grant and it is the whole
+    // difference between a supervisor and a component that types an index: the
+    // frame resolves `entry.cap` in the submitter's table, so a supervisor that
+    // had not been handed this would be refused `AUTHORITY/RIGHT_NOT_HELD` —
+    // which is exactly what the first boot of this path was, and it was the
+    // check working rather than the check failing.
+    //
+    // `GRANT` beside the four the account already carries, because spending an
+    // `Untyped` on somebody else's behalf is handing authority on, and that is
+    // the right which names doing so. `Serving::spawn` requires it by name.
+    //
+    // Granted from what the *frame's* table says the object is, rather than from
+    // `Account::floor` and a length computed here: one reading, from the place
+    // that owns it.
+    let found = supervisor.inspect(open.account.handle).map_err(Failure::Need)?;
+    let account = grant_into(
+        &mut occupant.table,
+        frames,
+        CapType::Untyped,
+        rights::READ | rights::WRITE | rights::DERIVE | rights::REVOKE | rights::GRANT,
+        found.object,
+        found.extent,
+    )?;
+    // SAFETY: the caller's guarantee. One frame, mapped by the direct map, owned
+    // by this instance, and not yet reachable from any other core.
+    let page =
+        unsafe { core::slice::from_raw_parts_mut(occupant.board as *mut u8, FRAME_SIZE as usize) };
+    let mut put = |offset: u32, value: u64| {
+        let start = offset as usize;
+        if let Some(slot) = page.get_mut(start..start + 8) {
+            slot.copy_from_slice(&value.to_le_bytes());
+        }
+    };
+    put(at::CONTROL_AT, crate::process::SPAWN_CONTROL);
+    put(at::CONTROL_LEN, FRAME_SIZE);
+    // The supervisor's own handle for the account it may spend — the one granted
+    // a few lines above, in *its* table. Not the frame's name for the same
+    // object: the two tables number their slots separately, so a handle copied
+    // across would name whatever happened to be in that slot on the other side.
+    // And not `Instance::first`, which is this component's handle for its *own*
+    // account — the memory it is made of, not the memory it may spend.
+    put(at::ACCOUNT, u64::from(account.bits()));
+    put(at::PLACES, 1);
+    put(at::MANIFEST, open.place.manifest.bits());
+    // Last, so that a component reading a page this function did not finish
+    // finds a zero rather than a plausible layout. Nothing here races — the core
+    // is idle until `start_on` — and the order is kept anyway, because the day
+    // something does race is the day nobody remembers this was safe. The same
+    // sentence `kernel/src/blk.rs` writes over its own board.
+    put(at::MAGIC, f_supervisor::routing::MAGIC);
+    Ok(())
+}
+
+/// What the supervisor said it did, read out of the far half of its board.
+///
+/// RFC 0013's *read, never delivered*: the frame watching a component through
+/// memory it granted, costing the component nothing and telling it nothing.
+///
+/// Answers zeroes for an occupant with no board, which is every component but
+/// one. That is not a silent failure — the caller prints what this returns
+/// beside what the *frame* counted, and the two disagreeing is the finding.
+///
+/// # Safety
+///
+/// As [`write_board`], except that the core must have finished rather than not
+/// started.
+unsafe fn read_board(occupant: &Instance) -> (u64, u64) {
+    if occupant.board == 0 {
+        return (0, 0);
+    }
+    use f_supervisor::routing::at;
+    // SAFETY: the caller's guarantee.
+    let page =
+        unsafe { core::slice::from_raw_parts(occupant.board as *const u8, FRAME_SIZE as usize) };
+    let get = |offset: u32| -> u64 {
+        let start = offset as usize;
+        page.get(start..start + 8)
+            .and_then(|slot| slot.try_into().ok())
+            .map_or(0, u64::from_le_bytes)
+    };
+    (get(at::SUBMITTED), get(at::REFUSED))
+}
+
+/// Answer everything the supervisor has asked for, and nothing else.
+///
+/// **The frame's polling point.** R05: nothing is delivered asynchronously, and
+/// what happens here is this core looking at a ring in its own loop while
+/// another core is inside a component. `kernel/src/supervisor.rs`'s
+/// `Supervising::serve` is the same function for a driver's ring, and the two
+/// are deliberately not merged: what they share is a loop and what they differ
+/// in is every refusal, so one function with a mode would be one function that
+/// could answer a spawn out of a driver's authority.
+///
+/// # Errors
+///
+/// [`Failure::Ring`] for a ring that stopped validating, or one with no room for
+/// an answer — an operation performed and then not answered is a supervisor
+/// waiting forever for a reply that was dropped on the floor, so the room is
+/// checked *before* the entry is acted on.
+/// Answers how many entries were served and the last refusal among them, or
+/// zero for a run in which nothing was refused. **The refusal is returned rather
+/// than only posted**, because the submitter of these entries has already ended
+/// and cannot read its own completions — so a refusal that went only onto the
+/// ring would be a refusal nothing in the machine ever reports.
+fn serve(asks: &Consumer, answers: &Poster, serving: &mut Serving) -> Result<(u32, i32), Failure> {
+    let broken = || Failure::Ring(error::pack(error::PEER, error::peer::GONE));
+    let mut answered = 0;
+    let mut refusal = 0;
+    loop {
+        let Some(entry) = asks.pop().map_err(|_| broken())? else { return Ok((answered, refusal)) };
+        if answers.free().map_err(|_| broken())? == 0 {
+            return Err(broken());
+        }
+        let answer = serving.execute(&entry);
+        if answer.result != 0 {
+            refusal = answer.result;
+        }
+        answers.post(answer).map_err(|_| broken())?;
+        answered += 1;
+    }
+}
+
+/// What the supervisor asked for and what it says it did.
+///
+/// Two counts from two sides of the privilege boundary on one line, because
+/// that is the only form in which either is evidence. The frame's `answered` is
+/// what this core actually served; `submitted` and `filled` are the component's
+/// own account of itself out of its board. A boot where they disagree has a
+/// supervisor that cannot see its own ring or a frame that answered something
+/// nobody asked — and a line carrying only one of them could not tell you which.
+fn supervised_line(frame: (u64, i32), filled: u32, said: (u64, u64)) {
+    let (submitted, unsent) = said;
+    let (answered, refusal) = frame;
+    crate::kprintln!(
+        "  supervised    the supervisor submitted {} spawn(s) from ring 3 and could not submit \
+         {}; the frame answered {}, filled {} place(s), last refusal {:#010x}",
+        submitted,
+        unsent,
+        answered,
+        filled,
+        refusal as u32,
+    );
+}
+
+/// Which module is the supervisor, by its manifest's label.
+///
+/// A label and not an index, for the reason `held_open` gives about the loader's
+/// order, and a label and not a content hash because the hash is a property of
+/// this build and the label is a property of the component — a supervisor
+/// recompiled is still the supervisor.
+fn supervising(modules: &[&'static [u8]; PLACES_MAX], count: usize) -> Option<usize> {
+    (1..count).find(|index| {
+        modules
+            .get(*index)
+            .copied()
+            .is_some_and(|module| Record::read(module).is_ok_and(|r| r.label() == SUPERVISOR))
+    })
+}
+
+/// Which place the frame builds and leaves for the supervisor to fill.
+///
+/// # Why this is one place and why it is that one
+///
+/// One, because the bootstrap argument only buys what it costs: a frame that
+/// held every place open would be a frame betting the whole boot on a component
+/// that has been executing for two commits. The interesting claim is that a
+/// spawn can come from above the frame at all, and one place demonstrates it as
+/// completely as four.
+///
+/// [`SUPERVISED`] and not *the next one along*, and three things pick it.
+///
+/// **It cannot be the first place.** That one is built before this loop and is
+/// the subject of every scripted demonstration below — the connect that pends,
+/// the fault, the restart, the retirement. Holding it open would not be an
+/// experiment about who spawns; it would be deleting the rest of the boot.
+///
+/// **It cannot be a place this boot then schedules.** The occupant would be
+/// running while the frame was still answering the supervisor's ring for it.
+///
+/// **Of the three that remain it is the one nothing else stands up.** All three
+/// drivers are spawned into places here and then, on the datapath boots, stood
+/// up *outside* those places by `prepare_driver` — which is `CHAOS_GAP`, still
+/// declared and still true. `virtio-gpu` is the one whose datapath boot this
+/// change cannot perturb, and holding its place open points at where that gap
+/// closes rather than away from it.
+///
+/// The earlier version of this comment named `user/store` and argued that a
+/// driver would entangle the evidence. It was wrong twice over: `store` is the
+/// first place, so it was never available, and the entanglement runs the other
+/// way — a driver's place is exactly the one a supervisor should end up filling.
+///
+/// Answers `None` when there is no supervisor to fill it, no such module, or no
+/// worker core — in each of which cases the frame spawns everything, exactly as
+/// it did before this change, and the boot is the boot it always was.
+fn held_open(modules: &[&'static [u8]; PLACES_MAX], count: usize, worker: bool) -> Option<usize> {
+    if !worker || supervising(modules, count).is_none() {
+        return None;
+    }
+    (1..count).find(|index| {
+        modules
+            .get(*index)
+            .copied()
+            .is_some_and(|module| Record::read(module).is_ok_and(|r| r.label() == SUPERVISED))
+    })
+}
+
+/// A place built, admitted, and deliberately left empty.
+///
+/// Its own line rather than a silence, because a place with no occupant and a
+/// place that failed to get one look identical in a log that only prints
+/// successes — and this boot now contains one of each on purpose. A reader who
+/// cannot tell them apart cannot read the evidence for RFC 0008 either way.
+///
+/// It carries no content hash, which is what keeps `xtask`'s `spawned_from`
+/// honest: that check counts the manifests a boot *spawned*, and this place has
+/// not been spawned into yet. The line that follows it when the supervisor
+/// succeeds is an ordinary [`spawned_line`], carrying the hash, printed from the
+/// ring server — so the count is right without the check knowing which side
+/// submitted.
+fn held_line(record: &Record, staked: u64) {
+    crate::kprintln!(
+        "  held          {} — place built and admitted against a {} B account, occupant left to \
+         the supervisor (RFC 0008)",
+        core::str::from_utf8(record.label()).unwrap_or("?"),
         staked,
     );
 }
@@ -2224,6 +2751,12 @@ unsafe fn spawn(
     // Where this component's heap landed, for the instance below. Zero when it
     // declared no `heap` need, which is every component but one today.
     let mut heap_at = 0u64;
+    // And its board, on the same terms. Zero for every component that is not the
+    // supervisor, which is what makes `write_board` refusing on zero a real
+    // check rather than a formality: a frame that tried to fill in a board for a
+    // component with no `board` need would be writing into the direct map at
+    // offset zero.
+    let mut board_at = 0u64;
     // The first capability the child is given, for the word it is entered with.
     let mut first = Handle::NULL;
     for need in record.needs() {
@@ -2303,6 +2836,45 @@ unsafe fn spawn(
             // `HEAP_MAX`.
             unsafe { f_ring::heap::describe(at, u32::try_from(found.extent).unwrap_or(0)) };
         }
+
+        // The board, and it is the second need the frame maps rather than merely
+        // granting — for the first one's reason, one step earlier. A supervisor
+        // has to read this page to know which ring to adopt, so there is no
+        // instruction it could have executed before the page was there.
+        //
+        // It is a *need* and not a fixed part, which is the whole of why this
+        // costs no arithmetic anywhere else: the account pays for it because the
+        // manifest declares it, `admit` already sizes declared needs, and
+        // `cargo xtask lint-manifests` already refuses a manifest that stops
+        // adding up. A component that declares no `board` gets no board and no
+        // mapping — which is every component but one.
+        if named(need, NEED_BOARD) {
+            // Exactly one page. A board is a layout both sides hold and
+            // `f_supervisor::routing::BYTES` is one frame; a need that declared
+            // two would be a second page nothing addresses, and a need that
+            // declared none would be a mapping of nothing at all.
+            if found.extent != FRAME_SIZE {
+                return Err(Failure::Capability(error::pack(
+                    error::ARGUMENT,
+                    error::argument::BAD_ADDRESS,
+                )));
+            }
+            // SAFETY: as the heap above — `space` is this component's and is not
+            // in `CR3`, and `found.object` names a frame the supervisor carved
+            // out of this component's own account.
+            unsafe {
+                paging::map_user(
+                    frames,
+                    &mut space,
+                    crate::process::BOARD,
+                    found.object,
+                    UserPage::Data,
+                    features,
+                )
+            }
+            .map_err(Failure::Space)?;
+            board_at = frames.virt(Frame::from_addr(found.object)) as u64;
+        }
     }
 
     // The state tree, written before the component's first instruction. RFC
@@ -2347,6 +2919,7 @@ unsafe fn spawn(
         tree: tree_at as u64,
         tree_physical: published,
         heap: heap_at,
+        board: board_at,
         tree_nodes,
         tree_snapshot: reader.snapshot(),
         first,
@@ -3293,10 +3866,49 @@ fn open_channel(frames: &mut FrameAllocator, epoch: u32) -> Result<u32, Failure>
 struct Serving<'a> {
     /// The place whose occupant these opcodes act on.
     place: &'a mut Place,
-    /// The submitter's table, and the one every handle in an entry is resolved
-    /// against. Named for what it is rather than for its role here, because
-    /// `Supervising` carries a field of the same type meaning the opposite
-    /// thing and a reader moving between them should trip over that.
+    /// Where the handles an entry *names* are resolved.
+    ///
+    /// # Why this is not the field below, since for two epochs it was
+    ///
+    /// Because they were one field doing two jobs, and the day a component
+    /// started submitting, the two jobs stopped having the same answer.
+    ///
+    /// A capability named in an entry has to be resolved in **the submitter's**
+    /// table — that is the whole of what a capability system is for, and a
+    /// server that resolved a caller's index in its own table would be the
+    /// confused deputy with extra steps. When the frame built these entries
+    /// itself, the submitter was the frame, so one field was right by accident.
+    /// Now `user/supervisor` submits, and the account it names is a handle in
+    /// its own table.
+    ///
+    /// Shared and not exclusive, which is the shape of the claim: an entry's
+    /// handles are *read*. Nothing a submitter names is minted, cleared or
+    /// grown here.
+    ///
+    /// **It is a copy, taken before the submitter ran.** The core clears an
+    /// occupant's table when the occupant ends, so the live table is empty by
+    /// the time the frame drains a ring the occupant left behind. The copy is
+    /// what the supervisor held at the moment it submitted, which is the
+    /// question this field is asked — *may the submitter spend this?* — and
+    /// answering it from a table emptied afterwards would refuse every entry
+    /// with `AUTHORITY/REVOKED`. That is not a theory: it is the refusal the
+    /// first boot of this path produced.
+    submitter: &'a Table,
+    /// Where handles are **minted**, and where what a spawn charged is recorded
+    /// for the teardown that gives it back.
+    ///
+    /// The frame's, and RFC 0008 says it should be the supervisor's. That half
+    /// has not moved and this is where the reason sits rather than in a
+    /// paragraph somewhere else: `offer` mints one name per need and `spawn`
+    /// records them in [`Instance::supplied`], and [`tear_down`] walks that list
+    /// in *this* table. Moving the supply to the submitter's table means the
+    /// teardown of a place has to walk whichever table its occupant was spawned
+    /// from — which is a per-place field, not a rename — and the cross-table
+    /// parent link that would make it a derive rather than a grant is RFC 0029's
+    /// and deliberately did not land.
+    ///
+    /// *Reversal:* that link. Then these two fields become one again, from the
+    /// other direction.
     supervisor: &'a mut Table,
     /// Where the frames a spawn charges come from.
     frames: &'a mut FrameAllocator,
@@ -3369,7 +3981,7 @@ impl Serving<'_> {
         // somebody else's behalf is handing authority on, which is the right
         // that names doing so.
         if let Err(packed) =
-            self.supervisor.invoke(Handle::from_bits(entry.cap), CapType::Untyped, rights::GRANT)
+            self.submitter.invoke(Handle::from_bits(entry.cap), CapType::Untyped, rights::GRANT)
         {
             return f_ring::refusal(entry.user_data, packed, u64::from(entry.cap), 0);
         }
@@ -3485,7 +4097,7 @@ impl Serving<'_> {
         // doing it in two steps is how a check that passes on the wrong type
         // gets written.
         if let Err(packed) =
-            self.supervisor.invoke(Handle::from_bits(entry.cap), CapType::Endpoint, rights::REVOKE)
+            self.submitter.invoke(Handle::from_bits(entry.cap), CapType::Endpoint, rights::REVOKE)
         {
             return f_ring::refusal(entry.user_data, packed, u64::from(entry.cap), 0);
         }

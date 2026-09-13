@@ -112,7 +112,7 @@ use crate::supervisor::{Declared, Registers, Supervising, declared, order_for};
 /// second time, in a second crate.
 ///
 /// `f_virtio_net::routing::AT` is written down in the component and
-/// `kernel::process::BLK_BOARD` in the frame, and they are linked separately.
+/// `kernel::process::BOARD` in the frame, and they are linked separately.
 /// The kernel is the one artefact that links both definitions, so the agreement
 /// is a check rather than a comment.
 ///
@@ -123,7 +123,7 @@ use crate::supervisor::{Declared, Registers, Supervising, declared, order_for};
 /// assertions, and a third driver adds a third. RFC 0051 says where the constant
 /// should live instead and why moving it is not this task's to do.
 const _: () = assert!(
-    crate::process::BLK_BOARD == routing::AT,
+    crate::process::BOARD == routing::AT,
     "the frame and the network driver disagree about where the routing page is"
 );
 

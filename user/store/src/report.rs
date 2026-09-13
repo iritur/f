@@ -286,7 +286,7 @@ pub const fn label(code: u8) -> &'static str {
 /// naming the cause.
 ///
 /// The three driver crates have had the other arrangement since RFC 0047:
-/// `kernel/src/blk.rs` carries `const _: () = assert!(process::BLK_BOARD ==
+/// `kernel/src/blk.rs` carries `const _: () = assert!(process::BOARD ==
 /// routing::AT)`, and a half-done move does not link. This is that, for the
 /// shape that did not have it.
 /// Unit: bytes, in this component's address space.

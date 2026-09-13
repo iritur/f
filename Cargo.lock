@@ -80,6 +80,7 @@ dependencies = [
  "f-hash",
  "f-ring",
  "f-store",
+ "f-supervisor",
  "f-virtio-blk",
  "f-virtio-gpu",
  "f-virtio-net",

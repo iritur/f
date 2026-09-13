@@ -34,10 +34,17 @@
 //!
 //! # Why a `Start` trait rather than a spawn
 //!
-//! Because there is no supervisor component yet. `kernel/src/component.rs` says
-//! so at length and `cargo xtask lint-owed` holds the sentence: nothing
-//! implements `f_abi::control::op::SPAWN`, and the frame is holding the ground
-//! a supervisor will stand on. So this crate decides **what to start, in what
+//! Because the supervisor component cannot yet be handed this work, and the
+//! reason has moved. It used to be that **nothing implemented**
+//! `f_abi::control::op::SPAWN`; `user/supervisor` submits one now and the frame
+//! answers it, so a component spawned by a component is something a boot
+//! contains rather than something this comment is waiting for.
+//!
+//! What that supervisor does is fill a list the frame wrote on its board, once,
+//! and end. It cannot be *asked* — nothing is delivered to a component while it
+//! runs, which `kernel/src/component.rs` argues at the join — and being asked is
+//! the whole of what this trait is for: an assembler decides a topology and then
+//! says *start this one*. So this crate still decides **what to start, in what
 //! order, bound to which device** — which is all of `E2-B05` that can exist
 //! before that day — and the act of starting is injected as [`start::Start`].
 //!
@@ -46,9 +53,12 @@
 //! implemented by the *system* and called by this crate, and nothing a peer
 //! sends registers anything.
 //!
-//! *Reversal, with an owner:* `E1-B05` moves restart policy above the frame and
-//! `E2-B06` puts the swap opcodes on the control ring. On that day the
-//! implementation of this trait is a component submitting `SPAWN`, and what
+//! *Reversal, with an owner, and half of it has arrived:* `E1-B05` moves restart
+//! policy above the frame and `E2-B06` puts the swap opcodes on the control
+//! ring. The half that arrived is the submission — a component does submit
+//! `SPAWN` now. The half that has not is the policy, which is still in the frame
+//! and still on `cargo xtask lint-owed`'s list. On the day it moves, the
+//! implementation of this trait is a supervisor answering a request, and what
 //! moves is one impl rather than this crate.
 //!
 //! # What this crate is not, and what it costs

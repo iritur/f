@@ -380,18 +380,34 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
 /// - **RFC 0008.** *Restart is the supervisor's act and the frame provides only
 ///   the mechanism.* The policy runs in the frame. `component::policy::decide`
 ///   was written to take a record and a tally and no kernel state precisely so
-///   that moving it would be a move rather than a rewrite, and what it is
-///   waiting for is not a place to move to but a supervisor to move into: a
-///   component that can be told its occupant died and can say *spawn it again*.
-///   RFC 0047 built the half of that a driver needed — a component asks the
-///   frame for something on its control ring and the frame answers — and did
-///   not build `op::SPAWN` or `op::STOP` behind it.
+///   that moving it would be a move rather than a rewrite, and **the place to
+///   move into now exists**: `user/supervisor` is scheduled, adopts its control
+///   ring and submits a real `op::SPAWN` that the frame answers, so a boot now
+///   contains a component spawned by a component.
+///
+///   What is missing is the input. Deciding starts from *the occupant died*,
+///   which arrives as a `notice::PEER_GONE` on the supervisor's own ring — and
+///   this supervisor cannot read its ring while it runs, because the frame
+///   serves that ring only after the core has finished. `kernel/src/component.rs`
+///   argues that at the join: a spawn names the submitter's `Untyped`, so
+///   answering one mid-run means the boot processor resolving handles in a table
+///   a running core may mutate, which is a fifth place two cores reach.
+///
+///   So the reason this row is unpaid has changed twice now, and both times it
+///   got smaller. It is no longer *there is nowhere to put it* and no longer
+///   *nothing submits*; it is *the supervisor cannot be told*.
 /// - **RFC 0014.** `ANNOUNCE` and `PROGRESS` retire when a component is started
-///   with a channel and told on it. The channel exists now and carries
-///   operations in both directions; what a component still cannot do is *be
-///   started* by anything but the frame writing a job into a per-core slot, so
-///   `ANNOUNCE` has nothing to announce itself onto that the frame did not
-///   already know.
+///   with a channel **and told on it**. The first half is done: a supervisor is
+///   started with a channel and submits on it. The second is not, for the reason
+///   RFC 0008's entry above now gives — nothing is delivered to a component
+///   while it is running — so `ANNOUNCE` is still how a component says it is
+///   here, and it is still the frame hearing it rather than a peer.
+///
+///   The previous version of this text said *a component cannot be started by
+///   anything but the frame writing a job into a per-core slot*. That is still
+///   how a component is started, and it stopped being the reason: the frame
+///   writes the job, and what the component then does on its channel is the
+///   thing this row is about.
 /// - **RFC 0015.** The four capability calls retire onto
 ///   `control::op::INSPECT`, `DERIVE`, `REVOKE` and `MAP`. All four opcodes are
 ///   named in `abi/src/control.rs` and nothing implements them; the two that
@@ -406,15 +422,16 @@ const OWED_REVERSALS: &[Gap] = &[
     (
         "kernel/src/component.rs",
         "policy::decide(",
-        "RFC 0008: the restart policy runs in the frame, where that RFC says it does not belong",
+        "RFC 0008: the restart policy runs in the frame, where that RFC says it does not belong — \
+         the supervisor it would move into now spawns, and still cannot be told its occupant died",
         "TODO.md E1-B05; docs/rfc/0008; kernel/src/component.rs's module comment; \
          claims/0006-driver-restart-latency.toml's [workload] notes",
     ),
     (
         "abi/src/door.rs",
         "pub const ANNOUNCE",
-        "RFC 0014: `ANNOUNCE` and `PROGRESS` are still on the door, because nothing starts a \
-         component with a channel",
+        "RFC 0014: `ANNOUNCE` and `PROGRESS` are still on the door — a component is started with \
+         a channel now and submits on it, but nothing is told to one while it runs",
         "TODO.md E1-B05; docs/rfc/0014; abi/src/door.rs's module comment",
     ),
     (

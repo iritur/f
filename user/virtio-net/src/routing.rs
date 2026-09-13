@@ -19,7 +19,7 @@
 //! # The two drivers hold the same constant, and that is a finding
 //!
 //! [`AT`] equals `f_virtio_blk::routing::AT`, and both equal
-//! `kernel::process::BLK_BOARD`. That is not a coincidence and it is not
+//! `kernel::process::BOARD`. That is not a coincidence and it is not
 //! sharing: the frame builds *one* driver shape — `process::prepare_driver` —
 //! whose address plan reserves a text region, a stack, a control ring, a data
 //! ring, a board, four register pages and a queue region, and every driver
@@ -89,7 +89,7 @@ pub mod life {
 ///
 /// The one number both sides hold, and — see the module comment — the same
 /// number the block driver holds, because there is one driver shape in the
-/// frame. It must equal `kernel::process::BLK_BOARD`, and `kernel/src/net.rs`
+/// frame. It must equal `kernel::process::BOARD`, and `kernel/src/net.rs`
 /// asserts that at compile time rather than saying it in a comment.
 ///
 /// Unit: bytes, in the component's own address space.

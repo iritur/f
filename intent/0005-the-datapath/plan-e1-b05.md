@@ -226,22 +226,90 @@ open here.
 `E2-B10`'s exit — a boot in which a component allocates — is met by this
 increment, and the line is the originator's to tick.
 
-### 7 — the policy moves, and three owed reversals are paid
+### 7 — the supervisor spawns *(done)*
 
-**Files:** `kernel/src/component.rs`, `user/supervisor/src/component.rs`,
-`abi/src/door.rs`, `xtask/src/main.rs` (`OWED_REVERSALS`).
+**Files:** `kernel/src/component.rs`, `kernel/src/process.rs`,
+`user/supervisor/{manifest.toml,src/component.rs,src/lib.rs,src/routing.rs}`,
+`Cargo.toml`, `kernel/Cargo.toml`, `xtask/src/main.rs`, the three driver
+`routing.rs` files.
 
-`policy::decide` (`kernel/src/component.rs:369`) was written over a `&Record`, a
-`&mut Budget` and a tick with no kernel state at all, precisely so this is a
-move. The work is in the callers — `:1212`, `:1331`, `:1378-1379` — each of
-which decides inline inside teardown today and must become *post the death
-outward, wait for a `SPAWN`*. The supervisor gains the `notice::PEER_GONE` arm
-that reads the cause `abi/src/control.rs` packs.
+The frame holds one place open — `virtio-gpu`'s, picked by `held_open` for three
+stated reasons — schedules `user/supervisor` on a worker core, and answers the
+`op::SPAWN` that component submits on its own control ring. The boot:
 
-Then `ANNOUNCE` and `PROGRESS` retire off the door (RFC 0014) because a
-component is now started by something other than the frame writing a job into a
-per-core slot, and the four capability calls retire onto `INSPECT`/`DERIVE`/
-`REVOKE`/`MAP` (RFC 0015).
+```
+held          virtio-gpu — place built and admitted against a 4194304 B account,
+              occupant left to the supervisor (RFC 0008)
+scheduled     place supervisor on core 1 — it announced itself from ring 3
+occupant      ended itself with status 0
+supervised    the supervisor submitted 1 spawn(s) from ring 3 and could not submit 0;
+              the frame answered 1, filled 1 place(s), last refusal 0x00000000
+spawn         place virtio-gpu epoch 0 — manifest 0x218eee25ee616281, 4 need(s) supplied
+```
+
+**Four things this increment found, each of them a check working.**
+
+*`AUTHORITY/RIGHT_NOT_HELD`.* `Serving` had one field for two jobs — where a
+handle is *resolved* and where handles are *minted*. While the frame built its
+own entries the submitter was the frame, so one field was right by accident. A
+component submitting makes them different tables, and resolving a caller's index
+in the server's own table is the confused deputy. Split into `submitter` and
+`supervisor`, with the supply staying the frame's until RFC 0029's cross-table
+link lands — because `tear_down` walks `Instance::supplied` in that table.
+
+*`AUTHORITY/REVOKED`.* A core clears an occupant's table when the occupant ends,
+so by the time the frame drains a ring the occupant left behind, every handle in
+it is gone. The submitter's table is now a copy taken at the moment the
+supervisor was started, which is the state the question *may the submitter spend
+this?* is actually about.
+
+*The powerbox grant was missing.* A supervisor must *hold* the account it names.
+`write_board` grants the held-open place's `Untyped` into the supervisor's own
+table with `GRANT` beside the four it already carries, and writes that handle —
+the supervisor's own name for it, not the frame's — onto the board.
+
+*`cargo xtask trace` went red.* `scheduled_line` printed a tick count, which is
+time-derived, into the log `trace` hashes — breaking the rule `state.rs` wrote
+down at E0-B14. It got away with it for exactly one increment: while the
+occupant only announced and ended, two boots agreed by luck. Removed; `announced`
+is what the line was for.
+
+**Where the board came from.** A supervisor is *told* what it may spend and fill,
+for `user/virtio-blk/src/routing.rs`'s reason and a sharper one — the frame
+chooses out of the modules the loader placed, and one recorded hardware boot
+placed them in a different order. It arrives as a declared `board` need, so the
+account pays for it and `lint-manifests` checks it; `BLK_BOARD` is `BOARD` now,
+because it is four shapes' address rather than the block driver's.
+
+**Gate:** met. `cargo xtask verify` — `verify: all green`, exit 0.
+
+### 8 — the policy moves, and three owed reversals are paid
+
+**Files:** `kernel/src/component.rs`, `user/supervisor/src/`, `abi/src/door.rs`,
+`xtask/src/main.rs` (`OWED_REVERSALS`).
+
+`policy::decide` was written over a `&Record`, a `&mut Budget` and a tick with no
+kernel state at all, precisely so this is a move. **Increment 7 found what it is
+actually blocked on, and it is not what this plan assumed.**
+
+The assumption was that the blocker was a place to move into. It is not: the
+supervisor exists, is scheduled, and submits. The blocker is the *input* —
+deciding starts from `notice::PEER_GONE`, and this arrangement serves a
+supervisor's control ring only **after** its core has finished, so nothing is
+delivered to a component while it runs.
+
+That is deliberate and it is the thing increment 8 has to reopen. Serving the
+ring mid-run means the boot processor resolving handles in a table the running
+core may mutate with its own capability calls — a fifth place two cores reach,
+which `CLAUDE.md` and RFC 0016 say needs an argument. **So increment 8 opens with
+an RFC and not with code**, and it has two candidate answers: a per-core serving
+arrangement in which the core running the supervisor answers its own ring, or
+RFC 0016's fifth shared word with the ordering named at the access.
+
+Only then do `ANNOUNCE` and `PROGRESS` retire off the door (RFC 0014) — half of
+that reversal's condition is already met, since a component *is* started with a
+channel and submits on it; what is missing is being told on it — and the four
+capability calls retire onto `INSPECT`/`DERIVE`/`REVOKE`/`MAP` (RFC 0015).
 
 **Gate:** `cargo xtask lint-owed` drops from four rows to one — RFC 0051's
 `Reported` merge, which is unrelated and stays.
@@ -254,7 +322,12 @@ per-core slot, and the four capability calls retire onto `INSPECT`/`DERIVE`/
   that list. Both are in the corrections document for the originator.
 - **It does not close `E1-B05`.** The line's exit is `E1-P06 passes`, and
   `E1-P06` is a separate task that kills drivers under sustained load. Increment
-  6 makes that possible; it does not perform it.
+  6 makes that possible; it does not perform it. Increment 7 moves one step
+  further in the same direction without reaching it either: `CHAOS_GAP` says the
+  driver is *scheduled outside the place its manifest is spawned into*, and the
+  place a supervisor now fills is a driver's — so the occupant a boot can kill
+  and the occupant that serves the datapath are one spawn closer to being the
+  same component, and still are not.
 - **It registers no number.** Nothing here is a measurement, and the one figure
   this makes true — a non-zero heap peak — is a count read out of a prologue,
   not a time. `claims/0006-driver-restart-latency.toml` is where a restart
