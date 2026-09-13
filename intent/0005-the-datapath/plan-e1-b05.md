@@ -198,6 +198,25 @@ changed, which is a red build for a false reason.
   it is why this work is based on the branch that declared it. The constant's
   fourth field names the documents to update in the same diff.
 
+**Outcome, and the gate is not met.** The mechanism landed in `9ddde09`: the
+supervisor's occupant enters ring 3 under its own address space on every boot,
+which is the first half of RFC 0033's sentence becoming false. It then dies on
+its first instruction — `exception 14 at 0x410ff8, error 0x6`, a stack probe
+walking `0x4008` past `SPAWN_STACK_TOP` into the guard page. So `peak` is still
+zero, `HEAP_GAP`'s needle is still in the tree, and this increment is open.
+
+What closes it is `SPAWN_STACK_PAGES`, and it is a diff of its own rather than a
+line here: four is pinned by three compile-time assertions to constants owned by
+`f_ring` and the two virtio drivers, so it moves in lockstep with them or the
+frame it is too small for shrinks instead.
+
+Two things this increment found that the RFC did not anticipate, both now in it:
+writing `Job` alone is not scheduling — a core needs five per-core shards — and
+the capability table is per-core rather than per-instance, so scheduling swaps it
+in and restores the core's previous one afterwards. That restore also explains a
+non-determinism a sibling session reported: two boots of one unchanged binary
+disagreeing, which `cargo xtask trace` no longer reproduces.
+
 `CHAOS_GAP` is **not** in this gate, and the earlier text was wrong to put it
 there. Its needle is `prepare_driver(` in `kernel/src/blk.rs`, and it closes when
 a *driver* is scheduled inside the place its manifest is spawned into — which
