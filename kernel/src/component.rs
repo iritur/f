@@ -857,12 +857,19 @@ pub struct Report {
     /// for. Zero here means no component allocated anything, which on a tree
     /// where one declares a `heap` need is a finding rather than a default.
     ///
-    /// **It stopped being zero when an occupant was first handed a core.** Until
-    /// then a component spawned into a place was never scheduled, so no
-    /// component with a `heap` need had ever executed and the figure was the
-    /// frame's reading of a region nothing had allocated out of. `HEAP_GAP` in
-    /// `xtask` is the constant that declared that and the check that refuses the
-    /// change — which is how this increment is gated. RFC 0075.
+    /// **It stopped being zero when an occupant was first handed a core**, and
+    /// the two things that had to be true for that are worth keeping together.
+    /// Until `E1-B05` a component spawned into a place was never scheduled, so
+    /// no component with a `heap` need had ever executed (RFC 0075). And once
+    /// one did, it died on its first allocation: `user/init/link.ld` pointed
+    /// `alloc`'s shim marker at the image's first byte, which this toolchain
+    /// *calls* rather than reads, so the allocator re-entered `component::start`
+    /// until the stack met its guard page. Both components that declare a heap
+    /// carried that, and neither could have shown it before one of them ran.
+    ///
+    /// `HEAP_GAP` in `xtask` was the constant that declared the zero and the
+    /// check that refused the change. It is gone, paid; the check is inverted
+    /// and a zero is now the failure.
     pub heap_peak: u32,
     /// Whether any component was ever refused an allocation for want of room.
     ///
