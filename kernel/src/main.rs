@@ -51,7 +51,7 @@ pub mod supervisor;
 
 use core::panic::PanicInfo;
 
-use arch::x86_64::multiboot::{BootInfo, Region, RegionKind};
+use arch::x86_64::multiboot::{BootInfo, FramebufferKind, Region, RegionKind, Video};
 use arch::x86_64::paging;
 use f_env::{Env, SeededEnv};
 
@@ -3611,6 +3611,70 @@ fn report_memory(magic: u32, info: u32) -> BootInfo {
             "  note          {} module(s) beyond what is tracked, and NOT reserved",
             boot.modules_dropped()
         );
+    }
+
+    // What the loader did with the header's video request, which is the whole
+    // of `intent/0011` step 1 and is deliberately a line and not a mapping.
+    //
+    // The two loaders this tree meets answer differently *by construction*, so
+    // this line is a measurement rather than a status: QEMU's `-kernel` loader
+    // does not implement the request — it prints `multiboot knows VBE. we
+    // don't.` on its own stderr and carries on — and GRUB resolves an all-zero
+    // request against the firmware's current mode and fills the fields in. A
+    // boot that prints `none` under QEMU and a geometry under GRUB is the
+    // expected pair, and either one printing the other's answer is the finding.
+    match boot.video() {
+        Video::Absent => kprintln!("  framebuffer   none, the loader answered no video fields"),
+        // Not fatal, and the asymmetry is the point: a loader that set the flag
+        // over fields that do not describe a surface has told us something is
+        // wrong with it, and refusing the boot over a display this kernel does
+        // not yet use would trade a working machine for a diagnosis.
+        Video::Refused(why) => kprintln!("  framebuffer   refused, {why}"),
+        Video::Present(fb) => {
+            kprintln!(
+                "  framebuffer   {} x {} x {} {} at {:#018x}",
+                fb.width,
+                fb.height,
+                fb.bits_per_pixel,
+                fb.kind.label(),
+                fb.addr
+            );
+            kprintln!(
+                "    pitch       {} B, extent {} KiB, ends {:#018x}",
+                fb.pitch,
+                fb.extent() / 1024,
+                fb.end()
+            );
+            if let FramebufferKind::Direct(channels) = fb.kind {
+                // Printed as positions and widths rather than only as a label,
+                // because `other` is a layout this tree has no name for and the
+                // six numbers are what somebody would need to give it one.
+                kprintln!(
+                    "    channels    r {}+{}, g {}+{}, b {}+{}",
+                    channels.red_at,
+                    channels.red_bits,
+                    channels.green_at,
+                    channels.green_bits,
+                    channels.blue_at,
+                    channels.blue_bits
+                );
+            }
+            // Whether this surface needs reserving is a question about the
+            // machine rather than about the design, and it decides how much
+            // step 2 has to do. A framebuffer is normally device memory the map
+            // never called usable; one that sits *inside* a usable region is
+            // memory the frame allocator will hand out from under a display, in
+            // exactly the way an unreserved module would be. Measured and
+            // printed here, acted on in step 2.
+            let overlaps = boot.regions().any(|region| {
+                region.kind == RegionKind::Usable
+                    && region.base < fb.end()
+                    && fb.addr < region.base.saturating_add(region.len)
+            });
+            if overlaps {
+                kprintln!("    note        inside a usable region, and NOT yet reserved");
+            }
+        }
     }
 
     // A map with no usable memory in it is a map that was misread, not a

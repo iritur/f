@@ -26,6 +26,32 @@ const FLAG_CMDLINE: u32 = 1 << 2;
 /// Flag bit 3: `mods_count` and `mods_addr` are populated.
 const FLAG_MODS: u32 = 1 << 3;
 
+/// Flag bit 12: the framebuffer fields are populated.
+///
+/// The loader sets this when it honoured the video request in the header. It is
+/// the *loader's* assertion about its own structure, so it is read the way
+/// every other flag here is read — as permission to look at those words, never
+/// as a promise about what is in them. [`Framebuffer::parse`] disbelieves the
+/// contents separately.
+const FLAG_FRAMEBUFFER: u32 = 1 << 12;
+
+/// The narrowest framebuffer worth believing in, per axis. Unit: pixels.
+///
+/// Not a mode list and not a policy: a guard against a structure whose geometry
+/// words are leftovers. Anything a person could read text on clears it by two
+/// orders of magnitude, and a loader reporting a one-pixel display has told us
+/// something other than a display.
+const FB_DIMENSION_MIN: u32 = 16;
+
+/// The widest, for the same reason and in the same spirit. Unit: pixels.
+///
+/// Sixteen thousand is past any display that exists and still finite, which is
+/// the only property a bound read out of untrusted memory needs. It is *not* a
+/// statement about what this system will drive: the component that draws is
+/// given the geometry the machine reported, and this is where a geometry that
+/// could only be corruption stops.
+const FB_DIMENSION_MAX: u32 = 16_384;
+
 /// How many loaded modules this kernel will keep track of.
 ///
 /// One is what E0-B10 needs: `user/init`. Eight is room for the handful a
@@ -210,6 +236,238 @@ pub struct Region {
     pub kind: RegionKind,
 }
 
+/// How a pixel is built, for a framebuffer the loader called direct colour.
+///
+/// Positions are bit offsets within a pixel and sizes are bit counts, which is
+/// how multiboot states it and how a consumer wants it: the two together are
+/// the whole of a channel and neither is useful alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Channels {
+    /// Bit position of the red field.
+    pub red_at: u8,
+    /// Bits of red.
+    pub red_bits: u8,
+    /// Bit position of the green field.
+    pub green_at: u8,
+    /// Bits of green.
+    pub green_bits: u8,
+    /// Bit position of the blue field.
+    pub blue_at: u8,
+    /// Bits of blue.
+    pub blue_bits: u8,
+}
+
+impl Channels {
+    /// Eight bits each, blue lowest — the layout whose bytes in memory read
+    /// blue, green, red, unused.
+    ///
+    /// Named because it is the one the display driver already pins:
+    /// `f_virtio_gpu::driver::FORMAT` is `B8G8R8X8_UNORM`, which is these
+    /// positions exactly. A firmware surface that reports this needs no
+    /// conversion to carry the same pixels the ring already carries, and one
+    /// that reports anything else is a second format — which is a fact about
+    /// the machine worth printing rather than discovering in a renderer.
+    const BGRX: Self =
+        Self { red_at: 16, red_bits: 8, green_at: 8, green_bits: 8, blue_at: 0, blue_bits: 8 };
+
+    /// The same widths with red lowest: bytes read red, green, blue, unused.
+    const RGBX: Self =
+        Self { red_at: 0, red_bits: 8, green_at: 8, green_bits: 8, blue_at: 16, blue_bits: 8 };
+
+    /// A short label for the boot report, or `other` for a layout with no name
+    /// here. The positions are printed beside it either way, so `other` costs
+    /// the reader nothing but a second of arithmetic.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BGRX => "b8g8r8x8",
+            Self::RGBX => "r8g8b8x8",
+            _ => "other",
+        }
+    }
+}
+
+/// What kind of surface the loader set up.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FramebufferKind {
+    /// Indexed colour through a palette this kernel does not read.
+    Indexed,
+    /// Direct colour, with the channel layout the loader reported.
+    Direct(Channels),
+    /// EGA text cells, not pixels. A legal answer to a video request and not an
+    /// answer to *this* one — the header asks for linear graphics — so a loader
+    /// that returns it has done something other than what was asked.
+    EgaText,
+    /// A type this kernel does not know, kept as a number because the number is
+    /// the only honest thing to say about it.
+    Unknown(u8),
+}
+
+impl FramebufferKind {
+    /// A short label for the boot report.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Indexed => "indexed",
+            Self::Direct(channels) => channels.label(),
+            Self::EgaText => "ega-text",
+            Self::Unknown(_) => "unknown",
+        }
+    }
+}
+
+/// A linear framebuffer the loader set up and handed over.
+///
+/// Every field here was written by the loader and has been bounds-checked, but
+/// **nothing in this structure has been mapped, reserved or touched.** It is a
+/// report. `intent/0011` step 1 is deliberately the reading and not the using:
+/// what reserves this range from the frame allocator and maps it
+/// write-combining is step 2, and keeping them apart is what makes a boot that
+/// prints a wrong geometry a wrong line rather than a wrong mapping.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Framebuffer {
+    /// Physical address of the first pixel.
+    pub addr: u64,
+    /// Bytes from one row to the next. Not `width * bytes_per_pixel` in
+    /// general — a surface is usually padded to something the scanout engine
+    /// likes, and a consumer that assumed otherwise would skew the image.
+    /// Unit: bytes.
+    pub pitch: u32,
+    /// Unit: pixels.
+    pub width: u32,
+    /// Unit: pixels.
+    pub height: u32,
+    /// Bits in one pixel. Unit: bits.
+    pub bits_per_pixel: u8,
+    /// How a pixel is built.
+    pub kind: FramebufferKind,
+}
+
+impl Framebuffer {
+    /// Bytes the whole surface occupies, pitch included.
+    ///
+    /// Saturating rather than checked because [`Self::parse`] has already
+    /// refused a geometry whose product overflows; this is the arithmetic done
+    /// twice rather than trusted once.
+    /// Unit: bytes.
+    #[must_use]
+    pub const fn extent(self) -> u64 {
+        (self.pitch as u64).saturating_mul(self.height as u64)
+    }
+
+    /// One past the last byte.
+    #[must_use]
+    pub const fn end(self) -> u64 {
+        self.addr.saturating_add(self.extent())
+    }
+
+    /// Read the framebuffer fields out of the loader's structure.
+    ///
+    /// Returns the refusal's own sentence on anything that does not describe a
+    /// surface. Refusing is cheap here and expensive later: these numbers are
+    /// the ones a future step will map and write through, so a pitch narrower
+    /// than a row or a height that overflows the extent is a structure to
+    /// disbelieve now rather than a fault in a component that trusted it.
+    ///
+    /// # Safety
+    ///
+    /// `base` must be the loader's validated info structure, as established by
+    /// [`BootInfo::new`], and the caller must have seen [`FLAG_FRAMEBUFFER`] in
+    /// its flags — which is what says these words exist at all.
+    unsafe fn parse(base: *const u32) -> Result<Self, &'static str> {
+        // Words 22 through 28 are byte offsets 88 through 115: the address as
+        // two words, then pitch, width, height, and two words of packed bytes.
+        // SAFETY: the caller's guarantee. The framebuffer fields are the tail of
+        // the fixed-size structure whose earlier words `BootInfo::new` has
+        // already read, and the flag it checked is the loader saying they are
+        // populated.
+        let addr_lo = unsafe { word_at(base, 22) };
+        // SAFETY: as above.
+        let addr_hi = unsafe { word_at(base, 23) };
+        // SAFETY: as above.
+        let pitch = unsafe { word_at(base, 24) };
+        // SAFETY: as above.
+        let width = unsafe { word_at(base, 25) };
+        // SAFETY: as above.
+        let height = unsafe { word_at(base, 26) };
+        // SAFETY: as above.
+        let packed_low = unsafe { word_at(base, 27) };
+        // SAFETY: as above.
+        let packed_high = unsafe { word_at(base, 28) };
+
+        let addr = (u64::from(addr_hi) << 32) | u64::from(addr_lo);
+        let bits_per_pixel = (packed_low & 0xFF) as u8;
+        let raw_kind = ((packed_low >> 8) & 0xFF) as u8;
+
+        // The same floor every other loader-owned address in this file gets: a
+        // structure that puts a display in the first page is describing
+        // something other than a display.
+        if addr < 0x1000 {
+            return Err("the surface's address is in the first page");
+        }
+        if !(FB_DIMENSION_MIN..=FB_DIMENSION_MAX).contains(&width)
+            || !(FB_DIMENSION_MIN..=FB_DIMENSION_MAX).contains(&height)
+        {
+            return Err("the geometry is outside anything a display could be");
+        }
+        if bits_per_pixel == 0 || bits_per_pixel > 32 {
+            return Err("a pixel is zero bits wide, or wider than four bytes");
+        }
+
+        // A pitch below one row of pixels is the dangerous one, because it is
+        // the field a writer multiplies by the row number: believing it would
+        // put the last row's last pixel short of where the loader said the
+        // surface ends, and every row after the first inside the previous one.
+        let bytes_per_pixel = u32::from(bits_per_pixel).div_ceil(8);
+        let row =
+            width.checked_mul(bytes_per_pixel).ok_or("a row of pixels does not fit in 32 bits")?;
+        if pitch < row {
+            return Err("the pitch is narrower than one row");
+        }
+
+        // The extent is what a later step reserves, so an extent that does not
+        // fit is refused here rather than saturating into a reservation that
+        // covers less than the surface.
+        let extent =
+            u64::from(pitch).checked_mul(u64::from(height)).ok_or("the extent overflows")?;
+        addr.checked_add(extent).ok_or("the surface ends past the end of the address space")?;
+
+        let kind = match raw_kind {
+            0 => FramebufferKind::Indexed,
+            1 => FramebufferKind::Direct(Channels {
+                red_at: ((packed_low >> 16) & 0xFF) as u8,
+                red_bits: ((packed_low >> 24) & 0xFF) as u8,
+                green_at: (packed_high & 0xFF) as u8,
+                green_bits: ((packed_high >> 8) & 0xFF) as u8,
+                blue_at: ((packed_high >> 16) & 0xFF) as u8,
+                blue_bits: ((packed_high >> 24) & 0xFF) as u8,
+            }),
+            2 => FramebufferKind::EgaText,
+            other => FramebufferKind::Unknown(other),
+        };
+
+        Ok(Self { addr, pitch, width, height, bits_per_pixel, kind })
+    }
+}
+
+/// What the loader did with the video request in the header.
+///
+/// Three answers rather than two, because *there was no answer* and *the answer
+/// was not a surface* are different facts about a machine and the second one is
+/// a defect somewhere. R04: an unreadable structure is absent and never
+/// assumed-good, and which of the two it was is printed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Video {
+    /// The loader set no framebuffer flag. Either it does not implement the
+    /// video request — QEMU's `-kernel` loader says so on stderr and continues
+    /// — or it could not satisfy it.
+    Absent,
+    /// The loader claimed the fields and they do not describe a surface.
+    Refused(&'static str),
+    /// A surface, validated.
+    Present(Framebuffer),
+}
+
 /// The loader's handoff structure, validated.
 #[derive(Clone, Copy)]
 pub struct BootInfo {
@@ -229,6 +487,11 @@ pub struct BootInfo {
     modules: [Module; MAX_MODULES],
     module_count: usize,
     modules_dropped: usize,
+    /// What the loader did with the header's video request. Copied by value
+    /// like everything else here: it is four small integers, and a pointer into
+    /// the loader's structure would be a fault waiting for the address-space
+    /// switch in exactly the way the memory map was.
+    video: Video,
 }
 
 /// Why a handoff was refused.
@@ -371,6 +634,19 @@ impl BootInfo {
             }
         }
 
+        let video = if flags & FLAG_FRAMEBUFFER == 0 {
+            Video::Absent
+        } else {
+            // SAFETY: `base` is the structure validated above, and the flag the
+            // branch tested is the loader's own statement that the framebuffer
+            // words are populated — which is the whole of what `parse` needs
+            // and none of what it trusts.
+            match unsafe { Framebuffer::parse(base) } {
+                Ok(fb) => Video::Present(fb),
+                Err(why) => Video::Refused(why),
+            }
+        };
+
         Ok(Self {
             mmap_addr,
             mmap_len,
@@ -381,7 +657,21 @@ impl BootInfo {
             modules,
             module_count,
             modules_dropped,
+            video,
         })
+    }
+
+    /// What the loader did with the header's video request.
+    ///
+    /// Nothing in the frame acts on this yet, which is `intent/0011` step 1
+    /// being exactly one step: the boot reports what it was given, and the
+    /// reservation, the mapping and the component that draws are each their own
+    /// change with their own evidence. A build that starts consuming this
+    /// without reserving the extent first has handed a display's memory to the
+    /// frame allocator.
+    #[must_use]
+    pub const fn video(&self) -> Video {
+        self.video
     }
 
     /// The modules the loader placed in memory, as extents.

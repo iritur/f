@@ -10,12 +10,23 @@
 //! `cargo xtask run` stays one command. Multiboot 2 would mean GRUB and an
 //! ISO; Limine would mean a binary in the tree.
 //!
-//! It buys exactly what M1 needs — a memory map — and nothing more. In
-//! particular it does **not** give a framebuffer, and it is a BIOS-era
-//! protocol, so the machine named at E5 will want Limine or UEFI instead. That
-//! is a deliberate M0-scoped choice with a known successor rather than an
-//! architectural position, and nothing above [`crate::kmain`] can tell the
-//! difference: the handoff is one pointer wide.
+//! It buys what M1 needs — a memory map — and one thing more, which arrived
+//! later and is worth separating from the protocol it is usually blamed on.
+//! **Multiboot 1 does define a video request**, at flag bit 2 and four fields
+//! in the header, and a loader that implements it hands back a linear
+//! framebuffer's address, pitch, geometry and channel layout. What does not
+//! implement it is QEMU's own `-kernel` loader, which prints *multiboot knows
+//! VBE. we don't.* and carries on. So the sentence that used to be here —
+//! *this protocol does not give a framebuffer* — was true of the emulator and
+//! false of the protocol, and the difference is the whole of `intent/0011`
+//! step 1: the request is made unconditionally, both loaders answer, and
+//! [`crate::arch::x86_64::multiboot`] reports which one answered with
+//! something. It is still a BIOS-era protocol and still cannot carry the ACPI
+//! root pointer under UEFI, which is the reason E5-D03 exists and which this
+//! header does not touch.
+//!
+//! Nothing above [`crate::kmain`] can tell the difference: the handoff is one
+//! pointer wide.
 //!
 //! # Two halves at two addresses
 //!
@@ -59,8 +70,29 @@ global_asm!(
     .section .multiboot, "a", @progbits
     .align 4
     .long 0x1BADB002                        // magic
-    .long 0x00000003                        // flags: page-align modules, memory info
-    .long -(0x1BADB002 + 0x00000003)        // checksum: the three must sum to zero
+    .long 0x00000007                        // flags: page-align modules, memory info, video mode
+    .long -(0x1BADB002 + 0x00000007)        // checksum: the three must sum to zero
+
+    // Offsets 12..31: the address fields, which belong to flag bit 16 and are
+    // not requested. They are emitted as zeroes because the video request below
+    // sits at *fixed* offsets 32..47 — a header that skipped these five words
+    // would put `mode_type` where `header_addr` belongs, and a loader that read
+    // it would set a video mode from an address. Padding the protocol requires,
+    // rather than an address plan.
+    .long 0, 0, 0, 0, 0
+
+    // Offsets 32..47: the video request, and every field of it says *you
+    // choose*. Asking for a linear framebuffer and naming no size is the widest
+    // request the protocol has, which is what makes the answer a measurement:
+    // GRUB resolves an all-zero request to `auto` and hands back whatever mode
+    // the firmware is already in, so what arrives is the machine's own answer
+    // and not a mode this kernel talked it into. A build that later wants a
+    // particular mode fills these in and finds out what the refusal looks like;
+    // this one is finding out whether there is an answer at all.
+    .long 0                                 // mode_type: 0 linear graphics, 1 EGA text
+    .long 0                                 // width:  no preference
+    .long 0                                 // height: no preference
+    .long 0                                 // depth:  no preference
 
     // ------------------------------------------------------- low data + code
     // Linked where it is loaded, so every symbol here is a physical address.
