@@ -60,13 +60,24 @@
 //! admission is not run because nothing here is admitted.
 //!
 //! That is the same shape RFC 0033 recorded for `virtio-blk`, from the other
-//! side: there, a component is spawned into a place and never scheduled; here,
-//! a component is scheduled and never spawned into one. Joining the two is a
-//! supervisor that sizes an account from what it was routed and then hands the
-//! occupant a core — which is what `E1-P06` needs and what the two halves of
-//! this epoch were each half of. *Reversal:* `component::spawn` gaining the two
-//! ring mappings and this file taking its runtime from a `Place` rather than
-//! from a boot module.
+//! side. **The sentence this file carried for two epochs was:** *there, a
+//! component is spawned into a place and never scheduled; here, a component is
+//! scheduled and never spawned into one.* Half of it is now false. `E1-B05`
+//! hands the supervisor's occupant a core (RFC 0075), so a component spawned
+//! into a place **is** scheduled, and the first thing that changed because of it
+//! is that a component's heap stopped reading zero.
+//!
+//! What is still true is this file's half: a runtime here is scheduled and is in
+//! no place. Its memory comes from the frame allocator rather than from an
+//! `Untyped` a supervisor supplied, and `process::reap` returns it — where an
+//! occupant's is derived from an account and refunded by `component::tear_down`.
+//! RFC 0075 is why those two ownership records stay apart and why neither
+//! becomes the other.
+//!
+//! *Reversal:* `component::spawn` gaining the two ring mappings and this file
+//! taking its runtime from a `Place` rather than from a boot module — at which
+//! point the remaining half goes too and this module is one shape rather than
+//! the survivor of two.
 //!
 //! # What the exit criterion excludes, and why
 //!

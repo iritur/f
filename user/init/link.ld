@@ -44,6 +44,14 @@ SECTIONS {
     .text : {
         KEEP(*(.text.*9component5start*))
         *(.text .text.*)
+
+        /* One `ret`, and the reason it is a whole instruction rather than a
+         * byte is at the `PROVIDE` below: the allocator shim's marker is
+         * *called* by this toolchain, not read. A marker pointed at anything
+         * that is not a valid return is a call into whatever happens to be
+         * there. */
+        __rust_alloc_shim_marker = .;
+        BYTE(0xC3)
     }
 
     /* Read-only data lands in the same page as the text and is therefore
@@ -88,19 +96,42 @@ SECTIONS {
      *
      * It cannot be defined in `f_ring` with `#[unsafe(no_mangle)]`, because the
      * name is v0-mangled and carries `alloc`'s own crate hash. So the script
-     * provides it, pointed at the image's first byte: the read is one byte from
-     * a page mapped read-only and executable, which is a page the component can
-     * always read. `PROVIDE` and not `=`, so an image that does not link `alloc`
+     * provides it. `PROVIDE` and not `=`, so an image that does not link `alloc`
      * gains no symbol at all.
      *
-     * An absolute symbol is `llvm-nm` class `a`, which is not among the eight
-     * classes `cargo xtask component` rejects, so nothing here becomes writable.
+     * **It used to be pointed at `__image_start`, and that was wrong in a way
+     * nothing could see until a component ran.** The paragraph above says the
+     * marker is *read*, one volatile byte, so any readable address would do and
+     * the image's first byte is certainly readable. This toolchain does not
+     * read it — it **calls** it:
+     *
+     *     40006d <box_new_uninit>:
+     *       40006e:  callq  0x400000 <__image_start>
+     *
+     * `__image_start` is `component::start`, so the allocator's first act was to
+     * re-enter the component's entry point, which allocates again. Sixteen bytes
+     * of stack per cycle, about a thousand cycles, and then the four-page stack
+     * runs into its guard page:
+     *
+     *     occupant  killed: exception 14 at 0x410ff8, error 0x6, rip 0x400000
+     *
+     * It could not be observed before `E1-B05` scheduled an occupant, because
+     * until then no component image had ever executed: `user/init` is a flat
+     * image on another path and a runtime comes from `prepare_runtime`. Both
+     * components that declare a heap — `store` and `supervisor` — carried it.
+     *
+     * So the marker now points at one `ret` placed at the end of `.text`. That
+     * satisfies both uses rather than the one this comment assumed: a read gets
+     * `0xC3` from a mapped read-only page, and a call returns immediately.
      *
      * *Reversal:* the hash changes when the toolchain pin moves, and the link
      * then fails naming this symbol — which is the right failure, loud and at
      * build time, and `rust-toolchain.toml` says a pin bump is a reviewable
-     * commit rather than an ambient change. */
-    PROVIDE(_RNvCskfAWsVLpDif_7___rustc35___rust_no_alloc_shim_is_unstable_v2 = __image_start);
+     * commit rather than an ambient change. That is the reversal this file
+     * already had, and it is not the one that arrived: the hash was unchanged
+     * and the *use* moved from a read to a call. A marker satisfying both is
+     * what stops the next such move mattering. */
+    PROVIDE(_RNvCskfAWsVLpDif_7___rustc35___rust_no_alloc_shim_is_unstable_v2 = __rust_alloc_shim_marker);
 
     /DISCARD/ : {
         *(.eh_frame)

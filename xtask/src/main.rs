@@ -2464,31 +2464,33 @@ fn run() -> Result<(), String> {
              declared."
             .into());
     }
-    // The component's half, and it is the half that has never run. Required to
-    // be zero rather than tolerated: the reason is in `HEAP_GAP`, and the needle
-    // going is what turns this red.
-    gap_holds("HEAP_GAP", HEAP_GAP)?;
-    if peak != 0 {
-        return Err(format!(
-            "a component allocated {peak} byte(s), and `HEAP_GAP` says none can.\n\n\
-             That gap's needle is still in kernel/src/runtime.rs, so a component is\n\
-             still spawned into a place and never handed a core — and yet something\n\
-             allocated out of a described region. Either the needle has stopped\n\
-             describing the tree, or a heap is being reached by something that is\n\
-             not the occupant it was charged to. Both are worth stopping for.\n\n\
-             If a supervisor now schedules an occupant, this is the good ending:\n\
-             delete the `HEAP_GAP` row, and re-read `E2-B10`'s exit — it asks for a\n\
-             boot in which a component allocates, and this is the first boot that\n\
-             could be one."
-        ));
+    // The component's half, and it has run. This required the peak to be
+    // **zero** until `E1-B05` scheduled an occupant, with `HEAP_GAP` carrying
+    // the reason; the day one was handed a core the check went red, said it was
+    // the good ending, and asked for the row to be deleted. That is this.
+    //
+    // The requirement is inverted rather than dropped, because zero is still a
+    // finding — `kernel/src/component.rs`'s `heap_peak` says so — and a check
+    // that stopped looking would let the allocation this whole task exists to
+    // demonstrate quietly stop happening.
+    if peak == 0 {
+        return Err("no component allocated anything, and one declares a `heap` need.\n\n\
+             This was the state of every boot until an occupant of a place was\n\
+             first handed a core: a component spawned and never scheduled cannot\n\
+             allocate, so the zero was structural and `HEAP_GAP` declared it.\n\
+             It is not structural now, so a zero means the allocation stopped\n\
+             happening — a component that is no longer scheduled, an image whose\n\
+             box was optimised out, or a `heap` need that has left a manifest.\n\n\
+             `kernel/src/component.rs`'s `heap_peak` field is the sentence this\n\
+             enforces: zero on a tree where one component declares a `heap` need\n\
+             is a finding rather than a default."
+            .into());
     }
     println!(
         "\nheap          {described} B described, peak {peak}, starved {starved} — \
-         the frame's half of E2-B10"
+         both halves of E2-B10, with the component's half taken from the region's \
+         own prologue after it ran"
     );
-    for (file, _, why, _) in HEAP_GAP {
-        println!("  {file:<24} {why}");
-    }
 
     println!("\nM0 ok");
     Ok(())
@@ -2977,84 +2979,24 @@ fn sim_scenarios() -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-/// What `cargo xtask chaos` kills that a boot cannot, declared as a set rather
-/// than left as a silence.
-///
-/// # Why a declaration and not a paragraph
-///
-/// RFC 0036 is the precedent and the argument is the same one: the join between
-/// two halves of a claim has a difference, and a difference that is prose is a
-/// difference nobody re-checks. So the gap is data, each entry naming the file
-/// and the exact text whose *presence* is what keeps the gap open, and this verb
-/// requires every one of them to still be there. The day one goes, this check
-/// goes red and tells whoever closed it to update the RFC — which is the
-/// opposite of the usual failure, where a gap quietly stops being true and the
-/// document keeps describing it.
-///
-/// One entry, and it is **narrower than it was**, which is the mechanism
-/// working rather than the gap closing on its own.
-///
-/// It used to be RFC 0033's reversal condition — *grep for `Driver::execute`
-/// and see which crate calls it* — and while the frame called it, the code the
-/// datapath ran on was not a scheduled component at all. RFC 0047 ended that:
-/// the driver serves its client from ring 3, on a core of its own, out of its
-/// own polling loop, and `cargo xtask lint-datapath` now refuses a frame that
-/// names the type. What that closed is *the datapath is served by a scheduled
-/// component*.
-///
-/// What it did not close is the sentence beside it, and the two are easy to
-/// read as one. `kernel/src/component.rs` builds a **place** for this manifest
-/// on every boot — an account, needs checked handle by handle, an endpoint
-/// clients hold, a restart policy — and never hands its occupant a core;
-/// `kernel/src/blk.rs` hands a core to an instance that is in no place. So the
-/// occupant a boot can kill is still not the occupant that serves a client's
-/// load, and *under sustained load* is still a sentence only the simulator
-/// makes true. The needle is the call that stands a driver up outside a place,
-/// and it goes when a supervisor spawns and schedules in one act — which is
-/// E1-B05's remaining half and RFC 0008's *restart is the supervisor's*.
-/// RFC 0041 states the shape of the gap; RFC 0047 states what is left of it.
-/// Why the heap peak every boot reports is zero, as data.
-///
-/// # Why a zero needed a declared quantity of its own
-///
-/// Because it has been printing since `E2-B10` landed and nothing read it. The
-/// supervisor line ends `heap 8192 B described, peak 0 byte(s), starved false`,
-/// and `kernel/src/component.rs`'s `heap_peak` field says in as many words that
-/// *zero here means no component allocated anything, which on a tree where one
-/// declares a `heap` need is a finding rather than a default*. It was a finding
-/// nobody was told about: on QEMU, on the second machine and on the third, the
-/// same zero, inside a green `verify`.
-///
-/// The frame's half of `E2-B10` is real and this does not say otherwise. The
-/// region is charged, mapped and described before the component's first
-/// instruction, `describe` has a caller at `kernel/src/component.rs`, the
-/// prologue is read back at teardown through `f_ring::heap::Heap::over`, and
-/// `described` being 8192 rather than 0 is that whole path working. What has
-/// never happened is the other half: `user/store` allocates a 64-byte box under
-/// `#[cfg(all(target_os = "none", feature = "image"))]`, and that code has never
-/// executed, because **a component spawned into a place is never handed a
-/// core**. `kernel/src/runtime.rs` is where the tree says so, and it is the same
-/// sentence [`CHAOS_GAP`] is one half of — there, the occupant a boot can kill
-/// is not the occupant serving the datapath; here, the occupant a boot describes
-/// a heap for is not an occupant that runs.
-///
-/// So the needle is that sentence, and the check beside it requires the zero
-/// rather than tolerating it. A zero that is *asserted* is evidence; a zero that
-/// is merely printed is the `claims/0017` shape this tree has already been
-/// bitten by twice. The day a supervisor hands an occupant a core, the needle
-/// goes, the build goes red on purpose, and whoever closed it re-reads the exit
-/// of `E2-B10` — which asks for a boot in which a component allocates — against
-/// a boot that finally can.
-const HEAP_GAP: &[Gap] = &[(
-    "kernel/src/runtime.rs",
-    "a component is spawned into a place and never scheduled",
-    "no component with a `heap` need has ever run, so the peak a boot reports is \
-     the frame's reading of a region nothing has allocated out of",
-    "TODO.md E2-B10, E1-B05 and E1-P06; kernel/src/component.rs's `heap_peak` field \
-     comment; kernel/src/runtime.rs's module comment and its stated reversal; \
-     docs/second-boot-outside-qemu.md and docs/third-boot-outside-qemu.md, which \
-     both record the zero as observed",
-)];
+// `HEAP_GAP` was here, and it is gone because it closed.
+//
+// It declared that the heap peak every boot reported was zero because a
+// component spawned into a place was never handed a core, so no component with
+// a `heap` need had ever executed. The check beside it *required* the zero
+// rather than tolerating it, and said in its own refusal that a non-zero peak
+// would be the good ending and the row should then be deleted.
+//
+// `E1-B05` handed an occupant a core and the peak became 64. The row is deleted
+// on its own terms, and the check above is inverted rather than dropped: a zero
+// is still the finding `kernel/src/component.rs`'s `heap_peak` field says it is,
+// and a check that stopped looking would let the allocation this task exists to
+// demonstrate quietly stop happening.
+//
+// Kept as a comment rather than removed without trace, because the next reader
+// of `CHAOS_GAP` — the constant directly above, which is the same shape and
+// still open — should be able to see what one of these looks like when it is
+// paid.
 
 /// One page, in bytes, as the least a granted `heap` need can come to.
 ///
@@ -3119,6 +3061,42 @@ fn heap_reading(log: &str) -> Result<(u32, u32, bool), String> {
     Ok((described, peak, starved))
 }
 
+/// What `cargo xtask chaos` kills that a boot cannot, declared as a set rather
+/// than left as a silence.
+///
+/// # Why a declaration and not a paragraph
+///
+/// RFC 0036 is the precedent and the argument is the same one: the join between
+/// two halves of a claim has a difference, and a difference that is prose is a
+/// difference nobody re-checks. So the gap is data, each entry naming the file
+/// and the exact text whose *presence* is what keeps the gap open, and this verb
+/// requires every one of them to still be there. The day one goes, this check
+/// goes red and tells whoever closed it to update the RFC — which is the
+/// opposite of the usual failure, where a gap quietly stops being true and the
+/// document keeps describing it.
+///
+/// One entry, and it is **narrower than it was**, which is the mechanism
+/// working rather than the gap closing on its own.
+///
+/// It used to be RFC 0033's reversal condition — *grep for `Driver::execute`
+/// and see which crate calls it* — and while the frame called it, the code the
+/// datapath ran on was not a scheduled component at all. RFC 0047 ended that:
+/// the driver serves its client from ring 3, on a core of its own, out of its
+/// own polling loop, and `cargo xtask lint-datapath` now refuses a frame that
+/// names the type. What that closed is *the datapath is served by a scheduled
+/// component*.
+///
+/// What it did not close is the sentence beside it, and the two are easy to
+/// read as one. `kernel/src/component.rs` builds a **place** for this manifest
+/// on every boot — an account, needs checked handle by handle, an endpoint
+/// clients hold, a restart policy — and never hands its occupant a core;
+/// `kernel/src/blk.rs` hands a core to an instance that is in no place. So the
+/// occupant a boot can kill is still not the occupant that serves a client's
+/// load, and *under sustained load* is still a sentence only the simulator
+/// makes true. The needle is the call that stands a driver up outside a place,
+/// and it goes when a supervisor spawns and schedules in one act — which is
+/// E1-B05's remaining half and RFC 0008's *restart is the supervisor's*.
+/// RFC 0041 states the shape of the gap; RFC 0047 states what is left of it.
 const CHAOS_GAP: &[Gap] = &[(
     "kernel/src/blk.rs",
     "prepare_driver(",
@@ -16023,9 +16001,9 @@ fn eval_run(filter: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        HEAP_GAP, JOIN_GAP, MINTS, code_mentions, datapath_findings, declared_fn, frame_findings,
-        gap_holds, gap_holds_under, heap_reading, hold_the_gap, thresholds_in, toml_field,
-        toml_multiline, trace_hash, unreadable_bounds_in, unspawned,
+        JOIN_GAP, MINTS, code_mentions, datapath_findings, declared_fn, frame_findings,
+        gap_holds_under, heap_reading, hold_the_gap, thresholds_in, toml_field, toml_multiline,
+        trace_hash, unreadable_bounds_in, unspawned,
     };
 
     /// The supervisor line as a boot actually prints it, trimmed to the tail
@@ -16315,13 +16293,33 @@ mod tests {
         assert!(!starved);
     }
 
-    /// The declared gap names a sentence that is really in the tree.
+    /// The component half of `E2-B10` is reachable, which is what `HEAP_GAP`
+    /// said it was not.
     ///
-    /// A row whose needle never matched would be a gap that cannot close, which
-    /// is the same failure as a check that cannot fail — one row over.
+    /// This replaces `the_heap_gap_names_a_sentence_the_kernel_still_carries`,
+    /// which asserted the needle was still in `kernel/src/runtime.rs`. It is
+    /// not, because `E1-B05` scheduled an occupant and the sentence stopped
+    /// being true. Deleting that test without putting one in its place would
+    /// have left the strongest claim on this path — *a component allocates* —
+    /// resting on a boot nobody checks.
+    ///
+    /// What is asserted here is the shape rather than the number: a peak of zero
+    /// is the failure, whatever the figure is when it is not.
     #[test]
-    fn the_heap_gap_names_a_sentence_the_kernel_still_carries() {
-        gap_holds("HEAP_GAP", HEAP_GAP).expect("the needle must be in kernel/src/runtime.rs");
+    fn a_zero_peak_is_refused_now_that_a_component_can_allocate() {
+        let ran = "  supervisor    ok — 5 place(s); heap 8192 B described, peak 64 byte(s), \
+                   starved false\nM0 ok\n";
+        let (_, peak, _) = heap_reading(ran).expect("the line a boot prints now");
+        assert!(peak > 0, "a component has run and allocated, so the peak is not zero");
+
+        // And the state every boot was in until an occupant was handed a core.
+        // Kept as a fixture because it is what the check must now refuse, and a
+        // check whose failing input nobody writes down is one nobody can tell
+        // has stopped failing.
+        let never_ran = "  supervisor    ok — 5 place(s); heap 8192 B described, \
+                         peak 0 byte(s), starved false\nM0 ok\n";
+        let (_, peak, _) = heap_reading(never_ran).expect("the line every boot used to print");
+        assert_eq!(peak, 0, "the fixture is the old state, and it is what `run` now refuses");
     }
 
     /// A bound that states a number this cannot read is reported, and a row
