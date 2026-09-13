@@ -167,21 +167,45 @@ states it: *there, a component is spawned into a place and never scheduled;
 here, a component is scheduled and never spawned into one.* A place's occupant
 is handed a core.
 
-**Gate, and it is three declared quantities going red at once — all on purpose:**
+**Amended after reading `process.rs`, and RFC 0075 is the decision that came out
+of it.** This section used to say the work was making an `Instance` produce a
+`Prepared`, since the scheduled path already knows how to run one. That is a
+double free: `reap` returns `Prepared::pages` to the `FrameAllocator` and checks
+the free count in `Prepared::before`, while an occupant's pages were derived
+from an account and are owed back to it by `tear_down`. The convenience method
+would be a value whose whole purpose is to be handed to a function that must
+never see it.
+
+What the code actually needs is much smaller. `smp::run_on` does not take a
+process — it publishes a `process::Job` into a per-CPU slot and the target core
+reads it: `{ root, entry, stack, argument, hz, target }`, six fields, every one
+of which an `Instance` has or trivially knows. So the join is a `Job` built from
+the occupant, and `Prepared` is not involved at any point.
+
+**Files, corrected:** `kernel/src/component.rs` and `kernel/src/process.rs`
+(a second `Job` construction site). `kernel/src/runtime.rs` is **not** touched —
+its half already works, and the sentence in its module comment is `HEAP_GAP`'s
+needle, so editing it would turn that constant red without the boot having
+changed, which is a red build for a false reason.
+
+**Gate — one declared quantity going red, on purpose:**
 
 - `HEAP_GAP` (`xtask/src/main.rs`). Its needle is the sentence at
   `kernel/src/runtime.rs:63`. When an occupant is scheduled, `user/store`'s
   64-byte box executes for the first time and the boot's `peak 0 byte(s)`
   becomes non-zero. `cargo xtask run` is written to refuse exactly that and to
   say it is the good ending. **This is the acceptance test for increment 6**, and
-  it is why this branch is based on the one that declared it.
-- `CHAOS_GAP`'s needle `prepare_driver(` in `kernel/src/blk.rs`, once a driver
-  is scheduled inside the place its manifest is spawned into rather than beside
-  it. That closes `E1-P06`'s remaining half.
-- `E2-B10`'s exit, which asks for a boot in which a component allocates.
+  it is why this work is based on the branch that declared it. The constant's
+  fourth field names the documents to update in the same diff.
 
-Each of those names documents in its fourth field, and they are updated in this
-increment's diff rather than the one after.
+`CHAOS_GAP` is **not** in this gate, and the earlier text was wrong to put it
+there. Its needle is `prepare_driver(` in `kernel/src/blk.rs`, and it closes when
+a *driver* is scheduled inside the place its manifest is spawned into — which
+this increment makes possible and does not do. `E1-P06`'s remaining half stays
+open here.
+
+`E2-B10`'s exit — a boot in which a component allocates — is met by this
+increment, and the line is the originator's to tick.
 
 ### 7 — the policy moves, and three owed reversals are paid
 
