@@ -1,0 +1,38 @@
+[package]
+name = "f-supervisor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The component that spawns and stops the others. RFC 0008's supervisor, above the frame."
+
+# A library and not a binary, for `user/store/Cargo.toml`'s reason: a binary
+# needs an entry point, naming one means `#[unsafe(no_mangle)]`, and that is an
+# unsafe attribute a crate forbidding unsafe code cannot write. `user/init`'s
+# link script finds the entry by the section `component::start` compiles into,
+# so this crate's entry has that path too — one script, one placement rule, one
+# check.
+
+[dependencies]
+f-abi.workspace = true
+# The ring, and here it is the whole point of the crate rather than a second
+# dependency: a supervisor exists to submit `control::op::SPAWN` and `op::STOP`,
+# and `f_ring::adopt` (RFC 0037) is what makes driving a control ring
+# expressible in a crate that forbids `unsafe`.
+f-ring.workspace = true
+
+# No override. This crate inherits `unsafe_code = "forbid"` from the workspace,
+# which is what makes RFC 0008's *restart is the supervisor's act* land above
+# the frame rather than beside it. A supervisor that needed `unsafe` would be a
+# supervisor that belonged in the frame, which is the argument this whole task
+# exists to end.
+[lints]
+workspace = true
+
+# The image half, on by default, off for anything linking this as a library —
+# `user/store/Cargo.toml` states the reason at length and it is unchanged here:
+# a `#[panic_handler]` is a lang item and there may be exactly one in a linked
+# artefact.
+[features]
+default = ["image"]
+image = []

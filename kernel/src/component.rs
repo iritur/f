@@ -187,10 +187,20 @@ fn account_bytes(record: &Record) -> u64 {
 
 /// How many places this build's supervisor can hold.
 ///
-/// Four, which is what this tree's two component files fit in with room for two
-/// more. When a supervisor is a component, this bound is its `Untyped` rather
-/// than a constant, which is the direction everything else in this tree has
-/// already gone.
+/// **Five, and the fifth is the supervisor itself.** It was four — two component
+/// files with room for two more — and `user/supervisor` is the fifth file, so
+/// the bound moved to fit it rather than the file being left out to fit the
+/// bound. A build that carried more component files than places is the drift
+/// this number exists to make impossible, and the direction of the fix is always
+/// this one.
+///
+/// That the supervisor occupies one of its own places is the bootstrap circle,
+/// and it is placed rather than removed: somebody is first, and what this build
+/// chooses is that the frame performs exactly one spawn and every other spawn
+/// moves above it. When a supervisor is a component *that runs*, this bound is
+/// its `Untyped` rather than a constant — RFC 0044 — which is the direction
+/// everything else in this tree has already gone and is what increment 7 of
+/// `intent/0005-the-datapath/plan-e1-b05.md` pays.
 ///
 /// It is also the bound on [`modules`], and the two being one number is the
 /// point: the loader hands over component files, and every one of them gets a
@@ -198,7 +208,7 @@ fn account_bytes(record: &Record) -> u64 {
 /// build where the boot half of RFC 0035's pair silently covered less than the
 /// workload half, which is exactly the drift `JOIN_GAP` was built to make
 /// visible.
-const PLACES_MAX: usize = 4;
+const PLACES_MAX: usize = 5;
 
 /// Why the lifecycle could not do what it was asked.
 ///
