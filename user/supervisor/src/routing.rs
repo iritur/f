@@ -115,10 +115,31 @@ pub mod at {
     /// half has to become a table. It is a table now, with one row.
     /// Unit: none — a capability handle.
     pub const ACCOUNT: u32 = 24;
-    /// How many of [`MANIFEST`] are real. Unit: places.
+    /// How many rows of [`ROW`] are real. Unit: places.
     pub const PLACES: u32 = 32;
-    /// The first place's manifest, by content hash — what
-    /// `f_abi::control::op::SPAWN` carries in `ext[0]`.
+    /// The logical tick this consultation is stamped with.
+    ///
+    /// **Not a clock**, and the distinction is the whole of RFC 0004 here. It is
+    /// a count the frame advances by the backoff a verdict returned, which is
+    /// what a supervisor's own clock would be if it had one — so two boots of
+    /// one commit agree, and a seeded scenario can drive a restart storm without
+    /// a wall-clock accident. `kernel/src/component.rs` holds it and never
+    /// interprets it.
+    /// Unit: timer ticks, at the frame's own rate.
+    pub const NOW: u32 = 40;
+
+    // --- one row per place, written by the frame ------------------------------
+
+    /// Where the rows begin. Unit: bytes.
+    pub const ROW: u32 = 64;
+    /// How far apart two rows are. Unit: bytes.
+    ///
+    /// Wider than the fields need, so that a field added to a row never moves
+    /// one — which on a page two crates read is the difference between a new
+    /// field and a silent reinterpretation of every row after the first.
+    pub const ROW_STRIDE: u32 = 40;
+    /// The place's manifest, by content hash — what
+    /// `f_abi::control::op::SPAWN` carries in `ext[0]`. Offset within a row.
     ///
     /// A content hash and not an index, because an index is a statement about
     /// the order the loader placed modules in and a hash is a statement about
@@ -126,14 +147,29 @@ pub mod at {
     /// (`TODO.md` E0-P18) is why that distinction is load-bearing rather than
     /// fastidious.
     /// Unit: none — an `f_abi::ContentId`.
-    pub const MANIFEST: u32 = 40;
-    /// How far apart two [`MANIFEST`] rows are. Unit: bytes.
-    pub const MANIFEST_STRIDE: u32 = 8;
+    pub const ROW_MANIFEST: u32 = 0;
+    /// The place's endpoint, as a handle **in this component's own table**.
+    ///
+    /// This is what makes a supervisor tellable at all (RFC 0076): a place's
+    /// `PEER_GONE` pends in the capability slot of the endpoint that names it,
+    /// so a supervisor that held no endpoint would be a supervisor the frame has
+    /// no slot to leave a death in. It is also what `op::STOP` is checked
+    /// against, so the same handle answers both halves of a lifecycle.
+    ///
+    /// A notice arrives with this value in `Cqe::user_data`, which is how a row
+    /// is found from a death.
+    /// Unit: none — a capability handle.
+    pub const ROW_ENDPOINT: u32 = 8;
+    /// The restarts already spent inside the current window, as this supervisor
+    /// last left it. Unit: restarts.
+    pub const ROW_USED: u32 = 16;
+    /// When that window opened, in [`NOW`]'s ticks. Unit: timer ticks.
+    pub const ROW_OPENED: u32 = 24;
 
     // --- what the component writes, and the frame reads afterwards ------------
 
     /// How many spawns this supervisor put on its control ring. Unit: entries.
-    pub const SUBMITTED: u32 = 128;
+    pub const SUBMITTED: u32 = 384;
     /// How many it could not, because the ring had no room. Unit: entries.
     ///
     /// **This is the only refusal this component can see**, and the module
@@ -146,7 +182,44 @@ pub mod at {
     /// refusals in it, which are on the other side of the boundary and stay
     /// there.
     /// Unit: entries.
-    pub const REFUSED: u32 = 136;
+    pub const REFUSED: u32 = 392;
+    /// How many deaths this supervisor was told about on its ring.
+    /// Unit: notices.
+    pub const TOLD: u32 = 400;
+
+    /// Where the component's own per-place rows begin. Unit: bytes.
+    pub const SAID: u32 = 448;
+    /// How far apart two of those are. Unit: bytes.
+    pub const SAID_STRIDE: u32 = 24;
+    /// What this supervisor decided about the row, as
+    /// `crate::policy::Verdict::to_wire`. Offset within a said-row.
+    ///
+    /// **The frame performs this and does not compute it.** A retirement is the
+    /// one verdict with no opcode behind it — there is nothing on the control
+    /// ring that says *end this place* as opposed to *end its occupant* — so it
+    /// travels here instead, and the frame does the revoking. That split is RFC
+    /// 0008's exactly: the decision is the supervisor's, the mechanism is the
+    /// frame's.
+    /// Unit: none — an ordinal.
+    pub const SAID_VERDICT: u32 = 0;
+    /// The tally as this supervisor left it, to be stored and handed back on the
+    /// next consultation. Unit: restarts.
+    pub const SAID_USED: u32 = 8;
+    /// And when its window opened. Unit: timer ticks.
+    pub const SAID_OPENED: u32 = 16;
+}
+
+/// One place this supervisor may act on, as the frame described it.
+#[derive(Clone, Copy, Default)]
+pub struct Row {
+    /// The manifest to put in it, by content hash.
+    pub manifest: u64,
+    /// Its endpoint, in this component's own table. A death arrives carrying
+    /// this in `Cqe::user_data`.
+    pub endpoint: u32,
+    /// The tally the frame is holding for this place, handed back so that a
+    /// window spans runs rather than restarting with the supervisor.
+    pub budget: crate::policy::Budget,
 }
 
 /// What the frame wrote, read once and believed thereafter.
@@ -155,8 +228,8 @@ pub mod at {
 /// the reason that file gives: validating a page in place and then acting on a
 /// later read of it is a check that bounds nothing. Nothing else writes this
 /// page while this component runs — the frame fills it before the first
-/// instruction and reads the far half after the last one — but the copy costs
-/// four words and does not depend on that staying true.
+/// instruction and reads the far half after the last one — but the copy is
+/// cheap and does not depend on that staying true.
 #[derive(Clone, Copy)]
 pub struct Board {
     /// Where the control ring is. Unit: bytes, in this address space.
@@ -165,9 +238,11 @@ pub struct Board {
     pub control_len: u32,
     /// The account this supervisor may spend.
     pub account: u32,
-    /// The manifests it may put into places, in the frame's order.
-    pub manifests: [u64; PLACES_MAX],
-    /// How many of `manifests` are real. Unit: places.
+    /// The logical tick this consultation is stamped with.
+    pub now: u64,
+    /// The places it may act on, in the frame's order.
+    pub rows: [Row; PLACES_MAX],
+    /// How many of `rows` are real. Unit: places.
     pub places: usize,
 }
 
@@ -176,9 +251,9 @@ impl Board {
     ///
     /// # Errors
     ///
-    /// `ARGUMENT/MALFORMED_HEADER` for a page whose magic is not
-    /// [`MAGIC`] — which is the frame not having written it, and is refused
-    /// before any other field is looked at.
+    /// `ARGUMENT/MALFORMED_HEADER` for a page whose magic is not [`MAGIC`] —
+    /// which is the frame not having written it, and is refused before any other
+    /// field is looked at.
     ///
     /// `RESOURCE/QUOTA_EXHAUSTED` for a page naming more places than
     /// [`PLACES_MAX`], so that a build which outgrew this page says so instead
@@ -186,6 +261,8 @@ impl Board {
     ///
     /// Whatever `f_ring::device::Window` refuses, for a page that is not there.
     pub fn read() -> Result<Self, i32> {
+        let quota =
+            f_abi::error::pack(f_abi::error::RESOURCE, f_abi::error::resource::QUOTA_EXHAUSTED);
         let page = f_ring::device::Window::at(AT, BYTES)?;
         if page.read64(at::MAGIC)? != MAGIC {
             return Err(f_abi::error::pack(
@@ -195,43 +272,51 @@ impl Board {
         }
         let places = usize::try_from(page.read64(at::PLACES)?).unwrap_or(usize::MAX);
         if places > PLACES_MAX {
-            return Err(f_abi::error::pack(
-                f_abi::error::RESOURCE,
-                f_abi::error::resource::QUOTA_EXHAUSTED,
-            ));
+            return Err(quota);
         }
-        let mut manifests = [0; PLACES_MAX];
-        for (index, slot) in manifests.iter_mut().enumerate().take(places) {
-            let offset = at::MANIFEST
-                + u32::try_from(index)
-                    .map_err(|_| {
-                        f_abi::error::pack(
-                            f_abi::error::RESOURCE,
-                            f_abi::error::resource::QUOTA_EXHAUSTED,
-                        )
-                    })?
-                    .saturating_mul(at::MANIFEST_STRIDE);
-            *slot = page.read64(offset)?;
+        let mut rows = [Row::default(); PLACES_MAX];
+        for (index, row) in rows.iter_mut().enumerate().take(places) {
+            let base =
+                at::ROW + u32::try_from(index).map_err(|_| quota)?.saturating_mul(at::ROW_STRIDE);
+            row.manifest = page.read64(base + at::ROW_MANIFEST)?;
+            row.endpoint = u32::try_from(page.read64(base + at::ROW_ENDPOINT)?).unwrap_or(0);
+            row.budget = crate::policy::Budget {
+                used: u32::try_from(page.read64(base + at::ROW_USED)?).unwrap_or(0),
+                opened: page.read64(base + at::ROW_OPENED)?,
+            };
         }
         Ok(Self {
             control_at: page.read64(at::CONTROL_AT)?,
             control_len: u32::try_from(page.read64(at::CONTROL_LEN)?).unwrap_or(0),
             account: u32::try_from(page.read64(at::ACCOUNT)?).unwrap_or(0),
-            manifests,
+            now: page.read64(at::NOW)?,
+            rows,
             places,
         })
     }
 
-    /// Write back what this run did.
+    /// Write back what this run decided, and what it did.
     ///
     /// Ignores its own refusals, and that is deliberate rather than lazy: this
     /// is the last thing the component does before [`f_abi::door::EXIT`], and a
     /// supervisor that died reporting would be a supervisor whose work the frame
     /// then could not see. The frame's own place table is what the boot checks;
     /// this is the component's account of itself beside it.
-    pub fn report(submitted: u64, refused: u64) {
+    pub fn report(
+        totals: (u64, u64, u64),
+        said: &[(crate::policy::Verdict, crate::policy::Budget)],
+    ) {
         let Ok(page) = f_ring::device::Window::at(AT, BYTES) else { return };
+        let (submitted, refused, told) = totals;
         let _ = page.write64(at::SUBMITTED, submitted);
         let _ = page.write64(at::REFUSED, refused);
+        let _ = page.write64(at::TOLD, told);
+        for (index, (verdict, budget)) in said.iter().enumerate().take(PLACES_MAX) {
+            let Ok(index) = u32::try_from(index) else { return };
+            let base = at::SAID + index.saturating_mul(at::SAID_STRIDE);
+            let _ = page.write64(base + at::SAID_VERDICT, verdict.to_wire());
+            let _ = page.write64(base + at::SAID_USED, u64::from(budget.used));
+            let _ = page.write64(base + at::SAID_OPENED, budget.opened);
+        }
     }
 }

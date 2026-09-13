@@ -84,17 +84,13 @@ pub mod component;
 
 // Architecture-independent, and compiled everywhere: a layout wants its
 // arithmetic checked on whatever machine is running the tests, and the frame
-// links this module to hold itself to the same one.
+// links `routing` to hold itself to the same one.
 //
-// **`policy` is deliberately not here yet**, and that is worth a sentence
-// because a reader who knows RFC 0008 will look for it. `kernel::component::
-// policy::decide` is still in the frame, `cargo xtask lint-owed` still reports
-// it as an unpaid reversal, and a copy of it in this crate would make that
-// report false while changing nothing: the lint watches the frame's call site,
-// so two copies would read as one moved. The blocker is not a place to put it —
-// this crate is the place — it is that deciding needs a `notice::PEER_GONE`,
-// and `component.rs`'s comment says at length why this component cannot yet
-// read one.
+// `policy` is what RFC 0008 spent three epochs moving and RFC 0076 finally
+// made possible. The frame does **not** link it, and that asymmetry is the
+// whole point: a frame that called the supervisor's policy would have moved a
+// file and kept the decision.
+pub mod policy;
 pub mod routing;
 
 #[cfg(test)]

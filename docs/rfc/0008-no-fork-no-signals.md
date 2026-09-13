@@ -724,3 +724,40 @@ says what the state tree could not show.
 appears — a device whose hardware delivers something a ring cannot carry —
 it is the reversal of R05 itself, and it belongs in an RFC about that rule
 rather than in an amendment to this one.
+
+## What landed, and when — 2026-09-13
+
+Recorded here because `xtask`'s `OWED_REVERSALS` held this RFC's central
+sentence as a declared quantity for three epochs and the day it was paid the
+build went red and named this file as one to update.
+
+**Restart is the supervisor's act.** `component::policy::decide` is
+`f_supervisor::policy::decide` now, above the frame, in a crate that forbids
+`unsafe`. A boot contains the whole loop: the frame posts `notice::PEER_GONE`
+into the slot of the endpoint a supervisor holds for a place, pumps it onto that
+supervisor's control ring, hands it a core, and performs the `op::SPAWN` it
+submits in reply.
+
+Three reasons were logged against this over three epochs and each was smaller
+than the last — *a component cannot drive a control ring* (ended by RFC 0037),
+*nothing submits `op::SPAWN`* (ended by RFC 0073 and the increment that used
+it), and *a supervisor cannot be told* (ended by RFC 0076, which decided that a
+supervisor is told **when it is started** rather than while it runs).
+
+**Two things this RFC asked for are still the frame's**, and they are named here
+rather than left for a reader to notice:
+
+- The **tally** a restart policy counts with is stored on the `Place`, because a
+  supervisor is run rather than resident and nothing in its image survives
+  between two runs. The frame copies those two numbers and never reads them; RFC
+  0076 records this as the seam where somebody will one day argue the frame still
+  holds the policy, and says what would make that argument land.
+- A **retirement** is still performed by the frame as a scripted act, because it
+  is the one of a place's three fates with no opcode behind it: the control ring
+  says *end this occupant*, not *end this place*. The verdict's arithmetic is
+  `f_supervisor::policy`'s and is tested there; driving it through the supervisor
+  needs a budget spent one death at a time.
+
+*This does not reverse anything above.* It is the decision arriving, which is
+the outcome an accepted RFC is supposed to have, and it is dated so that the
+gap between deciding and landing is legible rather than implied.

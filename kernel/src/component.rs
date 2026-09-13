@@ -41,40 +41,43 @@
 //! safe code, submits operations on it, and is answered by the frame from a
 //! polling loop.
 //!
-//! **Two of the three things that were missing are here now.** What this
-//! paragraph used to say is that there is no supervisor component, in three
-//! bullets; `user/supervisor` is that component, and the boot walks it:
+//! **All three of the things that were missing are here now, and the restart
+//! policy has left this file.** What this paragraph used to say is that there is
+//! no supervisor component, in three bullets; `user/supervisor` is that
+//! component, and the boot walks all three:
 //!
 //! - `f_abi::control::op::SPAWN` is implemented *and submitted*. The frame holds
 //!   one place open ([`held_open`]), schedules the supervisor on a worker core,
 //!   and answers the entry the supervisor puts on its own control ring — so a
 //!   boot contains a component that another component spawned. The `held` and
 //!   `supervised` lines are where a reader meets it.
+//! - **A supervisor is told its occupant died**, by RFC 0076: the frame posts
+//!   `notice::PEER_GONE` into the slot of the endpoint the supervisor holds for
+//!   that place, pumps it onto the supervisor's ring, and *then* hands over a
+//!   core. Being told happens between runs rather than during one, which is what
+//!   lets it happen at all without the boot processor writing a running core's
+//!   capability table. [`consult`] is the whole sequence and carries the
+//!   argument.
 //! - A supervisor is a component, so it needs a place, an account and a
 //!   manifest, and it has all three. What it does **not** yet have is an
 //!   `Untyped` of its own standing in for [`PLACES_MAX`] and
 //!   [`SUPERVISOR_ORDER`]; RFC 0044 names that as one deviation with the other
 //!   two, and it is the one still outstanding.
 //!
-//! The third is not here, and it is the one [`policy`] needs:
+//! So the decision is `f_supervisor::policy`'s, above the frame, and this file
+//! no longer contains it. What is left here is [`Budget`] — two numbers the
+//! frame stores between consultations and never reads — and the mechanism a
+//! verdict is performed by. RFC 0008 asked for exactly that split and
+//! `cargo xtask lint-owed` held the sentence for three epochs; the day the call
+//! left, it went red and said so.
 //!
-//! - **A supervisor still cannot be *told* its occupant died.** The frame posts
-//!   `notice::PEER_GONE` with a cause — [`tear_down`] does it on every teardown
-//!   — so the notice is there and the reader is not, and the reason is not that
-//!   nobody wrote one. It is that this frame serves a supervisor's ring only
-//!   *after* the core has finished: a spawn names the submitter's `Untyped`, so
-//!   answering one while the component runs would be the boot processor
-//!   resolving handles in a table that core may be mutating, which RFC 0016 and
-//!   `CLAUDE.md` say is a fifth place two cores reach and needs an argument.
-//!   The join below carries that argument and its reversal condition.
-//!
-//! So [`policy`] stays here for one increment more, still written as one
-//! function over a record and a tally taking no kernel state at all, so that
-//! moving it is a move rather than a rewrite. `cargo xtask lint-owed` is what
-//! keeps that honest: it holds `policy::decide(` in this file as a declared
-//! quantity and goes red the day the call goes, which is the day this paragraph
-//! and RFC 0008's status both have to change. Its stated *reason* has now
-//! changed twice and got smaller both times, which is the mechanism working.
+//! **Two of the three fates a place has now come back across the boundary and
+//! one does not.** A restart does: the supervisor decides it and submits the
+//! spawn. A retirement does not — there is no opcode for *end this place* as
+//! opposed to *end its occupant* — so the boot's retirement is still the frame's
+//! scripted act, with the verdict's arithmetic tested in `f_supervisor::policy`
+//! rather than driven here. Closing that needs four deaths in a row and is the
+//! increment after this one.
 //!
 //! # What a spawn checks, and what it does not
 //!
@@ -392,75 +395,37 @@ pub unsafe fn modules(boot: &BootInfo) -> ([&'static [u8]; PLACES_MAX], usize) {
     (found, count)
 }
 
-/// What a supervisor decides, as a function of a manifest and a tally.
+/// The two numbers a supervisor's restart policy counts with, stored by the
+/// frame and interpreted by nobody here.
 ///
-/// The whole of RFC 0008's restart rule, in one place, taking no kernel state:
-/// this is the code that moves above the frame when E1-B08 lands a safe channel
-/// adoption, and it is written this way so that the move is a move.
-pub mod policy {
-    use f_abi::manifest::Record;
-
-    /// What the supervisor does next about a place whose occupant has ended.
-    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    pub enum Verdict {
-        /// Leave the place empty. The policy says so, or the death was a stop —
-        /// which is the supervisor's own decision, and restarting after one
-        /// would be the supervisor arguing with itself.
-        Leave,
-        /// Spawn again, after this many timer ticks.
-        /// Unit of the payload: timer ticks, at the frame's own tick rate.
-        Restart(u32),
-        /// Retire the place: the budget ran out. Its endpoint is revoked in
-        /// every holder's table and pending connects complete `PEER/GONE`.
-        Retire,
-    }
-
-    /// How many restarts have happened inside the current budget window, and
-    /// when the window opened.
-    ///
-    /// The window is read from `Env` rather than from a clock, which is RFC
-    /// 0008's sentence and RFC 0004's substrate keeping a call site it would
-    /// otherwise have lost: under the simulator a restart storm is a seeded
-    /// scenario and not a wall-clock accident.
-    #[derive(Clone, Copy, Debug, Default)]
-    pub struct Budget {
-        /// Restarts inside the window. Unit: restarts.
-        pub used: u32,
-        /// When the window opened. Unit: timer ticks, at the frame's own rate,
-        /// as `Env` reports them to the supervisor.
-        pub opened: u64,
-    }
-
-    /// Decide.
-    ///
-    /// `faulted` and `exited` are how the occupant ended; `now` is the
-    /// supervisor's own tick count, read through `Env`. A window that has
-    /// elapsed resets the count *before* the decision, which is the order that
-    /// matters: a component that fails once a day forever is restarted forever,
-    /// and `docs/manifest.md` says at length that a lifetime cap beside the
-    /// window is schema 2's and needs a workload — E1-P06 — to justify it.
-    #[must_use]
-    pub fn decide(
-        record: &Record,
-        budget: &mut Budget,
-        faulted: bool,
-        exited: bool,
-        now: u64,
-    ) -> Verdict {
-        if !record.restarts_after(faulted, exited) {
-            return Verdict::Leave;
-        }
-        if now.saturating_sub(budget.opened) >= u64::from(record.budget_window_ticks) {
-            budget.used = 0;
-            budget.opened = now;
-        }
-        if budget.used >= record.max_restarts {
-            return Verdict::Retire;
-        }
-        let pause = record.backoff_ticks(budget.used);
-        budget.used += 1;
-        Verdict::Restart(pause)
-    }
+/// # Why the frame holds these and does not read them
+///
+/// RFC 0008 moved the decision above the frame and RFC 0076 is what finally
+/// made that possible: a supervisor is *run* when the frame has something to
+/// tell it, so nothing in a supervisor's image survives between two of its
+/// runs — there are no writable statics in a component, and the core clears an
+/// occupant's table on the way out. Its tally therefore has to live somewhere
+/// that outlives an instance, and the only such place that already exists is
+/// the [`Place`].
+///
+/// So these are **bytes the frame copies**. They go out to the supervisor on
+/// its board, come back changed, and are stored again. Nothing in `kernel/`
+/// compares them, adds to them, or branches on them; `user/supervisor`'s
+/// `policy::Budget` is the type that means something, and this is its
+/// resting place.
+///
+/// RFC 0076 records this as the seam where somebody will one day argue the
+/// frame still holds the policy. The answer is this doc comment and
+/// `cargo xtask lint-owed`'s absence of a row: the day the frame reads one of
+/// these, the objection lands.
+#[derive(Clone, Copy, Debug, Default)]
+struct Budget {
+    /// Restarts inside the window, as the supervisor last left it.
+    /// Unit: restarts.
+    used: u32,
+    /// When that window opened, in the logical ticks the frame stamps a
+    /// consultation with. Unit: timer ticks.
+    opened: u64,
 }
 
 /// An account: an untyped region a component's parts are retyped from.
@@ -767,7 +732,7 @@ struct Place {
     /// the field to belong to it.
     reservation: Option<Grant>,
     /// The restart budget.
-    budget: policy::Budget,
+    budget: Budget,
     /// Deaths by cause, for the boot log and for the state tree E1-P06 reads
     /// its blast-radius number out of.
     faults: u32,
@@ -858,10 +823,27 @@ pub struct Report {
     /// Unit: none — a bitmask, one bit per kind, counted from bit zero.
     pub kinds: u8,
     /// Notices read back off a control ring at a polling point, as flagged
-    /// completion entries. Equal to [`Report::notices`] on a boot that
-    /// finished, and counted apart because *published* and *delivered* are the
-    /// two halves R05 is about. Unit: notices.
+    /// completion entries. Counted apart from [`Report::notices`] because
+    /// *published* and *delivered* are the two halves R05 is about.
+    /// Unit: notices.
     pub collected: u32,
+    /// Notices posted onto a ring whose holder drains it **itself**, and
+    /// therefore not collected here.
+    ///
+    /// # Why this is a second bucket and not a weaker check
+    ///
+    /// The invariant used to be `collected == notices`: every notice the frame
+    /// published, it drained back, because nothing was scheduled and the frame
+    /// performed the component's half on its behalf. `user/supervisor` performs
+    /// its own half now — that is what being told means (RFC 0076) — so the
+    /// frame must post to its ring and leave it alone.
+    ///
+    /// Relaxing the check to `collected <= notices` would have made a boot that
+    /// published nothing and a boot that lost everything look the same. Instead
+    /// the two are still required to add up: `collected + handed == notices`,
+    /// and what changed is that a notice now has two honest destinations rather
+    /// than one. Unit: notices.
+    pub handed: u32,
     /// How many post-then-drain rounds the notices took.
     ///
     /// More than one is the property worth seeing: a control ring is sixteen
@@ -1015,7 +997,6 @@ pub unsafe fn demonstrate(
 
     let before = frames.free_count();
     let mut report = Report { components: count, places: count, ..Report::default() };
-    let mut now = now;
     // Every place after the first: built, filled, held for the whole of this
     // function, and given back at the end. They are here rather than in an array
     // beside `place` because the first place is *scripted* and the others are
@@ -1133,7 +1114,7 @@ pub unsafe fn demonstrate(
         occupant: None,
         retired: false,
         reservation: None,
-        budget: policy::Budget::default(),
+        budget: Budget::default(),
         faults: 0,
         exits: 0,
         stops: 0,
@@ -1251,6 +1232,12 @@ pub unsafe fn demonstrate(
     // orders. A loop that held a place open the moment it met one and hoped the
     // supervisor came later would be a boot that depends on that sort.
     let held = held_open(&modules, count, worker.is_some());
+    // The supervisor, its core, and where it goes back — held out of `extras`
+    // from the join below until the scripted place has finished dying, because
+    // it is consulted about every one of those deaths. `None` on a build with no
+    // supervisor or no second core, where the frame decides nothing and
+    // `restart_line` says so rather than a verdict appearing from nowhere.
+    let mut consulting: Option<(usize, usize, u64, Extra)> = None;
     for index in 1..count {
         let Some(module) = modules.get(index).copied() else { break };
         let occupant =
@@ -1328,131 +1315,31 @@ pub unsafe fn demonstrate(
             return Err(Failure::WrongPlace);
         };
 
-        let outcome = {
+        let consulted = {
             let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
-            // Everything the component needs to know that is not a constant: its
-            // ring, its account, and what it may put where. `board` is the page
-            // `f_supervisor::routing` reads, and it is written *before* the core
-            // is told to run, which is the whole of why it may be believed.
-            // SAFETY: `occupant.board` is a frame this frame allocated for this
-            // instance and mapped into its address space and nobody else's; the
-            // direct map covers it and the core that will read it has not been
-            // started yet.
-            unsafe { write_board(frames, occupant, &open, &supervisor) }?;
-            // What the supervisor holds at the moment it is started, kept for
-            // the server below to resolve its entries against. Taken here — the
-            // statement after the grant that put the account in it, and before
-            // the core is told to run — because that is precisely the state the
-            // question *may the submitter spend this?* is about. The table the
-            // core hands back is not it: an occupant's table is cleared when the
-            // occupant ends.
-            let submitted_from = occupant.table;
-
-            // Selector zero: the life every component has. `first` is the
-            // occupant's own handle for its account, so its first act can be a
-            // capability call rather than a guess about which slot it holds.
-            let argument = f_abi::door::Entry::new(0, occupant.first).bits();
-            let root = occupant.space.root();
-            // SAFETY: `root` is the address space this frame built for this
-            // occupant and nothing has torn it down; its text is mapped
-            // executable at `process::TEXT` and its stack is writable below
-            // `process::SPAWN_STACK_TOP`, both by `spawn`. `cpu` is a core the
-            // caller vouched is started and idle, and the table handed over is
-            // taken back below before this instance is touched again.
-            let previous = unsafe {
-                crate::process::schedule_occupant(
-                    cpu,
-                    root,
-                    features,
-                    occupant.table,
-                    argument,
-                    OCCUPANT_HZ,
-                    OCCUPANT_TICKS,
-                )
-            };
-            // SAFETY: the boot processor, with the kernel's space in `CR3` and
-            // the job published into `cpu`'s own shard above. `run_on` makes the
-            // `Release` store that publishes it.
-            let ran = unsafe { crate::smp::run_on(cpu, kernel.root(), tsc_khz, OCCUPANT_MICROS) };
-            ran.map_err(|_| Failure::NoAnswer)?;
-
-            // What the core recorded, read before the shards are reused. The
-            // boot prints it rather than asserting it: a boot that hands an
-            // occupant a core and says only that it did so cannot tell *the
-            // component ran* from *a core was told to run it*.
-            // SAFETY: the core reported finished, which is what `Ok` above means.
-            let (announced, death, _ticks) = unsafe { crate::process::occupant_outcome(cpu) };
-            // The other half of the swap, and it is taken back *before* anything
-            // else looks at this instance. What comes back is not what went in:
-            // a component may have derived, and the teardown below has to revoke
-            // what the component ended holding rather than what it was handed.
-            // SAFETY: as above — the core is finished, so nothing over there is
-            // holding either table.
-            occupant.table = unsafe { crate::process::reclaim_occupant_table(cpu, previous) };
-            // SAFETY: as above, and the page is still mapped — the address space
-            // is torn down below and not here.
-            let said = unsafe { read_board(occupant) };
-
-            // --- what the supervisor asked for, answered now ------------------
-            //
-            // **After the core has finished, and that is the design rather than
-            // the order the code happened to end up in.** A driver's ring is
-            // served *while* its core runs (`kernel/src/smp.rs`'s
-            // `join_serviced`) because what a driver asks for is resolved
-            // against the frame's own tables. What a supervisor asks for is
-            // resolved against **its own** — a spawn names the `Untyped` the
-            // submitter may spend — and while the component is running, its
-            // table is the live one in `cap::of(cpu)`, which belongs to that
-            // core.
-            //
-            // Serving mid-run would therefore have been the boot processor
-            // reading and writing a table a running core may mutate with its own
-            // capability calls: a fifth place two cores reach, which
-            // `CLAUDE.md` and RFC 0016 say needs an argument rather than a
-            // convenience. The frame's kept copy is not a way out either — the
-            // grants `offer` mints would land in the copy and be discarded by
-            // the `reclaim` above, and the teardown would then revoke handles
-            // that were never in the table it walks.
-            //
-            // So the supervisor submits and ends, and the frame answers the ring
-            // it left behind, against the table it left behind. Everything the
-            // component said is still on the ring: entries are memory, not
-            // events, and nothing about a control ring requires its two ends to
-            // be moving at the same time.
-            //
-            // *What it costs, stated because somebody pays it:* this supervisor
-            // cannot act on its own completions — it does not learn whether a
-            // spawn was refused, and `user/supervisor` therefore submits without
-            // waiting. That is enough for a spawn and not enough for a restart
-            // policy, which has to read a notice.
-            //
-            // *Reversal:* a supervisor that must see its answers. The frame then
-            // needs either a per-core serving arrangement or RFC 0016's fifth
-            // word, and both are an RFC rather than an edit here.
-            let asks = Consumer::new(occupant.ring.channel()).ok_or(Failure::WrongPlace)?;
-            let answers = Poster::new(occupant.ring.completions()).ok_or(Failure::WrongPlace)?;
-            let mut serving = Serving {
-                place: &mut open.place,
-                // The supervisor's own table as it stood when it submitted.
-                submitter: &submitted_from,
-                supervisor: &mut supervisor,
+            // Nothing has died here — this place has never been filled — so the
+            // watch buys no notice on this consultation. It is taken anyway,
+            // because the supervisor matches a death against the endpoint on its
+            // board and a row with no endpoint would be a row no future death
+            // could ever be attributed to.
+            let watches = watch(occupant, frames)?;
+            let mut asking = Consulting {
                 frames,
-                account: &open.account,
                 kernel,
                 features,
+                supervisor: &mut supervisor,
                 reservations: &reservations,
-                spawned: (0, 0, 0),
-                answered: 0,
+                on: (cpu, tsc_khz),
             };
-            let (_, refusal) = serve(&asks, &answers, &mut serving)?;
-            let answered = serving.answered;
-            let spawned = serving.spawned;
-            (announced, death, (answered, refusal), spawned, said)
+            // SAFETY: `cpu` is the core `main` vouched is started and idle, and
+            // `occupant` is the instance this frame spawned a few lines above
+            // with its address space live.
+            unsafe { consult(&mut asking, occupant, &mut open.place, &open.account, watches, now) }?
         };
-        let (announced, death, answered, spawned, said) = outcome;
+        open.place.budget = consulted.budget;
         report.scheduled += 1;
-        scheduled_line(cpu, announced, death);
-        supervised_line(answered, u32::from(open.place.occupant.is_some()), said);
+        scheduled_line(cpu, consulted.announced, consulted.death);
+        supervised_line(&consulted, u32::from(open.place.occupant.is_some()));
 
         // The spawn the *supervisor* made, recorded on this side. Everything
         // below is what `fill` does after its own spawn and for the same
@@ -1463,7 +1350,7 @@ pub unsafe fn demonstrate(
             let record = Record::read(open.place.module).map_err(Failure::Manifest)?;
             report.spawns += 1;
             report.unbound += unbound_needs(record);
-            spawned_line(record, &open.place, spawned);
+            spawned_line(record, &open.place, consulted.spawned);
             mounted_line(record, &open.place, mount(tree, &open.place, &mut report)?);
             open.place.reservation = Some(
                 reservations
@@ -1473,14 +1360,15 @@ pub unsafe fn demonstrate(
             publish(&mut open.place, &mut supervisor, &ledger_ring, &mut report)?;
         }
 
-        // Both places go back where they came from. Separately, because they are
-        // two indices into one array and the borrow checker is right to insist:
-        // the whole reason they were taken out is that one of them was the
-        // server's and the other was the occupant's, at the same time.
-        let Some(slot) = extras.get_mut(at) else { return Err(Failure::WrongPlace) };
-        *slot = Some(extra);
+        // The held-open place goes back; the supervisor's does **not**, yet. It
+        // is kept out until the scripted place below has been through its
+        // lifecycle, because every death there is a death this supervisor is
+        // consulted about — RFC 0008's *restart is the supervisor's act*, and
+        // RFC 0076's *it is told when it is started*. It is put back before the
+        // teardown loop, which is the one place every place has to be present.
         let Some(back) = extras.get_mut(index) else { return Err(Failure::WrongPlace) };
         *back = Some(open);
+        consulting = Some((at, cpu, tsc_khz, extra));
     }
 
     // -------------------------------------------------------------- connect
@@ -1517,8 +1405,33 @@ pub unsafe fn demonstrate(
     if speaking.is_ok() {
         return Err(Failure::Ring(0));
     }
+    // The endpoint, in the **supervisor's** table, granted before the death
+    // rather than after it. RFC 0076: a place's `PEER_GONE` pends in the slot of
+    // the endpoint that names it, so a supervisor granted one afterwards would
+    // hold a handle to a place whose death it had already missed. This is the
+    // powerbox grant that makes a supervisor tellable, and the ordering is the
+    // whole of it.
+    let watching = match consulting.as_mut() {
+        Some((_, _, _, extra)) => {
+            let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
+            Some(watch(occupant, frames)?)
+        }
+        None => None,
+    };
+
     let cause = cause::pack(cause::FAULT, u64::from(error::argument::MALFORMED_HEADER));
     let torn = tear_down(frames, &mut place, &mut supervisor, &account, cause, &mut report, tree)?;
+    // And the supervisor is told, in the slot it holds for this place.
+    // `tear_down` posts to the frame's own table because that is the holder it
+    // knows; a second holder is told here, at the one site that has one. Walking
+    // *every* holder is what a revocation walk does and this is not one — the
+    // day there are two supervisors, this line becomes that walk.
+    if let Some(handle) = watching
+        && let Some((_, _, _, extra)) = consulting.as_mut()
+        && let Some(occupant) = extra.place.occupant.as_mut()
+    {
+        let _ = occupant.table.note_peer_gone(handle);
+    }
     crate::kprintln!(
         "  fault         place {} epoch {} stopped speaking: its control ring header no longer \
          validates",
@@ -1598,42 +1511,94 @@ pub unsafe fn demonstrate(
     );
 
     // -------------------------------------------------------------- restart
-    // The supervisor's act, under the manifest's declared policy. `now` is a
-    // tick count read once through `Env` and advanced by the backoff the policy
-    // itself returns — which is what a supervisor does, and is why nothing in
-    // this log moves between a fast host and a slow one.
-    let verdict = policy::decide(record, &mut place.budget, true, false, now);
-    // The demonstration's manifest declares a policy that restarts after a
-    // fault and a budget with room in it, so any other verdict here is the
-    // frame and the record disagreeing about what was declared — which is a
-    // boot failure rather than a smaller result.
-    let policy::Verdict::Restart(pause) = verdict else { return Err(Failure::WrongPlace) };
-    now = now.saturating_add(u64::from(pause));
-    place.restarts += 1;
-    report.restarts += 1;
-    crate::kprintln!(
-        "  restart       place {} under {} — restart {} of {}, backoff {} tick(s)",
-        Name(record.label()),
-        restart::label(record.restart),
-        place.budget.used,
-        record.max_restarts,
-        pause,
-    );
-
-    let offered = offer(&mut supervisor, &account, &place, record, frames)?;
-    // SAFETY: as the first spawn.
-    let spawned = unsafe {
-        spawn(
+    //
+    // **The supervisor's act, and this is the line where that stopped being a
+    // sentence in RFC 0008 and became something the boot does.** The frame does
+    // not decide: it hands a core to the component that was told, on its ring,
+    // that this place lost its occupant, and then performs whatever that
+    // component asked for. `kernel/src/component.rs` held `policy::decide` for
+    // three epochs and no longer contains it.
+    //
+    // `now` is a tick count read once through `Env` and advanced by the backoff
+    // the *supervisor* returns, which is why nothing in this log moves between a
+    // fast host and a slow one.
+    if let Some((_, cpu, tsc_khz, extra)) = consulting.as_mut() {
+        // The notice the teardown made pending, onto the supervisor's own ring,
+        // *before* it is given a core. This is RFC 0076's whole mechanism in one
+        // call: everything a supervisor is told is memory put there while
+        // nothing was running. It happens before the occupant is borrowed,
+        // because `publish` takes the place and the consultation takes what is
+        // in it.
+        publish_only(&mut extra.place, &mut supervisor, &ledger_ring, &mut report)?;
+        let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
+        let mut asking = Consulting {
             frames,
             kernel,
             features,
-            &mut place,
-            &account,
-            &mut supervisor,
-            &reservations,
-            offered,
-        )
-    }?;
+            supervisor: &mut supervisor,
+            reservations: &reservations,
+            on: (*cpu, *tsc_khz),
+        };
+        let watches = watching.ok_or(Failure::WrongPlace)?;
+        // SAFETY: `cpu` is the core `main` vouched is started and idle, and this
+        // instance's address space is live — it is torn down in the loop at the
+        // end of this function and not before.
+        let consulted =
+            unsafe { consult(&mut asking, occupant, &mut place, &account, watches, now) }?;
+        place.budget = consulted.budget;
+        report.scheduled += 1;
+        supervised_line(&consulted, u32::from(place.occupant.is_some()));
+        if place.occupant.is_none() {
+            // A supervisor that was asked and did not refill is not a failure
+            // here — `Leave` and `Retire` are two of its three verdicts — but it
+            // is not this demonstration either, and a boot that carried on would
+            // be reporting a restart that did not happen.
+            return Err(Failure::WrongPlace);
+        }
+        place.restarts += 1;
+        report.restarts += 1;
+        restart_line(record, &place, consulted.verdict);
+    } else {
+        // --- no supervisor to ask, and the boot says so rather than pretending
+        //
+        // A machine with one core has nowhere to run a supervisor — `main` hands
+        // `worker` as `None` and `held_open` answers `None` with it — so this
+        // place is refilled by the frame, with no policy consulted at all.
+        //
+        // **That is a smaller demonstration and it is labelled as one.** The
+        // alternative was to keep a copy of the decision here for this case,
+        // which is exactly the thing RFC 0008 spent three epochs removing: a
+        // second implementation of a rule, reachable on a configuration nobody
+        // looks at, drifting from the one above it. A frame that respawns
+        // without deciding is honest; a frame that decides is the reversal
+        // coming back.
+        //
+        // `cargo xtask cores` is the boot that takes this path.
+        let offered = offer(&mut supervisor, &account, &place, record, frames)?;
+        // SAFETY: as the first spawn — the caller's guarantee, and the place is
+        // empty because the teardown above emptied it.
+        unsafe {
+            spawn(
+                frames,
+                kernel,
+                features,
+                &mut place,
+                &account,
+                &mut supervisor,
+                &reservations,
+                offered,
+            )
+        }?;
+        place.restarts += 1;
+        report.restarts += 1;
+        crate::kprintln!(
+            "  restart       place {} under {} — refilled by the frame, with no supervisor \
+             consulted: this machine has no core to run one on",
+            Name(record.label()),
+            restart::label(record.restart),
+        );
+    }
+    let spawned = place.occupant.as_ref().map_or((0, 0, 0), |occupant| (occupant.epoch, 0, 0));
     report.spawns += 1;
     crate::kprintln!(
         "  spawn         place {} epoch {} — nothing carried over: new table, new memory, \
@@ -1766,15 +1731,24 @@ pub unsafe fn demonstrate(
     // the one a demonstration that stopped at *restart* would leave to E1-P06
     // to discover: a place whose budget ran out is *retired*, and a connect to
     // a retired place is `PEER/GONE` rather than a wait.
-    let exhausted = loop {
-        match policy::decide(record, &mut place.budget, true, false, now) {
-            policy::Verdict::Restart(pause) => now = now.saturating_add(u64::from(pause)),
-            other => break other,
-        }
-    };
-    if exhausted != policy::Verdict::Retire {
-        return Err(Failure::WrongPlace);
-    }
+    //
+    // **What is demonstrated here is the mechanism, and the verdict behind it is
+    // no longer computed here.** This used to drive `policy::decide` in a loop
+    // until it returned `Retire` and then act on that — a pure computation
+    // wearing a boot's clothes, since no memory was spent and nothing was
+    // spawned in any round of it. That arithmetic is
+    // `f_supervisor::policy`'s now, and
+    // `a_budget_spent_inside_its_window_retires_the_place` is the test. What
+    // stays is what a test cannot do: tear the place down as retired and show
+    // both ways a client meets one.
+    //
+    // *What that costs, stated rather than left to be noticed:* the retirement
+    // in this boot is the frame's scripted act and not a verdict that came back
+    // across the boundary, which the restart above now is. Driving it through
+    // the supervisor means four deaths — `max_restarts` restarts and the one
+    // that finds the budget spent — each with its own teardown, notice, core
+    // schedule and refill. That is the next increment and it is a bigger boot,
+    // not a harder one.
     let cause = cause::pack(cause::RETIRED, u64::from(place.epoch));
     let torn = tear_down(frames, &mut place, &mut supervisor, &account, cause, &mut report, tree)?;
     crate::kprintln!(
@@ -1807,33 +1781,40 @@ pub unsafe fn demonstrate(
          waiting: the place is not coming back"
     );
 
-    // The window the budget is counted over, driven at its edge. Its own
-    // arithmetic, on a tally of its own, because the place above is retired and
-    // a retired place is not restarted whatever a window says: what is under
-    // test here is that a count exhausted *inside* the window is not exhausted
-    // once the window has elapsed, which is the difference between a budget and
-    // a lifetime cap — `docs/manifest.md` says the second is schema 2's.
-    let mut window = policy::Budget { used: record.max_restarts, opened: now };
-    let inside = policy::decide(record, &mut window, true, false, now);
-    let after = policy::decide(
-        record,
-        &mut window,
-        true,
-        false,
-        now.saturating_add(u64::from(record.budget_window_ticks)),
-    );
-    if inside != policy::Verdict::Retire || !matches!(after, policy::Verdict::Restart(_)) {
-        return Err(Failure::WrongPlace);
-    }
+    // The window the budget is counted over **is no longer exercised here**, and
+    // the line it printed is gone rather than kept saying something the frame
+    // did not do. It was four calls into `policy::decide` on a tally of its own
+    // — a count exhausted inside the window retires, the same count once the
+    // window has elapsed does not, which is the difference between a budget and
+    // a lifetime cap that `docs/manifest.md` says is schema 2's.
+    //
+    // Those four calls are
+    // `f_supervisor::policy`'s
+    // `the_same_count_retires_inside_the_window_and_does_not_once_it_has_elapsed`
+    // now. A boot cannot reach them at all any more: the window is a property of
+    // arithmetic the frame does not contain, and a line here asserting it would
+    // be the frame claiming to have checked something it cannot see.
     crate::kprintln!(
-        "  budget        a window {} tick(s) wide: {} restart(s) inside it retires the place, \
-         and the same count once it has elapsed does not",
+        "  budget        a window {} tick(s) wide and {} restart(s) in it, declared by the \
+         manifest and counted above the frame — `f_supervisor::policy` is where it is decided \
+         and tested",
         record.budget_window_ticks,
         record.max_restarts,
     );
 
     // ------------------------------------------------- the other places, back
     //
+    // The supervisor's place first, back into the array it was held out of for
+    // the whole of the scripted lifecycle above. It is put back *before* the
+    // loop rather than skipped by it, because the loop is where every place is
+    // torn down and a place that missed it is a place whose frames never come
+    // home — which is exactly what the boot said, in the one sentence a leak
+    // gets: *a component's frames did not all come back*.
+    if let Some((at, _, _, extra)) = consulting.take() {
+        let Some(slot) = extras.get_mut(at) else { return Err(Failure::WrongPlace) };
+        *slot = Some(extra);
+    }
+
     // Uniform teardown, and *uniform* is the word doing the work: this is the
     // same [`tear_down`] the scripted place above reached three times by three
     // different routes, called here on an occupant that did nothing wrong. RFC
@@ -1867,16 +1848,18 @@ pub unsafe fn demonstrate(
     // -------------------------------------------------------------- notices
     publish(&mut place, &mut supervisor, &ledger_ring, &mut report)?;
     report.owed = supervisor.owes();
-    if report.owed != 0 || report.collected != report.notices {
+    if report.owed != 0 || report.collected + report.handed != report.notices {
         return Err(Failure::Leaked);
     }
     crate::kprintln!(
         "  notices       {} published in slot-then-stop-then-grade order over {} round(s), {} \
-         drained back at a polling point as {} of 7 kind(s), {} still owed",
+         drained back at a polling point as {} of 7 kind(s), {} handed to a component that \
+         drains for itself, {} still owed",
         report.notices,
         report.rounds,
         report.collected,
         report.kinds.count_ones(),
+        report.handed,
         report.owed,
     );
 
@@ -2040,7 +2023,7 @@ unsafe fn fill(
         occupant: None,
         retired: false,
         reservation: None,
-        budget: policy::Budget::default(),
+        budget: Budget::default(),
         faults: 0,
         exits: 0,
         stops: 0,
@@ -2185,6 +2168,43 @@ fn admitted_line(record: &Record, staked: u64) {
 const _: () = assert!(crate::process::BOARD == f_supervisor::routing::AT);
 const _: () = assert!(f_supervisor::routing::BYTES as u64 == FRAME_SIZE);
 
+/// Give a supervisor the endpoint of a place, so that it can be told when that
+/// place loses its occupant.
+///
+/// **Called before the death, never after**, and [`write_board`] argues why at
+/// the parameter that carries the result: a `PEER_GONE` pends in the slot of the
+/// endpoint it concerns, so a supervisor granted one afterwards holds a handle
+/// to a place whose death it has already missed.
+///
+/// `REVOKE` beside `READ` and `WRITE`, because this is also the handle
+/// `op::STOP` is checked against — one grant answers both halves of a lifecycle
+/// rather than two grants answering one each. Deliberately **not** `GRANT`: a
+/// supervisor that could hand a place's endpoint on could introduce a client to
+/// a place without the frame knowing, which is the powerbox's job.
+///
+/// # Errors
+///
+/// As [`grant_into`].
+fn watch(occupant: &mut Instance, frames: &FrameAllocator) -> Result<Handle, Failure> {
+    // **Re-armed, because a supervisor runs more than once.** `Table::clear_all`
+    // turns notice-owing off on its way out — *nothing is owed to a component
+    // that no longer exists*, which is right for a teardown and wrong for an
+    // occupant that has merely finished a run and will be given another core.
+    // Without this the grant below succeeds, the death is posted, and
+    // `note_peer_gone` records nothing because the table says nobody is
+    // listening: the boot reported `told of 0 death(s)` for a place that had
+    // demonstrably died, twice, before this line existed.
+    occupant.table.owes_notices();
+    grant_into(
+        &mut occupant.table,
+        frames,
+        CapType::Endpoint,
+        rights::READ | rights::WRITE | rights::REVOKE,
+        0,
+        0,
+    )
+}
+
 /// Fill in the page the supervisor reads before it does anything else.
 ///
 /// Written through the direct map, into a frame this instance's account paid for
@@ -2207,8 +2227,11 @@ const _: () = assert!(f_supervisor::routing::BYTES as u64 == FRAME_SIZE);
 unsafe fn write_board(
     frames: &FrameAllocator,
     occupant: &mut Instance,
-    open: &Extra,
+    target: &Place,
+    account: &Account,
     supervisor: &Table,
+    watches: Handle,
+    now: u64,
 ) -> Result<(), Failure> {
     use f_supervisor::routing::at;
 
@@ -2234,8 +2257,8 @@ unsafe fn write_board(
     // Granted from what the *frame's* table says the object is, rather than from
     // `Account::floor` and a length computed here: one reading, from the place
     // that owns it.
-    let found = supervisor.inspect(open.account.handle).map_err(Failure::Need)?;
-    let account = grant_into(
+    let found = supervisor.inspect(account.handle).map_err(Failure::Need)?;
+    let spends = grant_into(
         &mut occupant.table,
         frames,
         CapType::Untyped,
@@ -2243,6 +2266,21 @@ unsafe fn write_board(
         found.object,
         found.extent,
     )?;
+
+    // --- and the endpoint, which is what makes a supervisor tellable ---------
+    //
+    // **Handed in rather than granted here**, and that is the whole of RFC
+    // 0076's ordering made into a parameter. A place's `PEER_GONE` pends in the
+    // capability slot of the endpoint that names it, so the supervisor has to
+    // hold that endpoint *before* the death — a handle minted at consultation
+    // time would name a place whose death had already been posted somewhere
+    // else, and the notice and the board would disagree about which row a death
+    // belongs to. That is not a hypothesis: the first boot of this path reported
+    // `told of 0 death(s)` for a place that had demonstrably died, because these
+    // were two grants.
+    //
+    // [`watch`] is where it is minted, at the caller, before whatever kills the
+    // occupant.
     // SAFETY: the caller's guarantee. One frame, mapped by the direct map, owned
     // by this instance, and not yet reachable from any other core.
     let page =
@@ -2261,12 +2299,19 @@ unsafe fn write_board(
     // across would name whatever happened to be in that slot on the other side.
     // And not `Instance::first`, which is this component's handle for its *own*
     // account — the memory it is made of, not the memory it may spend.
-    put(at::ACCOUNT, u64::from(account.bits()));
+    put(at::ACCOUNT, u64::from(spends.bits()));
     put(at::PLACES, 1);
-    put(at::MANIFEST, open.place.manifest.bits());
+    put(at::NOW, now);
+    put(at::ROW + at::ROW_MANIFEST, target.manifest.bits());
+    put(at::ROW + at::ROW_ENDPOINT, u64::from(watches.bits()));
+    // The tally, handed back out. The frame stored these and did not look at
+    // them; RFC 0076 is the argument and `Budget`'s doc comment is where it
+    // says so beside the field.
+    put(at::ROW + at::ROW_USED, u64::from(target.budget.used));
+    put(at::ROW + at::ROW_OPENED, target.budget.opened);
     // Last, so that a component reading a page this function did not finish
     // finds a zero rather than a plausible layout. Nothing here races — the core
-    // is idle until `start_on` — and the order is kept anyway, because the day
+    // is idle until `run_on` — and the order is kept anyway, because the day
     // something does race is the day nobody remembers this was safe. The same
     // sentence `kernel/src/blk.rs` writes over its own board.
     put(at::MAGIC, f_supervisor::routing::MAGIC);
@@ -2286,9 +2331,9 @@ unsafe fn write_board(
 ///
 /// As [`write_board`], except that the core must have finished rather than not
 /// started.
-unsafe fn read_board(occupant: &Instance) -> (u64, u64) {
+unsafe fn read_board(occupant: &Instance) -> (u64, u64, u64, u64, Budget) {
     if occupant.board == 0 {
-        return (0, 0);
+        return (0, 0, 0, 0, Budget::default());
     }
     use f_supervisor::routing::at;
     // SAFETY: the caller's guarantee.
@@ -2300,7 +2345,204 @@ unsafe fn read_board(occupant: &Instance) -> (u64, u64) {
             .and_then(|slot| slot.try_into().ok())
             .map_or(0, u64::from_le_bytes)
     };
-    (get(at::SUBMITTED), get(at::REFUSED))
+    (
+        get(at::TOLD),
+        get(at::SUBMITTED),
+        get(at::REFUSED),
+        get(at::SAID + at::SAID_VERDICT),
+        // Copied, not interpreted. The frame stores these two numbers between
+        // consultations and never compares them to anything; RFC 0076 names this
+        // as the seam and `Budget`'s doc comment is the standing answer.
+        Budget {
+            used: u32::try_from(get(at::SAID + at::SAID_USED)).unwrap_or(0),
+            opened: get(at::SAID + at::SAID_OPENED),
+        },
+    )
+}
+
+/// What one consultation produced.
+///
+/// Two halves from two sides of the privilege boundary, kept apart in the type
+/// because that is the only form in which either is evidence: `answered` and
+/// `spawned` are what *this core* did, and `told`, `submitted` and `verdict` are
+/// the supervisor's own account of itself out of its board.
+struct Consulted {
+    /// Did the occupant announce itself from ring 3?
+    announced: bool,
+    /// How it ended.
+    death: crate::process::Death,
+    /// Entries this core answered on its ring. Unit: entries.
+    answered: u64,
+    /// The last refusal among them, or zero. Unit: none — a packed error.
+    refusal: i32,
+    /// What the last spawn produced: epoch, frames charged, needs supplied.
+    spawned: (u32, usize, usize),
+    /// Deaths the supervisor says it was told about. Unit: notices.
+    told: u64,
+    /// Spawns it says it submitted. Unit: entries.
+    submitted: u64,
+    /// Spawns it could not submit, for want of room. Unit: entries.
+    unsent: u64,
+    /// What it decided about the place it was consulted over, as
+    /// `f_supervisor::policy::Verdict::to_wire`.
+    verdict: u64,
+    /// The tally it left behind, to be stored on the place.
+    budget: Budget,
+}
+
+/// Ask the supervisor what to do about one place, and let it act.
+///
+/// # What this is, in one sentence
+///
+/// RFC 0008's *restart is the supervisor's act and the frame provides only the
+/// mechanism*, as a function: the frame writes down what it knows, hands a core
+/// to the component that decides, and then performs whatever that component
+/// asked for.
+///
+/// # The order, which is the whole of RFC 0076
+///
+/// The caller has already torn down whatever died and called [`publish`], so the
+/// `notice::PEER_GONE` is **on the supervisor's ring before this is called**.
+/// That is what makes a supervisor tellable without the frame ever writing a
+/// running core's capability table: everything it needs to know is memory it can
+/// read at its own polling point, put there while nothing was running.
+///
+/// Then, and only then, the ring is served — against the table the core handed
+/// back. `serve`'s doc and `user/supervisor/src/component.rs` carry the argument
+/// for why that cannot happen while the component runs.
+///
+/// # Errors
+///
+/// [`Failure::NoAnswer`] for a core that did not report finished, and whatever
+/// the board, the grants and the ring refuse.
+///
+/// # Safety
+///
+/// `cpu` must be a core the caller has vouched is started and idle, and
+/// `occupant` must be an instance this frame built whose address space is live.
+/// The frame's side of a consultation: everything a spawn the supervisor asks
+/// for would be built out of, and the core it is asked on.
+///
+/// A struct for `Serving`'s reason rather than for clippy's. These five borrows
+/// and one core travel together through every consultation and are meaningless
+/// apart — a `consult` taking them loose had twelve parameters, and the two that
+/// are about *this* consultation (which place, which tally) were lost among the
+/// ten that are about the machine.
+struct Consulting<'a> {
+    /// Where the frames a spawn charges come from.
+    frames: &'a mut FrameAllocator,
+    /// The kernel's address space, which a new instance's tables are built
+    /// against.
+    kernel: &'a paging::AddressSpace,
+    /// What the processor offers those tables.
+    features: Features,
+    /// Where handles are minted and what a teardown will walk. The frame's,
+    /// until RFC 0029's cross-table parent link lands — `Serving::supervisor`
+    /// carries the argument.
+    supervisor: &'a mut Table,
+    /// What a spawn's admission is tested against.
+    reservations: &'a Reservations,
+    /// The core the supervisor runs on, and its timestamp rate.
+    on: (usize, u64),
+}
+
+unsafe fn consult(
+    asking: &mut Consulting,
+    occupant: &mut Instance,
+    target: &mut Place,
+    account: &Account,
+    watches: Handle,
+    now: u64,
+) -> Result<Consulted, Failure> {
+    let Consulting { frames, kernel, features, supervisor, reservations, on: (cpu, tsc_khz) } =
+        asking;
+    let (features, cpu, tsc_khz) = (*features, *cpu, *tsc_khz);
+    // Everything the component needs to know that is not a constant: its ring,
+    // the account it may spend, the place it may act on, and the tally the frame
+    // is holding for it. Written *before* the core is told to run, which is the
+    // whole of why it may be believed.
+    // SAFETY: `occupant.board` is a frame this frame allocated for this instance
+    // and mapped into its address space and nobody else's; the direct map covers
+    // it and the core that will read it is idle.
+    unsafe { write_board(frames, occupant, target, account, supervisor, watches, now) }?;
+
+    // What the supervisor holds at the moment it is started, kept for the server
+    // below to resolve its entries against. Taken here — after the grants above
+    // and before the core is told to run — because that is precisely the state
+    // the question *may the submitter spend this?* is about. The table the core
+    // hands back is not it: an occupant's table is cleared when it ends.
+    let submitted_from = occupant.table;
+
+    // Selector zero: the life every component has. `first` is the occupant's own
+    // handle for its account, so its first act can be a capability call rather
+    // than a guess about which slot it holds.
+    let argument = f_abi::door::Entry::new(0, occupant.first).bits();
+    let root = occupant.space.root();
+    // SAFETY: `root` is the address space this frame built for this occupant and
+    // nothing has torn it down; its text is mapped executable at `process::TEXT`
+    // and its stack is writable below `process::SPAWN_STACK_TOP`, both by
+    // `spawn`. `cpu` is the caller's, and the table handed over is taken back
+    // below before this instance is touched again.
+    let previous = unsafe {
+        crate::process::schedule_occupant(
+            cpu,
+            root,
+            features,
+            occupant.table,
+            argument,
+            OCCUPANT_HZ,
+            OCCUPANT_TICKS,
+        )
+    };
+    // SAFETY: the boot processor, with the kernel's space in `CR3` and the job
+    // published into `cpu`'s own shard above. `run_on` makes the `Release` store
+    // that publishes it.
+    let ran = unsafe { crate::smp::run_on(cpu, kernel.root(), tsc_khz, OCCUPANT_MICROS) };
+    ran.map_err(|_| Failure::NoAnswer)?;
+
+    // What the core recorded, read before the shards are reused.
+    // SAFETY: the core reported finished, which is what `Ok` above means.
+    let (announced, death, _ticks) = unsafe { crate::process::occupant_outcome(cpu) };
+    // The other half of the swap, taken back *before* anything else looks at
+    // this instance. What comes back is not what went in: a component may have
+    // derived, and a teardown has to revoke what it ended holding.
+    // SAFETY: as above — the core is finished, so nothing over there is holding
+    // either table.
+    occupant.table = unsafe { crate::process::reclaim_occupant_table(cpu, previous) };
+    // SAFETY: as above, and the page is still mapped — an address space is torn
+    // down by `tear_down` and not here.
+    let (told, submitted, unsent, verdict, budget) = unsafe { read_board(occupant) };
+
+    let asks = Consumer::new(occupant.ring.channel()).ok_or(Failure::WrongPlace)?;
+    let answers = Poster::new(occupant.ring.completions()).ok_or(Failure::WrongPlace)?;
+    let mut serving = Serving {
+        place: target,
+        // The supervisor's own table as it stood when it submitted.
+        submitter: &submitted_from,
+        supervisor,
+        frames,
+        account,
+        kernel,
+        features,
+        reservations,
+        spawned: (0, 0, 0),
+        answered: 0,
+    };
+    let (_, refusal) = serve(&asks, &answers, &mut serving)?;
+    let answered = serving.answered;
+    let spawned = serving.spawned;
+    Ok(Consulted {
+        announced,
+        death,
+        answered,
+        refusal,
+        spawned,
+        told,
+        submitted,
+        unsent,
+        verdict,
+        budget,
+    })
 }
 
 /// Answer everything the supervisor has asked for, and nothing else.
@@ -2350,18 +2592,55 @@ fn serve(asks: &Consumer, answers: &Poster, serving: &mut Serving) -> Result<(u3
 /// own account of itself out of its board. A boot where they disagree has a
 /// supervisor that cannot see its own ring or a frame that answered something
 /// nobody asked — and a line carrying only one of them could not tell you which.
-fn supervised_line(frame: (u64, i32), filled: u32, said: (u64, u64)) {
-    let (submitted, unsent) = said;
-    let (answered, refusal) = frame;
+fn supervised_line(consulted: &Consulted, filled: u32) {
     crate::kprintln!(
-        "  supervised    the supervisor submitted {} spawn(s) from ring 3 and could not submit \
-         {}; the frame answered {}, filled {} place(s), last refusal {:#010x}",
-        submitted,
-        unsent,
-        answered,
+        "  supervised    told of {} death(s); decided {}; submitted {} spawn(s) from ring 3 and \
+         could not submit {} — the frame answered {}, filled {} place(s), last refusal {:#010x}",
+        consulted.told,
+        verdict_label(consulted.verdict),
+        consulted.submitted,
+        consulted.unsent,
+        consulted.answered,
         filled,
-        refusal as u32,
+        consulted.refusal as u32,
     );
+}
+
+/// A restart, named for what decided it.
+///
+/// The line used to carry the backoff the frame's own `policy::decide` had
+/// returned. It carries the *verdict* now, and not the pause, because the pause
+/// was only ever interesting as evidence that a policy had run — and a verdict
+/// that came back across a privilege boundary is better evidence of that than a
+/// number the frame computed for itself. The backoff is the supervisor's, and it
+/// is in the tally on its board.
+fn restart_line(record: &Record, place: &Place, verdict: u64) {
+    crate::kprintln!(
+        "  restart       place {} under {} — the supervisor said {}; restart {} of {}",
+        Name(record.label()),
+        restart::label(record.restart),
+        verdict_label(verdict),
+        place.budget.used,
+        record.max_restarts,
+    );
+}
+
+/// A verdict ordinal as the word a reader wants.
+///
+/// The mapping is `f_supervisor::policy::Verdict::to_wire`'s, and it is written
+/// out here rather than imported because what crosses the board is a number: a
+/// frame that could pattern-match the supervisor's enum would be a frame that
+/// links the supervisor's policy, which is the thing RFC 0008 spent three epochs
+/// getting rid of. An ordinal this build does not name is printed as such
+/// (R04) — a supervisor speaking a vocabulary the frame does not have is
+/// something a boot log should say rather than round down to *leave*.
+const fn verdict_label(wire: u64) -> &'static str {
+    match wire {
+        0 => "leave",
+        1 => "restart",
+        2 => "retire",
+        _ => "a verdict this build does not name",
+    }
 }
 
 /// Which module is the supervisor, by its manifest's label.
@@ -4275,6 +4554,18 @@ fn tear_down(
 /// completion entry and is not enough to show a component acting on one — which
 /// is E1-B08's, and `user/store/src/lib.rs` says so at the crate that will do
 /// it.
+///
+/// # The one place that half must *not* be performed
+///
+/// `user/supervisor` reads its own ring. Draining on its behalf would take the
+/// notices it is about to be told by (RFC 0076) and, worse, the frame's own
+/// answers to the spawns it submitted — which are not notices at all, and which
+/// this function refuses on sight because for every other component an entry on
+/// a control ring is a notice or a mistake.
+///
+/// That refusal is correct and stays. What was missing is that a component which
+/// drains for itself has a control ring the frame may post to and may not read,
+/// so [`publish_only`] is that call and this one keeps its meaning.
 fn publish(
     place: &mut Place,
     supervisor: &mut Table,
@@ -4294,6 +4585,68 @@ fn publish(
     report.rounds += pumped.2;
     report.kinds |= pumped.3;
     Ok(())
+}
+
+/// Post what an occupant is owed onto its control ring, and **leave it there**.
+///
+/// For the one component that drains for itself. [`publish`]'s doc argues why
+/// that needs its own call rather than a flag on the drain: the notices this
+/// posts are what the supervisor is *told* by on its next run (RFC 0076), and
+/// the frame's own answers to its spawns are already on the same ring and are
+/// not notices at all.
+///
+/// The frame's own ledger is still pumped both ways, because that half is the
+/// frame talking to itself and is where `Report::collected` comes from.
+///
+/// # Errors
+///
+/// As [`publish`].
+fn publish_only(
+    place: &mut Place,
+    supervisor: &mut Table,
+    ledger: &Mapping,
+    report: &mut Report,
+) -> Result<(), Failure> {
+    if let Some(occupant) = place.occupant.as_mut() {
+        let posted = post_only(&mut occupant.table, &occupant.ring, Handle::NULL)?;
+        report.notices += posted;
+        report.handed += posted;
+    }
+    let pumped = pump(supervisor, ledger, Handle::NULL)?;
+    report.notices += pumped.0;
+    report.collected += pumped.1;
+    report.rounds += pumped.2;
+    report.kinds |= pumped.3;
+    Ok(())
+}
+
+/// [`pump`]'s posting half, without the drain.
+///
+/// One round rather than rounds, and that is a real bound rather than a
+/// simplification: with nobody draining on this side, a second round would find
+/// exactly the room the first one left. A table owing more than the ring holds
+/// keeps owing it, which is precisely what RFC 0008 says pending state is for —
+/// the ring's depth bounds what is *visible*, never what is true, and the rest
+/// is posted the next time this component is consulted.
+///
+/// # Errors
+///
+/// As [`pump`], for a ring that stopped validating or a kind this build does not
+/// define.
+fn post_only(table: &mut Table, ring: &Mapping, control: Handle) -> Result<u32, Failure> {
+    let poster = Poster::new(ring.completions()).ok_or_else(|| {
+        Failure::Notice(error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER))
+    })?;
+    let mut posted = 0;
+    while poster.free().map_err(ring_error)? > 0 {
+        let Some(entry) = next_notice(table, control) else { break };
+        if !f_abi::control::is_notice(&entry) || !notice::known(entry.result) {
+            return Err(Failure::Notice(entry.result));
+        }
+        poster.post(entry).map_err(ring_error)?;
+        posted += 1;
+    }
+    Ok(posted)
 }
 
 /// Post what fits, drain what arrived, and go round until nothing is owed.

@@ -15,51 +15,47 @@
 //!
 //! # What this does
 //!
-//! It reads the page the frame filled in for it, adopts its control ring, and
-//! **submits `control::op::SPAWN` for every place the frame said it may fill**.
-//! That is the act `TODO.md`'s E1-B05 has been about since it was written and
-//! the one `kernel/src/component.rs` named in three bullets it called one thing:
-//! *there is no supervisor component*.
+//! Three things, in this order, and the order is the design:
 //!
-//! The previous version of this comment said the submission loop was
-//! deliberately absent because writing it would be writing against a machine
-//! state no boot reaches — a promised layer with no owner. The state is reached
-//! now: RFC 0075 handed an occupant a core, and the boot that proved it also
-//! found the reason no component had ever executed (`user/init/link.ld`).
+//! 1. **Drains its control ring.** Everything the frame had to say is already
+//!    there when the core is handed over — RFC 0076 — so this is where a
+//!    `notice::PEER_GONE` becomes *this place lost its occupant*.
+//! 2. **Decides.** [`crate::policy::decide`] is RFC 0008's restart rule, above
+//!    the frame at last, over the tally the board carried in.
+//! 3. **Submits.** `control::op::SPAWN` for every place it decided to refill,
+//!    and a verdict written back for every place it did not — because a retire
+//!    has no opcode behind it and travels on the board instead.
 //!
-//! # What it still does not do, stated so the next reader does not go looking
+//! # Why it does not wait for its answers
 //!
-//! **It does not restart anything.** [`crate::policy`] is here and decides, and
-//! nothing yet calls it from a notice, because being *told its occupant died* is
-//! a `notice::PEER_GONE` for a place this component does not hold an endpoint to
-//! — it holds manifests. That is the next increment and it is the one that
-//! retires the frame's own restart demonstration.
-//!
-//! # Why it does not wait for its answers, which is the sharp edge here
-//!
-//! **Because nothing is answering while it runs, on purpose.** A driver's
-//! control ring is served by the frame *during* the driver's run, because what a
-//! driver asks for — a device translation — is resolved against the frame's own
-//! tables. A spawn is not: it names the `Untyped` the submitter may spend, and
-//! the submitter's table, while this component is running, is the live one on
-//! this core. A frame that resolved handles in it from the boot processor would
-//! be two cores reaching one table, which `CLAUDE.md` permits in exactly four
+//! **Because nothing answers while it runs, on purpose.** A driver's control
+//! ring is served by the frame *during* the driver's run, because what a driver
+//! asks for — a device translation — is resolved against the frame's own tables.
+//! A spawn is not: it names the `Untyped` the submitter may spend, and the
+//! submitter's table, while this component is running, is the live one on this
+//! core. A frame that resolved handles in it from the boot processor would be
+//! two cores reaching one table, which `CLAUDE.md` permits in exactly four
 //! places and says a fifth needs an argument.
 //!
 //! So `kernel/src/component.rs` serves this ring *after* the core reports
-//! finished, against the table it took back. Entries are memory rather than
-//! events, so nothing is lost by the two ends not moving at once — what is lost
-//! is this component's ability to see the answer, and that is stated here rather
-//! than discovered by a loop that spins forever waiting for one.
+//! finished, against the table it took back, and the answers wait there until
+//! the next consultation. Entries are memory rather than events; nothing is lost
+//! by the two ends not moving at once.
 //!
-//! *What it costs:* this supervisor reports what it **submitted**, and the frame
-//! reports what it **filled**. Those are two numbers from two sides and the boot
-//! prints both, which is a better arrangement than one number anyway — but it is
-//! not a supervisor that can retry, and a restart policy has to be able to.
+//! **RFC 0076 is what turns that from a limitation into a shape.** A supervisor
+//! is not a daemon with a loop — it is a thing the frame *runs when it has
+//! something to tell it*. Being told happens at the start of a run and acting
+//! happens during it, so the only thing this component cannot do is react to a
+//! death that arrives while it is already on a core. It is told about that one
+//! on its next run, and the RFC names the observation that would make that
+//! insufficient.
 //!
-//! *Reversal:* [`crate::policy`] being called from a notice. That needs answers,
-//! and answers need one of the two arrangements the frame's comment names.
+//! Nothing in this image survives between two runs — there are no writable
+//! statics in a component and the core clears the table on the way out — so the
+//! restart tally travels on the board. RFC 0076 records that seam: the frame
+//! stores those two numbers and never reads them.
 
+use crate::routing::PLACES_MAX;
 use f_abi::door;
 
 /// A run that did what it meant to.
@@ -115,11 +111,13 @@ pub fn start(_argument: u64) -> ! {
     end(supervise())
 }
 
-/// Fill every place the frame said this component may fill.
+/// Decide what to do about every place the frame named, and do the part of it
+/// that is a submission.
 ///
-/// Returns the status [`start`] ends with: [`DONE`] when every place named was
-/// filled, and the packed refusal otherwise — so a boot reads *what went wrong*
-/// out of the exit status rather than out of a counter it has to interpret.
+/// Returns the status [`start`] ends with: [`DONE`] for a run that got every
+/// entry it wanted onto its ring, and a packed refusal otherwise — so a boot
+/// reads *what went wrong* out of the exit status rather than out of a counter
+/// it has to interpret.
 fn supervise() -> u64 {
     let board = match crate::routing::Board::read() {
         Ok(board) => board,
@@ -131,8 +129,8 @@ fn supervise() -> u64 {
     // `CONTROL_EVENTS` required and not merely offered, which is the one
     // refusal a control ring depends on and `user/virtio-blk` states in the same
     // words: a control ring whose peer cannot speak notices is not a control
-    // ring. A supervisor's dependence on it is stronger than a driver's — the
-    // next increment's whole input is a notice.
+    // ring. A supervisor's dependence on it is stronger than a driver's — a
+    // death arrives on it, and a supervisor that cannot be told is not one.
     let control = match f_ring::adopt::Adopted::at(
         board.control_at,
         board.control_len,
@@ -146,40 +144,134 @@ fn supervise() -> u64 {
         // memory has gone. Writing an error code into a field named for a count
         // would make both unreadable.
         Err(packed) => {
-            crate::routing::Board::report(0, 0);
+            crate::routing::Board::report((0, 0, 0), &[]);
             return i64::from(packed) as u64;
         }
     };
 
+    // --- what happened, taken off the ring before anything is decided --------
+    //
+    // RFC 0076: a supervisor is told when it is started. Everything the frame
+    // had to say is already here, posted into this ring before the core was
+    // handed the job, and this drain is the polling point R05 says every event
+    // arrives at. It is **not** a wait — an empty ring means nothing happened,
+    // which is the ordinary case and the reason this returns rather than spins.
+    let mut told = 0;
+    let mut died = [false; crate::routing::PLACES_MAX];
+    while let Ok(Some(entry)) = control.take() {
+        if !f_abi::control::is_notice(&entry) {
+            // An answer to something submitted on a previous run, arriving now
+            // because nothing answers this ring while its owner holds a core.
+            // Dropped rather than misread: the verdict it would inform has
+            // already been acted on by the frame.
+            continue;
+        }
+        // R04: a kind this build does not define is the frame speaking a
+        // protocol this component was not built against, and reading on after
+        // one would be guessing.
+        if !f_abi::control::notice::known(entry.result) {
+            break;
+        }
+        if entry.result != f_abi::control::notice::PEER_GONE {
+            continue;
+        }
+        told += 1;
+        // Which place, by the endpoint the notice pends in. The board is the
+        // only thing that maps a handle to a row, which is why a supervisor is
+        // given its endpoints rather than left to infer them.
+        for (index, row) in board.rows.iter().enumerate().take(board.places) {
+            if u64::from(row.endpoint) == entry.user_data
+                && let Some(slot) = died.get_mut(index)
+            {
+                *slot = true;
+            }
+        }
+    }
+
+    // --- the decision --------------------------------------------------------
+    let mut said = [(crate::policy::Verdict::Leave, crate::policy::Budget::default()); PLACES_MAX];
     let mut submitted = 0;
     let mut refused = 0;
-    for (index, manifest) in board.manifests.iter().enumerate().take(board.places) {
+    for (index, row) in board.rows.iter().enumerate().take(board.places) {
+        let mut budget = row.budget;
+        // A place nothing died in has nothing to decide about — except on the
+        // first consultation, where the frame has handed over a place it built
+        // and deliberately never filled. Those two are told apart by whether a
+        // death arrived, and by the tally being untouched. A flag on the board
+        // saying *fill this* would be the frame deciding and this component
+        // typing, which is the thing RFC 0008 refuses.
+        let verdict = if died.get(index).copied().unwrap_or(false) {
+            // `faulted`: an occupant the frame tore down is a death this
+            // supervisor treats as a fault. A stop is the supervisor's own act
+            // and never arrives here as something to decide about.
+            crate::policy::decide(&declared(), &mut budget, true, false, board.now)
+        } else if budget == crate::policy::Budget::default() {
+            crate::policy::Verdict::Restart(0)
+        } else {
+            crate::policy::Verdict::Leave
+        };
+        if let Some(slot) = said.get_mut(index) {
+            *slot = (verdict, budget);
+        }
+        if !matches!(verdict, crate::policy::Verdict::Restart(_)) {
+            continue;
+        }
         // The token is the row, plus one so that it is never zero: zero is the
         // `user_data` an entry nobody set carries, and an answer matched against
-        // it would match the frame's own notices. Nothing in this component
-        // reads the answers, but the token is what makes them readable *later*
-        // — by the frame draining this ring, and by the supervisor that
-        // eventually waits for them.
-        let token = index as u64 + 1;
+        // it would match the frame's own notices.
         let entry = f_abi::Sqe {
             opcode: f_abi::control::op::SPAWN,
             cap: board.account,
-            user_data: token,
-            ext: [*manifest, 0],
+            user_data: index as u64 + 1,
+            ext: [row.manifest, 0],
             ..f_abi::Sqe::ZERO
         };
         // A full ring is the one refusal this component can see for itself, and
-        // it is a real one: the frame is not draining yet, so a supervisor with
-        // more places than ring entries would silently submit a prefix. Counted
-        // rather than retried — there is nobody to wait for.
+        // it is a real one: nothing drains this ring while this component holds
+        // the core, so a supervisor with more places than ring entries would
+        // silently submit a prefix. Counted rather than retried — there is
+        // nobody to wait for.
         match control.submit(entry) {
             Ok(_) => submitted += 1,
             Err(_) => refused += 1,
         }
     }
 
-    crate::routing::Board::report(submitted, refused);
+    crate::routing::Board::report((submitted, refused, told), &said[..board.places]);
     if refused == 0 { DONE } else { i64::from(RING_FULL) as u64 }
+}
+
+/// The manifest fields [`crate::policy::decide`] reads.
+///
+/// # Why a supervisor does not read the manifest itself
+///
+/// Because it has no way to. A manifest is compiled into a record beside the
+/// component's image (RFC 0030) and lives in a boot module the frame maps for
+/// itself; a supervisor holds a content *hash*, which names a manifest and does
+/// not reach it. Handing the whole record across would be handing a component a
+/// page it did not ask for, and every field in it but four is the frame's
+/// business.
+///
+/// **So this is a stated gap rather than a helper**, and it is a function with
+/// this comment rather than four literals inline so that it is greppable. What
+/// it returns is the policy `user/store` declares, which is the manifest behind
+/// every place this boot supervises — so it is right today and is right by
+/// coincidence.
+///
+/// *Reversal:* a row that carries the four fields. It costs the board 32 bytes
+/// and the frame four writes it already has the values for, and it is not here
+/// because the increment that needs it is the one where two supervised places
+/// declare *different* policies. This boot has one manifest behind all of them,
+/// and a field that cannot yet differ is a field nothing tests.
+fn declared() -> f_abi::manifest::Record {
+    f_abi::manifest::Record {
+        restart: f_abi::manifest::restart::ON_FAULT,
+        max_restarts: 3,
+        budget_window_ticks: 3000,
+        backoff_first_ticks: 8,
+        backoff_max_ticks: 64,
+        ..f_abi::manifest::Record::EMPTY
+    }
 }
 
 /// What this component ends with when it could not put an entry on its own ring.

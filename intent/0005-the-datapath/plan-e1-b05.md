@@ -283,35 +283,90 @@ because it is four shapes' address rather than the block driver's.
 
 **Gate:** met. `cargo xtask verify` — `verify: all green`, exit 0.
 
-### 8 — the policy moves, and three owed reversals are paid
+### 8 — the policy moves *(done)*
+
+**Files:** `docs/rfc/0076`, `kernel/src/component.rs`, `user/supervisor/src/`,
+`xtask/src/main.rs`, `docs/rfc/0008`, `claims/0006`.
+
+**RFC 0076 first, and it found that the plan's assumption was wrong.** The
+blocker was never a place to put the policy — it was the *input*. A component is
+told things by the frame writing pending state into its capability table, and
+while a component runs, that table is its core's. The RFC's decision: **a
+supervisor is told when it is started, not while it runs.** The frame posts
+`PEER_GONE` into the endpoint slot, pumps it onto the ring, *then* hands over a
+core. It refuses two alternatives on record — moving where a place-death pends,
+which trades RFC 0008's structurally-guaranteed *granted then peer gone* for a
+documented ordering; and a fifth shared word, which is affordable only when
+something cannot be done without it.
+
+`policy::decide` is `f_supervisor::policy::decide` now. The boot:
+
+```
+fault       place store epoch 0 stopped speaking: its control ring header no longer validates
+supervised  told of 1 death(s); decided restart; submitted 1 spawn(s) from ring 3 …
+restart     place store under on_fault — the supervisor said restart; restart 1 of 3
+spawn       place store epoch 1 — nothing carried over: …
+```
+
+**Four things this increment found.**
+
+*The supervisor was never told, twice.* First because the board minted a *second*
+endpoint handle at consultation time, so the notice's handle matched no row —
+the grant has to happen before the death, which is now `watch` and is a
+parameter rather than a local. Then because `Table::clear_all` turns notice-owing
+off on the way out — right for a teardown, wrong for an occupant that will be
+given another core. Both presented identically: `told of 0 death(s)` for a place
+that had demonstrably died.
+
+*`publish` stole the supervisor's answers.* The frame drains a component's
+completion ring on its behalf, and refuses anything that is not a notice. A
+component that reads its own ring needs `publish_only`, and the invariant
+`collected == notices` becomes `collected + handed == notices` — a second
+destination, not a weaker check.
+
+*The supervisor's place was never torn down*, because it is held out of `extras`
+for the scripted lifecycle and nothing put it back. One leak, one sentence:
+*a component's frames did not all come back*.
+
+*A single-core boot has no supervisor to ask.* `cargo xtask cores` refills the
+place from the frame with no policy consulted, and says so on the line. Keeping
+a copy of the decision for that path would have been the reversal coming back.
+
+**Gate:** `cargo xtask lint-owed` drops from four rows to three. RFC 0008's row
+is deleted, and `docs/rfc/0008` gains a dated *what landed* section rather than
+being left describing a tree that no longer exists.
+
+**What did not move, stated because a paid row is as misread as a stale one:**
+the frame still *stores* the restart tally (RFC 0076 names that seam), and a
+**retirement** is still the frame's scripted act — it is the one fate with no
+opcode behind it. Driving it through the supervisor needs four deaths in a row.
+
+### 9 — the retirement, and two owed reversals are paid
 
 **Files:** `kernel/src/component.rs`, `user/supervisor/src/`, `abi/src/door.rs`,
 `xtask/src/main.rs` (`OWED_REVERSALS`).
 
-`policy::decide` was written over a `&Record`, a `&mut Budget` and a tick with no
-kernel state at all, precisely so this is a move. **Increment 7 found what it is
-actually blocked on, and it is not what this plan assumed.**
+Two things are left, and they are separable.
 
-The assumption was that the blocker was a place to move into. It is not: the
-supervisor exists, is scheduled, and submits. The blocker is the *input* —
-deciding starts from `notice::PEER_GONE`, and this arrangement serves a
-supervisor's control ring only **after** its core has finished, so nothing is
-delivered to a component while it runs.
+**The retirement.** A place's third fate is the one with no opcode behind it:
+the control ring says *end this occupant*, not *end this place*. Today the
+supervisor's `Retire` travels on its board and the frame performs it, and the
+boot's retirement is scripted rather than reached. Reaching it means driving the
+budget one death at a time — `max_restarts` restarts and the one that finds the
+budget spent — each with its own teardown, notice, core schedule and refill.
+That is a bigger boot, not a harder one.
 
-That is deliberate and it is the thing increment 8 has to reopen. Serving the
-ring mid-run means the boot processor resolving handles in a table the running
-core may mutate with its own capability calls — a fifth place two cores reach,
-which `CLAUDE.md` and RFC 0016 say needs an argument. **So increment 8 opens with
-an RFC and not with code**, and it has two candidate answers: a per-core serving
-arrangement in which the core running the supervisor answers its own ring, or
-RFC 0016's fifth shared word with the ordering named at the access.
+**`ANNOUNCE` and `PROGRESS` (RFC 0014), whose condition is now met.** A
+component is started with a channel *and told on it*, which is exactly what that
+reversal waited for. The row in `OWED_REVERSALS` says `MET` in capitals because
+a reader skimming for blockers would otherwise count it as one. The work is to
+make an announcement a ring entry and delete two door calls.
 
-Only then do `ANNOUNCE` and `PROGRESS` retire off the door (RFC 0014) — half of
-that reversal's condition is already met, since a component *is* started with a
-channel and submits on it; what is missing is being told on it — and the four
-capability calls retire onto `INSPECT`/`DERIVE`/`REVOKE`/`MAP` (RFC 0015).
+The four capability calls (RFC 0015) retire onto
+`INSPECT`/`DERIVE`/`REVOKE`/`MAP`, which are still named and unimplemented, and
+that is genuinely blocked rather than owed.
 
-**Gate:** `cargo xtask lint-owed` drops from four rows to one — RFC 0051's
+**Gate:** `cargo xtask lint-owed` drops from three rows to one — RFC 0051's
 `Reported` merge, which is unrelated and stays.
 
 ## What this plan does not do
