@@ -448,6 +448,100 @@ impl Framebuffer {
 
         Ok(Self { addr, pitch, width, height, bits_per_pixel, kind })
     }
+
+    /// Read a structure this kernel wrote, and say whether it read it back.
+    ///
+    /// # Why a fixture is the only way this can be checked here
+    ///
+    /// [`Self::parse`] is seven reads at seven word offsets into a structure
+    /// somebody else's code wrote, and every one of those offsets is a number
+    /// taken from a specification. An offset that is wrong by one word compiles,
+    /// passes every lint, and produces a *plausible* framebuffer — a pitch read
+    /// as a width, a height read as a depth — which is the kind of wrong that is
+    /// found on the machine rather than in the tree.
+    ///
+    /// It cannot be exercised by any boot `xtask` can start, because QEMU's
+    /// `-kernel` loader never sets the flag that reaches it. So the structure is
+    /// built here instead, from the specification's byte offsets written out as
+    /// arithmetic rather than as the word indices the parser uses — the two
+    /// spellings are what make this a check and not a restatement — and handed
+    /// to the real function.
+    ///
+    /// The obvious alternative, feeding a fixture to [`BootInfo::new`], is
+    /// foreclosed by a detail worth recording: that function takes the pointer
+    /// as a `u32` because a multiboot loader leaves one in `ebx`, and nothing
+    /// this kernel can allocate after the address-space switch has an address
+    /// that fits in thirty-two bits.
+    ///
+    /// Returns the parsed surface, or the reason it was refused.
+    pub fn self_check() -> Result<Self, &'static str> {
+        /// Byte offset to word index, which is the conversion the parser does
+        /// in its head and this does on the page.
+        const fn word(byte_offset: usize) -> usize {
+            byte_offset / 4
+        }
+
+        // Thirty-two words is past the last field this parser reads, and the
+        // structure a loader writes is longer still.
+        let mut fixture = [0u32; 32];
+
+        // The framebuffer block, at the byte offsets the specification gives.
+        fixture[word(88)] = 0xFD00_0000; // address, low half
+        fixture[word(92)] = 0; // address, high half
+        fixture[word(96)] = 4096; // pitch
+        fixture[word(100)] = 1024; // width
+        fixture[word(104)] = 768; // height
+        // The packed bytes, written as bytes in the order the specification
+        // lists them rather than as a shifted-and-ored word: one of these
+        // fields is at bit zero, and a `0 << 0` term is both noise and a lint.
+        //
+        // Byte 108 is bits per pixel, 109 the type, 110 and 111 the first
+        // channel: thirty-two bits, direct colour, red at 16 for 8 bits — which
+        // is the layout a display usually reports and the one the driver pins.
+        fixture[word(108)] = u32::from_le_bytes([32, 1, 16, 8]);
+        // Bytes 112 to 115: green at 8 for 8 bits, blue at 0 for 8.
+        fixture[word(112)] = u32::from_le_bytes([8, 8, 0, 8]);
+
+        // SAFETY: `fixture` is a live array this function owns, longer than the
+        // last word `parse` reads, and correctly aligned for `u32` by its type.
+        let parsed = unsafe { Self::parse(fixture.as_ptr()) }?;
+
+        // Each of these is a field that would still be *plausible* if the offset
+        // it came from were wrong, which is why every one is checked rather than
+        // the geometry alone.
+        if parsed.addr != 0xFD00_0000 {
+            return Err("the address did not survive the round trip");
+        }
+        if parsed.pitch != 4096 {
+            return Err("the pitch did not survive the round trip");
+        }
+        if parsed.width != 1024 || parsed.height != 768 {
+            return Err("the geometry did not survive the round trip");
+        }
+        if parsed.bits_per_pixel != 32 {
+            return Err("the depth did not survive the round trip");
+        }
+        // Written out rather than compared against the named constant in
+        // `crate::screen`: that constant is what the drawing code *believes*
+        // this layout is, and a check that asked one belief whether it matched
+        // itself would pass however wrong both were.
+        let expected = Channels {
+            red_at: 16,
+            red_bits: 8,
+            green_at: 8,
+            green_bits: 8,
+            blue_at: 0,
+            blue_bits: 8,
+        };
+        if parsed.kind != FramebufferKind::Direct(expected) {
+            return Err("the channel layout did not survive the round trip");
+        }
+        if parsed.extent() != 4096 * 768 {
+            return Err("the extent is not the pitch times the height");
+        }
+
+        Ok(parsed)
+    }
 }
 
 /// What the loader did with the video request in the header.
