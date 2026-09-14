@@ -114,17 +114,28 @@ impl Write for Serial {
     }
 }
 
-/// Print to COM1. Available before anything else in the system works.
+/// Print to COM1, and to the screen if the loader gave the frame one.
+///
+/// Available before anything else in the system works, which is why the screen
+/// half is here and not at a second call site: by the time a framebuffer is
+/// mapped this kernel has already printed its memory map, and every one of
+/// those lines went through this macro. Teeing here is what makes *the screen
+/// shows the boot log* true without one caller knowing there is a screen.
+///
+/// The cost to a boot with no display — which is every boot under the emulator,
+/// whose `-kernel` loader hands over no framebuffer — is one acquire load and a
+/// branch that is not taken, per string. `screen::write_str` returns on that
+/// load, before it touches the grid behind it.
 #[macro_export]
 macro_rules! kprint {
     ($($arg:tt)*) => {{
         use core::fmt::Write as _;
-        let mut serial = $crate::arch::x86_64::serial::Serial;
-        let _ = write!(serial, $($arg)*);
+        let mut out = $crate::screen::Tee;
+        let _ = write!(out, $($arg)*);
     }};
 }
 
-/// Print a line to COM1.
+/// Print a line to COM1 and to the screen.
 #[macro_export]
 macro_rules! kprintln {
     () => { $crate::kprint!("\n") };

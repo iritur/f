@@ -16,19 +16,50 @@ sense unless F boots on the metal.
 
 | | |
 |---|---|
-| **Loader** | multiboot **1** — header magic `0x1BADB002`, flags `0x3`. GRUB's `multiboot` command, not `multiboot2`. |
+| **Loader** | multiboot **1** — header magic `0x1BADB002`, flags `0x7`. GRUB's `multiboot` command, not `multiboot2`. |
 | **Modules** | exactly one: `user/init`, as the first module. Under QEMU this arrives as `-initrd`; under GRUB it is `module`. |
 | **Console** | 16550 UART on **COM1, port `0x3F8`, 38400 baud, 8N1**. |
-| **Video** | none. The multiboot header does not request a framebuffer, and the kernel writes to no display. |
+| **Video** | optional, and used when it is there. The header asks for a linear framebuffer at no particular size; a loader that provides one gets the boot log drawn on it. See *The screen* below. |
 | **Firmware** | Secure Boot off. The image is not signed. |
 
-### The console is the whole interface, and 38400 is not a typo
+### The screen, and what it is and is not
+
+**A loader that answers the video request gets the boot log on the display.**
+The header asks for a linear framebuffer and names no size, so GRUB resolves it
+against whatever mode the firmware is already in and hands back an address, a
+pitch, a geometry and a channel layout. The frame maps that, and from the line
+after the address-space switch every `kprintln!` goes to the screen as well as
+to the wire. RFC 0081 is why a console lives in the frame at all and what it
+will cost to take it back out again.
+
+Three things to expect, because each of them looks like a fault and is not:
+
+- **The screen starts partway down the log.** Everything before the address
+  space exists is on the serial port only, and is not replayed. The first line
+  you see on the display is the one reporting the framebuffer itself.
+- **The screen goes blank when GRUB hands over.** GRUB has set a graphics mode
+  and nothing has drawn yet. On a machine where the kernel dies before the
+  address-space switch, a black screen is therefore all you get — which is the
+  case the serial port still exists for.
+- **The text is small, plain and grey.** The font is five pixels by seven and is
+  typed into `kernel/src/screen.rs` rather than imported, because
+  `LICENSING.md` has no category for imported data and the frame may not reach
+  into `third_party/`. RFC 0081's reversal section is where a better font comes
+  from, and it arrives with the component rather than with a licence exception.
+
+Under QEMU there is no screen at all, and that is the emulator rather than the
+kernel: its `-kernel` loader implements no part of the video request, prints
+`multiboot knows VBE. we don't` and carries on. Every boot started by `xtask`
+therefore reports `framebuffer none`. What can be checked without a display is
+checked by `cargo xtask screen font` and `cargo xtask screen selftest`.
+
+### The serial console is still the record, and 38400 is not a typo
 
 `kernel/src/arch/x86_64/serial.rs` sets divisor 3, which is 38400 baud — not the
-115200 most people reach for. There is no other output device. **On a machine
-with no serial port you will see a black screen and have no way to tell a clean
-boot from a triple fault**, which is the single most important thing on this
-page.
+115200 most people reach for. **The serial log remains the whole log**: it
+starts earlier than the screen can, it survives a fault in the drawing path, and
+it is the only one of the two a harness can read. The screen is for a person
+standing in front of a machine; the wire is for everything else.
 
 That is also why a laptop is close to useless here and why server hardware is
 the right target: a BMC gives you serial-over-LAN without a cable. A desktop
