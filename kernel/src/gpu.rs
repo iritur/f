@@ -97,7 +97,7 @@ use crate::supervisor::{Declared, Registers, Supervising, declared, order_for};
 /// third time, in a third crate.
 ///
 /// `f_virtio_gpu::routing::AT` is written down in the component and
-/// `kernel::process::BLK_BOARD` in the frame, and they are linked separately.
+/// `kernel::process::BOARD` in the frame, and they are linked separately.
 /// The kernel is the one artefact that links every definition, so the agreement
 /// is a check rather than a comment.
 ///
@@ -106,7 +106,7 @@ use crate::supervisor::{Declared, Registers, Supervising, declared, order_for};
 /// `abi/`, moving it touches two closed tasks' evidence, and a third assertion
 /// costs one line while the move costs a review of `user/virtio-blk`.
 const _: () = assert!(
-    crate::process::BLK_BOARD == routing::AT,
+    crate::process::BOARD == routing::AT,
     "the frame and the display driver disagree about where the routing page is"
 );
 

@@ -148,7 +148,7 @@ use crate::supervisor::{Declared, Registers, Supervising, declared, order_for};
 /// The one address a driver component holds as a constant, agreed.
 ///
 /// `f_virtio_blk::routing::AT` is written down in the component and
-/// `kernel::process::BLK_BOARD` in the frame, and they are linked separately —
+/// `kernel::process::BOARD` in the frame, and they are linked separately —
 /// the component is a flat image built by a different invocation of the
 /// compiler. There is nothing to share a constant through, which is the same
 /// position `user/init/link.ld` and `INIT_TEXT` are in. What is different is
@@ -157,7 +157,7 @@ use crate::supervisor::{Declared, Registers, Supervising, declared, order_for};
 /// disagree does not link, instead of booting into a page fault at the
 /// component's first read.
 const _: () = assert!(
-    crate::process::BLK_BOARD == routing::AT,
+    crate::process::BOARD == routing::AT,
     "the frame and the driver disagree about where the routing page is"
 );
 

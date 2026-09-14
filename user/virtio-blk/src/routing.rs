@@ -69,7 +69,7 @@ pub mod life {
 
 /// Where the frame maps this page in the component's address space.
 ///
-/// The one number both sides hold. It must equal `kernel::process::BLK_BOARD`,
+/// The one number both sides hold. It must equal `kernel::process::BOARD`,
 /// and the kernel asserts that at compile time rather than saying it in a
 /// comment — `kernel/src/blk.rs` holds the assertion, because the kernel is the
 /// artefact that links both definitions and a comment is not a check.

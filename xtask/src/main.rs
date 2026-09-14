@@ -380,18 +380,37 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
 /// - **RFC 0008.** *Restart is the supervisor's act and the frame provides only
 ///   the mechanism.* The policy runs in the frame. `component::policy::decide`
 ///   was written to take a record and a tally and no kernel state precisely so
-///   that moving it would be a move rather than a rewrite, and what it is
-///   waiting for is not a place to move to but a supervisor to move into: a
-///   component that can be told its occupant died and can say *spawn it again*.
-///   RFC 0047 built the half of that a driver needed — a component asks the
-///   frame for something on its control ring and the frame answers — and did
-///   not build `op::SPAWN` or `op::STOP` behind it.
+///   that moving it would be a move rather than a rewrite, and **the place to
+///   move into now exists**: `user/supervisor` is scheduled, adopts its control
+///   ring and submits a real `op::SPAWN` that the frame answers, so a boot now
+///   contains a component spawned by a component.
+///
+///   What is missing is the input. Deciding starts from *the occupant died*,
+///   which arrives as a `notice::PEER_GONE` on the supervisor's own ring — and
+///   this supervisor cannot read its ring while it runs, because the frame
+///   serves that ring only after the core has finished. `kernel/src/component.rs`
+///   argues that at the join: a spawn names the submitter's `Untyped`, so
+///   answering one mid-run means the boot processor resolving handles in a table
+///   a running core may mutate, which is a fifth place two cores reach.
+///
+///   So the reason this row is unpaid has changed twice now, and both times it
+///   got smaller. It is no longer *there is nowhere to put it* and no longer
+///   *nothing submits*; it is *the supervisor cannot be told*.
 /// - **RFC 0014.** `ANNOUNCE` and `PROGRESS` retire when a component is started
-///   with a channel and told on it. The channel exists now and carries
-///   operations in both directions; what a component still cannot do is *be
-///   started* by anything but the frame writing a job into a per-core slot, so
-///   `ANNOUNCE` has nothing to announce itself onto that the frame did not
-///   already know.
+///   with a channel **and told on it**, and as of RFC 0076 **both halves are
+///   true**: `user/supervisor` is started with a channel, submits on it, and is
+///   told on it — a `notice::PEER_GONE` for a place it holds the endpoint of is
+///   what its restart policy runs on.
+///
+///   So this row has changed kind rather than shrunk. It is no longer a
+///   reversal *waiting* for something; it is a retirement nobody has performed.
+///   `ANNOUNCE` is still how a component says it is here, and the work is to
+///   make that a ring entry and delete two door calls.
+///
+///   **A row whose condition is met is the most dangerous kind to leave
+///   unlabelled**, which is why the text says so in capitals: a reader skimming
+///   for blockers would otherwise count this among them and conclude that
+///   something still stands in the way.
 /// - **RFC 0015.** The four capability calls retire onto
 ///   `control::op::INSPECT`, `DERIVE`, `REVOKE` and `MAP`. All four opcodes are
 ///   named in `abi/src/control.rs` and nothing implements them; the two that
@@ -403,18 +422,33 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
 /// text it names goes, and what replaces it is a boot that shows the new thing
 /// happening.
 const OWED_REVERSALS: &[Gap] = &[
-    (
-        "kernel/src/component.rs",
-        "policy::decide(",
-        "RFC 0008: the restart policy runs in the frame, where that RFC says it does not belong",
-        "TODO.md E1-B05; docs/rfc/0008; kernel/src/component.rs's module comment; \
-         claims/0006-driver-restart-latency.toml's [workload] notes",
-    ),
+    // **RFC 0008's row was here and is paid.** *Restart is the supervisor's act
+    // and the frame provides only the mechanism* — `policy::decide` is
+    // `f_supervisor::policy::decide` now, and a boot contains a supervisor being
+    // told on its ring that an occupant died, deciding, and submitting the
+    // spawn the frame then performs.
+    //
+    // Three reasons were logged against it over three epochs and each was
+    // smaller than the last: *a component cannot drive a ring* (RFC 0037 ended
+    // it), *nothing submits `op::SPAWN`* (RFC 0073 and the increment that used
+    // it ended that), and *the supervisor cannot be told* (RFC 0076). Watching a
+    // declared reversal shrink in the words of the check rather than in a commit
+    // message is the argument for declaring them at all — and this row is the
+    // first of the four to reach zero.
+    //
+    // **What is not claimed by its absence**, because a paid row is exactly as
+    // misread as a stale one: the frame still *stores* the tally a restart
+    // policy counts with, in `component::Budget`, and still performs the one
+    // fate that has no opcode behind it — a retirement. RFC 0076 names the first
+    // as a seam somebody will argue about and says what would make the argument
+    // land; the second is the increment after this one. Neither is a reversal
+    // that has fallen due, which is what this constant is a list of.
     (
         "abi/src/door.rs",
         "pub const ANNOUNCE",
-        "RFC 0014: `ANNOUNCE` and `PROGRESS` are still on the door, because nothing starts a \
-         component with a channel",
+        "RFC 0014: `ANNOUNCE` and `PROGRESS` are still on the door, and their condition is now \
+         MET — a component is started with a channel and told on it (RFC 0076). This row is work \
+         owed rather than work blocked",
         "TODO.md E1-B05; docs/rfc/0014; abi/src/door.rs's module comment",
     ),
     (

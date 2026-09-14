@@ -67,7 +67,7 @@ use core::alloc::{GlobalAlloc, Layout};
 /// Must equal `kernel::process::SPAWN_HEAP`, which asserts it at compile time so
 /// that a disagreement fails to link rather than faulting at the first
 /// allocation. That is the arrangement `kernel/src/blk.rs` has had for
-/// `BLK_BOARD` since RFC 0047 and `kernel/src/runtime.rs` has for the three
+/// `BOARD` since RFC 0047 and `kernel/src/runtime.rs` has for the three
 /// runtime addresses.
 ///
 /// One address for every component shape, so there is one assertion rather than

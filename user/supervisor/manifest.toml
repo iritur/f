@@ -94,6 +94,31 @@ type   = "endpoint"
 rights = ["write", "grant"]
 from   = "supervisor"
 
+# The board: one page, in which the frame writes what this component was given
+# and what it may fill, and this component writes what it did. `user/supervisor/
+# src/routing.rs` is the layout and `kernel/src/component.rs` asserts that the
+# address the two sides agree on is one number.
+#
+# **A need rather than a fixed part**, which is the whole reason this costs no
+# arithmetic anywhere else: the account pays for it because this line declares
+# it, `admit` already sizes declared needs, and the lint already refuses a
+# manifest that stops adding up. A supervisor is the only component that
+# declares one, and a component that does not gets no board and no mapping.
+#
+# Mapped by the frame, for `heap`'s reason one step earlier: the first thing
+# this component does is read this page, so there is no instruction it could
+# have executed in which to ask for it.
+#
+# Read and write and nothing else. `write`, because the far half of the page is
+# this component's own report; not `derive`, because a board handed on is a
+# second component believing it may spend this one's account.
+[[capability]]
+name   = "board"
+type   = "untyped"
+rights = ["read", "write"]
+from   = "supervisor"
+bytes  = 4_096
+
 # --- Ring: the one a client asks this component on ----------------------------
 
 # A supervisor is a thing you *ask*. `op::SPAWN` and `op::STOP` are what it

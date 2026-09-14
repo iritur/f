@@ -12,7 +12,7 @@
 //! at three. It has not moved, and RFC 0054 says why and who owes it.
 //!
 //! [`AT`] equals `f_virtio_blk::routing::AT` and `f_virtio_net::routing::AT`,
-//! and all three equal `kernel::process::BLK_BOARD`. That is not sharing and it
+//! and all three equal `kernel::process::BOARD`. That is not sharing and it
 //! is not a coincidence: the frame builds one driver shape, whose address plan
 //! reserves a text region, a stack, a control ring, a data ring, a board, four
 //! register pages and a queue region, and every driver scheduled into that shape
@@ -65,7 +65,7 @@ pub mod life {
 /// Where the frame maps this page in the component's address space.
 ///
 /// The one number all three driver crates hold — see the module comment — and it
-/// must equal `kernel::process::BLK_BOARD`, which `kernel/src/gpu.rs` asserts at
+/// must equal `kernel::process::BOARD`, which `kernel/src/gpu.rs` asserts at
 /// compile time rather than saying in a comment.
 ///
 /// Unit: bytes, in the component's own address space.

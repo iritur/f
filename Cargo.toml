@@ -114,6 +114,13 @@ f-virtio-gpu = { path = "user/virtio-gpu", default-features = false }
 # `user/store/Cargo.toml` says which, and the frame links this so that
 # `f_store::report` has one definition rather than two.
 f-store = { path = "user/store", default-features = false }
+# The supervisor, and the frame links it for the one reason the four lines above
+# name: a layout both sides read is worth one definition the compiler checks.
+# Here it is `f_supervisor::routing`, the page the frame fills in before the
+# component's first instruction and the component reads after it — the same
+# arrangement `f_virtio_blk::routing` has had since RFC 0047, and the assertion
+# that pins it lives in `kernel/src/component.rs` for the same reason.
+f-supervisor = { path = "user/supervisor", default-features = false }
 f-bench = { path = "bench" }
 
 # ---------------------------------------------------------------------------

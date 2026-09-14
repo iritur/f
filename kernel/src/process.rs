@@ -226,7 +226,7 @@ const _: () = assert!(OWN_TREE + FRAME_SIZE <= SPAWN_GUARD);
 ///
 /// Sixteen rather than four, because what this constant really buys is that
 /// **the addresses below do not move when a component's code grows.** A layout
-/// derived from an image's own length would make [`BLK_BOARD`] a different
+/// derived from an image's own length would make [`BOARD`] a different
 /// number on every commit, and it is the one address a component holds as a
 /// constant.
 ///
@@ -279,15 +279,15 @@ pub const SPAWN_STACK: u64 = SPAWN_GUARD + FRAME_SIZE;
 /// What it costs, stated because it is charged to somebody: three more frames
 /// per spawned component, out of that component's own account exactly as the
 /// first was, and three pages of address space below [`SPAWN_CONTROL`] — which
-/// moves [`BLK_BOARD`], the one address a driver holds as a constant, and its
+/// moves [`BOARD`], the one address a driver holds as a constant, and its
 /// two siblings. The three driver crates are edited in the same commit;
 /// `kernel/src/blk.rs` asserts the agreement at compile time, so a half-done
 /// move does not link.
 /// Unit: pages.
 pub const SPAWN_STACK_PAGES: usize = 4;
 
-/// **Four is not enough for a component that runs, and this is where that was
-/// found out.**
+/// **Four was accused of being too small, and it was not. This is the record of
+/// that, kept because the arithmetic was convincing and wrong.**
 ///
 /// Nothing had ever executed through the spawn path — `user/init` is a flat
 /// image on another path and a runtime comes from [`prepare_runtime`] — so this
@@ -299,14 +299,35 @@ pub const SPAWN_STACK_PAGES: usize = 4;
 /// ```
 ///
 /// `0x415000 - 0x410ff8` is `0x4008`: the whole four-page stack plus eight
-/// bytes, which is a frame's stack probe walking down and stepping one word
-/// past the end. The guard page caught it exactly as designed — the fault is at
-/// [`SPAWN_GUARD`] and not in somebody else's memory.
+/// bytes. That reads exactly like one enormous frame's stack probe stepping a
+/// word past the end, and it was written up here as such. It was not. The
+/// faulting `rip` is the *entry point*, which no stack probe has any business
+/// being at, and that is the tell nobody read: `user/init/link.ld` had aliased
+/// `alloc`'s shim marker onto the image's first byte on the documented
+/// assumption that the marker is only ever *read*, and this toolchain **calls**
+/// it. The allocator's first act was a call back into `component::start`, which
+/// allocated again — sixteen bytes of stack a cycle, about a thousand cycles,
+/// and then the guard page. `user/init/link.ld` carries the disassembly.
+///
+/// So four pages is enough, the occupant runs, and what this number did was its
+/// job: the fault is at [`SPAWN_GUARD`] and not in somebody else's memory, and
+/// a recursion with no floor was stopped after 16 KiB rather than after
+/// whatever it would have reached.
+///
+/// **The cheap fix would have hidden it.** Raising this to eight was the other
+/// candidate and would have bought about a thousand more cycles of the same
+/// recursion before the same fault, on a layout widened for every component to
+/// pay for one component's bug. A guard page that fires is evidence; the first
+/// question it deserves is *what is the faulting instruction*, and not *how
+/// much more stack would make this stop*.
+///
+/// *Reversal:* a component whose frames genuinely do not fit, diagnosed from a
+/// disassembly rather than from the size of the gap.
 ///
 /// **Raising it is a cross-crate move rather than a constant.** Every spawn
 /// address above the stack is derived from this one, and three compile-time
 /// assertions pin them to constants owned elsewhere: `SPAWN_HEAP` against
-/// `f_ring::heap::AT`, and `BLK_BOARD` against `f_virtio_blk::routing::AT` from
+/// `f_ring::heap::AT`, and `BOARD` against `f_virtio_blk::routing::AT` from
 /// both the block and network drivers. Changing this number alone does not
 /// build, which is the tree refusing a layout change made in one place — so it
 /// moves with `f_ring` and the drivers in one diff, or the frame it is too small
@@ -324,8 +345,9 @@ pub const SPAWN_STACK_TOP: u64 = SPAWN_STACK + SPAWN_STACK_PAGES as u64 * FRAME_
 /// Where the frame maps such a component's control ring.
 ///
 /// The ring the frame publishes its notices onto, and — for a driver — the ring
-/// it asks the frame for a device translation on. RFC 0047. A driver reads this
-/// address out of [`BLK_BOARD`] rather than holding it as a constant, which is
+/// it asks the frame for a device translation on, and — for a supervisor — the
+/// ring it submits `op::SPAWN` on. RFC 0047, RFC 0073. A component reads this
+/// address out of [`BOARD`] rather than holding it as a constant, which is
 /// why it may move without anything outside this file being edited.
 pub const SPAWN_CONTROL: u64 = SPAWN_STACK_TOP + FRAME_SIZE;
 
@@ -334,18 +356,26 @@ pub const BLK_DATA: u64 = SPAWN_CONTROL + FRAME_SIZE;
 
 /// Where the frame maps the page that says where everything else is.
 ///
-/// **The one address a driver component holds as a constant**, and it must
+/// **The one address a spawned component holds as a constant**, and it must
 /// equal `f_virtio_blk::routing::AT`. `kernel/src/blk.rs` asserts that at
 /// compile time; a comment would be a claim and the assertion is a check, and
 /// the kernel is the one artefact that links both definitions.
-pub const BLK_BOARD: u64 = BLK_DATA + FRAME_SIZE;
+///
+/// It was `BLK_BOARD` while a board was a driver's. It is four shapes' now —
+/// the three drivers and `user/supervisor`, which is told its account and the
+/// manifest it may fill here for the same reason a driver is told where its
+/// device landed. Each crate keeps its own *layout*; what is shared is the one
+/// address, which is `f_ring::heap::AT`'s arrangement and its argument: one
+/// address for every component shape, so there is one assertion per shape
+/// rather than one per field.
+pub const BOARD: u64 = BLK_DATA + FRAME_SIZE;
 
 /// Where the frame maps the device's register pages for the driver.
 ///
 /// Four of them, which is what `user/virtio-blk/manifest.toml` declares and
 /// what the modern virtio transport lays out in one base-address register.
 /// Mapped [`paging::UserPage::Device`] and not `Data`: see that variant.
-pub const BLK_REGISTERS: u64 = BLK_BOARD + FRAME_SIZE;
+pub const BLK_REGISTERS: u64 = BOARD + FRAME_SIZE;
 
 /// How many register pages the driver shape maps. Unit: pages.
 pub const BLK_REGISTER_PAGES: usize = 4;
@@ -2374,7 +2404,7 @@ pub unsafe fn prepare_driver(
     for (virt, at, kind) in [
         (SPAWN_CONTROL, control.addr(), paging::UserPage::Data),
         (BLK_DATA, plan.data, paging::UserPage::Data),
-        (BLK_BOARD, board.addr(), paging::UserPage::Data),
+        (BOARD, board.addr(), paging::UserPage::Data),
     ] {
         // SAFETY: as above.
         unsafe { paging::map_user(frames, &mut space, virt, at, kind, features) }

@@ -14,22 +14,30 @@
 //! the gap in three bullets and called them one thing — *there is no supervisor
 //! component* — and this is it.
 //!
-//! # What it does today, which is less than its name
+//! # What it does today, which is still less than its name
 //!
-//! It is spawned into a place, it publishes a state tree, and it ends. That is
-//! the same life `user/store` has had since `E1-B05` began, and it is not an
-//! accident of being unfinished: **a component spawned into a place is never
-//! handed a core** (`kernel/src/runtime.rs`), so nothing in this image has ever
-//! executed and nothing in it can until that changes. `xtask`'s `HEAP_GAP`
-//! declares exactly that, and the day an occupant is scheduled the build goes
-//! red on purpose and says it is the good ending.
+//! It is spawned into a place, handed a core, and **it spawns another
+//! component**: it reads the board the frame filled in for it, adopts its
+//! control ring, and submits `control::op::SPAWN` for the place the frame held
+//! open. The frame answers from the server RFC 0073 built. That is the act this
+//! crate exists for, and it is one act — this supervisor does not restart
+//! anything, because restarting starts from being told an occupant died and
+//! nothing is told to a component while it runs. [`component`]'s comment has the
+//! whole of that argument and its reversal condition.
 //!
-//! So what this crate buys, before it runs a line, is that the *declaration*
-//! exists and is checked on every boot: a manifest whose account, heap and
-//! endpoint are the ones a supervisor needs, a state schema the frame writes out
-//! before the first instruction, and a place in the generation the assembler
-//! checks its routes against. The code below is written for the core it does not
-//! have yet, and the reason it is written now rather than then is that a crate
+//! What this paragraph said until that worked is worth keeping, because it was
+//! the thing that changed: *a component spawned into a place is never handed a
+//! core, so nothing in this image has ever executed and nothing in it can until
+//! that changes.* `xtask`'s `HEAP_GAP` declared exactly that and went red on
+//! purpose the day it stopped being true. Two boots later, the reason no
+//! component image had ever executed turned out to be a linker script, which is
+//! `user/init/link.ld`'s story rather than this file's.
+//!
+//! What the crate bought *before* it ran a line still stands and is why it was
+//! written then: the *declaration* exists and is checked on every boot — a
+//! manifest whose account, heap, board and endpoint are the ones a supervisor
+//! needs, a state schema the frame writes out before the first instruction, and
+//! a place in the generation the assembler checks its routes against. A crate
 //! nobody can compile is a design nobody can disagree with.
 //!
 //! # The bootstrap, stated rather than hidden
@@ -73,6 +81,17 @@ static HEAP: f_ring::heap::Heap = f_ring::heap::Heap::COMPONENT;
 // item may appear once per linked artefact.
 #[cfg(all(target_arch = "x86_64", feature = "image"))]
 pub mod component;
+
+// Architecture-independent, and compiled everywhere: a layout wants its
+// arithmetic checked on whatever machine is running the tests, and the frame
+// links `routing` to hold itself to the same one.
+//
+// `policy` is what RFC 0008 spent three epochs moving and RFC 0076 finally
+// made possible. The frame does **not** link it, and that asymmetry is the
+// whole point: a frame that called the supervisor's policy would have moved a
+// file and kept the decision.
+pub mod policy;
+pub mod routing;
 
 #[cfg(test)]
 mod tests {

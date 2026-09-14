@@ -109,6 +109,18 @@ f-virtio-gpu.workspace = true
 # goes.
 f-store.workspace = true
 
+# The component that spawns the others. The frame links it for `routing`, which
+# is the page it fills in before the supervisor's first instruction: one
+# definition of that layout, checked by the compiler, rather than two that agree
+# today. It does not link it for `policy` — that is the whole of RFC 0008's
+# move, and a frame that called the supervisor's policy would have moved a file
+# and kept the decision.
+#
+# *Reversal:* the routing page becoming something a supervisor is handed on its
+# ring rather than told in memory, at which point this line goes and the layout
+# is `abi/`'s.
+f-supervisor.workspace = true
+
 [lints.rust]
 # The frame. This is the crate the < 5% unsafe-of-TCB metric measures.
 # Adding another crate to this list is a visible, reviewable diff.
