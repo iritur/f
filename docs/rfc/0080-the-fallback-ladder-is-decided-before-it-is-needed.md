@@ -213,6 +213,33 @@ scanout using its own rolling p99 cost, and a rung change moves that
 distribution underneath the estimator. One decision point, at a start, with a
 restart as the only way to take it again.
 
+### The rungs are written once
+
+`interface/src/ladder.rs` emits `Rung`, `RUNGS`, `Rung::ALL`, the four answers a
+rung owes and `Rung::below` from a single `ladder!` invocation, one line per
+rung. This is RFC 0077's `vocabulary!` arriving here, and it arrived by the same
+route: a rung absent from `Rung::ALL` is on no ladder, reachable by no machine
+and iterated by no test — because iterating the ladder is exactly what it is
+absent from — and two guards were written against that and both were defeated.
+The first looped over the array to ask what the array held. The second was an
+exhaustive `match` over `Rung`, on the reasoning that a fifth variant cannot
+compile without an arm; true, and not enough, because nothing forces the arm to
+say anything, and `Rung::Fifth => ()` compiled and passed.
+
+Both are deleted rather than strengthened, which is the part worth recording: a
+rung that is not on the ladder is no longer a thing that can be written, so a
+test for it would be a test for nothing. `Rung::below` is derived from
+declaration order for the same reason — it was a second table, checked against
+the first by a test that is also now deleted, because comparing a list to itself
+is not a check.
+
+What this does **not** enforce is the order, which is this decision's whole
+content: four lines rearranged together compile and step perfectly happily. The
+order is held by the two tests that read files outside the crate through
+`include_str!` — this RFC's own table, and `claims/0033`'s thresholds — so a
+ladder reordered here fails the build against the documents that argue for it,
+which is the only place an ordering can be checked from.
+
 ## What would reverse this
 
 **The hybrid is the rung with an expiry condition, and the condition compares

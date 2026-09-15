@@ -90,27 +90,6 @@
 /// compares it to the claim's own `name` field.
 pub const CLAIM: &str = "raster-cost-per-rung";
 
-/// How many rungs there are.
-///
-/// Four is an argument and not a count — RFC 0080 refuses three and refuses
-/// five, and the reasoning is there rather than here. What this constant is for
-/// is [`Rung::ALL`]'s length.
-///
-/// **What the type system enforces about a fifth rung, stated exactly, because
-/// this comment used to overstate it.** It said a fifth variant left out of
-/// `ALL` fails to compile. It does not: `ALL` is a hand-written `[Self; 4]` and
-/// stays a valid one, so a fifth variant with arms in the five `match`es below
-/// compiles and is simply on no ladder — reachable by nothing, iterated by
-/// nothing, and green. What the compiler does enforce is narrower and worth
-/// having: every method here matches exhaustively, so a fifth variant with no
-/// arm does not build, which makes *what it costs*, *how much of it runs on the
-/// CPU*, *what it looks like* and *what is below it* four questions somebody has
-/// to answer. `ALL`'s agreement with the enum is reached for one layer out, in
-/// `all_is_every_rung_the_enum_has`, and that test states exactly how far its
-/// reach goes — a test build rather than a crate build, and an arm somebody has
-/// to write rather than an arm that has to be right.
-pub const RUNGS: usize = 4;
-
 /// Whether a rung draws the picture the scene describes, or an approximation
 /// of it.
 ///
@@ -133,41 +112,217 @@ pub enum Fidelity {
 /// How much of a frame's coverage arithmetic a rung puts on the CPU.
 ///
 /// **This is not the third thing a rung declares.** It says nothing about what a
-/// machine must supply — that is still RFC 0080's table and still prose, for the
-/// reason the module comment gives. It is a property of the *renderer*, and it
-/// is a type because `docs/design/ring-scene-boot.html` section 08 carries one
-/// sentence that counts it: the narrowing of section 05's *the CPU raster
-/// segment disappears entirely*. While that count lived only in prose, in three
-/// files, the published one was wrong by a rung — it said three of four, and it
-/// is two of four. A number in a design document that nothing can recompute is a
-/// number that drifts on the first edit to the thing it describes, and this
-/// ladder is the thing it describes.
+/// rung needs from the machine, which is the question a compositor picking a
+/// rung actually asks; it is the answer to a narrower one — *how much of section
+/// 08's coverage arithmetic came back to the CPU* — and it exists because the
+/// narrowing this decision writes into `docs/design/ring-scene-boot.html` is a
+/// count over these values, and a count nothing computes is a sentence that
+/// drifts.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CpuCoverage {
-    /// None of it: the device computes coverage. True of two rungs, by two
-    /// different pieces of hardware — [`Rung::ComputePath`] reaches it with a
-    /// compute shader, [`Rung::TessellatingFloor`] with a fixed-function
-    /// triangle pipeline, and no machine is required to have both. The floor's CPU work is flattening paths into triangles, which
-    /// is geometry and not coverage, and reading it as CPU rasterisation is the
-    /// specific mistake this type exists to stop.
+    /// None of it: the GPU does the coverage arithmetic.
+    ///
+    /// True of the compute path, and — the answer readers get wrong — true of
+    /// the tessellating floor, whose triangles are rastered by fixed-function
+    /// hardware. What the CPU does for the floor is flatten paths, which is
+    /// section 08's stage 1 and is on the CPU at every rung.
     None,
-    /// The coarse raster's parallel prefix scan, and nothing else: the one stage
-    /// that needs cooperating lanes, run on the processor that has none. Fine
-    /// raster and present stay on the device.
+    /// The coarse raster's parallel prefix scan, and nothing else.
     PrefixScan,
-    /// All of it, with the device used for nothing but putting the finished
-    /// image on the screen.
+    /// All of it: coarse and fine raster both.
     Whole,
 }
 
-/// One rung of the fallback ladder, in descending order of fidelity.
+/// The ladder, written once.
 ///
-/// The variants are the ladder. Their declaration order is `E3-D04`'s exit
-/// clause and RFC 0080's table, and it is the order [`Rung::below`] walks — so
-/// reordering them is not a cosmetic change, it is a change to what a machine
-/// falls back *to*.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Rung {
+/// One line per rung, in descending order of fidelity, carrying everything this
+/// module answers about it: the variant, the word it is spelled with, the row in
+/// [`CLAIM`] that bounds its cost, how much coverage arithmetic it returns to the
+/// CPU, and whether it draws the scene or an approximation of it. [`Rung`],
+/// [`RUNGS`], [`Rung::ALL`], [`Rung::index`] and all five answers are emitted
+/// from it.
+///
+/// # Why a macro, which is not this tree's habit
+///
+/// Because the alternative was tried twice and lost twice, and the second
+/// attempt is worth recording because it looked like it had worked.
+///
+/// A rung that is not on [`Rung::ALL`] is reachable by no machine and iterated by
+/// no test — it is the one defect this file exists to make impossible, and it is
+/// invisible to every test that walks the ladder, because walking the ladder is
+/// exactly what it is absent from. The first guard was the array itself, which
+/// sees nothing. The second was an exhaustive `match` over `Rung` in a test, one
+/// arm per variant, each arm a `const` assertion that the variant it matched was
+/// on the ladder; the reasoning was that the compiler will not accept a fifth
+/// variant without an arm. That much is true. What it does not force is that the
+/// arm say anything: `Rung::Fifth => ()` compiles, and so does an arm copied
+/// verbatim from its neighbour, which asserts a *fourth* rung's membership under
+/// a fifth rung's pattern. The guard reduced to *somebody has to edit this line*,
+/// which is a convention with a `#[test]` attribute on it.
+///
+/// `node.rs` reached the same place by the same two steps and its `vocabulary!`
+/// is the answer this copies: emit the enum and the array from one list, and the
+/// question stops being *what checks that they agree* — there is no second thing
+/// to agree with. The test that guarded it is deleted rather than strengthened,
+/// and deleting it is the repair.
+///
+/// # What this still does not enforce
+///
+/// The *order*, which is the ladder's whole content. Nothing here stops the four
+/// lines being rearranged together, and a reordered ladder compiles, iterates and
+/// steps perfectly happily — it is simply a different decision. That is checked
+/// one layer out, against files outside this crate:
+/// `the_rfc_s_table_states_this_ladder_s_order` reads RFC 0080's table and
+/// `no_rung_is_allowed_less_than_the_rung_above_it` reads `claims/0033`'s
+/// thresholds. Both are `include_str!`, so both fail the build rather than
+/// drifting.
+macro_rules! ladder {
+    (
+        $(
+            $(#[$about:meta])*
+            $variant:ident, $spelling:literal, $metric:literal, $coverage:ident, $fidelity:ident,
+        )*
+    ) => {
+        /// How many rungs there are.
+        ///
+        /// Four is an argument and not a count — RFC 0080 refuses three and
+        /// refuses five, and the reasoning is there rather than here.
+        ///
+        /// Counted from the ladder rather than written as a literal, for the
+        /// reason `node.rs`'s `COUNT` gives: a number that is derived cannot
+        /// disagree with what it is derived from. It was a `4`, under a comment
+        /// that spent a paragraph stating exactly how little the type system
+        /// enforced about a fifth rung. Nothing needs stating now. A fifth rung
+        /// is a fifth line of [`ladder!`], and this number moves with it.
+        pub const RUNGS: usize = [$(stringify!($variant)),*].len();
+
+        /// One rung of the fallback ladder, in descending order of fidelity.
+        ///
+        /// The variants are the ladder. Their declaration order is `E3-D04`'s
+        /// exit clause and RFC 0080's table, and it is the order [`Rung::below`]
+        /// walks — so reordering them is not a cosmetic change, it is a change
+        /// to what a machine falls back *to*.
+        ///
+        /// Emitted from the [`ladder!`] invocation that declares the rungs,
+        /// which is the only place a rung is written.
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        pub enum Rung {
+            $($(#[$about])* $variant,)*
+        }
+
+        impl Rung {
+            /// Every rung, highest fidelity first.
+            ///
+            /// The order is the ladder's, not alphabetical and not by cost. A
+            /// reader tempted to sort this by what each rung demands of the
+            /// machine should read the module comment first: the ladder is not
+            /// monotone in hardware and is not meant to be.
+            ///
+            /// Emitted from the same list as the enum, so it holds every variant
+            /// the enum has — not because a test checks it, but because there is
+            /// no way to write a rung this array does not get.
+            pub const ALL: [Self; RUNGS] = [$(Self::$variant),*];
+
+            /// This rung's position on the ladder, counting from the top.
+            ///
+            /// The enum's own discriminant, which is the position of the line
+            /// that declared the rung, which is its index in [`ALL`](Self::ALL):
+            /// one list, read three ways.
+            #[must_use]
+            pub const fn index(self) -> usize {
+                self as usize
+            }
+
+            /// The word a log line, a state tree and a command line share.
+            ///
+            /// One spelling, in one place, because the rung a machine is on is a
+            /// thing somebody will grep for across a boot log and a component's
+            /// published tree, and two spellings of it is a question that cannot
+            /// be answered by searching.
+            #[must_use]
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $spelling,)*
+                }
+            }
+
+            /// The row in [`CLAIM`] that states what this rung is allowed to
+            /// cost.
+            ///
+            /// Every name ends in `_us_x100` — microseconds times one hundred —
+            /// because RFC 0004 forbids a float in this tree and a frame cost is
+            /// exactly the quantity somebody reaches for one to hold. The scale
+            /// is in the name for the same reason: a bare `cost` is a number
+            /// whose unit is obvious only to whoever wrote it down, and this one
+            /// crosses from a renderer to a claim file to a design document.
+            #[must_use]
+            pub const fn cost_metric(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $metric,)*
+                }
+            }
+
+            /// How much of the frame's coverage arithmetic this rung puts on the
+            /// CPU.
+            ///
+            /// The floor is the answer a reader gets wrong, so it is worth
+            /// stating twice: the floor is [`CpuCoverage::None`]. Its triangles
+            /// are rastered by fixed-function hardware and what the CPU does for
+            /// it is flatten paths, so *the CPU raster segment returns below the
+            /// top rung* is true of two of the three lower rungs and not of all
+            /// three. Section 08's narrowing states that count, and
+            /// `section_08_s_narrowing_counts_this_ladder` is where the two are
+            /// held to each other.
+            #[must_use]
+            pub const fn cpu_coverage(self) -> CpuCoverage {
+                match self {
+                    $(Self::$variant => CpuCoverage::$coverage,)*
+                }
+            }
+
+            /// Whether this rung draws the scene or an approximation of it.
+            ///
+            /// Three of four are [`Fidelity::Exact`], and the asymmetry is the
+            /// whole shape of the ladder: descending through the first three
+            /// costs time and changes nothing a user can see, and the last step
+            /// changes the picture. A compositor that is willing to take the
+            /// first three steps silently and unwilling to take the fourth one
+            /// silently is behaving correctly, and this is the predicate it asks.
+            #[must_use]
+            pub const fn fidelity(self) -> Fidelity {
+                match self {
+                    $(Self::$variant => Fidelity::$fidelity,)*
+                }
+            }
+
+            /// The next rung down, or `None` at the floor.
+            ///
+            /// One step, deliberately, rather than *the best rung this machine
+            /// can run*. A search would need every rung's requirement expressed
+            /// as a predicate over a backend that does not exist yet, and
+            /// inventing that vocabulary here would be guessing at what a GPU
+            /// driver will report. Stepping needs nothing: whoever holds the
+            /// backend tries a rung, fails to start it, and asks for the one
+            /// below. `None` is a compositor that cannot run at all, which RFC
+            /// 0080 makes a refusal rather than a degraded start.
+            ///
+            /// The step is the declaration order rather than a table beside it.
+            /// It was a table — a `match` with one arm per rung naming the rung
+            /// under it — and the two were checked against each other by a test,
+            /// which is the shape this whole module has now stopped writing
+            /// twice. A rung inserted into the middle of [`ladder!`] is a rung
+            /// the one above steps to, because that is what being in the middle
+            /// of the list means.
+            #[must_use]
+            pub const fn below(self) -> Option<Self> {
+                let next = self.index() + 1;
+                if next < RUNGS { Some(Self::ALL[next]) } else { None }
+            }
+        }
+    };
+}
+
+ladder! {
     /// The whole pipeline of section 08: encode on the CPU, then coarse
     /// raster, fine raster and present as compute on the GPU.
     ///
@@ -179,7 +334,7 @@ pub enum Rung {
     /// copy of the registry's number in the module that argues against second
     /// copies is the stale constant this module exists to refuse. Every other
     /// rung exists because a machine cannot reach this one.
-    ComputePath,
+    ComputePath, "compute-path", "compute_path_us_x100", None, Exact,
     /// The coarse raster's parallel prefix scan moves to the CPU; fine raster
     /// and present stay on the GPU.
     ///
@@ -191,14 +346,14 @@ pub enum Rung {
     /// scaled from different arguments and say nothing about which renderer is
     /// faster. A middle rung that nothing lands on profitably is a seam being
     /// maintained for its own sake.
-    Hybrid,
+    Hybrid, "hybrid", "hybrid_us_x100", PrefixScan, Exact,
     /// Every stage on the CPU, with the GPU used for nothing but putting the
     /// finished image on the screen.
     ///
     /// Slow and exactly right. This is the rung that is worth having when a
     /// backend cannot be trusted rather than when it cannot be found, because
     /// the image is identical to the compute path's and only the clock differs.
-    CpuRaster,
+    CpuRaster, "cpu-raster", "cpu_raster_us_x100", Whole, Exact,
     /// Paths flattened to triangles and handed to a fixed-function pipeline.
     ///
     /// The floor: the only rung that changes what is on the screen, and the
@@ -220,105 +375,7 @@ pub enum Rung {
     /// comparison *on a machine that cannot start rung 1*: the floor at or above
     /// that machine's own `cpu_raster_us_x100` is a worse picture bought for no
     /// saving, and that is the rung failing to justify itself.
-    TessellatingFloor,
-}
-
-impl Rung {
-    /// Every rung, highest fidelity first.
-    ///
-    /// The order is the ladder's, not alphabetical and not by cost. A reader
-    /// tempted to sort this by what each rung demands of the machine should
-    /// read the module comment first: the ladder is not monotone in hardware
-    /// and is not meant to be.
-    pub const ALL: [Self; RUNGS] =
-        [Self::ComputePath, Self::Hybrid, Self::CpuRaster, Self::TessellatingFloor];
-
-    /// The word a log line, a state tree and a command line share.
-    ///
-    /// One spelling, in one place, because the rung a machine is on is a thing
-    /// somebody will grep for across a boot log and a component's published
-    /// tree, and two spellings of it is a question that cannot be answered by
-    /// searching.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::ComputePath => "compute-path",
-            Self::Hybrid => "hybrid",
-            Self::CpuRaster => "cpu-raster",
-            Self::TessellatingFloor => "tessellating-floor",
-        }
-    }
-
-    /// The row in [`CLAIM`] that states what this rung is allowed to cost.
-    ///
-    /// Every name ends in `_us_x100` — microseconds times one hundred — because
-    /// RFC 0004 forbids a float in this tree and a frame cost is exactly the
-    /// quantity somebody reaches for one to hold. The scale is in the name for
-    /// the same reason: a bare `cost` is a number whose unit is obvious only to
-    /// whoever wrote it down, and this one crosses from a renderer to a claim
-    /// file to a design document.
-    #[must_use]
-    pub const fn cost_metric(self) -> &'static str {
-        match self {
-            Self::ComputePath => "compute_path_us_x100",
-            Self::Hybrid => "hybrid_us_x100",
-            Self::CpuRaster => "cpu_raster_us_x100",
-            Self::TessellatingFloor => "tessellated_us_x100",
-        }
-    }
-
-    /// How much of the frame's coverage arithmetic this rung puts on the CPU.
-    ///
-    /// The floor is the answer a reader gets wrong, so it is worth stating
-    /// twice: the floor is [`CpuCoverage::None`]. Its triangles are rastered by
-    /// fixed-function hardware and what the CPU does for it is flatten paths, so
-    /// *the CPU raster segment returns below the top rung* is true of two of the
-    /// three lower rungs and not of all three. Section 08's narrowing states
-    /// that count, and `section_08_s_narrowing_counts_this_ladder` is where the
-    /// two are held to each other.
-    #[must_use]
-    pub const fn cpu_coverage(self) -> CpuCoverage {
-        match self {
-            Self::ComputePath | Self::TessellatingFloor => CpuCoverage::None,
-            Self::Hybrid => CpuCoverage::PrefixScan,
-            Self::CpuRaster => CpuCoverage::Whole,
-        }
-    }
-
-    /// Whether this rung draws the scene or an approximation of it.
-    ///
-    /// Three of four are [`Fidelity::Exact`], and the asymmetry is the whole
-    /// shape of the ladder: descending through the first three costs time and
-    /// changes nothing a user can see, and the last step changes the picture.
-    /// A compositor that is willing to take the first three steps silently and
-    /// unwilling to take the fourth one silently is behaving correctly, and
-    /// this is the predicate it asks.
-    #[must_use]
-    pub const fn fidelity(self) -> Fidelity {
-        match self {
-            Self::ComputePath | Self::Hybrid | Self::CpuRaster => Fidelity::Exact,
-            Self::TessellatingFloor => Fidelity::Approximate,
-        }
-    }
-
-    /// The next rung down, or `None` at the floor.
-    ///
-    /// One step, deliberately, rather than *the best rung this machine can
-    /// run*. A search would need every rung's requirement expressed as a
-    /// predicate over a backend that does not exist yet, and inventing that
-    /// vocabulary here would be guessing at what a GPU driver will report.
-    /// Stepping needs nothing: whoever holds the backend tries a rung, fails to
-    /// start it, and asks for the one below. `None` is a compositor that cannot
-    /// run at all, which RFC 0080 makes a refusal rather than a degraded start.
-    #[must_use]
-    pub const fn below(self) -> Option<Self> {
-        match self {
-            Self::ComputePath => Some(Self::Hybrid),
-            Self::Hybrid => Some(Self::CpuRaster),
-            Self::CpuRaster => Some(Self::TessellatingFloor),
-            Self::TessellatingFloor => None,
-        }
-    }
+    TessellatingFloor, "tessellating-floor", "tessellated_us_x100", None, Approximate,
 }
 
 #[cfg(test)]
@@ -575,91 +632,45 @@ mod tests {
         }
     }
 
-    /// Whether two rungs are one rung, decidable while this file compiles.
-    ///
-    /// A match over the pair rather than the derived `PartialEq`, because the
-    /// membership check below has to hold at compile time and a derived `eq` is
-    /// not `const`. There is no wildcard arm and that is the load-bearing part:
-    /// a fifth variant makes every pair that mentions it answer *false*, so the
-    /// const assertion it is given goes red rather than passing by default.
-    const fn same(a: Rung, b: Rung) -> bool {
-        matches!(
-            (a, b),
-            (Rung::ComputePath, Rung::ComputePath)
-                | (Rung::Hybrid, Rung::Hybrid)
-                | (Rung::CpuRaster, Rung::CpuRaster)
-                | (Rung::TessellatingFloor, Rung::TessellatingFloor)
-        )
-    }
-
-    /// Whether [`Rung::ALL`] holds this rung.
-    const fn on_ladder(rung: Rung) -> bool {
-        let mut at = 0;
-        while at < RUNGS {
-            if same(Rung::ALL[at], rung) {
-                return true;
-            }
-            at += 1;
-        }
-        false
-    }
-
-    #[test]
-    fn all_is_every_rung_the_enum_has() {
-        // **This is the closedness guard, and nothing else in this module is
-        // one.** Every other test here either iterates `Rung::ALL` or walks
-        // `below` from the top, and neither can see a variant `ALL` omits — so a
-        // `Rung::Fifth` with arms in `name`, `cost_metric`, `cpu_coverage`,
-        // `fidelity` and `below`, left out of the array, compiled and passed.
-        // A rung on no ladder is reachable by no machine, which is the one
-        // defect this file exists to make impossible.
-        //
-        // The guard cannot be a loop; it is this match. The match is exhaustive
-        // over `Rung`, so a fifth variant does not build until somebody writes an
-        // arm, and every arm is a `const` block, so the arm's assertion is
-        // evaluated when this file is compiled rather than when a loop reaches
-        // it. `ALL` stays a hand-written array, and what the compiler adds is
-        // that no new variant can reach the ladder's tests without an edit at
-        // this line.
-        //
-        // *The edit that makes this go red:* add `Rung::Fifth` to the enum with
-        // arms in the five methods and leave `ALL` and `RUNGS` alone. With no arm
-        // here the match is not exhaustive and the test build fails. Widening
-        // `RUNGS` to 5 without extending `ALL` does not rescue it either: the
-        // array's length is `RUNGS`, so that is also a build failure.
-        //
-        // *And what it does not force, because this comment used to say it did.*
-        // It claimed an arm "copied from its neighbours" goes red at
-        // const-evaluation. A literally copied one does not:
-        // `Rung::Fifth => const { assert!(on_ladder(Rung::TessellatingFloor)) }`
-        // compiles and passes, and so does `Rung::Fifth => ()`. Exhaustiveness
-        // forces an arm to be *written* at the line that says every variant is on
-        // the ladder; it does not force the arm to name its own variant. What
-        // would force that is generating the enum and `ALL` from one macro list,
-        // which this module has not done — so the reach of this guard is a diff
-        // somebody has to make here, and that sentence is the whole of the claim
-        // made for it.
-        fn every_variant_is_on_ladder(rung: Rung) {
-            match rung {
-                Rung::ComputePath => const { assert!(on_ladder(Rung::ComputePath)) },
-                Rung::Hybrid => const { assert!(on_ladder(Rung::Hybrid)) },
-                Rung::CpuRaster => const { assert!(on_ladder(Rung::CpuRaster)) },
-                Rung::TessellatingFloor => const { assert!(on_ladder(Rung::TessellatingFloor)) },
-            }
-        }
-
-        for rung in Rung::ALL {
-            every_variant_is_on_ladder(rung);
-        }
-    }
+    // **The closedness guard is gone, and its absence is the repair.**
+    //
+    // Two of them stood here. The first asked whether `Rung::ALL` held every
+    // rung by looping over `Rung::ALL`, which is a question that answers itself.
+    // The second was an exhaustive `match` over `Rung` with a `const` assertion
+    // per arm, on the reasoning that the compiler will not take a fifth variant
+    // without an arm — true, and not enough, because it does not force the arm
+    // to say anything: `Rung::Fifth => ()` compiles, and so does an arm copied
+    // from its neighbour, which asserts a *fourth* rung's membership under a
+    // fifth rung's pattern. Both are deleted, along with the `same` and
+    // `on_ladder` helpers written to serve them.
+    //
+    // What replaces them is not a better test. `ladder!` emits the enum and
+    // `ALL` from one list, so a rung absent from the ladder is not a thing that
+    // can be written, and a test for it would be a test for nothing. This is
+    // `node.rs`'s `vocabulary!` arriving here for the same reason and after the
+    // same two failures — which is CLAUDE.md's *added when the same mistake
+    // happens twice* being paid in code rather than in a line of prose.
 
     #[test]
     fn the_ladder_descends_through_every_rung_and_stops() {
-        // Bounded rather than `while let`, because the defect this test is
-        // nearest to — a `below` that steps into a cycle — is the one an
-        // unbounded walk cannot report. It hangs the suite instead of failing
-        // it, and a hung suite is read as an infrastructure fault by whoever
-        // sees it rather than as this file being wrong.
+        // **What is left of this test, now that `below` is derived.** The walk
+        // cannot cycle and cannot stop early — `below` is `index() + 1` into an
+        // array of length `RUNGS` — so `visited == RUNGS` and the `is_none()` at
+        // the bottom are both by construction, and saying otherwise would be
+        // this file's own repeated mistake. They stay because they are what
+        // makes the third assertion legible, not because they can fail.
+        //
+        // The third can. `rung == Rung::TessellatingFloor` says the last line of
+        // `ladder!` is the floor, which is a fact about the list and not about
+        // the walk. *The edit that makes it red:* move `TessellatingFloor` off
+        // the bottom of the `ladder!` invocation — put it above `CpuRaster` —
+        // and the descent ends on a rung that is not the floor.
+        //
+        // The loop is bounded rather than `while let` regardless. It costs the
+        // same line and it means that a `below` which ever stopped being derived
+        // fails this suite instead of hanging it, and a hung suite is read as an
+        // infrastructure fault by whoever sees it rather than as this file being
+        // wrong.
         let mut rung = Rung::ComputePath;
         let mut visited = 1;
         for _ in 0..RUNGS {
@@ -672,20 +683,17 @@ mod tests {
         assert!(rung.below().is_none(), "the floor steps down, so this ladder has no bottom");
     }
 
-    #[test]
-    fn descending_agrees_with_the_declared_order() {
-        // Two statements of the ladder — the variant order and the step — and
-        // they are checked against each other because they are edited
-        // separately. A new rung inserted into `ALL` without a `below` arm
-        // would otherwise be a rung nothing can reach. What this cannot see is
-        // the two lists being reordered together, which is green here and red
-        // in `the_rfc_s_table_states_this_ladder_s_order`.
-        for pair in Rung::ALL.windows(2) {
-            let (upper, lower) = (pair[0], pair[1]);
-            let step = upper.below();
-            assert_eq!(step, Some(lower), "{} does not step to {}", upper.name(), lower.name());
-        }
-    }
+    // `descending_agrees_with_the_declared_order` stood here and is deleted for
+    // the reason above, one step further on. It compared `Rung::ALL`'s pairs
+    // against `below`, which were two statements of the ladder edited
+    // separately; `below` is now `index() + 1` into `ALL`, so the comparison is
+    // between a list and itself. Its own comment already named what it could not
+    // see — the two lists reordered together — and named the test that can:
+    // `the_rfc_s_table_states_this_ladder_s_order`, which reads RFC 0080 through
+    // `include_str!` and therefore fails the build rather than drifting. That
+    // one, and `no_rung_is_allowed_less_than_the_rung_above_it` over
+    // `claims/0033`, are what guard the order now, and both read a file outside
+    // this crate, which is the only place an ordering can be checked from.
 
     #[test]
     fn only_the_floor_changes_the_picture() {
