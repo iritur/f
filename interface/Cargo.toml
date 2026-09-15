@@ -1,0 +1,19 @@
+[package]
+name = "f-interface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The semantic vocabulary an application declares, and what a projection is allowed to do with it."
+
+# No dependencies, for `hash/Cargo.toml`'s reason and one more. The vocabulary
+# is the thing applications are asked to adopt, so every crate it pulls in is a
+# crate their toolchain has to agree with; and part III of `ring-scene-boot`
+# says this layer is the least settled piece of the system, so it must be
+# possible to abandon it without taking anything else down. A leaf crate can be
+# deleted. `f-abi` is deliberately *not* a dependency: nothing here is on a
+# wire yet, and the day something is, the wire form belongs in `abi` and this
+# crate keeps the meaning.
+
+[lints]
+workspace = true

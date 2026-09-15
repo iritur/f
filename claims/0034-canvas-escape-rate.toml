@@ -1,0 +1,115 @@
+# There is no corpus. No application has been ported to this vocabulary, none
+# can be until there is a compositor to port one to, and so the number below was
+# not measured, could not have been, and is registered here *before* anything can
+# produce one precisely so that the target predates any number somebody is later
+# tempted by. `claims/0002` and `claims/0033` are the same shape and the same
+# reason; this file differs from both in that the thing it measures is not a cost
+# but a **verdict on a design decision** — RFC 0077 chose twenty-two roles and
+# named this rate as the observation that would say the choice was wrong.
+#
+# `E3-D01` is what put it here and `E3-B06l` is what moves it to `tracked`. What
+# stands between this file and a number is one thing and it is large: a corpus of
+# real applications expressed as `Node` trees. Not three fixtures written by the
+# author of the vocabulary — those are in `interface/src/node.rs`'s tests, they
+# are the argument for the number rather than evidence about it, and a rate taken
+# over them would be a vocabulary grading its own homework.
+#
+# **Why the threshold is written before the corpus.** Because the alternative is
+# writing it after, and after means writing it once the rate is known, which is
+# choosing the line so that the design passes. RFC 0077 states the condition as a
+# reversal — *if more than one declared node in twenty is a canvas, the
+# vocabulary is too small* — and a reversal condition set after the observation
+# is not one. This row is a **target**. A green run of this claim on the day it
+# first runs will mean *the vocabulary did not obviously fail*, which is a
+# smaller statement than a threshold usually makes and is said here rather than
+# left to be assumed.
+#
+# Under RFC 0069's taxonomy this is a `count` rather than a `measured` claim: it
+# is a ratio of two integers taken from declarations, identical on every machine
+# and under every emulator, with no clock anywhere in it. That is why
+# `[hardware]` below says what it says.
+name       = "canvas-escape-rate"
+status     = "pending"          # pending | tracked | gating
+milestone  = "E3"
+
+statement  = """
+Across a corpus of applications expressed in the semantic vocabulary of RFC
+0077, **fewer than one declared node in twenty is a `Role::Canvas`**.
+
+The rate is `canvas_escape_rate_x1000` — canvases per thousand declared nodes,
+an integer with its scale in its name, because the two architectures do not
+agree about a float and a rate is exactly the quantity somebody would reach for
+one to hold. The target is 50, which is RFC 0077's *one node in twenty*.
+
+**The denominator is every declared node in the corpus**, and it is worth saying
+why rather than something narrower. RFC 0077 first wrote *one node in twenty
+that carries the application's own work*, which reads better and cannot be
+computed: nothing decides which nodes carry the application's own work, so two
+people counting one corpus would produce two rates and each could defend theirs.
+A reversal condition nobody can compute is a sentiment with a number in it.
+
+**The rate is taken over the corpus, not averaged over applications.** Canvases
+summed, nodes summed, one division at the end. An average of per-application
+rates would let a hundred-node application with one canvas outvote a
+ten-thousand-node application with four hundred, and the thing being measured is
+whether the vocabulary covers the work that exists, not whether it covers the
+median project.
+
+**What a canvas means here, and why every one of them counts against the
+vocabulary.** `docs/design/ring-scene-boot.html` section 13 asks that every
+escape into a canvas be read as a bug report about the vocabulary rather than as
+an application's choice, and this claim is that sentence made arithmetic. It
+counts canvases that declare their content properly and are entirely legitimate,
+because an application that had to reach for one still had to reach for one. A
+rate that excused the well-behaved canvases would measure politeness rather than
+coverage.
+
+**What this claim does not say.** It says nothing about `canvas_escapes`, which
+counts a different and narrower thing — canvases that declared *nothing* — and
+which is zero for every tree that passed `check`, by construction. That count is
+a floor being evaded and belongs in a defect report; this is a rate and belongs
+in an argument about the size of the vocabulary. It says nothing about which
+roles are missing: a rate over the target says the vocabulary is too small and
+is silent about what to add, which RFC 0077 answers with roles argued one at a
+time. And it says nothing about whether an application *could* have been
+expressed without a canvas, only that it was not.
+"""
+
+[baseline]
+system  = "none"
+notes   = "There is nothing to compare against and a comparison would be the wrong instrument. This is an absolute bound on one vocabulary's coverage, in the manner of `claims/0002` and `claims/0033`, so a baseline configuration would be a baseline of nothing. What takes its place is the **corpus**, and it does the work a baseline usually does: the number means nothing without knowing which applications were ported, by whom, and whether the porter was free to give up and reach for a canvas. A corpus ported by the vocabulary's own authors would score well and prove nothing, which is the failure mode this row exists to name in advance. `E3-B06l` records what the corpus was with every run, and a run that cannot say what it counted is not this claim whatever number it produces."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/ring-scene-boot.html"
+section  = "13"
+notes    = "Section 13 owns this number because it is where the metric is defined and where the two failure directions — too small and applications escape into canvas, too large and the meanings go ambiguous — are stated. What owns the *vocabulary* is `interface/src/node.rs`, whose `canvas_census` computes the two integers this rate is a ratio of, and RFC 0077 is the decision behind both. The seam worth watching: this claim can only go red in one direction. A rate far *below* the target is not evidence that twenty-two roles is right — it is equally consistent with a corpus of applications too simple to push on anything, and no number in this file can tell those apart."
+
+[workload]
+# There is no workload. This row names the file holding the metric the workload
+# will report, because a `[workload] path` pointing at nothing is worse than one
+# pointing at the closest true thing and saying so.
+path    = "interface/src/node.rs"
+notes   = "What stands in: nothing, and the three interfaces in that file's tests are emphatically not a stand-in. They are a settings panel, a file browser and a timeline written by the author of the vocabulary to argue that twenty-two is defensible; running this rate over them would return 1 canvas in 50 nodes and would be a measurement of the argument rather than of the world. `E3-B06l` builds the corpus and its exit already carries the discipline this needs: the reproduction must **refuse when the corpus is empty rather than reporting a clean zero**, because a clean zero here retires RFC 0077's reversal condition on the day nobody has ported anything — the one direction in which this metric can do damage silently and in the reassuring direction. `canvas_census` in `interface/src/node.rs` is written to the same rule and returns `None` for a tree with no nodes, so the two halves of the refusal cannot come to disagree."
+
+[metrics]
+primary   = "canvas_escape_rate_x1000"
+secondary = ["canvas_nodes", "declared_nodes", "applications"]
+
+[threshold]
+# RFC 0077's one node in twenty: 50 canvases per thousand declared nodes.
+canvas_escape_rate_x1000 = { max = 50 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "**This claim does not need that machine and says so rather than pretending**, for `claims/0005`'s reason: the metric is a ratio of two counts taken from declarations, so it is the same number in a container, on bare metal and under an emulator, and nothing here is timed. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it. What this claim needs and no runner can supply is the corpus, which is why `[workload]` above puts that first rather than in a footnote."
+
+[reproduce]
+command = "cargo xtask claim canvas-escape-rate"
+
+[diagnosis]
+# A first debugging step per row, recorded while the decision is understood
+# rather than on the afternoon a number goes red.
+canvas_escape_rate_x1000_over = "RFC 0077's primary reversal condition has fired and the vocabulary is too small for the work real applications do. Before treating it as one, read `canvas_nodes` against `applications`: a rate carried by a single application is a gap and the RFC says so — *one is a gap; two is a shape* — while a rate spread across the corpus is the shape. Then ask what the canvases are *for*, because the answer is the list of roles to argue for, one at a time, and an RFC per role is the mechanism rather than the obstacle. Do not answer this by widening `Role::Canvas`'s licence or by demoting `Defect::EmptyCanvas`: the RFC names that second move as its own separate reversal, and it is the one that arrives first because it looks like a convenience"
+canvas_escape_rate_x1000_far_under = "not evidence that twenty-two is right, and the row most likely to be misread. A rate near zero is equally consistent with a corpus of applications too simple to push on the vocabulary at all, and this claim cannot tell the two apart. What can: whether the corpus contains anything of the kind section 13 calls hard — a timeline, a canvas-shaped editor, a drawing surface. A corpus with none of those has measured the easy half of the problem"
+a_threshold_no_workload_printed = "the run reached no number at all, which in this epoch is the expected ending rather than a fault: there is no corpus, `Route::Unbuilt` refuses rather than exiting zero, and the refusal names `E3-B06l` as the task that owes one. It becomes a real finding on the day that task lands, and what to read then is whether the corpus refused itself for being empty — which is the same refusal one layer down and is the run working rather than failing"

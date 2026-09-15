@@ -393,7 +393,7 @@ slot.seq.store(pos.wrapping_add(1), Ordering::<span class="k">Release</span>);</
 <section>
   <div class="sec-head"><div class="sec-num">08</div><h2>The GPU pipeline</h2></div>
   <div class="flow">
-    <p>Four stages, of which only the first touches the CPU. This is the shape Vello demonstrates and the reason section 05's CPU raster segment disappears entirely rather than merely getting faster.</p>
+    <p>Four stages, of which only the first touches the CPU. This is the shape Vello demonstrates and the reason section 05's CPU raster segment disappears entirely rather than merely getting faster. <b>Narrowed:</b> that last clause is a property of this pipeline and not of the system &mdash; RFC 0080's fallback ladder puts a CPU raster back underneath it, and two of the three rungs below it put coverage arithmetic back on the CPU: the hybrid moves this section's coarse-raster prefix scan, and the all-CPU rung moves every stage. The tessellating floor moves none of it &mdash; its triangles are rastered by fixed-function hardware and the CPU only flattens the paths for it. So the segment disappears on hardware that runs the rung this section describes; below that rung it returns on two, and on the floor it is replaced by flattening rather than removed.</p>
   </div>
   <div class="chain">
     <div class="step"><span class="i">1</span><span class="d"><b>Encode.</b> Walk the dirty subtrees and flatten them into a linear encoding of paths, transforms and paints. The only CPU stage, and it touches changed nodes only.</span><span class="t">CPU &middot; ~0.3 ms</span></div>

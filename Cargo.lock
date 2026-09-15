@@ -71,6 +71,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "f-interface"
+version = "0.0.1"
+
+[[package]]
 name = "f-kernel"
 version = "0.0.1"
 dependencies = [

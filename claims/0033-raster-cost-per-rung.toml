@@ -1,0 +1,267 @@
+# None of this exists. There is no compositor, no renderer, no backend bound to
+# a display, and no machine in this project's reach with a GPU on it — so the
+# four numbers below were not measured, could not have been, and are registered
+# here *before* anything can produce one precisely so that the target predates
+# any number somebody is later tempted by. `claims/0002` is the same shape and
+# the same reason; this file differs only in owing four numbers instead of one.
+#
+# `E3-D04` is what put it here and `E3-B02` is what moves it to `tracked`. Three
+# things stand between this file and a gating claim, and they are not
+# interchangeable: a compositor that renders anything at all (`E3-B01`), a
+# renderer per rung to render it with (`E3-B02`), and a machine of a class
+# `claims/runner-class-A.md` does not yet describe — that file's own *What would
+# change this file* names the moment, and it is `E5-D01`'s graphics workstation
+# rather than anything in this epoch.
+#
+# **Why the thresholds are written before the machine.** Because the alternative
+# is writing them after, and after means writing them on a machine that has
+# already been chosen and has already failed to run the top rung. A ladder
+# decided under that pressure is a ladder whose bottom rung is whatever the
+# hardware in the room can do, fitted afterwards with a justification — which is
+# the failure RFC 0080 exists to refuse. Every row below is a **target**. None of
+# them is evidence about anything, and a green run of this claim on the day it
+# first runs will mean *the targets were not absurd*, which is a smaller
+# statement than a threshold usually makes and is said here rather than left to
+# be assumed.
+#
+# Under RFC 0069's taxonomy — `draft`, so this file carries no `evidence` key
+# yet — all four rows are `measured`: a distribution drawn from one machine, on
+# a named runner class, and not a count that any machine would agree on. That is
+# why none of these may gate where `claims/0005` and `claims/0032` may.
+name       = "raster-cost-per-rung"
+status     = "pending"          # pending | tracked | gating
+milestone  = "E3"
+
+statement  = """
+Four renderers produce one frame of one scene on one machine, and each of the
+four costs no more than the ladder allowed it to. The rungs are RFC 0080's, in
+its order, and the cost is **compositor-side wall time for one frame** — from
+the commit being applied to the frame being presentable — taken at p99 over a
+run and stored as a distribution, per `claims/README.md` rule 3.
+
+**The measure is the tail, and the rows carry the allowance that makes that
+true.** This file's first version summed section 08's four stage figures — each
+written with a tilde, each a typical frame — and published the sum as a p99
+bound. That is a substitution and not a derivation: it sets a tail from a
+central number, so the first honest run on hardware that meets section 08's own
+arithmetic goes red on jitter alone, and that red says nothing about the
+pipeline. The measure stays p99, because section 09's pacing rests on one — the
+compositor sets the application's deadline at `T_scanout − gpu_p99 − margin`, so
+the quantity this ladder has to bound is the quantity that estimator holds — and
+each row below says which of the two kinds of number it was derived from.
+
+  rung            metric                    target (p99)   what the machine supplies
+  compute path    compute_path_us_x100      3 150 µs       compute shaders, storage buffers, a usable scan
+  hybrid          hybrid_us_x100            6 300 µs       a GPU whose compute stage is only partly usable
+  CPU             cpu_raster_us_x100        8 400 µs       a CPU and somewhere to put pixels
+  tessellating    tessellated_us_x100       8 400 µs       a fixed-function triangle pipeline
+
+**The top rung: section 08's four stage costs summed, plus a stated tail
+allowance.** Encode 0.3 ms on the CPU, coarse raster 0.5 ms, fine raster 1.2 ms,
+present 0.1 ms — 2.1 ms for a typical frame, which
+`docs/design/ring-scene-boot.html` section 08 already publishes as the shape of
+this pipeline. It is quoted here as a target rather than restated as a result:
+that document is ahead of the code by design, and the number in it is an
+argument about what a Vello-shaped pipeline costs on hardware that runs it, not
+a measurement this project took. The p99 row is that sum times **one and a
+half**, and the factor is the weakest thing in this file, so it is written as a
+target with a reversal attached rather than dressed up as a derivation: half
+again is the smallest allowance that does not simply re-publish a typical frame
+as a tail, and there is no published p99/p50 spread for those four stages to
+take a better one from. The first run that produces a distribution replaces it —
+a measured spread wider than 1.5 means this row is wrong and it moves, and a
+much narrower one means this row is slack and it moves. Section 08's 2.1 ms is
+not lost inside the allowance: it is registered below as
+`compute_path_p50_us_x100`, where it is comparable against the number it came
+from, and `E3-B02` owes that row a bound on the day there is a distribution to
+set one from.
+
+**The hybrid is a multiple of the top rung. The CPU rung is not, and reading it
+as one was the second half of the same mistake.**
+
+  - A hybrid costing more than **twice** the compute path is not buying
+    anything. What the hybrid moves off the GPU is the coarse raster's parallel
+    prefix scan — priced at 0.5 ms in section 08, and the one stage a CPU does
+    worst. If paying that back costs more than doubling the frame, the machine
+    belongs on the CPU rung, where there is one renderer to reason about instead
+    of a seam between two. The multiple is of the row above it, so this row moves
+    when that allowance moves, which is right: it is a statement about the seam
+    and not about silicon.
+  - The CPU rung's bound is **section 09's latency chain, and not a multiple of
+    anything**. That chain is already a tail argument, which is what makes it
+    usable here: `E3-P02`'s p99 input-to-photon bound is 14 ms, the application
+    has 3 ms of it and scanout about 2 ms, which leaves **9 ms exactly** — and 9
+    ms is not the compositor's, because section 09's chain carries three terms
+    that section prices at nothing: the driver's timestamp at interrupt time, the
+    deadline wake, and the late-latch re-read before submit. Each takes from the
+    9 and none adds to it, so the compositor's share is *under* 9 ms, and this
+    row says how far under: 8.4 ms, leaving 0.6 ms for the three. **That split is
+    this file's choice and not a derivation** — it is the line here most likely to
+    be wrong, and the first measurement of those three terms replaces it outright
+    rather than arguing with it. An earlier version wrote *a little over 9 ms*,
+    which inflated the budget in the one direction that made 8.4 ms look
+    comfortable. The value itself is unchanged from this file's first version,
+    where the reason beside it read *four times the top rung* — true of 2.1 ms by
+    arithmetic coincidence and false the moment the top rung carried an
+    allowance; carrying the multiple through would have dragged this row to 12.6
+    ms, which is outside the chain it is derived from. At 8.4 ms the chain is at its edge with nothing left, and the honest
+    answer for a machine that cannot make it is a lower refresh rate or the floor
+    — not a compositor that misses every frame.
+
+**The floor's bound is section 09's chain, and what refutes the floor is not a
+bound at all.** The tessellating floor draws a *different picture* — paths
+flattened to triangles, conflation artifacts where two shapes meet, coverage
+sampled rather than computed — and the only thing it offers in exchange is that
+it asks less of the machine. It is emphatically not offering speed *against the
+top rung*, whose hardware it will never be selected on. Against the rung it
+actually competes with — rung 3, on a machine with no compute — costing less is
+the whole of what it offers, and that comparison is where the argument for this
+rung lives and is not a threshold. So this row is bounded by what the CPU rung is
+bounded by: what section 09's chain leaves the compositor. A machine running the
+floor still has to present a frame, and on its own that is the only question this
+row can ask.
+
+This row was 3 150 µs — the top rung's target, set so that a floor which was not
+cheaper refuted itself — and it is the second half of the mistake the paragraph
+above corrects. It refuted the rung on speed against the top rung, two sentences
+after this file said the floor is not offering speed against the top rung, and it
+fired in the wrong direction. The floor
+exists for a machine that cannot run rung 1, so a red on it could only ever be
+recorded on a machine that *can* — the one class that never selects the floor —
+and on a uniformly slow machine `compute_path_us_x100` and this row go red
+together while the diagnosis reads the second as a refuted rung. Deleting the
+floor on that evidence hands the machine it was built for RFC 0080's *refused a
+compositor*, which is the outcome the rung exists to prevent.
+
+What refutes the floor is a comparison on the hardware the floor is for, and RFC
+0080 now states it as one: **on a machine that cannot start rung 1**, the floor
+measured at or above that machine's own `cpu_raster_us_x100` is a worse picture
+bought for no saving, and the rung has no argument left. No machine in this
+project's reach can produce that measurement today, and its absence is not
+evidence in either direction — the rung stands untested rather than confirmed.
+
+**Rule 5, which every mechanism in this file is in tension with.**
+`claims/README.md` says regression detection is change-point and not threshold,
+because thresholds either miss real regressions or fire until everyone mutes
+them — and this claim is four thresholds whose every failure mode is written as
+*a red row*. That is the right instrument only while there is nothing to detect a
+change in: no run has happened, there is no series, and a target is all that is
+left. It stops being the right one the day `E3-B02` produces a second run. From
+then the regression question is read from the series and these four rows keep
+only the job they have now, which is refusing a number that was never plausible
+rather than noticing one that moved.
+
+**What this claim does not say.** It says nothing about which rung a given
+machine lands on: that is a predicate per rung, and RFC 0080 holds it rather
+than this file. It says nothing about *quality* — three of the four rungs
+produce the same image and the fourth does not, and no number here can tell them
+apart. And it says nothing about the per-frame effect degradation in section 10,
+which is a different mechanism on a different time-scale and shares nothing with
+the ladder but the word *fallback*.
+"""
+
+[baseline]
+system  = "none"
+notes   = "There is nothing to compare against, and a comparison would be the wrong instrument anyway. `claims/0001` is a ratio against somebody else's system; this is four absolute bounds on this system's own renderers, in the manner of `claims/0002`, so a baseline configuration would be a baseline of nothing. What takes its place is the *scene*: the four numbers mean nothing unless all four are taken over one scene, on one machine, in one run, and the workload below says so. A rung timed on an easier frame than the rung above it is not a ladder, it is four unrelated numbers in a table that looks like one."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/ring-scene-boot.html"
+section  = "08"
+notes    = "Section 08 is the GPU pipeline, and it owns these numbers because it is where the four stage costs are published — the top rung's target is that section's own arithmetic, times a tail allowance this file argues and names, rather than a second opinion about the stages themselves. What owns the *ladder* is `interface/src/ladder.rs`, which names the four rungs and carries each rung's metric name so that this file and that enum cannot drift apart silently; RFC 0080 is the decision behind both. The seam worth watching: section 08 argues one pipeline and this claim prices four, so on the day a stage cost in that section moves, two of these rows are stale and only the first is obviously so — the compute path directly, and the hybrid because it is defined as a multiple of it. The other two do not move with this section: the CPU rung and the floor are both derived from section 09's chain, and they go stale when `E3-P02`'s bound or section 09's budget moves, which is a different day and a different document. The floor used to be in the first group, set at the top rung's target as a refutation condition; RFC 0080's reversal section says why that ran backwards and where the refutation went instead."
+
+[workload]
+# There is no workload. This row names the file holding the vocabulary the
+# workload will one day report against, because a `[workload] path` pointing at
+# nothing is worse than one pointing at the closest true thing and saying so.
+path    = "interface/src/ladder.rs"
+rungs   = 4
+notes   = "What stands in, said before the number rather than after it: nothing. There is no second implementation, no model and no simulator arm — unlike `claims/0026` or `claims/0029`, which measure a modelled device and say so, this claim has no stand-in at all and will not have one until `E3-B02`. What *is* decided is the discipline the run must have: one scene, one machine, one invocation, four renderers, and every rung's number taken with the other three present in the same build. A run that rebuilt between rungs would be four measurements of four programs. **And a run records which rung the compositor started at.** That is not bookkeeping: RFC 0080's reversal conditions for the hybrid and for the floor are both comparisons between two rungs *on a machine that started at one of them*, so a run that does not say where it started produces numbers those conditions cannot read, and the condition would then be met by arithmetic over machines it was never about. **One run is one machine, and this claim is the set of them** — the first three machines this ladder is exercised on each get one, and every row above is a per-machine bound rather than a single number about the project. That is also the honest answer to the thing this file could not otherwise say: a machine that runs all four rungs is by construction a machine that can run rung 1, and three of these four rungs exist for machines that cannot. Their numbers are owed from *those* machines; `E3-B02l` in `intent/0012-the-interface/spec.md` is the task that takes the ladder onto one, and until it lands the lower three rows are targets measured on hardware they are not about, which is a weakness of the evidence and not of the rungs. — The scene itself is deliberately not fixed here. Fixing it now would be choosing a benchmark before there is anything to run it on, and a scene chosen that early is chosen to be reachable rather than to be representative. `E3-B02` picks it, and the day it does, this table gains a row naming it and its content hash."
+
+[metrics]
+# Four rungs, four bounded metrics, and the ladder's order is the order they
+# appear in. Every time here is microseconds times one hundred — an integer with
+# its scale in its name, RFC 0004 — because the two architectures do not agree
+# about a float and a frame cost is exactly the quantity somebody would reach for
+# one to hold.
+#
+# **The rest of this list is `claims/README.md` rule 4, which the first version
+# of this file ignored.** Rule 4 asks for instructions and joules per operation
+# and not only nanoseconds, because those survive a hardware change and are far
+# less noisy — and this claim is four *times* on hardware nobody owns yet, which
+# is the case rule 4 is most pointed at. The operation is one frame, so the rows
+# are per frame rather than per op, and there are two kinds rather than one:
+#
+#   - `*_instructions_per_frame` is CPU-side instructions retired. It is the
+#     honest measure for the CPU rung and a partial one for the three that run
+#     on a device this project cannot count instructions on, and that asymmetry
+#     is the reason it is not the headline.
+#   - `*_ujoules_per_frame` is whole-machine energy for the frame, in
+#     microjoules because the scale belongs in the name. It is the one measure
+#     that spans the CPU and the GPU, which is exactly what a ladder whose rungs
+#     move work between them needs. `E3-P07` is joules per frame against a tuned
+#     Linux compositor on the same content, and these rows are what that
+#     comparison will be built from rather than a second attempt at it.
+#
+# None of them carries a threshold and that is deliberate: a bound on energy
+# before a machine exists would be a number invented twice over, and `E3-P07`
+# owns the comparison. They are recorded so that the day this claim first runs
+# it produces the thing rule 4 asks for instead of a time and an apology.
+#
+# `compute_path_p50_us_x100` is the row section 08's 2.1 ms is directly
+# comparable against — the statement says why the bounded row above it is not.
+primary   = "compute_path_us_x100"
+secondary = [
+  "hybrid_us_x100",
+  "cpu_raster_us_x100",
+  "tessellated_us_x100",
+  "compute_path_p50_us_x100",
+  "compute_path_instructions_per_frame",
+  "hybrid_instructions_per_frame",
+  "cpu_raster_instructions_per_frame",
+  "tessellated_instructions_per_frame",
+  "compute_path_ujoules_per_frame",
+  "hybrid_ujoules_per_frame",
+  "cpu_raster_ujoules_per_frame",
+  "tessellated_ujoules_per_frame",
+]
+
+# Four rows, one per rung, and exactly four: `interface/src/ladder.rs` reads this
+# table when it compiles and refuses a row no rung claims as well as a rung no row
+# prices. A fifth bound belongs to a fifth rung, which is RFC 0080's argument to
+# reopen rather than a line to add here.
+[threshold]
+# Section 08's four stages summed — 0.3 + 0.5 + 1.2 + 0.1 ms, a typical frame —
+# times the one-and-a-half tail allowance the statement argues and offers a
+# reversal for. The headline, and the only row whose basis was argued somewhere
+# other than in this file.
+compute_path_us_x100 = { max = 315_000 }
+# Twice the rung above. Past this the seam costs more than removing it does.
+hybrid_us_x100       = { max = 630_000 }
+# Section 09's chain and not a multiple: 14 ms p99 input-to-photon, less 3 ms of
+# application and about 2 ms of scanout, is the whole of what the compositor has.
+cpu_raster_us_x100   = { max = 840_000 }
+# Section 09's chain, the same bound the CPU rung carries and for the same
+# reason: a machine running the floor still has to present a frame, and that is
+# the whole of what a bound can ask of a rung on its own. It was 315_000 — the
+# top rung's target, so that a floor which was not cheaper refuted itself — and
+# that fires in the wrong direction. The floor is for machines that cannot run
+# rung 1, so that red could only be recorded where the floor is never selected.
+# What refutes the floor is in RFC 0080 and is a comparison, not a row.
+tessellated_us_x100  = { max = 840_000 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "**This claim needs that machine and needs more than that machine, and the second half is the honest part.** It needs it for the ordinary reason `claims/0002` does: all four rows are times, `bench/src/lib.rs` records a time on no other class, and RFC 0069's second rule says a measured claim gates only where the harness will record. It needs *more* because `claims/runner-class-A.md` specifies a machine for defensible tails — cores, cache, bandwidth, pre-faulted pages — and specifies no GPU at all, while three of these four rungs are statements about one. That file's *What would change this file* anticipates exactly this case: `E1-P10`'s datapath claims add a network card to its table, and `E5-D01` is named there as the graphics bill of materials three releases later. So the class named here is what `lint-reproduce` requires and is not yet a machine this number could be taken on, and a reader should not read it as one. Naming a class that does not exist would be worse — unrunnable *and* uncheckable. What settles it is the question that file already asks once: whether the graphics workstation and the tail machine are one machine. If they are, this row is right and stays. If they are not, this claim moves to a class with its own file beside `runner-class-A.md`, which is the mechanism that file describes rather than an exception to it."
+
+[reproduce]
+command = "cargo xtask claim raster-cost-per-rung"
+
+[diagnosis]
+# A first debugging step per row, recorded while the ladder is understood rather
+# than on the afternoon a number goes red.
+compute_path_us_x100_over = "read `compute_path_p50_us_x100` before anything else. This row is a tail and that row is the typical frame section 08 argues, so a p50 at or near 2.1 ms with this row red is jitter and not a stage — the scheduler, a cold cache, a frame whose dirty subtree was unusually large — and the thing to question is the tail allowance in the statement rather than the pipeline. If the p50 is also over, the top rung has lost the property the whole pipeline exists for, and the first question is which of section 08's four stages grew — the command has to print the four separately or this row cannot be debugged at all. If it is encode, the CPU stage is touching clean nodes and the dirty-subtree walk is wrong. If it is coarse raster, the prefix scan is not running in parallel and the machine's compute is being used as a serial processor, which is the hybrid rung's condition arriving without the hybrid rung. Do not answer a red p50 by relaxing this row: the p50 is section 08's own arithmetic with no allowance in it, and a tree that cannot meet it has refuted the design document rather than the threshold. The allowance above the p50 is the only part of this bound that is this file's opinion, and the statement says what moves it"
+hybrid_us_x100_over = "this row alone says the hybrid is over its budget on this machine, which is a reason for *this machine* to descend a rung and is not a reason to delete the rung. Do not read it against `cpu_raster_us_x100`'s bound: the two bounds are scaled from different arguments — one is the seam's budget, the other is section 09's chain — so `hybrid` red and `cpu_raster` green is a comparison of two thresholds and says nothing about which renderer is faster here. The comparison that means something is between the two *measurements*, on the one scene and in the one run the workload already requires: if this machine's `hybrid_us_x100` is not below its own `cpu_raster_us_x100`, the seam is buying nothing and the machine belongs one rung down, and that observation repeated across machines is RFC 0080's reversal condition for deleting the rung. If both rows are outside their bounds, the fault is shared and is not in the seam, which points at the encode stage both rungs run"
+cpu_raster_us_x100_over = "the frame is being rasterised and the latency chain has nothing left. First establish whether the time is going to coverage or to the present — a CPU rung that is slow at *presenting* has no path for the blit and is copying the frame, which is a fixable defect and not the renderer being slow. If it is coverage, this is the rung working as designed on a machine too small for it, and the answer is the display's refresh rate or the floor. Both are decisions and neither is a change to this file"
+tessellated_us_x100_over = "read where the run was taken before reading the row. The workload times four renderers on one machine, so that machine can run rung 1 — and a machine that can run rung 1 never selects the floor. A red here is therefore a statement about a rung this machine would not have used, and on a uniformly slow machine it arrives beside a red `compute_path_us_x100` and means the same thing that one does. The first thing to check is whether the tessellation is being redone every frame for geometry that did not change, which is a defect and is fixable; the second is the machine, against the rows above. What this red is **not** is a refuted rung, and this row used to say it was. The floor's refutation lives in RFC 0080 and needs a run this claim cannot yet commission: on a machine that cannot start rung 1, the floor at or above that machine's own `cpu_raster_us_x100` is a worse picture bought for no saving, and only then is the ladder three rungs. Widening this bound is still the wrong repair, for the ordinary reason — it is section 09's chain, and a compositor that does not fit in it misses frames whichever rung it is on"
+a_threshold_no_workload_printed = "this row used to say that such a run says so and exits zero. It does not, and it never did: `cargo xtask claim raster-cost-per-rung` resolves the name in `ROUTES` and finds `Route::Unbuilt(\"E3-B02\")`, which **refuses** and names the task that owes a workload. The refusal is the design rather than a gap — a command that exited zero having measured nothing is a green run reporting no measurement, which is the one outcome `claims/README.md` exists to prevent, and the registry would rather be red for a reason it can name. So in this epoch the expected ending of this command is a non-zero exit whose message says `E3-B02`. What is *not* expected, and is the finding this row is named for, is the same command reaching a workload and printing no row for a threshold — that becomes possible the day `E3-B02` lands a renderer, and what to read then is which rung refused to build rather than which number went missing"
