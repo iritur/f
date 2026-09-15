@@ -18,12 +18,17 @@ pub mod cap;
 pub mod control;
 pub mod deadline;
 pub mod door;
+pub mod input;
 pub mod layout;
 pub mod manifest;
+pub mod participate;
 pub mod reserve;
+pub mod scene;
+pub mod semantic;
 pub mod state;
 pub mod store;
 pub mod swap;
+pub mod sync;
 pub mod transfer;
 
 /// The frame's opcode space.

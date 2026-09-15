@@ -35,6 +35,7 @@
 
 #![no_std]
 
+pub mod backend;
 pub mod canvas;
 pub mod ladder;
 pub mod node;

@@ -71,6 +71,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "f-input"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-env",
+]
+
+[[package]]
 name = "f-interface"
 version = "0.0.1"
 
@@ -112,6 +120,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "f-scene"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+]
+
+[[package]]
 name = "f-sim"
 version = "0.0.1"
 dependencies = [
@@ -137,6 +152,10 @@ dependencies = [
  "f-abi",
  "f-ring",
 ]
+
+[[package]]
+name = "f-text"
+version = "0.0.1"
 
 [[package]]
 name = "f-virtio-blk"
