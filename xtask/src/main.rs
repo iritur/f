@@ -197,11 +197,27 @@ const UNSAFE_ALLOW: &[&str] = &["abi/", "ring/", "kernel/"];
 const PERCPU_SCOPE: &str = "kernel/";
 
 /// Where a mutable `static` is the point rather than a violation.
-const PERCPU_ALLOW: &[(&str, &str)] = &[(
-    "kernel/src/percpu.rs",
-    "the shard itself: `PerCpu` is the type every other mutable static has to \
-     be spelled as, so it is the one place that may hold the cell",
-)];
+const PERCPU_ALLOW: &[(&str, &str)] = &[
+    (
+        "kernel/src/percpu.rs",
+        "the shard itself: `PerCpu` is the type every other mutable static has to \
+         be spelled as, so it is the one place that may hold the cell",
+    ),
+    (
+        "kernel/src/screen.rs",
+        "RFC 0081, and this is the only row here that is a decision rather than a \
+         definition — read that entry before adding a third. A screen is one \
+         device, written by whatever core is printing, exactly as COM1 has been \
+         since M0. The conforming spelling is `PerCpu<Console>`, which at \
+         MAX_CPUS is eight grids and about 320 KiB of .bss for one display, seven \
+         of them never drawn from — and eight cursors over one surface is a \
+         screen that is wrong by construction rather than wrong under a race. \
+         What separates this from RFC 0076, which refused a fifth shared place \
+         for a supervisor's pending state, is that nothing reads this one back: \
+         no decision anywhere depends on the console's contents, so a race \
+         garbles a character beside a serial log that is unaffected",
+    ),
+];
 
 /// What a mutable `static` looks like when it is not spelled `static mut`.
 ///
@@ -637,6 +653,7 @@ fn main() -> ExitCode {
         "blk" => blk(args.get(1).map(String::as_str)),
         "net" => net(args.get(1).map(String::as_str)),
         "gpu" => gpu(args.get(1).map(String::as_str)),
+        "screen" => screen(args.get(1).map(String::as_str)),
         "deadline" => deadline(args.get(1).map(String::as_str)),
         "runtime" => runtime(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
@@ -854,6 +871,15 @@ cargo xtask <command>
                      argument. The only check here that observes something from
                      outside the machine, because a scanout cannot be read back
                      from inside one
+  screen [check]     Check the frame's fallback console on a machine with no
+                     display, which is every machine this harness has. `font`
+                     renders all ninety-five glyphs to the serial port as
+                     characters, which is the only way a table somebody typed
+                     can be read back as shapes; `selftest` draws a string into
+                     an ordinary array through the real surface code and reports
+                     the pixels the same way. Neither needs a framebuffer, which
+                     is the point: QEMU's `-kernel` loader gives none, so the
+                     drawing path is otherwise never executed here at all
   deadline [half]    Boot the block datapath with batch work queued and a
                      hard-class read submitted behind it: ordered, where the
                      read must be handed to the device first; arrival, the
@@ -2461,6 +2487,48 @@ fn machine_devices(
     };
 
     Ok((ending, log))
+}
+
+/// Check the console on a machine that has no screen.
+///
+/// # Why this verb exists and what it is evidence of
+///
+/// `open_screen` returns on its first line under this emulator, for ever:
+/// QEMU's `-kernel` loader implements no part of the multiboot video request,
+/// so no boot `xtask` can start will ever have a framebuffer to draw on. That
+/// leaves the two halves of the console that *can* be wrong without a display
+/// unexercised — the font, which is a table somebody typed, and the glyph blit,
+/// which is arithmetic over a pitch and a scale.
+///
+/// Both report through the serial port, which needs no mapping. `font` prints
+/// every glyph as `#` and `.`, so a mistyped row is a letter that visibly is
+/// not the letter. `selftest` runs the real `Surface` over an ordinary array
+/// and prints what landed in it, so a blit that is off by a row, doubled at the
+/// wrong scale, or packing colour into the wrong bits shows up as a shape.
+///
+/// **What it is not evidence of** is the handoff: that the loader fills the
+/// framebuffer fields in, that the extent is mappable, and that a real display
+/// shows what was written. Those need a loader that implements the request,
+/// which means GRUB, which means a machine that is not this emulator.
+fn screen(check: Option<&str>) -> Result<(), String> {
+    let append = match check {
+        Some("font") => "screen=font",
+        Some("parse") => "screen=parse",
+        None | Some("selftest") => "screen=selftest",
+        Some(other) => {
+            return Err(format!(
+                "unknown screen check `{other}` — try `font`, `selftest` or `parse`"
+            ));
+        }
+    };
+
+    let (code, _) = boot_captured(Some(append), &[])?;
+    match code {
+        Some(33) => Ok(()),
+        Some(35) => Err("kernel reported failure — see the serial log above".into()),
+        Some(other) => Err(format!("qemu exited {other}; expected 33 or 35")),
+        None => Err("qemu terminated by signal".into()),
+    }
 }
 
 fn run() -> Result<(), String> {

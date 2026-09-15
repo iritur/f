@@ -45,13 +45,14 @@ pub mod percpu;
 pub mod process;
 pub mod ring;
 pub mod runtime;
+pub mod screen;
 pub mod smp;
 pub mod state;
 pub mod supervisor;
 
 use core::panic::PanicInfo;
 
-use arch::x86_64::multiboot::{BootInfo, Region, RegionKind};
+use arch::x86_64::multiboot::{BootInfo, FramebufferKind, Region, RegionKind, Video};
 use arch::x86_64::paging;
 use f_env::{Env, SeededEnv};
 
@@ -317,6 +318,46 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         space.root(),
         paging::PHYS_OFFSET
     );
+
+    // The screen, as soon as there is an address space to map it into and an
+    // allocator that can pay for the tables. Everything printed from here on
+    // appears on the display as well as on the wire; everything above this line
+    // is on the wire only, which `screen::begin` says at more length and which
+    // is the honest boundary rather than a replayed log pretending otherwise.
+    open_screen(&mut frames, &space, features, &boot);
+
+    // Two provocations, and they exist because the path above cannot be
+    // exercised where this kernel is actually tested: QEMU's `-kernel` loader
+    // hands over no framebuffer, so under the emulator `open_screen` returns on
+    // its first line, for ever. What can be checked without a display is the
+    // half that is data somebody typed and arithmetic somebody wrote, and both
+    // report to the serial port, which needs no mapping to work.
+    if boot.has_parameter(b"screen=font") {
+        screen::dump_font();
+    }
+    if boot.has_parameter(b"screen=selftest") {
+        screen::selftest("F screen ok");
+    }
+    if boot.has_parameter(b"screen=parse") {
+        // The seven word offsets into the loader's structure, which are seven
+        // numbers copied out of a specification and which no boot this harness
+        // can start will ever execute. A fixture is the only way to reach them.
+        match arch::x86_64::multiboot::Framebuffer::self_check() {
+            Ok(fb) => kprintln!(
+                "  screen        parse ok: {} x {} x {} {} at {:#018x}, pitch {}",
+                fb.width,
+                fb.height,
+                fb.bits_per_pixel,
+                fb.kind.label(),
+                fb.addr,
+                fb.pitch
+            ),
+            Err(why) => {
+                kprintln!("FAIL: screen: the framebuffer fields did not round trip: {why}");
+                arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+            }
+        }
+    }
 
     // RFC 0012, and `E2-B07`. The frame measures its own text and rodata *here*
     // and not earlier or later, and both bounds are load-bearing. Earlier and
@@ -3613,6 +3654,70 @@ fn report_memory(magic: u32, info: u32) -> BootInfo {
         );
     }
 
+    // What the loader did with the header's video request, which is the whole
+    // of `intent/0011` step 1 and is deliberately a line and not a mapping.
+    //
+    // The two loaders this tree meets answer differently *by construction*, so
+    // this line is a measurement rather than a status: QEMU's `-kernel` loader
+    // does not implement the request — it prints `multiboot knows VBE. we
+    // don't.` on its own stderr and carries on — and GRUB resolves an all-zero
+    // request against the firmware's current mode and fills the fields in. A
+    // boot that prints `none` under QEMU and a geometry under GRUB is the
+    // expected pair, and either one printing the other's answer is the finding.
+    match boot.video() {
+        Video::Absent => kprintln!("  framebuffer   none, the loader answered no video fields"),
+        // Not fatal, and the asymmetry is the point: a loader that set the flag
+        // over fields that do not describe a surface has told us something is
+        // wrong with it, and refusing the boot over a display this kernel does
+        // not yet use would trade a working machine for a diagnosis.
+        Video::Refused(why) => kprintln!("  framebuffer   refused, {why}"),
+        Video::Present(fb) => {
+            kprintln!(
+                "  framebuffer   {} x {} x {} {} at {:#018x}",
+                fb.width,
+                fb.height,
+                fb.bits_per_pixel,
+                fb.kind.label(),
+                fb.addr
+            );
+            kprintln!(
+                "    pitch       {} B, extent {} KiB, ends {:#018x}",
+                fb.pitch,
+                fb.extent() / 1024,
+                fb.end()
+            );
+            if let FramebufferKind::Direct(channels) = fb.kind {
+                // Printed as positions and widths rather than only as a label,
+                // because `other` is a layout this tree has no name for and the
+                // six numbers are what somebody would need to give it one.
+                kprintln!(
+                    "    channels    r {}+{}, g {}+{}, b {}+{}",
+                    channels.red_at,
+                    channels.red_bits,
+                    channels.green_at,
+                    channels.green_bits,
+                    channels.blue_at,
+                    channels.blue_bits
+                );
+            }
+            // Whether this surface needs reserving is a question about the
+            // machine rather than about the design, and it decides how much
+            // step 2 has to do. A framebuffer is normally device memory the map
+            // never called usable; one that sits *inside* a usable region is
+            // memory the frame allocator will hand out from under a display, in
+            // exactly the way an unreserved module would be. Measured and
+            // printed here, acted on in step 2.
+            let overlaps = boot.regions().any(|region| {
+                region.kind == RegionKind::Usable
+                    && region.base < fb.end()
+                    && fb.addr < region.base.saturating_add(region.len)
+            });
+            if overlaps {
+                kprintln!("    note        inside a usable region, and NOT yet reserved");
+            }
+        }
+    }
+
     // A map with no usable memory in it is a map that was misread, not a
     // machine with no memory: the kernel is running out of some of it.
     if usable == 0 {
@@ -3660,7 +3765,7 @@ fn collect(boot: &BootInfo) -> ([Region; MAX_REGIONS], usize, bool) {
 /// can never be the thing that drops a reservation: a range that does not fit
 /// is memory handed to somebody while its owner is still using it, and there is
 /// no diagnostic for that worth the name.
-const MAX_RESERVED: usize = 12;
+const MAX_RESERVED: usize = 13;
 
 /// Everything inside usable memory that is already spoken for.
 ///
@@ -3691,6 +3796,19 @@ fn reserved_ranges(
         count += 1;
     }
 
+    // The loader's framebuffer, when it gave one. Normally this changes
+    // nothing — a display's memory is a device's, and the map does not call it
+    // usable — and on the machine where that is not true it is the difference
+    // between a screen and a corruption: the allocator would hand a display's
+    // memory to whoever asked next, and the symptom would be a picture that
+    // dissolves into somebody else's data. `report_memory` prints whether this
+    // range sits inside a usable region, so the rare case is visible rather
+    // than merely handled.
+    if let Video::Present(fb) = boot.video() {
+        list[count] = mem::Reserved { base: fb.addr, end: fb.end() };
+        count += 1;
+    }
+
     // Every file the loader placed in memory. These sit *inside* regions the
     // same loader called usable, which is what makes forgetting them a bug that
     // waits until something first depends on a module's contents — E0-B10 —
@@ -3704,6 +3822,74 @@ fn reserved_ranges(
     }
 
     (list, count)
+}
+
+/// Map the loader's framebuffer and start drawing the boot log on it.
+///
+/// # Why a loop of one-page mappings, and why that is not a complaint
+///
+/// [`paging::map_device`] maps one page, because every caller it was written
+/// for — the interrupt controller, a virtio register block, a remapping unit —
+/// wants one page or four. A display is the first device in this tree whose
+/// registers *are* its memory: a modest 1024 by 768 surface is three mebibytes
+/// and seven hundred and sixty-eight pages. The loop is therefore the whole of
+/// what is new here, and it is deliberately not a new mapping primitive — a
+/// `map_device_range` would have one caller, and the page tables it filled
+/// would be the same tables this fills.
+///
+/// What it costs is paid once at boot: seven hundred and sixty-eight walks, two
+/// or three frames of page table, and one `invlpg` each. What it buys is that
+/// the display is reached through the device window, uncacheable, at an address
+/// this function can hand over as one number.
+///
+/// # Uncacheable, and the one number that would change it
+///
+/// The mapping is strongly uncacheable, because that is what the device window
+/// is and this kernel programs no page-attribute table. Write-combining would
+/// be several times faster and is the obvious next change; it needs
+/// `IA32_PAT` reprogrammed on every core, which is a change to a global
+/// processor register for the benefit of a fallback console, and it should be
+/// bought with a measurement rather than assumed. RFC 0081 names it.
+///
+/// A failure here is reported and not fatal. The serial port is unaffected by
+/// anything that can go wrong in this function, and a machine that boots
+/// without a picture is strictly better than one that refuses to boot because
+/// it could not draw.
+fn open_screen(
+    frames: &mut mem::FrameAllocator,
+    space: &paging::AddressSpace,
+    features: paging::Features,
+    boot: &BootInfo,
+) {
+    let Video::Present(fb) = boot.video() else { return };
+
+    let first = fb.addr & !(mem::FRAME_SIZE - 1);
+    let last = fb.end();
+    let mut page = first;
+    let mut pages: u64 = 0;
+
+    while page < last {
+        // SAFETY: `space` is the address space activated immediately above and
+        // `frames` was rebound onto its direct map in the same breath. `page`
+        // names a display's memory, which the loader reported and
+        // `Framebuffer::parse` bounded — device memory rather than somebody
+        // else's frames, which is the other half of what `map_device` asks.
+        match unsafe { paging::map_device(frames, space, page, features) } {
+            Ok(_) => pages += 1,
+            Err(e) => {
+                kprintln!("  screen        not mapped: {} after {pages} page(s)", e.message());
+                return;
+            }
+        }
+        page += mem::FRAME_SIZE;
+    }
+
+    if let Err(why) = screen::begin(&fb, paging::DEVICE_OFFSET + fb.addr) {
+        kprintln!("  screen        mapped, and not drawn on: {why}");
+        return;
+    }
+    let (cols, rows) = screen::grid();
+    kprintln!("  screen        {cols} x {rows} characters over {pages} mapped page(s), uncached");
 }
 
 /// Give the allocator every usable frame that is not already spoken for.
