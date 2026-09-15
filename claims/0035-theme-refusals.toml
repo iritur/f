@@ -1,0 +1,128 @@
+# Nothing here has been measured and nothing here can be, yet. There is no
+# compositor, no corpus of themes, and nobody outside this repository has written
+# a theme against this vocabulary at all — so the two numbers below are targets,
+# registered *before* the first theme arrives precisely so that they predate any
+# number somebody is later tempted by. `claims/0033` is the same shape and the
+# same reason; this file differs in owing a *ratio between two failures* rather
+# than a ladder of costs.
+#
+# RFC 0079 is what put it here and `E3-B01` is what moves it to `tracked`: the
+# compositor is the first thing to hold a `Resolved`, and a corpus of themes is
+# the first thing that could be run through `resolve` in bulk. Until then the
+# reproduction command has nothing to run, and should say so rather than exiting
+# zero on a measurement nobody took — `Route::Unbuilt`, the variant the registry
+# gained for exactly this.
+#
+# **Why this claim is a share and not a count.** Because the count alone cannot
+# be read. A layer that clamps nothing in any theme is not doing anything —
+# either its floors are below every palette anybody writes, or nothing is
+# reaching it. A layer that clamps something in every theme has bounds that are
+# wrong, and is telling every designer their work does not survive contact with
+# it, which is how a policy that is technically correct gets routed around. The
+# useful number is the one in between, and only a share can be in between.
+#
+# Under RFC 0069's taxonomy — `draft`, so this file carries no `evidence` key
+# yet — both rows are `counted`: they are integers over a named corpus, and any
+# machine reading the same corpus gets the same answers. That is what would let
+# this claim gate where a timing claim could not. It does not gate today because
+# the corpus does not exist.
+name       = "theme-refusals"
+status     = "pending"          # pending | tracked | gating
+milestone  = "E3"
+
+statement  = """
+A corpus of real themes is resolved by `interface/src/token.rs`, and two things
+about the result are recorded: **how many of them come out clean**, and **how
+much this layer decided on their authors' behalf when they did not**.
+
+  metric                               target           what it is
+  themes_resolving_clean_per_thousand  200 .. 900       `Report::is_clean()`, per thousand themes
+  decisions_per_theme_x100             at most 400      notes per theme, times one hundred
+
+**The first row is the claim and the second is its context.** A share of clean
+themes near zero and a share near one thousand are both failures, and they are
+different failures, which is why this row carries a floor *and* a ceiling rather
+than the single bound most rows in this registry carry:
+
+  - **Under two hundred in a thousand** means almost every theme is corrected
+    somewhere. The floors are not what is wrong in that case — they are cited
+    from WCAG 2.1 and this project has measured no legibility — so what is wrong
+    is one of the four metric bounds or the operable minimum, every one of which
+    RFC 0079 registers as a target with no measurement behind it. A layer that
+    corrects every theme it is shown is a layer whose authors learn to work
+    around it, and the interface it exists to protect is what loses.
+  - **Over nine hundred in a thousand** means it is not doing anything. Either
+    the corpus is themes written *against* these floors — in which case it is not
+    a corpus of real themes, it is a corpus of this module's own output — or the
+    clamp is unreachable in practice and the apparatus is ceremony. The second is
+    the finding worth having, and it is the reason the ceiling is written down
+    rather than left implied.
+
+**The second row is what a red first row is debugged with.** Decisions per theme
+counts every `Note` a resolution produced: contrast raised, metric clamped, font
+preference dropped. It is times one hundred because it is a mean over a corpus,
+and a mean of small integers rounded to an integer destroys the distinction this
+claim exists to make. Four notes a theme is the point past which a `Report` has
+stopped being something anybody reads — `NOTES_MAX` is thirty-two, and a layer
+routinely producing eight times what a reader will actually look at has made its
+own honesty useless.
+
+**What this claim does not say.** It says nothing about whether the clamped
+themes still look like themselves. `a_clamp_is_not_a_collapse` asserts that one
+saturated colour survives one hostile theme, which is a test and not a
+measurement, and no number here would catch a layer that met every floor by
+pushing every palette towards grey — RFC 0079 names that as the real cost of
+clamping and this registry cannot price it. It says nothing about *ground*
+boundaries either: whether two grounds part on their own is reported by
+`Resolved::boundary` and not by a `Note`, deliberately, because nothing was
+changed and a report that complained about `#F2F2F2` on `#FFFFFF` would be a
+report nobody read. If a later epoch wants that number, it is a third row here
+and a different question.
+"""
+
+[baseline]
+system  = "none"
+notes   = "There is nothing to compare against, and a comparison would be the wrong instrument anyway. The obvious baseline — how often some other system's theme engine corrects a theme — does not exist as a number anywhere, because the systems that ship user themes mostly do not check them, which is the observation RFC 0079's Context is built on. What takes its place is the corpus, and the corpus is the whole of the evidence: a share is meaningful only over a population somebody can name, and the workload row below says what would make one legitimate. A corpus assembled after the first red run would be a corpus chosen to be green."
+
+[owner]
+# R09: every headline claim names the subsystem that owns it.
+document = "docs/design/ring-scene-boot.html"
+section  = "12"
+notes    = "Section 12 owns it because section 12 is where a token stops being a name, and these two numbers are the only evidence that stopping it there was worth doing. The seam worth watching: that section argues the mechanism and this claim prices the policy, so a change to the floors or the bounds in `interface/src/token.rs` moves this claim without moving a word of that document — which is the direction that goes unnoticed. RFC 0079 is the decision behind both, and its *What would reverse this* names this row as where the metric bounds would be seen to be wrong first."
+
+[workload]
+# There is no workload. This row names the file holding the thing that would be
+# measured, because a `[workload] path` pointing at nothing is worse than one
+# pointing at the closest true thing and saying so.
+path    = "interface/src/token.rs"
+themes  = 0
+notes   = "What stands in, said before the number rather than after it: nothing. `interface/src/token.rs` carries five themes — two legal and three hostile — and they are a demonstration rather than a sample; a share computed over them would be a share computed over the answers. A corpus is legitimate under exactly two conditions, and both are decided by `E3-B01` rather than here: every theme in it was written by somebody who was not working on this module, and no theme was added or removed after a run. The second decays quietly, so whatever assembles the corpus has to record its content hash beside the number, in the manner `claims/0033` reserves a row for its scene."
+
+[metrics]
+# Two rows, both integers with the scale in the name — RFC 0004. A share is per
+# thousand rather than a fraction because the two architectures do not agree
+# about a float, and a mean is times one hundred for the same reason.
+primary   = "themes_resolving_clean_per_thousand"
+secondary = ["decisions_per_theme_x100"]
+
+[threshold]
+# A floor and a ceiling, because both ends are failures and they are different
+# ones. The statement says which is which.
+themes_resolving_clean_per_thousand = { min = 200, max = 900 }
+# Four notes a theme. Past it the report is longer than anybody reads.
+decisions_per_theme_x100            = { max = 400 }
+
+[hardware]
+runner = "runner-class-A"
+notes  = "Neither row is a time, so strictly this claim does not need that machine — it needs a machine, and any two would agree. The class is named because `lint-reproduce` requires every claim to name one with a specification file beside it, and naming a class nobody has described would be worse than naming one this claim does not strictly need. If a later epoch adds a class for the counted claims that run anywhere, this row moves to it; that is the mechanism `claims/runner-class-A.md`'s own *What would change this file* describes, rather than an exception to it."
+
+[reproduce]
+command = "cargo xtask claim theme-refusals"
+
+[diagnosis]
+# A first debugging step per row, recorded while the policy is understood rather
+# than on the afternoon a number goes red.
+themes_resolving_clean_per_thousand_under = "almost every theme is being corrected. Do not touch the contrast floors first: they are cited from WCAG 2.1 and this project has measured nothing that would justify moving them. Read `decisions_per_theme_x100` and then the distribution of note kinds — the command has to print that breakdown or this row cannot be debugged at all. If the notes are `MetricClamped`, the fault is one of the four metric bounds or the operable minimum, which RFC 0079 registers as targets with nothing behind them and which this row is the first evidence about. If they are `ContrastRaised` and piled on one ground, that is RFC 0079's first reversal condition arriving — a band of grounds the floor cannot serve — and the answer is that RFC being superseded rather than this bound being widened"
+themes_resolving_clean_per_thousand_over = "the layer is not doing anything, and the first question is about the corpus rather than the code. If the themes were written against this vocabulary, the share is a measurement of this module against itself and means nothing; the workload row says what a legitimate corpus is. If the corpus is genuinely independent and still nothing clamps, then the floors sit below every palette anybody writes and the honest finding is that the apparatus is ceremony — which is a finding, and is why this ceiling exists"
+decisions_per_theme_x100_over = "a `Report` nobody reads. Check `Report::dropped()` across the corpus before anything else: a non-zero dropped count means `NOTES_MAX` is being reached, and a truncated report is the silence this module exists to remove arriving by the back door. If dropped is zero and the mean is still high, read whether the notes are spread across the eighteen pairs or concentrated on a few — spread means the bounds are wrong, concentrated means the corpus has a common idiom this layer refuses, and the second is a design conversation rather than a threshold"
+a_threshold_no_workload_printed = "the run reached no number at all, which in this epoch is the expected ending rather than a fault: there is no compositor, no corpus, and `Route::Unbuilt` refuses rather than exiting zero precisely so that this cannot be mistaken for a green measurement. It becomes a real finding on the day `E3-B01` lands a compositor and a corpus, and what to read then is which of the two is missing"

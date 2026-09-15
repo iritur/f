@@ -10140,6 +10140,7 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-zone", host: None, bare: None },
     Portability { krate: "f-index", host: None, bare: None },
     Portability { krate: "f-generation", host: None, bare: None },
+    Portability { krate: "f-interface", host: None, bare: None },
     Portability {
         krate: "f-kernel",
         host: Some(
@@ -14683,6 +14684,34 @@ enum Route {
     /// rather than leaving a green run to imply otherwise.
     /// E2-B07, RFC 0012.
     Attest,
+    /// A claim whose workload does not exist yet, naming the task that owes it.
+    ///
+    /// Every other route in this table runs something, and the registry has not
+    /// needed this distinction until now. `timer-jitter` is `pending` because
+    /// the *machine* is missing — `cargo xtask claim timer-jitter` runs the
+    /// timer regardless, on whatever machine asked, and the harness declines to
+    /// record. `raster-cost-per-rung` is `pending` because the *compositor* is
+    /// missing, and there is no machine anywhere on which something could run.
+    /// The two are both `pending` and they are not the same state.
+    ///
+    /// It refuses rather than printing a line and exiting zero, and that is the
+    /// whole of the variant's content. A route that succeeded would make
+    /// `cargo xtask claim raster-cost-per-rung` a green command that measured
+    /// nothing — on exactly the claims least able to defend themselves, the
+    /// ones with no workload to read — and `claims/README.md` exists to prevent
+    /// that. The refusal names the task that owes the workload, so the next
+    /// question after the failure is answered by the failure.
+    ///
+    /// The alternative was to leave such a claim out of `ROUTES` entirely, and
+    /// `lint-reproduce` already refuses it: a published reproduction command
+    /// that runs nothing is a number only its author can re-derive. This
+    /// variant is that same refusal moved from the lint to the command, where
+    /// it can say who owes what. What would retire it is one line — the day
+    /// `E3-B02` lands a rasteriser, `raster-cost-per-rung` takes a real route
+    /// and this variant has no members. A variant with no members is dead code
+    /// and should be deleted rather than kept for a second occasion.
+    /// E3-D04, RFC 0080.
+    Unbuilt(&'static str),
 }
 
 const ROUTES: &[(&str, Route)] = &[
@@ -14790,6 +14819,25 @@ const ROUTES: &[(&str, Route)] = &[
     ("rollback-comparisons", Route::Rollback),
     ("whole-system-divergences-localised", Route::Compare),
     ("frame-identities-across-boots", Route::Attest),
+    // The first row in this table whose workload is not late but absent. Every
+    // route above it runs on this machine and some of them decline to record;
+    // `E3-B02` has not been started, so there is no rasteriser to time at any
+    // rung and no machine on which that would be different. `Route::Unbuilt`
+    // says so and refuses, which is the distinction the registry needed the day
+    // a claim was registered in front of the code rather than behind it.
+    ("raster-cost-per-rung", Route::Unbuilt("E3-B02")),
+    // The second and third rows whose workload is absent rather than late, and
+    // they are absent for two different reasons that the one variant is still
+    // the right answer to. `canvas-escape-rate` needs a *corpus* — applications
+    // ported by somebody who was free to give up and reach for a canvas — and
+    // `E3-B06l` is what builds one; the three interfaces in `interface/src/`
+    // are the vocabulary author's own argument and counting them would measure
+    // the argument. `theme-refusals` needs a compositor and a corpus of themes
+    // nobody working on the module wrote, and `E3-B01` is what lands both. Each
+    // refusal names its task, so the next question after the failure is
+    // answered by the failure. E3-D01 and RFC 0077; E3-D03 and RFC 0079.
+    ("canvas-escape-rate", Route::Unbuilt("E3-B06l")),
+    ("theme-refusals", Route::Unbuilt("E3-B01")),
 ];
 
 /// The registry file one claim name resolves to.
@@ -14913,6 +14961,18 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         Route::Rollback => claim_rollback(&text, &relative(&file))?,
         Route::Compare => claim_compare_run(&text, &relative(&file))?,
         Route::Attest => claim_attest(&text, &relative(&file))?,
+        Route::Unbuilt(owed) => {
+            return Err(format!(
+                "claim {name} has no workload: {owed} is the task that builds one.\n\
+                 \n\
+                 This is not the `pending` line below, which means the workload ran on a\n\
+                 machine that declined to record it. Nothing ran, and nothing here could\n\
+                 have run. The thresholds in the file are targets registered before the\n\
+                 thing they measure exists, which is what `claims/README.md` asks for — and\n\
+                 a command that exited zero would turn that discipline into a green run\n\
+                 reporting no measurement."
+            ));
+        }
     }
 
     // The harness itself refuses in a non-measurement environment and says so
