@@ -511,6 +511,15 @@ extern "C" fn arrive() -> ! {
     // this core, and published by the `Release` store it is waiting on.
     let handoff = unsafe { HANDOFF.mine().read() };
 
+    // Before this core prints anything, and it can: the frame's console is one
+    // screen written by whatever core is talking, and a core whose
+    // page-attribute table still said write-back for entry 4 would put the
+    // display in its own cache with nothing to flush it. Cheap enough to do
+    // unconditionally — one `wrmsr` of a constant.
+    // SAFETY: ring 0, once on this core, before it writes through any mapping
+    // carrying the attribute bit.
+    unsafe { crate::arch::x86_64::paging::enable_write_combining() };
+
     // SAFETY: once on this core, before interrupts are enabled on it, and the
     // descriptors it installs describe the flat address space it is already
     // running in.

@@ -3,10 +3,14 @@
 - Status: accepted
 - Date: 2026-09-16
 - Affects: `kernel/src/screen.rs` (the font, the fold, the scale, the grid
-  bounds), `kernel/src/arch/x86_64/multiboot.rs` (`Channels::saturated`),
+  bounds, the blit and the clear), `kernel/src/arch/x86_64/multiboot.rs`
+  (`Channels::saturated`), `kernel/src/arch/x86_64/paging.rs` (the
+  page-attribute table, `map_device_wc`, `fence_stores`),
   `kernel/src/arch/x86_64/boot.rs` (the video request's three numbers),
-  `kernel/src/main.rs` (the self-test string),
-  `docs/booting-on-hardware.md`'s *The screen* section
+  `kernel/src/smp.rs` (one call on the arrival path), `kernel/src/main.rs`,
+  `xtask/src/main.rs` (`cargo xtask screen cost`),
+  `docs/booting-on-hardware.md`'s *The screen* section, and RFC 0081's
+  write-combining reversal condition, which is paid here
 - Supersedes, in RFC 0081 and nowhere else, **three statements about the
   implementation and one reversal condition**: that the font is *five pixels by
   seven, ninety-five glyphs, typed*; that the console draws *a light grey on
@@ -22,8 +26,10 @@
 The console keeps every decision RFC 0081 made and changes everything RFC 0081
 described. An eight-by-sixteen cell rather than a five-by-seven drawn at double
 size; white built from the channel masks rather than a colour packed through
-them; characters rather than bytes; and a video request that names 1920 by 1080
-rather than asking the firmware what it already has.
+them; characters rather than bytes; a video request that names 1920 by 1080
+rather than asking the firmware what it already has; and **a write-combining
+mapping rather than an uncacheable one**, which is RFC 0081's own named next
+change, paid.
 
 ## Context
 
@@ -133,6 +139,57 @@ wins over the machine's configuration, which is the wrong way round for anything
 except a fallback console whose whole job is to be readable before there is
 anything else. Zeroing the three numbers hands the choice back.
 
+### And it was too slow to watch, which the mapping's memory type explains
+
+A boot that draws is a boot that redraws. A scroll moves every line, so every
+cell whose character changed is drawn again — on a 1080p screen that is up to
+sixteen thousand cells of a hundred and twenty-eight pixels each, two million
+stores, for one new line of output. Under the uncacheable mapping every one of
+those stores is its own bus transaction, and the processor waits for it.
+Uncacheable is what a device *register* needs and needs for correctness, since a
+cached read of a status register returns whatever it said the first time. A
+framebuffer has no registers, and this console never reads it back — that is the
+property RFC 0081 rests on — so uncacheable was buying nothing there but the
+cost.
+
+Three changes, and they are one improvement rather than three:
+
+- **Entry 4 of the page-attribute table becomes write-combining**, and the
+  display is mapped through it. The processor may then gather stores into fill
+  buffers and put them out as bursts. It needs none of the cache-flushing
+  ceremony the manual attaches to that register, for the reason `PAT_VALUE`
+  states: nothing has ever been mapped through entry 4, so there is no old
+  meaning to be wrong about, and entries 0 to 3 are written back as found.
+- **Every core programs it**, on the arrival path, because any core can print
+  and the memory type is the writing core's. A core that had missed it would
+  put the display in its own cache with nothing to flush it — not slow, wrong.
+- **The blit hoists its per-pixel work.** A glyph row is now eight stores to
+  consecutive addresses with the row address computed once, rather than eight
+  calls that each rebuild an address, re-test a bound and re-match a depth that
+  cannot change during a boot. That matters *because of* the mapping: scattered
+  stores do not combine, so the gathering the first change buys is only
+  available to a loop shaped like this one.
+
+Two smaller things fall out. The first paint was sixteen thousand blank glyphs,
+drawn to cover whatever the firmware left on the screen; it is one sequential
+sweep now, which is the access pattern write-combining is best at, and the
+console may then record the screen as blank rather than as unknown — so the
+first flush draws only the cells that have text in them.
+
+And **a flush ends with a store fence**, which is the cost of the memory type
+rather than an optimisation. A write-combining store may sit in a fill buffer
+until the processor has a reason to drain it, and *the machine stopped* is not
+one of its reasons. Without the fence, the last line before a hang is the line
+that never reaches the screen — which is the line somebody is reading the screen
+to find.
+
+**What is not claimed is a number.** `cargo xtask screen cost` times a full
+redraw and prints cycles, per-cell cycles and microseconds, and it reports *no
+surface* on every machine this harness can start, because QEMU's loader provides
+none. The measurement belongs to a machine with a display, and the verb exists
+so that the question is settled by one rather than by this paragraph. What can
+be said from here is the shape of the change and not its size.
+
 ## Consequences
 
 - 240 columns by 67 rows at 1080p, against 85 by 48 before. The grid bounds go
@@ -160,6 +217,11 @@ anything else. Zeroing the three numbers hands the choice back.
   than it could. If naming a mode turns out to cost more machines than it
   serves, the three numbers go back to zero and the choice returns to
   `GRUB_GFXMODE`, where a machine's own configuration is a better place for it.
+- **`cargo xtask screen cost` on a real display showing the redraw is still too
+  slow.** Then the memory type was not the binding constraint and the next thing
+  to attack is the redraw itself: a scroll that rewrites every changed cell is
+  the algorithm a dumb framebuffer forces, and escaping it needs a scanout whose
+  start address can move — which is a display driver, which is the component.
 - **The `framebuffer` line reporting channel fields that are plainly wrong.**
   Then the yellow-green screen was a parsing defect rather than a fragile
   colour, `saturated` has been hiding it, and the fix belongs in

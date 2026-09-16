@@ -878,9 +878,17 @@ cargo xtask <command>
                      characters, which is the only way a table somebody typed
                      can be read back as shapes; `selftest` draws a string into
                      an ordinary array through the real surface code and reports
-                     the pixels the same way. Neither needs a framebuffer, which
-                     is the point: QEMU's `-kernel` loader gives none, so the
-                     drawing path is otherwise never executed here at all
+                     the pixels the same way; `parse` builds a loader structure
+                     from the specification's own byte offsets and requires the
+                     framebuffer fields to survive the round trip. None of the
+                     three needs a framebuffer, which is the point: QEMU's
+                     `-kernel` loader gives none, so the drawing path is
+                     otherwise never executed here at all.
+                     `cost` is the exception and says so — it times a full
+                     screen redraw, so it needs a real display and reports that
+                     it has none here. It is for a machine that has one, where
+                     the number it prints is what settles whether the mapping's
+                     memory type is worth what RFC 0085 paid for it
   deadline [half]    Boot the block datapath with batch work queued and a
                      hard-class read submitted behind it: ordered, where the
                      read must be handed to the device first; arrival, the
@@ -2517,12 +2525,13 @@ fn machine_devices(
 /// which means GRUB, which means a machine that is not this emulator.
 fn screen(check: Option<&str>) -> Result<(), String> {
     let append = match check {
+        Some("cost") => "screen=cost",
         Some("font") => "screen=font",
         Some("parse") => "screen=parse",
         None | Some("selftest") => "screen=selftest",
         Some(other) => {
             return Err(format!(
-                "unknown screen check `{other}` — try `font`, `selftest` or `parse`"
+                "unknown screen check `{other}` — try `font`, `selftest`, `parse` or `cost`"
             ));
         }
     };
