@@ -238,6 +238,32 @@ pub struct Region {
 
 /// How a pixel is built, for a framebuffer the loader called direct colour.
 ///
+/// # These are at byte 112, and the specification's table says 110
+///
+/// The table is the one the specification draws, and it is not what is in
+/// memory. Every loader fills this structure through the reference
+/// `multiboot.h`, where the colour fields are the second arm of a union whose
+/// *first* arm begins with a thirty-two-bit palette address. That union is
+/// four-byte aligned, so the compiler puts it at 112 and leaves bytes 110 and
+/// 111 as padding. The header is what the loader compiled; the table is what a
+/// reader implements from.
+///
+/// **This cost a wrong screen and is why it is written here rather than
+/// inferred twice.** Read at 110, a VMware guest's boot reported
+/// `r 0+0, g 16+8, b 8+8`: red with no width at all, and green and blue each
+/// one field further along than they should be. Those are the two padding
+/// bytes and then the first four real ones. The machine was reporting ordinary
+/// `b8g8r8x8` — `r 16+8, g 8+8, b 0+8` — and the frame was reading it two bytes
+/// early, which dropped red entirely and moved the other two. RFC 0085 records
+/// the symptom that found it: the console drew the log in yellow-green, which
+/// is red and green with the blue missing, because a colour packed through
+/// these numbers landed in the wrong fields.
+///
+/// A zero-width channel is therefore the signature of this mistake being made
+/// again. [`Channels::saturated`] survives it — a field it cannot use
+/// contributes nothing, so the worst is a tint — which is why the screen was
+/// legible while this was found rather than black.
+///
 /// Positions are bit offsets within a pixel and sizes are bit counts, which is
 /// how multiboot states it and how a consumer wants it: the two together are
 /// the whole of a channel and neither is useful alone.
@@ -430,8 +456,15 @@ impl Framebuffer {
         let height = unsafe { word_at(base, 26) };
         // SAFETY: as above.
         let packed_low = unsafe { word_at(base, 27) };
+        // Word 28 and not word 27's upper half, and word 29 after it, because
+        // the colour fields are at byte 112 rather than at byte 110. See
+        // `Channels`' note below: the specification's table and the header
+        // every loader is built from disagree by two bytes of padding, and the
+        // header is what is in memory.
         // SAFETY: as above.
-        let packed_high = unsafe { word_at(base, 28) };
+        let colour_low = unsafe { word_at(base, 28) };
+        // SAFETY: as above.
+        let colour_high = unsafe { word_at(base, 29) };
 
         let addr = (u64::from(addr_hi) << 32) | u64::from(addr_lo);
         let bits_per_pixel = (packed_low & 0xFF) as u8;
@@ -473,12 +506,12 @@ impl Framebuffer {
         let kind = match raw_kind {
             0 => FramebufferKind::Indexed,
             1 => FramebufferKind::Direct(Channels {
-                red_at: ((packed_low >> 16) & 0xFF) as u8,
-                red_bits: ((packed_low >> 24) & 0xFF) as u8,
-                green_at: (packed_high & 0xFF) as u8,
-                green_bits: ((packed_high >> 8) & 0xFF) as u8,
-                blue_at: ((packed_high >> 16) & 0xFF) as u8,
-                blue_bits: ((packed_high >> 24) & 0xFF) as u8,
+                red_at: (colour_low & 0xFF) as u8,
+                red_bits: ((colour_low >> 8) & 0xFF) as u8,
+                green_at: ((colour_low >> 16) & 0xFF) as u8,
+                green_bits: ((colour_low >> 24) & 0xFF) as u8,
+                blue_at: (colour_high & 0xFF) as u8,
+                blue_bits: ((colour_high >> 8) & 0xFF) as u8,
             }),
             2 => FramebufferKind::EgaText,
             other => FramebufferKind::Unknown(other),
@@ -523,22 +556,27 @@ impl Framebuffer {
         // structure a loader writes is longer still.
         let mut fixture = [0u32; 32];
 
-        // The framebuffer block, at the byte offsets the specification gives.
+        // The framebuffer block, at the byte offsets a loader actually writes.
         fixture[word(88)] = 0xFD00_0000; // address, low half
         fixture[word(92)] = 0; // address, high half
         fixture[word(96)] = 4096; // pitch
         fixture[word(100)] = 1024; // width
         fixture[word(104)] = 768; // height
-        // The packed bytes, written as bytes in the order the specification
-        // lists them rather than as a shifted-and-ored word: one of these
-        // fields is at bit zero, and a `0 << 0` term is both noise and a lint.
+        // The packed bytes, written as bytes in the order they sit in memory
+        // rather than as a shifted-and-ored word: one of these fields is at bit
+        // zero, and a `0 << 0` term is both noise and a lint.
         //
-        // Byte 108 is bits per pixel, 109 the type, 110 and 111 the first
-        // channel: thirty-two bits, direct colour, red at 16 for 8 bits — which
-        // is the layout a display usually reports and the one the driver pins.
-        fixture[word(108)] = u32::from_le_bytes([32, 1, 16, 8]);
-        // Bytes 112 to 115: green at 8 for 8 bits, blue at 0 for 8.
-        fixture[word(112)] = u32::from_le_bytes([8, 8, 0, 8]);
+        // Byte 108 is bits per pixel and 109 the type — thirty-two bits, direct
+        // colour. **Bytes 110 and 111 are padding and are left zero**, which is
+        // the whole of what this fixture had wrong: see `Channels`. The colour
+        // fields begin at 112 because the union they live in is four-byte
+        // aligned in the header every loader compiles against, and a machine
+        // confirmed it by reporting a red channel zero bits wide.
+        fixture[word(108)] = u32::from_le_bytes([32, 1, 0, 0]);
+        // Bytes 112 to 115: red at 16 for 8 bits, green at 8 for 8.
+        fixture[word(112)] = u32::from_le_bytes([16, 8, 8, 8]);
+        // Bytes 116 and 117: blue at 0 for 8 bits, then the structure's tail.
+        fixture[word(116)] = u32::from_le_bytes([0, 8, 0, 0]);
 
         // SAFETY: `fixture` is a live array this function owns, longer than the
         // last word `parse` reads, and correctly aligned for `u32` by its type.
@@ -563,6 +601,15 @@ impl Framebuffer {
         // `crate::screen`: that constant is what the drawing code *believes*
         // this layout is, and a check that asked one belief whether it matched
         // itself would pass however wrong both were.
+        //
+        // **That is exactly how this check missed the offset defect**, and the
+        // lesson is worth more than the fix. The fixture wrote the colour bytes
+        // where the specification's table draws them and the parser read them
+        // from the same place, so the round trip agreed — while every real
+        // loader wrote them two bytes further along. A fixture built from the
+        // same belief as the code it checks is a mirror, and a mirror always
+        // agrees. What broke the tie was not this check but a machine: the
+        // boot printed `r 0+0` and a channel cannot be zero bits wide.
         let expected = Channels {
             red_at: 16,
             red_bits: 8,
