@@ -1,0 +1,708 @@
+<title>F Evidence</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;700;900&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root{
+  --paper:#F2F4F7; --surface:#FFFFFF; --surface-2:#E9ECF2;
+  --ink:#12141A; --ink-2:#3A4150; --muted:#6B7382;
+  --line:#D6DBE4; --line-strong:#B9C0CD;
+  --cobalt:#2F4FD8; --rust:#A8431C; --teal:#0B6E5C;
+  --on-accent:#FFFFFF;
+  --shadow:0 1px 2px rgba(18,20,26,.05), 0 8px 24px -16px rgba(18,20,26,.28);
+  --sans:"IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --display:"Chivo", "IBM Plex Sans", ui-sans-serif, sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --col:66ch; --wide:1180px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+    --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+    --line:#262C39; --line-strong:#3D4657;
+    --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+    --on-accent:#0D0F14;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+  --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+  --line:#262C39; --line-strong:#3D4657;
+  --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+  --on-accent:#0D0F14;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+}
+
+*{box-sizing:border-box;}
+body{margin:0; background:var(--paper); color:var(--ink); font-family:var(--sans); font-size:17px; line-height:1.65; -webkit-font-smoothing:antialiased;}
+.wrap{max-width:var(--wide); margin:0 auto; padding:0 28px 96px;}
+
+h1,h2,h3,h4{font-family:var(--display); text-wrap:balance; margin:0;}
+h1{font-weight:900; font-size:clamp(2.6rem,6.5vw,4.4rem); line-height:.98; letter-spacing:-.035em;}
+h2{font-weight:900; font-size:clamp(1.5rem,3vw,2.05rem); line-height:1.08; letter-spacing:-.025em;}
+h3{font-weight:700; font-size:1.14rem; line-height:1.3; letter-spacing:-.012em;}
+h4{font-weight:700; font-size:.95rem; line-height:1.35;}
+p{margin:0;}
+a{color:var(--cobalt); text-decoration-thickness:1px; text-underline-offset:2px;}
+a:focus-visible{outline:2px solid var(--cobalt); outline-offset:3px; border-radius:2px;}
+strong,b{font-weight:600;}
+code{font-family:var(--mono); font-size:.87em; background:var(--surface-2); padding:.1em .34em; border-radius:3px;}
+
+.eyebrow{font-family:var(--mono); font-size:.7rem; font-weight:600; letter-spacing:.16em; text-transform:uppercase; color:var(--muted);}
+
+.mast{padding:72px 0 40px; border-bottom:1px solid var(--line-strong);}
+.mast-grid{display:flex; flex-direction:column; gap:26px;}
+.mast .lede{font-size:1.2rem; line-height:1.55; color:var(--ink-2); max-width:60ch;}
+.mast .lede b{color:var(--ink);}
+.specline{display:flex; flex-wrap:wrap; gap:10px 26px; padding-top:6px; font-family:var(--mono); font-size:.74rem; color:var(--muted); letter-spacing:.04em;}
+.specline span b{color:var(--ink-2);}
+
+.partbar{
+  display:flex; align-items:baseline; gap:18px; padding:64px 0 8px; flex-wrap:wrap;
+}
+.partbar .n{font-family:var(--mono); font-size:.72rem; font-weight:600; letter-spacing:.18em; text-transform:uppercase; color:var(--rust);}
+.partbar h2{font-size:clamp(1.7rem,3.6vw,2.5rem);}
+.partbar .r{flex:1 1 120px; height:1px; background:var(--line-strong); min-width:40px;}
+
+section{padding:44px 0 8px; border-bottom:1px solid var(--line);}
+section:last-of-type{border-bottom:0;}
+.sec-head{display:flex; align-items:baseline; gap:16px; margin-bottom:20px; flex-wrap:wrap;}
+.sec-num{font-family:var(--mono); font-size:.74rem; font-weight:600; color:var(--cobalt); letter-spacing:.1em; padding-top:.5em;}
+.flow{display:flex; flex-direction:column; gap:18px;}
+.flow > p, .flow > ul, .flow > .note, .flow > h3, .flow > .claim{max-width:var(--col);}
+
+ul.list{margin:0; padding-left:0; list-style:none; display:flex; flex-direction:column; gap:11px;}
+ul.list li{position:relative; padding-left:22px;}
+ul.list li::before{content:""; position:absolute; left:2px; top:.62em; width:7px; height:7px; border:1.5px solid var(--cobalt); border-radius:1px;}
+
+.note{border-left:3px solid var(--rust); background:color-mix(in srgb, var(--rust) 7%, var(--surface)); padding:14px 18px; border-radius:0 5px 5px 0; font-size:.95rem; color:var(--ink-2);}
+.note b{color:var(--ink);}
+.claim{border-left:3px solid var(--cobalt); background:color-mix(in srgb, var(--cobalt) 7%, var(--surface)); padding:14px 18px; border-radius:0 5px 5px 0; font-size:.95rem; color:var(--ink-2);}
+.claim b{color:var(--ink);}
+
+pre{
+  background:var(--surface-2); border:1px solid var(--line); border-radius:6px;
+  padding:15px 18px; overflow-x:auto; font-family:var(--mono); font-size:.755rem;
+  line-height:1.7; color:var(--ink-2); margin:0; tab-size:4;
+}
+pre .c{color:var(--muted); font-style:normal;}
+pre .k{color:var(--cobalt); font-weight:600;}
+pre .w{color:var(--rust); font-weight:600;}
+.codecap{font-family:var(--mono); font-size:.68rem; color:var(--muted); letter-spacing:.06em; text-transform:uppercase; padding-bottom:7px;}
+.codeblock{display:flex; flex-direction:column; margin:4px 0;}
+
+.tablewrap{overflow-x:auto; border:1px solid var(--line); border-radius:7px; background:var(--surface); margin:6px 0 4px;}
+table{border-collapse:collapse; width:100%; min-width:640px; font-size:.88rem;}
+th,td{text-align:left; padding:11px 15px; border-bottom:1px solid var(--line); vertical-align:top; line-height:1.5;}
+thead th{font-family:var(--mono); font-size:.67rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); background:var(--surface-2); border-bottom:1px solid var(--line-strong); white-space:nowrap;}
+tbody tr:last-child td{border-bottom:0;}
+td.m{font-family:var(--mono); font-size:.76rem; color:var(--ink-2); white-space:nowrap;}
+td.num{font-family:var(--mono); font-variant-numeric:tabular-nums; white-space:nowrap;}
+
+.chip{display:inline-block; font-family:var(--mono); font-size:.63rem; font-weight:600; letter-spacing:.08em; text-transform:uppercase; padding:3px 8px; border-radius:3px; border:1px solid currentColor; white-space:nowrap;}
+.chip.ok{color:var(--teal); background:color-mix(in srgb, var(--teal) 10%, var(--surface));}
+.chip.warn{color:var(--rust); background:color-mix(in srgb, var(--rust) 10%, var(--surface));}
+.chip.part{color:var(--cobalt); background:color-mix(in srgb, var(--cobalt) 10%, var(--surface));}
+
+/* Book furniture: a table of contents, and the per-chapter state marker.
+   Both are new here rather than in docs/design, because a design document is
+   read start to finish and a book is not. */
+.toc{display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:0 36px; margin:6px 0 4px;}
+.toc-part{display:flex; flex-direction:column; padding-top:12px;}
+.toc-part h4{font-family:var(--mono); font-size:.68rem; font-weight:600; letter-spacing:.14em; text-transform:uppercase; color:var(--rust); padding-bottom:9px; border-bottom:1px solid var(--line-strong);}
+.toc a{display:grid; grid-template-columns:32px 1fr; gap:0 10px; padding:10px 0; border-bottom:1px solid var(--line); text-decoration:none; color:var(--ink-2); font-size:.92rem; line-height:1.4;}
+.toc a:hover{color:var(--cobalt);}
+.toc a .n{font-family:var(--mono); font-size:.72rem; font-weight:600; color:var(--cobalt); padding-top:.15em;}
+.state{font-size:.9rem; color:var(--ink-2); border-left:2px solid var(--line-strong); padding-left:14px; max-width:var(--col);}
+.state b{font-family:var(--mono); font-size:.66rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); display:block; margin-bottom:3px;}
+
+.foot{padding-top:40px; font-family:var(--mono); font-size:.7rem; color:var(--muted); letter-spacing:.06em; line-height:1.8; max-width:80ch;}
+
+@media (max-width:720px){
+  body{font-size:16px;}
+  .wrap{padding:0 20px 72px;}
+  .toc{grid-template-columns:1fr;}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none !important; transition:none !important;}}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="mast-grid">
+    <div class="eyebrow">Book two of three</div>
+    <h1>F Evidence</h1>
+    <p class="lede">For a reader who <b>does not believe any of it</b>. The other two books describe a system; this one is about whether anything in them is true, and what a green check is actually worth. The determinism substrate that makes the rest possible, the simulator and what it is declared unable to see, sweeps whose oracle names no bug, the concurrency test that was shown not to catch the defect it was written for, proof that is narrow on purpose, fuzzing one surface, and the registry that decides which numbers this project is allowed to say out loud.</p>
+    <div class="specline">
+      <span><b>Milestone</b> &nbsp;M0</span>
+      <span><b>Layers</b> &nbsp;seven specified, six with something in them</span>
+      <span><b>Assumes</b> &nbsp;F Foundations, chapters 03 and 09</span>
+      <span><b>Alongside</b> &nbsp;Proving Ground &middot; docs/TESTING-STATUS.md</span>
+    </div>
+  </div>
+</header>
+
+<section id="status">
+  <div class="sec-head"><div class="sec-num">&mdash;</div><h2>What in this book runs</h2></div>
+  <div class="flow">
+    <p>This is the book with the least distance between it and the tree, because the apparatus was built before most of the system it measures. That is deliberate — <code>docs/design/proving-ground.html</code> argues that an evidence apparatus retrofitted onto a mature kernel is an apparatus that will never be built — and it means nearly every command in this book executes today.</p>
+    <p>It also means this is the book where the <em>gaps</em> carry the most information, so chapter 12 is not an appendix. Read it.</p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Chapter</th><th>State</th><th>What that means here</th></tr></thead>
+    <tbody>
+      <tr><td class="m">01 &nbsp;Why this book exists</td><td><span class="chip ok">true</span></td><td>An argument about method, not a description of behaviour.</td></tr>
+      <tr><td class="m">02 &nbsp;The seven layers</td><td><span class="chip ok">runs</span></td><td>The status column is read from <code>docs/TESTING-STATUS.md</code>, which is maintained against the tree.</td></tr>
+      <tr><td class="m">03 &nbsp;Determinism</td><td><span class="chip ok">runs</span></td><td>Built, enforced by a lint, and checked at every boot against both environments.</td></tr>
+      <tr><td class="m">04 &nbsp;The simulator</td><td><span class="chip ok">runs</span></td><td>Built above the frame. Its scope is declared, not discovered.</td></tr>
+      <tr><td class="m">05 &nbsp;Sweeps</td><td><span class="chip ok">runs</span></td><td>Built, with a committed corpus and a self-testing mutation mode.</td></tr>
+      <tr><td class="m">06 &nbsp;Concurrency</td><td><span class="chip part">partly</span></td><td>Stress tests run and have a known blind spot that was measured rather than argued. Model checking is open.</td></tr>
+      <tr><td class="m">07 &nbsp;Proof</td><td><span class="chip ok">runs</span></td><td>Built and narrow on purpose. Runs on a schedule rather than in <code>verify</code>.</td></tr>
+      <tr><td class="m">08 &nbsp;Fuzzing</td><td><span class="chip ok">runs</span></td><td>Built, two committed corpora, both shipped in the release package.</td></tr>
+      <tr><td class="m">09 &nbsp;Provoking the real kernel</td><td><span class="chip ok">runs</span></td><td>In the CI gate. This is where most of this project's evidence currently comes from.</td></tr>
+      <tr><td class="m">10 &nbsp;The claims registry</td><td><span class="chip part">mostly</span></td><td>Built and gating. RFC 0069's evidence key is decided and not yet mechanical.</td></tr>
+      <tr><td class="m">11 &nbsp;The machine</td><td><span class="chip warn">a file</span></td><td>The specification exists. <b>The machine does not.</b> Every timing claim waits on it.</td></tr>
+      <tr><td class="m">12 &nbsp;The honest gaps</td><td><span class="chip ok">true</span></td><td>The most important chapter, and the one most likely to be out of date. Check it against <code>docs/TESTING-STATUS.md</code>.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="flow">
+    <div class="note"><b>No measured number appears in this book, which in a book about measurement deserves an explanation.</b> Every figure this project publishes lives in <code>claims/</code> with a baseline, a workload, a threshold and a one-command reproduction, and a document is not permitted to hold a second copy of one — that is the rule chapter 10 is about, and a book that broke it while explaining it would be the wrong kind of joke. Structural counts of the tree are not measurements and do appear. Run <code>cargo xtask claims</code> for the registry and <code>cargo xtask reproduce &lt;name&gt;</code> to re-derive one here. RFC 0085.</div>
+  </div>
+</section>
+
+<section id="toc">
+  <div class="sec-head"><div class="sec-num">&mdash;</div><h2>Contents</h2></div>
+  <div class="toc">
+    <div class="toc-part">
+      <h4>Part I &middot; What a green result is worth</h4>
+      <a href="#c01"><span class="n">01</span><span>Why this book exists</span></a>
+      <a href="#c02"><span class="n">02</span><span>The seven layers, and where each stands</span></a>
+    </div>
+    <div class="toc-part">
+      <h4>Part II &middot; The instruments</h4>
+      <a href="#c03"><span class="n">03</span><span>Determinism, and the instrument that tests it</span></a>
+      <a href="#c04"><span class="n">04</span><span>The simulator, and its declared scope</span></a>
+      <a href="#c05"><span class="n">05</span><span>Sweeps, and an oracle that names no bug</span></a>
+      <a href="#c06"><span class="n">06</span><span>Concurrency, and the test that did not catch it</span></a>
+      <a href="#c07"><span class="n">07</span><span>Proof, deliberately narrow</span></a>
+      <a href="#c08"><span class="n">08</span><span>Fuzzing the one surface</span></a>
+      <a href="#c09"><span class="n">09</span><span>Provoking the real kernel</span></a>
+    </div>
+    <div class="toc-part">
+      <h4>Part III &middot; Numbers</h4>
+      <a href="#c10"><span class="n">10</span><span>The claims registry</span></a>
+      <a href="#c11"><span class="n">11</span><span>The machine a number may be taken on</span></a>
+      <a href="#c12"><span class="n">12</span><span>The honest gaps</span></a>
+    </div>
+  </div>
+</section>
+
+<div class="partbar"><span class="n">Part I</span><h2>What a green result is worth</h2><span class="r"></span></div>
+
+<section id="c01">
+  <div class="sec-head"><div class="sec-num">01</div><h2>Why this book exists</h2><span class="chip ok">true</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> An argument about method. Nothing in this chapter can be ahead of the code because it describes how the project reasons rather than what it does.</div>
+
+    <p>An operating system that claims a large constant factor over the incumbent is making a claim that is very easy to make and very hard to be held to. The usual failure is not dishonesty. It is that the benchmark was run on a machine nobody else has, against a baseline nobody tuned, reporting a mean that hides the stalls the architecture exists to eliminate, with no way for a stranger to re-derive any of it. Every step of that is defensible in isolation and the result is marketing.</p>
+
+    <p>So this project decided early that the apparatus deciding whether its claims are true would be built <em>before</em> most of the claims, and would be allowed to refuse. That is unusual enough to need its own book.</p>
+
+    <h3>The rule this whole book is organised around</h3>
+
+    <div class="claim"><b>A check that has never failed is a check nobody has tested.</b> Every instrument in this book has a mode that deliberately breaks the thing it watches and requires the instrument to notice. A test suite that only ever goes green is measuring whether it runs, not whether it works — and the difference between those two is invisible right up until the moment it matters.</div>
+
+    <p>That rule is not a slogan here; it is four separate commands, and running them is part of the ordinary local loop:</p>
+  </div>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Command</th><th>What it breaks</th><th>What must then happen</th></tr></thead>
+    <tbody>
+      <tr><td class="m">cargo xtask mutate</td><td>Builds the kernel with a deliberate defect.</td><td>The boot must go red, with a panic in the log. Then the same boot without it must go green.</td></tr>
+      <tr><td class="m">cargo xtask sweep --mutate</td><td>Arms a deliberate defect in the simulator.</td><td>The sweep <em>and the corpus</em> must both find it, then both go quiet when it is disarmed.</td></tr>
+      <tr><td class="m">cargo xtask prove</td><td>Injects defects into the proved code.</td><td>Each must fail the harness stating the property it breaks — and no other.</td></tr>
+      <tr><td class="m">cargo xtask generation --mutate</td><td>Compiles the build path into the frame.</td><td>The comparison must go red and name the frame.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="flow">
+    <p><code>cargo xtask lint-mutations</code> then closes the obvious hole: it refuses any manifest that turns a deliberate defect on by default. A defect that ships is not a test.</p>
+
+    <h3>The second rule: a guarantee needs a control</h3>
+
+    <p>Almost every serious check in this tree runs the thing twice and requires the two runs to <em>disagree</em>. <code>cargo xtask user</code> is the clearest example: seven boots in which a process at ring 3 violates one isolation rule each, six of which must fault — and <b>a seventh which must not</b>. That seventh boot is what stops the other six passing for the wrong reason, because a kernel that faults on everything passes a suite of six fault tests perfectly.</p>
+
+    <p><code>cargo xtask admission</code> has the same shape: a granted reservation under adversarial load, beside the same load with no reservation, which <em>must</em> miss. A guarantee with no control beside it has never been tested against the possibility that the load was simply easy.</p>
+
+    <h3>What you should be most suspicious of</h3>
+
+    <div class="note"><b>Nearly every result in this project is an assertion about an emulator.</b> The kernel has run outside QEMU three times, all on virtual machines, and has never booted on bare metal. Nothing about this is <em>failing</em> — the tests pass, the boots are green — and that is exactly what makes it easy to miss. Chapter 12 is the full account. If you read one chapter of this book adversarially, read that one; if you read two, read that one and chapter 06.</div>
+
+    <p>The reason that sentence is in the first chapter rather than buried at the end is a position this project takes about documentation generally: a gap that is stated is a gap somebody can act on, and a gap that is implied by an absence is one that gets rediscovered expensively. <code>docs/TESTING-STATUS.md</code> exists for exactly this, and it is the file this book is checked against.</p>
+  </div>
+</section>
+
+<section id="c02">
+  <div class="sec-head"><div class="sec-num">02</div><h2>The seven layers, and where each stands</h2><span class="chip ok">runs</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> The layer definitions are from <code>docs/design/proving-ground.html</code>. The status column is read from <code>docs/TESTING-STATUS.md</code>, which is maintained against the tree; where the two disagree, that file is right.</div>
+
+    <p>Seven layers, each answering a question the others cannot. The point of the decomposition is not tidiness — it is that <b>each layer has a different failure mode</b>, and a project that runs only one kind of check has a blind spot shaped exactly like the checks it does not run.</p>
+  </div>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Layer</th><th>The question it answers</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td class="m">L0 &nbsp;Determinism substrate</td><td>Can a run be reproduced at all?</td><td><span class="chip ok">built</span></td></tr>
+      <tr><td class="m">L1 &nbsp;Deterministic simulation</td><td>What happens to the components under seeded faults?</td><td><span class="chip ok">built</span> above the frame</td></tr>
+      <tr><td class="m">L2 &nbsp;Concurrency &amp; memory model</td><td>What does the memory model <em>permit</em>?</td><td><span class="chip warn">stress only</span></td></tr>
+      <tr><td class="m">L3 &nbsp;Proof</td><td>Does a counterexample exist inside a stated bound?</td><td><span class="chip ok">built</span>, narrow</td></tr>
+      <tr><td class="m">L4 &nbsp;Fuzzing</td><td>What does a hostile peer do to the one surface?</td><td><span class="chip ok">built</span></td></tr>
+      <tr><td class="m">L5 &nbsp;Performance regression</td><td>Did this commit make it slower?</td><td><span class="chip part">harness only</span></td></tr>
+      <tr><td class="m">L6 &nbsp;Hardware in the loop</td><td>What does a photodiode see?</td><td><span class="chip warn">absent</span></td></tr>
+      <tr><td class="m">L7 &nbsp;Claims registry</td><td>Which numbers may this project say out loud?</td><td><span class="chip ok">built</span>, gating</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="flow">
+    <p>Two of those statuses are worth reading rather than skimming. <b>L5 is a harness with no change-point detection</b>, because change-point detection needs commit history to reason about and that is a later phase; the harness records distributions and marks the counters it cannot read as absent, which is the honest half. <b>L6 is absent and correctly so</b> — a photodiode rig measures input-to-photon latency and there is no compositor yet to put photons on a screen.</p>
+
+    <h3>The layer with no row</h3>
+
+    <p>A taxonomy built around simulation, proof and fuzzing has no natural home for <em>run the real thing and try to break it</em>. That is chapter 09, and it is where most of this project's evidence currently comes from.</p>
+
+    <div class="claim"><b>The absence of a row is stated rather than papered over, and that is the pattern to learn from this book.</b> It would have been easy to file the fault boots under L1 and the capability boots under L4 and have a tidy seven-row table with nothing missing. The table would then have described a taxonomy rather than a tree. A category that does not fit is information about the category.</div>
+
+    <h3>The two cadences</h3>
+
+    <p>Not everything runs on every commit, and which instrument runs when is itself a decision. <code>cargo xtask verify</code> is the local loop — lint, test, boot, mutate — and is what a session runs before a human is asked to look. The expensive instruments run on a schedule: the proofs take long enough that putting them in <code>verify</code> would mean nobody ran <code>verify</code>, and a nightly sweep varies its base seed so that successive nights cover new seed space rather than re-covering the same.</p>
+
+    <p><code>docs/test-taxonomy.md</code> is the full matrix — every property, the layer that covers it, the cadence it runs at, and who owns each gap. It is long, and it is the document to read if you want to know whether a specific property is checked rather than whether the apparatus exists.</p>
+  </div>
+</section>
+
+<div class="partbar"><span class="n">Part II</span><h2>The instruments</h2><span class="r"></span></div>
+
+<section id="c03">
+  <div class="sec-head"><div class="sec-num">03</div><h2>Determinism, and the instrument that tests it</h2><span class="chip ok">runs</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> Built. The lint runs on every commit, and the contract check runs at every boot against both the seeded and the hardware environment on the same run.</div>
+
+    <p>Everything else in this book depends on this layer, which is why it was built first and why it is the one property the project treats as unretrofittable. The contract is that <code>(seed, commit)</code> reproduces a run byte for byte. <em>F Foundations</em> chapter 03 describes the mechanism; this chapter is about how you would know it is true.</p>
+
+    <h3>The instrument</h3>
+  </div>
+
+  <div class="codeblock">
+    <div class="codecap">Checking the substrate, rather than trusting it</div>
+<pre>cargo xtask trace          <span class="c"># two runs of this commit must produce one trace hash,</span>
+                           <span class="c"># and one unseeded read of time must break that</span>
+cargo xtask trace --hash   <span class="c"># print this run's trace hash and nothing else</span>
+
+cargo xtask sim --hash &lt;scenario&gt; &lt;seed&gt;
+                           <span class="c"># the same question, one scenario at a time</span>
+cargo xtask compare        <span class="c"># two whole-system states as two hashes,</span>
+                           <span class="c"># and the subtree they differ in</span></pre>
+  </div>
+
+  <div class="flow">
+    <p>Note the second half of the <code>trace</code> line, because it is the whole design in one clause. It is not enough that two runs agree; <b>an unseeded read of the clock must make them disagree</b>. A determinism check that only asserts agreement passes trivially on a program that does nothing, and passes just as well on a program whose nondeterminism happens not to have been exercised on the day you ran it.</p>
+
+    <div class="note"><b>The same trap, one level down, stated in the sweep code:</b> a run with nothing in it produces a short trace and a perfectly stable digest, which is the one result a check must never report as a pass. That sentence is why <code>--seeds</code>, <code>--scenarios</code>, <code>--clients</code>, <code>--window</code>, <code>--ops</code> and <code>--jobs</code> all refuse zero, and why a report whose grid held no trials is an error rather than a clean sweep. RFC 0042.</div>
+
+    <h3>Enforcement, and why it is a lint rather than a review item</h3>
+
+    <p><code>cargo xtask lint-determinism</code> refuses any direct source of nondeterminism outside an allow-list, where each allow-list entry carries a reason. The list of forbidden things is in <em>F Foundations</em>; what matters here is the mechanism. A new call site is a visible diff to <code>xtask/src/main.rs</code> rather than a line of code nobody notices, and <b>the lint is applied to <code>xtask</code> itself</b> — the tool is subject to the policy it implements, which has caught the policy being wrong more than once.</p>
+
+    <p>The boot does the other half. <code>kernel/src/env.rs</code> and <code>kernel/src/main.rs</code> run <code>env/src/contract.rs</code> against the seeded environment and the hardware-derived one on the same run, so a divergence between the two is caught by the system rather than inferred from a failing test somewhere else.</p>
+
+    <h3>One derivation, and streams that split</h3>
+
+    <p>A subtlety worth knowing before you read the simulator chapter. Everything drawn from a seed comes from one derivation — <code>env/src/split.rs</code> — and separate call sites get separate streams derived from it by identity rather than by consuming a shared generator. A wall-clock reading is a different stream under the same seed than a random draw, so stamping a timestamp and drawing a value cannot correlate and neither moves the other. RFC 0026.</p>
+
+    <p>That sounds like a detail and is load-bearing: without it, adding a draw anywhere changes every subsequent value everywhere, and a seed stops reproducing a run the moment anybody adds a line of code. The property the whole apparatus rests on would have decayed silently.</p>
+  </div>
+</section>
+
+<section id="c04">
+  <div class="sec-head"><div class="sec-num">04</div><h2>The simulator, and its declared scope</h2><span class="chip ok">runs</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> Built, above the frame. Virtual time, seeded ordering, device models on the real ring types, component substitution, snapshot and restore, and a scenario set that must each reproduce from its seed.</div>
+
+    <p>Deterministic simulation is the strongest known technique in systems reliability and is almost never applied to operating systems, because kernels leak nondeterminism at thousands of unmarked places. F's architecture happens to remove nearly all of them — one ring interface is a single interception point, no ambient authority means no hidden channels, user-space drivers make a modelled device a substitution rather than a mock. Those decisions were made for speed and safety, and they hand simulation its preconditions for free.</p>
+
+    <h3>What it does not simulate, said in advance</h3>
+
+    <div class="claim"><b>The simulator runs the <em>components</em>, not the frame's instructions.</b> It will never catch a bug inside the frame's own algorithms. This is RFC 0032 — a decision recorded before the simulator was built, rather than a limitation discovered when somebody asked why a kernel bug got through. The frame is covered instead by the boot suite, the mutation harness and the proofs, which is chapters 07 and 09.</div>
+
+    <p>Scope declared in advance is worth more than scope discovered later for a reason specific to this kind of tool: a simulator that is believed to cover the frame is worse than no simulator, because the belief displaces the checks that would have covered it.</p>
+
+    <h3>A modelled device is a peer, not a mock</h3>
+
+    <p>The device models for block, network and graphics speak <b>the real ring types</b> — the same <code>abi/</code> structures a physical driver uses, not a parallel test interface. RFC 0034. A mock is a second implementation of an interface, which means it is a second thing that can disagree with the interface and be wrong in a way the test cannot see. A peer on the real types cannot drift, because there is nothing for it to drift from.</p>
+
+    <p>The same logic drives component substitution: swapping a real component for a modelled one is a change to which image a manifest names, not a change to how anything is wired.</p>
+
+    <h3>Both halves of reproducibility</h3>
+
+    <p>Every scenario must <b>reproduce from its seed</b> and must <b>move when the seed moves</b>. <code>cargo xtask sim</code> runs every scenario twice at one seed and once at another: the pair must agree and the odd one must not. A scenario that produces the same trace for every seed is a scenario that is not exercising anything, and it would otherwise sit in the suite forever looking like coverage.</p>
+
+    <h3>Faults that assert rather than print</h3>
+
+    <p>Seven fault classes, each <em>asserting a response</em> rather than printing one, per RFC 0039 — a fault class states what should happen and the test requires it. This is the layer whose hook was deliberately built before it was needed: once code asks its <code>Env</code> whether an operation should fail, adding a fault class is a change to one file, whereas code that assumes success has to have every call site revisited later.</p>
+
+    <h3>Joining the two halves</h3>
+
+    <p>The simulator and the real boot are two accounts of the same system, and two accounts that are never compared will eventually be about different things. <code>cargo xtask sim --join</code> boots the real kernel, reads the component hashes out of its log, and requires the set the simulator runs to be the set the boot spawned — joined at an artefact rather than at a sentence. RFC 0035.</p>
+
+    <p>And RFC 0036 is the other half of that: <b>the join names the gap it cannot close.</b> <code>JOIN_GAP</code> is a declared constant that a lint compares against the tree, so it goes red both when the gap grows and when the reason for it stops being true. That is the difference between a known limitation and a forgotten one.</p>
+  </div>
+</section>
+
+<section id="c05">
+  <div class="sec-head"><div class="sec-num">05</div><h2>Sweeps, and an oracle that names no bug</h2><span class="chip ok">runs</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> Built, with a committed corpus, automatic minimisation, sharding, and a mutation mode that requires the sweep to find a defect it was not told about.</div>
+
+    <p>A scenario suite checks the things somebody thought of. A seed sweep is the instrument for the other category, and it is the one you can point at your own checkout to go looking for something nobody has found yet.</p>
+  </div>
+
+  <div class="codeblock">
+    <div class="codecap">One command, from the repository root, Docker the only prerequisite</div>
+<pre>docker compose -f docker/compose.yaml run --rm dev cargo xtask sweep
+
+cargo xtask sweep --help      <span class="c"># what a seed is, what a finding is, what to do with one</span>
+cargo xtask sweep --mutate    <span class="c"># arm a defect; the sweep AND the corpus must find it</span>
+cargo xtask sweep --corpus    <span class="c"># replay every trial that ever found something</span>
+cargo xtask sweep --base &lt;s&gt;  <span class="c"># the seed the sweep derives from; a nightly varies it</span></pre>
+  </div>
+
+  <div class="flow">
+    <h3>The oracle must not know what it is looking for</h3>
+
+    <div class="claim"><b>A seed sweep is checked by properties that name no scenario, no fault class and no defect.</b> RFC 0040. The five properties in <code>sim/src/check.rs</code> are expressed over the trace's own vocabulary and were written <em>before</em> the deliberate defect that tests them existed. The reasoning is exact: a sweep's premise is that the bug is not known in advance, so an injected bug that had to be named by an assertion written for it would have been found by the assertion rather than by the sweep — and the sweep would have been credited with a capability it does not have.</div>
+
+    <p>This is also why the oracle is deliberately separate from the fault classes of chapter 04. Those assert a stated response and are right to; that shape is correct for a class and wrong for a sweep.</p>
+
+    <h3>A finding is a command line, not a symptom</h3>
+
+    <p>Every failure is minimised and printed as a line that <b>judges itself</b>: it is spelled <code>--check</code>, which exits non-zero and names the property that broke, rather than <code>--trace</code>, which prints a wall of output and exits zero. <code>cargo xtask sweep --mutate</code> takes that line off the report and runs it, requiring non-zero armed and zero disarmed — so what is asserted is the command, not the shape of a string that looks like one.</p>
+
+    <p>Two details in the minimiser are worth knowing because they are the kind of thing that is wrong in most minimisers:</p>
+
+    <ul class="list">
+      <li><b>A finding's signature is the first check that fails, and minimisation preserves the signature</b> rather than merely preserving a failure. Neither knob of an injection is a subset operation, so a minimiser that accepted <em>any</em> failure will happily conclude that earlier strikes were not required and hand you a reproduction of a different bug.</li>
+      <li><b>The sweep decides what is smallest and says in what terms.</b> Size is a lexicographic tuple — armed classes, strikes actually made, operations, clients, window, how late injection begins — and the report leads with the smallest reproduction across the whole sweep. That is <em>no human triage</em> made mechanical: read finding one.</li>
+    </ul>
+
+    <p>If you find something, add the argument list to <code>sim/corpus.txt</code> so it stays found. That file is append-only, <b>a corpus line is an argv</b>, and <code>--corpus</code> replays all of it and requires each line to be clean now. It is the permanent regression half of a sweep, and it ships in the release package.</p>
+
+    <h3>What a sweep costs, and what it cannot catch</h3>
+
+    <p>RFC 0042 is the amendment that made those two things stated quantities rather than assumptions, and it exists because the earlier shape could report a green result for a run that had not happened.</p>
+
+    <ul class="list">
+      <li><b>The leak is a budget rather than a hope.</b> Every trial leaks its clients' buffer regions, because a component's region is granted for the life of the component and a simulated component's life is the run. That was bounded when a run was a process and is bounded by nothing once a sweep runs many trials in one. So a grid past the budget is <em>refused before a trial runs</em>, with the largest acceptable value printed beside the refusal, and <code>cargo xtask sweep</code> shards on that ceiling — where a shard is a range of the same seed derivation, so the shards together try exactly what one process would have tried, in the same order.</li>
+      <li><b>Zero is refused everywhere it means <em>nothing ran</em></b>, per chapter 03.</li>
+      <li><b>The report prints its own wall clock and says in the same breath that the number is in no verdict in it.</b> A container is the one environment the benchmark harness refuses to record a timing in, so the cost of a sweep is reported as a courtesy and is not evidence.</li>
+    </ul>
+
+    <p>A finding carries the commit as a <code>git switch</code> in front of it — but <b>only when the sweep ran in a tree that was exactly that commit.</b> On a checkout you have edited it does not, because checking the commit out would throw away the changes that found the thing. The report's <code>tree</code> line says which of the two you are reading. A sweep of your own work in progress is a perfectly good way to find a bug; it is not a bug report anybody else can run until you have committed.</p>
+  </div>
+</section>
+
+<section id="c06">
+  <div class="sec-head"><div class="sec-num">06</div><h2>Concurrency, and the test that did not catch it</h2><span class="chip part">partly</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> Stress tests run, on both architectures, and have a <b>known and measured</b> blind spot. Model checking is open and has been for several epochs. This is the weakest layer in the book and the chapter is written accordingly.</div>
+
+    <p>The ring rests on one <code>Release</code> store and one <code>Acquire</code> load. Getting that pair wrong produces a defect that passes every test on x86-64 and corrupts data on AArch64, because total store order hides the entire class of bug the ring is exposed to. So the litmus tests run on both architectures, and the AArch64 job is where they mean anything.</p>
+
+    <h3>What happened when that was checked</h3>
+
+    <div class="note">Two deliberate defects weaken the publishing stores from <code>Release</code> to <code>Relaxed</code>. CI required the litmus suite to fail with them armed, on the AArch64 runner — the machine where that weakening is a real defect. <b>The suite passed.</b> Both steps were then removed as gates, because a gate asserting that a probabilistic test catches a specific reordering goes red on a Tuesday for reasons nobody can reproduce.</div>
+
+    <p>Read that carefully, because it is the single most useful paragraph in this book. The standing position is not the soft version — <em>stress tests are empirical, so there is a theoretical gap</em>. It is the sharp version: <b>the suite has been shown not to catch the exact defect it was written to guard against, on the exact hardware that defect is about.</b></p>
+
+    <p>That is what the apparatus is for. The mutation harness of chapter 01 was pointed at the concurrency suite, the suite failed to notice, and the result was written down and the misleading gate removed — rather than the gate being kept because it was green. A project without that harness would still have a passing litmus job and would believe it meant something.</p>
+
+    <h3>What would actually close it</h3>
+
+    <p>Model checking explores what the memory model <em>permits</em>; stress tests explore what one machine happened to do on one afternoon. Those are different questions and only the first can settle the ordering. RustMC is the open task, and it has been open long enough that its absence is a standing fact about this project rather than a temporary state.</p>
+
+    <div class="claim"><b>And it will arrive with a caveat, stated here in advance rather than discovered next to a result.</b> A checker brings its own toolchain (RFC 0022), so it checks the protocol <em>as written</em> and not the machine code this tree ships. Atomic orderings are specified by the language rather than chosen by the backend, which makes that a small gap — but it is a gap, and a citation of a model-check result owes the reader this sentence.</div>
+
+    <h3>What does cover some of it</h3>
+
+    <p>The proofs of chapter 07 cover the ring's <em>validation</em> paths against arbitrary peer bytes. That is a different question from what the memory model permits, and it is worth being precise that it is not a substitute: two instruments, two questions. One defect in this area does remain a working gate — the one that removes the doorbell fence, which is the <code>SeqCst</code> fence the suppression protocol needs and whose absence is deterministic enough to catch.</p>
+
+    <p>If you are evaluating this project and you care about the ring's correctness under weak memory, this chapter is the honest answer: the design is argued in <code>docs/design/ring-scene-boot.html</code>, the orderings are in the code with their reasoning at the access, the empirical test is known not to catch the defect it targets, and the proof that would settle it has not been built.</p>
+  </div>
+</section>
+
+<section id="c07">
+  <div class="sec-head"><div class="sec-num">07</div><h2>Proof, deliberately narrow</h2><span class="chip ok">runs</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> Built. Bounded model checking with Kani over three crates, on a nightly schedule rather than in <code>verify</code>, with deliberate defects that must each fail the harness stating the property they break.</div>
+
+    <p>Proof here is targeted rather than aspirational. The project does not claim a verified kernel and does not want one on the current schedule; what it claims is that a small number of properties — the ones where being wrong is silent and catastrophic — have been checked exhaustively inside a stated bound.</p>
+  </div>
+
+  <div class="codeblock">
+    <div class="codecap">Three proof crates, all outside the workspace</div>
+<pre>kernel/proofs   <span class="c"># the five capability properties</span>
+ring/proofs     <span class="c"># the peer-facing validation paths</span>
+abi/proofs      <span class="c"># the admission arithmetic RFC 0050 put there</span>
+
+cargo xtask prove [harness]   <span class="c"># every harness, at both bounds, then every defect</span>
+cargo xtask lint-proofs       <span class="c"># they still compile against the code they prove</span></pre>
+  </div>
+
+  <div class="flow">
+    <p>They are excluded from the workspace rather than absent from it, and the reason is a rule worth stating generally: <b>a verification tool's toolchain is the tool's business.</b> Kani installs its own rustc, which is not the one pinned in <code>rust-toolchain.toml</code>, and a workspace member would be built by <code>cargo xtask test</code> under the pin — which buys nothing and breaks on the day the two compilers disagree. RFC 0022, and RFCs 0053 and 0057 for the two ways a proof crate reaches the code it proves.</p>
+
+    <h3>Proving the file that ships</h3>
+
+    <div class="claim"><b>A proof of a copy is a proof about the copy.</b> The capability properties are proved over the file the kernel actually ships — compiled a second time through <code>#[path]</code> against stand-ins — rather than over a reimplementation written for the checker. RFC 0053 makes that a requirement and also requires each proof to state its bound, because an unbounded claim from a bounded checker is the most common way a verification result is oversold.</div>
+
+    <p>Where the bound falls is chosen rather than accepted. Handles are unbounded across the whole 32-bit space and rights across the whole rights lattice, because those are the inputs an attacker controls. The admission arithmetic is proved over every demand and every machine shape up to a small core count, and the two properties about the walk are proved again at a much larger one.</p>
+
+    <h3>Two traps this avoids, both worth stealing</h3>
+
+    <ul class="list">
+      <li><b>Table contents are bounded by construction, not by assumption.</b> A harness never writes a table slot. It runs the real operations with symbolic operands, so the only states reachable in the proof are the states the table can actually reach — which means no proof holds for a state that cannot exist. A harness that populated the table directly would prove things about impossible tables and miss things about possible ones.</li>
+      <li><b>The ring is proved against bytes, not against a struct.</b> The peer-facing paths take a region of symbolic bytes handed to the real adoption path, rather than a struct of fields the harness itself constructed. <code>ring/src/mapping.rs</code> names that as the trap: a harness that builds a well-formed struct has assumed away exactly the hostile input the validation exists for. RFC 0057.</li>
+    </ul>
+
+    <h3>And the proofs are themselves tested</h3>
+
+    <p>Deliberate defects are injected into the proved code, and each must fail the harness stating the property it breaks — and no other. A proof that passes on a build with a known defect proves nothing, and the "and no other" half is what catches a harness that has become a blunt instrument asserting something broader than it claims.</p>
+
+    <p>The registry does not yet distinguish a proved result from a counted one in a machine-readable way. RFC 0069 decides that it should — an <code>evidence</code> key with three values, and a rule that a claim quantifying universally is <code>proved</code> or is misworded — and that RFC is deliberately <code>draft</code> until the lint lands, so that a reader cannot find a rule there that the tree does not enforce. Chapter 10 has the rest.</p>
+  </div>
+</section>
+
+<section id="c08">
+  <div class="sec-head"><div class="sec-num">08</div><h2>Fuzzing the one surface</h2><span class="chip ok">runs</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> Built, with two committed corpora that ship in the release package. Coverage instrumentation was added deliberately early, while the kernel was small enough for it to be cheap.</div>
+
+    <p>Fuzzing an operating system is usually intractable because there is no single surface to fuzz — a conventional kernel presents hundreds of system calls, each with its own argument grammar. F presents one ring, and <b>that is what makes this layer affordable</b>. It is a case where a decision made for performance pays out somewhere entirely unrelated.</p>
+
+    <h3>A hostile peer</h3>
+
+    <p><code>cargo xtask hostile</code> generates a hostile peer from a seed and runs it for a very large number of operations, requiring no panic, no memory unsafety and no hang. Two design choices carry it:</p>
+
+    <ul class="list">
+      <li><b>A run is episodes derived by identity</b>, so a finding deep into a run replays in a moment rather than requiring the whole run to be repeated. Without this, a fuzzer that finds something at the end of a long run hands you a reproduction that takes as long as the original — which in practice means nobody reproduces it. RFC 0046.</li>
+      <li><b>A hang is a count, never a wall-clock timeout.</b> This is the determinism substrate asserting itself: a wall-clock timeout is a nondeterministic oracle, so a hang detected that way is a finding that may not reproduce, on a fuzzer whose entire value is that findings reproduce.</li>
+    </ul>
+
+    <h3>Structure-aware, and why</h3>
+
+    <div class="claim"><b>Random bytes are a bad fuzzer for a structured format, and here the arithmetic is exact.</b> A submission entry's first check is a zero word, which random bytes fail with probability 1 − 2⁻³². A purely random generator would therefore spend essentially all of its budget being rejected at the first branch and would never reach the validation logic it was pointed at. <code>cargo xtask entries</code> is structure-aware with coverage feedback for that reason. RFC 0048 — an entry is generated by its structure and kept by its coverage.</div>
+
+    <p>Both corpora — <code>ring/corpus.txt</code> and <code>sim/corpus.txt</code> — are committed to the tree and included in the release package, so a stranger's first run starts from everything that has ever been found rather than from nothing. There is no separate corpus to fetch, which is a deliberate choice about what a reproduction should cost somebody who was not there.</p>
+
+    <h3>Two instruments, two counts, both reported</h3>
+
+    <p>Miri also covers the memory-unsafety property, at a much smaller operation count, under a much stronger notion of what counts as unsafe. Both numbers are reported rather than one being quoted — which matters, because quoting only the large count implies a strength the large count does not have, and quoting only Miri's implies a weakness the fuzzer does not have.</p>
+  </div>
+</section>
+
+<section id="c09">
+  <div class="sec-head"><div class="sec-num">09</div><h2>Provoking the real kernel</h2><span class="chip ok">runs</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> Built and in the CI gate. This is the layer the seven-layer taxonomy has no row for, and it is where most of this project's evidence currently comes from.</div>
+
+    <p>None of this is simulation, proof or fuzzing. It is the real kernel, in QEMU, being asked to do something that must not work. Every verb below boots the system more than once and requires the boots to disagree in a specified way.</p>
+  </div>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Command</th><th>What it does</th><th>The control that makes it mean something</th></tr></thead>
+    <tbody>
+      <tr><td class="m">fault</td><td>Boots into each of six kernel faults.</td><td>Each must be <em>reported</em> rather than survived. The exception path only runs when something has already gone wrong.</td></tr>
+      <tr><td class="m">user</td><td>Seven boots; a ring-3 process violates one isolation rule each.</td><td>Six must fault and the kernel survive each; <b>the seventh must not fault.</b></td></tr>
+      <tr><td class="m">cap</td><td>Nine boots; a process tries to hold authority it was not granted.</td><td>Seven refused with the exact code each escape earns; one not refused at all &mdash; the process legitimately revokes, reads the unmapped page, and is stopped by the processor.</td></tr>
+      <tr><td class="m">mutate</td><td>A kernel built with a deliberate defect.</td><td>Must go red with a panic in the log; the same boot without it must go green.</td></tr>
+      <tr><td class="m">chaos</td><td>Kills every component under sustained load at seeded moments.</td><td>The same load with nothing killed. No client may observe anything but added latency.</td></tr>
+      <tr><td class="m">swap</td><td>Replaces every component by the route its manifest declares.</td><td>The same load with nothing replaced, and the crossed state compared against what the outgoing instance held.</td></tr>
+      <tr><td class="m">cut</td><td>Cuts power at every write boundary in a publish, at block and byte granularity, honest and lying.</td><td>Every cut must leave either the old root or the new one, with the tree it names resolving.</td></tr>
+      <tr><td class="m">rollback</td><td>Breaks a generation and names the previous one to the loader.</td><td>What comes back must be bit-identical: the root, every byte as delivered, and the generation rebuilt from source.</td></tr>
+      <tr><td class="m">cores</td><td>Four boots at differing core counts.</td><td>A machine reporting eight and answering with two must still reach M0, holding the six and saying how far each got.</td></tr>
+      <tr><td class="m">admission</td><td>A granted reservation under adversarial load.</td><td>The same load unreserved, which must miss; and an over-subscription, which must be refused and run nothing.</td></tr>
+      <tr><td class="m">attest</td><td>Five boots asking what this machine is running.</td><td>Is the answer the same twice; does modifying the frame move it; does the frame refuse a root it cannot measure its way to.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="flow">
+    <p>Read the third column, not the second. Almost every row is a pair, and the second half of the pair is what stops the first half passing for the wrong reason. A kernel that faults on everything passes six fault tests. A store that loses every write survives a power-cut test that only checks for corruption. A system that refuses every reservation never misses a deadline.</p>
+
+    <div class="note"><b>The <code>cap</code> suite's eighth boot is the one to understand if you only look at one.</b> Seven boots are refused by the capability table with a named error code each. The eighth is <em>not refused</em>: the process revokes a capability it is fully entitled to revoke, then reads the page that revoke unmapped, and is stopped by the processor rather than by the table. That distinction — authority enforced by the table versus authority enforced by hardware after the table has already done the right thing — is the kind of thing a suite of refusals would never surface.</div>
+
+    <h3>Why this has no row in the taxonomy</h3>
+
+    <p>A taxonomy organised around simulation, proof and fuzzing has no natural category for running the real thing and trying to break it. The project's response was to leave the row absent and say so in <code>docs/TESTING-STATUS.md</code> rather than to file these verbs under whichever layer they least badly fit. Chapter 02 makes the general argument; this is the instance that prompted it.</p>
+
+    <p>The caveat that applies to this whole chapter is chapter 12's: the machine under all of it is an emulator.</p>
+  </div>
+</section>
+
+<div class="partbar"><span class="n">Part III</span><h2>Numbers</h2><span class="r"></span></div>
+
+<section id="c10">
+  <div class="sec-head"><div class="sec-num">10</div><h2>The claims registry</h2><span class="chip part">mostly</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> Built and gating. Several lints keep it agreeing with the documents. RFC 0069's evidence key is decided and deliberately not yet implemented, and that RFC is <code>draft</code> for exactly that reason.</div>
+
+    <p>A claim without a named baseline, a published workload and a one-command reproduction is an anecdote. <code>claims/</code> is that requirement made mechanical, and it is the layer that decides which numbers this project is permitted to say out loud.</p>
+
+    <h3>What an entry carries</h3>
+
+    <p>A statement in prose; a baseline that is <em>a configuration rather than a description of one</em>; a workload with its parameters; the primary and secondary metrics; thresholds; the class of machine required; a one-command reproduction; the document and section that own it; and a diagnosis block, so that a red result arrives with its own first debugging step rather than with a question.</p>
+
+    <p>That last field is unusual and worth copying. A claim about ring submission latency records that a result far above target usually means false sharing on the cursors, and that a flat batch curve means the batch is not being amortised. The person who understood the number best was the person who registered it, and a registry that does not capture that hands the next reader a number and no thread to pull.</p>
+
+    <h3>The five rules</h3>
+
+    <ul class="list">
+      <li><b>The baseline is versioned with the claim.</b> This is what stops a tuned-Linux comparison decaying into a stock-Linux comparison as the baseline configuration ages and nobody re-checks it.</li>
+      <li><b>Gating fails the build on regression; tracked records without gating.</b> Muting a claim is a status change in a reviewable diff, never a comment in CI configuration.</li>
+      <li><b>Distributions, not summaries.</b> A mean computed at collection time destroys what cannot be recovered, and systematically under-reports the stalls this architecture exists to eliminate.</li>
+      <li><b>Report instructions and joules per operation, not only nanoseconds.</b> Those survive a hardware change and are far less noisy.</li>
+      <li><b>Regression detection is change-point, not threshold.</b> Thresholds either miss real regressions or fire until everyone mutes them.</li>
+    </ul>
+
+    <h3>The split that is the honest part</h3>
+
+    <div class="claim"><b>A count may gate on this machine, and a time may not.</b> The claims that currently gate are all counts — blast radius, hostile-peer operations, entry-validation coverage, admission refusals, deadline overtake, unmap churn — and a count is identical on any machine, because it is a fact about a deterministic run rather than about silicon. Every claim that is a time or a ratio of times is <code>pending</code>, and it is pending because the benchmark harness refuses to record a measurement in a container. <b>That refusal is the harness working.</b></div>
+
+    <p>Where one piece of work produced both kinds, <b>the claim was split rather than weakened</b>. There are several such pairs in the registry: one entry gates on the count, and a sibling entry waits on the machine for the time. The alternative — one claim, gating, with the timing threshold quietly loosened until it passes in a container — is how a registry becomes decoration.</p>
+
+    <p>RFC 0069 makes that distinction a field rather than a convention: <code>proved</code>, <code>counted</code> or <code>measured</code>, with three rules behind it. A kind may not stand in for a stronger one, so a claim whose statement quantifies universally is <code>proved</code> or it is misworded. Only <code>counted</code> may gate on an ordinary machine. And a <code>proved</code> claim names its harness and nothing else — no baseline, because a proof is not faster or slower than Linux, and no hardware, because a solver's verdict does not depend on the machine it ran on.</p>
+
+    <h3>The lints that keep it true</h3>
+  </div>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Lint</th><th>What it refuses</th></tr></thead>
+    <tbody>
+      <tr><td class="m">lint-claims</td><td>A document citing a value the claim no longer has. A number in a document is never a second copy of a claim.</td></tr>
+      <tr><td class="m">lint-claim-owners</td><td>A claim that does not name the document owning it. A claim nobody owns is a claim nobody can be asked about.</td></tr>
+      <tr><td class="m">lint-reproduce</td><td>A published reproduction command that no longer resolves inside the tree.</td></tr>
+      <tr><td class="m">lint-snapshot</td><td>The snapshot disagreeing with the registry.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="flow">
+    <p><code>cargo xtask claims --render</code> rewrites a document's cited values from the registry, so the documents are generated from the numbers rather than being a parallel account of them. And <code>cargo xtask reproduce</code> is the entry point for somebody who was not there: it prints the claim, the commit, the class of machine required and what <em>this</em> machine is, runs the claim's own published reproduction, and ends by saying plainly whether the number was recorded.</p>
+  </div>
+</section>
+
+<section id="c11">
+  <div class="sec-head"><div class="sec-num">11</div><h2>The machine a number may be taken on</h2><span class="chip warn">a file</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> <code>claims/runner-class-A.md</code> is a complete specification. It is not a machine, and no machine matching it exists in this project. Every timing claim in the registry is waiting on that and says so.</div>
+
+    <p>A timing measurement is only recorded on a machine that can defend it. Anywhere else — a laptop, a shared cloud runner, the development container — the workload still runs, the distribution is still drawn and printed, and recording is <em>refused with the reason</em>. A number with no environment attached is how a benchmark becomes marketing, so the default is to refuse.</p>
+
+    <h3>What the class requires</h3>
+
+    <p>A granted hard-class reservation holds four things, and admission tests all four together or it is testing nothing. Class A is the class where all four are obtained <b>by partition</b>:</p>
+  </div>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Component</th><th>Mechanism</th><th>Why a desktop cannot do it</th></tr></thead>
+    <tbody>
+      <tr><td class="m">A physical core</td><td><code>isolcpus</code>, both SMT siblings taken as a unit.</td><td>A schedulability test that counts threads has already conceded the tail it was run to bound.</td></tr>
+      <tr><td class="m">Memory bandwidth</td><td><code>resctrl</code> MBA or SMBA.</td><td>Consumer silicon does not offer it.</td></tr>
+      <tr><td class="m">Last-level cache</td><td><code>resctrl</code> CAT or L3 QoS.</td><td>Dropped from client parts years ago. This is the single constraint that rules out a workstation.</td></tr>
+      <tr><td class="m">Pre-faulted memory</td><td>1 GiB hugepages, populated and locked.</td><td>Faulted, not merely allocated — so no fault, tier migration or compaction lands inside a deadline.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="flow">
+    <p>Partitioning <em>by exclusion</em> — holding co-resident cores idle — is a legitimate reservation and is not this class. A machine without the cache and bandwidth controls needs a different class name with its own file, because reusing this one is how a class decays into whatever hardware was to hand.</p>
+
+    <h3>The failure mode the whole apparatus exists for</h3>
+
+    <div class="note"><b>The environment variable is an assertion, not a measurement.</b> No code in this tree can tell a class-A machine from a workstation with <code>F_ENVIRONMENT</code> set by hand. What the tree can do is two things: fail closed on an unset or unrecognised value, so that everything else refuses by default; and require that the record of <em>how each reservation component was obtained</em> travels with every number. A number whose record says "by exclusion" for a component the class requires by partition was not taken here, and a reviewer can catch that by reading one page.</div>
+
+    <p>The file is honest about its own limit in the same terms: <b>a file is not a machine.</b> Nothing in this repository can buy hardware. What a specification can do is make the purchase decidable and make the cheat visible.</p>
+
+    <h3>The baseline, and the asymmetry that raises it</h3>
+
+    <p>The baseline is <em>"tuned Linux, configured by someone trying to win"</em>, and it is a directory of applied configuration with a verifier beside it rather than a sentence — because a sentence cannot be re-run, and therefore cannot be found to have stopped being true.</p>
+
+    <p>Two judgements in it are worth reading if you suspect this apparatus of flattering F, because they are where flattery would live:</p>
+
+    <ul class="list">
+      <li><b>Speculative-execution mitigations are left on and recorded.</b> The only thing that makes a comparison mean anything is that the setting is identical on both sides. Turning them off flatters both sides and describes a machine nobody deploys.</li>
+      <li><b>Transparent huge pages are off for F and on for the baseline.</b> F maps its own 1 GiB pages and never uses Linux's, so <code>never</code> is right on F's side; a baseline handed small pages on that account would be a machine nobody configures, so <code>always</code> is right on the other. <b>The asymmetry raises the baseline</b> — and the file says in as many words that this is the direction a sceptical reader should check first.</li>
+    </ul>
+
+    <p>Turbo off, uncore frequency fixed, C-states shallow, prefetchers left at defaults <em>and recorded</em>, no hypervisor, ECC, cooling with headroom so that the six-hundredth second of a run is the same machine as the first. The full list, the kernel command line and a seven-point verification checklist a stranger can work through are in <code>claims/runner-class-A.md</code>.</p>
+  </div>
+</section>
+
+<section id="c12">
+  <div class="sec-head"><div class="sec-num">12</div><h2>The honest gaps</h2><span class="chip ok">true</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> True at the time of writing and the fastest-moving chapter in the book. <code>docs/TESTING-STATUS.md</code> is the maintained version; where this disagrees with it, that file is right.</div>
+
+    <p>This chapter is not a disclaimer. It is the part of the apparatus with the most information in it, and a reader deciding whether to take this project seriously should weigh it more heavily than any green check in the preceding nine chapters.</p>
+
+    <h3>The largest one, and the easiest to miss</h3>
+
+    <div class="note"><b>The kernel has never run on bare metal.</b> It has run outside QEMU three times, all on virtual machines. Three further attempts on a Threadripper host did not reach <code>M0 ok</code> at all — the first died inside core bring-up, and two RFCs came out of that; the last ran to ring 3 and refused its own stack selector at the first interrupt, because the emulator had been forcing privilege bits this kernel forgot, which is a third RFC. Everything else this book reports is an assertion about an emulator: the APIC enumeration, the memory map, the UART, application-processor startup, and every datapath result. <b>Nothing here is failing.</b> The tests pass, the boots are green, and the subject of nearly every one of them is QEMU.</div>
+
+    <p>Two consequences worth knowing before that first metal boot rather than after. The trace hash <em>will</em> differ on hardware, because the memory map and core count are in the log by design and QEMU's are pinned. And the kernel supports a fixed maximum number of logical processors, so a larger machine leaves the rest asleep and says so on its own line.</p>
+
+    <h3>The rest, in the order they would bite</h3>
+
+    <ul class="list">
+      <li><b>The IOMMU stage has never met real firmware, and under UEFI it cannot.</b> The boot found no checksummed root pointer in either legacy window, because the boot protocol has no field for it and UEFI does not leave one where this kernel can scan. That is structural and will happen on every UEFI machine, including the one the project is waiting for. The kernel fails closed and says so, which is the refusal policy working rather than a defect — which is precisely why it needs a line here, since nothing goes red.</li>
+      <li><b>Generation selection has never run on hardware.</b> All three boots outside QEMU printed that no generation was selected, so the frame measured itself and had nothing to compare against. Under QEMU both tokens are on every command line, so that half of the attestation design is exercised constantly on an emulator and nowhere else. Found by the third boot and fixed in the same change &mdash; but <b>the fix is tested under QEMU and staged, not booted.</b></li>
+      <li><b>The user-interrupt doorbell is written and has never executed.</b> The construction refuses on a machine that does not report the hardware, which is every machine this project can reach; QEMU's emulation implements no part of it. What is tested is the <em>refusal</em> and the selection logic. Do not read the suppression test passing on three paths as three paths having run: two have.</li>
+      <li><b>The doorbell count in the boot log is a boot count, not a measurement.</b> It is taken over the two operations the self-test performs, which is enough to show the count exists and is not always one. It is not doorbells per operation under load, and it is deliberately <em>not</em> registered as a claim.</li>
+      <li><b>The litmus suite does not catch the defect it was written for.</b> Chapter 06, and the sharpest item on this list.</li>
+      <li><b>The state tree publishes nothing that varies with time.</b> Counts, cores, ring tallies, capability slots, datapath tallies — not the timer's counters, not a stamp, not a hash of anything live, because the boot log is the reproduction artefact and a tick count in it would make two runs of one commit disagree for a reason having nothing to do with the kernel. That exclusion is a decision with a reversal condition, not a gap: it lifts when the boot log stops being the reproduction artefact.</li>
+    </ul>
+
+    <h3>Gaps that are quantities rather than sentences</h3>
+
+    <div class="claim"><b>Several gaps in this tree are declared constants that a lint compares against the tree</b>, so each goes red <em>both</em> when it grows and when the reason for it stops being true. A gap written as prose can only be found to have grown by somebody reading the prose; a gap written as a number that something checks cannot quietly persist after it has been closed. One of them was paid recently, and the constant, its row and the wall it described all went together — which is the mechanism working rather than the list shrinking.</div>
+
+    <p><code>cargo xtask lint-owed</code> is the sharpest of these: it lists reversal conditions that have fallen due and are unpaid, and it fails on the day one is paid and nobody updates the documents that describe the old shape. <b>That is the difference between a debt and a wish.</b></p>
+
+    <h3>How to read the rest of this book now</h3>
+
+    <p>The instruments in part II are real and most of them are good. The thing to hold onto is what each one is evidence <em>about</em>: the simulator is evidence about components and declares that it is not evidence about the frame; the proofs are evidence inside a stated bound and name the bound; the fuzzer is evidence about one surface; the boot suite is evidence about an emulator; and the registry's timing claims are evidence about nothing yet, because the machine they require does not exist.</p>
+
+    <p>Stated that way it sounds like a thin case, and at M0 it is a thin case — that is what M0 means. The argument this book actually makes is narrower and, I think, harder to dismiss: <b>the apparatus is capable of telling this project it is wrong, and has already done so at least once in a way that cost a green check.</b></p>
+  </div>
+</section>
+
+<div class="foot">
+  F Evidence &middot; book two of three &middot; revised at milestone M0<br>
+  Companion volumes: F Foundations &middot; F Applications (unwritten, gated on epoch E3)<br>
+  Checked against docs/TESTING-STATUS.md, which is the maintained ledger and wins any disagreement.<br>
+  Numbers live in claims/ and are named, never quoted. Decisions live in docs/rfc/ and are cited, never restated.<br>
+  Apache-2.0 OR MIT, except third_party/. See LICENSING.md.
+</div>
+
+</div>
