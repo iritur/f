@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "f-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Text metrics as fixed-point integers, and the corpus of scripts and directions those metrics are argued against."
+
+# No dependencies, and `hash/Cargo.toml`'s reason applies with one addition of
+# its own. Section 08 of `ring-scene-boot` says text is the part of a renderer
+# that is always underestimated, and RFC 0004 says why it is underestimated
+# *here* in particular: text metrics are the single most natural place in this
+# system to reach for a float, and a shaping cache is the single most natural
+# place to reach for a `HashMap`. A crate with no dependencies cannot inherit
+# either from somebody else's public type, which leaves both of them as choices
+# this crate makes in the open. The shaper itself is `E3-B03a`'s decision and
+# may land behind the licence boundary, where it is reached over a ring and not
+# by a dependency row.
+
+[lints]
+workspace = true

@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "f-scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The retained scene graph: deltas in, no pixel buffers. One fixed allocation, and a commit is atomic or it is nothing."
+
+[dependencies]
+# The wire form of a delta is in `abi/` and the meaning of one is here, on the
+# terms `blob/Cargo.toml` states for the store: the only use for `#[repr(C)]`
+# over a delta is to view somebody else's bytes as a struct, a library above the
+# frame may not write that cast, so this crate consumes the decoder rather than
+# carrying a second transcription of the format. Two crates, one opinion about
+# what a delta is.
+f-abi.workspace = true
+
+[lints]
+workspace = true

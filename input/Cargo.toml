@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "f-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "One timestamp, taken at the driver at interrupt time, and the prediction forward to the next scanout that is derived from it."
+
+[dependencies]
+# The wire form of an input entry, on `scene/Cargo.toml`'s terms exactly.
+f-abi.workspace = true
+
+# The determinism substrate, and here it is load-bearing rather than
+# conventional. This crate's whole subject is a clock reading, RFC 0004 says
+# there is one way to take one, and a prediction that could not be replayed from
+# a seed would be a prediction no test could bound. The dependency is what makes
+# "one time source in the whole path" checkable rather than asserted.
+f-env.workspace = true
+
+[lints]
+workspace = true
