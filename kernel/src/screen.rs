@@ -48,33 +48,52 @@ use core::cell::UnsafeCell;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::arch::x86_64::multiboot::{Channels, Framebuffer, FramebufferKind};
+use crate::arch::x86_64::multiboot::{Framebuffer, FramebufferKind};
 
-/// Glyph box width, before scaling. Unit: pixels.
-const GLYPH_W: usize = 6;
+/// Glyph box width. Unit: pixels.
+const GLYPH_W: usize = 8;
 
-/// Glyph box height, before scaling. Unit: pixels.
-const GLYPH_H: usize = 8;
+/// Glyph box height. Unit: pixels.
+///
+/// Eight by sixteen, which is the size a text console has been on this
+/// architecture since the VGA adapter and is what a Linux console still uses
+/// today. That is not nostalgia: it is the cell that has had the most eyes on
+/// it, and at 1024 by 768 it gives 128 columns by 48 rows — the shape a
+/// terminal is expected to be, rather than the shape a font happened to make.
+///
+/// **This replaced a five-by-seven drawn at double size**, which was legible
+/// and looked like a calculator. Sixteen rows is what buys real ascenders,
+/// descenders that clear the baseline, and a `1` that cannot be read as an `l`.
+const GLYPH_H: usize = 16;
 
 /// How many screen pixels one glyph pixel becomes, on each axis.
 ///
-/// Two rather than one, and the reason is a person rather than a number: at one
-/// this font is six pixels wide, which on a 1080p panel is a character about a
-/// millimetre across and unreadable at the distance somebody stands from a
-/// machine they are bringing up. At two the grid is 160 by 67 on that panel and
-/// 85 by 48 on the 1024 by 768 a virtual machine usually starts in, which is a
-/// terminal-shaped screen in both.
-const SCALE: usize = 2;
+/// One, on anything a machine of this era actually has. The font is now a
+/// full-size cell rather than a small one that needed doubling, so a 1080p
+/// panel gets 240 by 67 characters — which is exactly what the same panel shows
+/// under Linux, because it is the same cell.
+///
+/// The exception is a display dense enough that a sixteen-pixel cell stops
+/// being readable at arm's length. Past 2560 pixels across, one cell becomes
+/// two, which on a 4K panel gives 240 by 67 again — the same screen, on a
+/// display with four times the pixels.
+fn scale_for(width: u32) -> usize {
+    if width >= 2560 { 2 } else { 1 }
+}
 
 /// The widest grid this console will keep, in characters.
 ///
-/// A surface wider than this is *clipped*, not refused: the console is a
+/// Two hundred and fifty-six covers 1920 across at one-to-one, with room past
+/// it. A surface wider than this is *clipped*, not refused: the console is a
 /// fallback for reading a boot, and half a line on the screen beats a refusal
 /// on a machine whose only other output is the serial port that is missing.
-const MAX_COLS: usize = 160;
+const MAX_COLS: usize = 256;
 
 /// The tallest grid this console will keep, in characters.
-const MAX_ROWS: usize = 64;
+///
+/// Ninety-six is 1536 pixels of sixteen-row cells, which covers every mode a
+/// firmware is likely to hand over at one-to-one and every 4K mode at two.
+const MAX_ROWS: usize = 96;
 
 /// Cells in the grid.
 const CELLS: usize = MAX_COLS * MAX_ROWS;
@@ -91,117 +110,137 @@ const LAST: u8 = 0x7E;
 /// failure this whole file would have no way to report.
 const REPLACEMENT: u8 = b'?';
 
-/// The font: five pixels wide, seven tall, in a six-by-eight box.
+/// The font: an eight-by-sixteen cell, ninety-five glyphs, ASCII order from
+/// [`FIRST`].
 ///
-/// One row per glyph, in ASCII order from [`FIRST`]. Bit 4 is the leftmost
-/// pixel of a row and bit 0 the rightmost, so a literal written in binary reads
-/// left to right as the pixels appear. The eighth row is blank for every glyph
-/// that has no descender, which is what separates one line from the next
-/// without the grid needing a gap of its own.
+/// Sixteen bytes per glyph, one per row, top row first. Bit 7 is the leftmost
+/// pixel and bit 0 the rightmost — the storage order every eight-wide bitmap
+/// font on this architecture has used, which is why a row reads as a hexadecimal
+/// byte rather than as a binary literal somebody has to squint at.
+///
+/// The shapes follow the proportions of the console font this architecture has
+/// had since the VGA adapter, because that is what a reader's eye expects a
+/// machine to boot in and because those proportions have had more hours of
+/// reading than any other bitmap: caps ten rows tall from row 2, x-height six
+/// rows from row 5, descenders through row 14, and the rightmost column left
+/// clear so adjacent characters do not touch.
 ///
 /// **This table is original work and is deliberately not an imported font.**
-/// `LICENSING.md` draws the licence boundary at `third_party/`, and a font is
-/// exactly the kind of asset that arrives with a licence nobody reads — the
-/// obvious candidate, GNU Unifont, is GPL and would have taken the whole frame
-/// with it. What is here is plain enough to have been typed, and
-/// [`dump_font`] is how it was checked: the glyphs were read back as characters
-/// on a serial line before anything was asked to draw them on a screen.
+/// `LICENSING.md` allows the permissive tree and `third_party/`, and permits
+/// nothing in the second to be reached from the first except over a ring. There
+/// is no category for imported *data* under a permissive licence, which is
+/// exactly what a font is: Terminus is SIL OFL and would be welcome in a
+/// component, and cannot go in `kernel/src/` without putting a licence that is
+/// not this tree's into this tree. GNU Unifont is GPL and would take the frame
+/// with it. RFC 0081 records that gap as the thing to close before a component
+/// draws, rather than as a thing to route around here.
+///
+/// [`dump_font`] is how it is checked, and the check is not optional: a table
+/// somebody typed is a table somebody mistyped, and a wrong row is a letter
+/// that is subtly not that letter — which no compiler and no test of the
+/// drawing path would notice. `cargo xtask screen font` reads all ninety-five
+/// back as shapes on a serial line.
+/// One line per glyph, which `rustfmt` would turn into six. The attribute is
+/// the same one `abi/src/scene.rs` uses for its fixtures and for the same
+/// reason: this is a picture stored as numbers, and a formatter that wrapped it
+/// would be wrapping the picture.
+#[rustfmt::skip]
 static GLYPHS: [[u8; GLYPH_H]; 95] = [
-    [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000], // space
-    [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100, 0b00000], // !
-    [0b01010, 0b01010, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000], // "
-    [0b01010, 0b01010, 0b11111, 0b01010, 0b11111, 0b01010, 0b01010, 0b00000], // #
-    [0b00100, 0b01111, 0b10100, 0b01110, 0b00101, 0b11110, 0b00100, 0b00000], // $
-    [0b11001, 0b11010, 0b00010, 0b00100, 0b01000, 0b01011, 0b10011, 0b00000], // %
-    [0b01100, 0b10010, 0b10100, 0b01000, 0b10101, 0b10010, 0b01101, 0b00000], // &
-    [0b00100, 0b00100, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000], // '
-    [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010, 0b00000], // (
-    [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000, 0b00000], // )
-    [0b00000, 0b00100, 0b10101, 0b01110, 0b10101, 0b00100, 0b00000, 0b00000], // *
-    [0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000, 0b00000], // +
-    [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b00100, 0b01000], // ,
-    [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000, 0b00000], // -
-    [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100, 0b00000], // .
-    [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000, 0b00000], // /
-    [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110, 0b00000], // 0
-    [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110, 0b00000], // 1
-    [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111, 0b00000], // 2
-    [0b11111, 0b00010, 0b00100, 0b00010, 0b00001, 0b10001, 0b01110, 0b00000], // 3
-    [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010, 0b00000], // 4
-    [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110, 0b00000], // 5
-    [0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110, 0b00000], // 6
-    [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00000], // 7
-    [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110, 0b00000], // 8
-    [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100, 0b00000], // 9
-    [0b00000, 0b01100, 0b01100, 0b00000, 0b01100, 0b01100, 0b00000, 0b00000], // :
-    [0b00000, 0b01100, 0b01100, 0b00000, 0b01100, 0b00100, 0b01000, 0b00000], // ;
-    [0b00010, 0b00100, 0b01000, 0b10000, 0b01000, 0b00100, 0b00010, 0b00000], // <
-    [0b00000, 0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000], // =
-    [0b01000, 0b00100, 0b00010, 0b00001, 0b00010, 0b00100, 0b01000, 0b00000], // >
-    [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b00000, 0b00100, 0b00000], // ?
-    [0b01110, 0b10001, 0b10111, 0b10101, 0b10111, 0b10000, 0b01110, 0b00000], // @
-    [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001, 0b00000], // A
-    [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110, 0b00000], // B
-    [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110, 0b00000], // C
-    [0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100, 0b00000], // D
-    [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111, 0b00000], // E
-    [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000, 0b00000], // F
-    [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111, 0b00000], // G
-    [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001, 0b00000], // H
-    [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110, 0b00000], // I
-    [0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100, 0b00000], // J
-    [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001, 0b00000], // K
-    [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111, 0b00000], // L
-    [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001, 0b00000], // M
-    [0b10001, 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b00000], // N
-    [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110, 0b00000], // O
-    [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000, 0b00000], // P
-    [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101, 0b00000], // Q
-    [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001, 0b00000], // R
-    [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110, 0b00000], // S
-    [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000], // T
-    [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110, 0b00000], // U
-    [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100, 0b00000], // V
-    [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001, 0b00000], // W
-    [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001, 0b00000], // X
-    [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000], // Y
-    [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111, 0b00000], // Z
-    [0b01110, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01110, 0b00000], // [
-    [0b10000, 0b01000, 0b01000, 0b00100, 0b00010, 0b00010, 0b00001, 0b00000], // \
-    [0b01110, 0b00010, 0b00010, 0b00010, 0b00010, 0b00010, 0b01110, 0b00000], // ]
-    [0b00100, 0b01010, 0b10001, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000], // ^
-    [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111], // _
-    [0b01000, 0b00100, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000], // `
-    [0b00000, 0b00000, 0b01110, 0b00001, 0b01111, 0b10001, 0b01111, 0b00000], // a
-    [0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b11110, 0b00000], // b
-    [0b00000, 0b00000, 0b01111, 0b10000, 0b10000, 0b10000, 0b01111, 0b00000], // c
-    [0b00001, 0b00001, 0b01111, 0b10001, 0b10001, 0b10001, 0b01111, 0b00000], // d
-    [0b00000, 0b00000, 0b01110, 0b10001, 0b11111, 0b10000, 0b01110, 0b00000], // e
-    [0b00110, 0b01001, 0b01000, 0b11100, 0b01000, 0b01000, 0b01000, 0b00000], // f
-    [0b00000, 0b00000, 0b01111, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110], // g
-    [0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b00000], // h
-    [0b00100, 0b00000, 0b01100, 0b00100, 0b00100, 0b00100, 0b01110, 0b00000], // i
-    [0b00010, 0b00000, 0b00110, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100], // j
-    [0b10000, 0b10000, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b00000], // k
-    [0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110, 0b00000], // l
-    [0b00000, 0b00000, 0b11010, 0b10101, 0b10101, 0b10101, 0b10101, 0b00000], // m
-    [0b00000, 0b00000, 0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b00000], // n
-    [0b00000, 0b00000, 0b01110, 0b10001, 0b10001, 0b10001, 0b01110, 0b00000], // o
-    [0b00000, 0b00000, 0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000], // p
-    [0b00000, 0b00000, 0b01111, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001], // q
-    [0b00000, 0b00000, 0b10110, 0b11001, 0b10000, 0b10000, 0b10000, 0b00000], // r
-    [0b00000, 0b00000, 0b01111, 0b10000, 0b01110, 0b00001, 0b11110, 0b00000], // s
-    [0b01000, 0b01000, 0b11100, 0b01000, 0b01000, 0b01001, 0b00110, 0b00000], // t
-    [0b00000, 0b00000, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101, 0b00000], // u
-    [0b00000, 0b00000, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100, 0b00000], // v
-    [0b00000, 0b00000, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010, 0b00000], // w
-    [0b00000, 0b00000, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b00000], // x
-    [0b00000, 0b00000, 0b10001, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110], // y
-    [0b00000, 0b00000, 0b11111, 0b00010, 0b00100, 0b01000, 0b11111, 0b00000], // z
-    [0b00010, 0b00100, 0b00100, 0b01000, 0b00100, 0b00100, 0b00010, 0b00000], // {
-    [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000], // |
-    [0b01000, 0b00100, 0b00100, 0b00010, 0b00100, 0b00100, 0b01000, 0b00000], // }
-    [0b00000, 0b00000, 0b01000, 0b10101, 0b00010, 0b00000, 0b00000, 0b00000], // ~
+    [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // space
+    [0x00,0x00,0x18,0x3C,0x3C,0x3C,0x18,0x18,0x18,0x00,0x18,0x18,0x00,0x00,0x00,0x00], // !
+    [0x00,0x00,0x66,0x66,0x66,0x24,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // "
+    [0x00,0x00,0x00,0x6C,0x6C,0xFE,0x6C,0x6C,0x6C,0xFE,0x6C,0x6C,0x00,0x00,0x00,0x00], // #
+    [0x00,0x18,0x18,0x7C,0xC6,0xC2,0xC0,0x7C,0x06,0x86,0xC6,0x7C,0x18,0x18,0x00,0x00], // $
+    [0x00,0x00,0x00,0x00,0xC2,0xC6,0x0C,0x18,0x30,0x60,0xC6,0x86,0x00,0x00,0x00,0x00], // %
+    [0x00,0x00,0x38,0x6C,0x6C,0x38,0x76,0xDC,0xCC,0xCC,0xCC,0x76,0x00,0x00,0x00,0x00], // &
+    [0x00,0x00,0x30,0x30,0x30,0x60,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // '
+    [0x00,0x00,0x0C,0x18,0x30,0x30,0x30,0x30,0x30,0x18,0x0C,0x00,0x00,0x00,0x00,0x00], // (
+    [0x00,0x00,0x30,0x18,0x0C,0x0C,0x0C,0x0C,0x0C,0x18,0x30,0x00,0x00,0x00,0x00,0x00], // )
+    [0x00,0x00,0x00,0x00,0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00,0x00,0x00,0x00,0x00], // *
+    [0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x7E,0x18,0x18,0x00,0x00,0x00,0x00,0x00,0x00], // +
+    [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x18,0x30,0x00,0x00], // ,
+    [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFE,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // -
+    [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00,0x00,0x00,0x00], // .
+    [0x00,0x00,0x02,0x06,0x0C,0x18,0x30,0x60,0xC0,0x80,0x00,0x00,0x00,0x00,0x00,0x00], // /
+    [0x00,0x00,0x38,0x6C,0xC6,0xC6,0xD6,0xD6,0xC6,0xC6,0x6C,0x38,0x00,0x00,0x00,0x00], // 0
+    [0x00,0x00,0x18,0x38,0x78,0x18,0x18,0x18,0x18,0x18,0x18,0x7E,0x00,0x00,0x00,0x00], // 1
+    [0x00,0x00,0x7C,0xC6,0x06,0x0C,0x18,0x30,0x60,0xC0,0xC6,0xFE,0x00,0x00,0x00,0x00], // 2
+    [0x00,0x00,0x7C,0xC6,0x06,0x06,0x3C,0x06,0x06,0x06,0xC6,0x7C,0x00,0x00,0x00,0x00], // 3
+    [0x00,0x00,0x0C,0x1C,0x3C,0x6C,0xCC,0xFE,0x0C,0x0C,0x0C,0x1E,0x00,0x00,0x00,0x00], // 4
+    [0x00,0x00,0xFE,0xC0,0xC0,0xC0,0xFC,0x06,0x06,0x06,0xC6,0x7C,0x00,0x00,0x00,0x00], // 5
+    [0x00,0x00,0x38,0x60,0xC0,0xC0,0xFC,0xC6,0xC6,0xC6,0xC6,0x7C,0x00,0x00,0x00,0x00], // 6
+    [0x00,0x00,0xFE,0xC6,0x06,0x06,0x0C,0x18,0x30,0x30,0x30,0x30,0x00,0x00,0x00,0x00], // 7
+    [0x00,0x00,0x7C,0xC6,0xC6,0xC6,0x7C,0xC6,0xC6,0xC6,0xC6,0x7C,0x00,0x00,0x00,0x00], // 8
+    [0x00,0x00,0x7C,0xC6,0xC6,0xC6,0x7E,0x06,0x06,0x06,0x0C,0x78,0x00,0x00,0x00,0x00], // 9
+    [0x00,0x00,0x00,0x00,0x18,0x18,0x00,0x00,0x00,0x18,0x18,0x00,0x00,0x00,0x00,0x00], // :
+    [0x00,0x00,0x00,0x00,0x18,0x18,0x00,0x00,0x00,0x18,0x18,0x30,0x00,0x00,0x00,0x00], // ;
+    [0x00,0x00,0x06,0x0C,0x18,0x30,0x60,0x30,0x18,0x0C,0x06,0x00,0x00,0x00,0x00,0x00], // <
+    [0x00,0x00,0x00,0x00,0x00,0x7E,0x00,0x00,0x7E,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // =
+    [0x00,0x00,0x60,0x30,0x18,0x0C,0x06,0x0C,0x18,0x30,0x60,0x00,0x00,0x00,0x00,0x00], // >
+    [0x00,0x00,0x7C,0xC6,0xC6,0x0C,0x18,0x18,0x18,0x00,0x18,0x18,0x00,0x00,0x00,0x00], // ?
+    [0x00,0x00,0x7C,0xC6,0xC6,0xDE,0xDE,0xDE,0xDC,0xC0,0x7C,0x00,0x00,0x00,0x00,0x00], // @
+    [0x00,0x00,0x10,0x38,0x6C,0xC6,0xC6,0xFE,0xC6,0xC6,0xC6,0xC6,0x00,0x00,0x00,0x00], // A
+    [0x00,0x00,0xFC,0x66,0x66,0x66,0x7C,0x66,0x66,0x66,0x66,0xFC,0x00,0x00,0x00,0x00], // B
+    [0x00,0x00,0x3C,0x66,0xC2,0xC0,0xC0,0xC0,0xC0,0xC2,0x66,0x3C,0x00,0x00,0x00,0x00], // C
+    [0x00,0x00,0xF8,0x6C,0x66,0x66,0x66,0x66,0x66,0x66,0x6C,0xF8,0x00,0x00,0x00,0x00], // D
+    [0x00,0x00,0xFE,0x66,0x62,0x68,0x78,0x68,0x60,0x62,0x66,0xFE,0x00,0x00,0x00,0x00], // E
+    [0x00,0x00,0xFE,0x66,0x62,0x68,0x78,0x68,0x60,0x60,0x60,0xF0,0x00,0x00,0x00,0x00], // F
+    [0x00,0x00,0x3C,0x66,0xC2,0xC0,0xC0,0xDE,0xC6,0xC6,0x66,0x3A,0x00,0x00,0x00,0x00], // G
+    [0x00,0x00,0xC6,0xC6,0xC6,0xC6,0xFE,0xC6,0xC6,0xC6,0xC6,0xC6,0x00,0x00,0x00,0x00], // H
+    [0x00,0x00,0x3C,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x3C,0x00,0x00,0x00,0x00], // I
+    [0x00,0x00,0x1E,0x0C,0x0C,0x0C,0x0C,0x0C,0xCC,0xCC,0xCC,0x78,0x00,0x00,0x00,0x00], // J
+    [0x00,0x00,0xE6,0x66,0x66,0x6C,0x78,0x78,0x6C,0x66,0x66,0xE6,0x00,0x00,0x00,0x00], // K
+    [0x00,0x00,0xF0,0x60,0x60,0x60,0x60,0x60,0x60,0x62,0x66,0xFE,0x00,0x00,0x00,0x00], // L
+    [0x00,0x00,0xC6,0xEE,0xFE,0xFE,0xD6,0xC6,0xC6,0xC6,0xC6,0xC6,0x00,0x00,0x00,0x00], // M
+    [0x00,0x00,0xC6,0xE6,0xF6,0xFE,0xDE,0xCE,0xC6,0xC6,0xC6,0xC6,0x00,0x00,0x00,0x00], // N
+    [0x00,0x00,0x38,0x6C,0xC6,0xC6,0xC6,0xC6,0xC6,0xC6,0x6C,0x38,0x00,0x00,0x00,0x00], // O
+    [0x00,0x00,0xFC,0x66,0x66,0x66,0x7C,0x60,0x60,0x60,0x60,0xF0,0x00,0x00,0x00,0x00], // P
+    [0x00,0x00,0x38,0x6C,0xC6,0xC6,0xC6,0xC6,0xC6,0xD6,0xDE,0x7C,0x0C,0x0E,0x00,0x00], // Q
+    [0x00,0x00,0xFC,0x66,0x66,0x66,0x7C,0x6C,0x66,0x66,0x66,0xE6,0x00,0x00,0x00,0x00], // R
+    [0x00,0x00,0x7C,0xC6,0xC6,0x60,0x38,0x0C,0x06,0xC6,0xC6,0x7C,0x00,0x00,0x00,0x00], // S
+    [0x00,0x00,0x7E,0x7E,0x5A,0x18,0x18,0x18,0x18,0x18,0x18,0x3C,0x00,0x00,0x00,0x00], // T
+    [0x00,0x00,0xC6,0xC6,0xC6,0xC6,0xC6,0xC6,0xC6,0xC6,0xC6,0x7C,0x00,0x00,0x00,0x00], // U
+    [0x00,0x00,0xC6,0xC6,0xC6,0xC6,0xC6,0xC6,0xC6,0x6C,0x38,0x10,0x00,0x00,0x00,0x00], // V
+    [0x00,0x00,0xC6,0xC6,0xC6,0xC6,0xD6,0xD6,0xD6,0xFE,0xEE,0x6C,0x00,0x00,0x00,0x00], // W
+    [0x00,0x00,0xC6,0xC6,0x6C,0x7C,0x38,0x38,0x7C,0x6C,0xC6,0xC6,0x00,0x00,0x00,0x00], // X
+    [0x00,0x00,0x66,0x66,0x66,0x66,0x3C,0x18,0x18,0x18,0x18,0x3C,0x00,0x00,0x00,0x00], // Y
+    [0x00,0x00,0xFE,0xC6,0x86,0x0C,0x18,0x30,0x60,0xC2,0xC6,0xFE,0x00,0x00,0x00,0x00], // Z
+    [0x00,0x00,0x3C,0x30,0x30,0x30,0x30,0x30,0x30,0x30,0x30,0x3C,0x00,0x00,0x00,0x00], // [
+    [0x00,0x00,0x80,0xC0,0x60,0x30,0x18,0x0C,0x06,0x02,0x00,0x00,0x00,0x00,0x00,0x00], // backslash
+    [0x00,0x00,0x3C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x3C,0x00,0x00,0x00,0x00], // ]
+    [0x10,0x38,0x6C,0xC6,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // ^
+    [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0x00], // _
+    [0x18,0x18,0x0C,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // `
+    [0x00,0x00,0x00,0x00,0x00,0x78,0x0C,0x7C,0xCC,0xCC,0xCC,0x76,0x00,0x00,0x00,0x00], // a
+    [0x00,0x00,0xE0,0x60,0x60,0x78,0x6C,0x66,0x66,0x66,0x66,0x7C,0x00,0x00,0x00,0x00], // b
+    [0x00,0x00,0x00,0x00,0x00,0x7C,0xC6,0xC0,0xC0,0xC0,0xC6,0x7C,0x00,0x00,0x00,0x00], // c
+    [0x00,0x00,0x1C,0x0C,0x0C,0x3C,0x6C,0xCC,0xCC,0xCC,0xCC,0x76,0x00,0x00,0x00,0x00], // d
+    [0x00,0x00,0x00,0x00,0x00,0x7C,0xC6,0xFE,0xC0,0xC0,0xC6,0x7C,0x00,0x00,0x00,0x00], // e
+    [0x00,0x00,0x38,0x6C,0x64,0x60,0xF0,0x60,0x60,0x60,0x60,0xF0,0x00,0x00,0x00,0x00], // f
+    [0x00,0x00,0x00,0x00,0x00,0x76,0xCC,0xCC,0xCC,0xCC,0xCC,0x7C,0x0C,0xCC,0x78,0x00], // g
+    [0x00,0x00,0xE0,0x60,0x60,0x6C,0x76,0x66,0x66,0x66,0x66,0xE6,0x00,0x00,0x00,0x00], // h
+    [0x00,0x00,0x18,0x18,0x00,0x38,0x18,0x18,0x18,0x18,0x18,0x3C,0x00,0x00,0x00,0x00], // i
+    [0x00,0x00,0x06,0x06,0x00,0x0E,0x06,0x06,0x06,0x06,0x06,0x66,0x66,0x3C,0x00,0x00], // j
+    [0x00,0x00,0xE0,0x60,0x60,0x66,0x6C,0x78,0x78,0x6C,0x66,0xE6,0x00,0x00,0x00,0x00], // k
+    [0x00,0x00,0x38,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x3C,0x00,0x00,0x00,0x00], // l
+    [0x00,0x00,0x00,0x00,0x00,0xEC,0xFE,0xD6,0xD6,0xD6,0xD6,0xC6,0x00,0x00,0x00,0x00], // m
+    [0x00,0x00,0x00,0x00,0x00,0xDC,0x66,0x66,0x66,0x66,0x66,0x66,0x00,0x00,0x00,0x00], // n
+    [0x00,0x00,0x00,0x00,0x00,0x7C,0xC6,0xC6,0xC6,0xC6,0xC6,0x7C,0x00,0x00,0x00,0x00], // o
+    [0x00,0x00,0x00,0x00,0x00,0xDC,0x66,0x66,0x66,0x66,0x66,0x7C,0x60,0x60,0xF0,0x00], // p
+    [0x00,0x00,0x00,0x00,0x00,0x76,0xCC,0xCC,0xCC,0xCC,0xCC,0x7C,0x0C,0x0C,0x1E,0x00], // q
+    [0x00,0x00,0x00,0x00,0x00,0xDC,0x76,0x66,0x60,0x60,0x60,0xF0,0x00,0x00,0x00,0x00], // r
+    [0x00,0x00,0x00,0x00,0x00,0x7C,0xC6,0x60,0x38,0x0C,0xC6,0x7C,0x00,0x00,0x00,0x00], // s
+    [0x00,0x00,0x10,0x30,0x30,0xFC,0x30,0x30,0x30,0x30,0x36,0x1C,0x00,0x00,0x00,0x00], // t
+    [0x00,0x00,0x00,0x00,0x00,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0x76,0x00,0x00,0x00,0x00], // u
+    [0x00,0x00,0x00,0x00,0x00,0xC6,0xC6,0xC6,0xC6,0x6C,0x38,0x10,0x00,0x00,0x00,0x00], // v
+    [0x00,0x00,0x00,0x00,0x00,0xC6,0xC6,0xD6,0xD6,0xD6,0xFE,0x6C,0x00,0x00,0x00,0x00], // w
+    [0x00,0x00,0x00,0x00,0x00,0xC6,0x6C,0x38,0x38,0x38,0x6C,0xC6,0x00,0x00,0x00,0x00], // x
+    [0x00,0x00,0x00,0x00,0x00,0xC6,0xC6,0xC6,0xC6,0xC6,0x7E,0x06,0x0C,0xF8,0x00,0x00], // y
+    [0x00,0x00,0x00,0x00,0x00,0xFE,0xCC,0x18,0x30,0x60,0xC6,0xFE,0x00,0x00,0x00,0x00], // z
+    [0x00,0x00,0x0E,0x18,0x18,0x18,0x70,0x18,0x18,0x18,0x18,0x0E,0x00,0x00,0x00,0x00], // {
+    [0x00,0x00,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x00,0x00,0x00,0x00], // |
+    [0x00,0x00,0x70,0x18,0x18,0x18,0x0E,0x18,0x18,0x18,0x18,0x70,0x00,0x00,0x00,0x00], // }
+    [0x00,0x00,0x76,0xDC,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // ~
 ];
 
 /// The table covers exactly the printable range and no reader has to count.
@@ -232,6 +271,10 @@ pub struct Surface {
     height: u32,
     /// Unit: bytes.
     bytes_per_pixel: u32,
+    /// How many screen pixels one glyph pixel becomes, on each axis. Carried on
+    /// the surface rather than being a constant, because it is a property of
+    /// the display that was handed over. [`scale_for`] decides it.
+    scale: usize,
     /// The packed value of a lit pixel.
     ink: u32,
     /// The packed value of an unlit one.
@@ -248,18 +291,36 @@ impl Surface {
     #[must_use]
     pub fn over(fb: &Framebuffer, at: u64) -> Self {
         let bytes_per_pixel = u32::from(fb.bits_per_pixel).div_ceil(8);
-        let (ink, paper) = match fb.kind {
-            // A light grey on near-black. Not white on black: a boot log is
-            // read for minutes at a time, and full-intensity white on a panel
-            // at close range is the one choice a reader notices.
-            FramebufferKind::Direct(channels) => {
-                (pack(channels, 0xC8, 0xCF, 0xD8), pack(channels, 0x0A, 0x0C, 0x12))
-            }
+        let ink = match fb.kind {
+            // **Every bit of every channel, rather than a chosen colour**, and
+            // the reason is a screen that came back the wrong hue. The first
+            // version of this picked a light grey — a considered `(0xC8, 0xCF,
+            // 0xD8)` — packed through the layout the loader reported, and the
+            // VMware guest drew the log in yellow-green. Yellow-green is red
+            // plus green with no blue, which is what a packed colour looks like
+            // when one channel's position or width is not what the code
+            // believed. The colour was carrying an assumption about a structure
+            // the loader wrote, and it was the only part of this file that
+            // could be wrong *quietly*: a misplaced glyph is visible, and a
+            // misplaced channel is just a colour somebody might have chosen.
+            //
+            // Saturating every channel removes the assumption rather than
+            // fixing it. All bits set in each reported field is white under any
+            // layout, any width and any order — there is no arrangement of
+            // three masks that makes it something else — so the worst a
+            // misreported channel can now do is leave that channel dark, which
+            // is a tint rather than a lie. `intent/0011` still asks for the
+            // channel line to be read back off the machine; this makes the
+            // screen legible whatever it says.
+            //
+            // White on black is also what the console this is compared against
+            // does, which is the other half of the argument.
+            FramebufferKind::Direct(channels) => channels.saturated(),
             // Indexed, text and unknown kinds get the two values every palette
             // agrees about at its ends. This console does not load a palette —
             // on a mode it did not ask for, the honest thing is to draw in
             // whatever *is* black and white rather than to guess an index.
-            _ => (u32::MAX, 0),
+            _ => u32::MAX,
         };
 
         Self {
@@ -268,16 +329,30 @@ impl Surface {
             width: fb.width,
             height: fb.height,
             bytes_per_pixel,
+            scale: scale_for(fb.width),
             ink,
-            paper,
+            // Black is zero in every direct-colour layout and at one end of
+            // every palette, so it needs none of the care the ink needed.
+            paper: 0,
         }
     }
 
     /// Describe a surface over memory the caller owns.
     ///
     /// For [`selftest`], and the two colours are the ones its dump reads back.
+    /// Scale one, because the check reads pixels back as characters and
+    /// doubling every one of them would only make the dump twice as wide.
     fn over_memory(at: u64, width: u32, height: u32) -> Self {
-        Self { at, pitch: width * 4, width, height, bytes_per_pixel: 4, ink: u32::MAX, paper: 0 }
+        Self {
+            at,
+            pitch: width * 4,
+            width,
+            height,
+            bytes_per_pixel: 4,
+            scale: 1,
+            ink: u32::MAX,
+            paper: 0,
+        }
     }
 
     /// Can this console write a pixel of this depth at all?
@@ -344,24 +419,31 @@ impl Surface {
     /// Draw one character in cell `(col, row)`.
     fn cell(self, col: usize, row: usize, ch: u8) {
         let rows = glyph(ch);
-        let origin_x = (col * GLYPH_W * SCALE) as u32;
-        let origin_y = (row * GLYPH_H * SCALE) as u32;
+        let origin_x = (col * GLYPH_W * self.scale) as u32;
+        let origin_y = (row * GLYPH_H * self.scale) as u32;
 
         for (dy, bits) in rows.iter().enumerate() {
             for dx in 0..GLYPH_W {
-                // Bit 4 is the leftmost of the five the font uses; the sixth
-                // column of the box is always blank and is what separates one
-                // character from the next.
-                let lit = dx < 5 && bits & (1 << (4 - dx)) != 0;
+                // Bit 7 is the leftmost pixel of the row, which is how every
+                // eight-wide bitmap font on this architecture is stored and how
+                // the table above reads: the byte is the row, most significant
+                // bit first. The spacing between characters is inside the glyph
+                // — the table leaves the rightmost column or two clear — rather
+                // than being a gap the grid adds, which is what lets a box
+                // drawing character reach the edge of its cell if one is ever
+                // added.
+                let lit = bits & (1 << (7 - dx)) != 0;
                 let value = if lit { self.ink } else { self.paper };
 
                 // The scale is a nested loop rather than a wider write because
                 // a wider write would have to know the pixel format again, and
-                // `put` is the one place in this file that does.
-                for sy in 0..SCALE {
-                    for sx in 0..SCALE {
-                        let x = origin_x + (dx * SCALE + sx) as u32;
-                        let y = origin_y + (dy * SCALE + sy) as u32;
+                // `put` is the one place in this file that does. At scale one,
+                // which is every display short of 4K, both loops run once and
+                // the compiler is left with the plain store.
+                for sy in 0..self.scale {
+                    for sx in 0..self.scale {
+                        let x = origin_x + (dx * self.scale + sx) as u32;
+                        let y = origin_y + (dy * self.scale + sy) as u32;
                         self.put(x, y, value);
                     }
                 }
@@ -370,19 +452,47 @@ impl Surface {
     }
 }
 
-/// Pack a colour the way this surface's channels are laid out.
-fn pack(channels: Channels, red: u32, green: u32, blue: u32) -> u32 {
-    /// Narrow an eight-bit component to the width a channel actually has.
-    fn fit(component: u32, bits: u8, at: u8) -> u32 {
-        if bits == 0 || bits > 8 || at > 31 {
-            return 0;
-        }
-        (component >> (8 - bits)) << at
+/// The nearest character this font has to `ch`.
+///
+/// # Why a fold and not a wider font
+///
+/// The alternative is to carry glyphs for the punctuation this tree writes,
+/// which means carrying a lookup from code point to glyph, which means the font
+/// stops being an array indexed by arithmetic. For a fallback console that
+/// exists to be read during a boot, the dash somebody typed and the dash this
+/// draws being *different dashes* costs the reader nothing; the character being
+/// absent costs them the line.
+///
+/// So the folds are the ones this repository's own prose actually uses, and
+/// everything else outside ASCII becomes [`REPLACEMENT`] — one mark for one
+/// character, which is the part that matters. The list is short on purpose: a
+/// fold nobody needs is a row somebody has to check.
+fn fold(ch: char) -> u8 {
+    match ch {
+        // ASCII passes through untouched, which is every byte of a boot log
+        // that is not punctuation somebody reached for.
+        '\n' | '\r' | '\t' => ch as u8,
+        ' '..='~' => ch as u8,
+        // The dashes. An em dash separates clauses all through this tree's
+        // output and an en dash turns up in ranges; both read as a hyphen.
+        '\u{2014}' | '\u{2013}' | '\u{2212}' => b'-',
+        // Quotation marks, which arrive whenever a sentence quotes a term.
+        '\u{2018}' | '\u{2019}' => b'\'',
+        '\u{201C}' | '\u{201D}' => b'"',
+        // The ellipsis, which is one character and three dots. Only the first
+        // is drawn: a fold that grew a cell would put the grid out of step with
+        // the column the caller counted on.
+        '\u{2026}' => b'.',
+        // Units and arithmetic the boot report prints: microseconds, a
+        // multiplication sign between dimensions, a middle dot between fields.
+        '\u{00B5}' | '\u{03BC}' => b'u',
+        '\u{00D7}' => b'x',
+        '\u{00B7}' => b'.',
+        // A non-breaking space is a space. Nothing about this grid breaks
+        // lines, so the distinction has nowhere to land.
+        '\u{00A0}' => b' ',
+        _ => REPLACEMENT,
     }
-
-    fit(red, channels.red_bits, channels.red_at)
-        | fit(green, channels.green_bits, channels.green_at)
-        | fit(blue, channels.blue_bits, channels.blue_at)
 }
 
 /// The text on the screen, and the text that should be.
@@ -412,8 +522,8 @@ impl Console {
 
     /// Take a surface and work out the grid that fits on it.
     fn attach(&mut self, surface: Surface) {
-        self.cols = (surface.width as usize / (GLYPH_W * SCALE)).min(MAX_COLS);
-        self.rows = (surface.height as usize / (GLYPH_H * SCALE)).min(MAX_ROWS);
+        self.cols = (surface.width as usize / (GLYPH_W * surface.scale)).min(MAX_COLS);
+        self.rows = (surface.height as usize / (GLYPH_H * surface.scale)).min(MAX_ROWS);
         self.col = 0;
         self.row = 0;
         self.want = [b' '; CELLS];
@@ -622,10 +732,19 @@ pub fn write_str(text: &str) {
     // function.
     let console = unsafe { console() };
 
+    // Characters, not bytes, and it is the difference between a readable screen
+    // and a littered one. This tree's log is written with typographic
+    // punctuation — the em dash in `frame — 4 capabilit(ies) revoked` is in
+    // almost every line the supervisor prints — and an em dash is three bytes
+    // of UTF-8. Walking bytes put three replacement marks on the screen for one
+    // character the reader can see is a dash, so the first real display this
+    // console met showed `???` down the middle of half its lines. `&str` is
+    // valid UTF-8 by construction, so `chars` is both the fix and the cheaper
+    // spelling: no decoder, no state, no way to be mid-character at a flush.
     let mut ended_a_line = false;
-    for byte in text.bytes() {
-        console.put(byte);
-        ended_a_line |= byte == b'\n';
+    for ch in text.chars() {
+        console.put(fold(ch));
+        ended_a_line |= ch == '\n';
     }
 
     // Once per line rather than once per character. A flush is a scan of the
@@ -665,13 +784,13 @@ pub fn dump_font() {
     for ch in FIRST..=LAST {
         crate::kprintln!("  glyph  {ch:#04x}  {}", ch as char);
         for row in glyph(ch) {
-            let mut line = [b'.'; 5];
+            let mut line = [b'.'; GLYPH_W];
             for (index, cell) in line.iter_mut().enumerate() {
-                if row & (1 << (4 - index)) != 0 {
+                if row & (1 << (7 - index)) != 0 {
                     *cell = b'#';
                 }
             }
-            crate::kprintln!("           {}", core::str::from_utf8(&line).unwrap_or("?????"));
+            crate::kprintln!("           {}", core::str::from_utf8(&line).unwrap_or("????????"));
         }
     }
 }
@@ -689,18 +808,20 @@ pub fn selftest(text: &str) {
     /// read back. It is a stack array, and the kernel stack is sixty-four
     /// kibibytes — so this is sized by what the stack can hold rather than by
     /// what would be nice to see. Unit: pixels.
-    const W: u32 = 144;
+    const W: u32 = 160;
     /// One row of cells. Unit: pixels.
-    const H: u32 = (GLYPH_H * SCALE) as u32;
+    ///
+    /// `over_memory` draws at scale one, so this is the cell height exactly.
+    const H: u32 = GLYPH_H as u32;
 
     let mut pixels = [0u32; (W * H) as usize];
     let surface = Surface::over_memory(pixels.as_mut_ptr() as u64, W, H);
 
-    for (col, ch) in text.bytes().enumerate() {
-        surface.cell(col, 0, ch);
+    for (col, ch) in text.chars().enumerate() {
+        surface.cell(col, 0, fold(ch));
     }
 
-    crate::kprintln!("  screen        self-test, {} x {} pixels, scale {SCALE}", W, H);
+    crate::kprintln!("  screen        self-test, {W} x {H} pixels, {GLYPH_W} x {GLYPH_H} cell");
     for y in 0..H {
         let mut line = [b'.'; W as usize];
         for x in 0..W {

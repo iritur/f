@@ -19,15 +19,18 @@ sense unless F boots on the metal.
 | **Loader** | multiboot **1** — header magic `0x1BADB002`, flags `0x7`. GRUB's `multiboot` command, not `multiboot2`. |
 | **Modules** | exactly one: `user/init`, as the first module. Under QEMU this arrives as `-initrd`; under GRUB it is `module`. |
 | **Console** | 16550 UART on **COM1, port `0x3F8`, 38400 baud, 8N1**. |
-| **Video** | optional, and used when it is there. The header asks for a linear framebuffer at no particular size; a loader that provides one gets the boot log drawn on it. See *The screen* below. |
+| **Video** | optional, and used when it is there. The header asks for a linear framebuffer at **1920 x 1080 x 32**, falling back to any depth at that size and then to the firmware's own mode; a loader that provides one gets the boot log drawn on it. See *The screen* below. |
 | **Firmware** | Secure Boot off. The image is not signed. |
 
 ### The screen, and what it is and is not
 
 **A loader that answers the video request gets the boot log on the display.**
-The header asks for a linear framebuffer and names no size, so GRUB resolves it
-against whatever mode the firmware is already in and hands back an address, a
-pitch, a geometry and a channel layout. The frame maps that, and from the line
+The header asks for a linear framebuffer at 1920 by 1080 and thirty-two bits,
+which GRUB turns into the mode list `1920x1080x32,1920x1080,auto` and tries in
+order — so a firmware that cannot set that mode falls back to its own, and there
+is no way for the request to end with no framebuffer where asking for nothing
+would have got one. What comes back is an address, a pitch, a geometry and a
+channel layout. The frame maps that, and from the line
 after the address-space switch every `kprintln!` goes to the screen as well as
 to the wire. RFC 0081 is why a console lives in the frame at all and what it
 will cost to take it back out again.
@@ -41,11 +44,25 @@ Three things to expect, because each of them looks like a fault and is not:
   and nothing has drawn yet. On a machine where the kernel dies before the
   address-space switch, a black screen is therefore all you get — which is the
   case the serial port still exists for.
-- **The text is small, plain and grey.** The font is five pixels by seven and is
-  typed into `kernel/src/screen.rs` rather than imported, because
+- **The text is plain, and white on black.** The font is an eight-by-sixteen
+  cell — the size a Linux console uses, giving 240 columns by 67 rows at 1080p —
+  and it is typed into `kernel/src/screen.rs` rather than imported, because
   `LICENSING.md` has no category for imported data and the frame may not reach
-  into `third_party/`. RFC 0081's reversal section is where a better font comes
-  from, and it arrives with the component rather than with a licence exception.
+  into `third_party/`. RFC 0081's reversal section is where a font somebody
+  chose comes from, and it arrives with the component rather than with a licence
+  exception.
+
+**To ask for a different mode**, change the three numbers in the video request
+at the top of `kernel/src/arch/x86_64/boot.rs` and rebuild. `GRUB_GFXMODE` will
+not do it: GRUB writes the header's request into `gfxpayload` itself, so the
+kernel's request wins over the configuration file. Setting all three back to
+zero gives that control back — the payload then gets whatever mode GRUB is
+already in, which is what `GRUB_GFXMODE` sets.
+
+On a virtual machine the ceiling is usually the guest's video memory rather than
+the request: a VMware guest with the default allocation may not offer 1080p to
+the firmware at all, and the boot report's `framebuffer` line is what says which
+mode actually landed.
 
 Under QEMU there is no screen at all, and that is the emulator rather than the
 kernel: its `-kernel` loader implements no part of the video request, prints

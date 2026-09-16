@@ -336,7 +336,14 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         screen::dump_font();
     }
     if boot.has_parameter(b"screen=selftest") {
-        screen::selftest("F screen ok");
+        // Not a neutral string. The em dash is the character that put `???`
+        // down the middle of the first real display this console met — three
+        // bytes of UTF-8 walked one at a time — so it is in the check now, and
+        // a dash that comes back as anything but one mark is that regression
+        // arriving again. `1l` sits beside it because a `1` that cannot be told
+        // from an `l` is the other way a boot log lies quietly, and the font
+        // this replaced could not tell them apart.
+        screen::selftest("F \u{2014} screen 1l");
     }
     if boot.has_parameter(b"screen=parse") {
         // The seven word offsets into the loader's structure, which are seven
