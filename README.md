@@ -147,6 +147,7 @@ user/init/    The first component. Proves the protocol needs no unsafe above the
 xtask/        Build orchestration, and where written policy becomes an executable check.
 third_party/  Imported driver source. Delimited, differently licensed, ring-only reachable.
 claims/       Every number published in docs/design, with its baseline and threshold.
+docs/book/    One book per reader. Foundations and Evidence; Applications unwritten.
 docs/design/  The five design documents.
 docs/rfc/     Decisions, and reversals.
 
@@ -174,6 +175,24 @@ opt out silently. RFC 0001.
 workload and a one-command reproduction is an anecdote. `claims/README.md`.
 
 ## Reading order
+
+Two shelves, and which one you want depends on whether you are trying to
+understand this system or to argue with it.
+
+**The books explain it,** one per reader, divided by what the reader takes as
+given. A book carries no permission to be ahead of the code — it says at the top
+of every chapter what fraction of it runs. RFC 0085.
+
+1. `docs/book/foundations.html` — the system itself, if you may change it
+2. `docs/book/evidence.html` — the apparatus, if you do not believe any of it.
+   Start at its chapter 12, which is the gaps
+3. **F Applications** — writing a component, if you take F as given. Not yet
+   written and deliberately gated on E3, because today it would have no worked
+   example that was not invented
+
+**The design documents argue for it,** and are ahead of the code on purpose.
+Read these if you think one of the bets is wrong, which is who they are written
+for.
 
 1. `docs/design/fast-path.html` — the architecture and the five bets
 2. `docs/design/ring-scene-boot.html` — ring, compositor, semantic layer, M0-M6

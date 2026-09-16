@@ -1,0 +1,748 @@
+<title>F Foundations</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;700;900&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root{
+  --paper:#F2F4F7; --surface:#FFFFFF; --surface-2:#E9ECF2;
+  --ink:#12141A; --ink-2:#3A4150; --muted:#6B7382;
+  --line:#D6DBE4; --line-strong:#B9C0CD;
+  --cobalt:#2F4FD8; --rust:#A8431C; --teal:#0B6E5C;
+  --on-accent:#FFFFFF;
+  --shadow:0 1px 2px rgba(18,20,26,.05), 0 8px 24px -16px rgba(18,20,26,.28);
+  --sans:"IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --display:"Chivo", "IBM Plex Sans", ui-sans-serif, sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --col:66ch; --wide:1180px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+    --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+    --line:#262C39; --line-strong:#3D4657;
+    --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+    --on-accent:#0D0F14;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0D0F14; --surface:#151922; --surface-2:#1D222D;
+  --ink:#E8EBF1; --ink-2:#B6BDCB; --muted:#838B9B;
+  --line:#262C39; --line-strong:#3D4657;
+  --cobalt:#7E9BFF; --rust:#E08A5E; --teal:#4CC3A5;
+  --on-accent:#0D0F14;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.9);
+}
+
+*{box-sizing:border-box;}
+body{margin:0; background:var(--paper); color:var(--ink); font-family:var(--sans); font-size:17px; line-height:1.65; -webkit-font-smoothing:antialiased;}
+.wrap{max-width:var(--wide); margin:0 auto; padding:0 28px 96px;}
+
+h1,h2,h3,h4{font-family:var(--display); text-wrap:balance; margin:0;}
+h1{font-weight:900; font-size:clamp(2.6rem,6.5vw,4.4rem); line-height:.98; letter-spacing:-.035em;}
+h2{font-weight:900; font-size:clamp(1.5rem,3vw,2.05rem); line-height:1.08; letter-spacing:-.025em;}
+h3{font-weight:700; font-size:1.14rem; line-height:1.3; letter-spacing:-.012em;}
+h4{font-weight:700; font-size:.95rem; line-height:1.35;}
+p{margin:0;}
+a{color:var(--cobalt); text-decoration-thickness:1px; text-underline-offset:2px;}
+a:focus-visible{outline:2px solid var(--cobalt); outline-offset:3px; border-radius:2px;}
+strong,b{font-weight:600;}
+code{font-family:var(--mono); font-size:.87em; background:var(--surface-2); padding:.1em .34em; border-radius:3px;}
+
+.eyebrow{font-family:var(--mono); font-size:.7rem; font-weight:600; letter-spacing:.16em; text-transform:uppercase; color:var(--muted);}
+
+.mast{padding:72px 0 40px; border-bottom:1px solid var(--line-strong);}
+.mast-grid{display:flex; flex-direction:column; gap:26px;}
+.mast .lede{font-size:1.2rem; line-height:1.55; color:var(--ink-2); max-width:60ch;}
+.mast .lede b{color:var(--ink);}
+.specline{display:flex; flex-wrap:wrap; gap:10px 26px; padding-top:6px; font-family:var(--mono); font-size:.74rem; color:var(--muted); letter-spacing:.04em;}
+.specline span b{color:var(--ink-2);}
+
+.partbar{
+  display:flex; align-items:baseline; gap:18px; padding:64px 0 8px; flex-wrap:wrap;
+}
+.partbar .n{font-family:var(--mono); font-size:.72rem; font-weight:600; letter-spacing:.18em; text-transform:uppercase; color:var(--rust);}
+.partbar h2{font-size:clamp(1.7rem,3.6vw,2.5rem);}
+.partbar .r{flex:1 1 120px; height:1px; background:var(--line-strong); min-width:40px;}
+
+section{padding:44px 0 8px; border-bottom:1px solid var(--line);}
+section:last-of-type{border-bottom:0;}
+.sec-head{display:flex; align-items:baseline; gap:16px; margin-bottom:20px; flex-wrap:wrap;}
+.sec-num{font-family:var(--mono); font-size:.74rem; font-weight:600; color:var(--cobalt); letter-spacing:.1em; padding-top:.5em;}
+.flow{display:flex; flex-direction:column; gap:18px;}
+.flow > p, .flow > ul, .flow > .note, .flow > h3, .flow > .claim{max-width:var(--col);}
+
+ul.list{margin:0; padding-left:0; list-style:none; display:flex; flex-direction:column; gap:11px;}
+ul.list li{position:relative; padding-left:22px;}
+ul.list li::before{content:""; position:absolute; left:2px; top:.62em; width:7px; height:7px; border:1.5px solid var(--cobalt); border-radius:1px;}
+
+.note{border-left:3px solid var(--rust); background:color-mix(in srgb, var(--rust) 7%, var(--surface)); padding:14px 18px; border-radius:0 5px 5px 0; font-size:.95rem; color:var(--ink-2);}
+.note b{color:var(--ink);}
+.claim{border-left:3px solid var(--cobalt); background:color-mix(in srgb, var(--cobalt) 7%, var(--surface)); padding:14px 18px; border-radius:0 5px 5px 0; font-size:.95rem; color:var(--ink-2);}
+.claim b{color:var(--ink);}
+
+pre{
+  background:var(--surface-2); border:1px solid var(--line); border-radius:6px;
+  padding:15px 18px; overflow-x:auto; font-family:var(--mono); font-size:.755rem;
+  line-height:1.7; color:var(--ink-2); margin:0; tab-size:4;
+}
+pre .c{color:var(--muted); font-style:normal;}
+pre .k{color:var(--cobalt); font-weight:600;}
+pre .w{color:var(--rust); font-weight:600;}
+.codecap{font-family:var(--mono); font-size:.68rem; color:var(--muted); letter-spacing:.06em; text-transform:uppercase; padding-bottom:7px;}
+.codeblock{display:flex; flex-direction:column; margin:4px 0;}
+
+.tablewrap{overflow-x:auto; border:1px solid var(--line); border-radius:7px; background:var(--surface); margin:6px 0 4px;}
+table{border-collapse:collapse; width:100%; min-width:640px; font-size:.88rem;}
+th,td{text-align:left; padding:11px 15px; border-bottom:1px solid var(--line); vertical-align:top; line-height:1.5;}
+thead th{font-family:var(--mono); font-size:.67rem; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); background:var(--surface-2); border-bottom:1px solid var(--line-strong); white-space:nowrap;}
+tbody tr:last-child td{border-bottom:0;}
+td.m{font-family:var(--mono); font-size:.76rem; color:var(--ink-2); white-space:nowrap;}
+td.num{font-family:var(--mono); font-variant-numeric:tabular-nums; white-space:nowrap;}
+
+.chip{display:inline-block; font-family:var(--mono); font-size:.63rem; font-weight:600; letter-spacing:.08em; text-transform:uppercase; padding:3px 8px; border-radius:3px; border:1px solid currentColor; white-space:nowrap;}
+.chip.ok{color:var(--teal); background:color-mix(in srgb, var(--teal) 10%, var(--surface));}
+.chip.warn{color:var(--rust); background:color-mix(in srgb, var(--rust) 10%, var(--surface));}
+.chip.part{color:var(--cobalt); background:color-mix(in srgb, var(--cobalt) 10%, var(--surface));}
+
+/* Book furniture: a table of contents, and the per-chapter state marker.
+   Both are new here rather than in docs/design, because a design document is
+   read start to finish and a book is not. */
+.toc{display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:0 36px; margin:6px 0 4px;}
+.toc-part{display:flex; flex-direction:column; padding-top:12px;}
+.toc-part h4{font-family:var(--mono); font-size:.68rem; font-weight:600; letter-spacing:.14em; text-transform:uppercase; color:var(--rust); padding-bottom:9px; border-bottom:1px solid var(--line-strong);}
+.toc a{display:grid; grid-template-columns:32px 1fr; gap:0 10px; padding:10px 0; border-bottom:1px solid var(--line); text-decoration:none; color:var(--ink-2); font-size:.92rem; line-height:1.4;}
+.toc a:hover{color:var(--cobalt);}
+.toc a .n{font-family:var(--mono); font-size:.72rem; font-weight:600; color:var(--cobalt); padding-top:.15em;}
+.state{font-size:.9rem; color:var(--ink-2); border-left:2px solid var(--line-strong); padding-left:14px; max-width:var(--col);}
+.state b{font-family:var(--mono); font-size:.66rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); display:block; margin-bottom:3px;}
+
+.foot{padding-top:40px; font-family:var(--mono); font-size:.7rem; color:var(--muted); letter-spacing:.06em; line-height:1.8; max-width:80ch;}
+
+@media (max-width:720px){
+  body{font-size:16px;}
+  .wrap{padding:0 20px 72px;}
+  .toc{grid-template-columns:1fr;}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none !important; transition:none !important;}}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="mast-grid">
+    <div class="eyebrow">Book one of three</div>
+    <h1>F Foundations</h1>
+    <p class="lede">The system itself, for a reader who wants to <b>understand or change F</b>. The frame and why it is three crates, the determinism substrate everything else rests on, capabilities with no root, the ring that replaces the system call, what a component is and how one is spawned, the five resources under one discipline, the interface that sends structure rather than pixels, and how a change reaches this repository. <b>F Applications</b> is for a reader who takes all of this as given and writes a component. <b>F Evidence</b> is for a reader who does not believe any of it.</p>
+    <div class="specline">
+      <span><b>Milestone</b> &nbsp;M0</span>
+      <span><b>Target</b> &nbsp;x86-64 first, AArch64 second</span>
+      <span><b>Language</b> &nbsp;Rust, <code>no_std</code></span>
+      <span><b>Assumes</b> &nbsp;nothing</span>
+      <span><b>Alongside</b> &nbsp;The Fast Path &middot; Ring, Scene, Boot</span>
+    </div>
+  </div>
+</header>
+
+<section id="status">
+  <div class="sec-head"><div class="sec-num">&mdash;</div><h2>What in this book runs</h2></div>
+  <div class="flow">
+    <p>The five documents in <code>docs/design/</code> are permitted to be ahead of the code, and they are, on purpose &mdash; they are arguments, and an argument is allowed to be about something that does not exist yet. <b>A book inherits no such permission.</b> A book reads as a manual, and a manual describing a system that does not do what it says is not ahead of the code; it is wrong about it.</p>
+    <p>So this page opens with the ledger, and every chapter repeats its own line before its first paragraph. F is at <b>M0</b>: it boots, it says so, and it is already deterministic. It has booted twice in a virtual machine and never on bare metal.</p>
+  </div>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Chapter</th><th>State</th><th>What that means here</th></tr></thead>
+    <tbody>
+      <tr><td class="m">01 &nbsp;Introduction</td><td><span class="chip ok">true</span></td><td>Describes the project, not the system.</td></tr>
+      <tr><td class="m">02 &nbsp;Getting started</td><td><span class="chip ok">runs</span></td><td>Every command here executes today. If one does not, that is a bug in this chapter.</td></tr>
+      <tr><td class="m">03 &nbsp;Architecture</td><td><span class="chip part">mostly</span></td><td>The frame, determinism and the licence boundary are enforced by lints now. Capabilities exist; the ring-based versions of their operations do not yet.</td></tr>
+      <tr><td class="m">04 &nbsp;The ring</td><td><span class="chip part">mostly</span></td><td>The protocol, the orderings and the entry formats are built. The hardware fast paths &mdash; user interrupts, shared virtual memory &mdash; are designed and unbuilt.</td></tr>
+      <tr><td class="m">05 &nbsp;Components</td><td><span class="chip part">partly</span></td><td>The manifest schema is enforced by a lint and there are components in the tree. Most of the supervisor and state-tree story is specified and in progress.</td></tr>
+      <tr><td class="m">06 &nbsp;Resources</td><td><span class="chip warn">ahead</span></td><td>Admission arithmetic and the error domain exist. The five subsystems are the design document's argument and are largely unbuilt.</td></tr>
+      <tr><td class="m">07 &nbsp;The interface</td><td><span class="chip warn">ahead</span></td><td>Four decisions are recorded as RFCs. There is no compositor. Read this as the shape the work will take.</td></tr>
+      <tr><td class="m">08 &nbsp;Under the hood</td><td><span class="chip part">mostly</span></td><td>Per-CPU state, the syscall door, the memory ordering and multi-core bring-up are built and tested.</td></tr>
+      <tr><td class="m">09 &nbsp;Development</td><td><span class="chip ok">runs</span></td><td>This is how the repository actually works, today, and the parts that are aspiration say so.</td></tr>
+      <tr><td class="m">10 &nbsp;Reference</td><td><span class="chip ok">true</span></td><td>Generated from reading the tree. Where it disagrees with the tree, the tree is right.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="flow">
+    <div class="note"><b>There are no measured numbers in this book, and that is a rule rather than an omission.</b> Every number this project publishes lives in <code>claims/</code> with a baseline, a workload, a threshold and a one-command reproduction, and a document is not allowed to hold a second copy of one. Where you want a figure, run <code>cargo xtask claims</code> for the registry and <code>cargo xtask reproduce &lt;name&gt;</code> to re-derive it here, on your machine. Expect most of them to refuse to record, and read chapter 09 for why that refusal is the point.</div>
+  </div>
+</section>
+
+<section id="toc">
+  <div class="sec-head"><div class="sec-num">&mdash;</div><h2>Contents</h2></div>
+  <div class="toc">
+    <div class="toc-part">
+      <h4>Part I &middot; The system</h4>
+      <a href="#c01"><span class="n">01</span><span>What F is, and what this book is not</span></a>
+      <a href="#c02"><span class="n">02</span><span>Getting started</span></a>
+      <a href="#c03"><span class="n">03</span><span>Architecture</span></a>
+      <a href="#c04"><span class="n">04</span><span>The ring</span></a>
+    </div>
+    <div class="toc-part">
+      <h4>Part II &middot; What runs on it</h4>
+      <a href="#c05"><span class="n">05</span><span>Components</span></a>
+      <a href="#c06"><span class="n">06</span><span>Resources</span></a>
+      <a href="#c07"><span class="n">07</span><span>The interface</span></a>
+    </div>
+    <div class="toc-part">
+      <h4>Part III &middot; Underneath, and around</h4>
+      <a href="#c08"><span class="n">08</span><span>Under the hood</span></a>
+      <a href="#c09"><span class="n">09</span><span>How work reaches this repository</span></a>
+      <a href="#c10"><span class="n">10</span><span>Reference</span></a>
+    </div>
+  </div>
+</section>
+
+<div class="partbar"><span class="n">Part I</span><h2>The system</h2><span class="r"></span></div>
+
+<section id="c01">
+  <div class="sec-head"><div class="sec-num">01</div><h2>What F is, and what this book is not</h2><span class="chip ok">true</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> This chapter describes the project rather than the system, so nothing in it can be ahead of the code.</div>
+
+    <p>F is a research operating system built on the observation that mainstream systems assume a machine that stopped existing around 2015. Uniform cores, one flat tier of memory, devices that need the kernel to mediate every access, accelerators reached as if they were files. A decade of silicon capability &mdash; user-level interrupt delivery, device-side address translation, memory tiering, zoned storage, on-package matrix engines &mdash; is either unused or retrofitted into abstractions that predate it.</p>
+
+    <p>The thesis is that designing <em>for</em> the current machine rather than adapting <em>to</em> it is worth a large constant factor in both speed and energy. Speed and efficiency are therefore not two promises; they are the predicted consequence of one thesis, which is a stronger position to have to defend than two independent boasts.</p>
+
+    <h3>What this book is not</h3>
+
+    <p>It is not the argument. The argument is <code>docs/design/fast-path.html</code>, which states five load-bearing bets and is written for a reader who thinks they are wrong. This book assumes you have either read it or are willing to take the bets as given while you learn what they produced. If at any point you want to know <em>why</em> rather than <em>what</em>, the design documents are where why lives, and this book points at them rather than restating them.</p>
+
+    <p>It is also not the decision record. There are eighty-odd numbered RFCs in <code>docs/rfc/</code>, each one a decision and the conditions that would reverse it. This book cites them constantly and never restates them, because a decision recorded in two places is a decision that will eventually be recorded differently in two places.</p>
+
+    <div class="claim"><b>The division of labour across the three books.</b> <em>Foundations</em> &mdash; this one &mdash; explains the system to somebody who may change it. <em>Applications</em> explains how to write a component to somebody who takes the system as given. <em>Evidence</em> explains the apparatus that decides whether any of the claims are true, to somebody who does not believe them. A chapter belongs to the book whose reader needs it, which is why device drivers appear here as an architectural position and in <em>Applications</em> as a thing you write.</div>
+
+    <h3>The three things to know before anything else</h3>
+
+    <ul class="list">
+      <li><b>Determinism is not optional.</b> Nothing observes time, randomness or ordering except through <code>f_env::Env</code>. The contract is that <code>(seed, commit)</code> reproduces a run byte for byte. This is the one property that cannot be retrofitted, and it is why whole-system simulation is possible here and not on Linux. RFC 0004.</li>
+      <li><b>The frame is three crates.</b> <code>abi</code>, <code>ring</code> and <code>kernel</code> may use <code>unsafe</code>. Everything else in the workspace inherits <code>unsafe_code = "forbid"</code> and cannot opt out quietly. RFC 0001.</li>
+      <li><b>Claims gate the build.</b> A number with no named baseline, no published workload and no one-command reproduction is an anecdote, and this repository will not publish one.</li>
+    </ul>
+
+    <h3>Where the project actually is</h3>
+
+    <p>Milestone <b>M0</b>. The system boots, reports that it booted, and is already deterministic. The design documents are considerably ahead of the code, which is the intended order and is stated here so that nobody has to discover it. Work is organised into epochs <code>E0</code> through <code>E7</code> in <code>TODO.md</code>, each ending at a gate; <code>E0</code> is ground truth and none of the later gates has been passed.</p>
+
+    <p>The honest summary of the risk is in <code>docs/design/lineage-and-debts.html</code>, which is the document that says what F owes to prior work and where it is behind and expects to stay behind. It is short, and a reader deciding whether to take this project seriously should read it before the architecture.</p>
+  </div>
+</section>
+
+<section id="c02">
+  <div class="sec-head"><div class="sec-num">02</div><h2>Getting started</h2><span class="chip ok">runs</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> Every command in this chapter executes today. If one does not, that is a bug in this chapter and not a feature that has not landed.</div>
+
+    <p>There are two routes and only one of them is supported. The supported one is the development container, whose single prerequisite is Docker; the other is a local toolchain pinned by <code>rust-toolchain.toml</code> plus <code>qemu-system-x86_64</code> on your path. The container exists because the pinned toolchain is load-bearing &mdash; changing it invalidates every claim in the registry &mdash; and a container is the cheapest way to stop that happening by accident.</p>
+  </div>
+
+  <div class="codeblock">
+    <div class="codecap">The supported route &mdash; Docker is the only prerequisite</div>
+<pre><span class="c"># Windows</span>
+.\docker\dev.ps1 build
+.\docker\dev.ps1 verify
+
+<span class="c"># everywhere else</span>
+docker compose -f docker/compose.yaml run --rm dev cargo xtask verify</pre>
+  </div>
+
+  <div class="flow">
+    <p>The <code>-f docker/compose.yaml</code> path is relative, so run it from the root of the checkout that <code>git clone</code> produced.</p>
+
+    <h3>The one command</h3>
+
+    <p><code>cargo xtask verify</code> is the whole local loop: lint, then test, then boot, then mutate, failing cheapest first. A session runs it before a human is asked to look at anything, because the alternative is that the human is the test suite.</p>
+
+    <div class="note"><b>Healthy output ends with <code>verify: all green</code> and exit code 0.</b> Anything else is a failure, and that includes a line beginning <code>warning:</code> &mdash; clippy runs with <code>-D warnings</code>, so there is no such thing as a warning you are allowed to leave. There is no partial credit and no summary line that says how many passed.</div>
+
+    <p>It has two gaps, stated rather than papered over. <code>verify</code> is local, so it cannot run the AArch64 tests or the litmus job &mdash; and those are exactly where the ring's memory ordering means anything, because total store order on x86 hides the entire class of bug the ring is exposed to. Those run in CI. A clean local <code>verify</code> is necessary and is not sufficient.</p>
+
+    <h3>Seeing it boot</h3>
+  </div>
+
+  <div class="codeblock">
+    <div class="codecap">The boots, and what each one asserts</div>
+<pre>cargo xtask run          <span class="c"># boot in QEMU; the assertion is exit code 33</span>
+cargo xtask fault pf     <span class="c"># boot into a deliberate fault: pf ud df nx wx stack</span>
+cargo xtask user         <span class="c"># seven boots; a process breaks one rule each and is killed</span>
+cargo xtask cap          <span class="c"># eight boots; a process tries to escape its capabilities</span>
+cargo xtask cores        <span class="c"># four boots; core counts that do and do not match the machine</span>
+cargo xtask mutate       <span class="c"># build the kernel wrong on purpose; the boot must go red</span>
+cargo xtask attest       <span class="c"># five boots; what is this machine running, and does it move</span></pre>
+  </div>
+
+  <div class="flow">
+    <p>Read that list as the shape of the whole project rather than as a menu. Almost every verb boots the system more than once and requires the boots to <em>disagree</em> in a specific way. <code>mutate</code> is the clearest case: it builds the kernel with a deliberate defect and requires the boot to fail, then requires the same boot to succeed without it. A test suite that only ever goes green is measuring whether it runs, not whether it works.</p>
+
+    <p>There is no visual check anywhere in this project, because there is nothing to look at. The boot log is the equivalent: it is byte-identical for a given <code>(seed, commit)</code>, so a diff of two logs is the screenshot diff that an operating system gets.</p>
+
+    <h3>The source tree</h3>
+  </div>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Directory</th><th>What is in it</th><th>May be <code>unsafe</code></th></tr></thead>
+    <tbody>
+      <tr><td class="m">abi/</td><td>Wire types crossing a trust boundary. <code>repr(C)</code>, no generics, no <code>Drop</code>.</td><td><span class="chip ok">yes</span></td></tr>
+      <tr><td class="m">env/</td><td>The determinism substrate. Read this before anything else.</td><td><span class="chip warn">no</span></td></tr>
+      <tr><td class="m">ring/</td><td>The universal system interface. One implementation, used by kernel and user alike.</td><td><span class="chip ok">yes</span></td></tr>
+      <tr><td class="m">kernel/</td><td>The frame.</td><td><span class="chip ok">yes</span></td></tr>
+      <tr><td class="m">hash/ blob/ zone/ index/ generation/</td><td>Content addressing, the chunker and store, the zoned mapping, the index, the generation tree.</td><td><span class="chip warn">no</span></td></tr>
+      <tr><td class="m">interface/</td><td>The semantic layer.</td><td><span class="chip warn">no</span></td></tr>
+      <tr><td class="m">user/</td><td>Components: <code>init</code>, <code>supervisor</code>, <code>store</code>, <code>objects</code>, <code>assembler</code>, and three virtio drivers.</td><td><span class="chip warn">no</span></td></tr>
+      <tr><td class="m">third_party/</td><td>Imported driver source. Differently licensed, reachable only over a ring.</td><td><span class="chip warn">boundary</span></td></tr>
+      <tr><td class="m">sim/ bench/ xtask/</td><td>The simulator, the benchmarks, and policy made executable.</td><td><span class="chip warn">no</span></td></tr>
+      <tr><td class="m">claims/ docs/ intent/ ops/ evals/</td><td>Numbers, reasoning, where changes start, what is watched, and what checks the agent configuration.</td><td>&mdash;</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="flow">
+    <p><code>cargo xtask</code> with no arguments lists every verb with a paragraph each, and that listing is the authority. This book does not reproduce it, for the same reason the README does not: a listing in a program cannot drift from the program, and a listing in a document always eventually does.</p>
+  </div>
+</section>
+
+<section id="c03">
+  <div class="sec-head"><div class="sec-num">03</div><h2>Architecture</h2><span class="chip part">mostly</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> The frame, determinism and the licence boundary are enforced by lints in <code>cargo xtask verify</code> today. Capabilities exist and are tested by eight negative boots; the ring-based form of their operations does not exist yet and is scheduled for M5.</div>
+
+    <p>Three positions do most of the architectural work, and each is enforced mechanically rather than by review, because a policy that depends on somebody remembering it is a policy with an expiry date.</p>
+
+    <h3>The frame, not a microkernel and not a monolith</h3>
+
+    <p>Everything runs in one address space, for monolithic speed, and the safety boundary is drawn by the language rather than by the memory management unit. A small privileged <em>frame</em> is the only code permitted <code>unsafe</code>; services above it are unprivileged by construction because they cannot express the operations that would make them privileged.</p>
+
+    <p>The microkernel shape was rejected, and not on isolation grounds &mdash; it is stronger there. It was rejected because the hot path in this design is meant to contain no boundary crossing at all, which makes fast inter-process communication a solution to a problem the architecture is trying to delete rather than optimise. Asterinas is the existence proof that the framekernel shape reaches Linux-comparable performance with the unsafe trusted base held to a small fraction of the codebase. RFC 0001.</p>
+
+    <div class="note"><b>The consequence is that isolation reasoning becomes a property of the type system, so it has to be enforced by a machine or it is not enforced at all.</b> Hence <code>unsafe_code = "forbid"</code> at the workspace root, exactly three crates overriding it, and <code>cargo xtask lint-unsafe</code> failing the build on a fourth. Every <code>unsafe</code> block in those three carries a <code>// SAFETY:</code> comment discharging the obligations that the corresponding <code>#&nbsp;Safety</code> section states &mdash; not a comment saying it is fine.</div>
+
+    <h3>Determinism, as a substrate rather than a test mode</h3>
+
+    <p>Nothing in the system observes nondeterminism except through an injectable <code>Env</code>. Time is not an instruction; it is a capability. Randomness is a capability. Interrupt arrival, ring consumer ordering, core assignment and allocation addresses are decided by a policy that is real in production and seeded under test &mdash; the same policy, not a test double.</p>
+  </div>
+
+  <div class="codeblock">
+    <div class="codecap">env/src/lib.rs &mdash; the only legitimate source of time, randomness and ordering</div>
+<pre><span class="k">pub trait</span> Env {
+    <span class="c">/// Current time. Virtual under simulation, hardware-derived in production.</span>
+    <span class="k">fn</span> now(&self) -> Instant;
+
+    <span class="c">/// Next pseudo-random value. Seeded under simulation.</span>
+    <span class="k">fn</span> next_u64(&<span class="k">mut</span> self) -> u64;
+
+    <span class="c">/// The ordering policy.</span>
+    <span class="k">fn</span> scheduler(&<span class="k">mut</span> self) -> &<span class="k">mut dyn</span> Scheduler;
+
+    <span class="c">/// Civil time, if this machine has any business claiming to know it.</span>
+    <span class="c">/// None is the honest answer on a machine with no trustworthy clock:</span>
+    <span class="c">/// a fabricated timestamp is worse than a missing one precisely</span>
+    <span class="c">/// because it is usable. The default is None.</span>
+    <span class="k">fn</span> wall(&self) -> Option&lt;WallTime&gt; { None }
+}</pre>
+  </div>
+
+  <div class="flow">
+    <p>The contract is that <code>(seed, commit_hash)</code> reproduces a run byte for byte. Deterministic simulation is the strongest known technique in systems reliability &mdash; FoundationDB and TigerBeetle are the standard citations &mdash; and it is almost never applied to operating systems, because kernels leak nondeterminism at thousands of unmarked places.</p>
+
+    <p>F's architecture removes nearly all of those places, and it did not do so deliberately. One ring interface gives a single interception point. No ambient authority means no hidden channels. User-space drivers make a modelled device a component substitution rather than a mock. Content-addressed state makes whole-system comparison a hash comparison. Every one of those decisions was made for speed or safety, and each hands simulation one of its preconditions for free. RFC 0004.</p>
+
+    <p>In practice this shows up as a list of things you may not write:</p>
+
+    <ul class="list">
+      <li><b>No <code>Instant::now</code>, no <code>rdtsc</code>, no <code>thread_rng</code>.</b> Take an <code>Env</code>.</li>
+      <li><b>No <code>HashMap</code> or <code>HashSet</code>.</b> Iteration order is seeded per process, so it is a nondeterminism source wearing a collection's clothes. Use <code>BTreeMap</code> and <code>BTreeSet</code>.</li>
+      <li><b>No <code>f32</code> or <code>f64</code>.</b> The two target architectures do not agree on them. Use an integer, or a fixed point with its scale in the name.</li>
+      <li><b>A new call site needs an allow-list entry with a reason</b> in <code>xtask/src/main.rs</code>, which is a deliberately visible diff rather than a silent one.</li>
+    </ul>
+
+    <p><code>cargo xtask lint-determinism</code> is the check, and it is applied to <code>xtask</code> itself &mdash; the tool is subject to the policy it implements, which has caught the policy being wrong more than once.</p>
+
+    <h3>Capabilities, with no root and no global namespace</h3>
+
+    <p>A component holds exactly the authority it was handed and has no way to name anything it was not. There is no root capability that confers everything, and there is no global namespace to look things up in &mdash; the two mechanisms by which ambient authority normally re-enters a capability system.</p>
+
+    <p>Because a ring is named by a <code>Channel</code> capability, the capability table has to work before there is any ring to work it through. Four operations therefore exist temporarily behind the system-call door, and each one names the opcode that will replace it:</p>
+  </div>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Call</th><th>What it does</th><th>Retired by</th></tr></thead>
+    <tbody>
+      <tr><td class="m">CAP_INSPECT</td><td>What a handle names.</td><td>An opcode on the component's control ring.</td></tr>
+      <tr><td class="m">CAP_DERIVE</td><td>Mint a weaker capability, or a copy.</td><td>The same.</td></tr>
+      <tr><td class="m">CAP_REVOKE</td><td>Withdraw everything below a capability.</td><td>The same.</td></tr>
+      <tr><td class="m">CAP_MAP</td><td>Map a frame into an address space.</td><td>The same, with <code>Sqe::cap</code> as the frame handle.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="flow">
+    <p>That table is the shape of a rule worth understanding, because it recurs. RFC 0014 says a call may exist only if it <em>cannot</em> be an opcode on a ring. Read alone, that forbids all four of these, since every one of them could be an opcode and at M5 every one of them will be. RFC 0015 records the reading that resolves it: rule 1 governs <b>permanent</b> calls, and a second rule &mdash; every call added before the ring exists names the thing that replaces it &mdash; governs <b>temporary</b> ones. A call satisfying neither may not exist. <code>cargo xtask lint-owed</code> goes red on the day one of those reversal conditions is paid and the documents still describe the old shape.</p>
+
+    <h3>The licence boundary is the isolation boundary</h3>
+
+    <p>Imported driver source lives in <code>third_party/</code>, is differently licensed, and is reachable only over a ring. The permissive tree never imports it, and <code>cargo xtask lint-licensing</code> enforces that alongside the requirement that every file carries <code>// SPDX-License-Identifier: Apache-2.0 OR MIT</code>.</p>
+
+    <p>The two boundaries are deliberately the same boundary. This is the part that strengthens the safety claim rather than weakening it: code you did not write and cannot fully audit is placed where it can only be reached through an interface that already assumes its peer may be hostile, because that is the interface the ring had to be anyway. <code>LICENSING.md</code> and RFC 0003.</p>
+  </div>
+</section>
+
+<section id="c04">
+  <div class="sec-head"><div class="sec-num">04</div><h2>The ring</h2><span class="chip part">mostly</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> The protocol, the cursor orderings, the suppression fence and the entry formats are built and are proved by bounded model checking over arbitrary peer bytes. The hardware fast paths &mdash; user-level interrupt delivery and shared virtual memory &mdash; are designed, argued and unbuilt.</div>
+
+    <p>Every service in F is a ring. That makes the ring the single most consequential piece of code in the system, and it has a harder job than <code>io_uring</code> does, because some of its peers are isolated components running imported driver code compiled from C, which may fault, hang or be compromised at any moment while holding a live channel.</p>
+
+    <p>Five requirements, in the order they constrain the design: no system call on the hot path; no copies, because buffers move by ownership; ABI stability across trust and language boundaries; <b>a dead peer must not corrupt or hang us</b>; and bounded latency rather than merely high throughput. The fourth eliminates more design options than the other four combined, and most importantly it forbids any lock in shared memory.</p>
+
+    <h3>One channel is one mapping</h3>
+  </div>
+
+  <div class="codeblock">
+    <div class="codecap">Channel layout &mdash; one contiguous shared mapping</div>
+<pre>offset    size   contents
+------    ----   --------
+0x0000    64     <span class="k">ChannelHeader</span>   magic, abi_version, ring_size,
+                                 sqe_off, cqe_off, epoch, capabilities
+0x0040    64     <span class="k">ProducerCursor</span>  head: AtomicU32          <span class="c">// own cache line</span>
+0x0080    64     <span class="k">ConsumerCursor</span>  tail: AtomicU32, flags   <span class="c">// own cache line</span>
+0x00C0    4*N    <span class="k">SQ index ring</span>   u32 slots, N a power of two
+...       64*N   <span class="k">SQE array</span>       64-byte entries, one cache line each
+...       32*M   <span class="k">CQ ring</span>         32-byte completions, inline
+...       var    <span class="k">inline arena</span>    optional, for payloads under ~256 bytes</pre>
+  </div>
+
+  <div class="flow">
+    <p>The indirection between the index ring and the entry array is worth keeping from <code>io_uring</code>: it lets a producer prepare entries out of order and publish a whole batch with one store. Ring sizes are powers of two so that index computation is <code>cursor &amp; mask</code> rather than a division, and cursors free-run and are allowed to wrap &mdash; occupancy is <code>head.wrapping_sub(tail)</code>, which stays correct across the wrap because unsigned arithmetic wraps the same way. There is never a separate count, because a count is a second piece of state that can disagree with the cursors.</p>
+
+    <div class="note"><b>The cursors get their own cache lines, and this is not a micro-optimisation.</b> If <code>head</code> and <code>tail</code> share a line, every producer store invalidates the consumer's copy and every consumer store invalidates the producer's. If your first benchmark comes in several times slower than you expected, this is the reason, essentially every time &mdash; and it is the first entry in the diagnosis section of the corresponding claim, so a red result carries its own first debugging step.</div>
+
+    <h3>The two orderings the whole thing rests on</h3>
+
+    <p>Publishing an entry is a <code>Release</code> store; observing one is an <code>Acquire</code> load. That pair is the entire correctness argument for the data path: the <code>Release</code> guarantees the entry write is visible before the cursor advance that exposes it, and paired with the consumer's <code>Acquire</code> it is a complete happens-before edge.</p>
+
+    <div class="note"><b><code>Relaxed</code> there passes on x86-64 and corrupts data on AArch64.</b> On x86 both compile to a plain <code>mov</code> with only a compiler barrier; on AArch64 they become <code>stlr</code> and <code>ldar</code>. Total store order hides the entire class of bug the ring is exposed to, which is why testing the ring only on x86-64 is listed in <code>CLAUDE.md</code> as a mistake that has happened twice. Changing either ordering requires a litmus test that <em>fails</em> under the weaker ordering &mdash; not an argument that it is fine.</div>
+
+    <h3>Notification suppression, and the fence that is not optional</h3>
+
+    <p>Waking a peer costs three orders of magnitude more than a submission does, so the consumer publishes its intent instead of being woken blindly. While actively draining, it clears <code>NEED_WAKEUP</code> and producers skip the doorbell entirely; before sleeping it sets the flag and then re-checks the ring once more.</p>
+
+    <p>That second check is necessary and is <b>not sufficient</b>, and the RFC that says so was written because an earlier version of this text claimed it was. The two ends run Dekker's algorithm: the producer stores <code>head</code> then loads <code>flags</code>, the consumer stores <code>flags</code> then loads <code>head</code>. Store-load is the one reordering that total store order still permits, and <code>Release</code>/<code>Acquire</code> do not forbid it. Without a <code>SeqCst</code> fence on the producer side, both sides can see nothing and the consumer sleeps holding work. The re-check closes the case where the consumer's flag write is late; it does not close the case where the consumer's ring read is early. RFC 0020.</p>
+
+    <div class="claim"><b>On a deadline-class core the consumer should never sleep at all.</b> It parks with user-level monitor-and-wait &mdash; <code>UMONITOR</code>/<code>UMWAIT</code> on x86, <code>WFE</code> on ARM &mdash; armed on the cursor's own address, so the core drops to low power but wakes on the store itself. No interrupt, no scheduler, no jitter tail. This is one of the silicon capabilities the thesis is about, and it is the easiest of them to adopt: the instructions have shipped for years and are almost entirely unused.</div>
+
+    <p>The doorbell itself is abstracted behind one function with three implementations &mdash; user interrupt, kernel inter-processor interrupt, and pure polling &mdash; selected at channel creation from what the hardware actually reports rather than from what it was compiled for. Keeping all three and measuring the difference between them is one of the cleanest results this system can produce, because nobody has published it for a general-purpose IPC path.</p>
+
+    <h3>Buffers are owned, not shared</h3>
+
+    <p>A buffer belongs to exactly one side at a time, and the transfer of ownership is enforced by the compiler rather than by convention. A process registers a memory region once and receives a <code>BufferSetId</code>; the IOMMU mapping is established at that moment and never touched again, and individual operations then reference <code>(buf_set, index, offset, len)</code> &mdash; no per-operation pinning, no page-table work, and no validation beyond a bounds check against a size the frame already knows. RFC 0024, RFC 0028.</p>
+
+    <p>Registration exists to solve a problem newer silicon removes. With IOMMU shared virtual memory &mdash; process address space identifiers, address translation services, page request interfaces &mdash; a device walks the process's own page tables and takes ordinary page faults, so there is nothing to pin and nothing to register. The buffer triple becomes a plain virtual address and the PASID is carried by the channel rather than by the entry. The registration path stays, because the hardware is not universal; it becomes the fallback rather than the design.</p>
+
+    <h3>Surviving a peer that is hostile or dead</h3>
+
+    <p>Every field a peer can write is validated before it is used, and the validation is proved rather than reviewed: <code>cargo xtask prove</code> runs bounded model checking over the ring's validation paths for arbitrary peer bytes, and then requires each deliberately injected defect to fail the harness that states the property it breaks. <code>cargo xtask hostile</code> generates a very large number of hostile peer operations, and a hang is counted rather than waited on. RFC 0046, RFC 0048.</p>
+
+    <p>The header carries an <code>epoch</code>, which is how a channel survives a peer that died and was restarted: entries stamped with a previous epoch are not the new peer's, and the distinction is in the wire format rather than in a convention both sides have to remember.</p>
+  </div>
+</section>
+
+<div class="partbar"><span class="n">Part II</span><h2>What runs on it</h2><span class="r"></span></div>
+
+<section id="c05">
+  <div class="sec-head"><div class="sec-num">05</div><h2>Components</h2><span class="chip part">partly</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> The manifest schema is enforced by <code>cargo xtask lint-manifests</code> with a fixture breaking each rule, and the tree contains components. The supervisor, the state tree and in-place transfer are specified in RFCs and are in progress rather than finished.</div>
+
+    <p>A component comes into existence in exactly one way, is controlled through exactly one path, holds exactly what it was handed, and ends in a way every other party can see. There is <b>no <code>fork</code></b> and there are <b>no signals</b>. RFC 0008.</p>
+
+    <p>Both absences are deliberate and both are load-bearing. <code>fork</code> is incompatible with a capability system that has no ambient authority, because the whole point of <code>fork</code> is that the child inherits everything without anybody naming what. Signals are asynchronous control flow delivered into a process that did not ask for them, which is the opposite of a system where everything arrives on a ring the process holds a capability to.</p>
+
+    <h3>The manifest is what a component is before it runs</h3>
+
+    <p>One file per component, called <code>manifest.toml</code>, in the permissive tree. It declares the image, the speculation domain, the capabilities routed to it and the ones it may ask for, the protocols it speaks and on how many rings, what its supervisor does when it ends, and what admission may refuse it. <code>user/virtio-blk/manifest.toml</code> is the worked example; <code>docs/manifest.md</code> is the schema as prose and <code>xtask/src/manifest.rs</code> is the schema as code.</p>
+  </div>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Section</th><th>What it declares</th><th>Why it cannot be decided at run time</th></tr></thead>
+    <tbody>
+      <tr><td class="m">top level</td><td>Image, schema version, speculation domain.</td><td>RFC 0005: a domain kind is declared and never inferred.</td></tr>
+      <tr><td class="m">[[capability]]</td><td>What is routed in, and what may be asked for.</td><td>A component holds what the manifest declared and the supervisor supplied. Nothing else is nameable.</td></tr>
+      <tr><td class="m">[[ring]]</td><td>Protocols spoken, and on how many rings.</td><td>A ring is a capability; it cannot be conjured by a process that was not given one.</td></tr>
+      <tr><td class="m">[restart]</td><td>What the supervisor does when the component ends.</td><td>The policy has to exist before the failure does.</td></tr>
+      <tr><td class="m">[reservation]</td><td>What admission may refuse.</td><td>Admission is arithmetic and refuses; arithmetic needs a declared demand.</td></tr>
+      <tr><td class="m">[transfer]</td><td>What the component declares about being updated in place.</td><td>RFC 0063: quiescence is asserted by the occupant, and declared in advance.</td></tr>
+      <tr><td class="m">[[device]]</td><td>The part of a device a driver binds.</td><td>RFC 0067: the topology never inherits a scan order.</td></tr>
+      <tr><td class="m">[[state]]</td><td>What the component publishes about itself.</td><td>RFC 0065: a spawn refuses a component that does not declare its tree.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="flow">
+    <div class="note"><b>The schema is closed, because it is a parser's input.</b> A field the reader does not know is refused, not skipped. A value outside a table is refused, not mapped to the nearest one. A field that means nothing under the declared policy is refused, not ignored. The cost is that every schema change is a version bump and a visible diff; the benefit is that no two readers can hold different beliefs about one file, which is exactly how a format acquires two incompatible interpretations and no error message.</div>
+
+    <p>The manifest is valid TOML, so any TOML reader accepts it &mdash; but the lint accepts strictly less than TOML does: comments, <code>[table]</code> and <code>[[array]]</code> headers, and <code>key = value</code>. Where <code>docs/manifest.md</code> and the lint disagree, <b>the lint is wrong and the document is what it is wrong against</b>; the fix is to change the lint and add the fixture that would have caught it.</p>
+
+    <h3>A spawn is where the declarations are checked</h3>
+
+    <p>A component is spawned from a manifest named by content hash. That single sentence carries three consequences worth separating. The hash is what measured boot extends into, so the identity of what is running is the identity of what was declared. The manifest is the topology's unit, so the set of components is a compiled artefact rather than a runtime discovery. And a spawn checks every declaration, so a component that under-declares fails at spawn rather than at the first moment it needs the thing it did not ask for.</p>
+
+    <p><code>cargo xtask lint-components</code> closes the other half: the components this tree declares must be the components it builds. A manifest with nothing building it is a component no downstream count will ever look for, which is a quieter failure than a missing file.</p>
+
+    <h3>Supervisors, places, and ending</h3>
+
+    <p>A supervisor is itself a component, and the frame answers its ring like anybody else's (RFC 0073). It is told when it is started (RFC 0076). The thing it supervises occupies a <em>place</em>, and a place survives its occupant (RFC 0041) &mdash; which is what makes restart and in-place replacement the same mechanism seen from two angles, rather than two mechanisms that have to be kept agreeing.</p>
+
+    <p>Ending is visible to every party with an interest, rather than being a condition each one discovers by timing out. <code>cargo xtask chaos</code> kills every component under sustained load at seeded moments and requires that no client observes anything except added latency; <code>cargo xtask swap</code> replaces every component by the route its own manifest declares and requires that no client observes a dropped operation, comparing the state that crossed against what the outgoing instance held.</p>
+  </div>
+</section>
+
+<section id="c06">
+  <div class="sec-head"><div class="sec-num">06</div><h2>Resources</h2><span class="chip warn">ahead</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> Ahead of the code. The admission arithmetic and the <code>ADMISSION</code> error domain exist and are proved; the five subsystems below are the argument in <code>docs/design/deadline-all-the-way-down.html</code> and are largely unbuilt. Read this chapter as the shape the work will take, not as a description of behaviour you can observe.</div>
+
+    <p>Mainstream systems have roughly five resource policies &mdash; a CPU scheduler, a page reclaimer, an I/O scheduler, a network queue discipline, a GPU arbiter &mdash; and they do not know about each other. A request that needs all five gets five independent answers and no guarantee, which is why tail latency in a conventional system is emergent rather than designed.</p>
+
+    <p>F's position is that there is <b>one discipline</b> and five places it is applied. The discipline is the deadline: it is declared by the requester, it inherits downward through every ring the request crosses, and it decays as the request proceeds so that a stale deadline cannot outrank a fresh one forever. RFC 0025.</p>
+
+    <h3>Admission is the load-bearing part</h3>
+
+    <p>The part that makes a deadline mean anything is not the scheduler; it is the refusal. Admission is arithmetic over declared demand, and it <em>refuses</em> &mdash; it does not degrade, queue, or best-effort. A reservation that cannot be satisfied is denied in the <code>ADMISSION</code> error domain, and the component finds out at the moment it asks rather than at the moment it misses.</p>
+
+    <div class="claim"><b>This is why the manifest carries a <code>[reservation]</code> section.</b> Arithmetic needs a declared demand, and a demand that is discovered from behaviour is a demand that can only be measured after the guarantee has already been broken. RFC 0007 and RFC 0050. <code>abi/proofs</code> proves the arithmetic under bounded model checking, because a refusal that is wrong in the permissive direction is a guarantee that silently is not one.</div>
+
+    <p><code>cargo xtask admission</code> is the boot that exercises it, and its shape is the shape of every serious check in this project: refuse an over-subscribed reservation, put a granted one under adversarial load, and run two controls beside it &mdash; the same load with no reservation, which <em>must</em> miss, and an over-subscription, which must be refused and run nothing. A guarantee with no control beside it is a guarantee that was never tested against the possibility that the load was simply easy.</p>
+
+    <h3>The five places it is applied</h3>
+
+    <ul class="list">
+      <li><b>CPU time.</b> Four classes rather than a priority number. Heterogeneous cores are the reason placement is decided by slack rather than by a fixed affinity: a big core and a little core are not two speeds of the same thing. User-level runtimes sit above this and inherit the deadline rather than inventing a second scheduler.</li>
+      <li><b>Memory.</b> Three resources, not one &mdash; capacity, bandwidth and tier. Tiering is measured rather than guessed, which is the whole difference between a memory tier and a cache.</li>
+      <li><b>Storage.</b> A content-addressed object store over a zoned mapping. The crates are <code>hash</code> (the one SHA-256 in the tree), <code>blob</code> (the chunker and the store), <code>zone</code> (the zoned mapping and the collector) and <code>index</code>. The collector is three invariants and a batch-class consumer rather than a background thread with a heuristic. RFC 0059.</li>
+      <li><b>Network.</b> What is written and what is not, with authority and contention decided by the same declarations everything else uses.</li>
+      <li><b>Accelerators.</b> Reached as peers on a ring, not as files.</li>
+    </ul>
+
+    <p>The storage layer is the one with the most code behind it today, and it is worth understanding as a single idea: content addressing makes whole-system state comparison a hash comparison, which is what makes deterministic simulation able to say <em>two runs diverged, and here is the subtree they diverged in</em> rather than <em>two runs diverged</em>. <code>cargo xtask compare</code> is that capability exposed directly. It is also why a generation swap can be an update and an attestation at the same time: the root hash of the generation tree <em>is</em> what the machine is running. RFC 0012.</p>
+
+    <div class="note"><b>Every immature bet in this chapter has a fallback, and the fallbacks are part of the design rather than a contingency.</b> Zoned storage, memory tiering, user interrupts and shared virtual memory are all silicon capabilities that are unevenly available. The rule is that each is abstracted behind one interface with a conventional implementation beside the new one, chosen from what the hardware reports. A design that only works on the best available machine is a demonstration, not an operating system.</div>
+  </div>
+</section>
+
+<section id="c07">
+  <div class="sec-head"><div class="sec-num">07</div><h2>The interface</h2><span class="chip warn">ahead</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> Ahead of the code, and further ahead than any other chapter. Four decisions are recorded as RFCs 0077 through 0081 and a fifth as RFC 0083; the <code>interface/</code> crate exists. There is no compositor. Epoch <code>E3</code> is the longest and hardest in the plan and has not opened.</div>
+
+    <p>The display in a conventional system receives pixels. Every layer above it &mdash; the application, the toolkit, the compositor &mdash; converges on a rectangle of colour, and everything the system knew about <em>what</em> was being shown is discarded at the last step. The consequences are familiar enough to be invisible: accessibility has to reconstruct meaning by inference, automation drives the system by pretending to be a mouse, and a screen reader and a test harness solve the same problem twice and badly.</p>
+
+    <p>F's position is that the application sends <b>structure</b>, and the pixels are produced at the end by one component that owns the whole machine's scene.</p>
+
+    <h3>Deltas, not frames</h3>
+
+    <p>The compositor holds a scene graph and receives deltas to it, not rendered output. A frame nobody asked for is not drawn (RFC 0023), which turns an idle interface into an idle machine rather than into a machine re-rendering an unchanged image sixty times a second. Synchronisation is explicit only &mdash; there is no implicit fence anywhere in the pipeline, because an implicit fence is a latency cost nobody can find.</p>
+
+    <h3>The semantic layer, and the closed vocabulary</h3>
+
+    <p>Above the scene graph sits a semantic model: a structure that says what the interface <em>is</em> rather than what it looks like. Projection turns that one structure into many presentations &mdash; a screen, a screen reader, a test harness, a remote session, a command line &mdash; and the payoff is that those stop being separate implementations that drift.</p>
+
+    <p>The vocabulary of node kinds is <b>closed</b> (RFC 0077). This is the decision most likely to be argued with, so the reasoning is worth stating plainly: an open vocabulary is one where any application can introduce a node kind nothing else understands, and a projection that meets an unknown node has no honest option. Closing it means the vocabulary has to be right, and that the version is negotiated between peers with an unknown role not being representable on the wire at all (RFC 0083) rather than being a value everybody agrees to ignore.</p>
+
+    <div class="note"><b>A canvas declares its content, or it is an escape.</b> RFC 0078. A self-rendering surface &mdash; a video, a map, a game &mdash; is unavoidable, and the temptation is to let it be opaque. An opaque canvas is a hole in every projection at once, so a canvas must still declare what it contains. The rate at which applications escape into canvases is a registered claim, because it is the number that says whether the semantic layer is working or is being routed around.</div>
+
+    <h3>Two rules about failing</h3>
+
+    <p>The interface has two decisions about degradation, and both were made before the thing that would need them was built, which is the opposite of how this usually goes.</p>
+
+    <ul class="list">
+      <li><b>A theme may not make an interface unreadable</b> (RFC 0079). Theming is customisation, and customisation that can produce an unusable result is a defect with a preferences dialog in front of it. A hostile theme is refused.</li>
+      <li><b>The fallback ladder is decided before it is needed</b> (RFC 0080), and at the bottom of it <b>the frame draws the log when nothing else can</b> (RFC 0081). A system whose failure mode is a blank screen is a system that cannot tell you why it failed. This is the rung that makes every rung above it debuggable.</li>
+    </ul>
+
+    <p>What would falsify the whole pillar is stated in <code>docs/design/ring-scene-boot.html</code> part III and is worth reading before you accept the argument: if the indirection costs the latency budget, or the vocabulary turns out to be the wrong size, the position does not survive.</p>
+  </div>
+</section>
+
+<div class="partbar"><span class="n">Part III</span><h2>Underneath, and around</h2><span class="r"></span></div>
+
+<section id="c08">
+  <div class="sec-head"><div class="sec-num">08</div><h2>Under the hood</h2><span class="chip part">mostly</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> Built and tested. Per-CPU state, the system-call door, multi-core bring-up and the shootdown handshake all run; <code>cargo xtask cores</code> exercises four core configurations and <code>cargo xtask lint-percpu</code> enforces the rule below on every commit.</div>
+
+    <h3>Kernel state is per-CPU, and nothing locks</h3>
+
+    <p>Every mutable <code>static</code> under <code>kernel/</code> is a <code>PerCpu&lt;T&gt;</code>. There is no lock anywhere in the kernel, and that is not a performance choice &mdash; it is what makes the frame's behaviour a function of its inputs rather than of its timing, which is what determinism requires of the one component that cannot be simulated away.</p>
+
+    <p>The rule has exactly one exception, and the exception is precisely bounded rather than being a general permission:</p>
+
+    <div class="claim"><b>A shard is one core's, except for a word two cores handshake through, and a handshake word is an atomic on both sides.</b> Four <code>PerCpu&lt;u64&gt;</code> shards in <code>kernel/src/smp.rs</code> are reached by a core that does not own them &mdash; a mailbox, and a page, a sequence number and an acknowledgement for the translation-buffer shootdown. Every one is a machine word, sits in the slot of the core it is <em>about</em>, and every access on both sides is an atomic with its ordering named at the access. A fifth needs an argument. RFC 0016.</div>
+
+    <p>That exception exists because bringing up a second core needs two things a single-core kernel does not: a core has to be told to do something, and it has to say when it is done. That is a handshake, and a handshake cannot be per-core state by definition. The RFC exists to record exactly how far the rule was bent, so that the next bend is a visible decision rather than a precedent.</p>
+
+    <h3>The system-call door</h3>
+
+    <p>The <code>syscall</code> entry exists so a process can reach the frame when there is no ring to reach it through. <b>It is not an interface and it does not accumulate one.</b> Three rules govern it: a call may exist only if it cannot be an opcode on a ring; every call added before the ring exists names the thing that replaces it; and nothing behind the door is measured, tuned or made fast.</p>
+
+    <p>That third rule is the one that surprises people, so here is the reasoning. The entire architectural claim of this system is that the hot path does not cross this boundary. Work spent making the crossing cheaper is work arguing against the claim &mdash; it makes the door more attractive, which makes it more used, which makes the claim less true. RFC 0014.</p>
+
+    <p>The permanent calls at M3 are <code>ANNOUNCE</code> (the process says it exists, which becomes the channel-setup handshake at M5), <code>PROGRESS</code> (asks the frame how much of its time the process has taken, and is what a blocking wait on a ring replaces) and <code>EXIT</code>. A call the frame does not have is refused as an <em>argument</em> error, not an authority one: the process was permitted to ask.</p>
+
+    <h3>Faults, and a core that does not answer</h3>
+
+    <p>A fault class states its response (RFC 0039) rather than being handled wherever it lands. <code>cargo xtask fault</code> boots deliberately into each of six &mdash; page fault, undefined instruction, double fault, no-execute, write-execute and stack &mdash; and requires the response the class declared.</p>
+
+    <p>A core that does not answer is <b>held, and not fatal</b> (RFC 0068). A machine that reports eight logical processors and answers with two must still reach M0, holding the six that are not there and saying how far each one got. This is the sort of behaviour that is easy to get wrong in a way nobody notices until the hardware is unusual, which is why it is four separate boots in <code>cargo xtask cores</code> rather than a unit test.</p>
+
+    <h3>Boot, and what it extends</h3>
+
+    <p>Boot compiles a generation: <code>user/generation.toml</code> becomes a record tree, folded to one root hash, packed with the component files into one boot module named by that root. Source that is not in canonical form is refused with the canonical form printed as a diff, never silently reordered &mdash; the same closed-input discipline the manifest uses, for the same reason.</p>
+
+    <p>The root hash is the attestation. <code>cargo xtask attest</code> is five boots asking, in order: what is this machine running; is the answer the same twice; does a modification to the frame move it; does the frame refuse to publish a root it cannot measure its way to; and is the reserved zero reachable. There is no signature and no freshness, and RFC 0012 says plainly what that does and does not prove.</p>
+  </div>
+</section>
+
+<section id="c09">
+  <div class="sec-head"><div class="sec-num">09</div><h2>How work reaches this repository</h2><span class="chip ok">runs</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> This is how the repository works today. Where something is aspiration rather than practice, the sentence says so.</div>
+
+    <p>Six stages, each naming its artifact and who is allowed to close it. <code>docs/sdlc.md</code> is the full route; this is the shape.</p>
+  </div>
+
+  <div class="codeblock">
+    <div class="codecap">intent &rarr; spec &rarr; plan &rarr; diff &rarr; review &rarr; claim</div>
+<pre>1 plan      intent/NNNN-name/intent.md      a person wants something
+2 design    intent/NNNN-name/spec.md        we agree what it means
+3 build     plan.md, then a diff            it gets made
+4 test      cargo xtask verify              it checks its own work
+5 deploy    REVIEW.md, then a tag           it leaves
+6 maintain  ops/bands.yaml, evals/          it tells us what happened</pre>
+  </div>
+
+  <div class="flow">
+    <p>The three files in an intent directory are separate because they are written by different people at different times and <b>they fail differently</b>. An <code>intent.md</code> that is wrong wastes a conversation. A <code>spec.md</code> that is wrong wastes a week. A <code>plan.md</code> that is wrong wastes an afternoon. Collapsing them hides which one was wrong.</p>
+
+    <p><code>intent.md</code> is never edited to match what was built &mdash; that belongs in the spec or an RFC. It records what somebody wanted at a moment, and rewriting it destroys the only evidence of whether this project builds what people ask for. It is also the only one of the three a non-engineer writes, so it should stay writable by somebody who has never run <code>cargo</code>; do not ask it for file paths.</p>
+
+    <h3>Four identifier spaces, and what links to what</h3>
+
+    <p>This repository is authoritative. There is no ticket system to reconcile with, and four numbered spaces point at each other: <code>intent/NNNN</code> is what somebody wanted; <code>TODO.md</code> task ids like <code>E2-B04</code> are permanent and ranked by what they unblock; <code>docs/rfc/NNNN</code> are decisions and reversals; <code>claims/NNNN</code> are numbers with baselines and thresholds.</p>
+
+    <p><b>An intent that produces a decision gets an RFC. One that produces a number gets a claim. One that produces neither produced a patch, which is fine and needs no ceremony.</b> Numbering is permanent in every space: an abandoned intent stays in place marked withdrawn with one line saying what was learned.</p>
+
+    <h3>What an RFC owes</h3>
+
+    <p>An RFC is required whenever a change contradicts something already written down, reverses an earlier decision, or widens a policy allow-list. Copy <code>docs/rfc/0000-template.md</code>. The section that matters, and the one reviewers actually read, is <b>What would reverse this</b> &mdash; a decision recorded without the conditions that would undo it is an opinion with a number on it.</p>
+
+    <p><code>cargo xtask lint-owed</code> is the mechanism that keeps that section honest. It declares the reversal conditions this tree has named and not yet paid, and it goes red on the day one of them <em>is</em> paid and the documents still describe the old shape. A reversal condition nobody checks is a reversal condition that quietly expires.</p>
+
+    <h3>What a claim owes</h3>
+
+    <p>Any number that reaches a published document needs an entry in <code>claims/</code> carrying a statement, a baseline that is a configuration rather than a description of one, a workload, the metrics, thresholds, the class of machine required, a one-command reproduction, and a diagnosis section so that a red result arrives with its own first debugging step.</p>
+
+    <div class="note"><b>Expect a reproduction to refuse to record, and understand that the refusal is the feature.</b> A timing measurement is only recorded on a machine that can defend it &mdash; bare metal, the reservation components obtained by partition, thermally stable. Anywhere else the workload still runs and the distribution is still printed, and recording is refused with the reason. A number with no environment attached is how a benchmark becomes marketing, so the default is to refuse. <code>claims/runner-class-A.md</code> is the specification of a machine that may record, and at the time of writing it is a name rather than a machine.</div>
+
+    <p>Two lints keep the registry and the documents agreeing. <code>lint-claims</code> fails if any document cites a value the claim no longer has &mdash; a number in a document is never allowed to be a second copy of a claim. <code>lint-claim-owners</code> requires every claim to name the document that owns it, because a claim nobody owns is a claim nobody can be asked about.</p>
+
+    <h3>Review, and what an agent may not close</h3>
+
+    <p>Review runs four passes in a fixed order &mdash; policy, bugs, security, compliance &mdash; with a severity ladder and a cap on nits. It runs on every pull request. <b>It may push fixes; it may not approve and it may not merge</b>, and branch protection enforces that in the repository settings rather than in a file, because a rule that lives only in a document the agent reads is a rule the agent can be talked out of.</p>
+
+    <p>The release gate works the same way: a hook blocks publishes, tag pushes and image pushes unless an environment variable names an authorisation, and an agent cannot set that variable for itself. A gate the gated party can open is a log entry.</p>
+
+    <h3>Working in parallel, and the mistake that keeps happening</h3>
+
+    <p>Independent tasks run in separate worktrees, and the build volumes are per-checkout so two sessions do not fight over <code>target/</code>. That much is easy.</p>
+
+    <div class="note"><b>Four green worktrees do not compose.</b> Twice now, separate trees each took one registry entry twice &mdash; an RFC number, a reserved byte &mdash; and once two of them split one grammar between a reader and a composer. Every tree passed and the merge could not boot. <b>Run the merged tree:</b> the merge is the first execution of a program nobody has run. <code>docs/postmortem/0001</code> is the write-up, and the practical consequence is that before you take a number in any of the four identifier spaces, you check the other branches and not just <code>main</code>.</div>
+
+    <p>The rest of the recurring mistakes are in <code>CLAUDE.md</code> under <em>Common mistakes</em>, which is a scar list rather than a style guide &mdash; a line is added when the same mistake has happened twice, and removed when it becomes a hook instead of advice.</p>
+  </div>
+</section>
+
+<section id="c10">
+  <div class="sec-head"><div class="sec-num">10</div><h2>Reference</h2><span class="chip ok">true</span></div>
+  <div class="flow">
+    <div class="state"><b>State</b> Read out of the tree at the time of writing. Where this disagrees with the tree, the tree is right and this is a bug.</div>
+
+    <h3>The error space</h3>
+
+    <p>Errors are structured rather than numbered: a <em>domain</em> says what kind of thing went wrong, and a code within the domain says which. The domains are closed, and a service may add a code to a domain without any peer having to learn it in advance. RFC 0010.</p>
+  </div>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Domain</th><th>Meaning</th><th>What the caller should conclude</th></tr></thead>
+    <tbody>
+      <tr><td class="m">AUTHORITY</td><td>You do not hold what you would need.</td><td>Not retryable. Ask whoever routed your capabilities.</td></tr>
+      <tr><td class="m">ADMISSION</td><td>The demand was refused as arithmetic.</td><td>Not retryable unchanged. Declare less, or wait for a different machine.</td></tr>
+      <tr><td class="m">RESOURCE</td><td>Something is exhausted right now.</td><td>Retryable in principle.</td></tr>
+      <tr><td class="m">PEER</td><td>The other side of the ring.</td><td>Depends on the code; a dead peer and a slow one are different.</td></tr>
+      <tr><td class="m">ARGUMENT</td><td>You were permitted to ask, and asked wrongly.</td><td>A bug in the caller.</td></tr>
+      <tr><td class="m">DEVICE</td><td>The hardware.</td><td>Depends on the code.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="flow">
+    <p>The distinction between <code>AUTHORITY</code> and <code>ARGUMENT</code> is the one worth internalising: asking for something you have no right to name is an authority failure, and asking wrongly for something you may ask for is an argument failure. A frame that conflates them leaks the existence of things the caller is not supposed to be able to name.</p>
+
+    <h3>Wire constants</h3>
+  </div>
+
+  <div class="codeblock">
+    <div class="codecap">abi/src/lib.rs &mdash; what both sides must agree on</div>
+<pre><span class="k">pub const</span> ABI_VERSION: u32     = 1;
+<span class="k">pub const</span> ABI_VERSION_MIN: u32 = 1;
+<span class="k">pub const</span> CHANNEL_MAGIC: u64   = 0x465f_4348_414e_0001;
+<span class="k">pub const</span> NO_DEADLINE: u64     = 0;
+
+<span class="c">// Sqe flags</span>
+LINK        <span class="c">// this entry and the next are one chain</span>
+DRAIN       <span class="c">// do not start until everything ahead has completed</span>
+FIXED_BUF   <span class="c">// the buffer is a registered set, not an address</span>
+NO_CQE      <span class="c">// do not produce a completion for this entry</span>
+
+<span class="c">// Cqe flags</span>
+MORE        <span class="c">// more completions will follow for this submission</span>
+CANCELLED   <span class="c">// the operation did not run</span>
+SHORTFALL   <span class="c">// it ran, and delivered less than asked</span>
+NOTICE      <span class="c">// this is a notice, which changes how user_data reads</span></pre>
+  </div>
+
+  <div class="flow">
+    <p>Every public field in <code>abi/</code> states its unit in its documentation comment, and that is not a convention &mdash; <code>cargo xtask lint-units</code> reads those comments and fails the build on a field that does not. A field whose unit lives in the reader's head is a field that will eventually be read in the wrong one.</p>
+
+    <p>Two other lints govern this crate's shape. <code>lint-callbacks</code> forbids any interface that registers a callback, because a callback is control flow the caller cannot see and cannot order. <code>lint-arch-tests</code> forbids a test compiled on one architecture and not the other without a reason and a reversal recorded beside it.</p>
+
+    <h3>Where to go next</h3>
+
+    <ul class="list">
+      <li><b>The argument, if you want to disagree with it.</b> <code>docs/design/fast-path.html</code> for the five bets, then <code>docs/design/lineage-and-debts.html</code> for what this owes and where it is behind.</li>
+      <li><b>The mechanism, in more depth than this book goes.</b> <code>docs/design/ring-scene-boot.html</code>, four parts: the ring protocol, the compositor, the semantic layer, and phase-00 bring-up.</li>
+      <li><b>The resource discipline.</b> <code>docs/design/deadline-all-the-way-down.html</code>.</li>
+      <li><b>Whether any of it is true.</b> <em>F Evidence</em>, <code>docs/book/evidence.html</code> &mdash; and its chapter 12 first, which is the list of what this project cannot yet show.</li>
+      <li><b>Writing a component.</b> <em>F Applications</em>, when it exists. Until then, <code>docs/manifest.md</code> and the worked example in <code>user/virtio-blk/</code>.</li>
+      <li><b>Putting it on a machine.</b> <code>docs/booting-on-hardware.md</code>, then the three <code>*-boot-outside-qemu.md</code> narratives in the order their names give.</li>
+    </ul>
+  </div>
+</section>
+
+<div class="foot">
+  F Foundations &middot; book one of three &middot; revised at milestone M0<br>
+  Companion volumes: F Evidence &middot; F Applications (unwritten, gated on epoch E3)<br>
+  Numbers live in claims/ and are cited, never copied. Decisions live in docs/rfc/ and are cited, never restated.<br>
+  Apache-2.0 OR MIT, except third_party/. See LICENSING.md.
+</div>
+
+</div>

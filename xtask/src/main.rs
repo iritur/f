@@ -14266,13 +14266,38 @@ fn spans(text: &str) -> Vec<(String, String)> {
 }
 
 /// The documents that may cite a claim.
+/// Every `.html` document under `docs/`, at any depth.
+///
+/// This recurses rather than naming two directories, and the reason is a hole
+/// it used to have. It walked exactly `docs/` and `docs/design/`, neither of
+/// them recursively, and `lint-claims` and `claims --render` both run off it —
+/// so a document in any third directory was invisible to both. A number could
+/// be published there with nothing in `claims/` behind it and the build would
+/// stay green, which is the one thing the claims discipline exists to prevent.
+/// `docs/book/` is that third directory, and widening this is what let it
+/// exist rather than something done afterwards once somebody noticed. RFC 0085.
+///
+/// **There is no skip list here, and that is deliberate.** `CLAUDE.md` records
+/// that five walkers in this tree carry one and that the four which forgot
+/// `.claude` read other checkouts of this repository and reported against this
+/// one. This walker is rooted at `docs/`, which holds documents and nothing
+/// else — no build products, no nested checkouts, no `.claude`. A skip list
+/// would be a copy of a problem this walker does not have, and copies of skip
+/// lists are the scar. If `docs/` ever acquires a directory that is not
+/// documents, the fix is to move that thing out, not to teach this about it.
+///
+/// The sort at the end is what makes the result independent of the order the
+/// filesystem hands entries back, so the stack order above does not matter.
 fn documents() -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
-    for dir in [root().join("docs"), root().join("docs").join("design")] {
+    let mut stack = vec![root().join("docs")];
+    while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "html") {
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "html") {
                 out.push(path);
             }
         }
