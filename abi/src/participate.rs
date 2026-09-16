@@ -2124,7 +2124,11 @@ fn sqe_bytes(entry: &Sqe) -> &[u8; SQE_BYTES] {
 /// of it is refused with the same [`Fault`] — but it holds no surface, so a
 /// receiver that drew something out of an entry it never saw is a receiver that
 /// wrote its own decoder. The rule is written here rather than assumed.
-#[derive(Clone, Copy, Debug)]
+///
+/// *It hands back no placement* is a claim about every public route out of this
+/// type, and a `#[derive(Debug)]` is one — which is why the [`core::fmt::Debug`]
+/// impl below is written by hand rather than derived.
+#[derive(Clone, Copy)]
 pub struct Reception {
     /// The channel epoch this frame belongs to.
     epoch: u32,
@@ -2134,6 +2138,44 @@ pub struct Reception {
     building: Option<Arrangement>,
     /// The refusal that poisoned the current frame, if one did.
     poison: Option<Fault>,
+}
+
+/// Printed by hand, and the hand-written impl **is** the repair.
+///
+/// `#[derive(Debug)]` here printed `building`, and through it every placement
+/// that had arrived — the occupant's identifier, its shape, and both tick
+/// bounds — on a reception whose frame had not been committed and whose census
+/// answer was a refusal. That is a public route from arriving bytes to *where
+/// does this occupant sit* which does not run through [`Arrangement::admit`],
+/// and the floor is precisely the claim that no such route exists. The privacy
+/// of `placement_of` and `placements` was standing in for that claim, and a
+/// derive walks straight past privacy: it is written against the fields, not
+/// against the methods.
+///
+/// So this prints what [`Reception::assembling`] and [`Reception::poisoned`]
+/// already publish, and nothing a renderer could draw from.
+/// `a_half_arrived_canvas_does_not_come_back_through_a_debug_line` compares the
+/// whole line, so a later `#[derive(Debug)]` here is a red test rather than a
+/// reopened hole.
+///
+/// [`Arrangement`] keeps its own derived `Debug`, and that is not the same
+/// question: there it is the declaring process printing placements it wrote
+/// itself, which is diagnostics about its own state. What may not come back is
+/// the *arriving* half before the commit has been admitted.
+///
+/// *What would reverse this:* a receiver that genuinely cannot debug a refused
+/// frame without seeing what had arrived. The answer then is a method that says
+/// so in its own name and its own documentation — not a derive that says
+/// nothing and is reached by `{:?}`.
+impl core::fmt::Debug for Reception {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Reception")
+            .field("epoch", &self.epoch)
+            .field("at", &self.at)
+            .field("assembling", &self.assembling())
+            .field("poison", &self.poison)
+            .finish()
+    }
 }
 
 impl Reception {
@@ -2417,6 +2459,35 @@ mod tests {
     ///   this format does not carry.
     const NOT_CARRIED: [&str; 3] = ["NotOfThisCanvas", "Unsayable", "Vocabulary"];
 
+    /// The refusals this format has that `interface`'s `Escape` does not, and
+    /// why none of them has a counterpart there.
+    ///
+    /// **Named rather than counted, and that is the repair.** What stood here
+    /// was a bare `7` inside `Escape::COUNT - 7`, with no list to count it
+    /// from, in a file whose whole design argument is that a count is derived
+    /// from the list it counts. Worse, it made the assertion a *lower bound*,
+    /// and a lower bound cannot see a clause deleted from the declaring side:
+    /// removing `Unplaced` — the floor itself — from `interface`'s `Escape`
+    /// left the comparison green while the test's own comment claimed that
+    /// deleting a variant made it red.
+    ///
+    /// Every one of these is a property of an arriving *entry* rather than of a
+    /// canvas: an opcode, a flag, a byte that should have been zero, a payload
+    /// that does not frame, a field that names no node, and the two rules about
+    /// a frame's order. A constructor in the declaring process cannot fail any
+    /// of them, because there are no bytes there to be wrong — which is why
+    /// their absence one crate over is a fact rather than an omission, and why
+    /// the test below asserts that `interface` does *not* declare them.
+    const WIRE_ONLY: [&str; 7] = [
+        "UnknownOpcode",
+        "UnknownFlag",
+        "Reserved",
+        "Malformed",
+        "NoNode",
+        "NotDeclared",
+        "Redeclared",
+    ];
+
     /// The canvas, as the receiving tree holds it.
     const SEQUENCE: u64 = 320;
     /// Its first lane.
@@ -2573,6 +2644,46 @@ mod tests {
         (out, found)
     }
 
+    /// A fixed byte buffer a `core::fmt::Write` can be driven into.
+    ///
+    /// A `#![no_std]` test has no `String`, and the point of
+    /// `a_half_arrived_canvas_does_not_come_back_through_a_debug_line` is to
+    /// *look at* a formatted line rather than trust what produced it.
+    struct Sink {
+        /// The bytes written so far.
+        buffer: [u8; 4096],
+        /// How many of them there are.
+        at: usize,
+    }
+
+    impl Sink {
+        /// An empty sink.
+        fn new() -> Self {
+            Self { buffer: [0; 4096], at: 0 }
+        }
+
+        /// What has been written, as text.
+        fn text(&self) -> &str {
+            core::str::from_utf8(&self.buffer[..self.at]).expect("a formatter writes text")
+        }
+    }
+
+    impl core::fmt::Write for Sink {
+        fn write_str(&mut self, text: &str) -> core::fmt::Result {
+            let bytes = text.as_bytes();
+            // Refused rather than truncated. A truncated line makes an
+            // assertion about a prefix while reading as an assertion about the
+            // whole, and a debug line that was cut off before the placements
+            // would pass the test that exists to find them.
+            if self.at + bytes.len() > self.buffer.len() {
+                return Err(core::fmt::Error);
+            }
+            self.buffer[self.at..self.at + bytes.len()].copy_from_slice(bytes);
+            self.at += bytes.len();
+            Ok(())
+        }
+    }
+
     /// The whole of a peer's frame, encoded.
     fn frame(arrangement: &Arrangement) -> ([Submission; PLACED_MAX + 2], usize) {
         let mut out = [Submission::UNSENT; PLACED_MAX + 2];
@@ -2602,9 +2713,23 @@ mod tests {
         // reception hands back — carries nothing that could be drawn.
         //
         // *The edits that make this go red:* deleting either half of the floor
-        // in `Arrangement::admit`; making `Progress` carry a placement;
-        // exposing `Arrangement::placement_of`; or giving `Participation` any
-        // constructor other than `admit`.
+        // in `Arrangement::admit`; making `Progress` carry a placement, which
+        // stops `nothing_says_where_anything_is_until_the_floor_is_met`
+        // compiling rather than merely failing.
+        //
+        // *And what no test here can see, said plainly rather than listed as
+        // though it could.* Making `Arrangement::placement_of` or
+        // `Arrangement::placements` public leaves every test in this file
+        // green, and so does giving `Participation` a second constructor. An
+        // earlier version of this comment listed both among the edits that go
+        // red. They are conventions, not guards, and listing a convention as a
+        // guard is worse than listing nothing — this comment is where a reader
+        // looks for the structural guarantee. What is actually held is
+        // narrower and is held where it can be: `Reception` is this module's
+        // only public decoder, everything before the commit answers
+        // `Progress::Assembling`, which carries nothing, and
+        // `a_half_arrived_canvas_does_not_come_back_through_a_debug_line`
+        // closes the one route that was walking past that.
         let tree = timeline();
 
         let silent = Arrangement::declaring(SEQUENCE, Base::FLICKS, Selection::NOTHING);
@@ -2661,6 +2786,71 @@ mod tests {
             );
         }
         assert!(reception.assembling(), "the frame is open until the commit");
+    }
+
+    #[test]
+    fn a_half_arrived_canvas_does_not_come_back_through_a_debug_line() {
+        // The other public route out of a reception, and the one a derive opens
+        // without anybody writing a line of code. `#[derive(Debug)]` on
+        // `Reception` printed its private `building`, and through it every
+        // placement that had arrived — occupant, shape and both tick bounds —
+        // on a frame whose commit had not happened and whose census answer is a
+        // refusal. The floor's structural claim is that no public route yields
+        // a placement before the commit; privacy on `placement_of` and
+        // `placements` was standing in for that claim, and a derive is written
+        // against fields rather than against methods.
+        //
+        // The whole line is compared rather than scanned. A scan for an
+        // occupant's digits passes the day somebody prints a placement some
+        // other way; an equality fails on any field appearing at all.
+        //
+        // *The edits that make this go red:* putting `Debug` back on
+        // `Reception`'s derive; adding any field to the hand-written impl.
+        use core::fmt::Write as _;
+
+        let tree = timeline();
+        let partial = Arrangement::declaring(SEQUENCE, Base::FLICKS, Selection::NOTHING)
+            .with_placement(Placement::over(DIALOGUE, span_x10(42, 68)))
+            .expect("room for one");
+        let (entries, written) = frame(&partial);
+        let mut reception = Reception::opening(1);
+
+        // Everything but the commit, so the reception is holding a canvas the
+        // floor has not admitted and never will.
+        for submission in &entries[..written - 1] {
+            assert_eq!(
+                reception.accept(&submission.entry, &submission.payload, &tree),
+                Ok(Progress::Assembling)
+            );
+        }
+        assert!(reception.assembling(), "the fixture is a half-arrived canvas");
+
+        let mut line = Sink::new();
+        write!(line, "{reception:?}").expect("a reception's debug line fits");
+        assert_eq!(
+            line.text(),
+            "Reception { epoch: 1, at: 2, assembling: true, poison: None }",
+            "a reception prints something other than what `assembling` and `poisoned` publish"
+        );
+
+        // And the occupant that did arrive is not in it, spelled the way it
+        // crossed. Redundant against the equality above and kept anyway,
+        // because it is the sentence the exit is about and it names the thing
+        // that leaked.
+        let mut occupant = Sink::new();
+        write!(occupant, "{DIALOGUE}").expect("a node identifier fits");
+        assert!(!line.text().contains(occupant.text()), "the occupant that arrived is printed");
+        let mut tick = Sink::new();
+        write!(tick, "{}", seconds_x10(42).count()).expect("a tick count fits");
+        assert!(!line.text().contains(tick.text()), "the tick bound that arrived is printed");
+
+        // And the frame really is refused, so this is a reception mid-flight
+        // rather than one that was never going to answer anything.
+        let commit = &entries[written - 1];
+        assert_eq!(
+            reception.accept(&commit.entry, &commit.payload, &tree),
+            Err(Fault { escape: Escape::Unplaced(STEPS), at: 2 })
+        );
     }
 
     #[test]
@@ -2774,9 +2964,21 @@ mod tests {
         // this fails naming it — which is the question somebody should be asked
         // rather than a wire that silently carries eleven of twelve clauses.
         //
+        // *Every word is still a clause.* The other direction, and the one the
+        // lower bound this replaced could not see: each variant this format
+        // carries is still declared by `interface`, unless it is on
+        // `WIRE_ONLY`, in which case `interface` must *not* declare it. A floor
+        // clause deleted one crate over used to appear in neither loop and pass.
+        //
         // *The reasons do not rot.* Every name on `NOT_CARRIED` is still a
         // variant `interface` declares, so a clause deleted or renamed there
         // does not leave a stale excuse behind.
+        //
+        // *The counts meet exactly.* `interface`'s list is this one, minus what
+        // only a wire can fail, plus what only a constructor can. An equality,
+        // with both subtrahends read off lists, because the `>=` that stood
+        // here admitted a whole missing clause and would have become a spurious
+        // failure the day four more wire-only refusals were added.
         //
         // *The capacity is one number.* `PLACED_MAX` is read out of the
         // declaring file, because a wire that held sixty-four placements while
@@ -2784,11 +2986,13 @@ mod tests {
         // direction and truncate them in the other.
         //
         // *The edits that make this go red:* adding, renaming or deleting a
-        // variant of `interface`'s `Escape`; changing `PLACED_MAX` on either
-        // side; changing `TimeBase::FLICKS`.
+        // variant of `interface`'s `Escape`; adding, renaming or deleting one
+        // of this module's carried variants; changing `PLACED_MAX` on either
+        // side; changing `TimeBase::FLICKS`. All three verbs were run in both
+        // directions, and deleting `Unplaced` from `interface` — the case that
+        // used to pass — is now red.
         let (declared, count) = declared_escapes();
         let declared = &declared[..count];
-        assert!(count >= Escape::COUNT - 7, "interface declares far fewer escapes than expected");
 
         for name in declared {
             let carried = Escape::LABELS.contains(name);
@@ -2799,12 +3003,30 @@ mod tests {
                  deliberately leaves behind — decide which, in `Escape` or in `NOT_CARRIED`"
             );
         }
+        for label in Escape::LABELS {
+            if WIRE_ONLY.contains(&label) {
+                assert!(
+                    !declared.contains(&label),
+                    "`{label}` is listed as this wire's own and `interface` declares it too"
+                );
+                continue;
+            }
+            assert!(
+                declared.contains(&label),
+                "`{label}` is carried across the ring and `interface` no longer declares it"
+            );
+        }
         for name in NOT_CARRIED {
             assert!(
                 declared.contains(&name),
                 "`{name}` is excused from the wire and `interface` no longer declares it"
             );
         }
+        assert_eq!(
+            count,
+            Escape::COUNT - WIRE_ONLY.len() + NOT_CARRIED.len(),
+            "the two refusal vocabularies no longer account for each other"
+        );
 
         assert_eq!(PLACED_MAX, declared_usize("PLACED_MAX"), "two capacities, one decision");
         assert!(

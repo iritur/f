@@ -44,7 +44,12 @@
 //!    appear once per channel epoch. Nothing in [`ChannelHeader`](crate::ChannelHeader) changes, and
 //!    that is part of the decision rather than an accident of scope: a field
 //!    that is meaningless on a block-device channel and must be zero there is
-//!    the shape R04 exists to refuse.
+//!    the shape R04 exists to refuse. Both legs are here, because RFC 0011's
+//!    shape is a mutual statement rather than a declaration: the writer's range
+//!    is the entry's payload, the receiver's answer is the entry's completion
+//!    ([`Agreed::detail`], read back by [`Handshake::confirm`]), and the
+//!    handshake may not carry [`flags::NO_CQE`] because that would suppress the
+//!    only leg coming the other way.
 //! 2. The vocabulary's indices are **append-only**, which is what makes a
 //!    version ordinal identify a list rather than merely label one. The failure
 //!    that ends systems is not the unknown ordinal — that one is loud — it is
@@ -259,6 +264,14 @@ pub const RELATIONS_MAX: usize = 4;
 /// client nothing it needs — which matters more here than it does for a scene,
 /// because here the refusal is the whole protocol.
 ///
+/// With exactly one exception, and it is the one entry whose *success* carries
+/// information: [`op::DECLARE_VOCABULARY`]'s completion is where the agreed
+/// version comes back ([`Agreed::detail`]), so a handshake carrying
+/// [`flags::NO_CQE`] is refused as [`Refusal::Malformed`] rather than accepted
+/// into a channel whose writer can never learn what it agreed. The rule lives
+/// in `envelope_rules`, which both [`Delta::check`] and [`Delta::decode`] run,
+/// so a producer is refused by its own build before a peer refuses it.
+///
 /// [`flags::LINK`] and [`flags::DRAIN`] are refused rather than honoured,
 /// because ordering inside a frame is already decided: the ring's order is the
 /// order, and the commit is the barrier. [`flags::FIXED_BUF`] is refused
@@ -314,8 +327,10 @@ pub enum Refusal {
     /// never looks at — including a deadline, which no semantic opcode reads.
     Reserved,
     /// The entry does not frame a payload: a length that is not
-    /// [`PAYLOAD_BYTES`], an arena offset that is not an arena offset, or a
-    /// handshake whose floor is above its ceiling.
+    /// [`PAYLOAD_BYTES`], an arena offset that is not an arena offset, a
+    /// handshake whose floor is above its ceiling, or a handshake carrying
+    /// [`flags::NO_CQE`] — which would suppress the completion the agreement
+    /// comes back in, and a handshake with no return leg is a declaration.
     Malformed,
     /// A closed field carries a value outside its set for a reason the
     /// vocabulary has no say in — a node named as its own parent, an edge that
@@ -376,7 +391,23 @@ pub enum Refusal {
     /// vocabulary both speak, which is what
     /// [`error::peer::VERSION_UNSUPPORTED`] already means one level up. RFC
     /// 0083 reuses it rather than minting a second code for one sentence.
-    VersionUnsupported,
+    ///
+    /// It carries *what was missing* rather than only that something was. RFC
+    /// 0011's shape is the intersection **or a refusal naming what was
+    /// missing**, and a refusal that said only *no common version* would leave
+    /// the refused peer unable to tell a floor it could still meet from a
+    /// ceiling it never will. [`Refusal::detail`] is how this reaches a
+    /// completion.
+    VersionUnsupported {
+        /// The highest vocabulary version the side that refused speaks.
+        ///
+        /// Its ceiling rather than its floor, because the refused peer's
+        /// question is *what would I have had to say*: a peer above this now
+        /// knows the version to fall back to, and a peer below it now knows it
+        /// is the side that has to move.
+        /// Unit: none — a vocabulary version ordinal. Zero is not a version.
+        offered: u16,
+    },
 }
 
 impl Refusal {
@@ -394,7 +425,7 @@ impl Refusal {
             Self::UnknownState { .. } => "the agreed vocabulary does not name one of these states",
             Self::NotNegotiated => "a semantic entry arrived before the vocabulary was agreed",
             Self::Renegotiated => "the vocabulary was agreed twice in one channel epoch",
-            Self::VersionUnsupported => "no vocabulary version is spoken by both sides",
+            Self::VersionUnsupported { .. } => "no vocabulary version is spoken by both sides",
         }
     }
 
@@ -420,7 +451,9 @@ impl Refusal {
     #[must_use]
     pub const fn packed(self) -> i32 {
         match self {
-            Self::VersionUnsupported => error::pack(error::PEER, error::peer::VERSION_UNSUPPORTED),
+            Self::VersionUnsupported { .. } => {
+                error::pack(error::PEER, error::peer::VERSION_UNSUPPORTED)
+            }
             Self::UnknownOpcode => error::pack(error::ARGUMENT, error::argument::UNKNOWN_OPCODE),
             Self::Reserved => error::pack(error::ARGUMENT, error::argument::RESERVED_NOT_ZERO),
             Self::Malformed => error::pack(error::ARGUMENT, error::argument::MALFORMED_HEADER),
@@ -436,15 +469,74 @@ impl Refusal {
             }
         }
     }
+
+    /// The detail word a completion carries for this refusal.
+    ///
+    /// [`Cqe::ext`](crate::Cqe::ext), which `f_ring::refusal` takes as its
+    /// `detail` argument. Written here rather than chosen by each caller
+    /// because a detail word four callers each decide is four meanings in one
+    /// field, and because RFC 0083 rests a sentence on one of them: *no overlap
+    /// is a refusal that names what was missing* is only true if the version
+    /// the refusing side offered actually leaves this build.
+    ///
+    /// **A conflict this function does not resolve.** [`error::PEER`]'s own
+    /// documentation says the domain's detail is *the peer's channel epoch*,
+    /// while [`error::peer::VERSION_UNSUPPORTED`]'s says *the version this side
+    /// offered*. This follows the code's, because a per-code detail is the only
+    /// one that can say anything a caller could not already read off the
+    /// channel header — an epoch is in the header, and the version the refusing
+    /// side speaks is nowhere else. Reconciling the two doc comments is an edit
+    /// to `abi/src/lib.rs`, which RFC 0083 records as owed rather than making
+    /// quietly here.
+    ///
+    /// Zero for every refusal whose value says all there is to say: a caller
+    /// reading a detail of zero is reading *the code is the whole answer*, not
+    /// a field somebody forgot.
+    #[must_use]
+    pub const fn detail(self) -> u64 {
+        match self {
+            Self::VersionUnsupported { offered } => offered as u64,
+            // The field in the high half and the ordinal in the low, because a
+            // bare ordinal cannot say whether 3 was read as a role or as a
+            // relation, and those are different bugs in different files.
+            Self::Unnamed { field, ordinal } => ((field as u64) << 16) | ordinal as u64,
+            Self::UnknownState { bits } => bits as u64,
+            Self::UnknownOpcode
+            | Self::UnknownFlag
+            | Self::Reserved
+            | Self::Malformed
+            | Self::Value
+            | Self::NoNode
+            | Self::NotNegotiated
+            | Self::Renegotiated => 0,
+        }
+    }
 }
 
 /// What this build and its peer agreed the vocabulary's ordinals mean.
 ///
-/// There is one way to obtain one — [`Handshake::negotiate`] — because the
-/// field is private and this module mints none anywhere else. So a function
-/// that takes an `Agreed` cannot be called on a channel where no version was
-/// agreed, and *the handshake happened* is a fact the type system carries
-/// rather than a comment asking a caller to remember.
+/// There are two ways to obtain one and both of them are a check rather than a
+/// copy, because the field is private and this module mints none anywhere else.
+/// [`Handshake::negotiate`] is the receiving side's: the peer's range against
+/// this build's constants. [`Handshake::confirm`] is the writing side's: the
+/// receiver's answer against the range this build actually stated. Neither
+/// takes a number from a peer and believes it, so no ordinal is ever admitted
+/// against a version some peer simply asserted.
+///
+/// What this type does **not** carry, stated because the difference is easy to
+/// overstate: it is not proof that a handshake *happened on a channel*.
+/// [`Handshake`]'s fields are public, so any code can build one and negotiate
+/// with itself; what that produces is this build's own opinion about its own
+/// constants, which is harmless and is what [`Handshake::HERE`] already is.
+/// *Nothing crosses before the vocabulary is agreed* is [`Session`]'s property,
+/// enforced by it holding `None` until [`op::DECLARE_VOCABULARY`] arrives, and
+/// [`Refusal::NotNegotiated`] is what it enforces it with.
+///
+/// Two, and not one, is what makes this RFC 0011's shape rather than a
+/// declaration: 0011's negotiation ends with **both** peers holding the same
+/// version, and a handshake only the receiver could compute would leave the
+/// writer unable to do either of the two things RFC 0083 says a sender does
+/// when it agrees a version below the one it was built against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Agreed(u16);
 
@@ -458,6 +550,31 @@ impl Agreed {
     #[must_use]
     pub const fn version(self) -> u16 {
         self.0
+    }
+
+    /// The detail word the receiver's completion carries, which is the
+    /// handshake's **return leg**.
+    ///
+    /// [`Handshake::negotiate`] runs on the side that reads
+    /// [`op::DECLARE_VOCABULARY`], so without this the writer would state a
+    /// range and never learn what was agreed. The completion it already gets —
+    /// [`op::DECLARE_VOCABULARY`] may not carry [`flags::NO_CQE`], and
+    /// `envelope_rules` is where that is refused — is the reverse channel that
+    /// already exists, so the agreement travels in `Cqe::ext` and costs no
+    /// opcode, no field and no feature bit.
+    ///
+    /// The writer reads it back with [`Handshake::confirm`], which checks it
+    /// against its own offer rather than believing it. A receiver that answered
+    /// a version the writer never offered is a receiver the writer refuses,
+    /// which is the same asymmetry
+    /// [`ChannelHeader::negotiate`](crate::ChannelHeader::negotiate) has one
+    /// level up: each side computes the intersection itself, and agreement is
+    /// two computations reaching the same number rather than one side being
+    /// told.
+    /// Unit: none — a vocabulary version ordinal, widened to the detail word.
+    #[must_use]
+    pub const fn detail(self) -> u64 {
+        self.0 as u64
     }
 
     /// Admit a state bitmask, or refuse it.
@@ -690,9 +807,24 @@ admitted! {
 
 /// The first entry on a semantic channel, and the only one that may be.
 ///
-/// RFC 0011's shape one level down: each side states the highest version it
-/// speaks and the oldest it still speaks, and the agreement is the highest
-/// version both reach. It is in band — an entry rather than a [`ChannelHeader`](crate::ChannelHeader)
+/// RFC 0011's shape one level down, and *shape* means both legs. The writer
+/// states the highest version it speaks and the oldest it still speaks, in this
+/// record; the receiver states its own range by answering out of its own
+/// constants, and its answer comes back in the entry's completion —
+/// [`Agreed::detail`] is what that word holds and [`Handshake::confirm`] is
+/// what reads it. Both sides then hold the same [`Agreed`], each having
+/// computed it, which is the property
+/// [`ChannelHeader::negotiate`](crate::ChannelHeader::negotiate) has one level
+/// up and the reason a peer's statement never has to be believed.
+///
+/// Why the completion and not a second entry: a semantic channel's reverse
+/// direction *is* the completion ring, so the return leg is already carried and
+/// already matched to the entry by `user_data`. A reply entry would need an
+/// eighth opcode, a rule about who may send it, and an answer to what happens
+/// when it never arrives — three new questions to move a number that already
+/// has a place to sit.
+///
+/// It is in band — an entry rather than a [`ChannelHeader`](crate::ChannelHeader)
 /// field — and that is a decision rather than an accident of scope. The header
 /// is sixty-four bytes with four reserved words for the entire system, and a
 /// field that is meaningless on a block-device channel and must be zero there
@@ -734,7 +866,8 @@ impl Handshake {
     ///
     /// [`Refusal::Malformed`] for a floor above the ceiling, which is a
     /// statement no honest build makes; [`Refusal::VersionUnsupported`] when
-    /// the ranges do not overlap.
+    /// the ranges do not overlap, carrying this build's ceiling so that the
+    /// refusal names what was missing rather than only that something was.
     pub const fn negotiate(self) -> Result<Agreed, Refusal> {
         if self.floor > self.highest {
             return Err(Refusal::Malformed);
@@ -742,9 +875,49 @@ impl Handshake {
         let version =
             if self.highest < VOCABULARY_VERSION { self.highest } else { VOCABULARY_VERSION };
         if version < self.floor || version < VOCABULARY_VERSION_MIN {
-            return Err(Refusal::VersionUnsupported);
+            return Err(Refusal::VersionUnsupported { offered: VOCABULARY_VERSION });
         }
         Ok(Agreed(version))
+    }
+
+    /// Read the receiver's answer out of this handshake's completion.
+    ///
+    /// The return leg, and the half that makes the exchange symmetric. `self`
+    /// is what this build offered — [`Handshake::HERE`] for an honest one —
+    /// and `detail` is the completion's [`Cqe::ext`](crate::Cqe::ext), which a
+    /// conforming receiver filled from [`Agreed::detail`].
+    ///
+    /// The answer is **checked, not believed**. A receiver that answered a
+    /// version outside the range this side stated has not agreed anything with
+    /// this build, and the version it named would be one this build might not
+    /// even be able to encode. Checking is also what keeps [`Agreed`]'s
+    /// invariant intact across this second door: the version handed back is one
+    /// this side already offered to speak.
+    ///
+    /// What this does **not** do is ask whether the receiver was honest about
+    /// its own range — nothing can, and RFC 0083 says so: the boundary refusal
+    /// is what holds against a peer that agreed one thing and sent another, and
+    /// this handshake is not what stops it.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::Malformed`] for an offer this build would not have made, or a
+    /// detail word that is not a version ordinal at all — zero, or wider than
+    /// the field the version travels in. [`Refusal::VersionUnsupported`] for an
+    /// answer outside the range this handshake stated, carrying this side's own
+    /// ceiling for the same reason [`Handshake::negotiate`] does.
+    pub const fn confirm(self, detail: u64) -> Result<Agreed, Refusal> {
+        if self.floor > self.highest || self.highest == 0 {
+            return Err(Refusal::Malformed);
+        }
+        if detail == 0 || detail > u16::MAX as u64 {
+            return Err(Refusal::Malformed);
+        }
+        let answered = detail as u16;
+        if answered > self.highest || answered < self.floor {
+            return Err(Refusal::VersionUnsupported { offered: self.highest });
+        }
+        Ok(Agreed(answered))
     }
 }
 
@@ -1802,11 +1975,23 @@ impl Delta {
 /// an omission: no semantic opcode reads one, so there is no per-opcode question
 /// to ask, and the byte comparison refuses a deadline as the unread field it is.
 const fn envelope_rules(opcode: u8, flags: u8) -> Result<(), Refusal> {
-    if op::is_handshake(opcode).is_none() {
-        return Err(Refusal::UnknownOpcode);
-    }
+    let handshake = match op::is_handshake(opcode) {
+        Some(handshake) => handshake,
+        None => return Err(Refusal::UnknownOpcode),
+    };
     if flags & !FLAGS_ACCEPTED != 0 {
         return Err(Refusal::UnknownFlag);
+    }
+    // The one per-opcode rule in this function, and it is the return leg made
+    // structural. `NO_CQE` is legal on every other entry precisely because
+    // nothing comes back on a success; on the handshake the agreement *is* what
+    // comes back, so suppressing the completion would leave the writer having
+    // stated a range and learnt nothing — the one-sided declaration RFC 0083
+    // says this is not. Refused rather than honoured-and-ignored, because a
+    // flag that is quietly dropped is two peers with different beliefs about
+    // what just happened.
+    if handshake && flags & flags::NO_CQE != 0 {
+        return Err(Refusal::Malformed);
     }
     Ok(())
 }
@@ -2261,18 +2446,75 @@ mod tests {
             .encode()
     }
 
-    /// A `DeclareNode` carrying an ordinal, whatever the vocabulary thinks of
-    /// it.
+    /// The `DeclareNode` every byte assertion below is made about.
+    ///
+    /// Every field distinct and non-zero, and that is the whole point of it
+    /// rather than decoration. `DeclareNode::SPECIMEN` zeroes `parent`,
+    /// `before` and `intent`, so against *it* a role field widened from two
+    /// bytes to four encodes to the same fifty-six bytes: the two bytes the
+    /// wider field steals from `intent` were zero, and the two it leaves behind
+    /// are zero too. A specimen of zeros cannot tell a field's width from its
+    /// neighbour's, which is exactly the move
+    /// `the_role_ordinals_on_the_wire_are_the_indices_the_vocabulary_declares`
+    /// is here to catch.
+    const NODE_FIXTURE: DeclareNode = DeclareNode {
+        node: 0x1122_3344_5566_7788,
+        parent: 0x0908_0706_0504_0302,
+        before: 0x1817_1615_1413_1211,
+        role: RoleOrdinal(0),
+        intent: 0xfeed_c0de,
+    };
+
+    /// Where each field of a `DeclareNode` sits in the payload, written out by
+    /// hand.
+    ///
+    /// **These five numbers are the copy this file wants.** Everything else
+    /// here is derived from the list or from the encoder, and derivation is
+    /// what makes a round trip prove nothing about the wire: an encoder and a
+    /// decoder that move a field together stay in agreement with each other
+    /// while the bytes a peer sees change underneath them. These offsets record
+    /// the wire as shipped, so a field that moves — biased, widened, narrowed
+    /// or reordered — disagrees with a number nobody moved.
+    ///
+    /// If one of these goes red the question is not *what is the new offset*.
+    /// It is *which deployed peer is now reading the wrong field*.
+    /// Unit: bytes from the first byte of the payload.
+    const NODE_AT: usize = 0;
+    /// See [`NODE_AT`]. Unit: bytes from the first byte of the payload.
+    const PARENT_AT: usize = 8;
+    /// See [`NODE_AT`]. Unit: bytes from the first byte of the payload.
+    const BEFORE_AT: usize = 16;
+    /// The field the exit sentence is about. See [`NODE_AT`].
+    /// Unit: bytes from the first byte of the payload.
+    const ROLE_AT: usize = 24;
+    /// See [`NODE_AT`]. Unit: bytes from the first byte of the payload.
+    const INTENT_AT: usize = 26;
+
+    /// [`NODE_FIXTURE`] carrying `ordinal`, as it crosses.
     ///
     /// Only this module can write one, because `RoleOrdinal`'s field is private
     /// — which is the property under test, read from the inside. A peer on the
     /// far side of a ring writes whatever bytes it likes, and this is how those
     /// bytes are produced without a second encoder.
     fn node_of_role(ordinal: u16) -> (Sqe, [u8; PAYLOAD_BYTES]) {
-        crossing(Entry::DeclareNode(DeclareNode {
-            role: RoleOrdinal(ordinal),
-            ..DeclareNode::SPECIMEN
-        }))
+        crossing(Entry::DeclareNode(DeclareNode { role: RoleOrdinal(ordinal), ..NODE_FIXTURE }))
+    }
+
+    /// The payload [`node_of_role`] must produce, assembled from the offsets
+    /// above rather than from the encoder.
+    ///
+    /// Not a second encoder: it writes five `copy_from_slice`s at five
+    /// hand-written offsets, and it does not know what a `Record` is. The
+    /// bytes past the last field stay zero because `Writer` never reaches them
+    /// and `Reader::finish` requires it — the tail rule, seen from outside.
+    fn expected_node_payload(ordinal: u16) -> [u8; PAYLOAD_BYTES] {
+        let mut out = [0; PAYLOAD_BYTES];
+        out[NODE_AT..NODE_AT + 8].copy_from_slice(&NODE_FIXTURE.node.to_le_bytes());
+        out[PARENT_AT..PARENT_AT + 8].copy_from_slice(&NODE_FIXTURE.parent.to_le_bytes());
+        out[BEFORE_AT..BEFORE_AT + 8].copy_from_slice(&NODE_FIXTURE.before.to_le_bytes());
+        out[ROLE_AT..ROLE_AT + 2].copy_from_slice(&ordinal.to_le_bytes());
+        out[INTENT_AT..INTENT_AT + 4].copy_from_slice(&NODE_FIXTURE.intent.to_le_bytes());
+        out
     }
 
     #[test]
@@ -2291,14 +2533,22 @@ mod tests {
         // or `ALL` stops being emitted in declaration order, the wire's
         // ordinals stop being `Role::index` values and this says so.
         //
-        // *The wire.* Every ordinal the list declares crosses and comes back as
-        // itself, through this format's own encoder and decoder; the first
-        // ordinal past the list is refused.
+        // *The wire.* Every ordinal the list declares is asserted **as bytes**,
+        // at a hand-written offset, in the payload this format encodes — and
+        // not only as a round trip. A round trip proves that this module's
+        // encoder and its own decoder agree with each other, which every
+        // symmetric transformation of the field preserves: a bias applied in
+        // `write` and undone in `read` moves what a peer sees while every round
+        // trip still closes, and a widened field moves `intent` with it. So the
+        // round trip is kept — it is what shows the ordinal is not *mapped* on
+        // the way in — and the byte image is added, because it is what shows
+        // where the ordinal actually lands.
         //
         // *The edits that make this go red:* appending a role to `vocabulary!`;
         // deleting one; changing `Role::index` to anything but the
-        // discriminant; changing `Role::ALL` to anything but declaration order;
-        // biasing the wire ordinal; widening or narrowing the role field.
+        // discriminant, `self as usize + 1` included; changing `Role::ALL` to
+        // anything but declaration order; biasing the wire ordinal; widening,
+        // narrowing or moving the role field; reordering the record's fields.
         let (names, count) = declared_roles();
         assert_eq!(count, 22, "`vocabulary!` declares {count} roles");
         assert!(
@@ -2310,13 +2560,21 @@ mod tests {
             VOCABULARY.contains("pub const ALL: [Self; Self::COUNT] = [$(Self::$variant),*];"),
             "`Role::ALL` is no longer the declaration order of `vocabulary!`"
         );
-        let Some(at) = VOCABULARY.find("pub const fn index(self) -> usize") else {
+        // The whole body, and not a substring of it. `contains` admits
+        // `self as usize + 1`, which is a wire bias written one crate over and
+        // is the edit this comparison exists to refuse; the `ALL` check above
+        // is already an exact comparison, and this is that shape copied.
+        const INDEX: &str = "pub const fn index(self) -> usize";
+        let Some(at) = VOCABULARY.find(INDEX) else {
             panic!("`Role::index` is gone; the wire's ordinal has no definition to be")
         };
-        let after = &VOCABULARY[at..];
-        let body = after.split('}').next().unwrap_or(after);
-        assert!(
-            body.contains("self as usize"),
+        let after = &VOCABULARY[at + INDEX.len()..];
+        let Some((body, _)) = after.split_once('}') else {
+            panic!("`Role::index`'s body never closes, so there is nothing to compare")
+        };
+        assert_eq!(
+            body.trim().trim_start_matches('{').trim(),
+            "self as usize",
             "`Role::index` is no longer the enum's discriminant, so it is no longer the \
              position of the line that declared the role"
         );
@@ -2326,6 +2584,26 @@ mod tests {
         for (index, name) in names.iter().take(count).enumerate() {
             let ordinal = u16::try_from(index).expect("a role index fits a wire ordinal");
             let (entry, payload) = node_of_role(ordinal);
+
+            // The bytes. Two of them, at `ROLE_AT`, little-endian, equal to the
+            // role's position in the declaring list with no arithmetic in
+            // between — the exit's sentence, read off the wire rather than off
+            // a decoded value.
+            assert_eq!(
+                &payload[ROLE_AT..ROLE_AT + 2],
+                &ordinal.to_le_bytes(),
+                "`{name}` does not sit at byte {ROLE_AT} of the payload as itself"
+            );
+            // And the whole payload, so that a field which moved *without*
+            // changing what sits at `ROLE_AT` — a role widened to four bytes
+            // still carries its low half there — is caught by the neighbour it
+            // displaced.
+            assert_eq!(
+                payload,
+                expected_node_payload(ordinal),
+                "the `DeclareNode` payload for `{name}` is not the record this wire ships"
+            );
+
             let delta = Delta::decode(&entry, &payload, Some(agreed), &vocabulary)
                 .unwrap_or_else(|refusal| panic!("`{name}` at {ordinal}: {}", refusal.message()));
             let Entry::DeclareNode(declared) = delta.body else {
@@ -2342,6 +2620,52 @@ mod tests {
             "the first ordinal past the list is not refused, so the wire admits more \
              ordinals than the vocabulary declares"
         );
+    }
+
+    #[test]
+    fn a_declare_node_is_these_bytes() {
+        // The golden vector. Fifty-six bytes written out by hand, derived from
+        // nothing, recording what this format shipped — the one artefact that
+        // turns *this is the wire* from a claim about two functions into a fact
+        // about an array.
+        //
+        // The test above assembles its expectation from five offsets, which is
+        // already independent of the encoder; this is independent of the
+        // offsets too. If the two ever disagree, the offsets moved and the
+        // bytes did not, which is the interesting direction.
+        //
+        // **This literal is never updated to match the encoder.** If it goes
+        // red the question is not *what are the new bytes*, it is *which
+        // deployed peer is now reading the wrong field*. A deliberate wire
+        // change is an ABI change, and RFC 0083's first reversal condition is
+        // what it has to be argued under.
+        let (entry, payload) = node_of_role(13);
+        #[rustfmt::skip]
+        let shipped: [u8; PAYLOAD_BYTES] = [
+            // node: 0x1122_3344_5566_7788, little-endian.
+            0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+            // parent: 0x0908_0706_0504_0302.
+            0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+            // before: 0x1817_1615_1413_1211.
+            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+            // role: 13, two bytes, unbiased.
+            0x0d, 0x00,
+            // intent: 0xfeed_c0de, immediately after the role and not two
+            // bytes later, which is what pins the role field's width.
+            0xde, 0xc0, 0xed, 0xfe,
+            // The tail `Reader::finish` requires to be zero.
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0,
+        ];
+        assert_eq!(payload, shipped, "a `DeclareNode` is not the bytes it shipped as");
+
+        // And the opcode it crosses under, because an entry whose payload is
+        // right and whose opcode moved is read as another record entirely.
+        assert_eq!(entry.opcode, 0x02, "`DECLARE_NODE` is no longer opcode 2 on the wire");
+        assert_eq!(entry.opcode, op::DECLARE_NODE);
+        assert_eq!(entry.len as usize, PAYLOAD_BYTES);
     }
 
     #[test]
@@ -2630,11 +2954,15 @@ mod tests {
         // The alternative — opening the channel anyway and degrading — is the
         // failure the whole module is arranged against, arriving at setup.
         let too_new = Handshake { highest: VOCABULARY_VERSION + 9, floor: VOCABULARY_VERSION + 1 };
-        assert_eq!(too_new.negotiate(), Err(Refusal::VersionUnsupported));
-        assert_eq!(
-            Refusal::VersionUnsupported.packed(),
-            error::pack(error::PEER, error::peer::VERSION_UNSUPPORTED)
-        );
+        let refusal = Refusal::VersionUnsupported { offered: VOCABULARY_VERSION };
+        assert_eq!(too_new.negotiate(), Err(refusal));
+        assert_eq!(refusal.packed(), error::pack(error::PEER, error::peer::VERSION_UNSUPPORTED));
+
+        // And it names what was missing, which is the half of RFC 0011's shape
+        // a bare code cannot carry: the detail word says the highest version
+        // this side speaks, so the refused peer learns the version to fall back
+        // to rather than only that there was none.
+        assert_eq!(refusal.detail(), u64::from(VOCABULARY_VERSION));
 
         // A peer ahead of this build but still speaking version 1 meets it in
         // the middle, which is the whole point of a floor.
@@ -2647,6 +2975,99 @@ mod tests {
         let (entry, payload) =
             crossing(Entry::DeclareVocabulary(Handshake { highest: 0, floor: 0 }));
         assert_eq!(Delta::decode(&entry, &payload, None, &vocabulary()), Err(Refusal::Malformed));
+    }
+
+    #[test]
+    fn the_agreement_comes_back_to_the_writer_and_both_sides_hold_it() {
+        // RFC 0011's shape is a *mutual* statement whose result both peers
+        // hold, and the leg that is easy to leave out is the one coming back. A
+        // writer that states a range and is never told what was agreed cannot
+        // do either of the two things RFC 0083 says a sender does when it
+        // agrees a version below the one it was built against — refuse to
+        // start, or substitute older roles in application code — so a handshake
+        // with no return leg is a declaration wearing a negotiation's name.
+        //
+        // *The edits that make this go red:* deleting `Agreed::detail` or
+        // `Handshake::confirm`; letting `confirm` believe an answer outside the
+        // range the writer stated; letting either side's refusal stop naming
+        // the version it offered.
+        let vocabulary = vocabulary();
+
+        // The receiver's leg: it reads the writer's range off the wire and
+        // computes the agreement against its own constants.
+        let offer = Handshake { highest: VOCABULARY_VERSION + 9, floor: VOCABULARY_VERSION_MIN };
+        let mut session = Session::opening(1);
+        let (entry, payload) = crossing(Entry::DeclareVocabulary(offer));
+        assert!(session.accept(&entry, &payload, &vocabulary).is_ok());
+        let receiver = session.agreed().expect("the receiver holds the agreement");
+
+        // The writer's leg: the detail word of that entry's completion, checked
+        // against the range the writer actually stated. Both sides then hold
+        // the same `Agreed`, each having computed it rather than been told.
+        let writer = offer.confirm(receiver.detail()).expect("the answer is inside the offer");
+        assert_eq!(writer, receiver);
+        assert_eq!(writer.version(), VOCABULARY_VERSION);
+
+        // Checked and not believed. A receiver that answers a version the
+        // writer never offered has agreed nothing with it, and the refusal
+        // names this side's ceiling the way the receiver's refusal does.
+        assert_eq!(
+            offer.confirm(u64::from(VOCABULARY_VERSION + 20)),
+            Err(Refusal::VersionUnsupported { offered: VOCABULARY_VERSION + 9 })
+        );
+        let floored = Handshake { highest: VOCABULARY_VERSION + 9, floor: VOCABULARY_VERSION + 5 };
+        assert_eq!(
+            floored.confirm(u64::from(VOCABULARY_VERSION)),
+            Err(Refusal::VersionUnsupported { offered: VOCABULARY_VERSION + 9 })
+        );
+
+        // A detail word that is not a version ordinal at all. Zero is the value
+        // an unfilled `Cqe::ext` has, so it is refused rather than read as
+        // *any*, for the reason a zeroed handshake payload is.
+        assert_eq!(offer.confirm(0), Err(Refusal::Malformed));
+        assert_eq!(offer.confirm(u64::from(u16::MAX) + 1), Err(Refusal::Malformed));
+    }
+
+    #[test]
+    fn a_handshake_may_not_suppress_the_completion_the_agreement_returns_in() {
+        // The return leg made structural rather than asked for. `NO_CQE` is the
+        // one flag this format accepts, and it is accepted because no other
+        // entry's *success* says anything a client needs; the handshake's
+        // success is the agreed version, so suppressing it suppresses the
+        // negotiation's other half. Refused through the one function both
+        // `check` and `decode` run, so a producer is stopped by its own build
+        // rather than by a peer's completion.
+        let vocabulary = vocabulary();
+        let quiet = Delta {
+            user_data: 0,
+            class: class::SOFT,
+            payload_offset: 8,
+            flags: flags::NO_CQE,
+            body: Entry::DeclareVocabulary(Handshake::HERE),
+        };
+        assert_eq!(quiet.check(), Err(Refusal::Malformed));
+        let (entry, payload) = quiet.encode();
+        assert_eq!(Delta::decode(&entry, &payload, None, &vocabulary), Err(Refusal::Malformed));
+
+        // And every other opcode still may, because for those the flag costs
+        // the client nothing it needs: a client declaring a hundred nodes does
+        // not want a hundred completions, and a refused entry completes
+        // whatever the flag says.
+        for body in Entry::specimens() {
+            if op::is_handshake(body.opcode()) == Some(true) {
+                continue;
+            }
+            let opcode = body.opcode();
+            let loud = Delta {
+                user_data: 0,
+                class: class::SOFT,
+                payload_offset: 8,
+                flags: flags::NO_CQE,
+                body,
+            };
+            let label = op::label(opcode);
+            assert_eq!(loud.check(), Ok(()), "{label} may not suppress its completion");
+        }
     }
 
     #[test]
@@ -2795,17 +3216,33 @@ mod tests {
             Refusal::UnknownState { bits: 0x80 },
             Refusal::NotNegotiated,
             Refusal::Renegotiated,
-            Refusal::VersionUnsupported,
+            Refusal::VersionUnsupported { offered: 3 },
         ];
         for refusal in every {
             let Some((domain, _)) = error::unpack(refusal.packed()) else {
                 panic!("{} does not unpack", refusal.message())
             };
-            let expected =
-                if refusal == Refusal::VersionUnsupported { error::PEER } else { error::ARGUMENT };
+            let expected = if matches!(refusal, Refusal::VersionUnsupported { .. }) {
+                error::PEER
+            } else {
+                error::ARGUMENT
+            };
             assert_eq!(domain, expected, "{}", refusal.message());
             assert!(!refusal.message().is_empty());
         }
+
+        // The detail word, on the three refusals that have something to say.
+        // Zero everywhere else is a statement rather than an omission: the code
+        // is the whole answer, and a caller reading zero is not reading a field
+        // somebody forgot to fill.
+        assert_eq!(Refusal::VersionUnsupported { offered: 3 }.detail(), 3);
+        assert_eq!(Refusal::UnknownState { bits: 0x80 }.detail(), 0x80);
+        assert_eq!(
+            Refusal::Unnamed { field: Closed::Relation, ordinal: 99 }.detail(),
+            ((Closed::Relation as u64) << 16) | 99,
+            "a bare ordinal cannot say whether 99 was read as a role or as a relation"
+        );
+        assert_eq!(Refusal::NoNode.detail(), 0);
         assert_eq!(
             Refusal::NotNegotiated.packed(),
             error::pack(error::ARGUMENT, error::argument::FEATURE_NOT_NEGOTIATED),
@@ -2849,6 +3286,13 @@ mod tests {
             "pending edit is poisoned",
             "entry on the channel and may appear once per channel epoch",
             "the vocabulary's indices are **append-only**",
+            // The return leg, which is the half of RFC 0011's shape this
+            // module would otherwise only claim. If the RFC ever drops it,
+            // `Agreed::detail`, `Handshake::confirm` and the `NO_CQE` refusal
+            // are three mechanisms implementing a decision nobody made.
+            "*Shape* means **both legs**, and the leg that is easy to leave out is the one",
+            "carry `NO_CQE` — a handshake that suppressed its own completion would be a",
+            "overlap is `PEER`/`VERSION_UNSUPPORTED`, and its **detail word carries the",
         ] {
             assert!(RFC_0083.contains(clause), "RFC 0083 no longer says `{clause}`");
         }

@@ -64,19 +64,51 @@
 //!   `interface/src/node.rs` gives about its `Role`: that attribute forces
 //!   every consumer to carry a wildcard arm, and a wildcard arm is where a kind
 //!   nobody understood goes to be rendered as nothing.
-//! - **Every consumer with a per-kind table stops compiling.** [`ByKind`] holds
-//!   `[T; Kind::COUNT]`, so a table written with six entries is the wrong
-//!   length the day there are seven. This is the arm of the argument a match
-//!   cannot carry: an exhaustive match demands an arm and not an arm that says
-//!   anything, and `Kind::Volume => {}` compiles. A table has no empty arm to
-//!   write. A consumer that wants per-kind behaviour should reach for
-//!   [`ByKind`] first and a match second, and this module offers no third way.
+//! - **Every consumer holding a per-kind table *as a literal* stops
+//!   compiling.** [`ByKind`] holds `[T; Kind::COUNT]`, so a table written out
+//!   with six entries is the wrong length the day there are seven. This is the
+//!   arm of the argument a match cannot carry: an exhaustive match demands an
+//!   arm and not an arm that says anything, and `Kind::Volume => {}` compiles.
+//!   A written-out table has no empty row. A consumer that wants per-kind
+//!   behaviour should reach for [`ByKind`] first and a match second, and this
+//!   module offers no third way. The one in the tree today is
+//!   `crate::effect`'s `MAY_DECLARE`, which decides which kinds may carry a
+//!   cost and a fallback, and which is the reason [`Effect`](Kind::Effect) is
+//!   not read out of a `matches!`.
 //!
-//! The limit is stated so nobody has to find it: a consumer that writes `_ =>`
-//! is not caught, here or in `interface/src/node.rs`, because Rust has no way
-//! to refuse a wildcard over somebody else's enum. The exit this file is
-//! accepted on says *the way `Role` already is*, and this is exactly how far
-//! that goes.
+//! # How far that goes, checked rather than asserted
+//!
+//! Stated exactly, because the summary of it is larger than any of it and this
+//! module's whole worth is that a reader can trust the summary.
+//!
+//! A seventh kind, added to the `kinds!` list below and to `abi::scene::kind`,
+//! stops **this file's** build twice — the wire cross-check and the family
+//! census, both const blocks — and stops **`crate::effect`'s** build once, at
+//! `MAY_DECLARE`'s six rows.
+//!
+//! It does not stop three other things, and none of the three is hypothetical:
+//!
+//! - **A consumer that writes `_ =>`.** Rust has no way to refuse a wildcard
+//!   over somebody else's enum, here or in `interface/src/node.rs`.
+//! - **A [`ByKind`] that is not written as a literal.** `ByKind::new([0;
+//!   Kind::COUNT])` is a repeat expression and `Kind::ALL.map(..)` is a map
+//!   over the list itself; both grow to seven silently. `crate::arena` holds
+//!   one of the first and two of the second, so the guard this section argues
+//!   for has exactly one instance in the workspace and it is the one named
+//!   above. A per-kind table that must fire is written out row by row.
+//! - **A consumer that carries a kind as a `u16`.** `crate::reconcile` and
+//!   `crate::commit` both do, validated by `abi::scene::kind::known` rather
+//!   than by this type, and a seventh kind reaches them with no edit at all.
+//!   Whether the decoder belongs below those modules is their argument and not
+//!   this one's; what is this one's is not to claim [`Kind`] is the only
+//!   near-side representation of *what kind a node is*, because it is not.
+//!
+//! The exit this file is accepted on says *a seventh kind is a compile error in
+//! every consumer, the way `Role` already is*. **That is more than is true of
+//! `Role` and more than is true here**, and the sentence this file does stand
+//! behind is the narrower one: a seventh kind is a compile error in every
+//! consumer that decides per kind without a wildcard, and the one consumer in
+//! this workspace that decides per kind is such a consumer.
 //!
 //! # Why a macro, in a tree that mostly refuses them
 //!
@@ -333,11 +365,20 @@ kinds! {
 ///
 /// The type a consumer should reach for before it reaches for a match. A
 /// dispatch table, a per-kind counter, a per-kind renderer entry point: each of
-/// those written as a [`ByKind`] is a six-element array literal today and a
-/// compile error the day there are seven kinds — in the consumer's own crate,
-/// with the consumer's own author reading the message. That is the part a match
-/// cannot do: an exhaustive match demands an arm, and an arm that says nothing
-/// is still an arm.
+/// those **written out as a six-element array literal** is a compile error the
+/// day there are seven kinds — in the consumer's own crate, with the consumer's
+/// own author reading the message. That is the part a match cannot do: an
+/// exhaustive match demands an arm, and an arm that says nothing is still an
+/// arm.
+///
+/// **Two ways of building one that a seventh kind does not stop**, named here
+/// because both are in this workspace and both look like this type doing its
+/// job: `ByKind::new([0; Kind::COUNT])` is a repeat expression and grows to
+/// seven zeros, and `ByKind::new(Kind::ALL.map(..))` is a map over the list
+/// that changed, so it grows too. Neither is wrong — a census that starts at
+/// zero for every kind wants exactly the first — but neither is a guard, and a
+/// table that has to *decide* something per kind is written row by row for that
+/// reason. `crate::effect`'s `MAY_DECLARE` is the one in the tree that decides.
 ///
 /// Indexing cannot fail and there is no `Option` anywhere on it:
 /// [`Kind::index`] is the enum's discriminant and [`Kind::COUNT`] is the array's

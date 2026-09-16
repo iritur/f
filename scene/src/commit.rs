@@ -62,11 +62,38 @@
 //!   changed under it is a different scene.
 //! - **A batch that refused anything can never produce a key.** This is the
 //!   load-bearing one, and it is why [`Batch::offer`] takes *bytes* rather than
-//!   a decoded [`Delta`]. A slot whose payload never landed reads as the zeros
-//!   an untouched mapping holds; `abi::scene` refuses those; this module
-//!   records the refusal; and the `COMMIT` that arrives afterwards is refused
-//!   with [`Refusal::Poisoned`] instead of sealing. **A frame that lost an
-//!   entry is not a shorter frame. It is not a frame.**
+//!   a decoded [`Delta`]. A slot the producer has never reached reads as the
+//!   zeros of a fresh mapping; `abi::scene` refuses those; this module records
+//!   the refusal; and the `COMMIT` that arrives afterwards is refused with
+//!   [`Refusal::Poisoned`] instead of sealing. **A frame that lost an entry is
+//!   not a shorter frame. It is not a frame.**
+//!
+//! # The limit of that last one, which is the ring's and not this file's
+//!
+//! *A slot that did not land reads as zeros* is true of a slot nobody has
+//! written yet and false of every slot after that. The ring initialises its
+//! entries once and zeroes none of them on completion — `ring/src/lib.rs` — so
+//! a slot whose write is not **visible** holds the entry that occupied it last,
+//! which is a previous frame's delta and decodes perfectly. The batch has no
+//! way to tell it from one of its own: there is no sequence number on an entry,
+//! and every field of [`Sqe`] a scene delta does not read is already required
+//! to be zero.
+//!
+//! What stands between that and a third scene is the ring's `Release` store and
+//! the consumer's `Acquire` load, which together promise that every slot below
+//! the published tail holds what the producer wrote. **A commit's atomicity
+//! therefore does rest on that pair**, and the sweep at the bottom of this file
+//! measures it rather than assuming it away: `tests::Mode::Lying` is a ring that
+//! promises nothing, it is swept at every cut alongside the honest one, and the
+//! run *requires* it to produce third scenes and to produce frames that only
+//! [`admit`] stopped. No count of them is written down here, because a count
+//! written into prose is a number nothing re-derives; the assertions are floors
+//! and the failure message prints what the run actually saw.
+//!
+//! *What would reverse this:* a per-entry submission sequence in the ABI, which
+//! the consumer checks against the slot's own index, at which point a stale slot
+//! is detectable and the sentence above loses its clause. That is a diff to
+//! `abi/src/scene.rs` with an RFC behind it and not a diff to this file.
 //!
 //! # Why the bytes are the door, and the only door
 //!
@@ -215,9 +242,13 @@ pub enum Refusal {
     ///
     /// Carried from `f_abi::scene` unchanged. The common case is not a hostile
     /// peer: it is a slot whose payload had not landed when the entry became
-    /// visible, which reads as the zeros an untouched mapping holds and is
-    /// refused as an unknown opcode. That refusal is what stops a frame with a
-    /// hole in it from ever sealing.
+    /// visible. Where the producer has never reached that slot, it reads as the
+    /// zeros of a fresh mapping and is refused as an unknown opcode, and that
+    /// refusal is what stops a frame with a hole in it from ever sealing. Where
+    /// it has, the slot holds a previous frame's entry instead and this refusal
+    /// is not made — the module's *the limit of that last one* is what carries
+    /// the frame then, and it is the ring's ordering pair rather than anything
+    /// here.
     Wire(WireRefusal),
     /// An edit arrived after an edit belonging to a later section.
     ///
@@ -262,6 +293,12 @@ pub enum Refusal {
     /// component's own code. *What would reverse this:* a compositor that
     /// drains two channels' frames through one code path, where the two batches
     /// are chosen by a value rather than by which variable is in scope.
+    ///
+    /// The one route to it that was *not* a trust boundary is closed:
+    /// [`Batch`] is no longer `Copy`, so `let twin = batch;` does not compile
+    /// and a second batch carrying one serial cannot be made by assignment.
+    /// That was a keystroke, and this paragraph excluded exactly the case it
+    /// made easy.
     StaleSeal,
 }
 
@@ -367,7 +404,16 @@ pub enum Refused {
     /// delta in it, or none of them* — and this is the *none*.
     Whole {
         /// Which delta of the frame was refused.
-        /// Unit: none — an index into the frame's edits.
+        ///
+        /// Two refusals have no such delta and say so here rather than
+        /// inventing one, because a caller that indexes `edits()` with this
+        /// deserves to know which: [`Refusal::Graph`] carrying
+        /// `GraphRefusal::Capacity` is a statement about the whole frame and
+        /// answers `edits().len()`, one past the last delta; and
+        /// [`Refusal::StaleSeal`] is a statement about the key rather than
+        /// about any entry and answers zero.
+        /// Unit: none — an index into the frame's edits, and `edits().len()`
+        /// for a refusal that is about the frame rather than a delta of it.
         at: usize,
         /// Why.
         refusal: Refusal,
@@ -438,7 +484,17 @@ const fn section_of(entry: &Entry) -> Option<Section> {
 /// `LIMIT` is the component's own statement of the largest frame it will
 /// accept, on `crate::reconcile::Deltas`' terms from the producing side.
 /// [`DELTAS_MAX`] is the number section 07 argues for.
-#[derive(Clone, Copy, Debug)]
+///
+/// **Neither `Clone` nor `Copy`, and that absence is load-bearing.** The
+/// module's *a frame cannot be applied twice* rests on the serial that ties a
+/// [`Sealed`] to the batch that cut it; a batch that could be duplicated by
+/// assignment duplicates that serial, and `let twin = batch;` then produces a
+/// second key for one frame and applies it twice — with nothing but
+/// [`admit`]'s runtime opinion of the second application standing in the way.
+/// [`Refusal::StaleSeal`]'s doc argues that two batches carrying one serial is
+/// unreachable across a trust boundary; a derived `Copy` made it one keystroke
+/// *inside* a component, which is precisely the case that argument excludes.
+#[derive(Debug)]
 pub struct Batch<const LIMIT: usize> {
     /// The frame's edits, in arrival order. Only the first `len` mean anything,
     /// and the commit that ends a frame is not among them — it is a [`Sealed`].
@@ -1062,12 +1118,20 @@ mod tests {
 
     /// Seeds swept. Unit: count of seeds.
     ///
-    /// Sixteen, which is what `cargo test` pays for in well under a second and
-    /// is therefore the wrong number to have chosen by feel. It is the floor of
-    /// what makes the six required observations below reliable rather than
-    /// lucky: the rarest of them — a torn payload the decoder refuses — needs a
-    /// tear that falls inside a record rather than in the padding after it, and
-    /// a run of four seeds reaches that a handful of times.
+    /// Sixteen, and the honest derivation is a budget rather than a floor:
+    /// it is what `cargo test` pays for in a couple of seconds. It is **not**
+    /// the least number that reaches the required observations — measured,
+    /// two seeds already reach every one of them — and an earlier version of
+    /// this comment said it was, which was a derivation written after the
+    /// number and not before it. What sixteen buys over two is margin: the
+    /// rarest observation here is a torn payload the decoder refuses, which
+    /// needs a tear falling inside a record rather than in the padding after
+    /// it, and margin on the rarest is what stops a corpus change from
+    /// silently turning a required observation into a coin toss.
+    ///
+    /// *What would reverse this:* the sweep costing enough to be skipped. A
+    /// number that makes a run slow is a number that makes the run optional,
+    /// which is worse than a smaller one.
     const SEEDS: u64 = 16;
 
     /// Commits published per seed. Unit: count of commits.
@@ -1103,10 +1167,13 @@ mod tests {
     enum Granularity {
         /// An entry arrived whole or not at all.
         Whole,
-        /// The cut falls inside the last entry submitted: a prefix of its
-        /// payload is in the arena and the rest is still the zeros an untouched
-        /// mapping holds. This is the only granularity at which a torn delta —
-        /// one of the required observations — can be produced at all.
+        /// The cut falls inside the last entry submitted, past the barrier: a
+        /// prefix of its payload is in the arena and the rest is still what the
+        /// slot held before. This is the only granularity at which a torn delta
+        /// — one of the required observations — can be produced at all, and a
+        /// barrier that covers the slot excludes it, which is why an honest ring
+        /// tears nothing: a promise of visibility is a promise about all the
+        /// bytes.
         Payload,
     }
 
@@ -1134,10 +1201,17 @@ mod tests {
         /// Every entry before the cut is in its slot. What the `Release` and
         /// `Acquire` pair buys.
         Honest,
-        /// The pair promises nothing, so a drawn subset of the entries before
-        /// the cut still holds the zeros of an untouched mapping. **A commit's
-        /// atomicity may not rest on this being false**, which is why it is
-        /// swept rather than assumed away.
+        /// The pair promises nothing, so a drawn subset of the slots before the
+        /// cut still holds whatever occupied it last — a previous frame's
+        /// entry, which decodes.
+        ///
+        /// **A commit's atomicity does rest on this being false**, and this
+        /// mode is the measurement of by how much rather than a case the sweep
+        /// exists to clear: the module's *the limit of that last one* is the
+        /// argument, and the run requires this mode to produce third scenes for
+        /// the same reason it requires [`Applier::Eager`] to. A zero here would
+        /// mean the model had stopped being faithful, not that the module had
+        /// grown a defence.
         Lying,
     }
 
@@ -1453,6 +1527,41 @@ mod tests {
         /// The token the commit entry carries when it arrives whole.
         /// Unit: none — a frame identifier.
         token: u64,
+        /// What the ring slots held before this frame was written into them.
+        ///
+        /// The previous commit's slots, index for index. **This is the model's
+        /// load-bearing element**, and `zone/tests/cut.rs` is where it comes
+        /// from: there, an operation that does not land is simply not performed
+        /// against a device that already holds every earlier publish, so the
+        /// medium retains its prior content. A ring is the same medium with a
+        /// shorter memory — `ring/src/lib.rs` initialises its slots once and
+        /// nothing zeroes one on completion — so a slot whose write is not
+        /// visible holds the entry that occupied it last, which is a perfectly
+        /// decodable delta from the frame before.
+        ///
+        /// The same-index slot of the previous frame rather than the entry
+        /// exactly `N` submissions ago: that is the cheapest faithful choice,
+        /// and the difference between them is which *older* frame the bytes
+        /// come from, not whether they are an older frame's.
+        prior: [Delta; SLOTS],
+        /// How many of `prior` were ever written. Zero for the first commit of
+        /// a run, whose slots are still the zeros of a fresh mapping.
+        /// Unit: entries.
+        prior_len: usize,
+    }
+
+    /// What slot `at` held before this frame reached it.
+    ///
+    /// The zeros of a fresh mapping only where the producer has genuinely never
+    /// reached that slot — which is the first commit of a run, and nothing
+    /// after it. Everything else is the previous frame's entry, encoded the way
+    /// the producer wrote it.
+    fn prior_bytes(recorded: &Recorded, at: usize) -> (Sqe, [u8; PAYLOAD_BYTES]) {
+        if at < recorded.prior_len {
+            recorded.prior[at].encode()
+        } else {
+            (Sqe::ZERO, [0u8; PAYLOAD_BYTES])
+        }
     }
 
     /// Replay the commits before `before` into a graph.
@@ -1482,10 +1591,19 @@ mod tests {
         let mut arena = Arena::EMPTY;
         let mut reconciler = Reconciler::<NODES>::new();
         let mut nodes = [Node::UNUSED; NODES];
+        let mut prior = [delta_of(Entry::Commit(Commit { frame_token: 1 })); SLOTS];
+        let mut prior_len = 0usize;
         for frame in 1..target {
             let len = tree(seed, frame, &mut nodes);
             let mut out = Deltas::<LIMIT>::new();
             assert!(reconciler.frame(&nodes[..len], &mut out).is_ok());
+            // The frame immediately before the target is what the target's
+            // slots held when the producer started writing into them.
+            if frame + 1 == target {
+                let (slots, len) = slots_of(out.as_slice(), token(seed, frame));
+                prior = slots;
+                prior_len = len;
+            }
             deliver(&mut arena, out.as_slice(), token(seed, frame));
         }
         let old = fingerprint(&arena);
@@ -1503,7 +1621,17 @@ mod tests {
         if old == new {
             return None;
         }
-        Some(Recorded { target, slots, len: slot_len, destroys, old, new, token: frame_token })
+        Some(Recorded {
+            target,
+            slots,
+            len: slot_len,
+            destroys,
+            old,
+            new,
+            token: frame_token,
+            prior,
+            prior_len,
+        })
     }
 
     /// Everything the sweep counts.
@@ -1526,9 +1654,24 @@ mod tests {
         /// Torn payloads the decoder refused, at payload granularity.
         /// Unit: count of entries.
         torn_refused: u64,
-        /// Zeroed slots the decoder refused, in lying mode.
+        /// Slots whose write was not visible, so the batch was offered whatever
+        /// the slot held before this frame reached it.
+        /// Unit: count of entries.
+        stale_offered: u64,
+        /// Of those, the ones the decoder refused — which is every one of them
+        /// whose slot the producer had never reached, and none of the rest.
         /// Unit: count of entries.
         stale_refused: u64,
+        /// Of those, the ones the decoder *believed*: a previous frame's entry
+        /// taken into this frame as one of its own. The case the zeroed model
+        /// could not produce, and the one every structural claim in this module
+        /// used to rest on being impossible.
+        /// Unit: count of entries.
+        stale_admitted: u64,
+        /// Commits that sealed over a frame at least one of whose entries was
+        /// not this frame's.
+        /// Unit: count of commits.
+        sealed_over_a_stale_entry: u64,
         /// Cuts inside a frame that destroys a subtree.
         /// Unit: count of cuts.
         inside_a_destroying_frame: u64,
@@ -1547,10 +1690,11 @@ mod tests {
     ///
     /// The model, stated before it is used: **at a cut of `n` the consumer sees
     /// the first `n` slots of the commit and no more; every slot a completed
-    /// barrier covers holds what the producer wrote, any subset of the rest
-    /// still holds the zeros of an untouched mapping, and the last slot's
-    /// payload is torn at the chosen granularity.** The re-run key is `(seed,
-    /// target, cut, granularity, mode)` and every draw derives from it.
+    /// barrier covers holds what the producer wrote, whole; any subset of the
+    /// rest still holds what it held before this frame reached it; and the last
+    /// slot past the barrier is torn at the chosen granularity, with the bytes
+    /// past the tear being the ones that were already there.** The re-run key is
+    /// `(seed, target, cut, granularity, mode)` and every draw derives from it.
     ///
     /// Two differences from `zone/tests/cut.rs`, both because a ring is not a
     /// device, and both stated rather than left for a reader to notice.
@@ -1561,12 +1705,20 @@ mod tests {
     /// draw here and **in what order they are read** is not. Drawing an order
     /// that changed nothing would be a parameter pretending to be evidence.
     ///
-    /// *A slot that did not land is zeros, not absent.* A ring has fixed slots
+    /// *A slot that did not land is stale, not absent.* A ring has fixed slots
     /// and the consumer reads whatever is in one; there is no way to skip a
-    /// slot, and a model that skipped would be modelling a queue. The zeros
-    /// matter: `abi::scene::op` starts its opcodes at one precisely so that an
-    /// untouched slot names no opcode, which is what turns *an entry did not
-    /// land* into a refusal rather than into a frame with a hole in it.
+    /// slot, and a model that skipped would be modelling a queue. *What* is in
+    /// one is the point, and it is where this model was wrong before: an
+    /// untouched slot holds the zeros of a fresh mapping, and `abi::scene::op`
+    /// starts its opcodes at one precisely so that those name no opcode — but a
+    /// slot the producer has already used once holds a **previous frame's
+    /// entry**, which decodes. That is `zone/tests/cut.rs`'s own model, where an
+    /// operation that does not land is simply not performed against a medium
+    /// that already holds every earlier publish; here the medium is the ring,
+    /// and `Recorded::prior` is what it held. Substituting zeros for it makes
+    /// every structural claim in this module true for free, which is why the
+    /// sweep that did so proved nothing about the mode it spends half its cuts
+    /// in.
     ///
     /// *What a third scene would look like here*, since a sweep that cannot say
     /// is a sweep that is not looking: a fingerprint equal to neither `old` nor
@@ -1596,40 +1748,79 @@ mod tests {
             Mode::Lying => 0,
         };
         let torn_at = cut.checked_sub(1);
+        let mut stale_in_this_frame = false;
 
         for at in 0..cut {
-            let landed = at < covered || draw(&mut state).is_multiple_of(2);
-            let torn = granularity == Granularity::Payload && Some(at) == torn_at && landed;
+            // A slot the barrier covers arrives whole, which is `zone/tests/
+            // cut.rs`'s `land(op, None)` for everything before the last
+            // completed flush: a barrier that promises visibility promises all
+            // of it, so a torn payload is not something an honest ring can
+            // show. Past the barrier, a drawn subset lands and the last of them
+            // is torn at payload granularity.
+            let covered_here = at < covered;
+            let landed = covered_here || draw(&mut state).is_multiple_of(2);
+            let torn = !covered_here
+                && granularity == Granularity::Payload
+                && Some(at) == torn_at
+                && landed;
+            let (was_entry, was_payload) = prior_bytes(recorded, at);
             let (entry, payload) = if landed {
                 let (entry, mut payload) = recorded.slots[at].encode();
                 if torn {
                     let keep = (draw(&mut state) % (PAYLOAD_BYTES as u64 + 1)) as usize;
-                    for byte in payload.iter_mut().skip(keep) {
-                        *byte = 0;
+                    // The bytes past the tear are the ones that were already
+                    // there, not zeros. `land` writes a prefix of an
+                    // operation's bytes and leaves the medium holding its own
+                    // for the rest; a ring slot's arena bytes are the same
+                    // medium.
+                    for (byte, was) in payload.iter_mut().zip(was_payload).skip(keep) {
+                        *byte = was;
                     }
                 }
                 (entry, payload)
             } else {
-                (Sqe::ZERO, [0u8; PAYLOAD_BYTES])
+                counted.stale_offered += 1;
+                (was_entry, was_payload)
             };
             counted.landed += 1;
 
             match applier {
                 Applier::Staged => match batch.offer(&entry, &payload) {
-                    Ok(Offered::Staged) => {}
+                    Ok(Offered::Staged) => {
+                        if !landed {
+                            // A previous frame's entry, believed and taken into
+                            // this frame as one of its own. Nothing in the
+                            // delta format can tell *this slot's bytes belong
+                            // to this frame* from *they belong to the last
+                            // one*, which is the whole of what the zeroed model
+                            // was hiding.
+                            counted.stale_admitted += 1;
+                            stale_in_this_frame = true;
+                        }
+                    }
                     Ok(Offered::Sealed(sealed)) => {
+                        if !landed {
+                            counted.stale_admitted += 1;
+                            stale_in_this_frame = true;
+                        }
+                        if stale_in_this_frame {
+                            counted.sealed_over_a_stale_entry += 1;
+                        }
                         let sealed_on = sealed.frame().token;
                         match batch.commit(&mut arena, sealed) {
                             Ok(closed) => {
                                 counted.applied += 1;
                                 assert_eq!(closed.frame.token, sealed_on);
-                                // Nothing was torn at this granularity, so the
-                                // token that closed the frame has to be the one
-                                // the client sent. At payload granularity it
-                                // need not be, and
+                                // Nothing was torn at this granularity and
+                                // every entry was this frame's, so the token
+                                // that closed the frame has to be the one the
+                                // client sent. At payload granularity it need
+                                // not be, and
                                 // `a_torn_commit_token_names_a_frame_nobody_sent`
-                                // is where that is said out loud.
-                                if granularity == Granularity::Whole {
+                                // is where that is said out loud; over a stale
+                                // commit it is the *previous* frame's token,
+                                // which is the same finding one slot wider.
+                                if granularity == Granularity::Whole && !stale_in_this_frame {
                                     assert_eq!(closed.frame.token, recorded.token);
                                 }
                             }
@@ -1692,21 +1883,63 @@ mod tests {
         outcome
     }
 
-    /// `E3-B01d`'s exit, as the run it is accepted on.
+    /// `E3-B01d`'s exit, as the run it is accepted on — and the reach of it.
     ///
     /// The `E2-P01` cut model, pointed at a commit instead of a publish: every
     /// entry boundary of every commit, at both granularities, in both modes,
-    /// across a seed sweep — and the graph read back is the old scene or the
-    /// new one, never a third.
+    /// across a seed sweep.
     ///
-    /// The run fails unless it also observed all six of the things that
-    /// distinguish a sweep from a sweep of the model. `zone/tests/cut.rs`
-    /// requires four of its own, in the same place, for the reason that file
-    /// states: *a sweep that has never failed is indistinguishable from one
-    /// that cannot.*
+    /// # The sentence this run stands behind, and the one it does not
+    ///
+    /// **Over a ring whose `Release`/`Acquire` pair holds, the graph read back
+    /// after a cut is the old scene or the new one, never a third.** That is
+    /// `Mode::Honest`, it is asserted as `honest.third == 0`, and the
+    /// `Applier::Eager` control over the same cuts is required to produce third
+    /// scenes so that the zero means something.
+    ///
+    /// **Over a ring whose pair does not hold, it is not.** `Mode::Lying` is
+    /// swept and the third scenes it produces are counted and *required to be
+    /// there*, in the same way and for the same reason the eager control is:
+    /// the number is what the ordering pair buys, and a run in which it were
+    /// zero would be a run whose model had stopped being the faithful one.
+    ///
+    /// The exit this subtask is accepted on says *the graph read back is the
+    /// old scene or the new one, never a third*, with no clause about the
+    /// ring's ordering. **That is broader than what is delivered**, and the
+    /// difference is the entire content of the paragraph below.
+    ///
+    /// # Why a lying ring produces one, and why nothing here can stop it
+    ///
+    /// A ring slot whose write is not visible does not read as zeros. It reads
+    /// as whatever occupied it last — `ring/src/lib.rs` initialises its slots
+    /// once and nothing zeroes one on completion — which is a previous frame's
+    /// entry, and a previous frame's entry decodes. The batch takes it for one
+    /// of this frame's, and the commit that follows either seals over a frame
+    /// that is part this one and part the last one, or is refused whole by
+    /// [`admit`]. The first of those is a third scene.
+    ///
+    /// Nothing in the delta format can tell *this slot's bytes belong to this
+    /// frame* from *they belong to the last one*: there is no sequence number
+    /// on an entry, and `f_abi::Sqe` has no field left that a scene delta does
+    /// not already read or require to be zero. **Closing it is an ABI change
+    /// and not a change to this file** — a per-entry submission sequence the
+    /// consumer checks against the slot's own index, which is what makes a
+    /// stale slot detectable rather than merely unlikely. Until then the
+    /// ordering pair is load-bearing for a commit's atomicity, which is what
+    /// this repository already says that pair is for, and this sweep is the
+    /// measurement of it rather than an argument against it.
+    ///
+    /// # What the run requires to have seen
+    ///
+    /// `zone/tests/cut.rs` requires four observations of its own, in the same
+    /// place, for the reason that file states: *a sweep that has never failed
+    /// is indistinguishable from one that cannot.* These are this file's.
     #[test]
     fn a_commit_cut_at_every_entry_boundary_leaves_the_old_scene_or_the_new_one() {
-        let mut staged = Counted::default();
+        // Counted per mode rather than together, because the two modes are now
+        // two different claims and a total would be neither of them.
+        let mut honest = Counted::default();
+        let mut lying = Counted::default();
         let mut control = Counted::default();
         let mut targets_swept = 0u64;
 
@@ -1721,6 +1954,10 @@ mod tests {
                 targets_swept += 1;
                 for granularity in [Granularity::Whole, Granularity::Payload] {
                     for mode in [Mode::Honest, Mode::Lying] {
+                        let staged = match mode {
+                            Mode::Honest => &mut honest,
+                            Mode::Lying => &mut lying,
+                        };
                         // Zero — nothing landed — through every entry. The
                         // upper end is the whole commit, which must leave the
                         // new scene and is the control on the lower end leaving
@@ -1733,35 +1970,34 @@ mod tests {
                                 granularity,
                                 mode,
                                 Applier::Staged,
-                                &mut staged,
+                                staged,
                             );
-                            assert_ne!(
-                                outcome,
-                                Outcome::Third,
-                                "a cut left a third scene. the commit was frame {} of {FRAMES}, \
-                                 the cut fell after {cut} of {} entry(s), at {} granularity in \
-                                 {} mode. reproduce: seed {seed:#018x} target {} cut {cut}",
-                                recorded.target,
-                                recorded.len,
-                                granularity.name(),
-                                mode.name(),
-                                recorded.target,
-                            );
-                            // The whole commit, delivered by an honest ring
-                            // with nothing torn, has to leave the new scene —
-                            // or every `Old` above is a sweep of a module that
-                            // never commits anything.
-                            if cut == recorded.len
-                                && mode == Mode::Honest
-                                && granularity == Granularity::Whole
-                            {
-                                assert_eq!(
+                            if mode == Mode::Honest {
+                                assert_ne!(
                                     outcome,
-                                    Outcome::New,
-                                    "a whole commit over an honest ring left the old scene: \
-                                     seed {seed:#018x} target {}",
-                                    recorded.target
+                                    Outcome::Third,
+                                    "a cut left a third scene over a ring that kept its \
+                                     ordering. the commit was frame {} of {FRAMES}, the cut fell \
+                                     after {cut} of {} entry(s), at {} granularity. reproduce: \
+                                     seed {seed:#018x} target {} cut {cut}",
+                                    recorded.target,
+                                    recorded.len,
+                                    granularity.name(),
+                                    recorded.target,
                                 );
+                                // The whole commit, delivered by an honest ring
+                                // with nothing torn, has to leave the new scene
+                                // — or every `Old` above is a sweep of a module
+                                // that never commits anything.
+                                if cut == recorded.len {
+                                    assert_eq!(
+                                        outcome,
+                                        Outcome::New,
+                                        "a whole commit over an honest ring left the old scene: \
+                                         seed {seed:#018x} target {}",
+                                        recorded.target
+                                    );
+                                }
                             }
                             let _ = one_cut(
                                 seed,
@@ -1779,65 +2015,112 @@ mod tests {
         }
 
         assert!(targets_swept > 0, "no corpus frame changed the scene, so nothing was swept");
-        assert_eq!(staged.third, 0, "the exit's own sentence, as a number");
-        assert_eq!(staged.diverged, 0, "admission and the graph disagreed");
-        assert_eq!(staged.landed, control.landed, "the two appliers swept different cuts");
+        assert_eq!(
+            honest.landed + lying.landed,
+            control.landed,
+            "the two appliers swept different cuts"
+        );
 
-        // The six observations, checked rather than hoped for.
+        // The exit's own sentence, as a number, and the clause it holds under.
+        assert_eq!(honest.third, 0, "the exit's own sentence, over a ring that kept its order");
+        assert_eq!(honest.diverged, 0, "admission and the graph disagreed");
+        assert_eq!(lying.diverged, 0, "admission and the graph disagreed");
         assert!(
-            staged.old > 0 && staged.new > 0,
+            honest.old > 0 && honest.new > 0,
             "the sweep reached only one of the two scenes, so `the old one or the new one` had \
              one answer and the run could not tell them apart"
         );
+        // Every cut that sealed left the new scene and every cut that did not
+        // left the old one. Stated as an equality rather than as two floors,
+        // because a run in which those numbers merely both exceeded zero would
+        // be consistent with a commit that applied and left the old scene
+        // anyway. Over an honest ring only: over a lying one a commit can seal
+        // over a frame that is not the recorded one, and the scene that leaves
+        // is neither of the two.
+        assert_eq!(
+            honest.new, honest.applied,
+            "a commit sealed and the scene it left was not the new one"
+        );
+        assert_eq!(
+            honest.old,
+            honest.cuts - honest.applied,
+            "a cut that never sealed left something other than the old scene"
+        );
         assert!(
-            staged.torn_refused > 0,
+            honest.applied > 0 && honest.refused_whole == 0,
+            "the honest sweep committed {} frame(s) and had {} refused whole: a corpus frame \
+             refused by admission over a ring that delivered it intact is this module \
+             over-refusing a frame the graph would have taken",
+            honest.applied,
+            honest.refused_whole
+        );
+
+        // What the model actually produced, without which none of the numbers
+        // above is about the model this exit names.
+        assert!(
+            lying.stale_offered > 0 && lying.stale_refused > 0,
+            "no slot was ever left holding what it held before this frame, so the case that \
+             decides whether a commit's atomicity rests on the ring's Release/Acquire pair was \
+             never reached"
+        );
+        assert!(
+            lying.stale_admitted > 0,
+            "every one of the {} stale slots offered was refused by the decoder, which is the \
+             answer the zeroed model gave for free: a slot holding a previous frame's entry \
+             decodes, and a sweep that never produced one is sweeping the model that made this \
+             exit true without trying",
+            lying.stale_offered
+        );
+        assert!(
+            lying.sealed_over_a_stale_entry > 0,
+            "no commit ever sealed over a frame carrying an entry that was not its own, so the \
+             forbidden state — a commit that sealed over an incomplete frame — was unreachable \
+             in this sweep rather than shown absent by it"
+        );
+        assert!(
+            lying.refused_whole > 0,
+            "admission refused nothing across {} cuts, so `admit` and everything it walks is not \
+             exercised by this run at all",
+            lying.cuts
+        );
+        assert!(
+            lying.torn_refused > 0,
             "no cut ever tore a payload the decoder refused, which at payload granularity over \
              {} cuts is not luck: either that granularity stopped being swept, or every record \
              became one a truncation still decodes — a change in what a torn entry means, and \
              not a change in this number",
-            staged.cuts
+            lying.cuts
         );
         assert!(
-            staged.stale_refused > 0,
-            "no zeroed slot was ever offered in lying mode, so the case that decides whether a \
-             commit's atomicity rests on the ring's Release/Acquire pair was never reached"
-        );
-        assert!(
-            staged.inside_a_destroying_frame > 0,
+            honest.inside_a_destroying_frame > 0 && lying.inside_a_destroying_frame > 0,
             "no frame in the corpus destroyed a subtree, so the entry a cut is most expensive \
              inside was never cut. Widen the corpus; do not lower this"
         );
+        // The measurement this sweep exists to make, and the second control. A
+        // ring whose ordering pair promises nothing is a ring over which a
+        // commit is not atomic: this is how often, and a zero here would mean
+        // the model had gone back to the one where a slot that did not land is
+        // zeros.
         assert!(
-            staged.applied > 0 && staged.refused_whole == 0,
-            "the sweep committed {} frame(s) and had {} refused whole: a corpus frame refused by \
-             admission is this module over-refusing a frame the graph would have taken",
-            staged.applied,
-            staged.refused_whole
+            lying.third > 0,
+            "a ring that kept none of its ordering promises still never produced a third scene \
+             across {} cuts, of which {} offered the batch a slot holding a previous frame's \
+             entry. Either the model stopped being the faithful one, or something in this module \
+             now distinguishes a stale slot from a fresh one — and if it is the second, this \
+             assertion is the one to delete and the module's `why a lying ring produces one` is \
+             the paragraph to rewrite",
+            lying.cuts,
+            lying.stale_offered
         );
-        // The control, and the whole reason the zeros above mean anything. A
-        // run in which the eager reading also never produced a third scene is a
-        // run whose fingerprint cannot see one.
+        // The first control, and the whole reason the honest zero means
+        // anything. A run in which the eager reading also never produced a
+        // third scene is a run whose fingerprint cannot see one.
         assert!(
             control.third > 0,
             "the eager reading — `Arena::apply` per entry, the commit a no-op — never produced a \
              third scene across {} cuts. That is not the eager reading being correct; it is this \
              sweep being unable to observe the thing it exists to forbid",
             control.cuts
-        );
-        // And the two halves of the exit's sentence tied to the one thing that
-        // decides them. Every cut that sealed left the new scene and every cut
-        // that did not left the old one: stated as an equality rather than as
-        // two floors, because a run in which those numbers merely both exceeded
-        // zero would be consistent with a commit that applied and left the old
-        // scene anyway.
-        assert_eq!(
-            staged.new, staged.applied,
-            "a commit sealed and the scene it left was not the new one"
-        );
-        assert_eq!(
-            staged.old,
-            staged.cuts - staged.applied,
-            "a cut that never sealed left something other than the old scene"
         );
     }
 

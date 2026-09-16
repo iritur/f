@@ -5,14 +5,17 @@
 - Affects: RFC 0077, whose fourth reversal condition names this day and asks for
   this companion *in the shape of RFC 0011*; RFC 0011, whose negotiation this
   repeats one level down and whose `PEER`/`VERSION_UNSUPPORTED` it reuses rather
-  than duplicating; `abi/src/semantic.rs` (`E3-B06b`), which does not exist yet
-  and which this decision is written to be implementable from;
-  `interface/src/node.rs`'s `vocabulary!` invocation, which owes three emitted
-  items listed under *What this decision owes*; `interface/src/node.rs`'s
-  `StateSet::from_bits`, whose documentation defers the question answered here
-  by name; `docs/design/ring-scene-boot.html` section 11, which says the tree
-  crosses on part I's envelope and says nothing about two envelopes disagreeing;
-  `TODO.md` `E3-B06a` and `E3-B06b`
+  than duplicating; `abi/src/semantic.rs` (`E3-B06b`), which is the
+  implementation of part one and part three and is in the tree — this document
+  is the argument for the choices that file makes, not a specification of a file
+  that does not exist; `interface/src/node.rs`'s `vocabulary!` invocation, which
+  owes three emitted items listed under *What this decision owes*;
+  `interface/src/node.rs`'s `StateSet::from_bits`, whose documentation defers the
+  question answered here by name; `docs/design/ring-scene-boot.html` section 11,
+  which says the tree crosses on part I's envelope and says nothing about two
+  envelopes disagreeing; `intent/0012-the-interface/spec.md`'s `E3-B06a` and
+  `E3-B06b`, which is where those subtasks live — `TODO.md` carries only the
+  coarse `E3-B06`
 
 ## Decision
 
@@ -29,26 +32,105 @@ entry on the channel and may appear once per channel epoch — not by a field in
 changes, and *that* is part of the decision rather than an accident of scope:
 see the refusals.
 
+*Shape* means **both legs**, and the leg that is easy to leave out is the one
+coming back. The writer's range is the entry's payload. The receiver's answer is
+the entry's **completion**: `Cqe::ext` carries the agreed version, and because
+that completion is the only channel the answer has, `DeclareVocabulary` may not
+carry `NO_CQE` — a handshake that suppressed its own completion would be a
+declaration, and a declaration is not 0011's shape. The writer then checks the
+answer against the range it actually stated rather than believing it, so both
+sides hold an agreement each of them computed, which is exactly what
+`ChannelHeader::negotiate` does one level up and the reason a peer's statement
+never has to be trusted. A reply *entry* was refused in its place: it would need
+an eighth opcode, a rule about who may send it, and an answer to what happens
+when it never arrives — three new questions to move a number that already has a
+place to sit.
+
+The return leg is not decoration. Without it the **sender rule** below is
+unreachable, and the sender rule is where this whole argument lands: a sender
+that is never told what was agreed can neither refuse to start nor substitute
+older roles by hand, so the only feedback left would be a refused frame, which
+the *Consequences* section says explicitly is not the notification.
+
+And the refusal names what was missing rather than only that something was. No
+overlap is `PEER`/`VERSION_UNSUPPORTED`, and its **detail word carries the
+highest vocabulary version the refusing side speaks** — its ceiling rather than
+its floor, because the refused peer's question is *what would I have had to say*.
+This is stated here because it was previously asserted by pointing at a doc
+comment: see *What this decision owes*, where the conflicting statements in
+`abi/src/lib.rs` about what a `PEER` detail word carries are recorded as an
+outstanding edit rather than quoted selectively.
+
 **Two.** A version ordinal is worth negotiating only if it identifies the **same
 list** on both sides, so the vocabulary's indices are **append-only**. A new role
 is appended and carries the version it was introduced in; no role is reordered;
 no index is reused; removing a role raises the floor, which is RFC 0011's own
 word for it and is a decision about which peers get dropped. Version 1's list is
-frozen by a digest over its roles' names in order, asserted at compile time, so
-that reordering the list is a build failure rather than a review note. Without
+frozen by a digest over its roles' names in order, so that reordering the list
+is a failure somebody is shown rather than a review note. *Where* it is asserted
+is worth stating rather than rounding to *at compile time*: today it is a test in
+`abi/src/semantic.rs`, which reads `interface/src/node.rs` with `include_str!`
+and so rebuilds when the list changes, but fails when the tests run. The `const`
+assertion in `interface/src/node.rs` that would make a reorder a **build**
+failure is owed below and is not there yet. Without
 this, negotiation is worse than absent: it certifies that two builds agree while
 the number 13 means `Command` on one and `Toggle` on the other, and neither side
 ever finds out.
 
+The freeze is asserted for the **role list only**, and that is narrower than the
+argument above deserves. `Relation` and `Content` already cross under the same
+admission rule, and `StateSet`'s bit order is answered by the same vocabulary;
+the re-meant-ordinal failure applies to all three identically, and nothing
+freezes them. So for those three the negotiated number is, today, precisely the
+*label* this section says a label is not. Extending the digest and the `since`
+column to them is listed under *What this decision owes* rather than assumed
+here, because writing *uniform* over a freeze that covers one list of four is
+the kind of sentence this RFC exists to not contain.
+
 **Three.** An ordinal outside the agreed vocabulary is **refused, and it is
-refused by not being representable**. Decoding a semantic entry yields a `Role`
-or it yields an error; there is no third outcome, and no decoded type has a role
-field wider than `Role`. The value a wildcard arm would have to match cannot be
-constructed, so no projection can be handed one and there is nothing for an arm
-to be written about. The refusal is uniform across every closed enum that
-crosses — `Role`, `StateSet`'s bits, `Relation`, `Unit`, `Flow`, `Content`'s
-discriminant — because a per-enum policy is a table of judgements that the next
-enum's author has to guess at.
+refused by not being representable**. The claim is exact, and it is worth
+stating exactly, because the layer it is true of is not the layer a reader
+assumes.
+
+Decoding a semantic entry yields an ordinal the agreed vocabulary **named**, or
+it yields an error; there is no third outcome. `abi` has no fallback role, no
+clamp and no skip, and it never supplies an ordinal it was not given: the
+admitted value's field is private and the admission is its only constructor, so
+an ordinal the agreement did not name is a value that does not exist anywhere in
+the system rather than a value every projection has to carry an arm for. The one
+function that turns an admitted ordinal into a `Role` is `interface`'s
+`Role::from_index`, derived from `ALL` the way `from_name` already is, and past
+that function no decoded type has a role field wider than `Role`. The value a
+wildcard arm would have to match cannot be constructed, so no projection can be
+handed one and there is nothing for an arm to be written about.
+
+What this does **not** claim, because it is not true and an RFC that claimed it
+would be the guard a later edit walks past: it does not claim the type system
+closes this on its own. Two seams are held by argument rather than by the
+compiler, and both are named here so that neither is discovered later.
+
+- **The predicate belongs to somebody else.** `abi` asks a `Vocabulary`
+  implementor whether the agreed version names an ordinal. An implementor that
+  answers `true` for everything reopens the vocabulary, and nothing in `abi` can
+  detect that — the module says so in its own words. What the implementor owes
+  is a *derivation*, `ALL.iter().filter(|r| r.since() <= agreed)`, and an
+  implementation that matches on a hand-written range of ordinals is the copied
+  table wearing a method. This is the one place *closed* rests on a review
+  rather than on a build, and `interface/`'s list — RFC 0077's — is what is
+  closed; `abi`'s contribution is that it never maps and never mints.
+- **The ordinal is readable.** The admitted ordinal's accessor is public,
+  because the crate that turns it into a `Role` is a crate `abi` cannot see, so
+  the number has to cross that boundary as a number. What stops the accessor
+  from being the escape hatch is that there is exactly one thing to do with it,
+  and *a second decoder*, below, is the reversal condition on that — it applies
+  to a snapshot read back and a simulator replay as much as to this wire.
+
+The refusal is uniform across every closed enum that crosses — `Role`,
+`StateSet`'s bits, `Relation`, `Unit`, `Flow`, `Content`'s discriminant —
+because a per-enum policy is a table of judgements that the next enum's author
+has to guess at. Uniform means the *refusal*: one admission rule, one refusal
+type, no per-enum policy. It does not mean the freeze, which part two says
+reaches the role list only.
 
 The **granularity** of the refusal is the frame. Section 11 says the semantic
 protocol is *atomic per commit*, so the unit that already exists is the unit that
@@ -58,6 +140,14 @@ with the same error, and the tree the receiver is already presenting **stands
 unchanged**. Not the entry alone, because a tree missing one node is a tree whose
 author believes the node is there. Not the channel, because one bad frame from a
 peer that may simply be newer is not grounds to destroy a working interface.
+
+*Stands unchanged* is a guarantee about a **working** interface, and on the first
+frame of a channel there is no interface yet: refusing that frame refuses
+everything there was, and what the receiver presents is what it was already
+presenting, which is nothing. The sentence is not a promise that a first frame
+can fail usefully, and a receiver whose peer's opening frame is refused has a
+channel it cannot use — which is the correct outcome and is why the handshake,
+not the frame, is where a version disagreement is supposed to surface.
 
 What a **sender** does when it agrees a version below the one it was built
 against is named here, because it is where the whole argument lands. It refuses
@@ -252,12 +342,15 @@ trading a real failure for an invented one.
 ## Consequences
 
 **What it makes easy.** A newer component learns at connect rather than at a
-user's desk. That is the whole of what this decision buys, and it is the same
-thing RFC 0077 bought with the compile error: *tell the person who can decide, at
-the moment they can decide*. Across a ring the compiler is absent, and the setup
-handshake stands in its place. The boundary refusal is not the notification; it
-is the floor under it, for the peer that ignored the notification or never made
-one.
+user's desk — and *learns* is a word this decision has to pay for, which is what
+part one's return leg is. The agreed version comes back in the handshake entry's
+completion, so a sender built against version 2 that agrees version 1 is told so
+before it declares its first node, by a value it reads rather than by an error it
+has to provoke. That is the same thing RFC 0077 bought with the compile error:
+*tell the person who can decide, at the moment they can decide*. Across a ring
+the compiler is absent, and the setup handshake stands in its place. The boundary
+refusal is not the notification; it is the floor under it, for the peer that
+ignored the notification or never made one.
 
 **What it makes hard.** Shipping a role. It was already hard — RFC 0077 made it a
 line in a list, a family census, a count that RFCs quote, and a break in every
@@ -297,8 +390,13 @@ threshold.
 
 ## What this decision owes, and who owns it
 
-Four items live in files this RFC does not touch. They are listed so their
-absence is visible rather than assumed, in the manner RFC 0077 established.
+Six items live in files this RFC does not touch, and one row below is here to
+record something that is **not** owed any more. They are listed so that absence
+is visible rather than assumed, in the manner RFC 0077 established — and so that
+a row describing a tree this is not gets corrected rather than quoted. Two of
+these rows previously said the opposite of the truth: that `abi/src/semantic.rs`
+did not exist, and that this RFC had no row in the index. Both were false on the
+day this was accepted.
 
 **`interface/src/node.rs` — `E3-D01`'s file, and three emitted items.** The
 `vocabulary!` list gains a **`since` column**, the vocabulary version a role was
@@ -315,29 +413,61 @@ one hand-written second copy this decision asks for, and it is the correct kind 
 it copies a fact that has already happened, and the whole value of it is that it
 does *not* follow the list.
 
-**`abi/src/semantic.rs` — `E3-B06b`'s file, and the next task.** The
-`DeclareVocabulary` entry, in `scene.rs`'s established shape: one fixed-width
-payload, the private `Reader` already in that crate, and `Reader::finish`
-refusing a non-zero tail so that an unread field is refused structurally rather
-than against a list of field names written out by hand. Payload: the writer's
-highest vocabulary version and its floor, both `u16`, everything else zero.
-Protocol constants `VOCABULARY_VERSION` and `VOCABULARY_VERSION_MIN`, both 1
-today. Three refusals with names rather than conventions — a semantic entry
-arriving before the handshake; a second handshake within one channel epoch, since
-re-negotiating mid-stream would change what an index means underneath a tree
-already built; and a role ordinal or state bit outside the agreed version. No
-overlap of version ranges reuses `PEER`/`VERSION_UNSUPPORTED`, which already
-means exactly this and whose detail word already carries the version the refusing
-side offered. When `ChannelHeader::epoch` moves, the agreement is discarded along
-with the tokens.
+**`abi/src/semantic.rs` — `E3-B06b`'s file. Paid, and this is what it pays.**
+Not owed: it is in the tree, and this paragraph describes it rather than asking
+for it. The `DeclareVocabulary` entry is in `scene.rs`'s established shape — one
+fixed-width payload, the private `Reader` already in that crate, and
+`Reader::finish` refusing a non-zero tail so that an unread field is refused
+structurally rather than against a list of field names written out by hand.
+Payload: the writer's highest vocabulary version and its floor, both `u16`,
+everything else zero. Protocol constants `VOCABULARY_VERSION` and
+`VOCABULARY_VERSION_MIN`, both 1 today. Three refusals with names rather than
+conventions — a semantic entry arriving before the handshake; a second handshake
+within one channel epoch, since re-negotiating mid-stream would change what an
+index means underneath a tree already built; and a role ordinal or state bit
+outside the agreed version. The return leg is the entry's completion: the agreed
+version is the detail word, the entry may not carry `NO_CQE`, and the writer
+confirms the answer against the range it stated rather than adopting it. No
+overlap of version ranges reuses `PEER`/`VERSION_UNSUPPORTED`, and the detail
+word carries the highest version the refusing side speaks.
 
-**`docs/rfc/README.md` — the orchestrator's.** This RFC has a number and no row,
-for the reason RFC 0077 gives at length: `intent/0012-the-interface/plan.md`
-names that file as the orchestrator's, and four parallel worktrees each editing
-one index is `docs/postmortem/0001`'s failure arriving by the other door. What
-would change the answer is the same thing 0077 named — an `xtask` verb that
+What that file does **not** carry, so the absence is visible: no `since` column
+and no `Role::from_index`, because both live in `interface/src/node.rs` and are
+owed above. Until they exist, the join between an admitted ordinal and a `Role`
+is unwritten, and the component that owns the tree (`E3-B06c`) is where it lands.
+
+**`abi/src/lib.rs` — two doc comments that disagree, and this RFC leans on
+one.** `error::PEER`'s domain documentation says the detail word carries *the
+peer's channel epoch*; `error::peer::VERSION_UNSUPPORTED`'s says it carries *the
+version this side offered*. Part one above requires the second, and the
+implementation follows the second, because an epoch is already in the channel
+header and the version the refusing side speaks is nowhere else. Reconciling the
+two — most likely by making the domain line say *per code, see each* — is an
+edit to a file this decision does not own, and it is recorded here rather than
+made quietly, because quoting the doc comment that suits an argument and not the
+one that contradicts it is how an RFC comes to rest on nothing.
+
+**The freeze, for the three closed enums that are not `Role`.** Part two's
+digest, `since` column and monotonicity assertion cover the role list.
+`Relation`, `Content` and `StateSet`'s bit order cross under the same admission
+rule and are unfrozen, so a reorder in any of them is the re-meant-ordinal
+failure with nothing standing in its way. Owed to whoever declares those lists.
+Also owed with it: what the digest may be computed *with*. `interface/` states
+in its own manifest that it has no dependencies and that `f-abi` is deliberately
+not one, and `f-hash` is this tree's one SHA-256 — so a compile-time digest over
+role names in `interface/src/node.rs` has to be a hand-rolled `const` fold,
+which is a second hash in the tree. `abi`'s own test-side digest is an FNV-1a
+fold for exactly that reason; whether that is the right answer for the
+`interface` side is the question, and this RFC does not settle it.
+
+**`docs/rfc/README.md` — the orchestrator's, and the row is there.** RFC 0077
+argues at length that `intent/0012-the-interface/plan.md` names that file as the
+orchestrator's, and that four parallel worktrees each editing one index is
+`docs/postmortem/0001`'s failure arriving by the other door. That argument is
+about who writes the row, not about whether one exists: the row for 0083 is in
+the file. What is still owed is the thing 0077 named — an `xtask` verb that
 refuses an RFC file with no row, the way `classify` refuses a workspace member
-with no row.
+with no row — so that the next RFC's row is not a thing somebody remembered.
 
 **An `xtask` lint, owed and deliberately not depended on.** That the highest
 `since` in the `vocabulary!` list equals `abi`'s `VOCABULARY_VERSION`. It is

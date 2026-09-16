@@ -5,10 +5,13 @@
 - Affects: `third_party/` — its first entry, owed rather than present;
   `LICENSING.md` rules 1 and 3 and RFC 0003's import inventory, applied to a
   class they did not enumerate; `text/src/lib.rs`, whose module documentation
-  names this decision as open; `docs/manifest.md`'s `image`/`domain` pair;
-  `xtask/src/main.rs`'s `lint_licensing`, which needs one strengthening named
-  below; `TODO.md` E3-B03a and a line in front of E3-B03c that does not exist
-  yet
+  names this decision as open, and `text/Cargo.toml`'s dependency comment
+  beside it; `LICENSING.md`'s table row for `third_party/<name>/`, which says
+  driver source; `docs/manifest.md`'s `image`/`domain` pair;
+  `xtask/src/main.rs`'s `lint_licensing`, which carries the strengthening named
+  below as of this revision; the root `Cargo.toml`'s `exclude`, which is owed
+  `"third_party"`; `TODO.md` E3-B03a and a line in front of E3-B03c that does
+  not exist yet
 
 ## Decision
 
@@ -16,16 +19,45 @@ The shaper is **imported**. Its source arrives under `third_party/<name>/`
 carrying whatever licence it arrives under, it is built into a component image
 of its own, and it is reached from the permissive tree over a ring.
 
-The second half of that sentence is the part written to survive an edit. It is
-reached over a ring **and by no other route, because there is no other route to
-take**: nothing under `third_party/` is a workspace member, nothing there has a
-row in `[workspace.dependencies]`, and what the permissive tree names is an
-`image` path in a `manifest.toml` rather than a crate. A Rust file cannot `use`
-an image. There is consequently no dependency row for anybody to write, no
-crate name for anybody to spell, and nothing for a later edit to reach for in a
-hurry — which is a different and much stronger state of affairs than a lint that
-notices afterwards. The lint is still owed, and *why* it is still owed is in
-*Consequences*; it is a second net rather than the guard.
+The second half of that sentence is the part that has to survive an edit, and
+the first draft of this section claimed more for it than was true. **It claimed
+that the shaper is reached over a ring and by no other route *because there is
+no other route to take*, and that is false.** The claim is corrected here rather
+than quietly softened, because it was the whole basis on which the decision was
+accepted.
+
+What is true: what the permissive tree *names* is an `image` path in a
+`manifest.toml` rather than a crate, and a Rust file cannot `use` an image. What
+is not true is that this leaves nothing for a later edit to reach for. A
+reviewer built the thing the paragraph called impossible, in this workspace's
+shape: a permissive crate takes `f-shape-sys = { path =
+"../third_party/shaper" }`, calls `f_shape_sys::shape()`, spells `third_party`
+in no Rust file, and builds. Worse, the imported crate **joins the workspace**
+while it is at it — cargo adds a path dependency under the workspace root to
+`workspace_members` automatically unless the root `Cargo.toml`'s `exclude` names
+it, and this workspace's `exclude` is `["kernel/proofs", "ring/proofs",
+"abi/proofs"]`. So the import would be compiled under the permissive tree's lint
+table and its licence field, by a row that fits on one line, with `cargo xtask
+lint` green throughout.
+
+So the narrowed claim, which is what this RFC now asserts: **the shaper is
+reached over a ring, and every other route is closed by a check rather than by
+impossibility.** The check is `lint_licensing`'s dependency-graph half, which
+exists as of this revision — it reads every permissive `Cargo.toml`, including
+the root's `[workspace.dependencies]` and its `members` list, and refuses any
+`path` that resolves under `third_party/` whatever the dependency is called. It
+has fixtures that drive each spelling of that row to red; `no_route_into_the_
+import` in `xtask/src/main.rs` is the module. The textual check stays, because a
+`use third_party` and a path row are different mistakes.
+
+What is *not* claimed any more: that the absence of a dependency row is a
+structural property of the workspace. It is a property of `third_party/` being
+empty, which stops being true on the day the import lands, and that is exactly
+the day it was supposed to hold. One edit would make it structural again and it
+is owed to whoever owns the root manifest: add `"third_party"` to `exclude`, so
+that cargo itself refuses the auto-membership and the lint is left guarding only
+the link. Until that lands, the guard is the lint, and a lint is a thing a
+reviewer reads rather than a thing a compiler enforces.
 
 What is imported is narrow and it is named here rather than left to the import:
 **the interpretation of a font's own tables for one run of text** — glyph
@@ -51,11 +83,20 @@ Three properties the import must satisfy. They are the import task's acceptance
 conditions and not this document's preferences, and an upstream that cannot
 meet them is not importable here whatever else is true of it:
 
-1. **It is a pure function of `(text, face, size, features)`.** Its manifest
-   routes it no `irq`, no device `[[capability]]`, and no `powerbox` ask, so it
-   holds no handle through which a clock, a locale database or an environment
-   could reach it. RFC 0004's rule is satisfied structurally at this boundary
-   rather than by reading somebody else's source for `time()`.
+1. **It is a pure function of `(text, face, size, features)` as far as its
+   handles go.** Its manifest routes it no `irq`, no device `[[capability]]`,
+   and no `powerbox` ask, so it holds no *handle* through which a clock, a
+   locale database or an environment could reach it. That is a narrower
+   statement than the first draft's "RFC 0004's rule is satisfied structurally
+   at this boundary", and the narrowing is owed to the syscall door: `PROGRESS`
+   (`abi/src/door.rs`) needs no handle, is available to every component, and is
+   answered out of a per-core tick count — so a component holding nothing at all
+   can poll it and observe a signal that varies with how long the frame let it
+   run. What property 3 below actually removes is the ability for that signal to
+   change the *output*: whatever the import observes, what crosses the ring is
+   fixed-point integers, and `E3-B03i`'s corpus is what would catch an import
+   whose positions moved with anything but its inputs. Structurally denied a
+   clock handle, checked rather than denied for the door.
 2. **It brings its own allocator, inside its own address space, sized in its own
    manifest.** A `[[capability]]` of type `untyped` with a `bytes` count, and
    admission refuses a component that asks for more than there is (RFC 0007).
@@ -245,8 +286,11 @@ the metric is also outside the speculation boundary.
 ### What `cargo xtask lint` has to show, and what it shows today
 
 `E3-B03a`'s exit asks that the lint show the permissive tree reaching the import
-over a ring **and by no other route**. That is three separate observations and
-this tree makes one and a half of them.
+over a ring **and by no other route**. That is three separate observations. This
+tree now makes two of them and cannot make the third, and which is which matters:
+the two it makes are the *no other route* half, and the one it cannot make is
+*the route exists*, because the route's two files are the entry that has not
+landed.
 
 1. **The route exists and it is a ring.** `user/shaper/manifest.toml` in the
    permissive tree — never under `third_party/`, which `docs/manifest.md` already
@@ -260,38 +304,62 @@ this tree makes one and a half of them.
 2. **No other route in source.** `lint_licensing` reads every Rust file in the
    permissive tree and refuses `use third_party` and `third_party::`. This exists
    and runs on every `cargo xtask lint`.
-3. **No other route in the dependency graph.** *This does not exist, and the
-   gap is specific enough to be worth writing out.* Check 2 matches two string
-   literals. A permissive crate that took an imported crate as a path dependency
-   under any name of its own — `f-shape-sys`, say — would spell `third_party`
-   nowhere in its Rust source and would pass. `manifests()`, the walker that
-   collects every crate manifest, excludes `third_party/` from its walk, and
-   nothing reads a *permissive* manifest looking for a path row pointing into it.
-   So today's licensing lint checks a spelling and not a graph.
+3. **No other route in the dependency graph.** *This now exists, and it exists
+   because the first draft of this RFC said it did not need to.* Check 2 matches
+   two string literals. A permissive crate that took an imported crate as a path
+   dependency under any name of its own — `f-shape-sys`, say — spells
+   `third_party` nowhere in its Rust source and passed. `manifests()`, the
+   walker that collects every crate manifest, excludes `third_party/` from its
+   walk, and nothing read a *permissive* manifest looking for a path row
+   pointing into it. So the licensing lint checked a spelling and not a graph.
 
-The strengthening is small and its shape is fixed here so that whoever writes it
-does not have to re-derive it: read every permissive `Cargo.toml` — the set
-`manifests()` already returns — plus the workspace root's
-`[workspace.dependencies]`, and refuse any dependency whose `path` resolves under
-`third_party/`, whatever the dependency is called. Keep check 2; a textual net
-and a structural one catch different mistakes and neither is redundant.
+   It reads both now. `licensing_graph_findings` in `xtask/src/main.rs` walks
+   every permissive `Cargo.toml` — the set `manifests()` already returns, which
+   includes the workspace root and so its `[workspace.dependencies]` — and
+   refuses any `path` value that resolves under `third_party/` by any spelling:
+   the inline table, the dotted key, the `[dependencies.x]` section, and a
+   `members` entry naming a directory under it. Comments are stripped first, and
+   `exclude = ["third_party"]` is deliberately not a finding, because that row is
+   the repair rather than the defect. Every one of those spellings has a fixture
+   that drives it red in `no_route_into_the_import`, and one more fixture runs
+   the lint against this workspace's own manifests, so a walker that stopped
+   returning anything fails as loudly as a row that appeared. Check 2 stays: a
+   `use third_party` and a path row are different mistakes.
 
-**And the removal matters more than the check.** The reason to write the
-strengthening is not that anybody is expected to write the row; it is that
-*nobody wrote the row* is not a property a reader can verify, and the check makes
-it one. The property itself is held by there being nothing to write: no
-workspace membership, no `[workspace.dependencies]` row, and an image built by
-its own step from source that is not a library this workspace resolves. A guard
-a later edit can walk past is not a guard, and the guard here is the absence of
-the thing rather than the lint about it.
+**And the removal would have mattered more than the check, which is why the
+first draft leaned on it and why the lean was wrong.** The paragraph that stood
+here said the property is held by there being nothing to write — no workspace
+membership, no `[workspace.dependencies]` row, and an image built from source
+that is not a library this workspace resolves. The first two clauses are false:
+cargo adds a path dependency under the workspace root to `workspace_members`
+automatically, so writing the row *creates* both the membership and the
+resolvable library, and no step in between is anybody's decision. What the
+absence really rests on is `third_party/` being empty, which is a property that
+expires on the day this decision is carried out. So the honest ordering is the
+opposite of the one written first: **the lint is the guard, and the structural
+removal is what is owed** — `"third_party"` in the root `Cargo.toml`'s
+`exclude`, which is an edit to a file this document's author may not touch and
+which is therefore named here with an owner rather than assumed.
 
 ### What cannot be observed on the day this is accepted, and what closes it
 
 Plainly, because the alternative is a clause everybody assumes somebody checked:
-`third_party/` is empty, `user/shaper/manifest.toml` does not exist,
-`abi/`'s `shape` protocol does not exist, and observation 3 above is unwritten.
-**The second clause of `E3-B03a`'s exit is therefore unobservable today, and this
-RFC does not claim otherwise.**
+`third_party/` is empty — `find third_party -type f` returns `README.md` and
+nothing else — `user/shaper/manifest.toml` does not exist, and `abi/`'s `shape`
+protocol does not exist. Observation 3 is written now and observations 1 and 2
+are not, because 1 needs the two files and 2 has nothing to read.
+
+**So the second clause of `E3-B03a`'s exit is not met, and this RFC's own first
+sentence is what makes it live.** The exit reads *if imported, `third_party/`
+carries the entry and `cargo xtask lint` shows the permissive tree reaching it
+over a ring and by no other route*; this RFC answers *imported*, and the
+conditional then asks for an entry that is not there. A conditional clause the
+document itself fires is not discharged by the document noting that it cannot be
+observed. **`E3-B03a` does not close on this artifact.** What it can close on is
+its first clause — an RFC, accepted, naming which of the two options and what
+would reverse it — and the *by no other route* half of the second, which is now
+a check with fixtures rather than an assertion. The entry is the part that is
+missing, and the task below is the one that lands it.
 
 What closes it is one task, and the decomposition in `intent/0012-the-interface`
 does not contain it — the eleven `E3-B03` subtasks assume a shaper and none of
@@ -304,10 +372,20 @@ that needs something to have been shaped.
 
 Its exit is three things and all three are observations: `third_party/<name>/`
 carries `LICENSE` and `PROVENANCE.md` with an upstream URL, a commit hash and a
-date; `cargo xtask lint` is green with observation 3 implemented, having been
-shown to go red against a fixture crate that takes a path dependency into
-`third_party/` under an unrelated name; and one run of text through the `shape`
+date; `cargo xtask lint` is green with the entry present — observation 3 is
+implemented and has been shown to go red against a crate that takes a path
+dependency into `third_party/` under an unrelated name, so what that task adds
+is the subject rather than the check; and one run of text through the `shape`
 protocol produces fixed-point advances on both architectures.
+
+Two smaller obligations, named so they are not inferred from an absence.
+`"third_party"` belongs in the root `Cargo.toml`'s `exclude`, for the reason
+*Decision* gives. And two comments are now stale: `text/src/lib.rs` and
+`text/Cargo.toml` both describe the shaper question as open — "if the answer is
+*imported*", "may land behind the licence boundary" — and this document closes
+it. `LICENSING.md`'s table row is the third: it defines `third_party/<name>/` as
+"Imported driver source and its shim", and what will sit there is a shaper. None
+of the three is a file this document's author owns.
 
 ### What this does not solve, and it will be met by `E3-B03e`
 

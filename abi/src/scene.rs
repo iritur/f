@@ -378,10 +378,11 @@ impl Writer<'_> {
     /// The one place bytes land.
     ///
     /// Indexing rather than a checked write, and the bound is a compile-time
-    /// fact rather than a runtime hope: every record asserts
-    /// `WIDTH <= PAYLOAD_BYTES` further down this file, and
-    /// `the_width_each_record_declares_is_the_width_it_writes` requires the
-    /// writer to stop at `WIDTH` for every record there is. A record wide
+    /// fact rather than a runtime hope: `entries!` emits
+    /// `assert!(WIDTH <= PAYLOAD_BYTES)` for every record it declares — so the
+    /// bound is not a list of six that a seventh joins by somebody remembering
+    /// — and `the_width_each_record_declares_is_the_width_it_writes` requires
+    /// the writer to stop at `WIDTH` for every record there is. A record wide
     /// enough to overflow this cannot reach a build.
     fn put(&mut self, bytes: &[u8]) {
         self.out[self.at..self.at + bytes.len()].copy_from_slice(bytes);
@@ -505,10 +506,23 @@ trait Record: Copy + Sized {
     /// # Errors
     ///
     /// A [`Refusal`] from the record's own fields, or [`Refusal::Reserved`] for
-    /// a byte past them.
+    /// a byte past them — including the bytes of a field the record declares a
+    /// width for and its decoder does not consume.
     fn from_payload(raw: &[u8; PAYLOAD_BYTES]) -> Result<Self, Refusal> {
         let mut reader = Reader { raw, at: 0 };
         let value = Self::read(&mut reader)?;
+        // The decoder stopped where the record says its fields end, or the two
+        // disagree and this entry is not believed. Without this line a decoder
+        // that dropped its record's *last* field would be invisible: the bytes
+        // it left behind are inside the declared width, so `finish` never sees
+        // them and `WIDTH` is only ever checked against the writer. The rule is
+        // written once, here, so a seventh record inherits it by existing —
+        // which is `Reader::finish`'s own shape, one level up. A decoder that
+        // read *past* its width is caught by the same comparison and is the
+        // more serious half: it would be reading a later field's bytes.
+        if reader.at != Self::WIDTH {
+            return Err(Refusal::Reserved);
+        }
         reader.finish()?;
         Ok(value)
     }
@@ -691,6 +705,19 @@ macro_rules! entries {
                 }
             }
         }
+
+        $(
+            // Every record fits the one payload width, emitted from the list
+            // that declares the records rather than written out beside them. A
+            // seventh opcode joins this check by existing, which is what
+            // `Writer::put`'s doc claims and what a hand-written list of six
+            // could not deliver: a seventh record wider than the stride built
+            // clean and panicked at run time instead.
+            const _: () = assert!(
+                <$record as Record>::WIDTH <= PAYLOAD_BYTES,
+                concat!(stringify!($record), " is wider than one payload slot"),
+            );
+        )*
     };
 }
 
@@ -765,7 +792,16 @@ pub struct CreateNode {
 
 impl Record for CreateNode {
     const WIDTH: usize = 4 + 4 + 4 + 2;
-    const SPECIMEN: Self = Self { node: 7, parent: 3, before: NO_NODE, kind: kind::DRAW };
+    // Every field distinct and none of them zero, which is what makes the
+    // round trip an observation rather than a coincidence: a decoder that
+    // dropped a field, swapped two of the three identifiers, or read one at the
+    // wrong width would produce a value that differs from this one. A specimen
+    // whose field happens to hold the value a broken decoder invents — zero is
+    // the one every broken decoder invents — cannot tell the two apart.
+    // `before` is therefore a real sibling rather than `NO_NODE`; that
+    // `NO_NODE` is legal there is `a_record_that_names_no_node_is_refused`'s
+    // business, not this corpus's.
+    const SPECIMEN: Self = Self { node: 7, parent: 3, before: 11, kind: kind::DRAW };
 
     fn write(&self, out: &mut Writer) {
         out.u32(self.node);
@@ -833,11 +869,16 @@ pub struct SetTransform {
 
 impl Record for SetTransform {
     const WIDTH: usize = 4 + 8 * 6;
+    // Six distinct non-zero numbers, three of them negative, for
+    // `CreateNode::SPECIMEN`'s reason: a matrix whose off-diagonal entries are
+    // zero cannot tell a decoder that reads `b` from one that has stopped
+    // reading it. This one is a shear as well as a scale, which is the only
+    // way the four matrix fields are distinguishable from each other.
     const SPECIMEN: Self = Self {
         node: 0x0A0B_0C0D,
         a_x65536: 65_536,
-        b_x65536: 0,
-        c_x65536: 0,
+        b_x65536: 32_768,
+        c_x65536: -32_768,
         d_x65536: 131_072,
         tx_x65536: -196_608,
         ty_x65536: 3_407_872,
@@ -994,13 +1035,17 @@ pub struct SetPaint {
 
 impl Record for SetPaint {
     const WIDTH: usize = 4 + 2 + 2 + 2 + 2 + 4;
+    // Six distinct non-zero values, and `stroke_width_x65536` is the field that
+    // made the rule: it is the record's last, and a specimen holding zero there
+    // made *the decoder read this field* and *the decoder stops before this
+    // field* the same observation. 0x0001_8000 is one and a half device pixels.
     const SPECIMEN: Self = Self {
         node: 7,
-        red_x65535: 0,
-        green_x65535: 32_768,
-        blue_x65535: 65_535,
-        alpha_x65535: 65_535,
-        stroke_width_x65536: 0,
+        red_x65535: 0x1111,
+        green_x65535: 0x2222,
+        blue_x65535: 0x3333,
+        alpha_x65535: 0x4444,
+        stroke_width_x65536: 0x0001_8000,
     };
 
     fn write(&self, out: &mut Writer) {
@@ -1346,8 +1391,9 @@ const fn envelope_rules(opcode: u8, flags: u8, deadline: u64) -> Result<(), Refu
 fn sqe_bytes(entry: &Sqe) -> &[u8; SQE_BYTES] {
     // SAFETY: `Sqe` is `#[repr(C, align(64))]`, so its fields are laid out in
     // declaration order at fixed offsets; `size_of::<Sqe>()` is `SQE_BYTES` and
-    // the assertion below this function shows that width to be the exact sum of
-    // its field widths, so the type carries no padding and every one of its
+    // `SQE_FIELD_BYTES` below adds up the width of each of its fields as the
+    // field's own type states it, which the assertion beside it requires to be
+    // the same number — so the type carries no padding and every one of its
     // bytes is an initialised byte of an integer. `[u8; SQE_BYTES]` has
     // alignment one, which `Sqe`'s sixty-four satisfies. The reference produced
     // borrows `entry` for its own lifetime and is shared, so nothing is mutated
@@ -1355,27 +1401,57 @@ fn sqe_bytes(entry: &Sqe) -> &[u8; SQE_BYTES] {
     unsafe { &*core::ptr::from_ref(entry).cast::<[u8; SQE_BYTES]>() }
 }
 
+/// The width of the field handed in, taken from the field's own type.
+///
+/// The type parameter is inferred at the call site, so the answer is the
+/// declaration's and not a number somebody typed next to it. That is the whole
+/// of the difference between [`SQE_FIELD_BYTES`] and the literal sum it
+/// replaced.
+const fn field_bytes<T: Copy>(_field: T) -> usize {
+    core::mem::size_of::<T>()
+}
+
+/// What [`Sqe`]'s fields occupy, added up from the fields themselves.
+///
+/// Every term is `field_bytes(<the field>)`, so a field that changes width
+/// changes this number without anybody editing it.
+/// Unit: bytes.
+const SQE_FIELD_BYTES: usize = {
+    let entry = Sqe::ZERO;
+    field_bytes(entry.opcode)
+        + field_bytes(entry.flags)
+        + field_bytes(entry.class)
+        + field_bytes(entry.cap)
+        + field_bytes(entry.user_data)
+        + field_bytes(entry.deadline)
+        + field_bytes(entry.offset)
+        + field_bytes(entry.buf_set)
+        + field_bytes(entry.buf_index)
+        + field_bytes(entry.len)
+        + field_bytes(entry._reserved)
+        + field_bytes(entry.ext)
+};
+
 // The two facts `sqe_bytes` rests on. The first is also asserted in `lib.rs`,
 // beside the type; it is asserted again here because this is the code that
 // would be unsound without it, and an assertion in another file is a fact this
 // one is trusting rather than stating.
 const _: () = assert!(core::mem::size_of::<Sqe>() == SQE_BYTES);
-// No padding: a `#[repr(C)]` type whose size equals the sum of its field widths
-// has none anywhere. Written as the sum rather than as `64`, so that the
-// arithmetic is in front of whoever changes a field.
-const _: () = assert!(SQE_BYTES == 1 + 1 + 2 + 4 + 8 + 8 + 8 + 4 + 4 + 4 + 4 + 16);
+// No padding: a `#[repr(C)]` type whose size equals the sum of its fields' own
+// widths has none anywhere. It has to be derived rather than transcribed,
+// because the interesting edit does not move a single offset: `_reserved: u32`
+// narrowed to a `u16` leaves `ext` where it was and puts two uninitialised
+// bytes in front of it, and a sum somebody typed — or a chain of `offset_of!`
+// comparisons against transcribed widths — still adds to sixty-four. This does
+// not, because `SQE_FIELD_BYTES` reads the width off the field.
+const _: () = assert!(
+    SQE_FIELD_BYTES == SQE_BYTES,
+    "Sqe carries padding, so sqe_bytes would read uninitialised memory"
+);
 
-// Every record fits the one payload width, asserted beside the records rather
-// than in a table somewhere else. A field added to any of these that would not
-// fit stops the build here, which is the whole reason `Writer::put` may index.
-const _: () = assert!(CreateNode::WIDTH <= PAYLOAD_BYTES);
-const _: () = assert!(SetTransform::WIDTH <= PAYLOAD_BYTES);
-const _: () = assert!(SetPath::WIDTH <= PAYLOAD_BYTES);
-const _: () = assert!(SetPaint::WIDTH <= PAYLOAD_BYTES);
-const _: () = assert!(RemoveNode::WIDTH <= PAYLOAD_BYTES);
-const _: () = assert!(Commit::WIDTH <= PAYLOAD_BYTES);
 // And the stride is the widest record's width rounded to eight. If a record
-// ever grows past it, the assertion above it is what fails; this one is here so
+// ever grows past it, the assertion `entries!` emits for it is what fails; this
+// one is here so
 // that a *narrowing* — a field deleted, leaving the stride eight bytes wider
 // than anything uses — is also visible rather than free.
 const _: () = assert!(PAYLOAD_BYTES == SetTransform::WIDTH.next_multiple_of(8));
@@ -1482,13 +1558,14 @@ mod tests {
             0x0D, 0x0C, 0x0B, 0x0A,
             // a = 65 536, which is 1.0 in 16.16.
             0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // b = 0.
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // c = 0.
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // b = 32 768, which is 0.5.
+            0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // c = -32 768, which is -0.5: two's complement, sign-extended, and
+            // the field that would be invisible if this matrix were diagonal.
+            0x00, 0x80, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
             // d = 131 072, which is 2.0.
             0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // tx = -196 608, which is -3.0: two's complement, sign-extended.
+            // tx = -196 608, which is -3.0.
             0x00, 0x00, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
             // ty = 3 407 872, which is 52.0.
             0x00, 0x00, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -1496,6 +1573,125 @@ mod tests {
             0x00, 0x00, 0x00, 0x00,
         ];
         assert_eq!(payload, expected_payload);
+    }
+
+    #[test]
+    fn every_record_is_the_bytes_written_down_beside_it() {
+        // The exit says *every opcode*, and a round trip is evidence about a
+        // writer and a reader agreeing with each other rather than about either
+        // agreeing with the format: a pair that had swapped two fields, or read
+        // one at the wrong width, would round-trip perfectly. So every record's
+        // field order and field widths are pinned here as literal bytes, once,
+        // against the specimen the round trip already uses.
+        //
+        // This list is written by hand, because a derived one would be derived
+        // from the encoder it is supposed to check. What is *not* left to
+        // memory is whether it is complete: the assertions below require one
+        // image per opcode, in `op::ALL`'s order, so a seventh opcode fails
+        // this test on the day it is declared rather than being quietly
+        // uncovered by it. That is the difference between this list and the
+        // hand-written arrays `docs/postmortem/0001` is about.
+        #[rustfmt::skip]
+        let images: [(Entry, &[u8]); op::COUNT] = [
+            (Entry::CreateNode(CreateNode::SPECIMEN), &[
+                0x07, 0x00, 0x00, 0x00,  // node = 7
+                0x03, 0x00, 0x00, 0x00,  // parent = 3
+                0x0B, 0x00, 0x00, 0x00,  // before = 11
+                0x04, 0x00,              // kind = DRAW
+            ]),
+            (Entry::SetTransform(SetTransform::SPECIMEN), &[
+                0x0D, 0x0C, 0x0B, 0x0A,
+                0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x80, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0x00, 0x00, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ]),
+            (Entry::SetPath(SetPath::SPECIMEN), &[
+                0x07, 0x00, 0x00, 0x00,  // node = 7
+                0x00, 0x20, 0x00, 0x00,  // geometry_offset = 0x2000
+                0x60, 0x00, 0x00, 0x00,  // geometry_bytes = 96
+                0x01, 0x00,              // fill_rule = NON_ZERO
+            ]),
+            (Entry::SetPaint(SetPaint::SPECIMEN), &[
+                0x07, 0x00, 0x00, 0x00,  // node = 7
+                0x11, 0x11,              // red
+                0x22, 0x22,              // green
+                0x33, 0x33,              // blue
+                0x44, 0x44,              // alpha
+                0x00, 0x80, 0x01, 0x00,  // stroke width = 1.5 device pixels
+            ]),
+            (Entry::RemoveNode(RemoveNode::SPECIMEN), &[
+                0x07, 0x00, 0x00, 0x00,  // node = 7
+            ]),
+            (Entry::Commit(Commit::SPECIMEN), &[
+                0xF0, 0xDE, 0xBC, 0x9A, 0x78, 0x56, 0x34, 0x12,  // frame token
+            ]),
+        ];
+
+        let covered: [u8; op::COUNT] = images.map(|(body, _)| body.opcode());
+        assert_eq!(covered, op::ALL, "an opcode has no byte image written down for it");
+
+        for (body, image) in images {
+            let label = op::label(body.opcode());
+            assert_eq!(image.len(), body.width(), "{label}: the image is not the record's width");
+            let payload = body.payload();
+            assert_eq!(&payload[..image.len()], image, "{label}");
+            assert!(payload[image.len()..].iter().all(|byte| *byte == 0), "{label}");
+        }
+    }
+
+    /// A record whose decoder stops one field short of its declared width.
+    ///
+    /// Test-only, and it is the only way this file can observe the rule
+    /// `Record::from_payload` states: every record that actually ships reads
+    /// exactly what it declares, so deleting that rule changes nothing any real
+    /// corpus can see. What it would change is the day a seventh record's
+    /// decoder drops its last field — and a guard whose absence nothing
+    /// notices is a guard a later edit walks past. This is that day, written
+    /// down.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Stumped {
+        /// The field the decoder reads.
+        /// Unit: none — a test value.
+        read: u32,
+        /// The field it declares a width for and does not read.
+        /// Unit: none — a test value.
+        dropped: u32,
+    }
+
+    impl Record for Stumped {
+        const WIDTH: usize = 4 + 4;
+        const SPECIMEN: Self = Self { read: 0x1111_1111, dropped: 0x2222_2222 };
+
+        fn write(&self, out: &mut Writer) {
+            out.u32(self.read);
+            out.u32(self.dropped);
+        }
+
+        fn read(raw: &mut Reader) -> Result<Self, Refusal> {
+            // The mistake, spelled out: the second field is written and never
+            // consumed, so the reader stops at four and the record says eight.
+            Ok(Self { read: raw.u32(), dropped: 0 })
+        }
+    }
+
+    #[test]
+    fn a_record_that_stops_short_of_its_declared_width_is_refused() {
+        // `Reader::finish` cannot see this: the bytes the decoder skipped are
+        // inside the width the record declares, so they are not in the tail.
+        // The comparison of `Reader::at` against `WIDTH` is what sees it, and
+        // this is the test that goes red when that comparison is deleted.
+        let payload = Stumped::SPECIMEN.to_payload();
+        assert_eq!(Stumped::from_payload(&payload), Err(Refusal::Reserved));
+
+        // And the rule is about the *decoder*, not about the bytes: a payload
+        // whose dropped field happens to be zero is refused just the same,
+        // which is the case a weak corpus would have let through.
+        let mut blank = payload;
+        blank[4..8].fill(0);
+        assert_eq!(Stumped::from_payload(&blank), Err(Refusal::Reserved));
     }
 
     /// Flip one byte of an entry, in place.
@@ -1805,16 +2001,25 @@ mod tests {
         // diff that fails a test somebody has to read, on top of being a diff
         // to the wire crate, which is reviewed as an ABI change.
         assert_eq!(op::COUNT, 6);
-        assert!(!kind::known(0));
-        assert!(!kind::known(kind::SEMANTIC + 1));
-        assert_eq!(kind::label(0), "unknown");
-        for value in
-            [kind::TRANSFORM, kind::CLIP, kind::LAYER, kind::DRAW, kind::EFFECT, kind::SEMANTIC]
-        {
+        let kinds =
+            [kind::TRANSFORM, kind::CLIP, kind::LAYER, kind::DRAW, kind::EFFECT, kind::SEMANTIC];
+        for value in kinds {
             assert!(kind::known(value));
             assert_ne!(kind::label(value), "unknown");
         }
-        assert!(!fill::known(0));
-        assert!(fill::known(fill::NON_ZERO) && fill::known(fill::EVEN_ODD));
+        // Swept over every `u16` there is rather than at zero and one past the
+        // end, for the reason `an_opcode_this_build_does_not_know_is_refused`
+        // sweeps all 256 opcodes: a `known` that accepted a *distant* value —
+        // a mistyped constant, a range where a list was meant — is invisible
+        // to a test that only asks about the two values beside the set.
+        for value in 0..=u16::MAX {
+            assert_eq!(kind::known(value), kinds.contains(&value), "kind {value}");
+            assert_eq!(kind::known(value), kind::label(value) != "unknown", "kind {value}");
+            assert_eq!(
+                fill::known(value),
+                value == fill::NON_ZERO || value == fill::EVEN_ODD,
+                "fill rule {value}"
+            );
+        }
     }
 }

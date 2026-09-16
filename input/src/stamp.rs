@@ -226,9 +226,12 @@ mod tests {
 
     /// The sequence [`SEED`] gives, written down rather than recomputed.
     ///
-    /// Nanoseconds of virtual time, so the run spans about thirteen
-    /// milliseconds of it — eight events with seeded gaps under four
-    /// milliseconds. None of these numbers is a claim about a machine and none
+    /// Nanoseconds of virtual time, so the run spans about twelve milliseconds
+    /// of it — the last stamp is 12_090_707 ns — eight events with seeded gaps
+    /// under four milliseconds. The number is restated here rather than
+    /// rounded in prose because the prose is the only part of this a reader
+    /// checks by eye, and it said thirteen. None of these numbers is a claim
+    /// about a machine and none
     /// of them may leave this file: they are what `f_env::SeededEnv` computes
     /// from `SEED`, which is a fact about the generator and not a measurement
     /// of anything.

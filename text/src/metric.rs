@@ -19,42 +19,91 @@
 //!
 //! There is exactly one division in this module. It lives in [`fine`], a private
 //! module which is the only code in the crate that can see the integer inside an
-//! accumulated position, and every public answer in pixels comes out of it. A
-//! caller cannot round differently because a caller cannot get at a number to
-//! round: [`Advance`] is design units and exposes none, [`Scale`] exposes none,
-//! and the accumulator's unit is a private type. The only *distance* this
-//! module hands out is a [`Px`], and it is already rounded. The one other
-//! integer it returns is [`Pen::glyphs`], a count of glyphs, which is not a
-//! length and divides into nothing.
+//! accumulated position, and every public answer in pixels comes out of it.
+//! [`Advance`] is design units and exposes none, [`Scale`] exposes none, and the
+//! accumulator's unit is a private type; the only *distance* this module hands
+//! out is a [`Px`], and it is already rounded. The one other integer it returns
+//! is [`Pen::glyphs`], a count of glyphs, which is not a length and divides into
+//! nothing.
 //!
-//! That is the third clause of `E3-B03d`'s exit taken structurally rather than
-//! by convention. A rounding rule written in a doc comment and obeyed at each
-//! call site is a rule the next call site gets wrong; a rounding rule that is
-//! the only reachable arithmetic is a rule a later edit cannot walk past
-//! without deleting it on purpose.
+//! So there is one rounding rule and one implementation of it, and a second one
+//! cannot be added *inside this crate* without deleting the first: outside
+//! [`fine`]'s forty lines there is no number here to round. That is the third
+//! clause of `E3-B03d`'s exit — the rule is stated once, where advances
+//! accumulate, rather than at each call site. A rule written in a doc comment
+//! and obeyed at every call site is a rule the next call site gets wrong; a rule
+//! that is the only arithmetic the crate can reach is one a later edit has to
+//! delete on purpose.
 //!
-//! # What that guarantee is, stated narrowly enough to be true
+//! It is **not** the claim that a caller outside this crate cannot arrive at a
+//! different rounding. It was, and the next section is why that sentence is
+//! gone.
 //!
-//! It is not a claim that nobody anywhere can divide. Whoever calls
-//! [`Scale::new`] passes `upem` and the em in and still has both afterwards; no
-//! type here takes a number out of somebody's hands. The claim is about what
-//! this module *hands out*, and it is worth stating in the case where that
-//! bites. The consumer of a shaped run did not build the scale — the shaper did,
-//! behind `E3-B03a`'s ring — so the run arrives as opaque [`Advance`]s and an
-//! opaque [`Scale`], and the consumer's only route to a number is
-//! [`Pen::position`]. **A run measured somewhere else cannot be re-rounded
-//! here.** That is a property a caller doing its own arithmetic on its own
-//! numbers never had and never claimed.
+//! # What a caller can still do, and why the stronger sentence was withdrawn
 //!
-//! `Debug` was the hole in exactly that case, and it is written down rather
-//! than quietly closed because the next person will reach for the derive again.
+//! An earlier draft said a consumer could not round its own way because there
+//! was no number for it to round. That is false, and it is false for a reason
+//! worth keeping rather than patching: **an exact, deterministic, repeatable
+//! answer about a hidden number is a way of reading that number.**
+//!
+//! Concretely, take the case the claim was written for. The consumer of a shaped
+//! run did not build the scale — the shaper did, behind `E3-B03a`'s ring — so it
+//! holds only an opaque [`Pen`] and the run's opaque [`Advance`]s. [`Pen`] is
+//! `Copy` and [`Pen::advance`] is public, so applying the same run `m` times
+//! gives a pen at `m` times the position. [`Pen::position`] rounds *that* to
+//! half a pixel, which is half a pixel of a quantity `m` times too big, so
+//! dividing by `m` pins the original to `1 / 2m` of a pixel; the only thing
+//! bounding `m` is [`PX_MAX`]. On the hundred-glyph run the tests below use,
+//! `m = 20 000` brackets a true 833.6 px in `[833.599975, 833.600025]`, after
+//! which floor, ceiling, thirds of a pixel or anything else is a decision taken
+//! at the call site, and it typechecks.
+//!
+//! [`Pen::would_fit`] is the same leak, cheaper and easier to see: an exact
+//! comparison against a caller-chosen [`Px`], so a binary search over the limit
+//! returns `ceil` in about twenty-five steps. On five origins of 521 units at a
+//! sixteen-pixel em this module answers `0 8 17 25 33 42`; a consumer's ceiling
+//! answers `0 9 17 26 34 42`.
+//!
+//! Removing `would_fit` was considered and is not the repair. The bracket above
+//! is a twenty-thousandth of a pixel wide and was measured with `would_fit` and
+//! [`Pen::fits`] never called at all, so closing the comparison oracle would
+//! cost `E3-B03f`'s line breaker an opaque limit type and close nothing — the
+//! finer of the two inversions does not go through it. Nor is `would_fit`'s
+//! exactness negotiable: it is what
+//! `a_run_a_third_of_a_pixel_over_does_not_fit` exists to pin, and exactness and
+//! invertibility are one property seen from its two ends.
+//!
+//! What would make the absolute claim true is the thing this tree forbids. An
+//! answer stops being invertible when it stops being repeatable — when the same
+//! question twice gives two answers — and RFC 0004 says nothing here observes a
+//! clock or draws a random number. Determinism and the impossibility claim
+//! cannot both be had, and determinism is worth incomparably more than a
+//! sentence about rounding.
+//!
+//! So the sentence this module is accepted on is the narrow one, and it is true:
+//! **the rounding happens in one place, and every pixel this module hands out
+//! came from there.** A consumer that wants another rule has to write arithmetic
+//! that says so — a loop that multiplies a run out, a binary search over a
+//! limit — and that is a diff a reviewer sees. That is what a convention buys
+//! where a type cannot, and pretending the type was doing it was the defect.
+//! `a_consumer_outside_this_crate_can_round_its_own_way` is the withdrawal as a
+//! test, so the stronger sentence cannot come back without something going red.
+//!
+//! # Why `Debug` is still closed, and what that is now worth
+//!
 //! Derived on [`Scale`] it printed `upem` beside the em; derived on [`Pen`] it
-//! printed the accumulator. Either one hands a consumer both halves of the
-//! arithmetic through a channel nobody thinks of as an interface, and it
-//! typechecks. So the accumulator has **no `Debug` at all**, which turns
-//! `#[derive(Debug)]` on either type that holds one into a compile error rather
-//! than a leak, and the two hand-written impls print pixels — numbers that have
-//! already been through the rounding.
+//! printed the accumulator. So the accumulator has **no `Debug` at all**, which
+//! turns `#[derive(Debug)]` on either type that holds one into a compile error,
+//! and the two hand-written impls print pixels that have been through the
+//! rounding. Given the section above this is no longer a wall; it is the
+//! difference between a leak that costs a consumer a format string and one that
+//! costs it a deliberate loop. Worth keeping at the price — one derive not
+//! taken — and not worth claiming anything more for.
+//!
+//! One thing the guard does not do, and a reader should know before relying on
+//! it: the compiler's own diagnostic ends with `help: consider annotating`
+//! `` `Fine` with `#[derive(Debug)]` ``. The error hands the next person the
+//! exact reversal. The test below is what catches them taking it.
 //!
 //! # Why the fine unit is one pixel over `upem * 64`
 //!
@@ -225,9 +274,11 @@ pub const ADVANCE_UNITS_MAX: i32 = 1 << 20;
 /// `PX_MAX * UPEM_MAX * 64` is 2^44, which with the per-glyph bound of 2^36 from
 /// [`ADVANCE_UNITS_MAX`] and [`EM_PX_X64_MAX`] keeps every intermediate in
 /// [`Pen`] under 2^45 and therefore inside a sixty-four-bit signed integer with
-/// eighteen bits to spare. **There is no saturating arithmetic anywhere in this
-/// module and no wrapping one**, because a text metric that silently stopped
-/// growing would be a line that silently stopped ending.
+/// eighteen bits to spare. **No position in this module saturates and none
+/// wraps**, because a text metric that silently stopped growing would be a line
+/// that silently stopped ending. The sentence is about positions and says so:
+/// the one integer here that is not one is [`Pen::glyphs`]'s counter, which
+/// states its own case there.
 pub const PX_MAX: i32 = 1 << 24;
 
 /// Why a number was not admitted as a metric.
@@ -404,12 +455,14 @@ impl core::fmt::Debug for Scale {
 
 /// The accumulated position, and the one place a pixel is produced.
 ///
-/// This module is private, and that is the whole of the structural guard
-/// `E3-B03d` is accepted on. `Fine` is a newtype over a wide signed integer with
-/// a private field, so the only code in this crate that can see that integer is
-/// the code in this module — `Fine::round_to_px` and its four exact neighbours.
-/// Rounding somewhere else does not need discipline to avoid; it does not
-/// typecheck, because outside these forty lines there is nothing to round.
+/// This module is private, and that is the structural half of what `E3-B03d` is
+/// accepted on — *one implementation of the rule*, not an impossibility theorem
+/// about consumers; the module doc's withdrawal section is the other half.
+/// `Fine` is a newtype over a wide signed integer with a private field, so the
+/// only code in this crate that can see that integer is the code in this
+/// module — `Fine::round_to_px` and its four exact neighbours. A second rounding
+/// *here* does not need discipline to avoid; it does not typecheck, because
+/// outside these forty lines there is nothing in this crate left to round.
 ///
 /// Keeping `Fine` out of the public interface is the other half. A fine unit is
 /// one pixel over `upem * 64` and therefore means different things on two faces,
@@ -550,6 +603,12 @@ impl Pen {
     /// could reproduce. It is derived from the exact prefix sum rather than from
     /// the previous rounded position, which is the property that keeps the error
     /// at half a pixel however long the run gets.
+    ///
+    /// Half a pixel *of the run it is asked about*, which is also why this is
+    /// the widest way out of the module: a caller that re-applies a run `m`
+    /// times and reads here divides that half pixel by `m`. The module doc's
+    /// withdrawal section is that arithmetic, and the reason it is priced rather
+    /// than closed.
     #[must_use]
     pub const fn position(&self) -> Px {
         // Within `PX_MAX` by `advance`'s check on every step that could have
@@ -566,6 +625,16 @@ impl Pen {
     /// is a third of a pixel over the margin round down onto it and fit, which
     /// is how a line acquires one glyph too many and the paragraph below it
     /// reflows. `a_run_a_third_of_a_pixel_over_does_not_fit` is that case.
+    ///
+    /// **This is an exact comparison oracle against a caller-chosen limit, and
+    /// it is therefore invertible**: binary search over `limit` returns the
+    /// ceiling of the unrounded position in about twenty-five steps, which is a
+    /// rounding rule this module did not choose. That is not a defect to be
+    /// fixed here — it is the same exactness the test above pins, and the module
+    /// doc's withdrawal section measures a strictly better inversion that never
+    /// calls this function. Taking a `Px` rather than an opaque limit therefore
+    /// costs nothing that was being held. What would reverse *that*: an
+    /// inversion that this function makes cheap and `position` does not.
     #[must_use]
     pub const fn would_fit(&self, next: Advance, limit: Px) -> bool {
         let after = self.at.plus_advance(next.design_units, self.scale.em_px_x64);
@@ -581,10 +650,18 @@ impl Pen {
     /// How many glyphs the pen has passed.
     ///
     /// Diagnostic, and the count a caller needs to say *this many glyphs fit*.
-    /// It cannot overflow before [`Pen::advance`] refuses: a run that reached
-    /// four billion glyphs passed [`PX_MAX`] long before, unless every one of
-    /// them were zero-width, and a four-billion-mark cluster is not a thing this
-    /// module owes an answer to.
+    /// A run that reached four billion glyphs passed [`PX_MAX`] long before —
+    /// unless every one of them were zero-width, and [`Advance::ZERO`] is always
+    /// within the bound, so four billion of those do wrap this counter, silently
+    /// in release. **It is the one number in this module that can**, which is
+    /// why [`PX_MAX`]'s no-wrapping sentence is scoped to positions rather than
+    /// written flat.
+    ///
+    /// Not repaired, priced: the repair is a fifth [`NotAMetric`] for a case no
+    /// face can produce, paid for by every caller matching on the enum, to
+    /// protect a count that is not a length and divides into nothing. What would
+    /// reverse that: a caller that derives a distance from this number, at which
+    /// point it is a position and the sentence above covers it.
     #[must_use]
     pub const fn glyphs(&self) -> u32 {
         self.glyphs
@@ -791,24 +868,43 @@ mod tests {
         assert!(!pen.fits(Px::new(-1).expect("inside PX_MAX")));
     }
 
-    /// The pen refuses rather than wraps, and refuses without moving. The scale
-    /// is the worst case the bounds admit — the largest grid at the largest em
-    /// with the largest advance — so this also exercises the arithmetic at the
-    /// corner the overflow argument is about.
+    /// The pen refuses rather than wraps, and refuses without moving, at both
+    /// corners of the grid.
+    ///
+    /// The second corner is the one that earns its place. [`Scale`]'s `limit` is
+    /// [`PX_MAX`] expressed in *this scale's* fine unit, and at [`UPEM_MAX`] a
+    /// limit wrongly computed from the constant instead of from `upem` is the
+    /// same number — so the widest grid alone cannot tell a scale-relative
+    /// limit from a constant one, and that mutation survived a suite that only
+    /// tested there. At [`UPEM_MIN`] the two differ by 2^10 and the first glyph
+    /// the constant wrongly admits lands at 2^26 pixels, which is the `as i32`
+    /// in `round_to_px` truncating — the one failure this module's overflow
+    /// argument claims cannot happen.
     #[test]
     fn a_run_that_would_pass_the_bound_is_refused_and_leaves_the_pen_where_it_was() {
-        let widest = Scale::new(UPEM_MAX, EM_PX_X64_MAX).expect("the corner is legal");
         let step = advance(ADVANCE_UNITS_MAX);
-        let mut pen = Pen::new(widest);
-        loop {
-            let before = pen;
-            if pen.advance(step).is_err() {
-                assert_eq!(pen, before, "a refused advance moved the pen");
-                break;
+        for upem in [UPEM_MAX, UPEM_MIN] {
+            let corner = Scale::new(upem, EM_PX_X64_MAX).expect("the corner is legal");
+            let mut pen = Pen::new(corner);
+            loop {
+                let before = pen;
+                if pen.advance(step).is_err() {
+                    assert_eq!(pen, before, "a refused advance moved the pen");
+                    break;
+                }
+                assert!(pen.position().px() <= PX_MAX, "a position passed PX_MAX without refusing");
             }
-            assert!(pen.position().px() <= PX_MAX, "a position passed PX_MAX without refusing");
         }
-        assert!(pen.glyphs() > 0, "the corner scale should admit at least one glyph");
+
+        let widest = Scale::new(UPEM_MAX, EM_PX_X64_MAX).expect("the corner is legal");
+        assert!(Pen::new(widest).advance(step).is_ok(), "the widest grid admits a glyph");
+
+        // Sixty-four thousand ems at a 1 024-pixel em is sixty-seven million
+        // pixels, so the smallest grid admits none. Stated as an equality rather
+        // than left to the loop because this is the assertion the mutation dies
+        // on, and a reader should be able to see which one that is.
+        let smallest = Scale::new(UPEM_MIN, EM_PX_X64_MAX).expect("the corner is legal");
+        assert_eq!(Pen::new(smallest).advance(step), Err(NotAMetric::PositionOutOfRange));
     }
 
     #[test]
@@ -855,7 +951,7 @@ mod tests {
             assert!(text.contains("em_px: 16"), "should say what size it is set at: {text}");
             assert!(!text.contains("1000"), "printed the design grid: {text}");
             assert!(!text.contains("1024"), "printed the em in its fine unit: {text}");
-            assert!(!text.contains("53"), "printed the accumulated prefix sum: {text}");
+            assert!(!text.contains("53350400"), "printed the accumulated prefix sum: {text}");
         }
         assert!(rendered(&run_of(AWKWARD_UNITS, 100)).as_str().contains("position_px: 834"));
     }
@@ -865,6 +961,11 @@ mod tests {
     /// than that, because each rounds its own end. Asserting the slack is there
     /// is the honest version of *coarse positions compose* — they do, and this is
     /// what it costs, in the units the rest of the module argues in.
+    ///
+    /// Note which way the lower assertion points: it fails if composition ever
+    /// gets *better*. That is deliberate — a bound nobody reaches is a bound
+    /// nobody weighs — but it means a failure here is not a regression. The
+    /// response to it is to delete this test, not to widen it.
     #[test]
     fn two_runs_compose_with_half_a_pixel_of_slack_each() {
         let one = i64::from(run_of(AWKWARD_UNITS, 100).position().px());
@@ -876,6 +977,72 @@ mod tests {
         let composed = ((one + one) * DIVISOR - 2 * exact_numerator).abs();
         assert!(2 * composed > DIVISOR, "two runs should be able to exceed half a pixel");
         assert!(2 * composed <= 2 * DIVISOR, "and never more than half a pixel each");
+    }
+
+    /// **The withdrawn claim, as an experiment.** An earlier draft of the module
+    /// doc said a consumer could not round its own way because there was no
+    /// number for it to round. It can, and this is how, so that the sentence
+    /// cannot come back without something here going red first.
+    ///
+    /// Every call below is public surface and nothing else — `Scale::new`,
+    /// `Advance::in_design_units`, `Pen::new`, `advance`, `position`, `fits`,
+    /// `Px::new` — which is what makes it evidence about a consumer rather than
+    /// about a test's privileges. It was first run as a separate crate with a
+    /// path dependency on this one, and produced these same numbers there.
+    ///
+    /// If it ever fails, it is because somebody closed the inversion, and the
+    /// honest response is to widen the module doc rather than to repair the
+    /// test. That is the opposite of how a failing test usually reads, which is
+    /// the reason it is written down here.
+    #[test]
+    fn a_consumer_outside_this_crate_can_round_its_own_way() {
+        // Re-applying a run M times scales the accumulator by M, so the half
+        // pixel `position` rounds to is half a pixel of a quantity M times too
+        // big. Nothing bounds M but PX_MAX.
+        const M: i32 = 20_000;
+        let mut multiplied = Pen::new(scale());
+        for _ in 0..M {
+            for _ in 0..100 {
+                multiplied.advance(advance(AWKWARD_UNITS)).expect("inside PX_MAX");
+            }
+        }
+        let scaled = i64::from(multiplied.position().px());
+        assert_eq!(scaled, 16_672_000, "a hundred glyphs, twenty thousand times over");
+
+        // So the true position is within 1 / 2M of a pixel of `scaled / M`.
+        let (bracket_lo, bracket_hi, den) = (2 * scaled - 1, 2 * scaled + 1, 2 * i64::from(M));
+        assert_eq!((bracket_lo, bracket_hi, den), (33_343_999, 33_344_001, 40_000));
+        assert_eq!(
+            bracket_lo.div_euclid(den),
+            bracket_hi.div_euclid(den),
+            "the bracket is narrow enough to name a whole pixel: 833.599975..833.600025"
+        );
+
+        // And the consumer rounds down where this module rounds up.
+        assert_eq!(bracket_lo.div_euclid(den), 833, "the consumer's floor");
+        assert_eq!(run_of(AWKWARD_UNITS, 100).position().px(), 834, "this module's answer");
+
+        // `would_fit` is the same leak by binary search, and the search here
+        // resolves a whole pixel where the loop above brackets one to a
+        // twenty-thousandth. Removing it would therefore close nothing.
+        let mut ceilings = [0i32; 6];
+        let mut module = [0i32; 6];
+        for k in 0..6u32 {
+            let pen = run_of(AWKWARD_UNITS, k);
+            module[k as usize] = pen.position().px();
+            let (mut lo, mut hi) = (0i32, PX_MAX);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if pen.fits(Px::new(mid).expect("inside PX_MAX")) {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            ceilings[k as usize] = lo;
+        }
+        assert_eq!(ceilings, [0, 9, 17, 26, 34, 42], "a ceiling rule stated at the call site");
+        assert_eq!(module, [0, 8, 17, 25, 33, 42], "and this module's rule over the same run");
     }
 
     /// Reading the pen is not moving it, which is what lets a caller measure a

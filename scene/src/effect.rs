@@ -23,10 +23,31 @@
 //!
 //! So the half declaration is refused where it is cheap to refuse: at the door
 //! between the words a producer wrote and the value this crate will act on.
-//! *An effect with no fallback is a declaration error rather than a frame-time
-//! surprise* is the whole of the exit, and both halves of it are here — the
-//! refusal below, and the fact that past the refusal there is no [`Effect`]
-//! holding one number and not the other, because the type has no shape for one.
+//! Two things are delivered there, and it is worth being exact about which,
+//! because the obvious summary of them is larger than either.
+//!
+//! - **A declaration that names one word and not the other is refused**, by
+//!   [`Effect::declared`], which is the only constructor of an [`Effect`].
+//! - **No [`Effect`] holds half a declaration**, because the type has no shape
+//!   for one: both fields are `NonZeroU32`, neither is an `Option`, and there
+//!   is no other constructor.
+//!
+//! **What is not delivered, stated here so that nobody has to find it.** An
+//! effect node that declares *nothing at all* is not refused by anything, in
+//! this module or anywhere else in this workspace. Nothing requires a
+//! `Kind::Effect` node to produce an [`Effect`]: `crate::arena` stores the node,
+//! `crate::commit` applies the frame, and neither has any notion of a
+//! declaration. Such a node reaches the degradation policy as a node absent
+//! from the policy's table — which is the frame-time surprise this file opened
+//! by describing, arriving by the one route this file does not close.
+//!
+//! Closing it is two changes and neither is here. It needs a record on the wire
+//! for a declaration to arrive in — see *where the boundary is* below — and it
+//! needs a census on the side that holds the nodes: a count of `Kind::Effect`
+//! creations against declarations, refused at the commit, which is
+//! `crate::arena`'s and `crate::commit`'s to keep and not this type's.
+//! [`kind::ByKind`](crate::kind::ByKind) is already the table for the first
+//! half of it.
 //!
 //! # Two numbers, and why the second is a saving
 //!
@@ -137,14 +158,32 @@
 //! a caller found somewhere.
 //!
 //! The second half has no record to arrive in today: `abi/src/scene.rs` has six
-//! opcodes and none of them carries an effect's parameters, and adding one is an
-//! ABI change with an RFC behind it. That costs this file nothing — [`Declared`]
-//! is those words as they will arrive and [`Effect::declared`] is the door they
-//! pass, and a door refuses whether or not anything has knocked yet. What it
-//! costs the reader is one stated limit, in the same place `kind.rs` states its
-//! own: nothing in this workspace can force a future decoder to call this
-//! function. What it can do, and does, is make sure there is no *other* route
-//! from two words to an [`Effect`], and no way to hold half of one afterwards.
+//! opcodes and none of them carries an effect's parameters. **So there is no
+//! delta in this workspace that can carry an estimate without a saving, and
+//! nothing is refused at the wire boundary — because nothing can knock on it.**
+//! [`Declared`] is a plain in-process struct that a caller inside this crate
+//! hands over, and [`Effect::declared`] is the boundary that exists: the one
+//! between two integers somebody wrote and the value this crate will act on.
+//! Every sentence in this file is about that boundary and none of them is about
+//! a decoder.
+//!
+//! That is a narrower claim than *a delta carrying one and not the other is
+//! refused*, and the difference is not a formality: a peer could not produce a
+//! half declaration if it tried, and the day it can, the refusal will be a
+//! decoder's rather than this function's. What landing the record would take is
+//! a seventh opcode in `abi/src/scene.rs` — `SET_EFFECT`, carrying a node, an
+//! estimate and a saving — which is an ABI change with an RFC behind it, and it
+//! stops the build of every consumer that decides per opcode: `section_of` and
+//! `admit` in `crate::commit`, `REACH` in `crate::dirty`, `Change::of` in
+//! `crate::kind`, and `Arena::apply`. That list is the cost of the change and
+//! the reason it is one diff and not this one.
+//!
+//! Two limits remain either way, stated in the same place `kind.rs` states its
+//! own. Nothing in this workspace can force a future decoder to call this
+//! function. And nothing requires an effect node to be declared at all — the
+//! module's *what is not delivered* above is the whole of that one. What this
+//! file does deliver is that there is no *other* route from two words to an
+//! [`Effect`], and no way to hold half of one afterwards.
 //!
 //! # No clock, no randomness, no binary floating point, no allocator
 //!
@@ -161,7 +200,59 @@ use core::num::NonZeroU32;
 
 use f_abi::scene::Refusal;
 
-use crate::kind::{Created, Kind};
+use crate::kind::{ByKind, Created, Kind};
+
+/// Which kinds may carry a declaration, one row per kind.
+///
+/// A [`ByKind`] written as a literal rather than a `match` on
+/// [`Created::kind`], and the choice is `crate::kind`'s own argument rather
+/// than a taste: an exhaustive match demands an arm and not an arm that *says*
+/// anything, so `Kind::Volume => false` compiles and is exactly how a seventh
+/// kind comes to be classified by whoever was in a hurry. A table has no empty
+/// row to write — this literal is six entries long, [`ByKind`] holds
+/// `[T; Kind::COUNT]`, and the day there are seven kinds this line is the wrong
+/// length and **this crate stops compiling**, in a consumer of `Kind` rather
+/// than only in the file that declares them.
+///
+/// The rows are positional, which is the one thing a table cannot state about
+/// itself: the length catches a kind *added*, and nothing in the length catches
+/// the six being **reordered** in the `kinds!` list, which would slide the
+/// permission onto a neighbour with every row still present and the array still
+/// six long. So the assertion below pins the `true` to [`Kind::Effect`] by name
+/// and requires it to be the only one — `crate::dirty`'s `REACH` pins its rows
+/// to opcodes for the same reason and in the same shape.
+///
+/// *What would reverse this:* a second kind that has something cheaper to do
+/// instead — a `Layer` whose intermediate target could be skipped is the
+/// candidate — at which point this row becomes `true` and every sentence in
+/// this module about *an effect node* becomes a sentence about two kinds.
+/// Unit: none — one permission per kind, in `Kind::ALL`'s order.
+const MAY_DECLARE: ByKind<bool> = ByKind::new([
+    false, // Transform: a matrix has no cheaper form; it is applied or it is not.
+    false, // Clip: the same, and skipping one paints outside the clip.
+    false, // Layer: an intermediate target the renderer may already elide.
+    false, // Draw: the marks themselves. Degrading these is not this policy's.
+    true,  // Effect: blur, drop shadow, material — the parameterised kinds.
+    false, // Semantic: contributes nothing to the picture, so costs nothing to skip.
+]);
+
+// The table's `true` belongs to the kind this module is about, and to one kind.
+// Checked here rather than in a test because a row that had shifted is not a
+// behaviour to observe, it is a build that should not link — `crate::kind`'s
+// own two const blocks are written for the same reason.
+const _: () = {
+    assert!(*MAY_DECLARE.at(Kind::Effect), "the effect kind may not declare an effect");
+    let rows = MAY_DECLARE.as_array();
+    let mut at = 0;
+    let mut allowed = 0;
+    while at < Kind::COUNT {
+        if rows[at] {
+            allowed += 1;
+        }
+        at += 1;
+    }
+    assert!(allowed == 1, "a kind other than Effect may declare an effect");
+};
 
 /// An effect's two words, exactly as a producer wrote them.
 ///
@@ -202,55 +293,123 @@ pub struct Declared {
     pub saving_us_x100: u32,
 }
 
-/// Why a declaration was not believed.
+/// The five refusals, written once.
 ///
-/// A local enum rather than `abi::scene::Refusal`, and the difference is worth
-/// a sentence: `kind.rs` returns that one because every refusal it makes is a
-/// refusal the wire decoder would also have made, and two statements of one rule
-/// is how two halves of a system come to disagree. None of these is such a rule.
-/// `abi::scene` has no effect record and therefore no opinion about these two
-/// words, so returning its type would claim an agreement that does not exist
-/// yet.
+/// # Why a macro, in a file that would rather not have one
 ///
-/// What does not vary is what a peer is told: [`Undeclared::REFUSAL`] is one
-/// code for all of them, which is `abi::scene::Refusal::packed`'s own argument
-/// — the distinctions below are for the producer reading its own log, and the
-/// domain is the part that is stable on the wire.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Undeclared {
+/// Because the alternative is two sequences that have to agree — the variants,
+/// and the list something walks to check that their sentences are distinct —
+/// and this repository has twice watched a variant be added to an enum and left
+/// out of an array every loop iterated. `docs/postmortem/0001` is one, and
+/// `interface/src/node.rs`'s `vocabulary!` was written after the other.
+///
+/// This file had exactly that array, five entries long, hand-written inside a
+/// test, one file away from the [`Fallback`] type it congratulates itself for
+/// removing a second copy from. A sixth variant is forced by the exhaustive
+/// `message` match below to have *a* sentence; it was not forced to have a
+/// *distinct* one, because the list that checks distinctness did not know it
+/// existed, so a copy-pasted sentence would have shipped green. One list closes
+/// it: [`Undeclared::ALL`] is emitted from the same lines as the variants, and
+/// there is no way to write a variant it does not get.
+macro_rules! refusals {
+    (
+        $(
+            $(#[$about:meta])*
+            $variant:ident, $sentence:literal;
+        )*
+    ) => {
+        /// Why a declaration was not believed.
+        ///
+        /// A local enum rather than `abi::scene::Refusal`, and the difference is
+        /// worth a sentence: `kind.rs` returns that one because every refusal it
+        /// makes is a refusal the wire decoder would also have made, and two
+        /// statements of one rule is how two halves of a system come to
+        /// disagree. None of these is such a rule. `abi::scene` has no effect
+        /// record and therefore no opinion about these two words, so returning
+        /// its type would claim an agreement that does not exist yet.
+        ///
+        /// What does not vary is what a peer is told: [`Undeclared::REFUSAL`] is
+        /// one code for all of them, which is `abi::scene::Refusal::packed`'s own
+        /// argument — the distinctions below are for the producer reading its own
+        /// log, and the domain is the part that is stable on the wire.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum Undeclared {
+            $($(#[$about])* $variant,)*
+        }
+
+        impl Undeclared {
+            /// How many ways a declaration can be refused.
+            ///
+            /// Counted from the list rather than written down, so it cannot
+            /// disagree with what it counts.
+            /// Unit: refusals.
+            pub const COUNT: usize = [$(stringify!($variant)),*].len();
+
+            /// Every refusal, in declaration order.
+            ///
+            /// Emitted from the same lines as the variants, so it holds every
+            /// refusal there is — not because a test checks it, but because
+            /// there is no way to write one this array does not get. That is
+            /// what makes `a_refusal_says_which_half_was_missing` a statement
+            /// about the enum rather than about whatever somebody remembered to
+            /// type into it.
+            /// Unit: none — refusals.
+            pub const ALL: [Self; Self::COUNT] = [$(Self::$variant),*];
+
+            /// A line for a log.
+            ///
+            /// Written per variant rather than derived from the name, because
+            /// the name says which case this is and the sentence says what the
+            /// producer did wrong, and a producer reading a boot log has the
+            /// second question.
+            #[must_use]
+            pub const fn message(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $sentence,)*
+                }
+            }
+        }
+    };
+}
+
+refusals! {
     /// The node is not an effect node.
     ///
     /// A cost and a fallback attached to a draw or a clip is a declaration about
     /// something that has no cheaper form to fall back to, and a policy that
     /// accepted it would be degrading nodes whose kind never said it could be
     /// degraded.
-    NotAnEffect,
+    NotAnEffect, "a declaration was offered for a node that is not an effect";
+
     /// Neither word was written.
     ///
     /// Kept distinct from the two halves below because a producer that wrote
     /// nothing is a different defect from one that wrote half: the first forgot
     /// the record, the second forgot a field in it, and they are fixed in
     /// different places.
-    Neither,
+    Neither, "an effect node declared neither a cost nor a fallback";
+
     /// A saving, and nothing for it to be a saving from.
     ///
     /// The mirror of [`Undeclared::NoFallback`], and refused just as hard. A
     /// fallback whose effect has no declared cost cannot be ranked against
     /// anything, so accepting it would put a node in the policy's table that the
     /// policy can never choose.
-    NoEstimate,
+    NoEstimate, "an effect node declared a saving and no cost to save from";
+
     /// An estimate, and nothing cheaper to do instead.
     ///
     /// The case the exit is written about: an effect that has told the
     /// compositor what it will cost and not what to do when that is too much.
-    NoFallback,
+    NoFallback, "an effect node declared a cost and nothing cheaper to do instead";
+
     /// A fallback that gives back more than the effect ever cost.
     ///
     /// Nothing is cheaper than free, so a saving above the estimate is not a
     /// generous declaration, it is an incoherent one — and a policy that
     /// subtracted it from a frame's remaining budget would believe it had
     /// recovered time that never existed.
-    CheaperThanFree,
+    CheaperThanFree, "a fallback saves more than the effect it replaces costs";
 }
 
 impl Undeclared {
@@ -264,22 +423,6 @@ impl Undeclared {
     /// that may not declare, or a word that may not be zero.
     /// Unit: none — a refusal, not a quantity.
     pub const REFUSAL: Refusal = Refusal::Value;
-
-    /// A line for a log.
-    ///
-    /// Written per variant rather than derived from the name, because the name
-    /// says which case this is and the sentence says what the producer did
-    /// wrong, and a producer reading a boot log has the second question.
-    #[must_use]
-    pub const fn message(self) -> &'static str {
-        match self {
-            Self::NotAnEffect => "a declaration was offered for a node that is not an effect",
-            Self::Neither => "an effect node declared neither a cost nor a fallback",
-            Self::NoEstimate => "an effect node declared a saving and no cost to save from",
-            Self::NoFallback => "an effect node declared a cost and nothing cheaper to do instead",
-            Self::CheaperThanFree => "a fallback saves more than the effect it replaces costs",
-        }
-    }
 }
 
 /// What a renderer does with an effect the frame cannot afford.
@@ -396,11 +539,13 @@ impl Effect {
     /// is a declaration offered for a node that is not [`Kind::Effect`]. Every
     /// one of them completes as [`Undeclared::REFUSAL`].
     pub fn declared(created: &Created, words: Declared) -> Result<Self, Undeclared> {
-        // Matched rather than compared, because `Kind` has no const equality and
-        // because a match is what a seventh kind would have to be re-read
-        // against — the kinds are closed in `kind.rs` and this arm is the one
-        // sentence here that depends on which of them is which.
-        if !matches!(created.kind(), Kind::Effect) {
+        // Read out of the table rather than matched, and [`MAY_DECLARE`] is
+        // where the argument is: this is the one sentence in the workspace that
+        // decides something per kind, so it is the one that has to stop
+        // compiling when there is a seventh — which `matches!(.., Kind::Effect)`
+        // did not, because a wildcard answers *not an effect* on a new kind's
+        // behalf and nothing ever revisits a safe answer.
+        if !*MAY_DECLARE.at(created.kind()) {
             return Err(Undeclared::NotAnEffect);
         }
         // The four combinations, written as four arms. `NonZeroU32::new` is the
@@ -627,21 +772,25 @@ mod tests {
 
     #[test]
     fn a_refusal_says_which_half_was_missing() {
-        // The five refusals are five sentences, because a producer that forgot a
+        // Five refusals are five sentences, because a producer that forgot a
         // word reads a log rather than a discriminant. Distinctness is the whole
         // property: a message shared by two causes is a message that identifies
         // neither.
-        let messages = [
-            Undeclared::NotAnEffect.message(),
-            Undeclared::Neither.message(),
-            Undeclared::NoEstimate.message(),
-            Undeclared::NoFallback.message(),
-            Undeclared::CheaperThanFree.message(),
-        ];
-        for (at, one) in messages.iter().enumerate() {
-            assert!(!one.is_empty());
-            for other in &messages[at + 1..] {
-                assert_ne!(one, other);
+        //
+        // Over `Undeclared::ALL`, which `refusals!` emits from the lines that
+        // declare the variants — so a sixth refusal is asked this question on
+        // the day it is written. It used to be over a five-element array typed
+        // out here, which a sixth variant would never have joined: the enum's
+        // exhaustive `message` match would have demanded a sentence for it and
+        // this list would have gone on checking the other five, so a
+        // copy-pasted sentence shipped green. That is this repository's own
+        // listed mistake, and the macro is the same repair it made twice
+        // before.
+        assert_eq!(Undeclared::ALL.len(), Undeclared::COUNT);
+        for (at, one) in Undeclared::ALL.iter().enumerate() {
+            assert!(!one.message().is_empty(), "{one:?} has no sentence");
+            for other in &Undeclared::ALL[at + 1..] {
+                assert_ne!(one.message(), other.message(), "{one:?} and {other:?} say one thing");
             }
         }
         // One code on the wire, five values here — the module documentation's
