@@ -285,6 +285,44 @@ impl Channels {
             _ => "other",
         }
     }
+
+    /// Every bit of every channel set: white, in this layout, whatever it is.
+    ///
+    /// # Why a caller wants this rather than packing a colour
+    ///
+    /// Because it is the one pixel value that cannot be got wrong. Packing a
+    /// chosen colour needs all six of these numbers to mean what the caller
+    /// believed; saturating needs only that each field lies where it was said
+    /// to, and it produces white under any order, any width and any
+    /// arrangement. A field this code misreads leaves that channel dark, which
+    /// tints the result — it cannot turn it into some other colour entirely.
+    ///
+    /// The distinction was bought rather than reasoned about. The frame's
+    /// console picked a considered light grey, packed it through this
+    /// structure, and a real display drew the boot log in yellow-green — which
+    /// is red and green with the blue missing. RFC 0081 carries the account.
+    ///
+    /// A field with no width, or one that would reach past the end of a pixel,
+    /// contributes nothing: the same refusal every other reader in this file
+    /// makes about a number the loader wrote, which is that unusable is absent
+    /// and never assumed-good.
+    #[must_use]
+    pub fn saturated(self) -> u32 {
+        /// All `bits` bits, moved up to `at`, or nothing if that cannot be done.
+        fn field(bits: u8, at: u8) -> u32 {
+            if bits == 0 || bits > 32 || u32::from(at) + u32::from(bits) > 32 {
+                return 0;
+            }
+            // `bits` is non-zero and at most 32, so neither shift reaches the
+            // width of the type and the mask cannot be empty.
+            let mask = u32::MAX >> (32 - u32::from(bits));
+            mask << at
+        }
+
+        field(self.red_bits, self.red_at)
+            | field(self.green_bits, self.green_at)
+            | field(self.blue_bits, self.blue_at)
+    }
 }
 
 /// What kind of surface the loader set up.
