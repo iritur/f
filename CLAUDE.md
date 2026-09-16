@@ -40,7 +40,9 @@ change: it invalidates every claim (`claims/README.md`).
 interface, `kernel` the frame, `user/init` the first component, `xtask` policy
 made executable, `third_party` imported drivers behind a licence boundary.
 `docs/design/*.html` is the reasoning and is ahead of the code by design;
-`docs/rfc/` is where reversals live.
+`docs/book/*.html` explains the system to one reader each and carries no such
+permission, so it states per chapter what runs and cites numbers rather than
+copying them (RFC 0085); `docs/rfc/` is where reversals live.
 
 ## Conventions
 
