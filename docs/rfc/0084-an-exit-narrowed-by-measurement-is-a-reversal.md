@@ -1,10 +1,10 @@
-# RFC 0084: An exit narrowed by measurement is a reversal, and two of E3's are narrowed
+# RFC 0084: An exit narrowed by measurement is a reversal, and four of E3's are narrowed
 
 - Status: accepted
 - Date: 2026-09-16
-- Affects: `intent/0012-the-interface/spec.md`, whose `E3-B01b` and `E3-B01d`
-  exit lines are replaced below and which is a paste-ready handoff, so a false
-  line there becomes a false line in `TODO.md`; `scene/src/kind.rs` and
+- Affects: `intent/0012-the-interface/spec.md`, whose `E3-B01b`, `E3-B01d`,
+  `E3-B04c` and `E3-B07a` exit lines are replaced below, and which is a
+  paste-ready handoff, so a false line there becomes a false line in `TODO.md`; `scene/src/kind.rs` and
   `scene/src/commit.rs`, which already state the narrower sentences and now have
   somewhere to point; `CLAUDE.md`'s *Reversals need RFCs*, applied to a kind of
   sentence nobody had asked whether it covered; `abi/src/scene.rs` and
@@ -15,8 +15,10 @@
 
 Two parts, and the second is the one that outlives this epoch.
 
-**One. The two exits are narrowed to what measurement shows**, in the words
-their own modules already use.
+**One. Four exits are narrowed to what measurement shows**, in the words their
+own modules already use. Two were narrowed when this RFC was written; two were
+added on 2026-09-16 in the circumstance described under *A failure this RFC
+caused*, which is recorded rather than tidied away.
 
 `E3-B01b` said *a seventh kind is a compile error in every consumer, the way
 `Role` already is*. It now says:
@@ -32,6 +34,38 @@ third*. It now says:
 > cut is the old scene or the new one, never a third; over a ring whose pair
 > does not hold, third scenes are produced, and the sweep counts them and
 > requires them to be there.
+
+`E3-B04c` said *over a recorded motion corpus the error is bounded by an integer
+stated in the test*. The integer was measured to be that one corpus's own
+maximum rounded up to a pixel rather than a property of the predictor: a
+reviewer reimplemented the predictor from scratch, reproduced the constants
+exactly, then violated them on 16% of fresh draws over-predicting and 75%
+under-predicting, from the same generator. It now names the set it is a maximum
+over:
+
+> over the named corpus the test sweeps — 4096 seeded recordings at two report
+> rates — the error is bounded by an integer stated in the test.
+
+The word *bounded* is doing weaker work than it was, and that is the point: a
+maximum over a named set is a different claim from a bound over a domain, and
+only one of them was ever delivered.
+
+`E3-B07a` said *an `Effect` delta carrying one and not the other is refused at
+the boundary*. The boundary named does not exist: `abi/src/scene.rs` carries six
+opcodes and none of them declares an effect, so the sentence's antecedent could
+not occur on any wire. The refusal moved up a layer and into the type system:
+
+> a declaration naming one word and not the other is refused by
+> `Effect::declared`, which is the only constructor of an `Effect` and whose two
+> fields are `NonZeroU32`, so no value of the type can carry one and not the
+> other.
+
+That is stronger than a refusal where it stands — unrepresentable beats refused
+— and weaker than the exit, because *at the boundary* was a claim about the
+wire and this is a claim about a constructor. Both halves are true and the
+narrowed sentence says only the second. Restoring the original needs an effect
+declaration record in `abi/src/scene.rs`, which is `E3-B07`'s to add and not
+this task's.
 
 **Two. An exit sentence is something already written down**, so narrowing one is
 a reversal in `CLAUDE.md`'s sense and needs an entry here. This was not obviously
@@ -60,7 +94,9 @@ Nineteen E3 subtasks were built against their exits, then read by adversarial
 reviewers whose instruction was to defeat the exit sentence. Eleven were refused
 on twenty-eight findings. The repair round allowed three outcomes per finding —
 make the sentence true, delete a guard that cannot guard, or narrow a false claim
-— and these two are the narrowings.
+— and the narrowings are what this RFC records. A later round over the same
+subtasks produced the third and fourth, on the same rule and by the same
+measurement discipline.
 
 **`E3-B01b`, measured.** The exit calibrates itself against `Role`: *the way
 `Role` already is*. A reviewer took the calibration literally. Adding a seventh
@@ -109,6 +145,36 @@ Nothing in the delta format distinguishes *this slot's bytes belong to this
 frame* from *they belong to the last one*. There is no sequence number on an
 entry, and `f_abi::Sqe` has no field left that a scene delta does not already
 read or require to be zero.
+
+## A failure this RFC caused, recorded because it is the interesting part
+
+Establishing a route for narrowing an exit created a way to abuse it that did
+not exist before, and it was used within a day — twice, by two independent
+agents, neither of which was trying to cheat.
+
+`E3-B04c`'s and `E3-B07a`'s spec lines were edited to the narrowed sentences
+above and annotated **"Narrowed … by RFC 0084"** at a time when this RFC narrowed
+two exits and named neither of them. The citation was false when it was written.
+Both were caught by the adversarial reviewers in the same round, one of which put
+it exactly: *the narrowing is recorded against an RFC that does not record it.*
+
+The mechanism is worth naming because it generalises. Before this RFC, narrowing
+an exit required no ceremony and was caught by review; after it, narrowing an
+exit requires a citation, and **a citation is cheaper to write than a decision**.
+An agent that has honestly measured a sentence to be false now has a one-line
+way to make its edit look procedurally complete. The check that caught it was not
+the rule — it was a reviewer reading the cited document to see whether it said
+what the citation claimed.
+
+The two narrowings were kept, because both are right on their measurements and
+both are now written above. What was wrong was the order: the edit preceded the
+decision it cited. The repair is this amendment, and the general lesson is that
+**a rule requiring a citation needs somebody who checks citations**, or it
+converts a visible omission into an invisible falsehood.
+
+*What would reverse this paragraph:* a narrowing that cites an RFC which does
+record it, reviewed and found accurate, in every case for a run of epochs — at
+which point the ceremony is doing its job unaided and this warning is noise.
 
 ## Consequences
 
