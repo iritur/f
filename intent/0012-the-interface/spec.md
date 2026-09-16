@@ -179,13 +179,13 @@ last one.
   *exit:* every opcode round-trips through fixed-width bytes on x86-64 and AArch64; an entry with a non-zero unread field is refused rather than ignored; the commit carries the frame token and the deadline it was scheduled against.
   *needs:* E3-00 (ordering rule 1: two peers read this the moment a client exists, so it lands before the compositor does)
 - [ ] **E3-B01b** `S` The scene node kinds as types — `Transform`, `Clip`, `Layer`, `Draw`, `Effect`, `Semantic` — and nothing else.
-  *exit:* each kind is created and removed by a delta and by no other route, and a seventh kind is a compile error in every consumer, the way `Role` already is.
+  *exit:* each kind is created and removed by a delta and by no other route, and a seventh kind is a compile error in every consumer that decides per kind without a wildcard — and the one consumer in this workspace that decides per kind is such a consumer. Narrowed from *a compile error in every consumer, the way `Role` already is* by RFC 0084, because a seventh kind was added end to end and broke exactly one build, and `Role` does not achieve the wider sentence either.
   *needs:* E3-B01a
 - [ ] **E3-B01c** `M` The retained graph itself: an arena with a named maximum, no allocator, no `Vec`.
   *exit:* a scene at the maximum is built, mutated and torn down inside one fixed allocation, and exceeding it is a named refusal rather than a panic.
   *needs:* E3-B01b
 - [ ] **E3-B01d** `M` The commit is atomic: every delta in it, or none of them.
-  *exit:* `E2-P01`'s cut model, pointed at a commit instead of a publish, cuts at every entry boundary across a seed sweep and the graph read back is the old scene or the new one, never a third.
+  *exit:* `E2-P01`'s cut model, pointed at a commit instead of a publish, cuts at every entry boundary across a seed sweep, and over a ring whose `Release`/`Acquire` pair holds the graph read back is the old scene or the new one, never a third; over a ring whose pair does not hold, third scenes are produced and the sweep is required to count them. Narrowed from the unqualified sentence by RFC 0084: a slot whose write is not visible reads as the previous frame's entry, which decodes, and closing that is a per-entry submission sequence in `abi/` rather than a change to the commit path.
   *needs:* E3-B01c
 - [ ] **E3-B01e** `M` Dirty-subtree tracking: what a commit marks, and what the encode stage is then allowed to walk.
   *exit:* one changed node in a scene of a thousand marks one subtree, and the number of nodes the encoder visits equals the number in that subtree — counted in a test rather than sampled in a profile.
