@@ -419,34 +419,98 @@ impl Surface {
     /// Draw one character in cell `(col, row)`.
     fn cell(self, col: usize, row: usize, ch: u8) {
         let rows = glyph(ch);
-        let origin_x = (col * GLYPH_W * self.scale) as u32;
-        let origin_y = (row * GLYPH_H * self.scale) as u32;
+        let origin_x = col * GLYPH_W * self.scale;
+        let origin_y = row * GLYPH_H * self.scale;
 
+        // The fast path, and it is the one every cell of a real boot takes: a
+        // cell wholly on the surface, four bytes to a pixel, drawn at
+        // one-to-one. `put` is correct for all of that and pays for it per
+        // pixel — a bounds test, two multiplies to rebuild an address the
+        // previous pixel was next to, and a match on a depth that cannot change
+        // during a boot. A hundred and twenty-eight times a character, on a
+        // screen that redraws sixteen thousand of them when it scrolls.
+        //
+        // What makes it worth separating rather than optimising in place is the
+        // *store pattern*. Hoisting the row address turns a glyph row into
+        // eight stores to consecutive addresses, which is exactly the shape
+        // write-combining exists to gather: the processor fills one buffer and
+        // puts it out as a burst. Scattered stores to the same page do not
+        // combine, so the mapping change and this loop are one improvement
+        // rather than two.
+        let fits = self.scale == 1
+            && self.bytes_per_pixel == 4
+            && origin_x + GLYPH_W <= self.width as usize
+            && origin_y + GLYPH_H <= self.height as usize;
+
+        if fits {
+            for (dy, bits) in rows.iter().enumerate() {
+                let base =
+                    self.at + (origin_y + dy) as u64 * u64::from(self.pitch) + origin_x as u64 * 4;
+                for dx in 0..GLYPH_W {
+                    // Bit 7 is the leftmost pixel of the row: the byte is the
+                    // row, most significant bit first, which is how every
+                    // eight-wide bitmap font on this architecture is stored.
+                    let value = if bits & (1 << (7 - dx)) != 0 { self.ink } else { self.paper };
+                    // SAFETY: the surface is four bytes to a pixel and this
+                    // whole cell was tested against its width and height above,
+                    // so this address is inside it. Four-byte aligned because
+                    // the surface's first pixel is page-aligned and every term
+                    // added to it is a multiple of four. Volatile because a
+                    // display is a device: the compiler may not drop, reorder
+                    // or merge a write to it.
+                    unsafe { ((base + dx as u64 * 4) as *mut u32).write_volatile(value) };
+                }
+            }
+            return;
+        }
+
+        // Everything else: a clipped cell at the edge of a screen whose size is
+        // not a multiple of the glyph, a depth that is not four bytes, or a
+        // scale of two. `put` clips and packs, one pixel at a time.
         for (dy, bits) in rows.iter().enumerate() {
             for dx in 0..GLYPH_W {
-                // Bit 7 is the leftmost pixel of the row, which is how every
-                // eight-wide bitmap font on this architecture is stored and how
-                // the table above reads: the byte is the row, most significant
-                // bit first. The spacing between characters is inside the glyph
-                // — the table leaves the rightmost column or two clear — rather
-                // than being a gap the grid adds, which is what lets a box
-                // drawing character reach the edge of its cell if one is ever
-                // added.
-                let lit = bits & (1 << (7 - dx)) != 0;
-                let value = if lit { self.ink } else { self.paper };
-
-                // The scale is a nested loop rather than a wider write because
-                // a wider write would have to know the pixel format again, and
-                // `put` is the one place in this file that does. At scale one,
-                // which is every display short of 4K, both loops run once and
-                // the compiler is left with the plain store.
+                let value = if bits & (1 << (7 - dx)) != 0 { self.ink } else { self.paper };
                 for sy in 0..self.scale {
                     for sx in 0..self.scale {
-                        let x = origin_x + (dx * self.scale + sx) as u32;
-                        let y = origin_y + (dy * self.scale + sy) as u32;
+                        let x = (origin_x + dx * self.scale + sx) as u32;
+                        let y = (origin_y + dy * self.scale + sy) as u32;
                         self.put(x, y, value);
                     }
                 }
+            }
+        }
+    }
+
+    /// Paint the whole surface in [`Surface::paper`].
+    ///
+    /// # Why this is not sixteen thousand blank glyphs
+    ///
+    /// Because that is what it replaced. The console starts by believing
+    /// nothing has been drawn, so its first flush used to draw *every* cell —
+    /// including the eleven-twelfths of a boot screen that are blank — as a
+    /// glyph, eight pixels at a time with a jump to the next row between them.
+    /// Two million stores in sixteen thousand strided bursts.
+    ///
+    /// This is the same two million stores in one sweep from the first byte of
+    /// the surface to the last, which is the access pattern write-combining is
+    /// best at and the one a display's memory is happiest with. Afterwards the
+    /// console records the screen as blank rather than as unknown, so the first
+    /// flush draws the handful of cells that actually have text in them.
+    fn clear(self) {
+        if self.bytes_per_pixel != 4 {
+            // The slow path is correct and this is a start-up cost paid once,
+            // so a depth the fast sweep cannot write is left to `cell`: the
+            // console will paint blanks over it on the first flush.
+            return;
+        }
+        for y in 0..self.height {
+            let base = self.at + u64::from(y) * u64::from(self.pitch);
+            for x in 0..self.width {
+                // SAFETY: inside the surface by construction — `y` and `x` are
+                // bounded by its own height and width, and its extent was
+                // validated before it was mapped. Aligned and volatile for the
+                // reasons `cell`'s fast path gives.
+                unsafe { ((base + u64::from(x) * 4) as *mut u32).write_volatile(self.paper) };
             }
         }
     }
@@ -527,11 +591,14 @@ impl Console {
         self.col = 0;
         self.row = 0;
         self.want = [b' '; CELLS];
-        // Not `[b' '; CELLS]`: nothing has been drawn, and the surface holds
-        // whatever the firmware left in it. Marking every cell as *already a
-        // space* would make the first flush skip the clearing pass and leave
-        // the firmware's logo behind the text.
-        self.have = [0; CELLS];
+        // The surface holds whatever the firmware left in it, so something has
+        // to paint over it. `clear` is that something — one sweep — and because
+        // it has run, the screen really *is* blank and the console may record
+        // it as such. Before `clear` existed this said `[0; CELLS]`, which
+        // meant every cell differed from what had been drawn and the first
+        // flush painted sixteen thousand blank glyphs to reach the same state.
+        surface.clear();
+        self.have = [b' '; CELLS];
         self.surface = Some(surface);
     }
 
@@ -613,6 +680,14 @@ impl Console {
                 self.have[at] = self.want[at];
             }
         }
+
+        // The display is write-combining now, which means a store to it may sit
+        // in a fill buffer until the processor has a reason to drain one — and
+        // *the machine stopped* is not among its reasons. Without this, the
+        // last line before a hang is the line that never reaches the screen,
+        // which is precisely the line somebody is looking at the screen to
+        // find. One instruction, once per line of output.
+        crate::arch::x86_64::paging::fence_stores();
     }
 }
 
@@ -770,6 +845,68 @@ impl fmt::Write for Tee {
         fmt::Write::write_str(&mut serial, s)?;
         write_str(s);
         Ok(())
+    }
+}
+
+/// Redraw the whole screen, timed, and say what it cost.
+///
+/// # Why this is behind a boot parameter and not a line of the boot report
+///
+/// Because the boot log is a fixture: two runs of one `(seed, commit)` produce
+/// byte-identical output, and `cargo xtask trace` hashes it. A number taken
+/// from a real clock is different every run, so printing one unconditionally
+/// would turn a check that catches real divergence into one that fails always.
+/// Behind `screen=cost` it is a measurement somebody asked for.
+///
+/// # What it measures, and what it does not
+///
+/// It marks every cell as undrawn and flushes, so what is timed is a full
+/// screen of glyphs — the worst thing this console ever does, and exactly what
+/// a scroll costs when the text is dense. It does not measure the clear sweep
+/// at attach, and it does not measure a typical line, which touches a few
+/// dozen cells rather than every one of them.
+///
+/// The number is the point of comparison for the memory type: the same screen
+/// drawn through an uncacheable mapping and through a write-combining one is
+/// the whole argument for RFC 0085's change, and this is how a machine settles
+/// it rather than a paragraph.
+pub fn cost() {
+    if !ENABLED.load(Ordering::Acquire) {
+        crate::kprintln!("  screen        no surface, so nothing to measure");
+        return;
+    }
+    if DRAWING.swap(true, Ordering::Acquire) {
+        return;
+    }
+
+    // SAFETY: as `write_str` — the swap above establishes that nothing else is
+    // inside the drawing path, and the reference is dropped before the store.
+    let console = unsafe { console() };
+    let (cols, rows) = (console.cols, console.rows);
+    let cells = cols * rows;
+
+    // Every cell differs from what is on the screen, which is what makes the
+    // flush below a full redraw rather than a no-op.
+    console.have = [0; CELLS];
+
+    let before = crate::arch::x86_64::read_tsc();
+    console.flush();
+    let after = crate::arch::x86_64::read_tsc();
+
+    DRAWING.store(false, Ordering::Release);
+
+    let cycles = after.saturating_sub(before);
+    let per_cell = if cells > 0 { cycles / cells as u64 } else { 0 };
+    crate::kprintln!(
+        "  screen        {cells} cell(s) redrawn in {cycles} cycle(s), {per_cell} per cell"
+    );
+
+    // Milliseconds when the timer has been calibrated, because cycles are a
+    // ratio and a person wants a duration. Zero means this core has no
+    // calibration yet, and saying so is better than dividing by it.
+    let khz = crate::arch::x86_64::apic::tsc_khz();
+    if let Some(us) = cycles.saturating_mul(1000).checked_div(khz) {
+        crate::kprintln!("                {us} us at {khz} kHz");
     }
 }
 

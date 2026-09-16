@@ -267,6 +267,12 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // SAFETY: boot processor, in long mode, before any address space carrying
     // these bits is activated.
     let features = unsafe { paging::enable_features() };
+    // Write-combining into the page-attribute table, on this core. Every core
+    // that can print needs it — `paging::enable_write_combining` says why — and
+    // the arriving cores do it for themselves in `smp::arrive`.
+    // SAFETY: ring 0, once on this core, and before anything carrying the
+    // attribute bit is mapped: the first such mapping is `open_screen`, below.
+    unsafe { paging::enable_write_combining() };
     kprintln!(
         "  paging        no-execute {}, global pages {}, pcid {}, direct map in {}",
         if features.nx { "on" } else { "unavailable" },
@@ -332,6 +338,9 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // its first line, for ever. What can be checked without a display is the
     // half that is data somebody typed and arithmetic somebody wrote, and both
     // report to the serial port, which needs no mapping to work.
+    if boot.has_parameter(b"screen=cost") {
+        screen::cost();
+    }
     if boot.has_parameter(b"screen=font") {
         screen::dump_font();
     }
@@ -3881,7 +3890,7 @@ fn open_screen(
         // names a display's memory, which the loader reported and
         // `Framebuffer::parse` bounded — device memory rather than somebody
         // else's frames, which is the other half of what `map_device` asks.
-        match unsafe { paging::map_device(frames, space, page, features) } {
+        match unsafe { paging::map_device_wc(frames, space, page, features) } {
             Ok(_) => pages += 1,
             Err(e) => {
                 kprintln!("  screen        not mapped: {} after {pages} page(s)", e.message());
@@ -3896,7 +3905,9 @@ fn open_screen(
         return;
     }
     let (cols, rows) = screen::grid();
-    kprintln!("  screen        {cols} x {rows} characters over {pages} mapped page(s), uncached");
+    kprintln!(
+        "  screen        {cols} x {rows} characters over {pages} mapped page(s), write-combining"
+    );
 }
 
 /// Give the allocator every usable frame that is not already spoken for.
