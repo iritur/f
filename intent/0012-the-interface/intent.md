@@ -1,6 +1,6 @@
 ---
 id: 0012
-status: draft
+status: accepted
 originator: Dmitri Chudinov
 todo: E3-00, E3-B01, E3-B02, E3-B03, E3-B04, E3-B05, E3-B06, E3-B07, E3-P01
 ---

@@ -1213,24 +1213,40 @@ accordingly and narrow early rather than late.*
 
 **Effort:** 4–10 person-years · **Risk:** high · **Ends at:** gate G3, release 0.4
 
-*Where the tree stands against this epoch, checked 2026-09-09.* Nothing in it
-is done and nothing in it is started, and until this paragraph every line below
-carried no `needs:` outside the epoch, so `cargo xtask todo E3` ranked thirteen
-of twenty tasks as ready to start — the same reading E2 corrected for itself on
-2026-09-06, and the tool's answer is only ever the graph's. What the graph now
-says. Gates G0, G1 and G2 are all unpassed, with eight, nine and ten tasks `[>]`
-behind them and releases 0.1, 0.2 and 0.3 unshipped; a release that precedes
-this one is on `E3-R01`'s line for the reason `E2-R01` gave. Every timing claim
-in the registry — fifteen of thirty — is `pending` because `runner-class-A`
-(`E0-D10`) is a name and not a machine and F has booted twice in a VM and never
-on metal (`E0-P18`), and gate G3 is a time: input to photon at p99, taken by a
-photodiode, under load. So every prove task in this epoch but one is a
-measurement on hardware nobody owns yet, and the one that is not (`E3-P05`)
-replaces a UI suite that does not exist. The frame is still moving:
-`cargo xtask lint-owed` reports five reversals fallen due and unpaid, four of
-them in the frame, and the ring and doorbell the scene graph would ride
-(`E0-B12`, `E0-B15`) and the tree a component owns that the degradation policy
-would write into (`E1-B15`) are `[>]`. Three intents filed from the E2 audit on
+*Where the tree stands against this epoch, checked 2026-09-17.* The
+decomposition landed. `intent/0012-the-interface/` is `E3-00`'s deliverable and
+the seventy-two lines below are its output, pasted under the eight parents they
+decompose; five tasks in this epoch are done and six are ready to start. Until
+that paste every line below carried no `needs:` outside the epoch, so
+`cargo xtask todo E3` ranked thirteen of twenty tasks as ready — the same reading
+E2 corrected for itself on 2026-09-06 — and the tool's answer is only ever the
+graph's, which is why every parent below now names its children. What the graph
+now says. Gates G0, G1 and G2 are all unpassed, with eight, nine and ten tasks
+`[>]` behind them and releases 0.1, 0.2 and 0.3 unshipped; a release that
+precedes this one is on `E3-R01`'s line for the reason `E2-R01` gave. The claims
+registry holds thirty-three rows — fifteen `pending`, seventeen `gating`, one
+`tracked`, recounted on 2026-09-17 with
+`grep -h '^status' claims/*.toml | sort | uniq -c` rather than carried over from
+the last draft, and the denominator moved because this epoch's own three claims
+landed in between. The fifteen are `pending` because `runner-class-A` (`E0-D10`)
+is a name and not a machine and F has booted twice in a VM and never on metal
+(`E0-P18`), and two of the fifteen are not times at all: `claims/0034` is a ratio
+of integers and `claims/0035` a share, and both say in their own first paragraphs
+that this is why they could gate where a timing claim could not. Gate G3 is a
+time: input to photon at p99, taken by a photodiode, under load. So every prove
+task in this epoch but one is a measurement on hardware nobody owns yet, and the
+one that is not (`E3-P05`) replaces a UI suite that does not exist. The frame is
+still moving, but less than this paragraph used to say: `cargo xtask lint-owed`
+reports three reversals fallen due and unpaid — RFC 0014's and RFC 0015's door
+retirements and RFC 0051's `Reported` — down from five, and the one that was paid
+is the frame's, `policy::decide` having become `f_supervisor::policy::decide` on
+2026-09-13. `E1-B15` is `[x]`, which is what moves `E3-B07`'s second clause out
+of the hardware bucket and onto `E3-B07d`. `E0-B12` and `E0-B15` are still `[>]`
+— for a number `E0-P05` owes and for a user-interrupt path QEMU's TCG backend
+implements no part of — and a scene graph waits for neither: the ring's layout,
+cursor protocol and suppression and the kernel's doorbell path are in the tree
+and green, so the subtasks below carry what they actually need and `E3-B01` no
+longer inherits either marker. Three intents filed from the E2 audit on
 2026-09-07 — `intent/0007` through `0009` — are drafts with no task behind
 them, and `0008`'s finding is that E2's storage story is argued rather than
 measured; opening a fourth epoch on top of that repeats what the audit named.
@@ -1239,58 +1255,285 @@ What this epoch has to stand on: virtio-gpu in user space (`E1-B04`), which
 the tuned-Linux baseline as configuration (`E1-D06`), which `E3-P07`'s
 compositor comparison reuses rather than re-argues; and `ring-scene-boot`
 parts II and III, which are the reasoning and are ahead of every line below by
-design. What can honestly start, because it needs no hardware and produces
-information: `E3-00`, whose deliverable is an `intent/` entry and not an edit
-to this file, because `docs/sdlc.md` puts an intent before a spec before a diff
-and E2 had `intent/0006`; and the four decisions, whose exits are paper — three
-interfaces expressed, a ladder written, a hostile theme refused. Ordering rule
-3 says a decision sits immediately before the work it protects, and none of
-that work can start, so the decisions are the epoch's whole available surface.
-`E3-P01` is deliberately not blocked on `E0-D10`: the rig is calibrated against
-a conventional machine on purpose, and blocking the instrument on the thing it
-will measure would be blocking a ruler on a wall.
+design. What can honestly start, because it needs no hardware: one wire format
+(`E3-B01a`), one backend vocabulary (`E3-B02a`), two decisions (`E3-B03a` and
+`E3-B06a`), one timestamping rule (`E3-B04a`) and one bill of materials
+(`E3-P01a`). None of the six is a renderer, and the reading to take from that is
+not that a twelfth of the epoch is available but that **the available twelfth
+contains none of the epoch's risk**: thirty-one of the seventy-two sit behind
+`E1-B05` and `E2-B01`, whose code is already in the tree and neither of which is
+a research problem. That, and not the available six, is where this epoch is
+gated. `E3-P01` is deliberately not blocked on `E0-D10`: the rig is calibrated
+against a conventional machine on purpose, and blocking the instrument on the
+thing it will measure would be blocking a ruler on a wall.
 
-- [ ] **E3-00** `M` **Decompose this epoch before starting it.** Everything below is coarse on purpose; each task becomes five to fifteen tasks with exits when the epoch opens.
+- [x] **E3-00** `M` **Decompose this epoch before starting it.** Everything below is coarse on purpose; each task becomes five to fifteen tasks with exits when the epoch opens. `intent/0012-the-interface/` is the decomposition and the argument for it.
   *exit:* E3 contains no `XL` task without a decomposition.
 
 ### Decide
 
-- [ ] **E3-D01** `L` The semantic node vocabulary, version 1 — small enough to be unambiguous, large enough that applications do not escape into opaque canvases.
-  *exit:* the vocabulary expresses three deliberately chosen hard interfaces on paper — a settings panel, a file browser, a timeline — with no node marked "other".
-- [ ] **E3-D02** `M` Canvas participation: what a self-rendering surface must still declare about its content.
-  *exit:* the timeline case is expressible — clips, tracks, times, selections, addressable and scriptable while the pixels stay custom.
-- [ ] **E3-D03** `M` The typed design-token layer: what is themeable, what is range-checked, what a theme cannot break.
-  *exit:* a deliberately hostile theme cannot produce an unreadable or unlayoutable interface, demonstrated by test.
-- [ ] **E3-D04** `S` The renderer fallback ladder, decided before it is needed.
-  *exit:* written — compute path renderer, hybrid, CPU, tessellating floor — with the claim each rung costs named.
+- [x] **E3-D01** `L` The semantic node vocabulary, version 1 — small enough to be unambiguous, large enough that applications do not escape into opaque canvases.
+  **Closedness is structural rather than tested, and that is the part worth checking first.** A `vocabulary!` macro in `interface/src/node.rs` emits the enum, `ALL`, `COUNT` and every per-role table from one list, so there is no second place a variant can be written. The two tests that tried to guard a hand-written array were both defeated — the second by `Role::Other => {}`, which is the loophole the whole decision exists to close — and deleting them was the repair rather than strengthening them. Twenty-two roles, no `Other`, no string role and no `#[non_exhaustive]`, because the web's annotation vocabulary failed on ambiguity rather than on size.
+  **What the tree cannot observe about this decision is registered rather than argued.** `claims/0034-canvas-escape-rate.toml` is the metric that would say twenty-two is too small, and it states in its own first paragraph that it can only go red in one direction: a rate below the target is equally consistent with a corpus of applications too simple to push on anything. A vocabulary size is the kind of number that invites a defence, and the claim refuses to be one.
+  *exit:* met. `docs/rfc/0077-the-semantic-vocabulary-is-closed.md` is accepted and expresses the settings panel, the file browser and the timeline with no node marked "other"; the canvas loophole is closed by `Defect::EmptyCanvas` rather than by convention. It departs from `ring-scene-boot` section 11 by one field, `parent`, and says what would make that wrong.
+- [x] **E3-D02** `M` Canvas participation: what a self-rendering surface must still declare about its content.
+  **The timeline was built to section 13's own falsification rather than to a case that would pass.** An agent selects the clip between 4.2 s and 6.8 s on track 3 and a screen reader describes it, neither of them seeing a pixel — the test the design page proposed against itself. Times are integers with the scale in the name, which makes a timeline's time base a decision this tree takes once rather than a formatting detail every surface invents; RFC 0004 leaves no other option.
+  **What it does not settle is written into the RFC rather than left to be discovered.** Whether developers will declare structure they do not declare today is a usability finding, and no test in this tree can produce one. What can be enforced is the floor, and the floor is enforced: a canvas that declares nothing is a defect and is not admitted.
+  *exit:* met. `docs/rfc/0078-a-canvas-declares-its-content-or-it-is-an-escape.md` is accepted and `interface/src/canvas.rs` makes the timeline case expressible — clips, tracks, times and a selection, addressable and scriptable while the pixels stay custom.
+- [x] **E3-D03** `M` The typed design-token layer: what is themeable, what is range-checked, what a theme cannot break.
+  **The sweep is what makes the guarantee safe to state.** `every_ground_admits_a_readable_ink` sweeps every integer luminance rather than a stride over the colour cube, which is how the true minimum of 4 582 at `#008909` was found lying between two swept greys — a stride would have reported a floor that does not exist, and reported it green. The contrast arithmetic is fixed point with the scale in the name, because the two architectures do not agree on floats.
+  **The stroke's floor is derived rather than chosen, and no longer shared with spacing.** A theme with no space is dense; a theme with no stroke has deleted a rule the compositor was told to draw. One constant serving both would have made those two outcomes indistinguishable, which is the kind of economy that costs a category.
+  *exit:* met. `docs/rfc/0079-a-theme-may-not-make-an-interface-unreadable.md` is accepted, `interface/src/token.rs` carries the three categories — themeable, range-checked, and out of a theme's reach — and a deliberately hostile theme is clamped rather than refused, demonstrated by test. `claims/0035-theme-refusals.toml` prices the policy the RFC argues.
+- [x] **E3-D04** `S` The renderer fallback ladder, decided before it is needed.
+  **Each rung's cost is registered rather than asserted, and the ladder reads the registry rather than a copy of it.** `claims/0033-raster-cost-per-rung.toml` holds the four thresholds and `interface/src/ladder.rs` binds to them with `include_str!`, so a number that moves in one place cannot stay still in the other. The CPU rung's threshold is derived from `ring-scene-boot` section 09's latency chain rather than from the rung above it — the correction RFC 0080 made out of its own first draft, which had quoted a ratio between two rungs and thereby made one rung's number an argument about another's.
+  **Both reversal conditions compare a rung to a rung on a machine that started at one of them.** The earlier threshold-to-threshold form deleted the hybrid while it was winning and refuted the floor on speed it was never offering: a condition that can be met by arithmetic over two different machines is not a condition about the ladder.
+  *exit:* met. `docs/rfc/0080-the-fallback-ladder-is-decided-before-it-is-needed.md` is accepted and names the four rungs in order — compute path renderer, hybrid, CPU, tessellating floor — with `claims/0033` carrying what each costs. A ladder decided after it is needed is decided under the pressure of a machine that cannot run the top rung.
 
 ### Build
 
 - [ ] **E3-B01** `XL` Retained scene graph for the whole machine; deltas in, no pixel buffers.
   *exit:* boundary crossings per UI frame under 10, counted rather than estimated.
-  *needs:* E3-00, E0-B12, E0-B15 (the ring and doorbell the deltas arrive over, both still `[>]`), E1-B05 (the compositor is a component, and the supervisor that spawns it still owes RFC 0008's restart policy to the frame)
+  *needs:* E3-B01a, E3-B01b, E3-B01c, E3-B01d, E3-B01e, E3-B01f, E3-B01g, E3-B01h, E3-B01i, E3-B01j, E3-B01k, E3-B01l (its decomposition, and nothing else — every external blocker this line used to carry is now on the subtask that waits on it, and the two that no subtask names are named nowhere because nothing in a scene graph waits for a submit-latency number or for a user-interrupt path)
+- [ ] **E3-B01a** `M` The scene-delta entry format in `abi/`: `CreateNode`, `SetTransform`, `SetPath`, `SetPaint`, `RemoveNode`, `Commit`, over part I's envelope.
+  *exit:* every opcode round-trips through fixed-width bytes on x86-64 and AArch64; an entry with a non-zero unread field is refused rather than ignored; the commit carries the frame token and the deadline it was scheduled against.
+  *needs:* E3-00 (ordering rule 1: two peers read this the moment a client exists, so it lands before the compositor does)
+- [ ] **E3-B01b** `S` The scene node kinds as types — `Transform`, `Clip`, `Layer`, `Draw`, `Effect`, `Semantic` — and nothing else.
+  *exit:* each kind is created and removed by a delta and by no other route, and a seventh kind is a compile error in every consumer that decides per kind without a wildcard — and the one consumer in this workspace that decides per kind is such a consumer. Narrowed from *a compile error in every consumer, the way `Role` already is* by RFC 0084, because a seventh kind was added end to end and broke exactly one build, and `Role` does not achieve the wider sentence either.
+  *needs:* E3-B01a
+- [ ] **E3-B01c** `M` The retained graph itself: an arena with a named maximum, no allocator, no `Vec`.
+  *exit:* a scene at the maximum is built, mutated and torn down inside one fixed allocation, and exceeding it is a named refusal rather than a panic.
+  *needs:* E3-B01b
+- [ ] **E3-B01d** `M` The commit is atomic: every delta in it, or none of them.
+  *exit:* `E2-P01`'s cut model, pointed at a commit instead of a publish, cuts at every entry boundary across a seed sweep, and over a ring whose `Release`/`Acquire` pair holds the graph read back is the old scene or the new one, never a third; over a ring whose pair does not hold, third scenes are produced and the sweep is required to count them. Narrowed from the unqualified sentence by RFC 0084: a slot whose write is not visible reads as the previous frame's entry, which decodes, and closing that is a per-entry submission sequence in `abi/` rather than a change to the commit path.
+  *needs:* E3-B01c
+- [ ] **E3-B01e** `M` Dirty-subtree tracking: what a commit marks, and what the encode stage is then allowed to walk.
+  *exit:* one changed node in a scene of a thousand marks one subtree, and the number of nodes the encoder visits equals the number in that subtree — counted in a test rather than sampled in a profile.
+  *needs:* E3-B01c
+- [ ] **E3-B01f** `M` The compositor is a component: a manifest, a declared state tree, spawned by the supervisor that now lives above the frame.
+  *exit:* a boot brings up a compositor at ring 3 that adopts its control ring and a client's data ring and publishes its tree; a build whose manifest declares no tree is refused at spawn, which `ADMISSION/NO_STATE_TREE` already does.
+  *needs:* E3-B01c, E1-B05
+- [ ] **E3-B01g** `M` The delta ring between two components, and the doorbell the compositor sleeps on.
+  *exit:* cross-core delivery is observed for the first time — `E0-B15` left it unproven and said it belonged with the component that would actually sleep on a doorbell; one boot shows a client's commit waking a parked compositor, and a batch still rings at most one doorbell.
+  *needs:* E3-B01f, E0-B13
+- [ ] **E3-B01h** `M` Frame pacing: the application's deadline computed backwards from the next scanout, from the compositor's own rolling p99.
+  *exit:* the wake time is scanout minus the p99 estimate minus the margin, every term an integer with its scale in its name, and two runs from one seed compute the same wake time to the tick on both architectures.
+  *needs:* E3-B01f
+- [ ] **E3-B01i** `M` Late-latch: pointer and stylus re-read immediately before submit and patched into the transform node.
+  *exit:* a frame trace shows the latched transform differing from the committed one by exactly the motion injected between commit and submit, and by nothing else.
+  *needs:* E3-B01h, E3-B04a
+- [ ] **E3-B01j** `M` The boundary-crossing counter, on both sides, and its claim row.
+  *exit:* the frame and the component each count the crossings of one UI frame, the two counts are required to agree and a deliberately miscounted side goes red, the number is printed at boot, and `claims/` gains a row carrying it — **whatever the number is**. The threshold is `E3-B01`'s exit and not this one: this task closes honestly with the count at forty-seven, and the claim is a count, so it may gate on the machines this project has in the way `claims/0005` established.
+  *needs:* E3-B01g, E3-B01h
+- [ ] **E3-B01k** `S` The compositor publishes the frame's story into its own state tree: rung, frame token, deadline, pacing estimate, and what was degraded.
+  *exit:* a boot reads all five back out of the component's subtree rather than out of the serial log.
+  *needs:* E3-B01f, E3-D04, E1-B15
+- [ ] **E3-B01l** `L` Reconciliation in the client library: immediate-mode in, deltas out — section 11's concession, and the one that decides adoption.
+  *exit:* a client that rebuilds its whole tree every frame emits exactly the differences, asserted against a hand-written diff over a corpus of edits that includes a reorder, which is the edit this kind of reconciler gets wrong.
+  *needs:* E3-B01a
 - [ ] **E3-B02** `XL` GPU compute path rasterisation over the chosen backend.
-  *exit:* the CPU raster segment of the budget is zero, measured; the fallback ladder is exercised on hardware that cannot run the top rung.
-  *needs:* E3-D04, E1-B04 (the backend it is chosen over — done, and named so the graph says which driver this rides)
+  *exit:* the CPU raster segment of the budget is zero on rung 1, measured — the rung `ring-scene-boot` section 05's budget is written for, with the lower three outside it and carrying `claims/0033`'s own thresholds, which is the narrowing RFC 0080 recorded on 2026-09-14. The ladder's descent onto hardware that cannot run the top rung is `E3-B02l`, because that is an observation about a machine with no GPU and this one is not.
+  *needs:* E3-B02a, E3-B02b, E3-B02c, E3-B02d, E3-B02e, E3-B02f, E3-B02g, E3-B02h, E3-B02i, E3-B02j, E3-B02k, E3-B02l (its decomposition; the ladder decision and the backend driver this line used to name are now on the two subtasks that read them)
+- [ ] **E3-B02a** `M` What a backend says about itself — the vocabulary RFC 0080 deliberately left in prose.
+  *exit:* each rung's *what the machine must supply* column becomes a predicate over a reported capability set, four synthetic backends select rungs one to four in a test, and no clause of that table is left in a paragraph. The test matches exhaustively on `Rung`, so a fifth rung is a compile error here rather than a rung nothing selects.
+  *needs:* E3-00, E3-D04
+- [ ] **E3-B02b** `M` The rung is chosen once, at start, by the compositor, and never promoted.
+  *exit:* a backend with compute shaders and no usable scan starts at rung 2 and says so in the compositor's tree; a backend satisfying no rung is refused a compositor rather than handed the floor; an overloaded compositor holds its rung.
+  *needs:* E3-B02a, E3-B01k
+- [ ] **E3-B02c** `L` Rung 1, stage 1 — encode: the dirty subtrees flattened into a linear encoding of paths, transforms and paints. The only stage that touches the CPU, and the only stage of rung 1 observable without a GPU.
+  *exit:* the encoding is byte-identical for one scene on both architectures, and the encoder visits only what `E3-B01e` marked.
+  *needs:* E3-B01e, E3-B02b
+- [ ] **E3-B02d** `L` Rung 1, stage 2 — coarse raster: segments binned into 16x16 tiles, a prefix scan computing per-tile counts and offsets.
+  *exit:* counts and offsets are bit-identical to a serial reference over the scene corpus, and the test names the scan as the one stage that requires cooperating lanes — which is what rung 2 exists for.
+  *needs:* E3-B02c, E5-D01
+- [ ] **E3-B02e** `L` Rung 1, stage 3 — fine raster: exact coverage per pixel, composited in linear space, effects as stages of this pass rather than as separate targets.
+  *exit:* one scene renders to a reference within an integer tolerance, and the number of intermediate targets a scene forces is counted and is zero for scenes that do not genuinely need one.
+  *needs:* E3-B02d, E5-D01
+- [ ] **E3-B02f** `M` Rung 1, stage 4 — present: the swapchain write, or the surface handed straight to the display controller when one surface covers the screen.
+  *exit:* a trace shows no composition at all in the single-surface case, and the present path costs one MMIO write rather than a system call.
+  *needs:* E3-B02e, E5-D01, E1-B04 (the backend this rides, named here rather than on the parent, because this is the line that touches it)
+- [ ] **E3-B02g** `L` Rung 2, the hybrid: the scan moves to the CPU and everything else stays on the GPU.
+  *exit:* on a backend whose scan is refused, the hybrid's image is *identical* to rung 1's on the same scene — identical, because `Fidelity::Exact` is a claim this test either keeps or breaks.
+  *needs:* E3-B02f, E5-D01
+- [ ] **E3-B02h** `L` Rung 3, the all-CPU raster.
+  *exit:* identical again, with the backend absent rather than degraded; the control is that the test runs on a machine with no GPU at all, which is every machine this project currently has.
+  *needs:* E3-B02e (the image it must match is rung 1's, which is why this line waits on a machine its own test does not use)
+- [ ] **E3-B02i** `L` Rung 4, the tessellating floor.
+  *exit:* an image that is *not* identical, whose difference from rung 1 is bounded and characterised, and which no consumer treats as exact — `Fidelity::Approximate` is read by something rather than merely declared.
+  *needs:* E3-B02h, E5-D01 (RFC 0080's fourth column for this rung is *a fixed-function triangle pipeline*, which is a machine and not a fallback from one)
+- [ ] **E3-B02j** `M` The scene `claims/0033` deliberately did not fix.
+  *exit:* one scene chosen and named in the claim's `[workload]` row with its content hash, and the argument recorded is representativeness rather than reachability — the claim says a scene chosen this early is chosen to be reachable, and this is the task that must not.
+  *needs:* E3-B02i
+- [ ] **E3-B02k** `M` Four rungs, one scene, one machine, one invocation: `claims/0033` moves off `pending`.
+  *exit:* `cargo xtask claim raster-cost-per-rung` produces four numbers from one build instead of the `Route::Unbuilt("E3-B02")` refusal it produces today, or refuses again and names which rung would not build; a run that rebuilt between rungs is refused by the harness rather than averaged.
+  *needs:* E3-B02j, E0-D10, E0-P18, E5-D01
+- [ ] **E3-B02l** `S` The ladder exercised on hardware that cannot run the top rung — moved here from the parent's exit, because it is an observation about a machine with no GPU.
+  *exit:* a machine reporting no compute shaders starts at rung 3 and renders, recorded with the machine named; the descent is one step, and no total order over hardware is computed anywhere, because none exists.
+  *needs:* E3-B02b, E3-B02h
 - [ ] **E3-B03** `XL` Text: shaping, bidirectional layout, and the parts of this that are always underestimated.
-  *exit:* a corpus of scripts and directions renders correctly against reference images, in CI.
+  *exit:* a corpus of scripts and directions renders correctly, in CI — script and direction coverage asserted as glyph ids and positions out of the shaper, and reference images for what those cannot observe: coverage per pixel, compositing in linear space, the atlas boundary, and text under a transform. Narrowed from *renders correctly against reference images* by RFC 0091, which draws the carve-out from `E3-P05` and confines it. `E3-B03j` defines the comparison and is the only place in this tree an image may be compared to an image; `E3-P05`'s blanket sentence narrows to interface assertions by the same entry, because as the two lines stood they could not both be exits.
+  *needs:* E3-B03a, E3-B03b, E3-B03c, E3-B03d, E3-B03e, E3-B03f, E3-B03g, E3-B03h, E3-B03i, E3-B03j, E3-B03k
+- [ ] **E3-B03a** `S` **Decide where the shaper comes from**: imported behind the licence boundary, or written in the permissive tree.
+  *exit:* an RFC, accepted, naming which and what would reverse it, and — because it answers *imported* — naming the task that lands the entry and the two files that make the ring observable; and `cargo xtask lint` refuses every route from the permissive tree into `third_party/` other than a ring, with a fixture driving each route red. Narrowed from *if imported, `third_party/` carries the entry and `cargo xtask lint` shows the permissive tree reaching it over a ring and by no other route* by RFC 0088, because this is an `S`-sized decide task whose own decision fired a conditional asking for an import, a manifest and a `shape` protocol that no amount of deciding produces; the entry, the ring it is reached over and `"third_party"` in the root `exclude` move to the import task RFC 0082 writes out.
+  *needs:* E3-00 (ordering rule 3: this sits immediately in front of every line below it)
+- [ ] **E3-B03b** `M` A face is addressed by content hash and declared before it is used.
+  *exit:* a boot loads a face out of the blob store by hash and refuses one the manifest did not declare — the first consumer of E2's addressing that is not E2.
+  *needs:* E3-B03a, E2-B01
+- [ ] **E3-B03c** `M` The shaping cache, keyed by string, face, size and features.
+  *exit:* no `HashMap` and no `HashSet`; from one seed the hit and miss counts are identical across runs and across architectures, which is the property a cache keyed by a hashed string loses silently.
+  *needs:* E3-B03b
+- [ ] **E3-B03d** `S` Every metric in the text path is a fixed-point integer with its scale in its name.
+  *exit:* no `f32` or `f64` reaches the tree, `DETERMINISM_ALLOW` gains no entry, and the rounding rule is stated once where advances accumulate rather than at each call site.
+  *needs:* E3-B03a
+- [ ] **E3-B03e** `L` Bidirectional reordering, UAX #9.
+  *exit:* the conformance corpus passes at a level named in the task rather than implied by the code, and the cases that level excludes are listed where a reader will find them.
+  *needs:* E3-B03c, E3-B03d
+- [ ] **E3-B03f** `L` Line breaking and cluster boundaries, UAX #14 and UAX #29.
+  *exit:* the conformance cases pass, and no break falls inside a cluster — asserted over the corpus rather than over an example.
+  *needs:* E3-B03e
+- [ ] **E3-B03g** `M` The coverage atlas for small static text.
+  *exit:* residency is bounded by a named maximum, and a scene whose text did not change regenerates no atlas entry, counted per frame rather than asserted.
+  *needs:* E3-B03f, E3-B02e
+- [ ] **E3-B03h** `M` GPU path rendering for large, animated and transformed text, and the rule that chooses between it and the atlas.
+  *exit:* the rule is data a test reads rather than a constant in a branch, and one glyph at two sizes an order apart takes both paths and is correct on both.
+  *needs:* E3-B03g
+- [ ] **E3-B03i** `M` The script and direction corpus: chosen, named, and argued one entry at a time.
+  *exit:* the list is in the tree with a sentence per entry saying what its absence would hide, and adding a script is a diff to that list rather than to a test.
+  *needs:* E3-B03a
+- [ ] **E3-B03j** `M` How a rendering is compared to a reference, and where in this tree that is allowed at all.
+  *exit:* the comparison is an integer over pixels with a stated tolerance and a deliberate one-pixel regression goes red; and the carve-out from `E3-P05` is RFC 0091, which narrows that line to interface assertions and confines an image-to-image comparison to this task's corpus — cited by number rather than assumed, because as the two parent lines stood they contradicted each other. The lint that entry's fourth point owes lands here too: in `lint_all`, refusing an image-to-image comparison outside this corpus's directory, in the shape `lint_licensing` already has, because a carve-out enforced by memory grows one exception at a time.
+  *needs:* E3-B03i, E3-B02e
+- [ ] **E3-B03k** `M` Text joins the vocabulary: `Role::Text` and `Role::Label` reach the rasteriser and the screen reader from one declaration.
+  *exit:* one tree produces a rendered paragraph and a spoken phrase with no second declaration and no text-specific branch in either projection.
+  *needs:* E3-B03f, E3-B06i
 - [ ] **E3-B04** `L` Input path: timestamped at the driver, predicted forward to the next scanout.
   *exit:* a full frame of latency removed, shown as before-and-after on the rig.
-  *needs:* E3-P01
+  *needs:* E3-B04a, E3-B04b, E3-B04c, E3-B04d, E3-B04e, E3-P01e (a *calibrated* rig, which is the line calibration is on; the blanket parent also waited on the rig's documentation, and a document is not a prerequisite for a measurement)
+- [ ] **E3-B04a** `M` Timestamped at the driver, at interrupt time, and nowhere else.
+  *exit:* one time source in the whole path; a lint finds any second reading of a clock in it, with a fixture that makes the lint fail; under the simulator the stamp is `Env`'s virtual time and one seed gives one sequence of stamps on both architectures.
+  *needs:* E3-00
+- [ ] **E3-B04b** `S` The input entry format in `abi/`.
+  *exit:* fixed-width on both architectures, unread fields refused when non-zero, and the timestamp's scale in its name rather than in a comment.
+  *needs:* E3-B04a
+- [ ] **E3-B04c** `M` Prediction forward to the next scanout.
+  *exit:* deterministic from a seed; over the named corpus the test sweeps — 4096 seeded recordings at two report rates — the error is bounded by an integer stated in the test, over-prediction is bounded separately from under-prediction because a user notices them differently, and the test draws ten times that corpus and is required to observe the over-prediction bound failing there. Narrowed from *over a recorded motion corpus the error is bounded by an integer* by RFC 0084, on a measurement: the integer is that corpus's own maximum rounded up to a pixel and not a property of the generator. Ten times the corpus runs the worst over-prediction from 7.20 px to 10.19 px at the recorded rate and from 7.90 px to 9.86 px at half of it — both past the stated 8, on fourteen of 81 920 measurements — while the two under-prediction maxima move by 4.6 and 5.1 per cent and are exceeded five times. So the tighter half of the pair, the half the module argues hardest for, is the less stable half. `input/src/predict.rs` states the pair over the named set, pins each number to the set's own maximum in a `const` so that widening it is a build error, and carries the one universal over-prediction bound beside it as a theorem over the speed and lead ceilings, eighty times looser. The unqualified sentence comes back only with a predictor whose over-prediction has a closed form over the input domain, which a first-order extrapolator of a measured velocity does not.
+  *needs:* E3-B04b
+- [ ] **E3-B04d** `M` A real device rather than a model: virtio-input in user space, in the shape the three E1 drivers already share.
+  *exit:* a driver component delivers events a compositor consumes, using `kernel/src/supervisor.rs`'s shared half rather than a fourth copy of it; hardware-timestamped native input is `E5-B06` and this line says so rather than implying it is here.
+  *needs:* E3-B04b, E1-B16
+- [ ] **E3-B04e** `M` Late-latch consumes the prediction.
+  *exit:* the latched value is the predicted one, asserted from both sides of the seam — the input path's trace and the compositor's frame trace agree on the value and on how far it moved.
+  *needs:* E3-B04c, E3-B01i
 - [ ] **E3-B05** `L` Explicit synchronisation throughout — timeline semaphores, never implicit driver waits.
-  *exit:* no implicit wait appears in a frame trace; frame time is bounded rather than typical.
-  *needs:* E3-B01 (there is no frame trace without a compositor producing frames)
+  *exit:* no implicit wait appears in a frame trace. *Frame time is bounded rather than typical* is `E3-B05d`, which needs a named machine and this line does not.
+  *needs:* E3-B05a, E3-B05b, E3-B05c, E3-B05d, E3-B05e, E3-B05f
+- [ ] **E3-B05a** `M` Timeline semaphores in `abi/`: the application signals N, the compositor waits N and signals M, the present engine waits M.
+  *exit:* fixed-width on both architectures, and a wait on a value nothing can ever signal is refused at submission rather than waited on — the one failure of this mechanism that leaves no evidence behind it.
+  *needs:* E3-00, E3-B01a
+- [ ] **E3-B05b** `M` What a frame trace is and what it records.
+  *exit:* one frame's trace names every wait, its value and who signalled it, and is byte-identical for one seed — a trace that is not reproducible cannot support this task's negative.
+  *needs:* E3-B05a, E3-B01f
+- [ ] **E3-B05c** `M` The submission cannot express an implicit wait.
+  *exit:* a submission is built by a constructor that takes its waits explicitly and refuses one that would let the driver insert its own, checked where the submission is built rather than where the trace is read — the static half of the parent's negative, and the half that still holds on a driver whose trace this tree cannot read.
+  *needs:* E3-B05b
+- [ ] **E3-B05d** `M` Frame time bounded rather than typical — moved here from the parent's exit, because it is a time and the parent's negative is not.
+  *exit:* the maximum and the p99 are both recorded and the claim gates on the maximum — a bound whose evidence is a central tendency is not a bound.
+  *needs:* E3-B05c, E0-D10, E0-P18
+- [ ] **E3-B05e** `M` What happens when a wait does not arrive.
+  *exit:* a timeout is a named fate, the supervisor decides it, and a boot shows a compositor restarted for one — RFC 0008 is paid, so the policy that decides is above the frame rather than inside it.
+  *needs:* E3-B05b, E1-B05
+- [ ] **E3-B05f** `S` The synchronisation state is in the compositor's own tree.
+  *exit:* waits outstanding, last value signalled and timeouts are read back at boot out of the component's subtree.
+  *needs:* E3-B05b, E1-B15
 - [ ] **E3-B06** `XL` The semantic layer and its projections: display, remote, screen reader, agent.
-  *exit:* E3-P04 passes.
-  *needs:* E3-D01, E3-B01 (the display projection emits scene deltas into part II's retained graph, which has to exist to receive them)
+  *exit:* one variant added to the `vocabulary!` invocation in `interface/src/node.rs` breaks all four projections at once — a compile-fail fixture requires an error from every one of them, so a projection that has quietly grown a wildcard arm is the one that fails to fail and is named. That is the observation no single projection can make. Each projection's own end-to-end observation is `E3-B06g` to `E3-B06j`'s, the authored-against-projected equivalence is `E3-B06f`'s, and the four-projection demonstration from one unmodified application stays `E3-P04`'s; none of the three is restated here.
+  *needs:* E3-B06a, E3-B06b, E3-B06c, E3-B06d, E3-B06e, E3-B06f, E3-B06g, E3-B06h, E3-B06i, E3-B06j, E3-B06k, E3-B06l, E3-B06m (its decomposition; the two decisions and the scene graph this line used to name are now on the four subtasks that read them, which name the two lines of the graph this layer actually needs rather than all twelve)
+- [ ] **E3-B06a** `M` **Decide what happens when two vocabulary versions meet across a ring.** RFC 0077's fourth reversal names this day: the day the semantic tree gets an entry format.
+  *exit:* an RFC in RFC 0011's shape, accepted, naming what a receiver does with a role it has never heard of and why that is not the wildcard arm this vocabulary was closed to prevent, arriving by a route the compiler does not cover.
+  *needs:* E3-00, E3-D01
+- [ ] **E3-B06b** `M` The semantic entry format in `abi/`: `DeclareNode`, `SetState`, `SetContent`, `SetRelations`, `Remove`, `Commit`, over part I's envelope.
+  *exit:* the twenty-two role indices on the wire are `Role::index`'s, by a test that fails if either moves; an index the vocabulary does not name is refused at the boundary rather than mapped to anything.
+  *needs:* E3-B06a
+- [ ] **E3-B06c** `M` The system owns the tree and the application holds a handle — section 11's inversion, built.
+  *exit:* a component that dies leaves its declared tree readable and addressable, and the handle does not survive it; one test shows both halves, because either one alone is the ordinary behaviour of something else.
+  *needs:* E3-B06b, E3-B01f
+- [ ] **E3-B06d** `M` Resolve: a `Theme` becomes a `Resolved` against the display's real characteristics, once per ground, with the `Report` carried to the caller rather than dropped.
+  *exit:* the compositor holds a `Resolved` and contains no readability arithmetic at all; and a lint refuses any type outside `interface/src/token.rs` that holds an `Rgb` without the `Token` pair it was checked against, with a fixture that makes the lint fail, which RFC 0079 names as the thing to watch first.
+  *needs:* E3-B06c, E3-D03
+- [ ] **E3-B06e** `L` Solve: incremental constraint layout. The stage the pillar dies at, if it dies.
+  *exit:* work proportional to the change — a delta touching five nodes of ten thousand re-solves five subtrees, counted; a cascade past a stated scope fails the test rather than slowing the frame.
+  *needs:* E3-B06d
+- [ ] **E3-B06f** `M` Emit: scene deltas into part II's retained graph, projected from types that exist.
+  *exit:* the compositor cannot tell an authored delta from a projected one — one scene fed both ways produces byte-identical graphs, which is the single property part III asks of part II so that this layer can be abandoned without taking the renderer down.
+  *needs:* E3-B06e, E3-B01e
+- [ ] **E3-B06g** `M` The display projection, end to end.
+  *exit:* the settings-panel tree `interface/src/node.rs` already builds reaches pixels with no application code beyond its declaration, and this projection matches `Role` exhaustively with no wildcard arm — a role it has nothing to draw is a named refusal rather than a silent skip.
+  *needs:* E3-B06f, E3-B02e
+- [ ] **E3-B06h** `M` The remote projection: the tree at the far side's density and refresh rate, not an encoded pixel stream.
+  *exit:* one declaration presented at two densities and two refresh rates from one unmodified application; the bytes crossing the link are counted and compared against what the same frame would have cost as pixels; and the far side's `Role` match is exhaustive with no wildcard arm, which is what stops a role the remote cannot present from crossing as nothing.
+  *needs:* E3-B06f
+- [ ] **E3-B06i** `M` The screen-reader projection: `canvas.rs`'s `linearise` generalised from one arrangement to a whole tree.
+  *exit:* every one of the twenty-two roles has a phrase and a twenty-third would be a compile error — an exhaustive `match` on `Role` in the projection rather than a table a new variant can silently miss; RFC 0078's timeline is described without a pixel, including the clip between 4.2 s and 6.8 s on track 3.
+  *needs:* E3-B06c
+- [ ] **E3-B06j** `M` The agent projection: the tree read directly, intents invoked as capability calls.
+  *exit:* an agent selects that clip and invokes its intent; the invocation is an authorised capability call that is logged, and the same call after the capability is revoked is refused — `cargo xtask cap`'s discipline in a new place; and what an agent may do with each role is an exhaustive `match` with no wildcard arm, so a new role is a decision here rather than a default.
+  *needs:* E3-B06i, E3-B06k
+- [ ] **E3-B06k** `M` Canvas participation across the ring: `Arrangement` and `Placement` keyed by `NodeId`, and the floor enforced on the far side too.
+  *exit:* a canvas whose placements did not arrive is refused rather than rendered — `Escape` is a wire refusal and not only a constructor's, which is what stops the floor being local to the declaring process.
+  *needs:* E3-B06b
+- [ ] **E3-B06l** `M` The corpus behind `claims/0034`, and the run that moves it off `pending`.
+  *exit:* `cargo xtask claim canvas-escape-rate` computes `canvas_escape_rate_x1000` over a corpus of applications ported by somebody who did not write the vocabulary, records what the corpus was beside the number, and refuses when the corpus is empty rather than reporting a clean zero — which `node.rs`'s `canvas_census` already does by returning `None` for a tree with no nodes, so the two halves of the refusal cannot come to disagree.
+  *needs:* E3-B06j
+- [ ] **E3-B06m** `M` The corpus behind `claims/0035`, and the run that moves it off `pending`.
+  *exit:* `cargo xtask claim theme-refusals` produces both of the numbers RFC 0079 named — themes resolving clean per thousand, and decisions per theme — over a corpus whose every theme was written by somebody not working on `token.rs`, with its content hash recorded beside the number; the five themes in `token.rs` are a demonstration and the run refuses them as a corpus. `claims/0035` names the parent as what moves it; the line that first brings up a compositor to hold a `Resolved` is what it actually waits for, and that is this line's second blocker.
+  *needs:* E3-B06d, E3-B01f
 - [ ] **E3-B07** `L` Degradation policy: miss quality rather than the frame, and record which was chosen.
-  *exit:* under 2x overload the frame rate holds and the quality reduction is visible in the state tree, per frame.
-  *needs:* E3-B01, E1-B15 (the tree the choice is recorded in is the one each component owns, and that is still `[>]`)
+  *exit:* under 2x overload the frame rate holds. *The quality reduction is visible in the state tree, per frame* is `E3-B07d`, which needs no machine, because `E1-B15` closed and every component publishes a tree.
+  *needs:* E3-B07a, E3-B07b, E3-B07c, E3-B07d, E3-B07e, E3-B07f, E3-B07g, E0-D10, E0-P18 (the two external ids are this line's own, not a child's: a frame rate holding is a time on a named machine)
 
+- [ ] **E3-B07a** `M` Every effect node declares a cost estimate and a cheaper fallback.
+  *exit:* a declaration naming one word and not the other is refused by `Effect::declared`, which is the only constructor of an `Effect` and whose two fields are `NonZeroU32`, so no value of the type can hold half a declaration and the refusal names which half was missing. Narrowed from *an `Effect` delta carrying one and not the other is refused at the boundary, so an effect with no fallback is a declaration error rather than a frame-time surprise* by RFC 0084, on two measurements. `abi/src/scene.rs` has six opcodes and none of them carries an effect's parameters, so no delta in this workspace can carry one word without the other and the exit's antecedent never reaches a decoder — the boundary that exists is the one between two integers a caller wrote and the value the crate will act on. And nothing requires a `Kind::Effect` node to declare anything at all: a node created with that kind and no declaration is accepted by `crate::arena` and `crate::commit`, which is a census neither of them keeps rather than a refusal this function could make. Both halves come back together with a seventh opcode `SET_EFFECT` carrying a node, an estimate and a saving, which is the reversal and is an ABI change.
+  *needs:* E3-B01b
+- [ ] **E3-B07b** `M` The downgrade priority order is data, and it is fixed.
+  *exit:* the order is a table a test reads rather than the order branches happen to be written in; one overload from one seed produces the same downgrades in the same sequence on both architectures.
+  *needs:* E3-B07a
+- [ ] **E3-B07c** `M` The running estimate against the remaining budget.
+  *exit:* integers with their scale in their names, taken from the compositor's own rolling p99 through `Env` and from no other clock; the estimate's staleness is bounded by a stated number of frames rather than assumed fresh.
+  *needs:* E3-B07b, E3-B01h
+- [ ] **E3-B07d** `M` The choice recorded per frame in the component's own tree — moved here from the parent's exit, because it is a boot and the parent's half is a measurement.
+  *exit:* under 2x overload every frame carries the reduction it chose, read out of the component's subtree rather than the serial log; `E1-B15` closed, so the tree this is written into already exists.
+  *needs:* E3-B07c, E1-B15
+- [ ] **E3-B07e** `M` The compositor is the lowest-ranked deadline task on the machine and its submissions are bandwidth-capped.
+  *exit:* an explicit cap, declared in the manifest and enforced rather than advisory, and a frame that tries to exceed it and is stopped.
+  *needs:* E3-B07c, E1-B07
+- [ ] **E3-B07f** `M` Section 10's measurable form: a deadline workload's p99.9 must not move.
+  *exit:* published either way, with the workload named and its baseline distribution established before the compositor is overloaded; a move says the isolation is decorative and is reported as that rather than re-scoped.
+  *needs:* E3-B07e, E0-D10, E0-P18
+- [ ] **E3-B07g** `S` A missed frame never changes the rung.
+  *exit:* an overloaded compositor degrades effects and holds the rung it started at, asserted in a test — the two mechanisms that share the word *fallback*, kept apart by something other than a paragraph.
+  *needs:* E3-B07d, E3-B02b
 ### Prove
 
 - [ ] **E3-P01** `L` **The photodiode rig.** External input injection, photodiode capture, no software timestamp anywhere in the measurement path.
-  *exit:* the rig reproduces a known measurement on a conventional machine within its own error bar — the instrument is calibrated before it is trusted.
+  *exit:* the rig is assembled and one capture runs end to end on it — the injector fires, the photodiode captures, and the digitiser records a trace at the error bar `E3-P01c` stated, over `E3-P01d`'s path with no software timestamp in it. Calibration is `E3-P01e`'s exit; it was this line's, and one observation cannot close two tasks.
+  *needs:* E3-P01a, E3-P01b, E3-P01c, E3-P01d, E3-P01e, E3-P01f
+- [ ] **E3-P01a** `M` The bill of materials, in the shape `claims/runner-class-A.md` already uses for a machine.
+  *exit:* every part named with a source and a price and the total stated; a rig nobody can order is a design for a rig.
+  *needs:* E3-00
+- [ ] **E3-P01b** `M` Injection: what presses the key, and how its own delay is known.
+  *exit:* the injector is not the machine under test, and its delay is characterised as a distribution rather than quoted as a constant.
+  *needs:* E3-P01a
+- [ ] **E3-P01c** `M` Capture: photodiode, amplifier, digitiser, and the sampling rate that sets the error bar.
+  *exit:* the instrument's own error bar is stated as an integer before any measurement is taken with it.
+  *needs:* E3-P01a
+- [ ] **E3-P01d** `S` No software timestamp anywhere in the measurement path.
+  *exit:* the path from injection to capture is written out and every time in it is the instrument's; one software timestamp found in it fails this task, and the review that looked is recorded rather than assumed.
+  *needs:* E3-P01b, E3-P01c
+- [ ] **E3-P01e** `M` Calibration.
+  *exit:* the rig reproduces a known measurement on a conventional machine within its own error bar, and the known measurement is named before the rig is built rather than chosen afterwards from what it happened to produce.
+  *needs:* E3-P01d
+- [ ] **E3-P01f** `M` The method, documented well enough for a third party to build one.
+  *exit:* a document carrying the bill of materials, the wiring, the procedure and the calibration result, well enough that a third party can build one. That sentence was `E3-R01`'s exit as written; Handoff step 9 moved it here, because it is an observation about this task's artefact and not about a release.
+  *needs:* E3-P01e
 - [ ] **E3-P02** `M` The latency claim: input to photon, p99 under 14 ms, on the rig, under load.
   *exit:* recorded as gating, with the load stated and any firmware-jitter observation reported beside it.
   *needs:* E3-P01, E3-B01 (something between the input and the photon to measure), E0-D10, E0-P18 (a time gates on `runner-class-A` with F on it, and every timing claim in the registry is `pending` until both exist)
@@ -1301,7 +1544,7 @@ will measure would be blocking a ruler on a wall.
   *exit:* local display, a remote client at different density and refresh rate, a screen reader, and an agent driving declared intents — all from one unmodified application.
   *needs:* E3-B06
 - [ ] **E3-P05** `M` Semantic-tree assertions replace screenshot diffing across the whole UI suite.
-  *exit:* no test in the tree compares images; node identity survives a deliberate visual redesign.
+  *exit:* no interface assertion in the tree compares images — the rasteriser conformance corpus RFC 0091 carves out, which lives behind `E3-B03j` and nowhere else, is the one exception and is named rather than excused; node identity survives a deliberate visual redesign. Narrowed from *no test in the tree compares images* by RFC 0091, because that sentence and `E3-B03`'s could not both be exits and a rasteriser's artefact is pixels.
   *needs:* E3-B06 (node identity is the semantic layer's; there is no UI suite to convert until there is a UI)
 - [ ] **E3-P06** `M` Frame-drop behaviour under adversarial load, with the degradation choice recorded per frame.
   *exit:* a sweep of load profiles produces no missed frame, only recorded quality reductions.
@@ -1313,7 +1556,7 @@ will measure would be blocking a ruler on a wall.
 ### Release
 
 - [ ] **E3-R01** `S` **Release 0.4.** The latency claim, the four-projection demonstration, and the parity result whichever way it lands.
-  *exit:* the rig's method is documented well enough for a third party to build one.
+  *exit:* release 0.4 is published carrying the three contents this line names — `E3-P02`'s latency claim, `E3-P04`'s four-projection demonstration, and `E3-P03`'s parity result whichever way it landed, including the way that says a derived scene graph costs more. *The rig's method is documented well enough for a third party to build one* was this line's and is `E3-P01f`'s: it is an observation about the rig's artefact and not about a release, and one criterion belonging to two tasks means one of them is always lying about its state — which this file has recorded on `E0-B12`, on `E1-B01` and on `E1-B05`, and this was the fourth.
   *needs:* E3-P02, E3-P03, E3-P04 (its own three contents, named so this line stops ranking as ready before the epoch has a task done, which is the reading `E2-R01` corrected), E2-R01 (release 0.4 follows 0.3)
 
 > ### Gate G3
