@@ -8,11 +8,32 @@
 //! resident bytes per unit of work recorded*. **This is the host, over a
 //! modelled zoned device, and no QEMU boot has run.** The boot
 //! `intent/0006-state/spec.md` describes is of `user/objects` over the blk
-//! driver's ring; that driver answers two of RFC 0060's seven opcodes, this
-//! crate is not yet a component for the reason `user/objects/src/lib.rs` gives
-//! about the heap, and `zone/tests/cycle.rs` recorded the same gap one task
+//! driver's ring, and `zone/tests/cycle.rs` recorded the same gap one task
 //! earlier. Saying which half is missing is worth more than a number taken
 //! somewhere else and called the same thing.
+//!
+//! **Two of the three reasons this sentence used to give have gone, and the
+//! third is the one the exit turns on.** It said the crate was not a component
+//! and that nothing answered an opcode. It is a component —
+//! `user/objects/manifest.toml` declares it, the boot builds a sixth place for
+//! it, spawns it, mounts its tree at frame root slot 5 and tears it down — and
+//! `abi::objects::op::known` now admits `READ`, which `f_objects::service`
+//! answers. So this run takes the same 256 records **twice**: once by calling
+//! the read path directly, which is where every number in this epoch has been
+//! taken, and once by encoding a request and submitting it, which is where
+//! `intent/0006-state/spec.md` says an application byte is. The two must
+//! deliver the same bytes and the second is the one the claims want.
+//!
+//! What is left is the transport, and it is left on purpose rather than
+//! overlooked. An `Sqe` reaches `f_objects::service` as an argument, not off a
+//! mapped channel: `kernel/src/component.rs` gives a place's occupant a control
+//! ring and no data ring, and `user/virtio-blk` answers two of RFC 0060's seven
+//! opcodes, so the boot the spec describes — this component over that driver's
+//! ring — still has nothing to boot. **`E2-B08`'s exit is a count taken across
+//! the objects ring in a boot**, and a request encoded and handed to a function
+//! in the same address space is not one however honest the encoding. The rows
+//! below say which boundary each number came from, because that is the only
+//! thing standing between an honest run and a number called by the exit's name.
 //!
 //! What is **not** modelled away is the thing the count is about. The
 //! registration is `f_ring::registry::Table` — E1-B10's service-side table,
@@ -55,6 +76,17 @@
 //!   inside `Landing::lend`, and `cargo xtask lint-datapath` reported both
 //!   clauses: *called from `lend`, not from `provoke_copy`* and *called 2
 //!   time(s)*.
+//! - **The entry boundary, when it landed.** The threshold above is a different
+//!   counter from the one below it, so it got the same treatment on the day it
+//!   was written rather than inheriting the other one's evidence.
+//!   `Service::answer` was pointed at `Service::staged_read` — one line, the
+//!   whole data path through a page cache — and the run went red:
+//!   `copies_per_read at the entry is 4096, over 0`, with
+//!   `staged_bytes_at_the_entry` at **1 048 576**, which is 256 reads × one
+//!   4096-byte block and is the same figure the direct boundary printed for the
+//!   same defect. Two counters, one workload, one arithmetic: that agreement is
+//!   worth more than either number alone, because a second counter that had
+//!   been wired to the first would have printed it too.
 //!
 //! What that lint does **not** catch is worth saying in the same breath,
 //! because the row is easy to over-read: it counts calls to a named function,
@@ -77,7 +109,9 @@
 
 use std::process::exit;
 
+use f_abi::objects::{Entry as Asked, PAYLOAD_BYTES, Read as ReadRecord, Request, op};
 use f_abi::store::{Header, kind, refusal};
+use f_abi::{Cqe, Sqe, error, flags};
 use f_blob::device::{Device, Memory};
 use f_blob::store::{Store, superblock_for_this_build};
 use f_env::split::{derive, label};
@@ -87,6 +121,7 @@ use f_index::{Index, ns};
 use f_objects::dma::Landing;
 use f_objects::read::{ReadPath, mount};
 use f_objects::resident::ONE;
+use f_objects::service::Service;
 use f_zone::device::ZonedMemory;
 use f_zone::map::ZoneMap;
 
@@ -569,6 +604,325 @@ fn main() {
         fail("the workload's own bookkeeping does not agree with the store's names");
     }
 
+    // ---- the same corpus, asked for across the ring ----------------------
+    //
+    // A second `build` and not the reader above, and the reason is the two
+    // numbers being compared. The reader above has had a record corrupted under
+    // it, a short run refused and a page cache provoked into it; a
+    // ring-boundary figure taken on top of that would be a figure about the
+    // controls. The seed is a constant, so this is the same 256 records — which
+    // the assertion below requires rather than assumes, because two corpora
+    // that had quietly diverged would make the comparison meaningless while
+    // every threshold stayed green.
+    let (ring_path, ring_hashes, ring_written) = build(reads);
+    if ring_hashes != hashes {
+        fail("the two builds produced different records, so the two boundaries are not comparable");
+    }
+    let mut service = Service::over(ring_path);
+    let mut ring_region = vec![0u8; BUFFERS as usize * BLOCK_BYTES];
+    let (mut ring_landing, ring_set) = match Landing::open(&mut ring_region, BUFFERS) {
+        Ok(pair) => pair,
+        Err(refusal) => fail(&format!("the ring region was refused as a set: {refusal:#x}")),
+    };
+
+    for (which, hash) in ring_hashes.iter().enumerate() {
+        // The token is `which + 1` rather than `which`, so that a completion
+        // carrying a zeroed `user_data` — which is what an answer this service
+        // never wrote would look like — is not the answer to read zero.
+        let token = which as u64 + 1;
+        let request = asking(token, *hash, BLOB_BYTES as u32, ring_set.bits());
+        // Refused by the client before it is submitted, which is what
+        // `Request::check` exists for: an entry this run built wrongly should
+        // fail here and not as a refusal the service was right to make.
+        if let Err(why) = request.check() {
+            fail(&format!("read {which}'s own entry is malformed: {}", why.message()));
+        }
+        let (entry, payload) = request.encode();
+        let answer = service.answer(&entry, &payload, &mut ring_landing, 0);
+        let delivered = match believed(&answer, token) {
+            Ok(delivered) => delivered,
+            Err(why) => fail(&format!("read {which} across the ring: {why}")),
+        };
+        if delivered != BLOB_BYTES {
+            fail(&format!(
+                "read {which} across the ring stated {delivered} bytes, not {BLOB_BYTES}"
+            ));
+        }
+        // The caller's own bytes, out of the caller's own buffer, at the offset
+        // the completion stated. A client knows its own stride, so the run of
+        // buffers is arithmetic it does rather than a field the wire owes it.
+        let at = answer.ext as usize;
+        let filled = match ring_landing.contents(0, ((at + delivered).div_ceil(BLOCK_BYTES)) as u32)
+        {
+            Some(filled) => filled,
+            None => fail("the buffers the completion implies do not exist"),
+        };
+        if &filled[at..at + delivered] != ring_written[which].as_slice() {
+            fail(&format!(
+                "read {which} across the ring delivered bytes that are not the ones written"
+            ));
+        }
+    }
+
+    let served = *service.served();
+    let ring_landed = *ring_landing.landed();
+    let ring_copies_per_read = served.staged_bytes / served.reads.max(1);
+
+    println!("\n  across the ring — the same {reads} records, asked for as entries");
+    println!("    entries answered                                 {}", served.entries);
+    println!("    entries refused                                  {}", served.refused);
+    println!("    reads completed                                  {}", served.reads);
+    println!("    application bytes delivered                      {}", served.delivered_bytes);
+    println!("    bytes staged while answering                     {}", served.staged_bytes);
+    println!(
+        "    device: bytes into the caller's buffer           {}",
+        ring_landed.registered_bytes
+    );
+    println!("    copies_per_read                                  {ring_copies_per_read}");
+
+    // ---- the rows that are taken at the boundary the spec names ----------
+    //
+    // Named apart from the rows above rather than replacing them, because they
+    // are a different measurement of the same workload and a claim that
+    // silently swapped one for the other would be a claim whose denominator
+    // moved without anybody saying so. `intent/0006-state/spec.md` defines an
+    // application byte as one a client submitted on the objects ring; these are
+    // the rows taken there, and the `_at_the_entry` suffix is what says it.
+    println!("\n  the rows taken where the spec says an application byte is");
+    println!("    entries_answered_at_the_entry                    {}", served.entries);
+    println!("    entries_refused_at_the_entry                     {}", served.refused);
+    println!("    reads_completed_at_the_entry                     {}", served.reads);
+    println!("    application_bytes_delivered_at_the_entry         {}", served.delivered_bytes);
+    println!("    copies_per_read_at_the_entry                     {ring_copies_per_read}");
+    println!("    staged_bytes_at_the_entry                        {}", served.staged_bytes);
+
+    if served.entries != reads as u64 {
+        fail(&format!("{} entries answered, not {reads}", served.entries));
+    }
+    if served.refused != 0 {
+        fail(&format!("{} of {reads} entries were refused", served.refused));
+    }
+    if served.reads != reads as u64 {
+        fail(&format!("{} reads completed across the ring, not {reads}", served.reads));
+    }
+    if ring_copies_per_read > COPIES_PER_READ_MAX {
+        fail(&format!(
+            "copies_per_read at the entry is {ring_copies_per_read}, over {COPIES_PER_READ_MAX}"
+        ));
+    }
+    if !service.readings_agree(&ring_landing) {
+        fail("the three readings of the staged bytes do not agree");
+    }
+    // The comparison the second build exists for. The direct boundary and the
+    // entry boundary are two counts of one workload, so they agree — and a run
+    // where they did not would mean the ring had changed what was delivered
+    // rather than only where it was counted, which is the one thing a service
+    // in front of a read path must not do.
+    if served.delivered_bytes != counters.content_bytes {
+        fail(&format!(
+            "the entry boundary delivered {} bytes and the direct one {}",
+            served.delivered_bytes, counters.content_bytes
+        ));
+    }
+    if ring_landed.registered_bytes == 0 {
+        fail("the device landed nothing, so the zero above is a run that did not happen");
+    }
+
+    // ---- the controls at this boundary -----------------------------------
+    println!("\n  controls at the entry");
+
+    // The four opcodes nothing answers. Derived from `Entry::SPECIMENS` rather
+    // than listed, so that a sixth opcode is covered on the day it is declared:
+    // whichever ones `op::known` does not admit must be refused
+    // `ARGUMENT`/`UNKNOWN_OPCODE`, and whichever it does must not reach here.
+    let mut unanswered = 0;
+    for specimen in Asked::SPECIMENS {
+        let opcode = specimen.opcode();
+        if op::known(opcode) {
+            continue;
+        }
+        unanswered += 1;
+        // The envelope an opcode that moves bytes needs and the one an opcode
+        // that does not may not have, taken from the wire's own answer rather
+        // than from a list here.
+        let moves = op::moves_bytes(opcode) == Some(true);
+        let request = Request {
+            user_data: 0xD15B_0000 + u64::from(opcode),
+            cap: 0,
+            class: 0,
+            deadline: 0,
+            payload_offset: 0,
+            buf_set: if moves { ring_set.bits() } else { 0 },
+            buf_index: 0,
+            flags: if moves { flags::FIXED_BUF } else { 0 },
+            body: specimen,
+        };
+        if let Err(why) = request.check() {
+            fail(&format!(
+                "the control entry for {} is malformed: {}",
+                op::label(opcode),
+                why.message()
+            ));
+        }
+        let (entry, payload) = request.encode();
+        let answer = service.answer(&entry, &payload, &mut ring_landing, 0);
+        match answer.error() {
+            Some((domain, code))
+                if domain == error::ARGUMENT && code == error::argument::UNKNOWN_OPCODE =>
+            {
+                if answer.ext != u64::from(opcode) {
+                    fail(&format!("{} was refused without saying which opcode", op::label(opcode)));
+                }
+            }
+            other => fail(&format!(
+                "{} was answered {other:?}, not ARGUMENT/UNKNOWN_OPCODE",
+                op::label(opcode)
+            )),
+        }
+    }
+    if unanswered != op::COUNT - 1 {
+        fail(&format!("{unanswered} opcodes are unanswered; exactly one should be answered"));
+    }
+    println!("    the {unanswered} opcodes with no body    refused UNKNOWN_OPCODE");
+
+    // A flag this format does not accept. `NO_CQE` specifically, because it is
+    // the one whose acceptance would suppress a refusal — which is the reason
+    // `abi::objects::FLAGS_ACCEPTED` gives for refusing it.
+    let mut entry = asking(1, hashes[0], BLOB_BYTES as u32, ring_set.bits()).encode().0;
+    entry.flags |= flags::NO_CQE;
+    let payload = asking(1, hashes[0], BLOB_BYTES as u32, ring_set.bits()).encode().1;
+    match service.answer(&entry, &payload, &mut ring_landing, 0).error() {
+        Some((error::ARGUMENT, code)) if code == error::argument::UNKNOWN_FLAG => {
+            println!("    a read carrying NO_CQE              refused UNKNOWN_FLAG");
+        }
+        other => fail(&format!("an entry carrying NO_CQE was answered {other:?}")),
+    }
+
+    // A read naming no registered buffer, which is the parenthesis `TODO.md`
+    // attaches to this task's `needs:` line made into a refusal: the caller's
+    // buffer is a registered one, or there is no read.
+    let mut naked = asking(2, hashes[0], BLOB_BYTES as u32, ring_set.bits());
+    naked.flags = 0;
+    naked.buf_set = 0;
+    let (entry, payload) = naked.encode();
+    match service.answer(&entry, &payload, &mut ring_landing, 0).error() {
+        Some((error::ARGUMENT, _)) => {
+            println!("    a read naming no buffer             refused ARGUMENT");
+        }
+        other => fail(&format!("a read naming no registered buffer was answered {other:?}")),
+    }
+
+    // A hash this store holds nothing under. The refusal that says the service
+    // resolves a name rather than trusting one.
+    let absent = [0x5Au8; 32];
+    let (entry, payload) = asking(3, absent, BLOB_BYTES as u32, ring_set.bits()).encode();
+    let answer = service.answer(&entry, &payload, &mut ring_landing, 0);
+    if answer.result != refusal::ADDRESS {
+        fail(&format!("a hash nothing holds was answered {:#x}, not ADDRESS", answer.result));
+    }
+    println!("    a hash nothing holds                refused ADDRESS");
+
+    // A zero-byte read: the wire's own reading of `Read::bytes`, which is how a
+    // client asks whether a hash resolves without moving anything. So nothing
+    // may move — and the device's own tally is what says so, not this service's.
+    let before_landed = ring_landing.landed().registered_bytes;
+    let before_delivered = service.served().delivered_bytes;
+    let (entry, payload) = asking(4, hashes[0], 0, ring_set.bits()).encode();
+    let answer = service.answer(&entry, &payload, &mut ring_landing, 0);
+    match believed(&answer, 4) {
+        Ok(0) => {}
+        Ok(other) => fail(&format!("a zero-byte read stated {other} bytes")),
+        Err(why) => fail(&format!("a zero-byte read was refused: {why}")),
+    }
+    if ring_landing.landed().registered_bytes != before_landed {
+        fail("a zero-byte read moved bytes, so it is not the question the wire says it is");
+    }
+    if service.served().delivered_bytes != before_delivered {
+        fail("a zero-byte read counted an application byte it did not deliver");
+    }
+    println!("    a zero-byte read                    resolved, moved nothing");
+
+    // The provocation, at this boundary. Everything above this line published a
+    // zero for `staged_bytes_at_the_entry`, and a zero that nothing can move is
+    // a default — the same argument the page cache makes forty lines up, made
+    // again here because that one moves a different counter. A client submitting
+    // the same entry gets the same bytes; what differs is that the first block
+    // moved twice and the count taken at the entry says so.
+    let before_staged = service.served().staged_bytes;
+    let (entry, payload) = asking(5, hashes[0], BLOB_BYTES as u32, ring_set.bits()).encode();
+    let answer = service.provoke_staged_answer(&entry, &payload, &mut ring_landing, 0);
+    let delivered = match believed(&answer, 5) {
+        Ok(delivered) => delivered,
+        Err(why) => fail(&format!("the provoked answer was refused: {why}")),
+    };
+    if delivered != BLOB_BYTES {
+        fail("the provoked answer delivered a different record than the honest one");
+    }
+    let staged_at_the_entry = service.served().staged_bytes;
+    if staged_at_the_entry <= before_staged {
+        fail("the provocation moved nothing at the entry, so the zero above is a default");
+    }
+    let at = answer.ext as usize;
+    let filled = match ring_landing.contents(0, ((at + delivered).div_ceil(BLOCK_BYTES)) as u32) {
+        Some(filled) => filled,
+        None => fail("the buffers the provoked completion implies do not exist"),
+    };
+    if &filled[at..at + delivered] != ring_written[0].as_slice() {
+        fail("the provocation delivered bytes that are not the record's");
+    }
+    println!("    the page cache, at the entry        staged {staged_at_the_entry} bytes");
+    println!("    provoked_staged_bytes_at_the_entry              {staged_at_the_entry}");
+
     println!("\nreads: ok — copies_per_read {copies_per_read}, both readings agreeing at zero;");
-    println!("       resident_bytes_per_read_byte {} over {reads} reads", micro(system));
+    println!("       resident_bytes_per_read_byte {} over {reads} reads;", micro(system));
+    println!(
+        "       {} application bytes across {} entries at the entry boundary, {ring_copies_per_read} copies per read",
+        served.delivered_bytes, served.entries
+    );
 }
+
+/// One `READ` request, built the way a client builds one.
+///
+/// A helper and not a literal per call site, because every field of a
+/// [`Request`] is either read by the format or refused — `Request::decode`
+/// compares the whole envelope — so a call site that spelled them out would be
+/// a second place the envelope's shape is written down, and the one that goes
+/// stale.
+fn asking(token: u64, hash: [u8; 32], bytes: u32, set: u32) -> Request {
+    Request {
+        user_data: token,
+        cap: 0,
+        class: 0,
+        deadline: 0,
+        payload_offset: 0,
+        buf_set: set,
+        buf_index: 0,
+        flags: flags::FIXED_BUF,
+        body: Asked::Read(ReadRecord { hash, bytes }),
+    }
+}
+
+/// A completion this client believes, or why it does not.
+///
+/// The token is checked rather than assumed, which is the half a harness that
+/// submits one entry at a time is most likely to skip: a service answering the
+/// previous request would pass every byte comparison in this file, because the
+/// records are read in the order they were written and the buffer still holds
+/// the right ones.
+fn believed(answer: &Cqe, token: u64) -> Result<usize, String> {
+    if answer.user_data != token {
+        return Err(format!("the completion carries token {}, not {token}", answer.user_data));
+    }
+    if let Some((domain, code)) = answer.error() {
+        return Err(format!("refused {domain:#x}/{code:#x}"));
+    }
+    usize::try_from(answer.result).map_err(|_| format!("a result of {}", answer.result))
+}
+
+/// The width of one request's payload, restated here so that a change to it is
+/// a compile error in this file too.
+///
+/// `Sqe` is in scope for the same reason: the entry and its payload are two
+/// halves of one submission, and a harness that named only one of them would
+/// not notice the other moving.
+const _: () = assert!(PAYLOAD_BYTES == 40 && size_of::<Sqe>() == 64);

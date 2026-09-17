@@ -43,6 +43,15 @@ of 8 registered buffers of one block:
   application bytes delivered                   4 096 000
   the provocation: both readings then               4 096
 
+and the same workload again, asked for as entries rather than called for — the
+boundary `intent/0006-state/spec.md` defines an application byte at:
+
+  entries answered                                    256   0 refused
+  reads completed at the entry                        256
+  application bytes delivered at the entry      4 096 000
+  copies_per_read at the entry                          0
+  the provocation at the entry                      4 096
+
 **The header is borrowed and not copied, which is the load-bearing line.** The
 blob header is decoded by `f_abi::store::Header::from_bytes` out of a
 `&[u8; 52]` pointing into the caller's own buffer, so the record is read from
@@ -58,17 +67,25 @@ registered* is answered here by the code that would answer it under a real
 driver. A count over an inline buffer would have been the copy nobody counted,
 which is the parenthesis `TODO.md` attaches to this task's `needs:` line.
 
-**Why this is `pending` and what would make it gate.** The count is taken at a
-modelled device boundary and not across the blk ring in a boot. `user/objects`
-is not yet a component — a component image linking `f-blob` needs a
-`#[global_allocator]`, that is an `unsafe impl GlobalAlloc`, and RFC 0001
-forbids `unsafe` above the frame, so the spec's decision 4 puts that heap in
-`ring/` and it does not exist — and `user/virtio-blk` answers two of RFC 0060's
-seven opcodes, so there is no ring under these transfers. **A count taken at a
-different boundary is a different count however similar it looks**, which is the
-sentence `claims/0016` already carries about its own modelled rows. What makes
-this gate is the boot: `user/objects` as a component over the blk driver's ring,
-with the same two tallies taken across it.
+**Why this is `pending`, and what two of the three reasons used to be.** It said
+`user/objects` is not a component, because an image linking `f-blob` needs a
+`#[global_allocator]` and RFC 0001 forbids `unsafe` above the frame. That heap
+landed in `ring/`, the component's manifest declares it, and the boot builds a
+place for it. It said nothing answers an opcode. `abi::objects::op::known`
+admits `READ` now and `user/objects/src/service.rs` is the body, which is where
+the second block of rows above comes from — counted at the entry, in the one
+place a client can be said to have asked for a byte.
+
+The third reason stands and is the one that decides the status. **There is no
+transport and therefore no boot.** An `Sqe` reaches the service as an argument:
+a place's occupant gets a control ring and no data ring, and `user/virtio-blk`
+still answers two of RFC 0060's seven opcodes, so the ring the exit names has no
+peer at either end of it. **A count taken at a different boundary is a different
+count however similar it looks** — `claims/0016` carries the same sentence about
+its own modelled rows — and an entry encoded and handed to a function in one
+address space is a different boundary from a ring in a boot. What makes this
+gate is unchanged: `user/objects` as a component over the blk driver's ring,
+with these tallies taken across it.
 """
 
 [baseline]
@@ -107,6 +124,17 @@ secondary = [
   "application_bytes_delivered",
   "zones_the_records_landed_in",
   "provoked_unregistered_bytes",
+  # The same event counted where the spec says an application byte is. Named
+  # apart from the rows above rather than replacing them, because two counts of
+  # one workload at two boundaries is the whole point — a claim that swapped one
+  # for the other would have moved its denominator without saying so.
+  "entries_answered_at_the_entry",
+  "entries_refused_at_the_entry",
+  "reads_completed_at_the_entry",
+  "application_bytes_delivered_at_the_entry",
+  "copies_per_read_at_the_entry",
+  "staged_bytes_at_the_entry",
+  "provoked_staged_bytes_at_the_entry",
 ]
 
 [threshold]
@@ -138,6 +166,38 @@ zones_the_records_landed_in                 = { min = 2 }
 # block size rather than the design's.
 provoked_unregistered_bytes                 = { min = 1 }
 
+# --- the same workload, counted at the entry ---------------------------------
+#
+# `intent/0006-state/spec.md` defines an application byte as one a client
+# submitted on the objects ring, and these are the rows taken there: a `Request`
+# encoded, an `Sqe` decoded by `abi::objects::Request::decode`, and
+# `f_objects::service::Served` moved by the answer. They are a second count of
+# the workload above and not a replacement for it, which is why the exit's own
+# zero appears twice under two names.
+#
+# **What these rows do not claim.** The boundary is an entry and not a ring: the
+# statement's third paragraph says so and the status is `pending` because of it.
+# These gate the arithmetic — that the service delivers what the read path
+# delivers, and stages nothing doing it — and they do not gate the exit.
+copies_per_read_at_the_entry                = { min = 0, max = 0 }
+staged_bytes_at_the_entry                   = { min = 0, max = 0 }
+# Exact and equal to `application_bytes_delivered` above, which is the row that
+# says the ring changed *where* the bytes were counted and not *what* was
+# delivered. A service in front of a read path that altered the second would be
+# the one failure this whole shape exists to refuse.
+application_bytes_delivered_at_the_entry    = { min = 4096000, max = 4096000 }
+reads_completed_at_the_entry                = { min = 256, max = 256 }
+entries_answered_at_the_entry               = { min = 256, max = 256 }
+# Zero in the measured phase, and it is a real row rather than a tautology: the
+# controls that follow it refuse on purpose, and they are counted after the
+# thresholds are judged. A refusal inside the measured phase is a workload that
+# did not run.
+entries_refused_at_the_entry                = { min = 0, max = 0 }
+# The provocation again, at this boundary, because the zero above is a different
+# counter from the one `provoked_unregistered_bytes` moves and inherits none of
+# its evidence. A floor, for that row's reason.
+provoked_staged_bytes_at_the_entry          = { min = 1 }
+
 [hardware]
 runner = "runner-class-A"       # pinned bare metal, thermally stable
 notes  = "This claim does not need that machine and says so rather than pretending, which is the note `claims/0023` and `claims/0024` carry. Every metric is a count of bytes a design moved through a modelled device from a stated seed, byte-identical on any host that runs the binary; there is no clock in the workload and `f_bench::Environment` has nothing to refuse. The machine it *does* need is the one that does not exist yet, and it is not a runner class: it is a boot of `user/objects` as a component over the blk driver's ring, which is what this claim's `pending` is about."
@@ -151,4 +211,6 @@ copies_per_read_above_zero = "a read staged bytes somewhere the caller did not r
 readings_that_disagree = "`driver_bytes_to_an_unregistered_destination` and `device_bytes_through_an_unregistered_buffer` are two readings of one event taken on opposite sides, and the run fails when they differ. A disagreement is not a copy, it is an accounting bug, and it invalidates the zero rather than reporting a number: either the driver stopped tallying a path the device sees, or the device model stopped seeing one the driver takes. Do not average them and do not pick one"
 provoked_unregistered_bytes_is_zero = "the provocation moved nothing, so both tallies are defaults rather than counts and every zero in this file is worth what an uninitialised field is worth. Look at `ReadPath::provoke_second_copy` and `f_objects::dma`'s one byte-mover before anything else; `cargo xtask lint-datapath` is the check that says the mover is called from where it should be, and it is the second half of this row"
 device_bytes_into_the_callers_buffer_moved = "the denominator moved, so the geometry moved: the blob, the block, the read count or the padding is no longer what this claim publishes, and every ratio above is about a different workload. It is not a failure of the read path — it is this claim describing a run nobody performed, which is `claims/0023`'s geometry row and the same failure"
+copies_per_read_at_the_entry_above_zero = "the service staged bytes while answering an entry, which the row above it says the read path did not. Two counters disagreeing like that is narrower than it looks: `Service::answer` calls `Service::read` and `Service::provoke_staged_answer` calls `Service::staged_read`, and the delta is taken around each, so a non-zero here with a zero above means the staging happened between the entry and the read path rather than inside it. Read `user/objects/src/service.rs` before `read.rs`"
+application_bytes_delivered_at_the_entry_differs = "the two boundaries disagree about what was delivered, which is not a copy count failing — it is the service in front of the read path changing what the read path did. The service exists to count at the entry and to alter nothing, so a difference here invalidates both numbers rather than reporting one. Check `Service::completed` first: it states the *ask* in `Cqe::result` and records the *transfer* in `Served::delivered_bytes`, and a diff that collapsed the two would move this row while every threshold above stayed green"
 zones_the_records_landed_in_is_one = "every record landed in one zone, so the hash-to-zone-and-offset half of `E2-B08` was never exercised: a mapping that returned a constant would pass every other row in this file. Check the zone size against the workload's total bytes before looking at `f-zone`"
