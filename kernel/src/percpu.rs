@@ -49,19 +49,55 @@ use crate::arch::x86_64::current_cpu;
 ///
 /// # What it costs, measured
 ///
-/// The whole cost is linear, and exactly so — these are arrays indexed by this
-/// constant, plus `linker.ld`'s `AP_CORES * AP_STACK_STRIDE`, which is why the
-/// fit is not a fit:
+/// *Resident* here is the sum of the image's allocated sections — what the
+/// linker reserves, loaded or not. The cost is linear in this constant, and
+/// exactly so, because every term is an array indexed by it plus `linker.ld`'s
+/// `AP_CORES * AP_STACK_STRIDE`, which is why the fit is not a fit:
 ///
 /// ```text
-/// resident(N) = 438 566 + 64 072 * N bytes      62.6 KiB per core
+/// resident(N) = 1 352 094 + 64 296 * N bytes      62.8 KiB per core
 /// ```
 ///
-/// Built at 8, 16 and 64: the model was derived from the first and third and
-/// predicted the second to the byte, 1 463 718. Most of the 62.6 KiB is not
-/// `PerCpu` at all — 56 KiB of it is one guarded application-processor stack
-/// block, reserved in the image because a guard page needs the mapper that
-/// builds the kernel window, and that runs long before any core starts.
+/// Built at 2, 8, 16, 32 and 64, on 2026-09-17 at `a8e5f31`: the model is taken
+/// from the two ends and predicts the middle three to the byte — 1 866 462,
+/// 2 380 830 and 3 409 566. The per-core term decomposes exactly, and most of
+/// it is not `PerCpu` at all:
+///
+/// ```text
+/// 57 344   one guarded application-processor stack block, AP_STACK_STRIDE
+///  4 504   .bss, of which the interrupt descriptor table is 4 096
+///  2 448   .data
+/// ```
+///
+/// The stack block is reserved in the image rather than allocated at bring-up
+/// because a guard page needs the mapper that builds the kernel window, and
+/// that runs long before any core starts.
+///
+/// **The intercept is this kernel's code and it rots. The slope is this
+/// constant and does not.** The intercept read 438 566 here until 2026-09-17,
+/// against a `.text` a third of today's — wrong by more than fourteen cores'
+/// worth of the per-core term it is the intercept of, while nothing about
+/// sharding had moved. So quote the slope, and re-read the intercept before
+/// quoting it:
+///
+/// ```text
+/// cargo build -p f-kernel --target x86_64-unknown-none -Zbuild-std=core,compiler_builtins
+/// size -A target/x86_64-unknown-none/debug/f-kernel   # every section with an address
+/// ```
+///
+/// A second point for the slope means moving this constant and `AP_CORES`
+/// together and building again. *What would stop this going stale:* two builds
+/// in `cargo xtask cores`, comparing the slope and not the intercept — the
+/// intercept is a different number in every commit that changes code, and a
+/// check on it would fire in all of them.
+///
+/// What the machine withholds is not this figure but the page-rounded span
+/// `__kernel_phys_start .. __kernel_end` — 1 871 872 bytes, 457 frames, at
+/// eight, and not quite linear because section padding is not. That one is
+/// checkable from a boot log rather than from an image: on the 128 MiB fixture
+/// the allocator reports `frames 31978 free of 31978`, which is the 32 479
+/// frames of usable memory above 1 MiB, less those 457 and the 44 the boot
+/// modules take.
 ///
 /// Bring-up costs a further ~10.4 ms per core, and that one is a hardcoded
 /// sequential spin: `ap::wake` waits 10 ms after `INIT` and 200 µs after each
@@ -75,12 +111,14 @@ use crate::arch::x86_64::current_cpu;
 ///
 /// # Why it is still eight
 ///
-/// It was raised to 64 for a Threadripper 2990WX, measured, and put back. The
-/// numbers above are that experiment; the reasoning is that a ceiling is not a
-/// speedup. Nothing here schedules work above two cores — `init` runs on one,
+/// It was raised to 64 for a Threadripper 2990WX, measured, and put back. That
+/// experiment is where the shape of the numbers above came from — they have
+/// been re-measured since, and the sweep is cheap enough to repeat that the
+/// decision need not rest on a remembered figure. The reasoning is that a
+/// ceiling is not a speedup. Nothing here schedules work above two cores — `init` runs on one,
 /// the timer on another, and every core past that is started, given tables and
 /// a stack, and parked — so the cores a larger ceiling admits would have had
-/// nothing to do, at 62.6 KiB and 10.4 ms each.
+/// nothing to do, at 62.8 KiB and 10.4 ms each.
 ///
 /// When it does pay, it will pay as *admission capacity* rather than as
 /// throughput: RFC 0007 reserves a core whole, with its SMT sibling and a cache

@@ -614,27 +614,37 @@ This is the first question that line provokes, so the answer is here rather than
 waiting to be re-derived. The constant was raised to 64 for a Threadripper
 2990WX, measured, and put back.
 
-The cost is linear, and exactly so — these are arrays indexed by the constant
-plus `linker.ld`'s `AP_CORES * AP_STACK_STRIDE`:
+*Resident* is the sum of the image's allocated sections — what the linker
+reserves, loaded or not. The cost is linear in the constant, and exactly so —
+these are arrays indexed by it plus `linker.ld`'s `AP_CORES * AP_STACK_STRIDE`:
 
 ```
-resident(N) = 438 566 + 64 072 × N bytes          62.6 KiB per core
+resident(N) = 1 352 094 + 64 296 × N bytes        62.8 KiB per core
 ```
 
 | MAX_CPUS | resident | AP spin on a 64-thread machine |
 |---|---|---|
-| 2 | 553 KiB | 10 ms |
-| **8** | **929 KiB** | **73 ms** |
-| 16 | 1.40 MiB | 156 ms |
-| 32 | 2.37 MiB | 322 ms |
-| 64 | 4.33 MiB | 655 ms |
+| 2 | 1.41 MiB | 10 ms |
+| **8** | **1.78 MiB** | **73 ms** |
+| 16 | 2.27 MiB | 156 ms |
+| 32 | 3.25 MiB | 322 ms |
+| 64 | 5.21 MiB | 655 ms |
 
-Built at 8, 16 and 64; the model came from the first and third and predicted the
-second to the byte. Most of the 62.6 KiB is not `PerCpu` — 56 KiB is one guarded
-AP stack block, reserved in the image because a guard page needs the mapper that
-builds the kernel window. The ~10.4 ms is a hardcoded sequential spin in
-`ap::wake`: 10 ms after `INIT`, 200 µs after each `STARTUP`, whatever the core
-actually does.
+Built at all five on 2026-09-17, at `a8e5f31`; the model comes from the two ends
+and predicts the middle three to the byte. The per-core term is 57 344 bytes of
+guarded AP stack block — reserved in the image because a guard page needs the
+mapper that builds the kernel window — plus 4 504 of `.bss`, of which the
+interrupt descriptor table is 4 096, and 2 448 of `.data`. So most of it is not
+`PerCpu` at all. The ~10.4 ms is a hardcoded sequential spin in `ap::wake`:
+10 ms after `INIT`, 200 µs after each `STARTUP`, whatever the core actually
+does.
+
+**The intercept is the kernel's own code, and it goes stale.** It read 438 566
+here, from the Threadripper experiment, until 2026-09-17 — by which time `.text`
+had tripled and the figure was wrong by more than fourteen cores' worth of the
+per-core term. The slope is the part that is about `MAX_CPUS`. Re-read the
+intercept before quoting it; the recipe is in `kernel/src/percpu.rs` beside the
+constant.
 
 **The two costs have different shapes.** Memory tracks the *constant* and is
 paid on every machine, including single-core ones. Boot time tracks
