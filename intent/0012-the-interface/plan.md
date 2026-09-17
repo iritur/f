@@ -1,6 +1,6 @@
 ---
 id: 0012
-status: draft
+status: done
 spec: ./spec.md
 ---
 
@@ -511,3 +511,55 @@ doorbell test. It is worth a sentence on `E0-B15`'s line whenever somebody is
 next in it. It is not in the *Handoff* because moving a clause of a task out of
 its own epoch is a decision, not a correction, and `intent.md`'s first open
 question is where it is asked.
+
+---
+
+## What happened when it was executed, 2026-09-17
+
+Steps 0 to 9 landed in one commit. Step 10 did not, and is still a proposal.
+
+Step 0's precondition was already paid: RFC 0077 through 0080, `interface/`'s
+four modules and `claims/0033` through `0035` reached `main` in
+`f514b0a` (PR #52), so the four `[x]` marks step 3 makes rest on evidence
+somebody else can read.
+
+The checks the *Evidence* section of `spec.md` asks for, run rather than
+asserted:
+
+```
+cargo xtask todo E3
+  ready to start — 6 task(s)   E3-B01a, E3-B02a, E3-B06a, E3-B03a, E3-B04a, E3-P01a
+  waiting — 81 task(s)
+  done 5 · standing 0
+```
+
+Six, not seven and not nine, which is check 1 passing on the nose: no `needs:`
+line was dropped and none of the three parents without one today was missed. E3
+holds 92 task lines, which is step 1's own check. Check 4 is zero — no `*needs:*`
+line in E3 names `E0-B12` or `E0-B15` — and check 5's closed set of fourteen ids
+outside the decomposition matches check 2's list exactly, with nothing extra and
+nothing missing. Check 3 holds: no two `*exit:*` lines in E3 share a sentence,
+which steps 7 and 9 are what made true.
+
+**Step 8 is RFC 0090.** Neither of the two contradicting exits won whole. An
+image may be compared to an image only where the artefact under test is pixels
+and nothing smaller can observe the defect — exactly one place, the text
+conformance corpus behind `E3-B03j` — and `E3-P05` narrows to *no interface
+assertion compares images*. The larger half of `E3-B03`'s corpus moves to glyph
+ids and positions, which are integers. `E3-B03j`'s exit, which was written to
+cite this RFC before it existed, now cites it by number and carries the lint the
+RFC's fourth point owes.
+
+**Step 10 was not taken**, and the two questions it leaves open are unchanged:
+whether the rule belongs to a task id in an interface epoch or to an always-on
+`A-05` item, and that taking it makes `cargo xtask todo E3` report seven ready
+rather than six. Until it is taken, `E3-00`'s exit is observed by nobody — a
+reader could delete all seventy-two lines and `cargo xtask verify` would stay
+green, which is the finding that step and no other is for.
+
+**One thing this execution found that the Handoff could not have.** Twelve of
+the seventy-two subtasks had code in the tree before the paste landed, built
+against their exits and reviewed adversarially over three rounds. Every one of
+them is pasted `[ ]`. Marking them is a separate judgment against each exit
+sentence as written, which is precisely the judgment this epoch has been getting
+wrong, and it is not something a paste should do on its way past.

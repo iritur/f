@@ -330,7 +330,7 @@ contradiction between two written exits is a reversal that needs an RFC. That is
   *exit:* the list is in the tree with a sentence per entry saying what its absence would hide, and adding a script is a diff to that list rather than to a test.
   *needs:* E3-B03a
 - [ ] **E3-B03j** `M` How a rendering is compared to a reference, and where in this tree that is allowed at all.
-  *exit:* the comparison is an integer over pixels with a stated tolerance and a deliberate one-pixel regression goes red; and the carve-out from `E3-P05` is the RFC Handoff step 8 owes, cited by number here rather than assumed, because as the two parent lines stand today they contradict each other.
+  *exit:* the comparison is an integer over pixels with a stated tolerance and a deliberate one-pixel regression goes red; and the carve-out from `E3-P05` is RFC 0090, which narrows that line to interface assertions and confines an image-to-image comparison to this task's corpus — cited by number rather than assumed, because as the two parent lines stood they contradicted each other. The lint that entry's fourth point owes lands here too: in `lint_all`, refusing an image-to-image comparison outside this corpus's directory, in the shape `lint_licensing` already has, because a carve-out enforced by memory grows one exception at a time.
   *needs:* E3-B03i, E3-B02e
 - [ ] **E3-B03k** `M` Text joins the vocabulary: `Role::Text` and `Role::Label` reach the rasteriser and the screen reader from one declaration.
   *exit:* one tree produces a rendered paragraph and a spoken phrase with no second declaration and no text-specific branch in either projection.
@@ -564,7 +564,7 @@ one* is a statement about this task's artefact and not about release 0.4. That i
   *exit:* the rig reproduces a known measurement on a conventional machine within its own error bar, and the known measurement is named before the rig is built rather than chosen afterwards from what it happened to produce.
   *needs:* E3-P01d
 - [ ] **E3-P01f** `M` The method, documented well enough for a third party to build one.
-  *exit:* a document carrying the bill of materials, the wiring, the procedure and the calibration result. **This sentence is `E3-R01`'s exit as written**, and it is an observation about this task's artefact — Handoff step 9 is where that is settled.
+  *exit:* a document carrying the bill of materials, the wiring, the procedure and the calibration result, well enough that a third party can build one. That sentence was `E3-R01`'s exit as written; Handoff step 9 moved it here, because it is an observation about this task's artefact and not about a release.
   *needs:* E3-P01e
 ```
 
