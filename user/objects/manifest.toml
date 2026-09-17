@@ -41,25 +41,35 @@ domain = "private"
 # page tables, text, stack, control ring, state tree and the capability table —
 # is retyped from one supplied `Untyped`, so revoking this ends the component.
 #
-# **Sixteen pages, which is `store`'s number, because this is `store`'s shape:**
-# one address space, four page tables, the text, a page of stack, a control ring,
-# a state tree of five nodes and the capability table, with a second instance
-# alive while a client still holds a channel to the first.
+# **Sixteen pages, and the interesting part is that the number did not move when
+# everything it is about did.** The reversal below said: *the day an opcode is
+# answered, the read path becomes reachable and this image grows to something
+# nobody here has measured.* That day is this diff. The image went from **1848
+# bytes to 49 120** — twenty-six times, because `--gc-sections` had been
+# discarding `f-blob`, `f-zone`, `f-index` and `f-hash` and now cannot — and the
+# spawn went from **25 frames to 36**.
 #
-# **It was written as twenty-four and measured down.** The first draft of this
-# file reasoned that an image linking `f-blob`, `f-zone`, `f-index` and `f-hash`
-# would need the four text pages `kernel::process::INIT_TEXT_PAGES` maps, and
-# sized the account for them. `cargo xtask component` then reported this image at
-# **1848 bytes** — smaller than `store`'s 5408 — because `user/init/link.ld` is
-# linked with `--gc-sections` and nothing in those four crates is reachable from
-# `component::start` yet. The reasoning was sound and the premise was false, which
-# is the only reason the number is in this file rather than in a comment about it.
+# Sixteen pages still covers it, and the arithmetic is worth writing down because
+# it is not obvious: `kernel::component::account_bytes` stakes a place's account
+# at `memory_bytes` plus every declared need, rounded up to a power of two of
+# pages. Sixteen plus sixteen plus two is 34 pages, which rounds to **64 pages —
+# 262 144 B** — and 36 frames fit inside that with room to spare. The declared
+# need is a *floor under the stake*, not the stake.
 #
-# *What moves it:* the day an opcode is answered, the read path becomes reachable,
-# the collector goes quiet and this image grows to something nobody here has
-# measured. A component that needs more than it declared is refused
-# `RESOURCE/QUOTA_EXHAUSTED` at the derive that could not pay, and that refusal is
-# a red boot rather than a silent shortfall — so this line moves with the log that
+# **Raising it was tried and the boot refused it**, which is the measurement that
+# says this line must stay where it is. Set to 48 pages, the stake rounds to
+# 524 288 and `cargo xtask run` answers *the spawn was refused admission before
+# anything was spent* — admission doing exactly what it exists to do, before a
+# frame is derived rather than after. The `[reservation]` figure below moves with
+# this one or the same thing happens; they were moved one at a time on the way to
+# finding that out.
+#
+# *What moves it:* a device below this component. `user/objects/src/serve.rs`
+# builds its store in this component's own heap; reaching one over the blk
+# driver's ring adds that driver's client to the image and a mount to the heap,
+# and neither is measured here. A component that needs more than it declared is
+# refused `RESOURCE/QUOTA_EXHAUSTED` at the derive that could not pay, which is a
+# red boot rather than a silent shortfall — so this line moves with the log that
 # refused it quoted beside it, and not before.
 [[capability]]
 name   = "account"
@@ -144,12 +154,14 @@ optional = true
 # The predicate is still written by hand rather than derived from the opcode
 # list, so declaring an opcode still cannot implement it.
 #
-# **What this ring does not have is a peer.** The service answers an `Sqe` handed
-# to it; nothing describes a channel for this component, because a place's
-# occupant gets a control ring and no data ring. So this declaration is still
-# ahead of the boot — which is the right way round for a manifest, and is why
-# `f-assembler` checks a route against this file rather than against what is
-# running.
+# **This ring has a peer now, and this declaration is no longer ahead of the
+# boot.** `cargo xtask objects read` describes a channel, hands the component the
+# server's end and the frame keeps the client's, and sixty-four entries cross it.
+# What the declaration is still ahead of is the *topology*: that boot is the frame
+# standing one component up on a core, not a supervisor routing a sibling's
+# endpoint to it, and `from = "sibling:virtio-blk"` below is still a supplier
+# nothing provides. `f-assembler` checks a route against this file rather than
+# against what is running, which is why the two can differ and be caught.
 [[ring]]
 name        = "data"
 role        = "server"
@@ -182,6 +194,13 @@ budget_window_ms = 3_000
 # schedules against rather than ignoring them. The memory figure is the account's,
 # because that is what this component's footprint costs, and a second instance of
 # it is alive at the same moment a client still holds a channel to the first.
+#
+# **The two are one number and this diff proved it by moving one of them.** The
+# account above was raised to 196 608 and this was left at 65 536; the boot
+# refused the spawn. Then this was raised to match and the boot refused it again,
+# for the other reason the account's comment now records — the stake rounds up
+# and 524 288 is past what admission will grant a soft place here. Both were put
+# back. They move together, and on this machine they do not move yet.
 [reservation]
 class        = "soft"
 memory_bytes = 65_536

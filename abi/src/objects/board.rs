@@ -1,6 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! The page the frame fills in before this component's first instruction, and
-//! the half of it this component fills in before its last.
+//! The page the frame fills in before the objects component's first instruction,
+//! and the half of it that component fills in before its last.
+//!
+//! # Why this is in the wire crate
+//!
+//! Because it is a wire, and both of its peers are in this tree: the frame
+//! writes one half and `user/objects` writes the other. It lived in
+//! `user/objects/src/routing.rs` for exactly one compile — `kernel/Cargo.toml`
+//! grew a row to reach it, and that row's own reversal condition said *routing
+//! moving into `abi/`, which is where a wire layout two crates agree on belongs*.
+//! The reversal fired immediately and for a reason the row had not predicted:
+//! `f-objects` uses `alloc`, the frame has no global allocator, and linking a
+//! crate for two constants brought its whole dependency graph with it. So the
+//! row is gone and this is here, which is where the three driver crates' routing
+//! pages will go the day somebody pays the same debt for them.
 //!
 //! # Why a page and not arguments
 //!
@@ -37,6 +50,32 @@
 //! granted region a component addresses from a constant and no instance is ever
 //! both shapes.
 
+/// Which of this component's lives serves the ring.
+///
+/// Here rather than in `crate::serve` because the **frame** names it, and
+/// `serve` is behind the image gate that keeps a `#[panic_handler]` out of a
+/// build that links this crate as a library. A selector the frame cannot see is
+/// a selector the frame cannot ask for.
+///
+/// A selector and not a second image, on `user/store/src/component.rs`'s
+/// argument: the place, the manifest, the account and the restart policy are the
+/// same component's, and what differs is whether the frame gave it a core and a
+/// client. A second manifest would be a second place, which is a claim about the
+/// topology rather than about scheduling.
+/// Unit: none — a selector ordinal.
+pub const SERVE: u32 = 1;
+
+/// The same loop, answering every entry the way a page cache would.
+///
+/// A second selector and not a flag on the board, which is
+/// `user/virtio-blk/src/component.rs`'s discipline: two entry points and not a
+/// flag, so the provocation is greppable. The whole content of it is that
+/// `staged_bytes` goes non-zero at the boundary the client is reading, so a zero
+/// published beside it is evidence rather than a default — and a counter nothing
+/// can move is not a counter.
+/// Unit: none — a selector ordinal.
+pub const PROVOKE: u32 = 2;
+
 /// Where the frame maps this page. Must equal `kernel::process::BOARD`.
 ///
 /// Asserted in `kernel/src/objects.rs` rather than trusted, so a build where the
@@ -54,11 +93,11 @@ pub const BYTES: u32 = 4096;
 /// frame reading the component's cannot accept each other's — which is what a
 /// single magic would let happen on a page that was written by the wrong side.
 /// Unit: none — a sentinel.
-pub const MAGIC: u64 = 0x0B_1E_C7_50_F_0000_01;
+pub const MAGIC: u64 = 0x00B1_EC75_0F00_0001;
 
 /// The same, for the half this component writes. See [`MAGIC`].
 /// Unit: none — a sentinel.
-pub const REPORTED_MAGIC: u64 = 0x0B_1E_C7_50_F_0000_02;
+pub const REPORTED_MAGIC: u64 = 0x00B1_EC75_0F00_0002;
 
 /// What the frame tells this component.
 ///

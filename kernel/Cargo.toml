@@ -97,6 +97,7 @@ f-virtio-net.workspace = true
 # this comment and the two above it in one sitting is the argument.
 f-virtio-gpu.workspace = true
 
+
 # The component a place holds, and — from E1-B08 — the runtime that holds a
 # core. The frame links it for one thing: `f_store::report` is the encoding a
 # runtime's exit status carries, and one definition the compiler checks is worth

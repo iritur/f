@@ -2692,8 +2692,7 @@ pub unsafe fn prepare_server(
     // the slack visible in the free count rather than hiding it in a loop.
     let heap_pages = plan.heap_bytes.div_ceil(FRAME_SIZE);
     let heap_order = Order::new(
-        u8::try_from((heap_pages as usize).next_power_of_two().trailing_zeros())
-            .unwrap_or(u8::MAX),
+        u8::try_from((heap_pages as usize).next_power_of_two().trailing_zeros()).unwrap_or(u8::MAX),
     )
     .ok_or(Error::NoFrames)?;
     let heap = frames.alloc_zeroed(heap_order).ok_or(Error::NoFrames)?;
@@ -2791,9 +2790,12 @@ pub unsafe fn prepare_server(
     // SAFETY: `heap` was just allocated zeroed at an order covering
     // `heap_pages`, is addressable through the direct map, and nothing else
     // holds a pointer into it.
-    let _ = unsafe {
-        f_ring::heap::describe(frames.virt(heap) as u64, u32::try_from(plan.heap_bytes).unwrap_or(0))
-    };
+    unsafe {
+        f_ring::heap::describe(
+            frames.virt(heap) as u64,
+            u32::try_from(plan.heap_bytes).unwrap_or(0),
+        );
+    }
 
     let pages =
         ServerPages { control: frames.virt(control) as u64, board: frames.virt(board) as u64 };

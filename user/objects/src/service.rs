@@ -29,14 +29,16 @@
 //!
 //! # What is still missing, said in the same breath
 //!
-//! **A transport.** An [`Sqe`] arrives here as an argument rather than off a
-//! mapped channel, because nothing maps one for this component yet: a place's
-//! occupant is given a control ring and no data ring
-//! (`kernel/src/component.rs`), and the two components that serve a real
-//! channel — `user/virtio-blk` and `user/store` — are each stood up by a
-//! purpose-written module in the frame. So what this module is is the *service*
-//! and not the *loop*, and the seam is deliberate: the day a channel exists the
-//! loop is four lines around this function —
+//! **Nothing, as of `kernel/src/objects.rs`** — and the paragraph that stood here
+//! said otherwise, so it is worth saying what it said. It said an [`Sqe`] reaches
+//! this function as an argument because nothing maps a channel for this
+//! component, and that the loop which would close it is four lines. Both were
+//! true and neither is now: `crate::serve` is that loop, it is closer to forty
+//! lines than four, and the frame describes the channel in `prepare_server`.
+//!
+//! What has not changed is the seam, which is the thing worth keeping. This
+//! function still takes an entry and answers a completion, and the loop still
+//! wraps it —
 //!
 //! ```text
 //! while let Some(entry) = server.pop()? {
@@ -46,16 +48,14 @@
 //! }
 //! ```
 //!
-//! — and not one line of the counting moves, because the counting is already at
-//! the entry. That is the property worth having from this shape: whoever writes
-//! the loop is not also deciding where an application byte is counted.
+//! — so not one line of the counting moved when the loop arrived, which is the
+//! property this shape was built for: whoever wrote the transport was not also
+//! deciding where an application byte is counted.
 //!
-//! *What this does not license:* calling the boundary crossed. `E2-B08`'s exit
-//! is a count taken across the objects ring **in a boot**, `TODO.md` says so in
-//! those words, and an argument passed between two functions in one address
-//! space is not a boot however honestly the entry was encoded.
-//! `user/objects/tests/reads.rs` prints both readings side by side for that
-//! reason.
+//! *What is still owed:* a device. `crate::serve` builds its store in the
+//! component's own heap, and `intent/0006-state/spec.md` describes this boot over
+//! the blk driver's ring. The boundary above the store is crossed; what is under
+//! it is modelled, and `claims/0022` names which of its rows come from where.
 //!
 //! # The two refusals that look the same and are not
 //!
