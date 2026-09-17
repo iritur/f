@@ -126,11 +126,27 @@
 //! recordings, at those report rates, nothing exceeded them. They are not
 //! bounds over all motions. Draw more recordings and the maximum rises — over
 //! eight of them the worst over-prediction is 4.8 px, over four thousand and
-//! ninety-six it is 7.2 — which is what a maximum does, and is why the count
-//! swept is written into the test beside the numbers it produced. An earlier
-//! version of this file stated *one* recording's maximum as though it were a
-//! bound, in prose that said the cursor *never* runs on by more than it; the
-//! same generator exceeded that number on one draw in six.
+//! ninety-six it is 7.2, over forty thousand it is 10.2, which is *past the
+//! eight-pixel bound stated below* — which is what a maximum does, and is why
+//! the count swept is written into the test beside the numbers it produced. An
+//! earlier version of this file stated *one* recording's maximum as though it
+//! were a bound, in prose that said the cursor *never* runs on by more than it;
+//! the same generator exceeded that number on one draw in six.
+//!
+//! The version after it did something subtler and is the reason this paragraph
+//! is longer than it was. It fitted the pair to 4096 draws and then defended the
+//! choice of 4096 with a convergence claim — *sweeping ten times as many moves
+//! the maxima by a few per cent* — which was written as a measured fact, was
+//! measured by nothing, and is false by an order of magnitude in the
+//! over-prediction direction. The maxima have not converged and this file no
+//! longer says they have:
+//! `ten_times_the_swept_set_runs_past_the_stated_over_prediction_bound` draws
+//! ten times the set and requires the escapes to be there. What that leaves is
+//! a true sentence and a smaller one — over *these* recordings, at those two
+//! rates, nothing exceeded these two integers, and one measurement in six
+//! thousand off the set does — and it is the sentence the exit for this subtask
+//! was narrowed to by RFC 0084. A reader who needs a number that holds for a
+//! motion nobody drew has the theorem below and its factor of eighty.
 //!
 //! What a universal bound would have to look like is worth writing down,
 //! because it is the reason there is not one here. Over-prediction does have a
@@ -973,8 +989,25 @@ fn axis(predicted: i32, anchor: i32, truth: i32) -> Deviation {
     let error = i64::from(predicted) - i64::from(truth);
     let magnitude = u32::try_from(error.unsigned_abs()).unwrap_or(u32::MAX);
     // Opposite signs mean the prediction did not reach where the pointer went;
-    // everything else — including a pointer that did not move on this axis, and
-    // including an error of zero — counts toward the tighter bound.
+    // everything else — including a pointer that did not move on this axis —
+    // counts toward the tighter bound. This is the separation the two bounds
+    // rest on: it is this function, not the two fields, that decides which
+    // bound an error is held to.
+    //
+    // The zero-travel clause is the half of that rule a reviewer deleted to see
+    // what would notice, and nothing did: without `travel != 0` a cursor drawn
+    // backwards along an axis the pointer never left is classified as lag and
+    // moves out from under the tighter bound into the looser one, and every
+    // test in this file stayed green. Both directions of it are now driven by
+    // `a_deviation_keeps_the_two_directions_apart`, because the case that test
+    // already carried — a cursor drawn *forwards* on a stationary axis — is
+    // exactly the one the deletion leaves alone.
+    //
+    // The `error != 0` clause is a statement about which branch runs rather than
+    // one a test can observe: an error of zero is zero in both fields whichever
+    // branch takes it. It is kept because a classifier that reads `is_negative`
+    // on an exact hit invites the next reader to work that out again, and it is
+    // labelled here so that nobody writes a test claiming to check it.
     if error != 0 && travel != 0 && error.is_negative() != travel.is_negative() {
         Deviation { ahead_x65536: 0, behind_x65536: magnitude }
     } else {
@@ -1342,9 +1375,24 @@ mod tests {
     /// file that swept a single recording stated an over-prediction bound the
     /// same generator then exceeded on one draw in six. It is finite because
     /// there is no universal bound to reach for instead; see the module's *the
-    /// two numbers are a maximum over a named set*. The whole sweep costs about
-    /// a sixth of a second unoptimised, and sweeping ten times as many moves
-    /// the maxima by a few per cent.
+    /// two numbers are a maximum over a named set*.
+    ///
+    /// What it is not is a convergence point, and the sentence that stood here
+    /// said it was: *sweeping ten times as many moves the maxima by a few per
+    /// cent*. That sentence was the whole reason eight pixels read as a bound
+    /// rather than as a fit to 4096 draws, it was prose beside a constant with
+    /// no test evaluating it, and this generator refutes it. Ten times as many
+    /// — [`DECADE_CORPORA`], of which these are the first — moves the worst
+    /// over-prediction from 471 635 to 668 081 at the recorded rate, two fifths
+    /// and 10.19 px against a stated bound of 8, and from 517 792 to 646 115 at
+    /// half that rate, a quarter and also past the bound. The two
+    /// under-prediction maxima move by 4.6 and 5.1 per cent, so *a few per cent*
+    /// was true of half the numbers it was written about and the half it was
+    /// false of is the half this module exists for. So the count below is the size
+    /// of the set the bounds are *stated over* and not evidence that a larger
+    /// set would agree; `ten_times_the_swept_set_runs_past_the_stated_over_prediction_bound`
+    /// is that measurement, and RFC 0084 is where the exit this subtask is
+    /// accepted on was narrowed to say so.
     /// Unit: recordings.
     const SWEPT_CORPORA: u64 = 4_096;
 
@@ -1439,16 +1487,24 @@ mod tests {
     /// arithmetic has to restate them rather than slide under the rounding —
     /// which is exactly what the rounding hid last time.
     ///
-    /// How much that disclaimer is worth was measured rather than guessed. The
-    /// same generator, over 4096 recordings the sweep does *not* contain, at
-    /// both report rates: the eight-pixel bound holds on all 8192 of those
-    /// measurements, worst 512 893, and the thirty-two-pixel bound is exceeded
-    /// once, at 2 119 748. One in eight thousand, against the one in six that
-    /// broke the single-recording bound this pair replaced. The bound is
-    /// deliberately *not* widened to swallow that one recording: a number moved
-    /// until its counterexample fits is a number that bounds nothing, and the
-    /// honest repair for a claim that fails off its set is to say where the set
-    /// ends and how often it fails past it.
+    /// How much that disclaimer is worth was measured rather than guessed, and
+    /// it is worth less than this file used to imply. The same generator over
+    /// ten times the swept set, at both report rates —
+    /// `ten_times_the_swept_set_runs_past_the_stated_over_prediction_bound`,
+    /// 81 920 measurements: the eight-pixel bound is exceeded fourteen times,
+    /// worst 668 081, which is 10.19 px and a quarter past the stated number;
+    /// the thirty-two-pixel bound is exceeded five times, worst 2 163 217, three
+    /// per cent past. So the tighter half of the pair — the half this file
+    /// argues hardest for — is the half that fails more often and by more, and
+    /// the number it fails by is not a rounding.
+    ///
+    /// Neither bound is widened to swallow those: a number moved until its
+    /// counterexample fits is a number that bounds nothing, and the honest
+    /// repair for a claim that fails off its set is to say where the set ends
+    /// and how often it fails past it. That is what the exit for this subtask
+    /// now says, narrowed by RFC 0084, and it is why the two `const` assertions
+    /// beside the swept maxima make a widened bound a build error rather than a
+    /// judgement call.
     ///
     /// What the *pair* carries is the asymmetry, and the asymmetry is not
     /// empirical. It is a fact about eyes, argued at the top of this module,
@@ -1508,6 +1564,39 @@ mod tests {
     /// Unit: 1/65536 of a device pixel.
     const SWEPT_HALVED_BEHIND_X65536: u32 = 2_057_997;
 
+    /// The larger of two measured maxima, rounded up to a whole pixel.
+    ///
+    /// The derivation [`BOUNDS`] says it is, written as arithmetic so that it
+    /// can be asserted rather than read.
+    /// Unit: 1/65536 of a device pixel.
+    const fn rounded_up_to_a_pixel(first_x65536: u32, second_x65536: u32) -> u32 {
+        let worst = if first_x65536 > second_x65536 { first_x65536 } else { second_x65536 };
+        worst.div_ceil(PX) * PX
+    }
+
+    // *Both are the sweep's own maxima rounded up to a whole pixel* was a
+    // sentence, and the pair was pinned only from below: tightening either bound
+    // reddened two tests, widening either reddened nothing whatever.
+    // `Bounds::stated(40 * PX, 63 * PX)` — five times the measured
+    // over-prediction maximum — passed every test in this file, because the only
+    // upper check anywhere was `!BOUNDS.admits(nothing)`, and doing nothing
+    // over-predicts by exactly zero, so that assertion constrains the lag bound
+    // alone. A bound pinned from one side is a bound the next repair can move to
+    // meet its counterexample, which is the failure the module's *the two
+    // numbers are a maximum over a named set* exists to refuse. These two are
+    // the derivation made load-bearing: a widened constant is now a build error,
+    // in a `const` for the same reason `Bounds::stated`'s refusal is.
+    const _: () = assert!(
+        BOUNDS.ahead_x65536()
+            == rounded_up_to_a_pixel(SWEPT_WORST_AHEAD_X65536, SWEPT_HALVED_AHEAD_X65536),
+        "the over-prediction bound must be the sweep's own maximum rounded up to a whole pixel"
+    );
+    const _: () = assert!(
+        BOUNDS.behind_x65536()
+            == rounded_up_to_a_pixel(SWEPT_WORST_BEHIND_X65536, SWEPT_HALVED_BEHIND_X65536),
+        "the under-prediction bound must be the sweep's own maximum rounded up to a whole pixel"
+    );
+
     /// The worst under-prediction not predicting at all costs anywhere in the
     /// sweep: sixty-four pixels, which is the generator's own speed clamp over
     /// a horizon, on both axes at once.
@@ -1538,6 +1627,115 @@ mod tests {
     /// name this file's degradation test used to carry.
     /// Unit: recordings.
     const SWEPT_HALVING_RAISES_OVERSHOOT: u64 = 1_484;
+
+    /// How many recordings the convergence check draws.
+    ///
+    /// Ten times [`SWEPT_CORPORA`], starting from the same seed, so the swept
+    /// set is a prefix of it and the comparison is *this set against ten times
+    /// this set* rather than against a differently drawn one. The sentence that
+    /// used to stand beside `SWEPT_CORPORA` made that comparison in prose and
+    /// got it wrong by an order of magnitude, which is why it is drawn here
+    /// instead.
+    /// Unit: recordings.
+    const DECADE_CORPORA: u64 = 10 * SWEPT_CORPORA;
+
+    /// What ten times the swept set says about the two stated bounds.
+    ///
+    /// The instrument for the one sentence this file cannot make true: that
+    /// [`SWEPT_CORPORA`] is enough, that the maxima have settled and a larger
+    /// set would leave them where they are. They have not settled. Measuring it
+    /// is the honest alternative to asserting it, and the numbers below are
+    /// what the exit for this subtask was narrowed to say.
+    struct Decade {
+        /// The worst deviation anywhere in it at the recorded rate, which is
+        /// [`Sweep::full`]'s number over ten times the recordings.
+        full: Deviation,
+        /// The same at half that rate.
+        halved: Deviation,
+        /// Measurements — one recording folded at one rate — whose
+        /// over-prediction is outside [`BOUNDS`].
+        /// Unit: measurements.
+        outside_ahead: u64,
+        /// The same for the under-prediction bound.
+        /// Unit: measurements.
+        outside_behind: u64,
+        /// How many measurements were taken, which is two per recording.
+        /// Unit: measurements.
+        measurements: u64,
+    }
+
+    impl Decade {
+        /// Take it.
+        ///
+        /// The two rates are kept apart rather than folded into one maximum,
+        /// because the sentence being checked is about *how the maxima move*
+        /// and they move differently: a single number over both rates would let
+        /// a rise at one of them be read as a rise at the other, which is the
+        /// species of slippage this whole repair is about.
+        fn taken() -> Self {
+            let mut decade = Self {
+                full: Deviation::NONE,
+                halved: Deviation::NONE,
+                outside_ahead: 0,
+                outside_behind: 0,
+                measurements: 0,
+            };
+            for index in 0..DECADE_CORPORA {
+                let recording = swept(index);
+                let full = measured(&recording, 1);
+                let halved = measured(&recording, 2);
+                decade.full = decade.full.worst(full);
+                decade.halved = decade.halved.worst(halved);
+                for deviation in [full, halved] {
+                    if deviation.ahead_x65536() > BOUNDS.ahead_x65536() {
+                        decade.outside_ahead += 1;
+                    }
+                    if deviation.behind_x65536() > BOUNDS.behind_x65536() {
+                        decade.outside_behind += 1;
+                    }
+                    decade.measurements += 1;
+                }
+            }
+            decade
+        }
+    }
+
+    /// The worst over-prediction over [`DECADE_CORPORA`] recordings at the
+    /// recorded rate: 10.19 pixels, against [`SWEPT_WORST_AHEAD_X65536`]'s
+    /// 7.20 over a tenth as many. Two fifths higher — 41.6 per cent — and a
+    /// quarter past the bound stated from the smaller set.
+    /// Unit: 1/65536 of a device pixel.
+    const DECADE_FULL_AHEAD_X65536: u32 = 668_081;
+
+    /// The worst under-prediction there: 29.11 pixels against
+    /// [`SWEPT_WORST_BEHIND_X65536`]'s 27.84, which is 4.6 per cent and is one
+    /// of the two numbers the deleted sentence was true of.
+    /// Unit: 1/65536 of a device pixel.
+    const DECADE_FULL_BEHIND_X65536: u32 = 1_908_104;
+
+    /// The worst over-prediction over them at half that rate: 9.86 pixels
+    /// against [`SWEPT_HALVED_AHEAD_X65536`]'s 7.90, which is 24.8 per cent and
+    /// is also past the eight-pixel bound.
+    /// Unit: 1/65536 of a device pixel.
+    const DECADE_HALVED_AHEAD_X65536: u32 = 646_115;
+
+    /// The worst under-prediction there: 33.01 pixels against
+    /// [`SWEPT_HALVED_BEHIND_X65536`]'s 31.40, which is 5.1 per cent and is the
+    /// other.
+    /// Unit: 1/65536 of a device pixel.
+    const DECADE_HALVED_BEHIND_X65536: u32 = 2_163_217;
+
+    /// Measurements in that set outside the stated over-prediction bound:
+    /// fourteen of 81 920, about one in 5 900.
+    /// Unit: measurements.
+    const DECADE_OUTSIDE_AHEAD: u64 = 14;
+
+    /// Measurements in that set outside the stated under-prediction bound: five
+    /// of 81 920, one in 16 384 — rarer than the over-prediction exceedance and
+    /// smaller when it happens, which is the opposite way round from how this
+    /// file used to read.
+    /// Unit: measurements.
+    const DECADE_OUTSIDE_BEHIND: u64 = 5;
 
     /// How much looser the one universal over-prediction bound is than the
     /// worst the sweep measured: eighty times. That ratio is the argument for
@@ -1597,6 +1795,84 @@ mod tests {
         assert!(
             u64::from(full.ahead_x65536()) * 3 < u64::from(full.behind_x65536()),
             "two bounds are ceremony unless the two maxima differ: {full:?}"
+        );
+    }
+
+    #[test]
+    fn ten_times_the_swept_set_runs_past_the_stated_over_prediction_bound() {
+        // Where the word *bounded* stops being true, measured rather than
+        // disclaimed. This file spent a round saying that sweeping ten times as
+        // many recordings *moves the maxima by a few per cent* — a convergence
+        // claim, and the thing that made eight pixels read as a bound rather
+        // than as a fit to 4096 draws. It is false in the one direction the
+        // module exists for: the worst over-prediction rises by two fifths and
+        // straight past the stated integer, while only the two under-prediction
+        // maxima behave as the sentence said.
+        let decade = Decade::taken();
+        assert_eq!(
+            (decade.full.ahead_x65536(), decade.full.behind_x65536()),
+            (DECADE_FULL_AHEAD_X65536, DECADE_FULL_BEHIND_X65536),
+            "what ten times the set produces at the recorded rate moved"
+        );
+        assert_eq!(
+            (decade.halved.ahead_x65536(), decade.halved.behind_x65536()),
+            (DECADE_HALVED_AHEAD_X65536, DECADE_HALVED_BEHIND_X65536),
+            "what it produces at half that rate moved"
+        );
+        // The comparison the deleted sentence made, made in arithmetic: each
+        // maximum against the same maximum over a tenth as many recordings. The
+        // over-prediction one rises by more than a third at the recorded rate;
+        // *a few per cent* is true of the two lag numbers and of neither of the
+        // other two.
+        let ahead_scaling_permille =
+            u64::from(decade.full.ahead_x65536()) * 1_000 / u64::from(SWEPT_WORST_AHEAD_X65536);
+        let behind_scaling_permille =
+            u64::from(decade.full.behind_x65536()) * 1_000 / u64::from(SWEPT_WORST_BEHIND_X65536);
+        assert!(
+            ahead_scaling_permille > 1_300,
+            "the over-prediction maximum has not settled: ten times the set puts it at \
+             {ahead_scaling_permille} thousandths of the swept one"
+        );
+        assert!(
+            behind_scaling_permille < 1_100,
+            "the under-prediction maximum is the one that does behave as the deleted sentence \
+             said: {behind_scaling_permille} thousandths"
+        );
+        assert_eq!(decade.measurements, 2 * DECADE_CORPORA, "both rates, every recording");
+        assert_eq!(
+            (decade.outside_ahead, decade.outside_behind),
+            (DECADE_OUTSIDE_AHEAD, DECADE_OUTSIDE_BEHIND),
+            "how often the stated bounds fail off their set moved"
+        );
+        // The three assertions below are the sentences the exact counts above
+        // support, in the words the spec's exit now uses; it is the counts that
+        // go red, and these say what a red count would mean. Required to be
+        // there, on RFC 0084's logic and `zone/tests/cut.rs`'s: the escapes are
+        // what makes eight pixels a maximum over a named set rather than a
+        // property of the generator, so a run that stopped producing them is a
+        // changed generator to investigate and not a bound to celebrate. The
+        // route back to green that this file must not offer is widening
+        // `BOUNDS` until they fit, and the two `const` assertions beside the
+        // swept maxima refuse that by failing to build.
+        assert!(
+            decade.outside_ahead > 0,
+            "the over-prediction bound is a maximum over the swept set, so a larger set must \
+             escape it; a run where none did is a changed generator, not a proved bound"
+        );
+        // And the direction the exceedance runs in, which is the finding that
+        // refused this subtask twice. The over-prediction bound fails more often
+        // than the under-prediction one, and by a quarter of itself rather than
+        // by three per cent — so the number this file presents as the solid half
+        // of the pair is the less stable of the two.
+        assert!(
+            decade.outside_ahead > decade.outside_behind,
+            "the tighter bound is the one that escapes more often, and this file says so"
+        );
+        assert!(
+            u64::from(decade.full.ahead_x65536()) * 4 > u64::from(BOUNDS.ahead_x65536()) * 5,
+            "a quarter past the stated bound is the size of the miss: {} against {}",
+            decade.full.ahead_x65536(),
+            BOUNDS.ahead_x65536()
         );
     }
 
@@ -1976,6 +2252,18 @@ mod tests {
         let ran_on = predicted_at(10 * 65_536, 0);
         let ahead = Deviation::between(&ran_on, 0, 0);
         assert_eq!((ahead.ahead_x65536(), ahead.behind_x65536()), (10 * PX, 0));
+        // The same stationary axis in the other direction, which is the half of
+        // `axis`'s zero-travel rule that nothing drove: a reviewer deleted
+        // `travel != 0` from it — one token — and all 28 tests stayed green,
+        // because the case above is the half the deletion leaves alone. With the
+        // clause gone this line reads (0, 10 px): a cursor drawn ten pixels the
+        // wrong way along an axis the pointer never left would be classified as
+        // lag, which moves a class of snap-back out from under the tighter bound
+        // and into the looser one. That is the asymmetry collapsing through the
+        // instrument rather than through the type, which is why the check is
+        // here and not on `Bounds`.
+        let ran_back = Deviation::between(&predicted_at(-10 * 65_536, 0), 0, 0);
+        assert_eq!((ran_back.ahead_x65536(), ran_back.behind_x65536()), (10 * PX, 0));
         // Folding the two keeps both, which is the whole reason `worst` is not
         // one comparison and a winner.
         let folded = behind.worst(ahead);
@@ -2056,5 +2344,17 @@ mod tests {
         println!("SWEPT_WITHIN_TWO_THIRDS = {}", sweep.within_two_thirds_of_nothing);
         println!("SWEPT_WORST_LAG_SHARE_PERMILLE = {}", sweep.worst_lag_share_permille);
         println!("SWEPT_HALVING_RAISES_OVERSHOOT = {}", sweep.halving_raises_overshoot);
+        // And the set that is ten times the swept one, which is where the
+        // stated over-prediction bound stops holding. Printed from the same
+        // place as everything else, because a number re-derived by a second
+        // procedure is a number that drifts from the first.
+        let decade = Decade::taken();
+        println!("DECADE_FULL_AHEAD_X65536 = {}", decade.full.ahead_x65536());
+        println!("DECADE_FULL_BEHIND_X65536 = {}", decade.full.behind_x65536());
+        println!("DECADE_HALVED_AHEAD_X65536 = {}", decade.halved.ahead_x65536());
+        println!("DECADE_HALVED_BEHIND_X65536 = {}", decade.halved.behind_x65536());
+        println!("DECADE_OUTSIDE_AHEAD = {}", decade.outside_ahead);
+        println!("DECADE_OUTSIDE_BEHIND = {}", decade.outside_behind);
+        println!("decade measurements = {}", decade.measurements);
     }
 }

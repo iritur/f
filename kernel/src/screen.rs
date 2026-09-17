@@ -98,6 +98,47 @@ const MAX_ROWS: usize = 96;
 /// Cells in the grid.
 const CELLS: usize = MAX_COLS * MAX_ROWS;
 
+/// How many rows the screen moves when it has to move at all.
+///
+/// # Why a block and not a line
+///
+/// Because a fixed framebuffer cannot pan. A display driver scrolls by moving
+/// the address the scanout reads from, which costs nothing; this console has no
+/// such address to move, so *scrolling* means every line's pixels are drawn
+/// again one row higher. Once the screen is full, a one-row scroll makes every
+/// new line cost a full redraw — and a boot prints two hundred lines onto a
+/// screen that holds sixty-seven.
+///
+/// Scrolling eight rows at once pays that redraw one time in eight. The seven
+/// lines in between land on rows that were left blank by the jump, and cost one
+/// row of drawing each.
+///
+/// What it costs is that the log advances in steps rather than smoothly, and
+/// that up to seven rows at the bottom are blank while a block fills. Neither
+/// costs a reader anything that matters: **the newest line is always the last
+/// one drawn**, so a machine that stops has its final line on the screen, which
+/// is the whole reason somebody is looking at it.
+///
+/// This is jump scrolling, which terminals did when they had the same problem
+/// for the same reason. *Reversal:* a display whose scanout address this system
+/// can move makes scrolling free and this constant meaningless — that is the
+/// component, and RFC 0085 names it as where this stops being the algorithm.
+const SCROLL_BLOCK: usize = 8;
+
+/// How many unchanged cells a run of damage will cross rather than break at.
+///
+/// A run is redrawn as one sweep of consecutive stores, and stopping it costs
+/// the sweep: the next run starts a new burst, and the processor's fill buffer
+/// takes the gap as a reason to drain early. Redrawing a cell that did not
+/// change costs the stores for one character and nothing else — it is
+/// idempotent, since what is drawn is what the grid already said.
+///
+/// So a short gap is cheaper to paint over than to stop for. Four cells is
+/// thirty-two pixels, which is half of one fill buffer; a gap wider than that
+/// is worth the break. RFC 0027's rule, applied where the tree already applies
+/// it: coalescing is a pass over the damage, not a lookup per cell.
+const RUN_GAP: usize = 4;
+
 /// First and last character the font has a glyph for.
 const FIRST: u8 = 0x20;
 const LAST: u8 = 0x7E;
@@ -481,6 +522,68 @@ impl Surface {
         }
     }
 
+    /// Draw a row of adjacent characters as one sweep.
+    ///
+    /// # Why this is not a loop over [`Surface::cell`]
+    ///
+    /// Because of where the stores land. Drawing one character writes eight
+    /// pixels, jumps a whole scanline to the next glyph row, and writes eight
+    /// more — sixteen bursts of thirty-two bytes, each a long way from the
+    /// last. The mapping is write-combining, and write-combining gathers
+    /// *consecutive* stores: a burst that ends after thirty-two bytes leaves
+    /// half a fill buffer, and the jump to the next row is the processor's
+    /// reason to flush it.
+    ///
+    /// Drawing sixty characters as a run inverts the loops. Each glyph row
+    /// becomes one sweep of four hundred and eighty pixels — nineteen hundred
+    /// contiguous bytes, which is thirty full buffers in a row — and there are
+    /// sixteen sweeps rather than nine hundred and sixty bursts. The pixels
+    /// written are identical; only their order changes.
+    ///
+    /// The glyph lookup moves inside the inner loop, which is one indexed read
+    /// per character per row out of a table that is never out of cache, against
+    /// stores to memory on the far side of the bus. It is not the expensive
+    /// part and it is not close.
+    fn run(self, col: usize, row: usize, chars: &[u8]) {
+        let origin_x = col * GLYPH_W * self.scale;
+        let origin_y = row * GLYPH_H * self.scale;
+        let span = chars.len() * GLYPH_W * self.scale;
+
+        let fits = self.scale == 1
+            && self.bytes_per_pixel == 4
+            && origin_x + span <= self.width as usize
+            && origin_y + GLYPH_H <= self.height as usize;
+
+        if !fits {
+            // A clipped run at the edge of a screen, a depth this cannot write
+            // wide, or a doubled scale. `cell` is correct for all of them and
+            // the sweep is an optimisation rather than the meaning.
+            for (index, &ch) in chars.iter().enumerate() {
+                self.cell(col + index, row, ch);
+            }
+            return;
+        }
+
+        for dy in 0..GLYPH_H {
+            let mut at =
+                self.at + (origin_y + dy) as u64 * u64::from(self.pitch) + origin_x as u64 * 4;
+            for &ch in chars {
+                let bits = glyph(ch)[dy];
+                for dx in 0..GLYPH_W {
+                    let value = if bits & (1 << (7 - dx)) != 0 { self.ink } else { self.paper };
+                    // SAFETY: four bytes to a pixel, and the whole run was
+                    // tested against the surface's width and height above, so
+                    // every address this walks is inside it. Four-byte aligned
+                    // because the first pixel is page-aligned and every term
+                    // added to it is a multiple of four. Volatile because a
+                    // display is a device.
+                    unsafe { (at as *mut u32).write_volatile(value) };
+                    at += 4;
+                }
+            }
+        }
+    }
+
     /// Paint the whole surface in [`Surface::paper`].
     ///
     /// # Why this is not sixteen thousand blank glyphs
@@ -648,22 +751,35 @@ impl Console {
         self.col = 0;
         if self.row + 1 < self.rows {
             self.row += 1;
-        } else {
-            self.scroll();
+            return;
         }
+
+        // The screen is full, so it moves — by a block rather than a line, for
+        // the reason [`SCROLL_BLOCK`] gives. Clamped, because a grid shorter
+        // than the block still has to advance by something and one row is what
+        // is left when there is no room for eight.
+        let by = SCROLL_BLOCK.clamp(1, self.rows.saturating_sub(1).max(1));
+        self.scroll(by);
+        self.row = self.rows - by;
     }
 
-    /// Shift the text up one line. The surface is not touched.
-    fn scroll(&mut self) {
-        for row in 1..self.rows {
-            let (above, here) = ((row - 1) * MAX_COLS, row * MAX_COLS);
+    /// Shift the text up `by` rows. The surface is not touched.
+    ///
+    /// This is the half of scrolling that is free: two array walks in ordinary
+    /// cached memory. What costs is the redraw it implies, which is why the
+    /// caller does this rarely rather than often.
+    fn scroll(&mut self, by: usize) {
+        for row in by..self.rows {
+            let (above, here) = ((row - by) * MAX_COLS, row * MAX_COLS);
             for col in 0..self.cols {
                 self.want[above + col] = self.want[here + col];
             }
         }
-        let last = (self.rows - 1) * MAX_COLS;
-        for col in 0..self.cols {
-            self.want[last + col] = b' ';
+        for row in self.rows.saturating_sub(by)..self.rows {
+            let at = row * MAX_COLS;
+            for col in 0..self.cols {
+                self.want[at + col] = b' ';
+            }
         }
     }
 
@@ -671,13 +787,39 @@ impl Console {
     fn flush(&mut self) {
         let Some(surface) = self.surface else { return };
         for row in 0..self.rows {
-            for col in 0..self.cols {
-                let at = row * MAX_COLS + col;
-                if self.want[at] == self.have[at] {
+            let base = row * MAX_COLS;
+            let mut col = 0;
+            while col < self.cols {
+                if self.want[base + col] == self.have[base + col] {
+                    col += 1;
                     continue;
                 }
-                surface.cell(col, row, self.want[at]);
-                self.have[at] = self.want[at];
+
+                // One past the last cell known to differ, and a scan that runs
+                // ahead of it. The run keeps going across a gap of unchanged
+                // cells shorter than `RUN_GAP` — painting over them, which is
+                // idempotent — and ends at the last difference rather than
+                // wherever the scan stopped, so no run has a tail of cells that
+                // did not need drawing.
+                let start = col;
+                let mut end = col + 1;
+                let mut scan = end;
+                while scan < self.cols {
+                    if self.want[base + scan] != self.have[base + scan] {
+                        scan += 1;
+                        end = scan;
+                    } else if scan - end < RUN_GAP {
+                        scan += 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                surface.run(start, row, &self.want[base + start..base + end]);
+                for index in start..end {
+                    self.have[base + index] = self.want[base + index];
+                }
+                col = end;
             }
         }
 
@@ -968,4 +1110,34 @@ pub fn selftest(text: &str) {
         }
         crate::kprintln!("    {}", core::str::from_utf8(&line).unwrap_or("?"));
     }
+
+    // The same characters again, through `run` this time, into a second buffer
+    // — and the two must be identical byte for byte.
+    //
+    // This is the whole check on the sweep, and it is the right shape for it:
+    // `run` exists only to write the pixels `cell` would have written, in a
+    // different order, so *it agrees with `cell`* is not a proxy for
+    // correctness, it is the definition. A faster loop that drew anything else
+    // — off by a row, short by a column, packing the wrong value into the gap
+    // between characters — shows up here as a byte that differs, on a check
+    // that needs no display and no eye.
+    let mut swept = [0u32; (W * H) as usize];
+    let by_run = Surface::over_memory(swept.as_mut_ptr() as u64, W, H);
+    let mut folded = [b' '; (W / GLYPH_W as u32) as usize];
+    for (index, ch) in text.chars().enumerate() {
+        if let Some(slot) = folded.get_mut(index) {
+            *slot = fold(ch);
+        }
+    }
+    by_run.run(0, 0, &folded);
+
+    let agree = pixels.iter().zip(swept.iter()).all(|(a, b)| a == b);
+    // `cell` left the cells past the string untouched and `run` painted them as
+    // spaces, so the comparison is over the characters both were given. The
+    // fold array is the full width of the surface for exactly that reason: both
+    // paths see the same trailing blanks.
+    crate::kprintln!(
+        "  screen        the run sweep and the per-cell blit {}",
+        if agree { "agree" } else { "DIFFER — the sweep is drawing something else" }
+    );
 }

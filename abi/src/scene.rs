@@ -798,9 +798,16 @@ impl Record for CreateNode {
     // wrong width would produce a value that differs from this one. A specimen
     // whose field happens to hold the value a broken decoder invents — zero is
     // the one every broken decoder invents — cannot tell the two apart.
-    // `before` is therefore a real sibling rather than `NO_NODE`; that
-    // `NO_NODE` is legal there is `a_record_that_names_no_node_is_refused`'s
-    // business, not this corpus's.
+    // `before` is therefore a real sibling rather than `NO_NODE`. That leaves
+    // this corpus blind to the one value of `parent` and `before` that carries
+    // a second documented meaning, so the sentinel is observed by
+    // `the_sentinel_this_record_documents_round_trips` instead — and it has to
+    // be observed somewhere, because a decoder that refused `NO_NODE` outright
+    // leaves every test in this module green. Measured: adding
+    // `if before == NO_NODE { return Err(Refusal::NoNode) }` to `read` below
+    // gave `17 passed; 0 failed` before that test existed.
+    // `a_record_that_names_no_node_is_refused` cannot carry this: it asserts
+    // that `node: NO_NODE` is *refused*, which is the opposite question.
     const SPECIMEN: Self = Self { node: 7, parent: 3, before: 11, kind: kind::DRAW };
 
     fn write(&self, out: &mut Writer) {
@@ -1992,6 +1999,31 @@ mod tests {
             assert_eq!(domain, error::ARGUMENT, "{}", refusal.message());
             assert!(!refusal.message().is_empty());
         }
+    }
+
+    #[test]
+    fn the_sentinel_this_record_documents_round_trips() {
+        // `CreateNode::node`'s doc says `NO_NODE` is refused there and
+        // `a_record_that_names_no_node_is_refused` observes that. `parent` and
+        // `before` document the opposite — `NO_NODE` means *no parent* and
+        // *append after the last sibling*, the two edits a client's first frame
+        // is made of — and a sentinel whose meaning is documented and whose
+        // decode nobody observes is a sentence in the format with no guard
+        // under it. `Entry::SPECIMENS` cannot be that guard: its values are
+        // chosen distinct and non-zero on purpose, so that a decoder which
+        // dropped or swapped a field produces a different value, and `NO_NODE`
+        // is `u32::MAX` in both of those fields at once.
+        //
+        // *What would reverse this:* `NO_NODE` losing its second meaning in
+        // `parent` or `before` — at which point the entry below stops being
+        // legal and this test becomes a refusal assertion rather than a round
+        // trip.
+        let rooted = CreateNode { parent: NO_NODE, before: NO_NODE, ..CreateNode::SPECIMEN };
+        let original = delta(Entry::CreateNode(rooted));
+        let (entry, payload) = original.encode();
+        let back = Delta::decode(&entry, &payload)
+            .unwrap_or_else(|refusal| panic!("a rooted, appended node: {}", refusal.message()));
+        assert_eq!(back, original);
     }
 
     #[test]

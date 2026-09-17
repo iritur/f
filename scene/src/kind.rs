@@ -82,9 +82,20 @@
 //! module's whole worth is that a reader can trust the summary.
 //!
 //! A seventh kind, added to the `kinds!` list below and to `abi::scene::kind`,
-//! stops **this file's** build twice — the wire cross-check and the family
-//! census, both const blocks — and stops **`crate::effect`'s** build once, at
-//! `MAY_DECLARE`'s six rows.
+//! stops **this file's** build once, at the family census const block, and
+//! stops **`crate::effect`'s** build once, at `MAY_DECLARE`'s six rows. Two
+//! errors, measured: `error[E0308]` at `scene/src/effect.rs:230` and
+//! `error[E0080]` at the census below.
+//!
+//! **Not the wire cross-check**, which an earlier draft of this paragraph
+//! counted and which a reviewer measured out of it. That const block asks
+//! whether `abi::scene::kind::known` and `from_wire` agree about every `u16`,
+//! and a kind added to *both* lists satisfies it. It fires on a **partial**
+//! addition — one list edited and not the other — which is a different and
+//! narrower event than a seventh kind, and the bullet above says so correctly.
+//! The count is written here rather than left implicit because a reader
+//! auditing this module will audit the number, and a number in a section
+//! titled *checked* has to have been.
 //!
 //! It does not stop three other things, and none of the three is hypothetical:
 //!

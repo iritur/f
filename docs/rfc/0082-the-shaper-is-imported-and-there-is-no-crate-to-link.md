@@ -326,6 +326,36 @@ landed.
    returning anything fails as loudly as a row that appeared. Check 2 stays: a
    `use third_party` and a path row are different mistakes.
 
+   Two corrections to this paragraph, both found by re-reading it against the
+   code rather than against itself. *By any spelling* was false by one
+   character: the scan read TOML's basic strings and not its literal ones, so
+   `path = '../third_party/shaper'` produced nothing, in the path check and in
+   the `members` walk both. It reads both kinds now and has a fixture for each
+   half. And *one more fixture runs the lint against this workspace's own
+   manifests* was true and pinned nothing: it asserted that the walk returned
+   more than one manifest, so adding one directory name to the walker's skip
+   list — `"user"`, which would stop seven crates being read — left it green.
+   It now reads the root manifest's own `members` list and requires a manifest
+   and a source from every crate in it, which is red against exactly that edit.
+
+4. **No other route through a `#[path]` attribute.** *This is the third route,
+   it was missed by both reviews of check 3, and it is the worst of them.*
+   `#[path = "../../third_party/shaper/src/lib.rs"] mod shaper;` in a permissive
+   crate writes no manifest row, so check 3 reads nothing, and no `use`, so
+   check 2 matches nothing — `grep -c` for both of check 2's literals over the
+   consuming file returns 0, and the crate's `Cargo.toml` contains no occurrence
+   of `third_party` at all. What it links is not a crate but a *file*, compiled
+   into the permissive crate under that crate's `unsafe_code = "forbid"` and its
+   `license = "Apache-2.0 OR MIT"` field, with no boundary left to inspect.
+   LICENSING.md rule 1 forbids `use`ing a file under `third_party/` from the
+   permissive tree; this is that, without the `use`. It is also the local idiom
+   rather than an exotic one — `kernel/proofs` and `ring/proofs` both compile a
+   shipped file through `#[path]` — which is what makes it the likeliest of the
+   three to be written by somebody who is not trying to evade anything.
+   `path_attr_findings` refuses it as of this revision, sharing check 3's parser
+   because it is the same grammar at a different layer, and the fixture that
+   drives it red sits beside the others.
+
 **And the removal would have mattered more than the check, which is why the
 first draft leaned on it and why the lean was wrong.** The paragraph that stood
 here said the property is held by there being nothing to write — no workspace
@@ -360,6 +390,31 @@ its first clause — an RFC, accepted, naming which of the two options and what
 would reverse it — and the *by no other route* half of the second, which is now
 a check with fixtures rather than an assertion. The entry is the part that is
 missing, and the task below is the one that lands it.
+
+**RFC 0085 is where that was settled, and it went the way this section implies.**
+Two refusals later the conclusion was that the exit was malformed rather than
+the work skipped: an `S`-sized *decide* task whose exit demanded an
+implementation was two tasks' exits joined by *if*, and the second task was not
+in the decomposition. So `E3-B03a`'s exit line in
+`intent/0012-the-interface/spec.md` was narrowed by RFC 0085 to the decision and
+the checks, with the entry, the ring and `"third_party"` in the root `exclude`
+moved to the task written out below. That is the route RFC 0084 opened for a
+narrowed exit, and the narrowing is in the spec with the number beside it rather
+than only here — which is the whole of what RFC 0084 asked for.
+
+A note on the registry row, because the honest version of it is not the one a
+reviewer reported. `docs/rfc/README.md`'s row for this document was refused for
+still asserting the retracted sentence while the body retracted it; the
+observation behind that was `git diff --stat docs/rfc/README.md` being empty
+across the repair commit, which was true. The row was in fact rewritten one
+commit later, and reading it now shows it quoting *"and by no other route because
+there is no other route to take"* as the claim that **was** retracted, saying a
+reviewer built what it called impossible, and saying in as many words that the
+exit is not closed and which clause. Body and index agree. What the row does not
+yet carry is route 4 above — it names the dependency graph and not the `#[path]`
+attribute — which is a row that is incomplete rather than false, and is owed to
+whoever owns that file, as no agent working in this tree may edit it and no check
+compares a registry row to the RFC it indexes.
 
 What closes it is one task, and the decomposition in `intent/0012-the-interface`
 does not contain it — the eleven `E3-B03` subtasks assume a shaper and none of

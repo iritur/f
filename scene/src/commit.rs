@@ -1529,23 +1529,31 @@ mod tests {
         token: u64,
         /// What the ring slots held before this frame was written into them.
         ///
-        /// The previous commit's slots, index for index. **This is the model's
-        /// load-bearing element**, and `zone/tests/cut.rs` is where it comes
-        /// from: there, an operation that does not land is simply not performed
-        /// against a device that already holds every earlier publish, so the
-        /// medium retains its prior content. A ring is the same medium with a
-        /// shorter memory — `ring/src/lib.rs` initialises its slots once and
-        /// nothing zeroes one on completion — so a slot whose write is not
-        /// visible holds the entry that occupied it last, which is a perfectly
-        /// decodable delta from the frame before.
+        /// **This is the model's load-bearing element**, and `zone/tests/cut.rs`
+        /// is where it comes from: there, an operation that does not land is
+        /// simply not performed against a device that already holds every
+        /// earlier publish, so the medium retains its prior content. A ring is
+        /// the same medium with a shorter memory — `ring/src/lib.rs` initialises
+        /// its slots once and nothing zeroes one on completion — so a slot whose
+        /// write is not visible holds the entry that occupied it last, which is
+        /// a perfectly decodable delta from an earlier frame.
         ///
-        /// The same-index slot of the previous frame rather than the entry
-        /// exactly `N` submissions ago: that is the cheapest faithful choice,
-        /// and the difference between them is which *older* frame the bytes
-        /// come from, not whether they are an older frame's.
+        /// **The last frame that reached each slot, slot by slot — not the
+        /// previous frame's.** The two differ exactly where the previous frame
+        /// was shorter than this one, and the difference is not cosmetic: under
+        /// the previous-frame rule those slots fell back to the zeros of a fresh
+        /// mapping, which is the substitution this whole model exists to remove,
+        /// and a measurement found 66 of them in a single sweep. A producer
+        /// writing shorter and longer frames into one ring leaves each slot
+        /// holding whatever frame last reached *it*, so that is what this holds,
+        /// and `prior_len` is then the ring's high-water mark rather than one
+        /// frame's length.
         prior: [Delta; SLOTS],
-        /// How many of `prior` were ever written. Zero for the first commit of
-        /// a run, whose slots are still the zeros of a fresh mapping.
+        /// How far into the ring the producer has ever written — the high-water
+        /// mark over every frame before this one, not the previous frame's
+        /// length. Zero for the first commit of a run, whose slots are still the
+        /// zeros of a fresh mapping, and that is the only case those zeros are
+        /// the honest answer.
         /// Unit: entries.
         prior_len: usize,
     }
@@ -1553,9 +1561,17 @@ mod tests {
     /// What slot `at` held before this frame reached it.
     ///
     /// The zeros of a fresh mapping only where the producer has genuinely never
-    /// reached that slot — which is the first commit of a run, and nothing
-    /// after it. Everything else is the previous frame's entry, encoded the way
-    /// the producer wrote it.
+    /// reached that slot — `at` past the high-water mark of every frame before
+    /// this one. Everything else is the entry of whichever earlier frame last
+    /// wrote that slot, encoded the way the producer wrote it.
+    ///
+    /// The sentence above was false while `prior_len` was the previous frame's
+    /// length: a target frame longer than the one before it fell back to zeros
+    /// for the slots past that length, and those are slots an earlier frame had
+    /// reached. Measured at 66 stale offers in one sweep, every one of them in
+    /// the direction that makes this module's exit easier — a zeroed slot is
+    /// refused by the decoder, and a decodable one is the case the exit is
+    /// about.
     fn prior_bytes(recorded: &Recorded, at: usize) -> (Sqe, [u8; PAYLOAD_BYTES]) {
         if at < recorded.prior_len {
             recorded.prior[at].encode()
@@ -1597,11 +1613,13 @@ mod tests {
             let len = tree(seed, frame, &mut nodes);
             let mut out = Deltas::<LIMIT>::new();
             assert!(reconciler.frame(&nodes[..len], &mut out).is_ok());
-            // The frame immediately before the target is what the target's
-            // slots held when the producer started writing into them.
-            if frame + 1 == target {
-                let (slots, len) = slots_of(out.as_slice(), token(seed, frame));
-                prior = slots;
+            // Every frame before the target writes its own slots, so what the
+            // target's slots hold when the producer starts writing into them is
+            // the last frame that reached each one — which is this frame for
+            // the slots it covers and an older frame for the rest.
+            let (slots, len) = slots_of(out.as_slice(), token(seed, frame));
+            prior[..len].copy_from_slice(&slots[..len]);
+            if len > prior_len {
                 prior_len = len;
             }
             deliver(&mut arena, out.as_slice(), token(seed, frame));
@@ -1617,6 +1635,42 @@ mod tests {
         let (slots, slot_len) = slots_of(entries, frame_token);
         deliver(&mut arena, entries, frame_token);
         let new = fingerprint(&arena);
+
+        // `new` came out of `deliver`, which is `Batch::offer` and
+        // `Batch::commit` — the code this sweep is about. An oracle produced by
+        // the code under test cannot see a defect that is uniform across every
+        // frame: a `Batch::commit` that dropped the last delta of every frame
+        // would redefine `new` to match itself, and the sweep would report the
+        // new scene as reached. Measured, before this check existed: mutating
+        // the apply loop to `self.edits[..self.len - 1]` left the sweep green.
+        //
+        // So the same frame is applied a second way — `Arena::apply` per delta,
+        // in the order the frame states, with no batch, no seal and no
+        // admission — and the two are required to agree. That is a different
+        // function reached by a different route, which is the whole of what
+        // makes it an oracle. The prefix is replayed identically in both, on
+        // purpose: what is being checked is this frame's application, not the
+        // corpus's.
+        let mut oracle = Arena::EMPTY;
+        replay(seed, target, &mut oracle);
+        for entry in entries {
+            let delta = delta_of(*entry);
+            oracle.apply(&delta).unwrap_or_else(|refusal| {
+                panic!(
+                    "the graph refused a corpus delta the batch applied: {} (seed \
+                     {seed:#018x} target {target})",
+                    refusal.message()
+                )
+            });
+        }
+        assert_eq!(
+            fingerprint(&oracle),
+            new,
+            "the frame applied through `Batch::commit` and the same frame applied delta by \
+             delta left two different scenes, so the sweep's reference for `the new one` \
+             is whatever the batch does rather than what the frame says. seed \
+             {seed:#018x} target {target}"
+        );
 
         if old == new {
             return None;
@@ -1681,10 +1735,26 @@ mod tests {
         /// Frames the graph would not have, refused whole.
         /// Unit: count of commits.
         refused_whole: u64,
-        /// Admission and the graph disagreeing.
+        /// Commits offered a decodable commit entry after this batch had
+        /// already refused something in the same frame. The reachability of the
+        /// rule below: an assertion that a poisoned batch never seals is worth
+        /// nothing in a run where no poisoned batch was ever offered a commit.
+        /// Unit: count of entries.
+        a_commit_offered_after_a_refusal: u64,
+        /// Seals produced by a batch that had already refused an entry in this
+        /// frame. *A batch that refused anything can never produce a key*, as a
+        /// number, and the number is required to be zero.
         /// Unit: count of commits.
-        diverged: u64,
+        sealed_after_a_refusal: u64,
     }
+
+    // There is no `diverged` counter, and the absence is deliberate. `one_cut`
+    // panics on `Refused::Diverged` with the re-run key in the message, so a
+    // counter beside it could only ever be read as zero and an
+    // `assert_eq!(diverged, 0)` at the bottom of the sweep was three lines no
+    // edit to this workspace could redden. Deleting it is the repair: the panic
+    // is the observation, and a second one that cannot fire reads as a second
+    // guard.
 
     /// Sweep one cut point, and answer which scene it left.
     ///
@@ -1749,6 +1819,15 @@ mod tests {
         };
         let torn_at = cut.checked_sub(1);
         let mut stale_in_this_frame = false;
+        // Whether this batch has already refused something in this frame.
+        // `Batch::offer`'s poison early-return is what makes a refusal
+        // permanent, and it is the rule the module's *or none of them* rests
+        // on; without it a frame that lost an entry seals and applies. Measured:
+        // with that early-return deleted, every assertion in this sweep still
+        // passed, because honest mode refuses nothing and every lying-mode
+        // number was a floor that the extra seals only pushed further up. This
+        // flag is what the sweep needed in order to be looking.
+        let mut refused_in_this_frame = false;
 
         for at in 0..cut {
             // A slot the barrier covers arrives whole, which is `zone/tests/
@@ -1785,73 +1864,89 @@ mod tests {
             counted.landed += 1;
 
             match applier {
-                Applier::Staged => match batch.offer(&entry, &payload) {
-                    Ok(Offered::Staged) => {
-                        if !landed {
-                            // A previous frame's entry, believed and taken into
-                            // this frame as one of its own. Nothing in the
-                            // delta format can tell *this slot's bytes belong
-                            // to this frame* from *they belong to the last
-                            // one*, which is the whole of what the zeroed model
-                            // was hiding.
-                            counted.stale_admitted += 1;
-                            stale_in_this_frame = true;
-                        }
+                Applier::Staged => {
+                    // Asked before the offer, because after it the batch has
+                    // consumed the bytes and a poisoned batch answers
+                    // `Poisoned` without saying what it was handed. A commit
+                    // offered to a batch that has already refused an entry is
+                    // exactly the state the poison rule exists to decide.
+                    if refused_in_this_frame
+                        && Delta::decode(&entry, &payload).is_ok_and(|d| d.frame().is_some())
+                    {
+                        counted.a_commit_offered_after_a_refusal += 1;
                     }
-                    Ok(Offered::Sealed(sealed)) => {
-                        if !landed {
-                            counted.stale_admitted += 1;
-                            stale_in_this_frame = true;
+                    match batch.offer(&entry, &payload) {
+                        Ok(Offered::Staged) => {
+                            if !landed {
+                                // A previous frame's entry, believed and taken into
+                                // this frame as one of its own. Nothing in the
+                                // delta format can tell *this slot's bytes belong
+                                // to this frame* from *they belong to the last
+                                // one*, which is the whole of what the zeroed model
+                                // was hiding.
+                                counted.stale_admitted += 1;
+                                stale_in_this_frame = true;
+                            }
                         }
-                        if stale_in_this_frame {
-                            counted.sealed_over_a_stale_entry += 1;
-                        }
-                        let sealed_on = sealed.frame().token;
-                        match batch.commit(&mut arena, sealed) {
-                            Ok(closed) => {
-                                counted.applied += 1;
-                                assert_eq!(closed.frame.token, sealed_on);
-                                // Nothing was torn at this granularity and
-                                // every entry was this frame's, so the token
-                                // that closed the frame has to be the one the
-                                // client sent. At payload granularity it need
-                                // not be, and
-                                // `a_torn_commit_token_names_a_frame_nobody_sent`
-                                // is where that is said out loud; over a stale
-                                // commit it is the *previous* frame's token,
-                                // which is the same finding one slot wider.
-                                if granularity == Granularity::Whole && !stale_in_this_frame {
-                                    assert_eq!(closed.frame.token, recorded.token);
+                        Ok(Offered::Sealed(sealed)) => {
+                            if refused_in_this_frame {
+                                counted.sealed_after_a_refusal += 1;
+                            }
+                            if !landed {
+                                counted.stale_admitted += 1;
+                                stale_in_this_frame = true;
+                            }
+                            if stale_in_this_frame {
+                                counted.sealed_over_a_stale_entry += 1;
+                            }
+                            let sealed_on = sealed.frame().token;
+                            match batch.commit(&mut arena, sealed) {
+                                Ok(closed) => {
+                                    counted.applied += 1;
+                                    assert_eq!(closed.frame.token, sealed_on);
+                                    // Nothing was torn at this granularity and
+                                    // every entry was this frame's, so the token
+                                    // that closed the frame has to be the one the
+                                    // client sent. At payload granularity it need
+                                    // not be, and
+                                    // `a_torn_commit_token_names_a_frame_nobody_sent`
+                                    // is where that is said out loud; over a stale
+                                    // commit it is the *previous* frame's token,
+                                    // which is the same finding one slot wider.
+                                    if granularity == Granularity::Whole && !stale_in_this_frame {
+                                        assert_eq!(closed.frame.token, recorded.token);
+                                    }
+                                }
+                                Err(Refused::Whole { .. }) => counted.refused_whole += 1,
+                                Err(Refused::Diverged { at, refusal, applied }) => {
+                                    panic!(
+                                        "admission and the graph disagreed at delta {at} of \
+                                         the commit ({}), with {applied} delta(s) already \
+                                         applied. This is the one third scene this module \
+                                         does not remove, and the module's `what is left \
+                                         open` says where it is closed. reproduce: seed \
+                                         {seed:#018x} target {} cut {cut} granularity {} \
+                                         mode {} applier {}",
+                                        refusal.message(),
+                                        recorded.target,
+                                        granularity.name(),
+                                        mode.name(),
+                                        applier.name()
+                                    );
                                 }
                             }
-                            Err(Refused::Whole { .. }) => counted.refused_whole += 1,
-                            Err(Refused::Diverged { at, refusal, applied }) => {
-                                counted.diverged += 1;
-                                panic!(
-                                    "admission and the graph disagreed at delta {at} of the \
-                                     commit ({}), with {applied} delta(s) already applied. This \
-                                     is the one third scene this module does not remove, and \
-                                     the module's `what is left open` says where it is closed. \
-                                     reproduce: seed {seed:#018x} target {} cut {cut} \
-                                     granularity {} mode {} applier {}",
-                                    refusal.message(),
-                                    recorded.target,
-                                    granularity.name(),
-                                    mode.name(),
-                                    applier.name()
-                                );
+                        }
+                        Err(Refusal::Wire(_)) => {
+                            refused_in_this_frame = true;
+                            if torn {
+                                counted.torn_refused += 1;
+                            } else if !landed {
+                                counted.stale_refused += 1;
                             }
                         }
+                        Err(_) => refused_in_this_frame = true,
                     }
-                    Err(Refusal::Wire(_)) => {
-                        if torn {
-                            counted.torn_refused += 1;
-                        } else if !landed {
-                            counted.stale_refused += 1;
-                        }
-                    }
-                    Err(_) => {}
-                },
+                }
                 // The control. No batch, no seal, no admission: a delta that
                 // decodes goes straight into the graph, and the commit is the
                 // no-op `arena::Applied::Closes` says it is.
@@ -1903,10 +1998,14 @@ mod tests {
     /// the number is what the ordering pair buys, and a run in which it were
     /// zero would be a run whose model had stopped being the faithful one.
     ///
-    /// The exit this subtask is accepted on says *the graph read back is the
+    /// The exit this subtask is accepted on said *the graph read back is the
     /// old scene or the new one, never a third*, with no clause about the
-    /// ring's ordering. **That is broader than what is delivered**, and the
-    /// difference is the entire content of the paragraph below.
+    /// ring's ordering. That was broader than what is delivered, and the
+    /// difference is the entire content of the paragraph below. It is no longer
+    /// a disagreement between this module and the record: RFC 0084 rules that
+    /// an exit is the sentence a task is accepted on, so narrowing one is a
+    /// reversal, and `intent/0012-the-interface/spec.md`'s `E3-B01d` line now
+    /// carries the clause with the RFC number beside it.
     ///
     /// # Why a lying ring produces one, and why nothing here can stop it
     ///
@@ -1954,6 +2053,25 @@ mod tests {
                 targets_swept += 1;
                 for granularity in [Granularity::Whole, Granularity::Payload] {
                     for mode in [Mode::Honest, Mode::Lying] {
+                        // Honest mode ignores the granularity axis, so sweeping
+                        // it twice counts one observation as two. `covered` is
+                        // `cut` there, the loop runs `0..cut`, so `covered_here`
+                        // holds for every slot: nothing is drawn, nothing is
+                        // stale and `torn` — the only thing granularity decides
+                        // — is false at both settings. Measured before this
+                        // line existed: whole-only and payload-only honest runs
+                        // produced byte-identical counters, so 584 of 1168
+                        // honest cuts were exact repeats of the other 584 and
+                        // the cut count read as twice the evidence it was.
+                        //
+                        // Skipped rather than reported in a comment, because a
+                        // number that overstates a run's breadth is the thing
+                        // the assertions below are written against. This is not
+                        // a narrowing: the set of distinct honest observations
+                        // is unchanged.
+                        if mode == Mode::Honest && granularity == Granularity::Payload {
+                            continue;
+                        }
                         let staged = match mode {
                             Mode::Honest => &mut honest,
                             Mode::Lying => &mut lying,
@@ -2015,16 +2133,24 @@ mod tests {
         }
 
         assert!(targets_swept > 0, "no corpus frame changed the scene, so nothing was swept");
-        assert_eq!(
-            honest.landed + lying.landed,
-            control.landed,
-            "the two appliers swept different cuts"
-        );
+
+        // Three assertions that stood here have been deleted rather than
+        // rewritten, because none of them could be driven to red and an
+        // assertion that cannot fail reads as a guard.
+        //
+        // `honest.landed + lying.landed == control.landed` was an identity:
+        // `counted.landed` is incremented before the `match applier`, and the
+        // eager control is invoked for exactly the (mode, granularity, cut)
+        // triples the staged applier is, so the two sides were the same
+        // additions written twice.
+        //
+        // `honest.diverged == 0` and `lying.diverged == 0` were unreachable:
+        // `one_cut` panics on the `Refused::Diverged` arm, with the re-run key,
+        // so the counter could only ever be observed as zero. The property is
+        // checked — by the panic — and the counter is gone with the assertions.
 
         // The exit's own sentence, as a number, and the clause it holds under.
         assert_eq!(honest.third, 0, "the exit's own sentence, over a ring that kept its order");
-        assert_eq!(honest.diverged, 0, "admission and the graph disagreed");
-        assert_eq!(lying.diverged, 0, "admission and the graph disagreed");
         assert!(
             honest.old > 0 && honest.new > 0,
             "the sweep reached only one of the two scenes, so `the old one or the new one` had \
@@ -2041,11 +2167,12 @@ mod tests {
             honest.new, honest.applied,
             "a commit sealed and the scene it left was not the new one"
         );
-        assert_eq!(
-            honest.old,
-            honest.cuts - honest.applied,
-            "a cut that never sealed left something other than the old scene"
-        );
+        // `honest.old == honest.cuts - honest.applied` stood here and is
+        // deleted for the reason above: one increment per cut makes
+        // `old + new + third == cuts`, and with `third == 0` and
+        // `new == applied` both asserted already it followed arithmetically
+        // from its two neighbours. It restated them; it could not disagree
+        // with them.
         assert!(
             honest.applied > 0 && honest.refused_whole == 0,
             "the honest sweep committed {} frame(s) and had {} refused whole: a corpus frame \
@@ -2076,6 +2203,28 @@ mod tests {
             "no commit ever sealed over a frame carrying an entry that was not its own, so the \
              forbidden state — a commit that sealed over an incomplete frame — was unreachable \
              in this sweep rather than shown absent by it"
+        );
+        // *A batch that refused anything can never produce a key.* The rule
+        // `Batch::offer`'s poison early-return carries, and the one this
+        // module's *or none of them* rests on — stated here as a number,
+        // because until it was the sweep passed with that early-return
+        // deleted and only a separate hand-built test went red. The floor
+        // beside it is what stops the zero being a run in which no poisoned
+        // batch was ever offered a commit.
+        assert!(
+            lying.a_commit_offered_after_a_refusal > 0,
+            "no batch was ever handed a decodable commit after it had already refused an \
+             entry in the same frame, so `a batch that refused anything can never produce \
+             a key` was never asked of this sweep and the zero below means nothing"
+        );
+        assert_eq!(
+            honest.sealed_after_a_refusal + lying.sealed_after_a_refusal,
+            0,
+            "a batch that had already refused an entry produced a seal, so a frame that lost \
+             an entry can be closed — which is the whole of what `Batch::offer`'s poison \
+             is for. {} of them were honest and {} were lying",
+            honest.sealed_after_a_refusal,
+            lying.sealed_after_a_refusal
         );
         assert!(
             lying.refused_whole > 0,
@@ -2155,6 +2304,119 @@ mod tests {
         assert!(matches!(batch.offer(&sqe, &payload), Err(Refusal::Poisoned(_))));
         assert_eq!(fingerprint(&arena), before, "a poisoned frame reached the graph");
         assert!(arena.is_empty());
+    }
+
+    /// The model never serves zeros for a slot the producer has reached.
+    ///
+    /// `prior_bytes`'s doc says the zeros of a fresh mapping appear *only*
+    /// where the producer has genuinely never reached that slot. That sentence
+    /// was false while `Recorded::prior_len` was the previous frame's length: a
+    /// target longer than the frame before it fell back to zeros for the slots
+    /// past that length, and a corpus whose frames vary in length reaches those
+    /// slots all the time. Measured at 8 such slots across 48 targets, which
+    /// one reviewer counted as 66 stale offers once cuts, granularities and
+    /// modes are multiplied out — every one of them in the direction that makes
+    /// this module's exit easier, because a zeroed slot is refused by the
+    /// decoder and a decodable one is the case the exit is about.
+    ///
+    /// The high-water mark is accumulated here a second time, from the recorded
+    /// frames rather than from `prior_len`, and that duplication is the guard:
+    /// a `prior_len` that went back to meaning one frame's length would agree
+    /// with itself and disagree with this.
+    #[test]
+    fn a_slot_an_earlier_frame_reached_is_never_served_as_zeros() {
+        let mut targets = 0u64;
+        let mut served_as_zeros = 0u64;
+        let mut reached_but_zeroed = 0u64;
+        for step in 0..SEEDS {
+            let seed = if step == 0 { FIRST_SEED } else { site(&[FIRST_SEED, step]) };
+            // How far into the ring the corpus had written before each target.
+            let mut ever = [0usize; (FRAMES + 1) as usize];
+            for target in 1..=FRAMES {
+                let before = ever[(target - 1) as usize];
+                let Some(recorded) = record(seed, target) else {
+                    continue;
+                };
+                targets += 1;
+                for at in 0..recorded.len {
+                    if at >= recorded.prior_len {
+                        served_as_zeros += 1;
+                        if at < before {
+                            reached_but_zeroed += 1;
+                        }
+                    }
+                }
+                ever[target as usize] = before.max(recorded.len);
+            }
+        }
+        assert!(targets > 0, "no target was recorded, so nothing was checked");
+        assert!(
+            served_as_zeros > 0,
+            "no slot was ever served the zeros of a fresh mapping, so the branch this test is \
+             about was not taken and the zero below is not evidence"
+        );
+        assert_eq!(
+            reached_but_zeroed, 0,
+            "{reached_but_zeroed} of {served_as_zeros} slot(s) served as a fresh mapping's \
+             zeros had already been written by an earlier frame of the same corpus, so \
+             `prior_bytes` is substituting zeros where a real ring holds a decodable entry \
+             and its doc says the opposite"
+        );
+    }
+
+    /// A second commit in one frame closes nothing.
+    ///
+    /// [`Refusal::AlreadySealed`] was a rule with no test: deleting the
+    /// `if self.sealed` guard from [`Batch::offer`] left every test in this
+    /// module green. It is a cut-adjacent condition — a consumer that
+    /// over-read the ring, a producer that lost its frame boundary — and it is
+    /// one of the routes by which a batch could close a frame that is part this
+    /// one and part the next, which is the class of event this whole file is
+    /// about.
+    #[test]
+    fn a_second_commit_in_one_frame_is_refused_and_poisons_it() {
+        let mut arena = Arena::EMPTY;
+        let mut batch = Batch::<LIMIT>::new();
+        let before = fingerprint(&arena);
+
+        let create = delta_of(Entry::CreateNode(CreateNode {
+            node: ROOT,
+            parent: NO_NODE,
+            before: NO_NODE,
+            kind: kind::LAYER,
+        }));
+        let (sqe, payload) = create.encode();
+        assert!(matches!(batch.offer(&sqe, &payload), Ok(Offered::Staged)));
+
+        let (sqe, payload) = delta_of(Entry::Commit(Commit { frame_token: 5 })).encode();
+        let first = match batch.offer(&sqe, &payload) {
+            Ok(Offered::Sealed(sealed)) => sealed,
+            other => panic!("the first commit did not seal the frame: {other:?}"),
+        };
+
+        // The second one, with a different token: the two frames this batch
+        // would otherwise have to choose between.
+        let (sqe, payload) = delta_of(Entry::Commit(Commit { frame_token: 6 })).encode();
+        assert_eq!(batch.offer(&sqe, &payload).unwrap_err(), Refusal::AlreadySealed);
+        assert!(batch.is_poisoned(), "a second commit was refused without poisoning the frame");
+
+        // And the poison is the permanent kind: everything after it, including
+        // a third commit, answers with the first refusal's message.
+        let (sqe, payload) = create.encode();
+        assert_eq!(
+            batch.offer(&sqe, &payload).unwrap_err(),
+            Refusal::Poisoned(Refusal::AlreadySealed.message())
+        );
+
+        assert_eq!(fingerprint(&arena), before, "a refused second commit reached the graph");
+
+        // The key the *first* commit cut still opens the frame it was cut for.
+        // That is the half worth saying: refusing the second commit is not the
+        // same as throwing the frame away, and a rule that quietly did both
+        // would lose a frame the client completed correctly.
+        let closed = batch.commit(&mut arena, first).expect("the first frame was lost");
+        assert_eq!(closed.frame.token, 5);
+        assert!(arena.holds(ROOT));
     }
 
     /// The other half of the task line, observed: a frame the graph will not
