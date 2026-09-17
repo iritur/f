@@ -86,10 +86,15 @@ use crate::arch::x86_64::current_cpu;
 /// ```
 ///
 /// A second point for the slope means moving this constant and `AP_CORES`
-/// together and building again. *What would stop this going stale:* two builds
-/// in `cargo xtask cores`, comparing the slope and not the intercept — the
-/// intercept is a different number in every commit that changes code, and a
-/// check on it would fire in all of them.
+/// together and building again, and that is now `cargo xtask cores`: two
+/// builds, at 2 and at 64, with the **slope** above required to be the
+/// difference over the span. It was this comment's own reversal condition and
+/// it is discharged — for the slope, and only for the slope. The intercept is
+/// deliberately left out, for the reason the condition gave: it is a different
+/// number in every commit that changes code, and a check on it would fire in
+/// all of them. So the recipe above is still the recipe and still the reader's
+/// job to run — and a green `cargo xtask cores` prints the intercept it
+/// measured on the way past, which is the number to paste here.
 ///
 /// What the machine withholds is not this figure but the page-rounded span
 /// `__kernel_phys_start .. __kernel_end` — 1 871 872 bytes, 457 frames, at
