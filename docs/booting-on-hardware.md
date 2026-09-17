@@ -618,23 +618,34 @@ The cost is linear, and exactly so — these are arrays indexed by the constant
 plus `linker.ld`'s `AP_CORES * AP_STACK_STRIDE`:
 
 ```
-resident(N) = 438 566 + 64 072 × N bytes          62.6 KiB per core
+resident(N) = 1 352 094 + 64 296 × N bytes        62.8 KiB per core
 ```
 
 | MAX_CPUS | resident | AP spin on a 64-thread machine |
 |---|---|---|
-| 2 | 553 KiB | 10 ms |
-| **8** | **929 KiB** | **73 ms** |
-| 16 | 1.40 MiB | 156 ms |
-| 32 | 2.37 MiB | 322 ms |
-| 64 | 4.33 MiB | 655 ms |
+| 2 | 1.41 MiB | 10 ms |
+| **8** | **1.78 MiB** | **73 ms** |
+| 16 | 2.27 MiB | 156 ms |
+| 32 | 3.25 MiB | 322 ms |
+| 64 | 5.21 MiB | 655 ms |
 
-Built at 8, 16 and 64; the model came from the first and third and predicted the
-second to the byte. Most of the 62.6 KiB is not `PerCpu` — 56 KiB is one guarded
-AP stack block, reserved in the image because a guard page needs the mapper that
-builds the kernel window. The ~10.4 ms is a hardcoded sequential spin in
-`ap::wake`: 10 ms after `INIT`, 200 µs after each `STARTUP`, whatever the core
-actually does.
+*Resident* is the sum of the image's allocated sections — `.bss` and `.stacks`
+included, so it is what a loader has to find room for rather than what the file
+weighs. Built at all five of those ceilings, and all five are on the line to the
+byte. Most of the 62.8 KiB is not `PerCpu` — 56 KiB is one guarded AP stack
+block, reserved in the image because a guard page needs the mapper that builds
+the kernel window. The ~10.4 ms is a hardcoded sequential spin in `ap::wake`:
+10 ms after `INIT`, 200 µs after each `STARTUP`, whatever the core actually
+does.
+
+The slope is gated. `cargo xtask cores` links the kernel at two ceilings and
+requires a core to cost 64 296 bytes; the intercept is not checked, because it
+is the kernel's own code and data and moves in every commit that changes a line.
+That asymmetry is worth knowing before trusting the left-hand column: until
+2026-09-17 the intercept here read 438 566, stale by more than a factor of
+three, and it had been wrong for months in both this table and the doc comment
+it is copied from. If you need the absolute number rather than the per-core one,
+re-measure it — the command prints it on a green run.
 
 **The two costs have different shapes.** Memory tracks the *constant* and is
 paid on every machine, including single-core ones. Boot time tracks

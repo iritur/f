@@ -117,6 +117,56 @@ pub fn frame(path: &Path) -> Result<([u8; 32], [Range; 2]), String> {
     Ok((state.finish(), ranges))
 }
 
+/// Every allocated section of a linked image, summed.
+///
+/// What a loader has to find room for, including the parts that arrive as
+/// zeroes: `.bss` and `.stacks` are `NOLOAD` and are counted anyway, because
+/// `sh_size` is what they occupy once the boot stub has zeroed them and they
+/// are where all but a few kibibytes of the per-core cost lives.
+///
+/// This is the quantity `percpu::MAX_CPUS`'s doc comment publishes a model of,
+/// and `xtask`'s `cores` is what holds that model to it. `SHF_ALLOC` is the
+/// selector rather than *has a nonzero address* because being allocated is what
+/// makes a section resident; on this kernel the two definitions pick the same
+/// eight sections, which is how this reader was cross-checked against `size -A`
+/// before it replaced it.
+///
+/// # Errors
+///
+/// A file that cannot be read, or an ELF64 this reader does not believe.
+pub fn resident(path: &Path) -> Result<u64, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("reading {} to size it: {e}", crate::relative(path)))?;
+    let elf = Elf::read(&bytes, &crate::relative(path))?;
+
+    let mut total: u64 = 0;
+    for index in 0..elf.shnum {
+        // `sh_flags` at 8, and `SHF_ALLOC` is bit one.
+        if long(elf.header(index)?, 8) & 0x2 != 0 {
+            total = total.saturating_add(elf.section_at(index)?.size);
+        }
+    }
+    Ok(total)
+}
+
+/// One linker-exported symbol's value, from a linked image.
+///
+/// Separate from [`frame`] because the caller is: `cores` builds the kernel at
+/// a ceiling it chose and reads `__ap_cores` back out to confirm the build it
+/// is about to measure is the build it asked for. That confirmation is the only
+/// thing standing between a source edit that quietly failed to apply and a
+/// command that measures the same image twice and reports the difference.
+///
+/// # Errors
+///
+/// A file that cannot be read, an ELF64 this reader does not believe, or an
+/// image that exports no such symbol.
+pub fn exported(path: &Path, name: &str) -> Result<u64, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("reading {} for `{name}`: {e}", crate::relative(path)))?;
+    Elf::read(&bytes, &crate::relative(path))?.symbol(name)
+}
+
 /// A section header, reduced to the three fields this file uses.
 #[derive(Clone, Copy)]
 struct Section {
@@ -243,10 +293,12 @@ impl<'a> Elf<'a> {
             }
         }
         Err(format!(
-            "{} exports no `{want}`.\n\nkernel/linker.ld is what exports it, and RFC 0012 names \
-             it as one of the four boundaries the frame hash is taken between. A build whose \
-             linker script no longer exports it is a build whose frame hash would be over an \
-             interval nobody wrote down.",
+            "{} exports no `{want}`.\n\nkernel/linker.ld is what exports every symbol this \
+             reader asks for, and a build whose linker script has stopped exporting one is a \
+             build that cannot be measured the way the thing measuring it was written to. For \
+             the four frame boundaries that is RFC 0012's definition, taken over an interval \
+             nobody would have written down; for the application-processor geometry it is what \
+             `smp::self_test` checks the linker's own arithmetic against.",
             self.name
         ))
     }

@@ -271,7 +271,8 @@ docker compose -f docker/compose.yaml run --rm dev cargo xtask verify</pre>
 cargo xtask fault pf     <span class="c"># boot into a deliberate fault: pf ud df nx wx stack</span>
 cargo xtask user         <span class="c"># seven boots; a process breaks one rule each and is killed</span>
 cargo xtask cap          <span class="c"># eight boots; a process tries to escape its capabilities</span>
-cargo xtask cores        <span class="c"># four boots; core counts that do and do not match the machine</span>
+cargo xtask cores        <span class="c"># two builds and four boots; what MAX_CPUS costs, and core counts</span>
+                         <span class="c"># that do and do not match the machine</span>
 cargo xtask mutate       <span class="c"># build the kernel wrong on purpose; the boot must go red</span>
 cargo xtask attest       <span class="c"># five boots; what is this machine running, and does it move</span></pre>
   </div>

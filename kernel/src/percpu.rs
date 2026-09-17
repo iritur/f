@@ -54,14 +54,33 @@ use crate::arch::x86_64::current_cpu;
 /// fit is not a fit:
 ///
 /// ```text
-/// resident(N) = 438 566 + 64 072 * N bytes      62.6 KiB per core
+/// resident(N) = 1 352 094 + 64 296 * N bytes      62.8 KiB per core
 /// ```
 ///
-/// Built at 8, 16 and 64: the model was derived from the first and third and
-/// predicted the second to the byte, 1 463 718. Most of the 62.6 KiB is not
-/// `PerCpu` at all — 56 KiB of it is one guarded application-processor stack
-/// block, reserved in the image because a guard page needs the mapper that
-/// builds the kernel window, and that runs long before any core starts.
+/// *Resident* is the sum of the image's allocated sections, `.bss` and
+/// `.stacks` included: what a loader has to find room for, not what the file
+/// weighs. Built at 2, 8, 16, 32 and 64, and all five land on that line to the
+/// byte — 1 480 686, 1 866 462, 2 380 830, 3 409 566, 5 467 038. Most of the
+/// 62.8 KiB is not `PerCpu` at all — 56 KiB of it is one guarded
+/// application-processor stack block, reserved in the image because a guard
+/// page needs the mapper that builds the kernel window, and that runs long
+/// before any core starts. The remaining 6 952 bytes are the shards.
+///
+/// ## What keeps this current, and what does not
+///
+/// `cargo xtask cores` links the kernel at two ceilings and requires the
+/// **slope** — the 64 296 — to be this one. It is the half that can be gated:
+/// the slope is `AP_STACK_STRIDE` plus the arrays subscripted by this constant,
+/// so it moves only when the sharding does.
+///
+/// The intercept is not checked and is not checkable. It is the kernel's own
+/// code and data, so it is a different number in every commit that changes a
+/// line, and a check on it would be red in all of them. That is the honest
+/// residual rather than an oversight — and it is not a hypothetical one: the
+/// figure here read 438 566 until 2026-09-17, stale by more than a factor of
+/// three, for months, because nothing read it. Whoever next touches this
+/// comment should re-measure the intercept while they are here; `cargo xtask
+/// cores` prints it on a green run for exactly that reason.
 ///
 /// Bring-up costs a further ~10.4 ms per core, and that one is a hardcoded
 /// sequential spin: `ap::wake` waits 10 ms after `INIT` and 200 µs after each
@@ -80,7 +99,7 @@ use crate::arch::x86_64::current_cpu;
 /// speedup. Nothing here schedules work above two cores — `init` runs on one,
 /// the timer on another, and every core past that is started, given tables and
 /// a stack, and parked — so the cores a larger ceiling admits would have had
-/// nothing to do, at 62.6 KiB and 10.4 ms each.
+/// nothing to do, at 62.8 KiB and 10.4 ms each.
 ///
 /// When it does pay, it will pay as *admission capacity* rather than as
 /// throughput: RFC 0007 reserves a core whole, with its SMT sibling and a cache
