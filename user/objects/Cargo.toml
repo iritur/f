@@ -55,6 +55,24 @@ f-env.workspace = true
 [lints]
 workspace = true
 
+# The image half, on by default and turned off by anything that links this crate
+# as a library rather than building it into a component file.
+#
+# It exists for `user/store/Cargo.toml`'s reason and not for a new one: a
+# `#[panic_handler]` is a lang item and there may be exactly one in a linked
+# artefact. `component::start` needs one, because a component has no serial port
+# and no unwinder and stopping is the whole handler, and anything that linked
+# this crate beside its own would collide.
+#
+# Nothing links it today. The workspace row this crate inherits says so in as
+# many words — *adding the feature later is a smaller diff than moving the path*
+# — so the flag gates nothing yet and is written now rather than then, because
+# the day something does link it the collision arrives as a link error in a
+# crate that did not change.
+[features]
+default = ["image"]
+image = []
+
 # The two numbers `E2-B08` owes are a *measurement*, and a libtest harness
 # captures output — so the run that takes them prints them and fails on the
 # bounds beneath them, which is `blob/tests/million.rs`'s arrangement under RFC

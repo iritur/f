@@ -128,6 +128,37 @@ const MODELS: &[(&str, Peer)] = &[
     // `Native` does — and `E1-B05`'s remaining increments are what make that
     // worth writing.
     ("supervisor", Peer::Native),
+    // **A mapping and not a model, and this one has a date on it.** `objects` is
+    // the read path in a place. It declares a `registered` payload rather than
+    // `store`'s `inline` one, because it is the component that moves bytes — so
+    // unlike the two entries above, `Native`'s registration table is not merely
+    // accurate here, it is the half of this component that matters.
+    //
+    // What makes it a mapping rather than a model is what is *below* it, which
+    // today is nothing. The read path reaches a modelled device inside its own
+    // crate; it holds no client of the blk driver's ring, so this component
+    // reaches no device a deployment scenario can see. `Native` — a registration
+    // table, a service time, and nothing below — is the accurate peer for exactly
+    // that, and it stops being accurate on a day that can be named.
+    //
+    // **The reversal this line carried has been re-dated once, and the correction
+    // is worth more than the line.** It said *the day an opcode is answered*.
+    // That day has come — `abi::objects::op::known` admits `READ` and
+    // `user/objects/src/service.rs` answers it — and `Native` did not stop being
+    // accurate. It became *more* so: `sim/src/native.rs` models a component that
+    // resolves the buffer a submission names, does the work, releases it and
+    // answers, which is now what this component is rather than what it was going
+    // to be. The prediction conflated two things a deployment scenario tells
+    // apart: whether a component answers on its own ring, and whether it reaches
+    // a device below it.
+    //
+    // *Reversal, restated on the second of those:* the day `user/objects` holds a
+    // client of the blk driver's ring and resolves a read over it. That is a
+    // component with a device below it that it does not drive, reached over
+    // another component's ring, which is a shape no peer in this enum has. Its
+    // manifest already declares the `sibling:virtio-blk` need, so the diff that
+    // turns that need into a submission is the diff that owes this table a peer.
+    ("objects", Peer::Native),
 ];
 
 /// One component file, held where a [`Record`] may be read out of it.

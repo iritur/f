@@ -459,7 +459,10 @@ pub const SCHEMA: u32 = 1;
 ///
 /// RFC 0010 says a service may add codes freely and may not add domains, and
 /// the store is a service — `E2-B08`'s `user/objects` is the component that
-/// will answer over a ring. `error::argument`'s eight codes are all about a
+/// will answer over a ring, and [`objects`](crate::objects) is that ring's
+/// vocabulary: the opcodes, the one payload width and the refusals live there,
+/// so that a reader looking for them finds a module rather than a component
+/// that does not exist yet. `error::argument`'s eight codes are all about a
 /// *ring entry*: an opcode, a flag bit, a reserved word, a class. A store's
 /// codes are about a record and a device, so they are defined beside the
 /// records rather than in the middle of the ring's vocabulary.

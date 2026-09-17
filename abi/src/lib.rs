@@ -21,6 +21,7 @@ pub mod door;
 pub mod input;
 pub mod layout;
 pub mod manifest;
+pub mod objects;
 pub mod participate;
 pub mod reserve;
 pub mod scene;

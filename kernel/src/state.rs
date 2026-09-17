@@ -255,6 +255,27 @@ pub mod node {
     /// there. `user/supervisor` is the fifth component file and `E1-B05` is why
     /// there is one.
     pub const COMPONENT_TREE_4: u32 = 51;
+
+    /// The sixth place's mount.
+    ///
+    /// **52, by the same two rules that made the fifth 51.** Ids here are
+    /// permanent and never reused, so a sixth slot takes the next free id rather
+    /// than a number that would make the mount run look contiguous;
+    /// and `f_abi::state::validate` requires ids to ascend in the schema's own
+    /// array order, so a node's id and its position are one decision. The sixth
+    /// mount goes last among the nodes that precede [`RESERVED_KIND`], and 52 is
+    /// what *last* means there now.
+    ///
+    /// **The paragraph on [`COMPONENT_TREE_4`] is a record, and this is its
+    /// second entry.** It said a build that grew a further place would find the
+    /// `None` arm at the call site rather than silently publishing into the last
+    /// mount. `E2-B08` grew one — `user/objects` is the sixth component file —
+    /// and that is exactly what happened: the boot refused with *a component's
+    /// state tree could not be published or read back* at the sixth spawn, after
+    /// the place had been built, admitted and spawned. Two builds apart, the same
+    /// design caught the same omission the same way, which is more than either
+    /// occurrence says alone.
+    pub const COMPONENT_TREE_5: u32 = 52;
     /// What this machine is running. RFC 0012.
     ///
     /// The node the exit of `E2-B07` is about: *the machine answers "what are
@@ -368,6 +389,7 @@ pub mod node {
             2 => Some(COMPONENT_TREE_2),
             3 => Some(COMPONENT_TREE_3),
             4 => Some(COMPONENT_TREE_4),
+            5 => Some(COMPONENT_TREE_5),
             _ => None,
         }
     }
@@ -383,7 +405,7 @@ pub mod node {
 }
 
 /// How many nodes this build publishes.
-pub const NODES: usize = 52;
+pub const NODES: usize = 53;
 
 /// The schema, written once and never again for a generation.
 ///
@@ -748,7 +770,15 @@ const SCHEMA: [SchemaEntry; NODES] = [
         unit::ADDRESS,
         b"place4",
     ),
-    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 51 * WORD, 0xEE, unit::NONE, b"reserved"),
+    SchemaEntry::new(
+        node::COMPONENT_TREE_5,
+        node::COMPONENTS,
+        51 * WORD,
+        kind::MOUNT,
+        unit::ADDRESS,
+        b"place5",
+    ),
+    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 52 * WORD, 0xEE, unit::NONE, b"reserved"),
 ];
 
 /// Where the schema block starts: immediately after the header, on the
