@@ -181,7 +181,7 @@ understand this system or to argue with it.
 
 **The books explain it,** one per reader, divided by what the reader takes as
 given. A book carries no permission to be ahead of the code — it says at the top
-of every chapter what fraction of it runs. RFC 0085.
+of every chapter what fraction of it runs. RFC 0087.
 
 1. `docs/book/foundations.html` — the system itself, if you may change it
 2. `docs/book/evidence.html` — the apparatus, if you do not believe any of it.

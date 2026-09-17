@@ -1,4 +1,4 @@
-# RFC 0085: A book is a third kind of document, and it states what it is ahead of
+# RFC 0087: A book is a third kind of document, and it states what it is ahead of
 
 - Status: accepted
 - Date: 2026-09-16

@@ -490,7 +490,7 @@ version 1, beside the one test that covers this ground today —
 a successful one and so cannot see this. It is written here rather than in that
 module's comment because the comment is where it was last asserted and not
 held, and a file is not the place to record what a file does not do. It is owed
-by `E3-B06b` rather than by `E3-B06a`, on RFC 0085's rule that an exit may
+by `E3-B06b` rather than by `E3-B06a`, on RFC 0088's rule that an exit may
 require the artefact its own task produces and not one a later task produces:
 what this task produces is the decision, and a field on `Session` is that file's.
 

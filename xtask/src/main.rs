@@ -786,6 +786,7 @@ fn main() -> ExitCode {
         "lint-manifests" => lint_manifests(),
         "lint-components" => lint_components(),
         "lint-datapath" => lint_datapath(),
+        "lint-registries" => lint_registries(),
         "lint-owed" => lint_owed(),
         "lint-arch-tests" => lint_arch_tests(),
         "lint-snapshot" => lint_snapshot(),
@@ -1000,6 +1001,10 @@ cargo xtask <command>
                      zero copies moves bytes in exactly one function, calls it
                      from exactly one place, and that place is not the data path,
                      and no part of it is called by the frame
+  lint-registries    Every number in docs/rfc/, claims/ and intent/ names one
+                     entry, and every entry that states its own number states
+                     the one it is filed under. A number naming two entries is
+                     a citation naming neither
   lint-owed          The reversal conditions RFC 0008, RFC 0014 and RFC 0015
                      name and this tree has not paid, declared as a set — red
                      the day one of them is paid and the documents go stale
@@ -11489,6 +11494,11 @@ fn lint_all() -> Result<(), String> {
     // where it actually lives — in the source — rather than inferred from a
     // number that cannot move. E1-B02.
     lint_datapath()?;
+    // And the registries a citation addresses by number. It runs beside the
+    // datapath check because both answer *does the thing this tree points at
+    // exist and is it one thing*, and this one had never been asked: three RFCs
+    // shared 0085 for a day with every lint green. RFC 0089.
+    lint_registries()?;
     // And the reversal conditions that have fallen due and are not paid,
     // declared as a set for `CHAOS_GAP`'s reason: a deviation in prose is one
     // nobody re-checks, and the failure that matters is not that it is never
@@ -12194,6 +12204,187 @@ fn lint_datapath() -> Result<(), String> {
         findings.len(),
         findings.join("\n")
     ))
+}
+
+/// One directory whose entries are addressed by a number.
+struct Registry {
+    /// Where the entries live, relative to the workspace root.
+    at: &'static str,
+    /// The extension a numbered entry carries, or `None` when an entry is a
+    /// directory rather than a file.
+    extension: Option<&'static str>,
+    /// What an entry's own first line writes before repeating its number, or
+    /// `None` for a registry whose entries do not repeat it anywhere inside.
+    restates: Option<&'static str>,
+}
+
+/// The three directories where a number is an address rather than a label.
+///
+/// `docs/rfc/`, `claims/` and `intent/` all name their entries `NNNN-title`, and
+/// in all three the number is what a citation carries: `RFC 0060`,
+/// `claims/0017`, `intent/0006-state/spec.md`. **A number that names two entries
+/// is a citation that names neither**, which is what happened to `0085` — three
+/// accepted RFCs, every one of them cited from somewhere else in the tree, and
+/// nothing red anywhere because nothing here read a registry for uniqueness. It
+/// was found by a human reading a directory listing. RFC 0089.
+///
+/// **Not a walker, which is why there is no skip list.** `CLAUDE.md` records
+/// five walkers that each carried a copy of one and four that got it wrong; this
+/// reads three named directories one level deep and recurses nowhere, so there
+/// is nothing for a skip list to be wrong about.
+const REGISTRIES: &[Registry] = &[
+    Registry { at: "docs/rfc", extension: Some("md"), restates: Some("# RFC ") },
+    // A claim's number is in its file name and nowhere inside it — the `name`
+    // field is the reproduction's name and not the number — so there is no
+    // second statement that could disagree with the first.
+    Registry { at: "claims", extension: Some("toml"), restates: None },
+    // An intent is a directory of several files, so the number is on the
+    // directory and what is inside it is `intent.md`, `spec.md` and `plan.md`.
+    Registry { at: "intent", extension: None, restates: None },
+];
+
+/// Every number in every registry names exactly one entry, and every entry that
+/// states its own number states the one it is filed under.
+///
+/// Two failures, and they are different: a **collision** is two entries sharing
+/// a number, which is what RFC 0089 was written about; a **disagreement** is one
+/// entry whose name and title line say different numbers, which is what a
+/// renumbering looks like when somebody renames the file and stops. The second
+/// is the likelier of the two from here on, because the first now has this
+/// check in front of it and the second is the repair for it.
+///
+/// What this cannot do is prevent a collision, and RFC 0089 says so at length: a
+/// lint runs in a tree and a tree cannot see its peers, so two worktrees will
+/// still take `0090` and both will still be green. What changes is that the
+/// *merge* goes red, which is where `docs/postmortem/0001` says the first
+/// execution of a program nobody has run takes place.
+///
+/// **Both halves were broken on purpose before this landed**, because a check
+/// that has only ever passed cannot be told from one that cannot fail — the
+/// argument `user/objects/tests/reads.rs` makes about a threshold, applied to a
+/// lint. Restoring one of the two renumbered files under `0085` printed
+/// *`docs/rfc/` 2 entries share 0085*, naming both; setting `0088`'s title line
+/// back to `# RFC 0085` printed *is filed under 0088 and its title line says
+/// 0085*. Two defects, two messages, neither found by the other.
+fn lint_registries() -> Result<(), String> {
+    let mut findings = Vec::new();
+    let mut total = 0usize;
+
+    for registry in REGISTRIES {
+        let at = registry.at;
+        let entries =
+            std::fs::read_dir(root().join(at)).map_err(|e| format!("reading {at}/: {e}"))?;
+        // Keyed by number rather than collected and sorted afterwards, because
+        // the grouping *is* the question: two names under one key is the whole
+        // finding. `BTreeMap` and not a hash map — RFC 0004, and this file is
+        // read by the determinism lint it implements.
+        let mut taken: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let directory = path.is_dir();
+            match registry.extension {
+                Some(extension) => {
+                    if directory || !path.extension().is_some_and(|had| had == extension) {
+                        continue;
+                    }
+                }
+                None if !directory => continue,
+                None => {}
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else { continue };
+            let Some(number) = leading_number(name) else { continue };
+            total += 1;
+
+            if let Some(prefix) = registry.restates {
+                let rel = format!("{at}/{name}");
+                let text =
+                    std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+                let opens = text.lines().next().unwrap_or_default();
+                match opens.strip_prefix(prefix).and_then(leading_number) {
+                    Some(stated) if stated == number => {}
+                    Some(stated) => findings.push(format!(
+                        "  {rel}  is filed under {number:04} and its title line says {stated:04}"
+                    )),
+                    None => findings.push(format!(
+                        "  {rel}  does not open with `{prefix}NNNN`, so nothing states its \
+                         number except its name"
+                    )),
+                }
+            }
+
+            taken.entry(number).or_default().push(name.to_string());
+        }
+
+        // Both directions, for `DATAPATH`'s reason one function up: a registry
+        // with no entries reports the same zero collisions as a registry with
+        // none that collide, and only one of those is the property holding. A
+        // directory renamed out from under this table goes red here.
+        if taken.is_empty() {
+            findings.push(format!(
+                "  {at}/  holds no numbered entries, so this row checks nothing — either \
+                 the directory moved or the shape did"
+            ));
+            continue;
+        }
+
+        for (number, mut names) in taken {
+            if names.len() < 2 {
+                continue;
+            }
+            // `read_dir` hands entries back in the filesystem's own order, which
+            // differs between two machines holding the same files. Sorted, so
+            // that one failure reads the same way twice.
+            names.sort();
+            findings.push(format!(
+                "  {at}/  {} entries share {number:04}: {}",
+                names.len(),
+                names.join(", ")
+            ));
+        }
+    }
+
+    if findings.is_empty() {
+        println!(
+            "lint-registries: ok  ({total} numbered entries across {} registries, each \
+             number naming one)",
+            REGISTRIES.len()
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{} registry finding(s):\n{}\n\n\
+         A number in `docs/rfc/`, `claims/` or `intent/` is what a citation carries, so a\n\
+         number naming two entries is a citation naming neither. Three RFCs were numbered\n\
+         0085 and all three were cited — `kernel/src/screen.rs` meant one, `CLAUDE.md`\n\
+         another, `intent/0012-the-interface/spec.md` a third — and nothing was red,\n\
+         because nothing read a registry for uniqueness until this.\n\n\
+         The tie-break is RFC 0089's and it is mechanical, so two agents reach the same\n\
+         answer without consulting each other: the number belongs to whichever entry\n\
+         merged into `main` first, and every later claimant is renumbered.\n\n\
+             git log --first-parent origin/main --diff-filter=A -- <path>\n\n\
+         Renumbering changes the file's name and its title line and nothing else. The\n\
+         body, the date and the status stay as they were accepted, because what was\n\
+         decided did not change and only its address did — then repoint the citations,\n\
+         and give the moved entry a row in the registry's README so a reader arriving\n\
+         from an old citation lands somewhere that explains itself.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// The four-digit number a registry entry's name opens with.
+///
+/// `None` for anything that does not open with four digits, which is how a
+/// `README.md`, a `snapshot.json` and a `baselines/` directory are skipped
+/// without a list of their names — a list that would need editing the day a
+/// registry grew a fourth unnumbered file.
+fn leading_number(name: &str) -> Option<u32> {
+    let digits = name.get(..4)?;
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 fn lint_determinism() -> Result<(), String> {
@@ -15586,7 +15777,7 @@ fn spans(text: &str) -> Vec<(String, String)> {
 /// be published there with nothing in `claims/` behind it and the build would
 /// stay green, which is the one thing the claims discipline exists to prevent.
 /// `docs/book/` is that third directory, and widening this is what let it
-/// exist rather than something done afterwards once somebody noticed. RFC 0085.
+/// exist rather than something done afterwards once somebody noticed. RFC 0087.
 ///
 /// **There is no skip list here, and that is deliberate.** `CLAUDE.md` records
 /// that five walkers in this tree carry one and that the four which forgot

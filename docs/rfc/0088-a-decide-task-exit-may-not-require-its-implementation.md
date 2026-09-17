@@ -1,4 +1,4 @@
-# RFC 0085: A decide task's exit may not require its implementation, and `E3-B03a`'s did
+# RFC 0088: A decide task's exit may not require its implementation, and `E3-B03a`'s did
 
 - Status: accepted
 - Date: 2026-09-16
