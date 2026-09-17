@@ -391,12 +391,12 @@ would reverse it — and the *by no other route* half of the second, which is no
 a check with fixtures rather than an assertion. The entry is the part that is
 missing, and the task below is the one that lands it.
 
-**RFC 0085 is where that was settled, and it went the way this section implies.**
+**RFC 0088 is where that was settled, and it went the way this section implies.**
 Two refusals later the conclusion was that the exit was malformed rather than
 the work skipped: an `S`-sized *decide* task whose exit demanded an
 implementation was two tasks' exits joined by *if*, and the second task was not
 in the decomposition. So `E3-B03a`'s exit line in
-`intent/0012-the-interface/spec.md` was narrowed by RFC 0085 to the decision and
+`intent/0012-the-interface/spec.md` was narrowed by RFC 0088 to the decision and
 the checks, with the entry, the ring and `"third_party"` in the root `exclude`
 moved to the task written out below. That is the route RFC 0084 opened for a
 narrowed exit, and the narrowing is in the spec with the number beside it rather

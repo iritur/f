@@ -42,7 +42,7 @@ made executable, `third_party` imported drivers behind a licence boundary.
 `docs/design/*.html` is the reasoning and is ahead of the code by design;
 `docs/book/*.html` explains the system to one reader each and carries no such
 permission, so it states per chapter what runs and cites numbers rather than
-copying them (RFC 0085); `docs/rfc/` is where reversals live.
+copying them (RFC 0087); `docs/rfc/` is where reversals live.
 
 ## Conventions
 
@@ -104,6 +104,12 @@ Added when the same mistake happens twice. Each line is a scar.
 - Writing a directory walker with its own copy of the skip list. Five carry one
   now; the four that forgot `.claude` read four *other* checkouts of this
   repository and reported their findings against this one.
+- Taking a registry number by looking at the tree you can see. Three RFCs were
+  numbered 0085 and all three were cited, so the number identified nothing.
+  Check the peers — `git worktree list`, then every branch — before taking one,
+  and expect the check to be imperfect: `cargo xtask lint-registries` is what
+  makes the next one a red merge instead of a reader's discovery. The tie-break
+  when it happens anyway is merge order into `main`. RFC 0089.
 
 ## How work reaches this repo
 
