@@ -81,18 +81,42 @@ global_asm!(
     // rather than an address plan.
     .long 0, 0, 0, 0, 0
 
-    // Offsets 32..47: the video request, and every field of it says *you
-    // choose*. Asking for a linear framebuffer and naming no size is the widest
-    // request the protocol has, which is what makes the answer a measurement:
-    // GRUB resolves an all-zero request to `auto` and hands back whatever mode
-    // the firmware is already in, so what arrives is the machine's own answer
-    // and not a mode this kernel talked it into. A build that later wants a
-    // particular mode fills these in and finds out what the refusal looks like;
-    // this one is finding out whether there is an answer at all.
+    // Offsets 32..47: the video request. Every field of this was zero at first
+    // — which the protocol reads as *you choose* — and the answer a real
+    // machine gave was 1024 by 768, because that is the mode a firmware is
+    // already sitting in when it hands over. That is the right request for
+    // finding out whether there is an answer at all, and the wrong one for
+    // reading a boot log: at eight by sixteen it is 128 columns by 48 rows, and
+    // this kernel prints lines longer than 128 columns.
+    //
+    // So a size is named, and naming one is safe for a reason worth writing
+    // down rather than trusting. GRUB turns this request into the mode string
+    // `1920x1080x32,1920x1080,auto` — its own construction, not this header's —
+    // and tries those in order. A firmware that cannot do 1920 by 1080 at
+    // thirty-two bits falls to that size at any depth, and then to `auto`,
+    // which is precisely the mode the all-zero request would have produced.
+    // **No arrangement of this header ends with no framebuffer where the empty
+    // one would have got one**, which is the only property that matters here:
+    // the failure to avoid is a machine that boots to a black screen because
+    // its kernel was ambitious about pixels.
+    //
+    // What it costs is the choice. GRUB writes this request into `gfxpayload`
+    // itself, so `GRUB_GFXMODE` no longer decides what the payload gets. A
+    // machine that wants a different mode changes the two numbers below, and
+    // `docs/booting-on-hardware.md` says so beside the menu entry it documents.
+    // Zeroing them restores the firmware's own answer and hands the choice back
+    // to the GRUB configuration.
+    //
+    // 1080p rather than something larger: it is the mode almost every panel and
+    // every virtual machine of this era can set, and at eight by sixteen it is
+    // 240 columns by 67 rows — a full terminal, and the same grid the same
+    // panel shows under Linux. A 4K request would name a mode many firmwares do
+    // not offer before an operating system has loaded a driver for the display,
+    // so it would fall back more often than it would land.
     .long 0                                 // mode_type: 0 linear graphics, 1 EGA text
-    .long 0                                 // width:  no preference
-    .long 0                                 // height: no preference
-    .long 0                                 // depth:  no preference
+    .long 1920                              // width,  in pixels
+    .long 1080                              // height, in pixels
+    .long 32                                // depth,  in bits per pixel
 
     // ------------------------------------------------------- low data + code
     // Linked where it is loaded, so every symbol here is a physical address.

@@ -168,6 +168,41 @@ const CACHE_DISABLE: u64 = 1 << 4;
 /// This entry is the page itself rather than a pointer to a finer table.
 const PAGE_SIZE_BIT: u64 = 1 << 7;
 
+/// In a four-kibibyte page-table entry, the high page-attribute selector.
+///
+/// A page's memory type is index `PAT:PCD:PWT` into the page-attribute table,
+/// so this bit is the top of three. In a *large*-page entry the same selector
+/// is bit 12 instead, which is one reason nothing here maps a framebuffer with
+/// a large page: one constant, one meaning.
+const PAT_BIT: u64 = 1 << 7;
+
+/// `IA32_PAT`.
+const IA32_PAT: u32 = 0x277;
+
+/// What this kernel writes to the page-attribute table.
+///
+/// The architectural default is `0x0007_0406_0007_0406`: entries 0 to 3 are
+/// write-back, write-through, uncacheable-minus and uncacheable, and entries 4
+/// to 7 repeat them. **This changes entry 4 and nothing else**, to
+/// write-combining — the one type the default table does not offer, and the one
+/// a display wants.
+///
+/// # Why changing it needs none of the ceremony the manual describes
+///
+/// The processor's documented procedure for changing this register is careful:
+/// disable caching, flush, invalidate, write, restore. All of that exists
+/// because changing an entry changes the type of memory that may already hold
+/// cached lines under the entry's old meaning.
+///
+/// Entry 4 is reached only by a mapping with [`PAT_BIT`] set, and there are
+/// none: the kernel's own tables, the direct map, every device window and every
+/// user page leave that bit clear. Nothing is cached under entry 4 because
+/// nothing has ever been mapped through it, and entries 0 to 3 — which
+/// everything in this system does use — are written back exactly as found. The
+/// argument is *there is no old meaning*, and it stops holding the moment a
+/// second caller wants a different type in this register.
+const PAT_VALUE: u64 = 0x0007_0401_0007_0406;
+
 /// The translation survives a `CR3` change. Only meaningful once page-global
 /// enable is set, and only correct for a mapping that is identical in every
 /// address space — which is exactly what a kernel mapping is.
@@ -592,6 +627,110 @@ pub unsafe fn map_device(
     }
 
     Ok(DEVICE_OFFSET + phys)
+}
+
+/// Put write-combining into the page-attribute table, on this core.
+///
+/// # Why every core and not just the one that draws
+///
+/// Because the type a page gets is the type the *writing* core's table says it
+/// is, and any core can print. A core that had not run this would find entry 4
+/// still meaning write-back and would write the display through its cache —
+/// which is not slow, it is wrong: the lines would sit in that core's cache
+/// with nothing to flush them, and the screen would show a boot that had
+/// already moved on. The processor requires this register to agree across cores
+/// for the same reason, and this is how it is made to.
+///
+/// Idempotent, and cheap enough to call from the arrival path without asking
+/// whether it has been called: one `wrmsr` of a constant.
+///
+/// # Safety
+///
+/// Call once per core, at ring 0, before that core writes through any mapping
+/// carrying [`PAT_BIT`]. [`PAT_VALUE`] says why this needs none of the
+/// cache-flushing ceremony the manual attaches to this register.
+pub unsafe fn enable_write_combining() {
+    // SAFETY: the caller's guarantee. `PAT_VALUE` leaves entries 0 to 3 exactly
+    // as the processor had them, so no mapping that exists changes meaning.
+    unsafe { super::write_msr(IA32_PAT, PAT_VALUE) };
+}
+
+/// Map one page of a display, write-combining.
+///
+/// # Why a display is not a device window, when it is reached through one
+///
+/// [`map_device`] maps uncacheable, which is what a register needs and needs
+/// for *correctness*: a cached read of a status register returns whatever it
+/// said the first time. A framebuffer has no registers and is never read — the
+/// console that writes it keeps its text in ordinary memory precisely so that
+/// it never has to — so the only thing uncacheable buys there is the cost.
+///
+/// And the cost is the whole of why this function exists. Under uncacheable,
+/// every store is its own bus transaction: a glyph is a hundred and twenty-eight
+/// of them, a full screen at 1080p is two million, and a boot that scrolls
+/// spends most of its time waiting for the bus. Write-combining lets the
+/// processor gather stores into fill buffers and put them out as bursts, which
+/// is the difference between a console that redraws faster than a reader
+/// notices and one that does not.
+///
+/// What it costs is ordering: write-combining stores may reach memory late and
+/// out of order, so anything that needs the screen to be *current* — the last
+/// line before a halt, most of all — must fence. [`fence_stores`] is that, and
+/// the console calls it at the end of every flush.
+///
+/// # Errors
+///
+/// As [`map_device`].
+///
+/// # Safety
+///
+/// As [`map_device`], and `phys` must name a display's memory rather than a
+/// register block: this mapping is *not* uncacheable, so a register read
+/// through it could be answered from a cache line.
+pub unsafe fn map_device_wc(
+    frames: &mut FrameAllocator,
+    space: &AddressSpace,
+    phys: u64,
+    features: Features,
+) -> Result<u64, BuildError> {
+    if phys >= DEVICE_WINDOW {
+        return Err(BuildError::DeviceOutOfWindow);
+    }
+
+    let page = phys & !(PAGE - 1);
+    let virt = DEVICE_OFFSET + page;
+
+    let nx = if features.nx { NO_EXECUTE } else { 0 };
+    let global = if features.global { GLOBAL } else { 0 };
+    // Index 4: the attribute bit set, and the two the device window uses clear.
+    // `PAT_VALUE` is what makes that write-combining.
+    let flags = PRESENT | WRITE | PAT_BIT | nx | global;
+
+    // SAFETY: as `map_device` — the caller has guaranteed the allocator is
+    // rebound onto the direct map of the active space.
+    unsafe { map_page(frames, space.root, virt, page, flags) }?;
+
+    // SAFETY: as `map_device`. A not-present translation may have been cached
+    // as such, and this is a mapping that was not present a moment ago.
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
+    }
+
+    Ok(DEVICE_OFFSET + phys)
+}
+
+/// Make every store this core has issued visible before the next one.
+///
+/// One instruction, and it exists for write-combining: a store to a
+/// write-combining page may sit in a fill buffer until the processor has a
+/// reason to drain it, and *the machine stopped* is not one of those reasons.
+/// Without this, the last thing a boot prints before it hangs is the one line
+/// that never reaches the screen — which is the line somebody is reading the
+/// screen to find.
+pub fn fence_stores() {
+    // SAFETY: `sfence` has no operands, no memory effect of its own and no
+    // privilege requirement. It orders stores and nothing else.
+    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
 }
 
 /// How many tables one process's address space may need.
