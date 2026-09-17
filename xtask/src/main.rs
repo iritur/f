@@ -656,6 +656,7 @@ fn main() -> ExitCode {
         "screen" => screen(args.get(1).map(String::as_str)),
         "deadline" => deadline(args.get(1).map(String::as_str)),
         "runtime" => runtime(args.get(1).map(String::as_str)),
+        "objects" => objects(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
         "component" => components().map(|_| ()),
         // E2-B04. One expression to one root hash, with every leaf printed
@@ -1568,8 +1569,27 @@ const INIT_TEXT: u64 = 0x0040_0000;
 /// difference is only how many pages the frame reserved. E5 is where the
 /// headers are read and where both of these stop existing.
 /// Unit: bytes.
-const IMAGE_MAX: &[(&str, u64)] =
-    &[("virtio-blk", 16 * 4096), ("virtio-net", 16 * 4096), ("virtio-gpu", 16 * 4096)];
+const IMAGE_MAX: &[(&str, u64)] = &[
+    ("virtio-blk", 16 * 4096),
+    ("virtio-net", 16 * 4096),
+    ("virtio-gpu", 16 * 4096),
+    // `objects`, and the row is the answer to a question
+    // `user/objects/src/component.rs` wrote down and could not answer: *whether
+    // the read path fits in what the frame maps.* It does, and the margin is
+    // narrower than the reasoning that preceded it suggested — **49 120 bytes
+    // against 65 536**, where the same image with no opcode reachable was 1848
+    // because `--gc-sections` discarded four crates nothing called.
+    //
+    // Sixteen pages and not four, and the sixteen was already true before this
+    // row existed: `kernel::component::spawn` refuses an image past
+    // `process::TEXT_PAGES`, which is sixteen, and `process::prepare_server`
+    // reserves the same. What was four is `INIT_MAX`, the *default* below, which
+    // belongs to the init and runtime shapes — one page of text and a work ring
+    // nine pages above it — and which this component is not. So the row moves no
+    // reservation: it stops a spawn-shape component being measured against a
+    // runtime-shape bound.
+    ("objects", 16 * 4096),
+];
 
 /// What a component whose shape [`IMAGE_MAX`] does not name may be.
 ///
@@ -1919,7 +1939,7 @@ fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
     let most = image_max(name);
     if bytes > most {
         return Err(format!(
-            "the {package} image is {bytes} bytes and the frame maps {most} for it.\n\n\
+            "the {package} image (shape `{name}`) is {bytes} bytes and the frame maps {most} for it.\n\n\
              A component that outgrows what its shape reserves needs a loader that reads\n\
              its headers, which is E5. Until then this is a real bound, and widening it\n\
              means widening `kernel::process`'s own reservation in the same diff: the two\n\
@@ -10391,6 +10411,97 @@ fn deadline(kind: Option<&str>) -> Result<(), String> {
 /// structured error rather than fault, hang, or believe it. Without this half
 /// the other three would show that adoption is *available* and not that it is
 /// safe.
+/// `E2-B08`'s two halves, and why there are two.
+///
+/// A delivered count of zero and a component nobody submitted to are the same
+/// number. `read` is the positive control and `quiet` is what tells them apart,
+/// which is the arrangement `blk`'s three halves have and the reason
+/// `user/objects/tests/reads.rs` gives about its own provocation: a zero proves
+/// nothing if the same setup would report zero when nothing happened at all.
+const OBJECTS_HALVES: &[(&str, &str)] = &[
+    ("read", "the client submits reads across a real ring and checks every byte it gets back"),
+    ("quiet", "the same component, the same grant, nothing submitted: it must report nothing"),
+    (
+        "provoke",
+        "every read answered through a page cache: the staged count must move and the bytes \
+         must still be right",
+    ),
+];
+
+/// Boot the objects datapath: a component serving a ring from ring 3, and the
+/// frame as its client.
+fn objects(kind: Option<&str>) -> Result<(), String> {
+    let chosen: Vec<&(&str, &str)> = match kind {
+        None => OBJECTS_HALVES.iter().collect(),
+        Some(name) => {
+            let found = OBJECTS_HALVES.iter().find(|(known, _)| *known == name);
+            let Some(found) = found else {
+                let list: Vec<String> =
+                    OBJECTS_HALVES.iter().map(|(n, w)| format!("  {n:<6} {w}")).collect();
+                return Err(format!(
+                    "unknown objects half: {name}
+
+{}",
+                    list.join(
+                        "
+"
+                    )
+                ));
+            };
+            vec![found]
+        }
+    };
+
+    let all = chosen.len() > 1;
+    for (name, what) in chosen {
+        if all {
+            println!(
+                "
+--- objects={name}: {what}"
+            );
+        }
+        let (ending, log) = machine_with(
+            Some(&format!("objects={name}")),
+            &[],
+            Capture::Printed,
+            BOOT_TIMEOUT,
+            BOOT_MEMORY,
+        )?;
+        match ending {
+            Ending::Exited(33) => {}
+            Ending::Exited(35) => {
+                return Err(format!(
+                    "the kernel refused to finish after `objects={name}`. Either the component                      did not serve, or bytes went somewhere the client did not register, or                      what landed is not what the client asked for — the serial log above says                      which, and the verdict that refused is in `kernel/src/objects.rs`."
+                ));
+            }
+            Ending::TimedOut(_) => {
+                return Err(format!(
+                    "`objects={name}` never finished. A component that holds a core and does                      not give it back is the one failure a served datapath has that a spawn                      does not: the boot core is waiting on a mailbox word that will never move."
+                ));
+            }
+            other => return Err(format!("the boot {other}; expected exit 33")),
+        }
+
+        // The exit code says the kernel agreed with itself; this says the stage
+        // ran at all. A boot that carried no `objects` module prints a refusal
+        // and stops, and a green exit with no line would be a half that was
+        // skipped rather than one that held.
+        if !log.contains("the {name} half held") && !log.contains("half held") {
+            return Err(format!(
+                "`objects={name}` exited green and printed no verdict line, so the half did                  not run. The likeliest cause is a boot with no `objects` component file."
+            ));
+        }
+    }
+
+    println!(
+        "
+objects: ok — a component served `objects::op::READ` from ring 3 across a mapped
+                  channel, the content landed in memory the client granted and registered,
+                  and the client checked every byte against arithmetic it did itself."
+    );
+    Ok(())
+}
+
 const RUNTIME_PROVOCATIONS: &[(&str, &str)] = &[
     ("load", "a component schedules its own work; nothing may cross the boundary until it exits"),
     ("provoke", "one crossing on purpose: the count must move, and by exactly as many"),
@@ -17442,16 +17553,42 @@ fn claim_reads(claim: &str, file: &str) -> Result<(), String> {
     claim_compare(
         claim,
         file,
-        &[(
-            "user/objects/tests/reads.rs: 256 reads into the caller's registered buffers",
-            "cargo",
-            &["test", "--release", "-p", "f-objects", "--test", "reads"],
-        )],
+        &[
+            (
+                "user/objects/tests/reads.rs: 256 reads into the caller's registered buffers",
+                "cargo",
+                &["test", "--release", "-p", "f-objects", "--test", "reads"][..],
+            ),
+            // The boot, second, on `claim_topology`'s ordering rule: the test is
+            // seconds and this builds a kernel and six component images, so a
+            // run about to go red on the cheap workload says so before the
+            // expensive one starts — and a run that is red only here has a
+            // finding about the *transport* rather than about the read path.
+            (
+                "cargo xtask objects read: 64 entries across a mapped channel in a boot",
+                "cargo",
+                &["xtask", "objects", "read"][..],
+            ),
+            // And the boot's own provocation, which is the third counter in this
+            // claim and inherits no evidence from the other two. Each half
+            // prints only the rows it is the authority for, so these two boots
+            // feed one table without ever answering the same row twice.
+            (
+                "cargo xtask objects provoke: the same reads through a page cache",
+                "cargo",
+                &["xtask", "objects", "provoke"][..],
+            ),
+        ],
         "Both zeros in this run are counted twice, on opposite sides of the boundary,\n\
          and neither reading derives from the other — so a red row is a real second\n\
          copy or a real residency, not an accounting change. Read the two provocation\n\
          rows first: if they are zero the tallies have stopped moving at all, and\n\
-         every zero above them is a default rather than a count.",
+         every zero above them is a default rather than a count.
+         
+         Three sets of rows and three boundaries: the read path called directly, the
+         same records asked for as entries, and the same design served across a
+         mapped channel in a boot. A row red in one set and green in the others is
+         a finding about that boundary and not about the design.",
     )
 }
 

@@ -46,7 +46,7 @@ pub mod registry;
 
 pub use adopt::{Adopted, Client, Server};
 pub use buffers::{BufferSet, Fixed, Idle, InFlight, Naming, PeerGone, Submitter, Virtual};
-pub use device::{Region, Window};
+pub use device::{Granted, Region, Window};
 pub use doorbell::{Bell, Hardware, Path, Ringer, Silent};
 pub use mapping::Mapping;
 
@@ -755,6 +755,37 @@ impl<'m> Arena<'m> {
             // is whatever the peer had written by then, which is exactly the
             // guarantee the module docs claim and no more.
             *byte = unsafe { self.0[offset + i].get().read_volatile() };
+        }
+        true
+    }
+
+    /// Copy `from` into the arena starting at `offset`.
+    ///
+    /// The mirror of [`Arena::copy_out`], and it exists for the same reason read
+    /// backwards: a *submitter* has to put its payload somewhere before naming
+    /// the offset in an entry, and until `user/objects` there was no submitter in
+    /// this tree that carried one — the frame's own `WRITE_SERIAL` is answered
+    /// out of an arena a test filled, and the three drivers carry everything
+    /// they need in an entry's own fields.
+    ///
+    /// Returns `false` without touching the arena when the range is not wholly
+    /// inside it, which is the second bound rather than the first: a caller that
+    /// framed a payload past the end has already been refused, and this is what
+    /// stops one that forgot from writing past the region.
+    #[must_use]
+    pub fn copy_in(&self, offset: usize, from: &[u8]) -> bool {
+        let Some(end) = offset.checked_add(from.len()) else { return false };
+        if end > self.0.len() {
+            return false;
+        }
+        for (i, byte) in from.iter().enumerate() {
+            // SAFETY: `offset + i` is inside the slice, checked above. Volatile
+            // for `copy_out`'s reason inverted: the peer reads these bytes, so
+            // the store may not be elided, merged or sunk past the point the
+            // entry naming them is published. What orders it against that
+            // publication is the ring's own `Release`, which every submission
+            // goes through after this returns.
+            unsafe { self.0[offset + i].get().write_volatile(*byte) };
         }
         true
     }

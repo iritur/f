@@ -105,6 +105,15 @@
 
 use crate::{Sqe, error, flags};
 
+/// The routing page the frame and the objects component share.
+///
+/// A wire like the entry format above and in the same module for that reason,
+/// not because a board and an opcode space are the same kind of thing: what
+/// they share is that two peers in this tree have to agree on them byte for
+/// byte, which is what this crate is for.
+#[path = "objects/board.rs"]
+pub mod board;
+
 /// Bytes of inline arena one objects entry's payload occupies, whatever its
 /// opcode.
 ///

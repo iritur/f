@@ -565,6 +565,107 @@ impl Region {
     }
 }
 
+/// Memory the frame granted to exactly one component, with no device attached.
+///
+/// The third accessor over frame-granted memory and the only one that hands out
+/// a slice. [`Window`] names a device's registers and [`Region`] names memory a
+/// device is reading and writing while the component runs; for both of those a
+/// `&mut [u8]` would assert an exclusivity that is false, which is RFC 0033's
+/// argument and is unchanged. This names memory that is in no remapping domain,
+/// that the frame mapped for one component, and that the frame does not touch
+/// between the spawn and the join — which is ordinary exclusive ownership, and
+/// RFC 0090 is where saying so was decided.
+///
+/// # What it is for
+///
+/// A component that is its own datapath. A driver never touches its client's
+/// bytes — it resolves a [`Reach`](crate::registry::Reach) and writes the
+/// address into a descriptor, and the device moves them — so a driver needs no
+/// slice and must not have one. `user/objects` has no device under it: the store
+/// is in its own heap, so it is genuinely the thing that moves the bytes into
+/// the buffer its client registered, and there is nowhere else for them to go.
+///
+/// # Why it holds a pointer rather than a slice
+///
+/// So that the borrow is taken per call rather than for the lifetime of the
+/// binding. A struct holding `&'m mut [u8]` would have to be threaded through
+/// every caller as one `&mut`, which is the borrow graph
+/// [`Adopted`](crate::Adopted) records avoiding for a channel; holding the
+/// address and lending the slice out of `&mut self` gives the same exclusivity
+/// with none of that.
+pub struct Granted {
+    base: *mut u8,
+    len: u32,
+}
+
+impl Granted {
+    /// Bind to a region the frame granted.
+    ///
+    /// # Errors
+    ///
+    /// `ARGUMENT/BAD_ADDRESS` for an address no region can be stated against:
+    /// zero, a zero length, or a base this machine cannot hold in a pointer.
+    /// The alignment asked for is one, because bytes have no alignment and the
+    /// whole of what this type offers is bytes.
+    ///
+    /// # Why this is safe to call, and the contract that makes it so
+    ///
+    /// [`Adopted::at`](crate::Adopted::at)'s arrangement, and the obligations
+    /// are stated here rather than gestured at because a caller who is going to
+    /// get one wrong should be looking at them:
+    ///
+    /// - `base` names `len` bytes the frame mapped for **this** component in
+    ///   answer to a capability it holds. There is no check for this and there
+    ///   cannot be one — a component that could tell whether an address was
+    ///   granted would be a component with a page walk — and a caller that
+    ///   invents an address takes a page fault rather than corrupting anything.
+    /// - **No device is attached to those bytes.** They are in no remapping
+    ///   domain, so nothing outside this address space is reading or writing
+    ///   them while this value lives. This is the obligation RFC 0090 turns on
+    ///   and the one a reader should check first; `kernel::process::prepare_server`
+    ///   is the only function in this tree that maps a region into a component
+    ///   without putting it in a domain, and it is where the obligation is
+    ///   discharged today.
+    /// - Nothing else holds a reference into the range, which
+    ///   [`Granted::bytes_mut`] then keeps by taking `&mut self`.
+    pub fn at(base: u64, len: u32) -> Result<Self, i32> {
+        if base == 0 || len == 0 || usize::try_from(base).is_err() {
+            return Err(error::pack(error::ARGUMENT, error::argument::BAD_ADDRESS));
+        }
+        Ok(Self { base: base as *mut u8, len })
+    }
+
+    /// Bytes in the region. Unit: bytes.
+    #[must_use]
+    pub const fn len(&self) -> u32 {
+        self.len
+    }
+
+    /// Never — [`Granted::at`] refuses a zero length — but the pair is
+    /// conventional and the lint asks for it.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The region, as the bytes it is.
+    ///
+    /// `&mut self` is what carries the exclusivity from here on: one of these
+    /// exists per region by [`Granted::at`]'s contract, and the borrow checker
+    /// does the rest. Nothing is copied and nothing is validated — there is
+    /// nothing to validate about a byte.
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: `at`'s contract supplies every obligation and this function
+        // adds none. `base` names `len` mapped bytes the frame granted this
+        // component, no device is attached to them so nothing outside this
+        // address space writes them, alignment is one and is therefore
+        // satisfied, and `&mut self` means no other reference derived from this
+        // value is live. The slice borrows `self` for its own lifetime, so it
+        // cannot outlive the binding the contract is about.
+        unsafe { core::slice::from_raw_parts_mut(self.base, self.len as usize) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
