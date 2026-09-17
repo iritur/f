@@ -12327,19 +12327,38 @@ const INPUT_PATH: &[(&str, &str)] = &[
 /// spelling it was written to catch: a downstream wrapper that keeps the
 /// upstream name both defines and calls `at_interrupt` on one line.
 ///
-/// Three of these — `Instant::now`, `SystemTime::now`, `rdtsc` — are already
-/// refused tree-wide by [`FORBIDDEN`], and they are repeated here on purpose. A
-/// path-scoped rule that leaned on another check for half its spellings would
-/// go quiet the day `DETERMINISM_ALLOW` grew a row covering one of these
-/// crates, and it would go quiet without failing, which is the shape of silence
-/// this file exists to avoid. Two lines is a cheap price for a check that does
-/// not depend on another check's allow-list.
+/// `::now` rather than `Env::now`, and that one row is deliberately three rows
+/// fewer than it was. The old set named the type: `Env::now`, `Instant::now`,
+/// `SystemTime::now`. A reviewer walked past all three by renaming it —
+/// `use f_env::Env as Clock; Clock::now(env)` — and past them again with
+/// `<dyn Env>::now(env)`, which does not contain the text `Env::now` at all.
+/// Naming the *call* instead of the type catches every alias, every trait
+/// object, and the two host clocks it replaces, because `Instant::now` contains
+/// `::now`. It also had to be a replacement rather than an addition: needles are
+/// counted as occurrences, so keeping both would have made one `Instant::now()`
+/// read as two clock readings in the file where the arithmetic is *exactly one*.
+///
+/// The host clocks are still refused here and not left to [`FORBIDDEN`], which
+/// is where they are also refused tree-wide. A path-scoped rule that leaned on
+/// another check for half its spellings would go quiet the day
+/// `DETERMINISM_ALLOW` grew a row covering one of these crates, and it would go
+/// quiet without failing, which is the shape of silence this file exists to
+/// avoid.
+///
+/// *Reversal:* an associated function called `now` that is not a clock —
+/// `Cursor::now`, say. It would be a finding, and the answer is to argue with
+/// the finding rather than to widen the needle, because the needle set is the
+/// whole of what this rule knows.
 const CLOCK_READS: &[(&str, &str, &str)] = &[
     (".now()", "", "the `Env` clock, read as a method"),
-    ("Env::now", "", "the `Env` clock, read as a path"),
+    (
+        "::now",
+        "",
+        "a clock read through a path, whatever the type is called: `Env::now`, \
+         `Clock::now` after an alias import, `<dyn Env>::now`, and the host's \
+         `Instant::now` and `SystemTime::now` behind `Env`'s back",
+    ),
     (".wall()", "", "the `Env` wall clock: a different clock is still a second clock"),
-    ("Instant::now", "", "the host clock, behind `Env`'s back"),
-    ("SystemTime::now", "", "the host clock, behind `Env`'s back"),
     ("rdtsc", "", "the counter, behind everything's back"),
     (
         "at_interrupt(",
@@ -12392,13 +12411,29 @@ const CLOCK_READS: &[(&str, &str, &str)] = &[
 /// returns still cannot become a `StampNanos`, because that type has no
 /// constructor which takes one.
 ///
+/// Two spellings of a clock read survive the needles and are named because a
+/// reviewer wrote them: `e . now ()` with spaces around the dot, and the same
+/// call split over two lines. Neither is closed here and neither is open
+/// either — `cargo xtask lint` runs `cargo fmt --all -- --check`, which refuses
+/// both in any file a crate root reaches, so the check that catches them is a
+/// different check rather than none. That is a dependency between two lints and
+/// it is stated rather than relied on quietly: the day this tree stops running
+/// `fmt` in `lint`, these two spellings become holes.
+///
 /// The `#[cfg(test)]` exclusion is the attributed item and nothing beyond it.
 /// That is worth stating here because for one round it was not: the scan
 /// abandoned the file at the first `#[cfg(test)]`, which on this path — where
 /// every file's tests are last — is most of the path's source, and the limit
 /// was in the code and not in this section. What is skipped now is bounded by
-/// the item's braces, and `a_reading_below_a_closed_test_module_is_still_found`
-/// is the fixture that fails if it stops being.
+/// the item's braces. Two fixtures fail if it stops being, and it takes both,
+/// which the round that wrote the first one did not notice:
+/// `a_reading_below_a_closed_test_module_is_still_found` covers a *downstream*
+/// file, where a missed reading is a finding that is not raised, and
+/// `a_reading_below_the_test_module_of_the_source_file_is_counted` covers
+/// `input/src/stamp.rs`, where a missed reading is the *exactly one* count
+/// coming out right for the wrong reason. Scoping the old `break` to the source
+/// file alone re-blinds the second and leaves the first green, so the first
+/// alone documented a guard it did not provide.
 ///
 /// Nor does it see a crate *off* the path calling `at_interrupt`. That is not a
 /// hole so much as a definition: a crate that stamps input events is on the
@@ -12727,15 +12762,63 @@ pub fn latency_nanos(latched: StampNanos, event: StampNanos) -> u64 {
         // the count clause could be satisfied by a comment.
         assert_eq!(stamp_findings(&held()), Vec::<String>::new());
         assert_eq!(SOURCE_HELD.matches("now()").count(), 3, "the fixture lost what it excludes");
-        // And the exclusion ends where the item does: `SOURCE_HELD` carries a
-        // line below its test module, so the held shape is also the evidence
-        // that the scan comes back rather than stopping at the attribute.
-        assert!(
-            SOURCE_HELD
-                .trim_end()
-                .ends_with("from_wire_nanos(nanos: u64) -> StampNanos { StampNanos { nanos } }"),
-            "the fixture lost the line below its test module"
+        // What used to stand here was an assertion that `SOURCE_HELD` still
+        // ends with a line below its test module, commented as the evidence
+        // that the scan resumes after the attributed item rather than stopping
+        // at it. It was not evidence and it is deleted rather than reworded:
+        // the line below is `from_wire_nanos`, which contains no needle, so
+        // this fixture's result is byte-identical whether the scan resumes
+        // there or runs to the end of the file. An assertion that cannot tell
+        // the two apart reads as protection and is not, which is worse than
+        // nothing. The evidence is a fixture that carries a *reading* below the
+        // module — `a_reading_below_the_test_module_of_the_source_file_is_counted`
+        // — and it is red against the behaviour this was claiming to catch.
+    }
+
+    #[test]
+    fn a_reading_below_the_test_module_of_the_source_file_is_counted() {
+        // The half of the exclusion defect that had no fixture, at the one
+        // location where it decides the answer rather than a line number.
+        // `a_reading_below_a_closed_test_module_is_still_found` covers
+        // `input/src/predict.rs`, and a `break` scoped to the source file alone
+        // leaves that test green while re-blinding `input/src/stamp.rs` below
+        // its tests — which is where the *exactly one* count is decided, so a
+        // second production reading appended to the end of the file goes back
+        // to reading as one and `lint-stamp` prints `ok`. Same defect, opposite
+        // location, and only this fixture is red against it.
+        //
+        // Built from `SOURCE_HELD` rather than copied, so the shape the rule
+        // passes and the shape it must refuse cannot drift apart.
+        let below = format!(
+            "{SOURCE_HELD}pub fn again(env: &dyn Env) -> StampNanos {{ \
+             StampNanos {{ nanos: env.now().as_nanos() }} }}\n"
         );
+        let mut files: Vec<(&str, &str)> = held();
+        files[0] = ("input/src/stamp.rs", below.as_str());
+        let findings = stamp_findings(&files);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("2 clock reading(s)"), "{}", findings[0]);
+        assert!(findings[0].contains("input/src/stamp.rs"), "{}", findings[0]);
+    }
+
+    #[test]
+    fn a_clock_renamed_or_reached_through_a_trait_object_is_still_a_clock() {
+        // Three spellings that walked past the needle set while it named the
+        // type rather than the call. The alias is the one somebody writes
+        // innocently; `<dyn Env>::now` is the one that does not contain the
+        // text `Env::now` at all, which is how it walked past a needle written
+        // to catch exactly it.
+        for (line, what) in [
+            ("pub fn a(e: &dyn Env) -> u64 { Clock::now(e).as_nanos() }\n", "an alias import"),
+            ("pub fn a(e: &dyn Env) -> u64 { <dyn Env>::now(e).as_nanos() }\n", "a trait object"),
+            ("pub fn a() -> u64 { Instant::now().elapsed().as_nanos() }\n", "the host clock"),
+        ] {
+            let mut files = held();
+            files[2] = ("interface/src/ladder.rs", line);
+            let findings = stamp_findings(&files);
+            assert_eq!(findings.len(), 1, "{what}: {findings:?}");
+            assert!(findings[0].contains("::now"), "{what}: {}", findings[0]);
+        }
     }
 
     #[test]
@@ -12747,6 +12830,12 @@ pub fn latency_nanos(latched: StampNanos, event: StampNanos) -> u64 {
         // Same needle, same file, different line number, opposite answer, and
         // nothing printed differently. This fixture is the difference: it is
         // red against the `break` and green against the brace walk.
+        //
+        // It covers a *downstream* file and only that. A `break` scoped to
+        // `is_source` leaves this test green, which for one round was read as
+        // the whole defect being fenced;
+        // `a_reading_below_the_test_module_of_the_source_file_is_counted` is
+        // the other half and neither one implies the other.
         let mut files = held();
         files[1] = (
             "input/src/predict.rs",
@@ -12862,9 +12951,17 @@ const IMPORTED: &str = "third_party";
 /// `deny.toml`'s licence allow-list and `cargo xtask deps` that stand there, and
 /// the row would be a visible one on a workspace that publishes nothing. And it
 /// reads TOML by line rather than by parser, so a `path` key written across two
-/// lines or inside a multi-line string is invisible. Both are stated rather than
-/// closed: the check is a second net, and the first one is that there is nothing
-/// under `third_party/` to point at.
+/// lines, or one whose value is a multi-line (`"""` / `'''`) string, is
+/// invisible. Both are stated rather than closed: the check is a second net, and
+/// the third is [`path_attr_findings`], which closes the route that writes no
+/// manifest row at all.
+///
+/// What is **not** on that list any more, because it was on it by accident:
+/// TOML's literal strings. `path = '../third_party/shaper'` is one character
+/// from the spelling the fixtures test and used to produce nothing, in both this
+/// check and the `members` walk. The reader who finds a route here should assume
+/// the remaining entries are the same kind of gap until a fixture says
+/// otherwise.
 fn licensing_graph_findings(manifests: &[(&str, &str)]) -> Vec<String> {
     let mut findings = Vec::new();
 
@@ -12916,7 +13013,7 @@ fn licensing_graph_findings(manifests: &[(&str, &str)]) -> Vec<String> {
             // The dependency's *name* is not read at all, which is the point —
             // the route this closes is the one taken under a name that says
             // nothing.
-            for value in toml_path_values(&code) {
+            for value in path_key_values(&code) {
                 if reaches_import(dir, &value) {
                     findings.push(format!(
                         "  {rel}:{}  path dependency `{value}` resolves under {IMPORTED}/",
@@ -12931,34 +13028,62 @@ fn licensing_graph_findings(manifests: &[(&str, &str)]) -> Vec<String> {
 }
 
 /// One TOML line with any comment removed, quotes respected.
+///
+/// Both quote characters, because TOML has two string kinds and a check that
+/// knew only one was the defect this function was part of: `path =
+/// '../third_party/shaper'` is a literal string, is one character away from the
+/// spelling the fixtures test, and was invisible. A `'` opens a string only
+/// when no string is already open, so `# cargo's own list` — a comment reached
+/// first — is still a comment, and `[target.'cfg(unix)'.dependencies]` is still
+/// a key.
 fn strip_toml_comment(line: &str) -> String {
     let bytes = line.as_bytes();
-    let mut quoted = false;
+    let mut quote: Option<u8> = None;
     for (i, b) in bytes.iter().enumerate() {
-        match b {
-            b'"' => quoted = !quoted,
-            b'#' if !quoted => return line[..i].to_string(),
+        match (*b, quote) {
+            (b'"' | b'\'', None) => quote = Some(*b),
+            (c, Some(open)) if c == open => quote = None,
+            (b'#', None) => return line[..i].to_string(),
             _ => {}
         }
     }
     line.to_string()
 }
 
-/// Every double-quoted string on a TOML line.
+/// Every quoted string on a TOML line, in either of TOML's two quote
+/// characters.
+///
+/// *Reversal:* a multi-line basic or literal string (`"""` / `'''`). This reads
+/// a line at a time, so the opening delimiter closes against itself and the
+/// body is not read. [`licensing_graph_findings`]'s *What it cannot see*
+/// carries that.
 fn toml_strings(code: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = code;
-    while let Some(open) = rest.find('"') {
+    while let Some(open) = rest.find(['"', '\'']) {
+        let quote = rest.as_bytes()[open] as char;
         let after = &rest[open + 1..];
-        let Some(close) = after.find('"') else { break };
+        let Some(close) = after.find(quote) else { break };
         out.push(after[..close].to_string());
         rest = &after[close + 1..];
     }
     out
 }
 
-/// The value of every `path = "…"` key on a TOML line.
-fn toml_path_values(code: &str) -> Vec<String> {
+/// The value of every `path = "…"` key on a line, in a TOML manifest or in a
+/// Rust `#[path = "…"]` attribute.
+///
+/// One function for both because it is one grammar — a bare key, `=`, a quoted
+/// string — and because the two routes it closes are the same route at two
+/// layers: a manifest row links imported source as a crate, and the attribute
+/// compiles the same file straight into a permissive crate. A second copy of
+/// this parser for the attribute would be the fifth directory walker in this
+/// file's *Common mistakes* entry, one layer down.
+///
+/// Both quote characters, for [`strip_toml_comment`]'s reason on the TOML side.
+/// Rust has no single-quoted string, so on that side the second character costs
+/// nothing and catches nothing; it is here because the parser is shared.
+fn path_key_values(code: &str) -> Vec<String> {
     let mut out = Vec::new();
     let bytes = code.as_bytes();
     let mut from = 0;
@@ -12979,13 +13104,70 @@ fn toml_path_values(code: &str) -> Vec<String> {
         let after = code[from..].trim_start();
         let Some(value) = after.strip_prefix('=') else { continue };
         let value = value.trim_start();
-        if let Some(quoted) = value.strip_prefix('"')
-            && let Some(close) = quoted.find('"')
-        {
-            out.push(quoted[..close].to_string());
+        for quote in ['"', '\''] {
+            if let Some(quoted) = value.strip_prefix(quote)
+                && let Some(close) = quoted.find(quote)
+            {
+                out.push(quoted[..close].to_string());
+                break;
+            }
         }
     }
     out
+}
+
+/// Every `#[path = "…"]` in one Rust source whose value reaches [`IMPORTED`].
+///
+/// # Why this is a third check and not a third string in the second
+///
+/// [`lint_licensing`]'s textual half matches `use third_party` and
+/// `third_party::`; [`licensing_graph_findings`] reads manifest rows. This
+/// route writes neither. `#[path = "../../third_party/shaper/src/lib.rs"] mod
+/// shaper;` compiles imported source **into the permissive crate itself** —
+/// under that crate's `unsafe_code = "forbid"`, under its
+/// `license = "Apache-2.0 OR MIT"` field, with no crate boundary to inspect and
+/// no manifest row to read. It was built and compiled rather than imagined:
+/// `grep -c "use third_party"` and `grep -c "third_party::"` over the consuming
+/// file both return 0, and its `Cargo.toml` contains no occurrence of
+/// `third_party` at all. LICENSING.md rule 1 says no file under `third_party/`
+/// may be `use`d from the permissive tree; this is that, without the `use`.
+///
+/// It is also the idiomatic spelling *here*: `kernel/proofs` and `ring/proofs`
+/// both compile a shipped file through `#[path]`, so it is the mechanism a
+/// contributor in this tree already knows, which is what makes it the likelier
+/// of the three routes rather than the exotic one.
+///
+/// # What it cannot see
+///
+/// An attribute written across two lines, and a `path` key inside
+/// `#[cfg_attr(…)]`. Both are stated rather than closed, on the same terms as
+/// the manifest half: this is the third net, and a route that needs two lines
+/// and a conditional attribute to hide is a route a reviewer reading the diff
+/// will see.
+fn path_attr_findings(rel: &str, text: &str) -> Vec<String> {
+    let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let mut findings = Vec::new();
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.trim_start();
+        // Prose about the rule is not the rule being broken — this file argues
+        // for the check in comments that contain the check's own subject. The
+        // exclusion is cruder than [`strip_to_code`] on purpose: that helper
+        // replaces a string literal with a placeholder, and the string literal
+        // is the text this check has to read.
+        if line.starts_with("//") || line.starts_with('*') {
+            continue;
+        }
+        let Some(at) = line.find("#[") else { continue };
+        for value in path_key_values(&line[at..]) {
+            if reaches_import(dir, &value) {
+                findings.push(format!(
+                    "  {rel}:{}  `#[path]` compiles `{value}` into this crate",
+                    n + 1
+                ));
+            }
+        }
+    }
+    findings
 }
 
 /// Whether `value`, read from a manifest in `dir`, names something under
@@ -13025,6 +13207,8 @@ fn toml_array_opens<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 fn lint_licensing() -> Result<(), String> {
     let mut missing = Vec::new();
     let mut leaked = Vec::new();
+    let mut compiled_in = Vec::new();
+    let mut sources = 0usize;
 
     for path in rust_sources()? {
         let rel = relative(&path);
@@ -13036,11 +13220,15 @@ fn lint_licensing() -> Result<(), String> {
         // The permissive tree may not depend on an imported tree by anything
         // other than the ring protocol. See LICENSING.md.
         //
-        // The SPDX check above applies everywhere, tooling included. This one
-        // cannot: the checker's own source contains the string it searches for.
-        if !is_tooling(&rel) && (text.contains("use third_party") || text.contains("third_party::"))
-        {
-            leaked.push(rel);
+        // The SPDX check above applies everywhere, tooling included. These two
+        // cannot: the checker's own source contains the strings it searches
+        // for, and the fixtures below contain the attribute.
+        if !is_tooling(&rel) {
+            sources += 1;
+            if text.contains("use third_party") || text.contains("third_party::") {
+                leaked.push(rel.clone());
+            }
+            compiled_in.extend(path_attr_findings(&rel, &text));
         }
     }
 
@@ -13072,6 +13260,19 @@ fn lint_licensing() -> Result<(), String> {
             leaked.join("\n  ")
         ));
     }
+    if !compiled_in.is_empty() {
+        problems.push_str(&format!(
+            "\npermissive tree compiles third_party source through {} `#[path]` attribute(s):\n\
+             {}\n\n\
+             This is the route with nothing to inspect: no crate boundary, no manifest\n\
+             row, and no `use` for the check above to match. The imported file is\n\
+             compiled into the permissive crate, under its `unsafe_code = \"forbid\"` and\n\
+             its licence field. The only permitted coupling is a ring. See LICENSING.md\n\
+             and RFC 0082.",
+            compiled_in.len(),
+            compiled_in.join("\n")
+        ));
+    }
     if !graph.is_empty() {
         problems.push_str(&format!(
             "\npermissive tree reaches third_party through {} manifest row(s):\n{}\n\n\
@@ -13087,7 +13288,8 @@ fn lint_licensing() -> Result<(), String> {
 
     if problems.is_empty() {
         println!(
-            "lint-licensing: ok  ({} manifest(s) carry no path into {IMPORTED}/)",
+            "lint-licensing: ok  ({} manifest(s) carry no path into {IMPORTED}/, \
+             {sources} source(s) neither name it nor compile it)",
             manifest_view.len()
         );
         Ok(())
@@ -13098,7 +13300,10 @@ fn lint_licensing() -> Result<(), String> {
 
 #[cfg(test)]
 mod no_route_into_the_import {
-    use super::{licensing_graph_findings, lint_licensing, manifests, reaches_import};
+    use super::{
+        licensing_graph_findings, lint_licensing, manifests, path_attr_findings, reaches_import,
+        relative, root, rust_sources, strip_toml_comment, toml_array_opens, toml_strings,
+    };
 
     /// The workspace root as it stands, reduced to the rows this check reads.
     const ROOT_HELD: &str = "\
@@ -13194,6 +13399,73 @@ f-text = { path = \"text\" }
     }
 
     #[test]
+    fn a_literal_string_is_the_same_row_as_a_basic_one() {
+        // TOML has two string kinds and this check knew one. Single quotes are
+        // one character from the fixture above, and both the path check and the
+        // `members` walk returned nothing against them — a bound that fitted
+        // the counterexamples somebody had already thought of. Each half has a
+        // row here because each half had its own scanner for quotes.
+        let mut files = held();
+        files[1] = (
+            "text/Cargo.toml",
+            "[dependencies]\nf-shape-sys = { path = '../third_party/shaper' }\n",
+        );
+        let findings = licensing_graph_findings(&files);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].starts_with("  text/Cargo.toml:2"), "{}", findings[0]);
+        assert!(findings[0].contains("resolves under third_party/"), "{}", findings[0]);
+
+        let mut files = held();
+        files[0] = ("Cargo.toml", "[workspace]\nmembers = ['abi', 'third_party/shaper']\n");
+        let findings = licensing_graph_findings(&files);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("workspace member"), "{}", findings[0]);
+        assert!(findings[0].starts_with("  Cargo.toml:2"), "{}", findings[0]);
+    }
+
+    #[test]
+    fn a_path_attribute_compiling_the_import_in_is_refused() {
+        // The third route, and the worst of the three: it writes no manifest
+        // row for the graph check and no `use` for the textual one, and what it
+        // links is not a crate but a *file*, compiled into the permissive crate
+        // under that crate's `unsafe_code = "forbid"` and its licence field.
+        // Missed twice, because both existing checks are about something the
+        // route does not do.
+        let findings = path_attr_findings(
+            "text/src/lib.rs",
+            "#[path = \"../../third_party/shaper/src/lib.rs\"]\nmod shaper;\n",
+        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].starts_with("  text/src/lib.rs:1"), "{}", findings[0]);
+        assert!(findings[0].contains("#[path]"), "{}", findings[0]);
+    }
+
+    #[test]
+    fn a_path_attribute_that_stays_in_this_tree_is_not_that_finding() {
+        // The direction it must never fire in, and it is not hypothetical:
+        // `kernel/proofs` compiles a shipped kernel file exactly this way and
+        // `ring/proofs` does the same. A check that refused every `#[path]`
+        // would refuse the tree it ships with, which is how a guard gets
+        // deleted rather than fixed.
+        assert_eq!(
+            path_attr_findings(
+                "kernel/proofs/src/lib.rs",
+                "#[path = \"../../src/cap.rs\"]\nmod cap;\n"
+            ),
+            Vec::<String>::new()
+        );
+        // And prose about the route is not the route. This file argues for the
+        // check in comments that quote it.
+        assert_eq!(
+            path_attr_findings(
+                "text/src/lib.rs",
+                "//! Never: #[path = \"../../third_party/shaper/src/lib.rs\"]\n"
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
     fn prose_about_the_rule_is_not_a_row() {
         // Every manifest in this tree is more comment than TOML, and this
         // file's own argument for the check would otherwise be the check's
@@ -13204,6 +13476,19 @@ f-text = { path = \"text\" }
             "# Never: f-shape-sys = { path = \"../third_party/shaper\" }\n\
              [dependencies]\n\
              f-abi.workspace = true # not path = \"third_party/x\"\n",
+        );
+        assert_eq!(licensing_graph_findings(&files), Vec::<String>::new());
+
+        // An apostrophe in a comment is not a literal string opening, and a
+        // literal string is not a comment. Both directions, because teaching
+        // the comment stripper TOML's second quote character is what made the
+        // row above readable and is the obvious place to have broken this.
+        let mut files = held();
+        files[1] = (
+            "text/Cargo.toml",
+            "[dependencies]\n\
+             f-abi.workspace = true # cargo's own path = \"third_party/x\"\n\
+             description = \"cargo's\" # path = 'third_party/x'\n",
         );
         assert_eq!(licensing_graph_findings(&files), Vec::<String>::new());
     }
@@ -13249,7 +13534,61 @@ f-text = { path = \"text\" }
         // check would be green on a tree whose walker returned nothing, which
         // is the gap between a mechanism that works and one that is wired up.
         lint_licensing().expect("the manifests this tree ships with");
-        assert!(manifests().expect("walking the tree").len() > 1, "a walker that found nothing");
+
+        // And *which* manifests, not how many. `len() > 1` was the whole of
+        // this assertion for one round, and the edit it cannot see is one word
+        // added to the walker's skip list: `"user"` there stops seven manifests
+        // being read, leaves the length far above one, leaves `lint_licensing`
+        // returning `Ok`, and leaves every fixture above green — each one hands
+        // text to the scan directly and not one of them goes through the
+        // walker. So the pin is the workspace's own membership, read from the
+        // root manifest rather than written down here, because a second copy of
+        // the crate list is a list that goes stale silently.
+        let root_manifest =
+            std::fs::read_to_string(root().join("Cargo.toml")).expect("the root manifest");
+        let mut members = Vec::new();
+        let mut inside = false;
+        for raw in root_manifest.lines() {
+            let code = strip_toml_comment(raw);
+            let rest = if inside {
+                Some(code.as_str())
+            } else {
+                toml_array_opens(code.trim_start(), "members")
+            };
+            let Some(rest) = rest else { continue };
+            members.extend(toml_strings(rest));
+            inside = !rest.contains(']');
+        }
+        assert!(members.len() > 20, "the root `members` list did not parse: {members:?}");
+
+        let read: Vec<String> =
+            manifests().expect("walking the tree").iter().map(|p| relative(p)).collect();
+        assert!(
+            read.iter().any(|rel| rel == "Cargo.toml"),
+            "the root manifest is where `[workspace.dependencies]` and `members` live, \
+             and the licensing walk did not read it: {read:?}"
+        );
+        for member in &members {
+            let owed = format!("{member}/Cargo.toml");
+            assert!(
+                read.contains(&owed),
+                "`{owed}` is a workspace member and the licensing walk did not read it"
+            );
+        }
+
+        // The same pin on the other walker, because this lint has two and the
+        // `#[path]` half rides on the source one. A crate whose sources are not
+        // read is a crate that may compile imported source into itself in
+        // silence.
+        let sources: Vec<String> =
+            rust_sources().expect("walking the tree").iter().map(|p| relative(p)).collect();
+        for member in &members {
+            let under = format!("{member}/");
+            assert!(
+                sources.iter().any(|rel| rel.starts_with(&under)),
+                "`{member}` is a workspace member and the licensing walk read none of its sources"
+            );
+        }
     }
 }
 

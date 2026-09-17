@@ -170,7 +170,14 @@
 //! That is a narrower claim than *a delta carrying one and not the other is
 //! refused*, and the difference is not a formality: a peer could not produce a
 //! half declaration if it tried, and the day it can, the refusal will be a
-//! decoder's rather than this function's. What landing the record would take is
+//! decoder's rather than this function's. It is also no longer a narrowing that
+//! lives only here. RFC 0084 rules that an exit is the sentence a task is
+//! accepted on, so narrowing one is a reversal and belongs in the record:
+//! `intent/0012-the-interface/spec.md`'s `E3-B07a` line now carries the
+//! narrower sentence, both of the measurements it rests on, and the RFC number
+//! beside it. A module paragraph that disagreed with the spec would be a false
+//! line waiting for a paste into `TODO.md`, which is exactly what that RFC was
+//! written about. What landing the record would take is
 //! a seventh opcode in `abi/src/scene.rs` — `SET_EFFECT`, carrying a node, an
 //! estimate and a saving — which is an ABI change with an RFC behind it, and it
 //! stops the build of every consumer that decides per opcode: `section_of` and
@@ -625,9 +632,6 @@ mod tests {
     use f_abi::NO_DEADLINE;
     use f_abi::scene::{CreateNode, Delta, Entry, NO_NODE, op};
 
-    /// A deadline far enough from zero to be unmistakably a deadline.
-    const SCHEDULED_AT: u64 = 0x0000_0002_1871_1A00;
-
     /// The node every declaration below is about. Any non-zero value; that it is
     /// non-zero is `CreateNode`'s rule and not this file's.
     const NODE: u32 = 7;
@@ -643,9 +647,18 @@ mod tests {
     ///
     /// Built through `Change::of` rather than by hand, because there is no by
     /// hand: `Created` has no public constructor, which is the property the
-    /// boundary below leans on. The envelope comes from `op::carries_deadline`
-    /// rather than from a literal here, so a change to which opcodes are
-    /// scheduled reaches this file from the list that states it.
+    /// boundary below leans on.
+    ///
+    /// The deadline is [`NO_DEADLINE`] and is asserted to be the only legal
+    /// choice rather than selected by an `if`. What stood here was a
+    /// `SCHEDULED_AT` constant behind
+    /// `op::carries_deadline(body.opcode()) == Some(true)`, which for
+    /// `CREATE_NODE` is `Some(false)` and always has been: the constant was
+    /// never the value used and the branch was a second arm no test could
+    /// reach, dressed as coverage of both. The assertion says the same thing
+    /// the branch pretended to — a change to which opcodes are scheduled
+    /// reaches this file from the list that states it — and unlike the branch
+    /// it goes red when it happens.
     fn created(kind: Kind) -> Created {
         let body = Entry::CreateNode(CreateNode {
             node: NODE,
@@ -653,11 +666,16 @@ mod tests {
             before: NO_NODE,
             kind: kind.wire(),
         });
-        let scheduled = op::carries_deadline(body.opcode()) == Some(true);
+        assert_eq!(
+            op::carries_deadline(body.opcode()),
+            Some(false),
+            "a create delta may now carry a deadline, so this helper's envelope is no longer \
+             the only legal one for it"
+        );
         let delta = Delta {
             user_data: 0,
             class: 0,
-            deadline: if scheduled { SCHEDULED_AT } else { NO_DEADLINE },
+            deadline: NO_DEADLINE,
             payload_offset: 0,
             flags: 0,
             body,
@@ -786,7 +804,13 @@ mod tests {
         // copy-pasted sentence shipped green. That is this repository's own
         // listed mistake, and the macro is the same repair it made twice
         // before.
-        assert_eq!(Undeclared::ALL.len(), Undeclared::COUNT);
+        // `assert_eq!(Undeclared::ALL.len(), Undeclared::COUNT)` stood here and
+        // is deleted rather than kept: `ALL` is declared
+        // `[Self; Self::COUNT]`, so its length *is* `COUNT` by its own type and
+        // no edit to this workspace could make the comparison false. It sat at
+        // the head of the one test that is a guard and read like a third one.
+        // The loop below is the guard, and a mutation that gave two variants
+        // one sentence reddens it.
         for (at, one) in Undeclared::ALL.iter().enumerate() {
             assert!(!one.message().is_empty(), "{one:?} has no sentence");
             for other in &Undeclared::ALL[at + 1..] {

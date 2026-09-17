@@ -61,6 +61,42 @@ comment: see *What this decision owes*, where the conflicting statements in
 `abi/src/lib.rs` about what a `PEER` detail word carries are recorded as an
 outstanding edit rather than quoted selectively.
 
+*Once per epoch* is the rule, and where that rule is **held** is worth writing
+down rather than rounding to *enforced*, because today it is held over
+agreements and not over attempts. `Session` in `abi/src/semantic.rs` remembers
+an agreement and refuses a second one with `Refusal::Renegotiated`; it remembers
+nothing whatever about a handshake it *refused*. So a peer whose range does not
+overlap is told this side's ceiling — the detail word above — and may then
+re-offer inside the same epoch without limit. That is measured rather than
+feared: on one `Session::opening(1)`, a million `{highest: 10, floor: 5}`
+handshakes are each refused `VersionUnsupported { offered: 1 }` and each leave
+`agreed` and `poisoned` at `None`, and the million-and-first entry, offering
+`{highest: 1, floor: 1}`, is agreed. The same missing memory is why *first*
+means first **accepted** and not first offered: a `DeclareNode` sent ahead of
+the handshake is refused `NotNegotiated` and poisons the frame, the `Commit`
+that ends the frame clears the poison, and the handshake is then agreed as the
+third entry the channel carried. Nothing is admitted before the handshake, which
+is the half the decision needs and the half that holds; the number of entries
+refused in front of it is bounded by nothing.
+
+RFC 0011 gets that bound for free and this RFC does not, which is a price of
+moving the handshake in band and is charged here rather than in a footnote.
+There the range is a header field, so a peer cannot re-state it without
+re-opening the channel, and re-opening moves the epoch; here the range is an
+entry, and an entry can simply be sent again. The bound therefore has to be a
+rule the receiver keeps, and the receiver keeps no such rule today. What would
+close it is one `Session` field and no new opcode — a refused negotiation made
+**terminal for the epoch**, recorded where a `Commit` does not clear it, so that
+every later entry of that epoch, a second `DeclareVocabulary` included, is
+refused with the standing `VersionUnsupported` until `follow_epoch` moves. That
+is the rule the frame poison already follows one level down — *the first is the
+cause and the rest are consequences* — applied to the channel rather than to the
+frame. It is owed below, with the test that has to go red without it. Until it
+lands, this clause binds a receiver only if the receiver keeps it itself, and
+the second reversal condition below — *a component that has to lie about its
+version to work* — is not merely available but free: the refusal names the
+version to claim, and nothing charges for claiming it.
+
 **Two.** A version ordinal is worth negotiating only if it identifies the **same
 list** on both sides, so the vocabulary's indices are **append-only**. A new role
 is appended and carries the version it was introduced in; no role is reordered;
@@ -390,9 +426,10 @@ threshold.
 
 ## What this decision owes, and who owns it
 
-Six items live in files this RFC does not touch, and one row below is here to
-record something that is **not** owed any more. They are listed so that absence
-is visible rather than assumed, in the manner RFC 0077 established — and so that
+Seven items live in files this RFC does not touch, one of them in a file the
+row below otherwise records as paid, and that row is also here to record
+something that is **not** owed any more. They are listed so that absence is
+visible rather than assumed, in the manner RFC 0077 established — and so that
 a row describing a tree this is not gets corrected rather than quoted. Two of
 these rows previously said the opposite of the truth: that `abi/src/semantic.rs`
 did not exist, and that this RFC had no row in the index. Both were false on the
@@ -413,12 +450,13 @@ one hand-written second copy this decision asks for, and it is the correct kind 
 it copies a fact that has already happened, and the whole value of it is that it
 does *not* follow the list.
 
-**`abi/src/semantic.rs` — `E3-B06b`'s file. Paid, and this is what it pays.**
-Not owed: it is in the tree, and this paragraph describes it rather than asking
-for it. The `DeclareVocabulary` entry is in `scene.rs`'s established shape — one
-fixed-width payload, the private `Reader` already in that crate, and
-`Reader::finish` refusing a non-zero tail so that an unread field is refused
-structurally rather than against a list of field names written out by hand.
+**`abi/src/semantic.rs` — `E3-B06b`'s file. Paid but for one clause, and this
+is what it pays.** Not owed, except for the last paragraph of this row: the file
+is in the tree, and what follows describes it rather than asking for it. The
+`DeclareVocabulary` entry is in `scene.rs`'s established shape — one fixed-width
+payload, the private `Reader` already in that crate, and `Reader::finish`
+refusing a non-zero tail so that an unread field is refused structurally rather
+than against a list of field names written out by hand.
 Payload: the writer's highest vocabulary version and its floor, both `u16`,
 everything else zero. Protocol constants `VOCABULARY_VERSION` and
 `VOCABULARY_VERSION_MIN`, both 1 today. Three refusals with names rather than
@@ -435,6 +473,26 @@ What that file does **not** carry, so the absence is visible: no `since` column
 and no `Role::from_index`, because both live in `interface/src/node.rs` and are
 owed above. Until they exist, the join between an admitted ordinal and a `Role`
 is unwritten, and the component that owns the tree (`E3-B06c`) is where it lands.
+
+And one rule of part one that file **states rather than holds**: the epoch has
+no memory of a refused negotiation. `Session` refuses a second handshake only
+once a first one has succeeded, so *may appear once per channel epoch* binds
+agreements and not attempts, and a peer refused for no overlap may re-offer
+within the epoch without limit — which the detail word makes cheap, since the
+refusal names the version to claim. What is owed is one field on `Session`: the
+refusal recorded where a `Commit` does not clear it, and every later entry of
+that epoch, a second `DeclareVocabulary` included, refused with that standing
+`Fault` until `follow_epoch` moves. Owed with it, because an owed mechanism with
+no failing test is a wish: a refused `{highest: 10, floor: 5}` followed on the
+same `Session` by `{highest: 1, floor: 1}`, which today returns `Ok` and agrees
+version 1, beside the one test that covers this ground today —
+`the_vocabulary_is_agreed_once_per_epoch`, which re-sends a handshake only after
+a successful one and so cannot see this. It is written here rather than in that
+module's comment because the comment is where it was last asserted and not
+held, and a file is not the place to record what a file does not do. It is owed
+by `E3-B06b` rather than by `E3-B06a`, on RFC 0085's rule that an exit may
+require the artefact its own task produces and not one a later task produces:
+what this task produces is the decision, and a field on `Session` is that file's.
 
 **`abi/src/lib.rs` — two doc comments that disagree, and this RFC leans on
 one.** `error::PEER`'s domain documentation says the detail word carries *the
@@ -492,6 +550,18 @@ doing all the work. The right response would be to make deliberate degradation
 cheap — a way for an author to declare, per node, which older role a newer one
 falls back to — rather than to let the lying continue under a rule that forbids
 it.
+
+**The once-per-epoch clause staying unheld.** Part one says the handshake may
+appear once per channel epoch; today that binds agreements and not attempts, and
+the field that would bind attempts is owed above. The reversal is not the gap —
+the gap is written down — it is the gap outliving the argument for it. If the
+owed `Session` field is not written, the honest edit is to **delete the clause**
+and say in its place that a receiver bounds retries itself, because a rule
+stated and unkept is read by a peer as permission and by a reader as protection,
+and it is the second of those that costs. Watch for it arriving as a comment
+claiming the bound rather than a field holding it: that is how it read before
+this paragraph, and a reviewer had to run a million handshakes to find out
+otherwise.
 
 **Boundary refusals being routine rather than exceptional.** After a handshake, a
 refused frame means a peer sent an ordinal it had just agreed not to send. One is
