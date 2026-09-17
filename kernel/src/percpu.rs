@@ -49,38 +49,60 @@ use crate::arch::x86_64::current_cpu;
 ///
 /// # What it costs, measured
 ///
-/// The whole cost is linear, and exactly so — these are arrays indexed by this
-/// constant, plus `linker.ld`'s `AP_CORES * AP_STACK_STRIDE`, which is why the
-/// fit is not a fit:
+/// *Resident* here is the sum of the image's allocated sections — what the
+/// linker reserves, loaded or not. The cost is linear in this constant, and
+/// exactly so, because every term is an array indexed by it plus `linker.ld`'s
+/// `AP_CORES * AP_STACK_STRIDE`, which is why the fit is not a fit:
 ///
 /// ```text
 /// resident(N) = 1 352 094 + 64 296 * N bytes      62.8 KiB per core
 /// ```
 ///
-/// *Resident* is the sum of the image's allocated sections, `.bss` and
-/// `.stacks` included: what a loader has to find room for, not what the file
-/// weighs. Built at 2, 8, 16, 32 and 64, and all five land on that line to the
-/// byte — 1 480 686, 1 866 462, 2 380 830, 3 409 566, 5 467 038. Most of the
-/// 62.8 KiB is not `PerCpu` at all — 56 KiB of it is one guarded
-/// application-processor stack block, reserved in the image because a guard
-/// page needs the mapper that builds the kernel window, and that runs long
-/// before any core starts. The remaining 6 952 bytes are the shards.
+/// Built at 2, 8, 16, 32 and 64, on 2026-09-17 at `a8e5f31`: the model is taken
+/// from the two ends and predicts the middle three to the byte — 1 866 462,
+/// 2 380 830 and 3 409 566. The per-core term decomposes exactly, and most of
+/// it is not `PerCpu` at all:
 ///
-/// ## What keeps this current, and what does not
+/// ```text
+/// 57 344   one guarded application-processor stack block, AP_STACK_STRIDE
+///  4 504   .bss, of which the interrupt descriptor table is 4 096
+///  2 448   .data
+/// ```
 ///
-/// `cargo xtask cores` links the kernel at two ceilings and requires the
-/// **slope** — the 64 296 — to be this one. It is the half that can be gated:
-/// the slope is `AP_STACK_STRIDE` plus the arrays subscripted by this constant,
-/// so it moves only when the sharding does.
+/// The stack block is reserved in the image rather than allocated at bring-up
+/// because a guard page needs the mapper that builds the kernel window, and
+/// that runs long before any core starts.
 ///
-/// The intercept is not checked and is not checkable. It is the kernel's own
-/// code and data, so it is a different number in every commit that changes a
-/// line, and a check on it would be red in all of them. That is the honest
-/// residual rather than an oversight — and it is not a hypothetical one: the
-/// figure here read 438 566 until 2026-09-17, stale by more than a factor of
-/// three, for months, because nothing read it. Whoever next touches this
-/// comment should re-measure the intercept while they are here; `cargo xtask
-/// cores` prints it on a green run for exactly that reason.
+/// **The intercept is this kernel's code and it rots. The slope is this
+/// constant and does not.** The intercept read 438 566 here until 2026-09-17,
+/// against a `.text` a third of today's — wrong by more than fourteen cores'
+/// worth of the per-core term it is the intercept of, while nothing about
+/// sharding had moved. So quote the slope, and re-read the intercept before
+/// quoting it:
+///
+/// ```text
+/// cargo build -p f-kernel --target x86_64-unknown-none -Zbuild-std=core,compiler_builtins
+/// size -A target/x86_64-unknown-none/debug/f-kernel   # every section with an address
+/// ```
+///
+/// A second point for the slope means moving this constant and `AP_CORES`
+/// together and building again, and that is now `cargo xtask cores`: two
+/// builds, at 2 and at 64, with the **slope** above required to be the
+/// difference over the span. It was this comment's own reversal condition and
+/// it is discharged — for the slope, and only for the slope. The intercept is
+/// deliberately left out, for the reason the condition gave: it is a different
+/// number in every commit that changes code, and a check on it would fire in
+/// all of them. So the recipe above is still the recipe and still the reader's
+/// job to run — and a green `cargo xtask cores` prints the intercept it
+/// measured on the way past, which is the number to paste here.
+///
+/// What the machine withholds is not this figure but the page-rounded span
+/// `__kernel_phys_start .. __kernel_end` — 1 871 872 bytes, 457 frames, at
+/// eight, and not quite linear because section padding is not. That one is
+/// checkable from a boot log rather than from an image: on the 128 MiB fixture
+/// the allocator reports `frames 31978 free of 31978`, which is the 32 479
+/// frames of usable memory above 1 MiB, less those 457 and the 44 the boot
+/// modules take.
 ///
 /// Bring-up costs a further ~10.4 ms per core, and that one is a hardcoded
 /// sequential spin: `ap::wake` waits 10 ms after `INIT` and 200 µs after each
@@ -94,9 +116,11 @@ use crate::arch::x86_64::current_cpu;
 ///
 /// # Why it is still eight
 ///
-/// It was raised to 64 for a Threadripper 2990WX, measured, and put back. The
-/// numbers above are that experiment; the reasoning is that a ceiling is not a
-/// speedup. Nothing here schedules work above two cores — `init` runs on one,
+/// It was raised to 64 for a Threadripper 2990WX, measured, and put back. That
+/// experiment is where the shape of the numbers above came from — they have
+/// been re-measured since, and the sweep is cheap enough to repeat that the
+/// decision need not rest on a remembered figure. The reasoning is that a
+/// ceiling is not a speedup. Nothing here schedules work above two cores — `init` runs on one,
 /// the timer on another, and every core past that is started, given tables and
 /// a stack, and parked — so the cores a larger ceiling admits would have had
 /// nothing to do, at 62.8 KiB and 10.4 ms each.
