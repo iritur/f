@@ -39,10 +39,17 @@ schema = 1
 # the moment the code changes and the moment somebody remembers.
 frame = "kernel"
 
-# The five components, in canonical order. This is exactly `COMPONENTS` in
-# `xtask/src/main.rs`, and the compiler refuses a name that list does not build
-# rather than emitting a leaf for a component file nothing produces.
-component = ["store", "supervisor", "virtio-blk", "virtio-gpu", "virtio-net"]
+# The six components, in canonical order. This is exactly `COMPONENTS` in
+# `xtask/src/main.rs` as a set, and the compiler refuses a name that list does not
+# build rather than emitting a leaf for a component file nothing produces. The two
+# orders differ on purpose and neither is the other's: that list is the order the
+# loader carries the modules in, and this one is bytewise on the name, which is
+# why `objects` is first here and last there.
+#
+# `objects` holds no route yet. It declares an optional `block` need, so the
+# assembler has nothing to refuse and nothing to check — and the day that need
+# stops being optional is the day a `[[route]]` for it belongs below.
+component = ["objects", "store", "supervisor", "virtio-blk", "virtio-gpu", "virtio-net"]
 
 # The routes. Two of them, and they are the two the datapath already boots:
 # `cargo xtask blk` moves a sector from a client through `virtio-blk`, and

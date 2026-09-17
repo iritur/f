@@ -1378,7 +1378,8 @@ fn image_dir(name: &str) -> PathBuf {
 /// manifest, every existing boot depends on it being first, and RFC 0030 says
 /// why that position is the contract. Everything here follows it, each as one
 /// module holding a record and an image.
-const COMPONENTS: &[&str] = &["store", "supervisor", "virtio-blk", "virtio-net", "virtio-gpu"];
+const COMPONENTS: &[&str] =
+    &["store", "supervisor", "virtio-blk", "virtio-net", "virtio-gpu", "objects"];
 
 /// Every component the *source tree* declares, by the name in its manifest.
 ///

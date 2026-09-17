@@ -265,7 +265,7 @@ const OCCUPANT_MICROS: u64 = 500_000;
 /// build where the boot half of RFC 0035's pair silently covered less than the
 /// workload half, which is exactly the drift `JOIN_GAP` was built to make
 /// visible.
-const PLACES_MAX: usize = 5;
+const PLACES_MAX: usize = 6;
 
 /// Why the lifecycle could not do what it was asked.
 ///

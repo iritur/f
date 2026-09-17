@@ -1,0 +1,274 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# objects: the read path in a place.
+#
+# `user/store/manifest.toml` is the worked example of what the lifecycle needs,
+# and this file is deliberately close to it because the two components are the
+# same shape: neither binds a device, both are spawned into a place, both are
+# restarted by policy. What differs is the one line that matters — this
+# component's data ring carries `registered` payloads rather than `inline` ones,
+# because this is the component that moves bytes, and `E2-B08`'s whole exit is a
+# count of bytes that went anywhere other than the caller's registered buffer.
+#
+# `docs/manifest.md` is the schema field by field, `cargo xtask lint-manifests`
+# refuses this file when it stops fitting it, and `cargo xtask component`
+# compiles it into the record the frame reads. RFC 0030 is why those are three
+# different things.
+
+schema = 3
+name   = "objects"
+image  = "user/objects"
+
+# `private`, on `user/store/manifest.toml`'s argument rather than a new one: a
+# component that starts `shared` and later acquires something worth keeping has
+# already been co-resident with everything for however long that took, and RFC
+# 0005 lets a spawner go more isolated but never less. The argument is stronger
+# here than it was there, because what this component will hold in a registered
+# buffer is somebody else's content.
+domain = "private"
+
+# --- Device: none, and the absence is the declaration -------------------------
+
+# No `[[device]]` table. This component drives nothing — it reaches a device the
+# only way anything above the frame does, over the blk driver's ring — so it
+# binds no part and the compiled record carries `devices = 0`. The distinction
+# `user/store/manifest.toml` draws applies unchanged: an empty device list is the
+# list, and not a default nobody chose.
+
+# --- Needs: routed at spawn, in this order, one handle each -------------------
+
+# The account. RFC 0008: everything this component is made of — address space,
+# page tables, text, stack, control ring, state tree and the capability table —
+# is retyped from one supplied `Untyped`, so revoking this ends the component.
+#
+# **Sixteen pages, which is `store`'s number, because this is `store`'s shape:**
+# one address space, four page tables, the text, a page of stack, a control ring,
+# a state tree of five nodes and the capability table, with a second instance
+# alive while a client still holds a channel to the first.
+#
+# **It was written as twenty-four and measured down.** The first draft of this
+# file reasoned that an image linking `f-blob`, `f-zone`, `f-index` and `f-hash`
+# would need the four text pages `kernel::process::INIT_TEXT_PAGES` maps, and
+# sized the account for them. `cargo xtask component` then reported this image at
+# **1848 bytes** — smaller than `store`'s 5408 — because `user/init/link.ld` is
+# linked with `--gc-sections` and nothing in those four crates is reachable from
+# `component::start` yet. The reasoning was sound and the premise was false, which
+# is the only reason the number is in this file rather than in a comment about it.
+#
+# *What moves it:* the day an opcode is answered, the read path becomes reachable,
+# the collector goes quiet and this image grows to something nobody here has
+# measured. A component that needs more than it declared is refused
+# `RESOURCE/QUOTA_EXHAUSTED` at the derive that could not pay, and that refusal is
+# a red boot rather than a silent shortfall — so this line moves with the log that
+# refused it quoted beside it, and not before.
+[[capability]]
+name   = "account"
+type   = "untyped"
+rights = ["read", "write", "derive", "revoke"]
+from   = "supervisor"
+bytes  = 65_536
+
+# The heap. Two pages, sized for what this component does **today**, which is one
+# bounded allocation in `component::start` to show that a crate linking the
+# chunker and the index can have an allocator at all.
+#
+# *What moves it:* a mount. `user/objects/src/resident.rs` says a mount is linear
+# in the live set — forty bytes per store entry, a name and a hash per index
+# entry — so a heap sized for a mount is a heap sized for a corpus, and that
+# number arrives with the ring rather than being guessed here. Declaring a large
+# heap now would be declaring a working set nothing has measured.
+#
+# Read and write and nothing else, on `user/store/manifest.toml`'s argument: a
+# component that could derive from its own heap could hand a piece of it on, and
+# an allocator whose memory has left is an allocator that will hand it out again.
+[[capability]]
+name   = "heap"
+type   = "untyped"
+rights = ["read", "write"]
+from   = "supervisor"
+bytes  = 8_192
+
+# The place's own endpoint, routed back to it. `write` is the right to connect and
+# `grant` the right to hand the endpoint on, which together let a client be
+# introduced without the supervisor knowing every client. Not `revoke`: nothing
+# may stop its own occupant, because a component that could refill its own place
+# has become its own supervisor.
+[[capability]]
+name   = "self"
+type   = "endpoint"
+rights = ["write", "grant"]
+from   = "supervisor"
+
+# The block device's ring, which is how this component reaches a device at all.
+#
+# `optional = true` for exactly `user/store/manifest.toml`'s reason and with
+# exactly its reversal: a sibling handle arrives from a supervisor holding an
+# endpoint to the named component, and the restart policy has not moved above the
+# frame yet — `cargo xtask lint-owed` still holds that sentence. Writing
+# `optional = false` today would declare a supplier that does not exist, and every
+# boot would be refused for it. The word goes when `E1-B05` does.
+#
+# It is declared now rather than with the first opcode because the topology is
+# what says where this component's bytes come from, and `f-assembler` checks a
+# route against this file before anything is started.
+[[capability]]
+name     = "block"
+type     = "endpoint"
+rights   = ["write"]
+from     = "sibling:virtio-blk"
+optional = true
+
+# --- Rings: the control ring is implicit; this is the data ring ---------------
+
+# One server ring per client, up to four, speaking the vocabulary
+# `abi/src/objects.rs` fixes: `READ`, `WRITE`, `PIN`, `UNPIN`, `COLLECT`.
+#
+# **`registered` and not `inline`, and this is the load-bearing line in the
+# file.** `user/store` declares `inline` and says why — it moves no bytes, so a
+# payload path there would be a claim about a datapath that does not exist.
+# This component is the datapath. `E2-B08`'s exit is *copies per read is zero*,
+# and `TODO.md` attaches the parenthesis that decides it: the caller's buffer is
+# a **registered** one, or the zero-copy count is a copy nobody counted. An
+# inline ring would carry the client's bytes in the entry, and the count would
+# then be taken over the second copy while the first went unremarked.
+#
+# `abi::objects::FLAGS_ACCEPTED` is `FIXED_BUF` alone for the same reason, so the
+# wire and this declaration say one thing rather than two that can drift.
+#
+# **One opcode is answered and four are not.** `abi::objects::op::known` admits
+# `READ`, and `user/objects/src/service.rs` is the body behind it: an entry in, a
+# completion out, the content landing in the buffer the entry named, and
+# `Served::delivered_bytes` counted at that entry because that is where
+# `intent/0006-state/spec.md` says an application byte is. The other four are
+# numbers with nothing behind them and are refused `ARGUMENT`/`UNKNOWN_OPCODE`.
+# The predicate is still written by hand rather than derived from the opcode
+# list, so declaring an opcode still cannot implement it.
+#
+# **What this ring does not have is a peer.** The service answers an `Sqe` handed
+# to it; nothing describes a channel for this component, because a place's
+# occupant gets a control ring and no data ring. So this declaration is still
+# ahead of the boot — which is the right way round for a manifest, and is why
+# `f-assembler` checks a route against this file rather than against what is
+# running.
+[[ring]]
+name        = "data"
+role        = "server"
+protocol    = "objects"
+version_min = 1
+version     = 1
+entries     = 16
+payload     = "registered"
+clients     = 4
+features    = []
+
+# --- Restart: the supervisor's policy, the frame's mechanism ------------------
+
+# On a fault and not on an exit, with `user/store/manifest.toml`'s small numbers
+# and for its reason: a budget one boot can drive to its edge is a policy a boot
+# can observe, and one measured in minutes is a policy only a soak can. This
+# component ends by itself today, so `on_fault` is a declaration about a life it
+# does not have yet — which is the right way round, because the day it holds a
+# client's registered buffer is the day a fault has a cost.
+[restart]
+policy           = "on_fault"
+backoff_first_ms = 8
+backoff_max_ms   = 64
+max_restarts     = 3
+budget_window_ms = 3_000
+
+# --- Reservation: what admission may refuse ----------------------------------
+
+# Soft, and no CPU fields: `docs/manifest.md` refuses them for a class nothing
+# schedules against rather than ignoring them. The memory figure is the account's,
+# because that is what this component's footprint costs, and a second instance of
+# it is alive at the same moment a client still holds a channel to the first.
+[reservation]
+class        = "soft"
+memory_bytes = 65_536
+
+# --- Transfer: what this component declares about being updated in place ------
+
+# `restart_only`, and it is a decision rather than a gap — RFC 0063 requires this
+# table for the reason `[restart]` is required. This component holds nothing
+# across a boot: no registration, no cursor, no mount. A second instance would be
+# no poorer for starting empty.
+#
+# *What changes it:* a mount. The moment this component holds a store map and an
+# index map built by scanning a device, a restart pays that scan again, and
+# `index/src/lib.rs` is explicit that the mount is the expensive half and the
+# reads are free. That is `mode = "in_place"` here and a state record in the
+# crate, and it is `E2-B08`'s to write rather than this file's to promise.
+[transfer]
+mode = "restart_only"
+
+# --- State: what this component publishes about itself ------------------------
+
+# RFC 0013 puts a state tree in every component and RFC 0065 makes "every" mean
+# every: a manifest declaring none is refused `ADMISSION/NO_STATE_TREE` at the
+# spawn. The frame writes this schema into the component's own address space
+# before its first instruction.
+#
+# The nodes are chosen so that `E2-B08`'s exit is readable out of the tree rather
+# than printed by a test that has to be believed. Ids are permanent and a retired
+# id is never reused, for the reason `TODO.md` never reuses a task id: the id is
+# what makes two readings across time comparable at all.
+
+[[state]]
+id   = 1
+name = "objects"
+kind = "subtree"
+unit = "none"
+
+# Reads served. A counter and not a gauge because it only goes up, and `calls`
+# because a read is something a client asked for rather than something this
+# component did to itself — which is the distinction `user/store`'s `work` node
+# draws in the other direction.
+[[state]]
+id     = 2
+parent = "objects"
+name   = "reads"
+kind   = "counter"
+unit   = "calls"
+
+# Content bytes landed in a caller's own registered buffer, which is the
+# denominator `claims/0017` and `claims/0022` are both defined against.
+# `intent/0006-state/spec.md` defines an application byte as one a client
+# submitted on this ring, and a number counted anywhere else is a number about a
+# different thing.
+#
+# **The number now exists and this node is still not written.** `Served::
+# delivered_bytes` in `user/objects/src/service.rs` is it, counted at the entry
+# and nowhere else; `cargo test -p f-objects --test reads` prints it. What is
+# missing between there and here is the write into the region the frame mapped
+# for this tree, and that belongs to the body the frame spawns rather than to a
+# service a test drives. Two gaps where there was one, and the remaining one is
+# smaller and named.
+[[state]]
+id     = 3
+parent = "objects"
+name   = "delivered"
+kind   = "counter"
+unit   = "bytes"
+
+# Bytes that went through any buffer that was **not** the caller's registered one.
+# This is `E2-B08`'s exit as a node: the exit says *copies per read is zero,
+# counted rather than asserted*, and a zero published continuously is harder to
+# fake than a zero a test prints once. `user/objects/src/read.rs` already keeps
+# this tally on one side and `dma.rs` keeps the matching one on the other; what is
+# missing is the ring between them, not the count.
+[[state]]
+id     = 4
+parent = "objects"
+name   = "staged"
+kind   = "counter"
+unit   = "bytes"
+
+# Notices drained off the control ring at a polling point. R05's other half,
+# published: a component that received nothing and a component that never drained
+# are two different states, and a count of what was posted cannot tell them apart.
+[[state]]
+id     = 5
+parent = "objects"
+name   = "notices"
+kind   = "counter"
+unit   = "events"
