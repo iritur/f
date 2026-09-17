@@ -1,4 +1,4 @@
-# RFC 0090: A reference image is for what only pixels show, and an interface assertion is not that
+# RFC 0091: A reference image is for what only pixels show, and an interface assertion is not that
 
 - Status: accepted
 - Date: 2026-09-17

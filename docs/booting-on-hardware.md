@@ -642,9 +642,13 @@ does.
 **The intercept is the kernel's own code, and it goes stale.** It read 438 566
 here, from the Threadripper experiment, until 2026-09-17 — by which time `.text`
 had tripled and the figure was wrong by more than fourteen cores' worth of the
-per-core term. The slope is the part that is about `MAX_CPUS`. Re-read the
-intercept before quoting it; the recipe is in `kernel/src/percpu.rs` beside the
-constant.
+per-core term. The slope is the part that is about `MAX_CPUS`, and it is the
+only part that is gated: `cargo xtask cores` links the kernel at two ceilings
+and requires a core to cost 64 296 bytes. Nothing checks the intercept, because
+it moves in every commit that changes a line and a check on it would fire in all
+of them — so re-read it before quoting it. The recipe is in
+`kernel/src/percpu.rs` beside the constant, and a green `cargo xtask cores`
+prints the intercept it measured on the way past.
 
 **The two costs have different shapes.** Memory tracks the *constant* and is
 paid on every machine, including single-core ones. Boot time tracks

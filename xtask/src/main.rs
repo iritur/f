@@ -656,6 +656,7 @@ fn main() -> ExitCode {
         "screen" => screen(args.get(1).map(String::as_str)),
         "deadline" => deadline(args.get(1).map(String::as_str)),
         "runtime" => runtime(args.get(1).map(String::as_str)),
+        "objects" => objects(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
         "component" => components().map(|_| ()),
         // E2-B04. One expression to one root hash, with every leaf printed
@@ -948,12 +949,17 @@ cargo xtask <command>
   mutate             Build the kernel with a deliberate defect, boot it, and
                      require the boot to go red — then require the same boot to
                      go green without it
-  cores              Four boots. A machine that reports eight logical processors
-                     and answers with two must still reach M0 ok, holding the six
-                     that are not there and saying how far each got; the same
-                     machine with all eight present must start all eight and hold
-                     none; `f.cores=1` must start one of the eight; and
-                     `f.bringup` must trace the arriving cores and change nothing
+  cores              Two builds and four boots, on the two costs of MAX_CPUS.
+                     The builds link the kernel at two ceilings and require a
+                     core to cost the bytes its doc comment publishes — the
+                     slope of that model, not its intercept, which is the
+                     kernel's own size. Then: a machine that reports eight
+                     logical processors and answers with two must still reach
+                     M0 ok, holding the six that are not there and saying how
+                     far each got; the same machine with all eight present must
+                     start all eight and hold none; `f.cores=1` must start one
+                     of the eight; and `f.bringup` must trace the arriving
+                     cores and change nothing
   attest             Five boots. What is this machine running, is the answer the
                      same twice, does a modification to the frame move it, does
                      the frame refuse to publish a root it cannot measure its way
@@ -1216,6 +1222,24 @@ fn target_dir() -> PathBuf {
 fn sh(program: &str, args: &[&str]) -> Result<(), String> {
     let status = Command::new(program)
         .args(args)
+        .current_dir(root())
+        .status()
+        .map_err(|e| format!("could not run {program}: {e}"))?;
+    if status.success() { Ok(()) } else { Err(format!("{program} {} failed", args.join(" "))) }
+}
+
+/// [`sh`], with environment variables set for the child.
+///
+/// Separate rather than a fourth argument on `sh` for the reason
+/// [`capture_with`] is separate from [`capture`]: every other caller wants the
+/// ambient environment, and threading an always-empty slice through them would
+/// be noise at each site to save one function here. The one caller is
+/// [`core_cost`], which builds the kernel somewhere other than where the rest
+/// of this file looks for it.
+fn sh_with(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<(), String> {
+    let status = Command::new(program)
+        .args(args)
+        .envs(env.iter().copied())
         .current_dir(root())
         .status()
         .map_err(|e| format!("could not run {program}: {e}"))?;
@@ -1545,8 +1569,27 @@ const INIT_TEXT: u64 = 0x0040_0000;
 /// difference is only how many pages the frame reserved. E5 is where the
 /// headers are read and where both of these stop existing.
 /// Unit: bytes.
-const IMAGE_MAX: &[(&str, u64)] =
-    &[("virtio-blk", 16 * 4096), ("virtio-net", 16 * 4096), ("virtio-gpu", 16 * 4096)];
+const IMAGE_MAX: &[(&str, u64)] = &[
+    ("virtio-blk", 16 * 4096),
+    ("virtio-net", 16 * 4096),
+    ("virtio-gpu", 16 * 4096),
+    // `objects`, and the row is the answer to a question
+    // `user/objects/src/component.rs` wrote down and could not answer: *whether
+    // the read path fits in what the frame maps.* It does, and the margin is
+    // narrower than the reasoning that preceded it suggested — **49 120 bytes
+    // against 65 536**, where the same image with no opcode reachable was 1848
+    // because `--gc-sections` discarded four crates nothing called.
+    //
+    // Sixteen pages and not four, and the sixteen was already true before this
+    // row existed: `kernel::component::spawn` refuses an image past
+    // `process::TEXT_PAGES`, which is sixteen, and `process::prepare_server`
+    // reserves the same. What was four is `INIT_MAX`, the *default* below, which
+    // belongs to the init and runtime shapes — one page of text and a work ring
+    // nine pages above it — and which this component is not. So the row moves no
+    // reservation: it stops a spawn-shape component being measured against a
+    // runtime-shape bound.
+    ("objects", 16 * 4096),
+];
 
 /// What a component whose shape [`IMAGE_MAX`] does not name may be.
 ///
@@ -1896,7 +1939,7 @@ fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
     let most = image_max(name);
     if bytes > most {
         return Err(format!(
-            "the {package} image is {bytes} bytes and the frame maps {most} for it.\n\n\
+            "the {package} image (shape `{name}`) is {bytes} bytes and the frame maps {most} for it.\n\n\
              A component that outgrows what its shape reserves needs a loader that reads\n\
              its headers, which is E5. Until then this is a real bound, and widening it\n\
              means widening `kernel::process`'s own reservation in the same diff: the two\n\
@@ -6184,6 +6227,396 @@ const MUTATIONS: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+/// What one more core costs the kernel image, in bytes.
+///
+/// Unit: bytes per unit of `percpu::MAX_CPUS`.
+///
+/// The slope of the model that constant's doc comment publishes —
+/// `resident(N) = 1 352 094 + 64 296 * N` — and the whole of what [`core_cost`]
+/// holds it to. It is `linker.ld`'s `AP_STACK_STRIDE`, 57 344 bytes of guarded
+/// application-processor stack, plus 6 952 bytes of arrays under `kernel/` that
+/// are subscripted by the constant.
+///
+/// This number and the two documents that publish it move together or not at
+/// all, and the failure below names those documents, because the person who
+/// sees it will not have read this.
+const CORE_COST_BYTES: u64 = 64_296;
+
+/// The two ceilings [`core_cost`] takes the slope between.
+///
+/// Unit: cores.
+///
+/// The ends of the sweep the published model was fitted to, so the span is as
+/// wide as the evidence behind it. Neither is the default eight, which is
+/// deliberate twice over: a source edit that silently failed to apply would
+/// otherwise build the image every other command in this file already has, and
+/// a divisor of sixty-two leaves an off-by-one in anything core-sized nowhere
+/// to hide.
+const CORE_COST_AT: [usize; 2] = [2, 64];
+
+/// The assignment in `kernel/src/percpu.rs` that [`core_cost`] moves.
+const CEILING_ASSIGNMENT: &str = "pub const MAX_CPUS: usize = ";
+
+/// The assignment in `kernel/linker.ld` that has to move with it.
+///
+/// Anchored to the start of a line because that file names `AP_CORES` three
+/// more times — in a comment, in the arithmetic that reserves the stacks, and
+/// in the symbol it exports — and none of those is the definition.
+const AP_CORES_ASSIGNMENT: &str = "\nAP_CORES = ";
+
+/// Build the kernel at two ceilings and require what a core costs to be what
+/// `percpu::MAX_CPUS` says a core costs.
+///
+/// # What this is a regression for
+///
+/// A comment that rotted. That doc comment states the constant's cost in memory
+/// as a line, `resident(N) = intercept + slope * N`, and until this existed
+/// nothing in the tree read it: the kernel grew, the intercept went stale by
+/// more than a factor of three, and it stayed that way for months — in the doc
+/// comment and in `docs/booting-on-hardware.md` both, because the second is a
+/// copy of the first and a copy rots with its original. The comment named this
+/// as its own reversal condition. This is it.
+///
+/// # Why the slope and not the intercept
+///
+/// The intercept is the kernel's own code and data at zero cores. It moves in
+/// every commit that adds a function, so a check on it would be red in all of
+/// them, and a check that is red in every commit is deleted within a week —
+/// which is the whole history of the number being checked. The slope is
+/// `AP_CORES * AP_STACK_STRIDE` plus the arrays subscripted by the constant, and
+/// it moves only when the sharding does, which is exactly the change worth being
+/// told about. Of the two halves of the model, one can be gated, and the gated
+/// half is the half that is supposed to hold still.
+///
+/// The intercept is still published and still worth re-measuring. It is
+/// published rather than gated, this command prints it so that whoever updates
+/// the comment has it in front of them, and the failure says so rather than
+/// leaving a reader to assume the whole model is covered.
+///
+/// # Why two builds and not a fit
+///
+/// Two points define a slope. They do not establish that the cost is *linear* —
+/// that is the claim the doc comment makes, from five points — and a third build
+/// here is what would hold it. Two is what `verify` can afford. The residual is
+/// stated rather than hidden: a cost that had grown a term in `N^2` would be
+/// reported as whatever slope its two ends happen to imply. The one part of
+/// linearity two points can see is whether the growth divides evenly by the
+/// span, and that is checked below.
+///
+/// # Why a target directory of its own
+///
+/// Because the alternative has a silent failure in it. Building at another
+/// ceiling into the usual place would leave [`kernel_elf64`] pointing at an
+/// image linked for sixty-four cores, and that image *boots* — both halves of
+/// the `MAX_CPUS` / `AP_CORES` invariant were moved together, so
+/// `smp::self_test` has nothing to object to and the boot reports `64 of 64
+/// shards` as if it had been asked to. Every command after this one in `verify`
+/// would then be running a kernel nobody chose. A directory of its own costs
+/// the dependency chain once per tree — about a minute in this container,
+/// against six seconds for each relink afterwards — and removes that failure
+/// rather than ordering around it.
+///
+/// # Why it is in `verify`
+///
+/// Because [`cores`] is, and because leaving it out reproduces exactly the
+/// failure it exists to fix: a check that runs only when somebody remembers it
+/// is a check that ran for the last time on the day it was written. Two kernel
+/// links is a price this loop already pays elsewhere for evidence — [`mutate`]
+/// builds the kernel twice and [`snapshot`] builds `f-sim` twice — and this is
+/// the cheap, deterministic half of `cores`, needing no emulator, so it runs
+/// before the four boots rather than after them.
+///
+/// # Errors
+///
+/// A build that failed, an image that was not linked for the ceiling it was
+/// given, growth that is not a whole number of bytes per core, or a slope that
+/// is not [`CORE_COST_BYTES`].
+fn core_cost() -> Result<(), String> {
+    let percpu = root().join("kernel").join("src").join("percpu.rs");
+    let script = root().join("kernel").join("linker.ld");
+    let source = |path: &Path| {
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", relative(path)))
+    };
+    let percpu_was = source(&percpu)?;
+    let script_was = source(&script)?;
+
+    let measured = core_cost_builds(&percpu, &percpu_was, &script, &script_was);
+
+    // Both files go back before the result is so much as looked at. A build
+    // that failed half way through would otherwise leave the tree holding a
+    // ceiling nobody chose, and the next reader's `git status` would be two
+    // edits they did not make — in the two files where such an edit is most
+    // likely to be believed.
+    let restored =
+        std::fs::write(&percpu, &percpu_was).and_then(|()| std::fs::write(&script, &script_was));
+    if let Err(e) = restored {
+        return Err(format!(
+            "{} and {} were edited to build at another ceiling and could not be put\n\
+             back: {e}\n\n\
+             `git checkout -- kernel/src/percpu.rs kernel/linker.ld` restores them, and\n\
+             nothing else in this tree should be trusted until it has been.{}",
+            relative(&percpu),
+            relative(&script),
+            match measured {
+                Err(why) => format!("\n\nThe measurement had already failed, with: {why}"),
+                Ok(_) => String::new(),
+            }
+        ));
+    }
+
+    let [(low, low_bytes), (high, high_bytes)] = measured?;
+    let span = (high - low) as u64;
+    let grew = high_bytes.checked_sub(low_bytes).ok_or_else(|| {
+        format!(
+            "the kernel image is {low_bytes} bytes at MAX_CPUS = {low} and {high_bytes} at\n\
+             MAX_CPUS = {high}, so it got *smaller* as the ceiling rose.\n\n\
+             Every per-core cost in this kernel is an array subscripted by the constant\n\
+             or a stack block reserved by kernel/linker.ld, and neither can shrink when\n\
+             the constant grows. Something is now sized in the opposite direction, and\n\
+             the model in the `MAX_CPUS` doc comment does not describe this kernel."
+        )
+    })?;
+
+    if grew % span != 0 {
+        return Err(format!(
+            "the image grew {grew} bytes between MAX_CPUS = {low} and MAX_CPUS = {high},\n\
+             which is not a whole number of bytes per core: {grew} / {span} leaves {}.\n\n\
+             The model in the `MAX_CPUS` doc comment is a straight line because the cost\n\
+             is arrays subscripted by the constant plus AP_CORES * AP_STACK_STRIDE, and\n\
+             both of those are exact. A remainder means something now grows with the\n\
+             ceiling in a way that is neither — alignment that rounds at one end and not\n\
+             the other is the likely shape — and the comment needs a third point before\n\
+             it can go on saying what it says. This command takes two.",
+            grew % span
+        ));
+    }
+
+    let slope = grew / span;
+    let intercept = low_bytes - slope * low as u64;
+    if slope != CORE_COST_BYTES {
+        return Err(format!(
+            "a core costs {slope} bytes and kernel/src/percpu.rs publishes \
+             {CORE_COST_BYTES}.\n\n\
+             Measured: MAX_CPUS = {low} is {low_bytes} bytes resident, MAX_CPUS = {high} is\n\
+             {high_bytes}, a difference of {grew} over {span} cores. The line those two\n\
+             imply is resident(N) = {intercept} + {slope} * N, or {} per core.\n\n\
+             If the sharding changed on purpose then this is the number moving, and the\n\
+             three places that publish it move together:\n\n  \
+             1. the model in the `MAX_CPUS` doc comment, kernel/src/percpu.rs\n  \
+             2. the same model and its table in docs/booting-on-hardware.md\n  \
+             3. CORE_COST_BYTES in xtask/src/main.rs, to {slope}\n\n\
+             Only the slope is checked here, and the intercept above is why the first\n\
+             two are more work than the third: it is not gated, it is stale far more\n\
+             often than this is, and the comment is wrong either way until it has been\n\
+             re-measured too. The figure above is that measurement — use it.",
+            kibibytes(slope)
+        ));
+    }
+
+    println!(
+        "\ncost model: ok — a core costs {slope} bytes ({}), which is what the `MAX_CPUS`\n\
+         \x20           doc comment publishes.\n\
+         \x20           MAX_CPUS = {low}: {low_bytes} bytes resident\n\
+         \x20           MAX_CPUS = {high}: {high_bytes} bytes resident\n\
+         \x20           the intercept these two imply is {intercept}, and it is *not*\n\
+         \x20           checked: it is the kernel's own size and moves in every commit.\n\
+         \x20           When the doc comment is next touched, this is the number to use.",
+        kibibytes(slope)
+    );
+    Ok(())
+}
+
+/// The two builds, and the two numbers they are for.
+///
+/// Split from [`core_cost`] so that the restore is on one path rather than on
+/// every early return in here: this returns, that puts the files back, and the
+/// two cannot come apart as the error cases grow.
+fn core_cost_builds(
+    percpu: &Path,
+    percpu_was: &str,
+    script: &Path,
+    script_was: &str,
+) -> Result<[(usize, u64); 2], String> {
+    let dir = target_dir().join("cores");
+    let dir_arg = dir.display().to_string();
+    let image = dir.join(KERNEL_TARGET).join("debug").join("f-kernel");
+
+    let mut points = [(0usize, 0u64); 2];
+    for (slot, ceiling) in CORE_COST_AT.iter().copied().enumerate() {
+        let aps = ceiling - 1;
+        std::fs::write(percpu, retarget(percpu_was, CEILING_ASSIGNMENT, ceiling, percpu)?)
+            .map_err(|e| format!("writing {}: {e}", relative(percpu)))?;
+        std::fs::write(script, retarget(script_was, AP_CORES_ASSIGNMENT, aps, script)?)
+            .map_err(|e| format!("writing {}: {e}", relative(script)))?;
+
+        println!("\n--- [{}/2] MAX_CPUS = {ceiling}, AP_CORES = {aps}", slot + 1);
+        sh_with(
+            "cargo",
+            &[
+                "build",
+                "-p",
+                "f-kernel",
+                "--target",
+                KERNEL_TARGET,
+                "-Zbuild-std=core,compiler_builtins",
+            ],
+            &[("CARGO_TARGET_DIR", dir_arg.as_str())],
+        )?;
+
+        // What the linker actually did, rather than what this loop asked for.
+        // `retarget` refuses an assignment it cannot find exactly once, so the
+        // edit cannot silently no-op — but cargo does not track the linker
+        // script as an input, and the relink above happens only because
+        // `percpu.rs` changed in the same breath. Reading the geometry back out
+        // of the image keeps that a fact rather than an assumption, and it is
+        // the difference between reporting a stale number and reporting one
+        // image measured twice.
+        let linked = measure::exported(&image, "__ap_cores")?;
+        if linked != aps as u64 {
+            return Err(format!(
+                "the kernel was built for MAX_CPUS = {ceiling} and linked for {linked} + 1\n\
+                 cores: `__ap_cores` says {linked} and kernel/linker.ld was given {aps}.\n\n\
+                 The linker script is passed as a link argument in .cargo/config.toml, and\n\
+                 cargo does not track it as an input — the relink above happens only\n\
+                 because kernel/src/percpu.rs changed with it. If those two have come\n\
+                 apart, this command measures one geometry while believing another, which\n\
+                 is worse than not measuring."
+            ));
+        }
+
+        let bytes = measure::resident(&image)?;
+        println!("    {bytes} bytes resident across every allocated section");
+        points[slot] = (ceiling, bytes);
+    }
+    Ok(points)
+}
+
+/// One numeric assignment in a source file, moved, and nothing else touched.
+///
+/// Byte for byte everywhere else, deliberately: the file is going back
+/// afterwards, and a rewrite that normalised a line ending on the way through
+/// would turn the restore into a diff.
+///
+/// The uniqueness check is the load-bearing half. An assignment this could not
+/// find, or found twice, would leave the file saying whatever it already said —
+/// and [`core_cost`] would then build one image twice and report the difference
+/// between it and itself as a cost model. A check that is green because it
+/// measured nothing is the failure mode that put the stale number there.
+fn retarget(text: &str, assignment: &str, value: usize, file: &Path) -> Result<String, String> {
+    let named = || {
+        format!(
+            "`{}` in {}.\n\n\
+             `cargo xtask cores` builds the kernel at two ceilings by moving that\n\
+             assignment, and it will not guess at one it cannot find exactly once. If\n\
+             the line was renamed or reformatted, CEILING_ASSIGNMENT and\n\
+             AP_CORES_ASSIGNMENT in xtask/src/main.rs are what follow it.",
+            assignment.trim(),
+            relative(file)
+        )
+    };
+    let at = text.find(assignment).ok_or_else(|| format!("nothing assigns {}", named()))?;
+    let from = at + assignment.len();
+    if text[from..].contains(assignment) {
+        return Err(format!("more than one thing assigns {}", named()));
+    }
+    let end = from
+        + text[from..]
+            .find(';')
+            .ok_or_else(|| format!("no `;` ends the assignment to {}", named()))?;
+    Ok(format!("{}{value}{}", &text[..from], &text[end..]))
+}
+
+/// Bytes as kibibytes to one decimal place, rounded half up.
+///
+/// Integer arithmetic because RFC 0004 forbids `f32` and `f64` in this tree, and
+/// this is why that rule is cheap to keep: one multiply and one divide say the
+/// same thing as a format string over a float, and they say it identically on
+/// both architectures.
+fn kibibytes(bytes: u64) -> String {
+    let tenths = (bytes * 10 + 512) / 1024;
+    format!("{}.{} KiB", tenths / 10, tenths % 10)
+}
+
+/// The two pieces of [`core_cost`] that can be checked without building a
+/// kernel, and the one check that matters most.
+///
+/// The one that matters most is the first: it reads the real
+/// `kernel/src/percpu.rs` and `kernel/linker.ld` and requires both anchors to
+/// hit exactly once. `cargo xtask cores` would catch a rename too — two kernel
+/// builds later, and only if somebody ran it. This catches it in `cargo xtask
+/// test`, in milliseconds, and names the constant to follow it with.
+#[cfg(test)]
+mod core_cost_tests {
+    use super::{AP_CORES_ASSIGNMENT, CEILING_ASSIGNMENT, kibibytes, relative, retarget, root};
+    use std::path::Path;
+
+    #[test]
+    fn the_two_assignments_are_still_where_the_check_reaches_for_them() {
+        for (file, assignment, to) in [
+            (root().join("kernel").join("src").join("percpu.rs"), CEILING_ASSIGNMENT, 64),
+            (root().join("kernel").join("linker.ld"), AP_CORES_ASSIGNMENT, 63),
+        ] {
+            let text = std::fs::read_to_string(&file).expect("the file is in the tree");
+            let moved = retarget(&text, assignment, to, &file)
+                .unwrap_or_else(|why| panic!("{}: {why}", relative(&file)));
+            assert!(
+                moved.contains(&format!("{assignment}{to};")),
+                "{}: the assignment was found and did not come back moved",
+                relative(&file)
+            );
+            // The whole of the difference, and nowhere else. A patcher that
+            // also normalised a line ending would leave `cargo xtask cores` with
+            // a restore that is a diff, which is how a command that edits the
+            // tree stops being safe to run.
+            assert_eq!(
+                text.len() + 1,
+                moved.len(),
+                "{}: moving a one-digit value to a two-digit one changed more than one \
+                 character's worth of file",
+                relative(&file)
+            );
+        }
+    }
+
+    #[test]
+    fn an_assignment_that_is_absent_or_doubled_is_refused_rather_than_guessed_at() {
+        let here = Path::new("a-file");
+        let absent = retarget("nothing = 1;\n", "elsewhere = ", 8, here);
+        assert!(absent.unwrap_err().starts_with("nothing assigns"));
+
+        // The case the refusal exists for: two matches and no way to know which
+        // one the kernel reads. Patching either would build *something*, and
+        // `core_cost` would report the difference between two images that may
+        // not differ at all.
+        let twice = retarget("N = 1;\nN = 2;\n", "N = ", 8, here);
+        assert!(twice.unwrap_err().starts_with("more than one thing assigns"));
+
+        let unterminated = retarget("N = 1\n", "N = ", 8, here);
+        assert!(unterminated.unwrap_err().starts_with("no `;` ends"));
+    }
+
+    #[test]
+    fn a_value_moves_and_the_rest_of_the_file_does_not() {
+        // Carriage returns and a trailing line, because the file this runs
+        // against is going to be written back verbatim afterwards.
+        let before = "a\r\nN = 7;\r\nb\r\n";
+        assert_eq!(
+            retarget(before, "\nN = ", 63, Path::new("x")).unwrap(),
+            "a\r\nN = 63;\r\nb\r\n"
+        );
+    }
+
+    #[test]
+    fn kibibytes_rounds_half_up_without_a_float() {
+        // The published per-core cost, which is what this exists to print.
+        assert_eq!(kibibytes(64_296), "62.8 KiB");
+        assert_eq!(kibibytes(1024), "1.0 KiB");
+        // Exactly halfway between 0.0 and 0.1 KiB: 51.2 bytes. Half up, so up.
+        assert_eq!(kibibytes(51), "0.0 KiB");
+        assert_eq!(kibibytes(52), "0.1 KiB");
+    }
+}
+
 /// Boot a machine that reports more logical processors than answer, and require
 /// it to reach `M0 ok` anyway.
 ///
@@ -6213,11 +6646,21 @@ const MUTATIONS: &[(&str, &str, &str, &str)] = &[
 /// boot's held count a measurement of absent cores rather than of a bring-up
 /// that has quietly stopped working.
 ///
+/// # The other question about the same constant
+///
+/// [`core_cost`] runs first, and it is not a boot. `MAX_CPUS` has two costs with
+/// two shapes — memory paid on every machine, time paid only by the cores that
+/// exist — and the boots below are about the second. The first is two builds and
+/// no emulator, so it is here, at the front, where it fails in seconds if the
+/// published cost model has gone stale.
+///
 /// # Errors
 ///
-/// A boot that did not reach `M0 ok`, or reached it having found the wrong
-/// number of cores.
+/// A cost model that no longer describes this kernel, a boot that did not reach
+/// `M0 ok`, or one that reached it having found the wrong number of cores.
 fn cores() -> Result<(), String> {
+    core_cost()?;
+
     // The core count is passed as this command's own machine options: a second
     // `-smp` overrides the one `emulator` pins, so this needs no parameter of
     // its own and the pinned `-smp 2` stays exactly where it is — every other
@@ -6325,7 +6768,8 @@ fn cores() -> Result<(), String> {
     println!(
         "\nall four boots reached M0 ok: a core that does not answer is held rather than\n\
          fatal, `f.cores=` skips the stage and `f.bringup` traces it, and the stage a\n\
-         core that never answered reached is in the log either way"
+         core that never answered reached is in the log either way — and the two builds\n\
+         above say a core still costs what the `MAX_CPUS` doc comment says it costs"
     );
     Ok(())
 }
@@ -9967,6 +10411,97 @@ fn deadline(kind: Option<&str>) -> Result<(), String> {
 /// structured error rather than fault, hang, or believe it. Without this half
 /// the other three would show that adoption is *available* and not that it is
 /// safe.
+/// `E2-B08`'s two halves, and why there are two.
+///
+/// A delivered count of zero and a component nobody submitted to are the same
+/// number. `read` is the positive control and `quiet` is what tells them apart,
+/// which is the arrangement `blk`'s three halves have and the reason
+/// `user/objects/tests/reads.rs` gives about its own provocation: a zero proves
+/// nothing if the same setup would report zero when nothing happened at all.
+const OBJECTS_HALVES: &[(&str, &str)] = &[
+    ("read", "the client submits reads across a real ring and checks every byte it gets back"),
+    ("quiet", "the same component, the same grant, nothing submitted: it must report nothing"),
+    (
+        "provoke",
+        "every read answered through a page cache: the staged count must move and the bytes \
+         must still be right",
+    ),
+];
+
+/// Boot the objects datapath: a component serving a ring from ring 3, and the
+/// frame as its client.
+fn objects(kind: Option<&str>) -> Result<(), String> {
+    let chosen: Vec<&(&str, &str)> = match kind {
+        None => OBJECTS_HALVES.iter().collect(),
+        Some(name) => {
+            let found = OBJECTS_HALVES.iter().find(|(known, _)| *known == name);
+            let Some(found) = found else {
+                let list: Vec<String> =
+                    OBJECTS_HALVES.iter().map(|(n, w)| format!("  {n:<6} {w}")).collect();
+                return Err(format!(
+                    "unknown objects half: {name}
+
+{}",
+                    list.join(
+                        "
+"
+                    )
+                ));
+            };
+            vec![found]
+        }
+    };
+
+    let all = chosen.len() > 1;
+    for (name, what) in chosen {
+        if all {
+            println!(
+                "
+--- objects={name}: {what}"
+            );
+        }
+        let (ending, log) = machine_with(
+            Some(&format!("objects={name}")),
+            &[],
+            Capture::Printed,
+            BOOT_TIMEOUT,
+            BOOT_MEMORY,
+        )?;
+        match ending {
+            Ending::Exited(33) => {}
+            Ending::Exited(35) => {
+                return Err(format!(
+                    "the kernel refused to finish after `objects={name}`. Either the component                      did not serve, or bytes went somewhere the client did not register, or                      what landed is not what the client asked for — the serial log above says                      which, and the verdict that refused is in `kernel/src/objects.rs`."
+                ));
+            }
+            Ending::TimedOut(_) => {
+                return Err(format!(
+                    "`objects={name}` never finished. A component that holds a core and does                      not give it back is the one failure a served datapath has that a spawn                      does not: the boot core is waiting on a mailbox word that will never move."
+                ));
+            }
+            other => return Err(format!("the boot {other}; expected exit 33")),
+        }
+
+        // The exit code says the kernel agreed with itself; this says the stage
+        // ran at all. A boot that carried no `objects` module prints a refusal
+        // and stops, and a green exit with no line would be a half that was
+        // skipped rather than one that held.
+        if !log.contains("the {name} half held") && !log.contains("half held") {
+            return Err(format!(
+                "`objects={name}` exited green and printed no verdict line, so the half did                  not run. The likeliest cause is a boot with no `objects` component file."
+            ));
+        }
+    }
+
+    println!(
+        "
+objects: ok — a component served `objects::op::READ` from ring 3 across a mapped
+                  channel, the content landed in memory the client granted and registered,
+                  and the client checked every byte against arithmetic it did itself."
+    );
+    Ok(())
+}
+
 const RUNTIME_PROVOCATIONS: &[(&str, &str)] = &[
     ("load", "a component schedules its own work; nothing may cross the boundary until it exits"),
     ("provoke", "one crossing on purpose: the count must move, and by exactly as many"),
@@ -11305,6 +11840,11 @@ fn verify() -> Result<(), String> {
     // machine shape this kernel has actually died on — a processor reporting
     // more logical processors than answer — is not exercised anywhere above
     // this line. Two boots, and the second is the control. RFC 0068.
+    //
+    // It now also carries the *memory* cost of the same constant, which is two
+    // kernel links and no emulator — `core_cost` argues why that belongs in this
+    // loop rather than beside it, and the short version is that the number it
+    // checks went stale by a factor of three in the months when nothing read it.
     cores()?;
     // Before `mutate`, and for the same reason `mutate` is in the loop at all.
     // Everything above this line establishes that the tree is green; these two
@@ -17013,16 +17553,42 @@ fn claim_reads(claim: &str, file: &str) -> Result<(), String> {
     claim_compare(
         claim,
         file,
-        &[(
-            "user/objects/tests/reads.rs: 256 reads into the caller's registered buffers",
-            "cargo",
-            &["test", "--release", "-p", "f-objects", "--test", "reads"],
-        )],
+        &[
+            (
+                "user/objects/tests/reads.rs: 256 reads into the caller's registered buffers",
+                "cargo",
+                &["test", "--release", "-p", "f-objects", "--test", "reads"][..],
+            ),
+            // The boot, second, on `claim_topology`'s ordering rule: the test is
+            // seconds and this builds a kernel and six component images, so a
+            // run about to go red on the cheap workload says so before the
+            // expensive one starts — and a run that is red only here has a
+            // finding about the *transport* rather than about the read path.
+            (
+                "cargo xtask objects read: 64 entries across a mapped channel in a boot",
+                "cargo",
+                &["xtask", "objects", "read"][..],
+            ),
+            // And the boot's own provocation, which is the third counter in this
+            // claim and inherits no evidence from the other two. Each half
+            // prints only the rows it is the authority for, so these two boots
+            // feed one table without ever answering the same row twice.
+            (
+                "cargo xtask objects provoke: the same reads through a page cache",
+                "cargo",
+                &["xtask", "objects", "provoke"][..],
+            ),
+        ],
         "Both zeros in this run are counted twice, on opposite sides of the boundary,\n\
          and neither reading derives from the other — so a red row is a real second\n\
          copy or a real residency, not an accounting change. Read the two provocation\n\
          rows first: if they are zero the tallies have stopped moving at all, and\n\
-         every zero above them is a default rather than a count.",
+         every zero above them is a default rather than a count.
+         
+         Three sets of rows and three boundaries: the read path called directly, the
+         same records asked for as entries, and the same design served across a
+         mapped channel in a boot. A row red in one set and green in the others is
+         a finding about that boundary and not about the design.",
     )
 }
 

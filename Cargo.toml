@@ -87,7 +87,7 @@ f-index = { path = "index" }
 # reason the three driver rows below give: a workspace row fixes the path for
 # everybody who inherits it, and adding the feature later is a smaller diff than
 # moving the path.
-f-objects = { path = "user/objects" }
+f-objects = { path = "user/objects", default-features = false }
 f-generation = { path = "generation" }
 # The assembler, and the row is short for `f-hash`'s reason: a library and not a
 # component, so no `image` feature and no `default-features` line. What is worth

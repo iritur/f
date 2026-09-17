@@ -52,6 +52,15 @@ boundary `intent/0006-state/spec.md` defines an application byte at:
   copies_per_read at the entry                          0
   the provocation at the entry                      4 096
 
+and once more **in a boot** — `cargo xtask objects read`, a component serving from
+ring 3 and this frame as its client, over a mapped channel and a granted region:
+
+  entries answered                                     64   0 refused
+  application bytes delivered                     192 000
+  copies_per_read                                       0
+  reads the client verified against its own bytes      64   of 64
+  the provocation, in the boot                    131 072
+
 **The header is borrowed and not copied, which is the load-bearing line.** The
 blob header is decoded by `f_abi::store::Header::from_bytes` out of a
 `&[u8; 52]` pointing into the caller's own buffer, so the record is read from
@@ -67,25 +76,40 @@ registered* is answered here by the code that would answer it under a real
 driver. A count over an inline buffer would have been the copy nobody counted,
 which is the parenthesis `TODO.md` attaches to this task's `needs:` line.
 
-**Why this is `pending`, and what two of the three reasons used to be.** It said
-`user/objects` is not a component, because an image linking `f-blob` needs a
-`#[global_allocator]` and RFC 0001 forbids `unsafe` above the frame. That heap
-landed in `ring/`, the component's manifest declares it, and the boot builds a
-place for it. It said nothing answers an opcode. `abi::objects::op::known`
-admits `READ` now and `user/objects/src/service.rs` is the body, which is where
-the second block of rows above comes from — counted at the entry, in the one
-place a client can be said to have asked for a byte.
+**Why this is `pending`, and what all three of the reasons used to be.** It said
+`user/objects` is not a component; the heap landed in `ring/`, its manifest
+declares it, and the boot builds a place for it. It said nothing answers an
+opcode; `abi::objects::op::known` admits `READ` and
+`user/objects/src/service.rs` is the body. It said there is no transport, so an
+`Sqe` reaches the service as an argument rather than off a mapped channel.
 
-The third reason stands and is the one that decides the status. **There is no
-transport and therefore no boot.** An `Sqe` reaches the service as an argument:
-a place's occupant gets a control ring and no data ring, and `user/virtio-blk`
-still answers two of RFC 0060's seven opcodes, so the ring the exit names has no
-peer at either end of it. **A count taken at a different boundary is a different
-count however similar it looks** — `claims/0016` carries the same sentence about
-its own modelled rows — and an entry encoded and handed to a function in one
-address space is a different boundary from a ring in a boot. What makes this
-gate is unchanged: `user/objects` as a component over the blk driver's ring,
-with these tallies taken across it.
+**That third one has gone too, and the rows above marked *in a boot* are what
+replaced it.** `cargo xtask objects read` stands the component up on a core of
+its own at ring 3, grants it eight pages of the client's memory, and the frame
+submits sixty-four `objects::op::READ` entries on a real mapped channel. The
+component registers the grant through `f_ring::registry::Table`, answers off the
+ring, and the content lands in the client's own memory — which the client then
+reads back through its own mapping and compares against
+`f_abi::objects::board::content_byte`, a function it computes itself and never
+receives. RFC 0090 is the decision that made the component able to write there
+in safe code at all.
+
+**What is still true is the device, and it is the whole of what is left.** The
+store `user/objects/src/serve.rs` serves out of is `f_zone::device::ZonedMemory`
+in the component's own heap. `intent/0006-state/spec.md` describes this boot over
+the **blk driver's ring**, that driver answers two of RFC 0060's seven opcodes,
+and `E2-B02` is the task that changes it. So `copies per read` is now counted
+where the spec says an application byte is, and what is underneath the store is
+modelled — which is a narrower gap than this claim has ever had and is still a
+gap. The status is the originator's to move, and this file does not move it.
+
+**One more thing a reader should not over-read.** The client in that boot is the
+*frame*. It is the far end of a real channel across a real privilege boundary,
+which is what makes the count a count, and it is not an unprivileged
+application: `E1-B05`'s ring-3 supervisor does not yet hand a place's occupant a
+core and a peer, so the frame is the only thing in this boot that can hold the
+other end. `kernel/src/blk.rs` has the same arrangement and `CHAOS_GAP` in xtask
+carries what both still owe.
 """
 
 [baseline]
@@ -135,6 +159,17 @@ secondary = [
   "copies_per_read_at_the_entry",
   "staged_bytes_at_the_entry",
   "provoked_staged_bytes_at_the_entry",
+  # And the same event again in a boot, across a mapped channel. A third set of
+  # names and not a replacement for the second, for the reason the second is not
+  # a replacement for the first: three counts of one design at three boundaries
+  # is the evidence, and a claim that silently promoted one would have moved what
+  # it is about without saying so.
+  "entries_answered_in_a_boot",
+  "application_bytes_delivered_in_a_boot",
+  "copies_per_read_in_a_boot",
+  "staged_bytes_in_a_boot",
+  "reads_verified_by_the_client",
+  "provoked_staged_bytes_in_a_boot",
 ]
 
 [threshold]
@@ -197,6 +232,30 @@ entries_refused_at_the_entry                = { min = 0, max = 0 }
 # counter from the one `provoked_unregistered_bytes` moves and inherits none of
 # its evidence. A floor, for that row's reason.
 provoked_staged_bytes_at_the_entry          = { min = 1 }
+
+# --- and in a boot, which is where the exit asks for it ----------------------
+#
+# `cargo xtask objects read`. Sixty-four entries on a mapped channel, a 3000-byte
+# blob over 2048-byte blocks, into eight pages the client granted. The geometry
+# differs from the host test's on purpose — `kernel/src/objects.rs` says why the
+# block is 2048 there and 4096 here — so these rows are exact about a workload
+# this boot defines and are not comparable term by term with the two sets above.
+# What *is* comparable is the zero, which is the same zero three times.
+copies_per_read_in_a_boot                   = { min = 0, max = 0 }
+staged_bytes_in_a_boot                      = { min = 0, max = 0 }
+entries_answered_in_a_boot                  = { min = 64, max = 64 }
+application_bytes_delivered_in_a_boot       = { min = 192000, max = 192000 }
+# The client's own check, and the row that makes the delivered count mean
+# something: the frame computes the content from the seed and compares what
+# landed against it, so a component returning the wrong record fails here rather
+# than at a hash it chose itself.
+reads_verified_by_the_client                = { min = 64, max = 64 }
+# The provocation, in the boot, and a third counter needing its own floor for the
+# reason the second one did: it inherits no evidence from the other two. Broken
+# on purpose before this landed — 131 072 bytes, 64 reads of one 2048-byte block,
+# with the boot going red at *bytes went through a buffer the client did not
+# register*.
+provoked_staged_bytes_in_a_boot             = { min = 1 }
 
 [hardware]
 runner = "runner-class-A"       # pinned bare metal, thermally stable

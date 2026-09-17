@@ -29,6 +29,7 @@ pub mod churn;
 pub mod component;
 pub mod doorbell;
 pub mod env;
+pub mod objects;
 // `E2-P07`. The frame's whole share of `f.root=`: read the token, hand the
 // loader's modules to `f-generation`, print what came back. Every branch that
 // could be wrong is in that library, where a host test can reach it.
@@ -882,6 +883,13 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         clocks,
         tree.physical(),
     );
+
+    // E2-B08. A component serving the objects ring from ring 3, with this frame
+    // as its client and the count taken at the entry. Behind its own parameter
+    // for `blk_datapath`'s reason: an ordinary boot has nobody to serve, and a
+    // default boot that ran it would stop being the fixture `cargo xtask trace`
+    // hashes.
+    let _objects = objects_datapath(&boot, &mut frames, &space, features, clocks, tree.physical());
 
     // E1-B08. A component that holds a core and schedules its own work inside
     // it, with the frame counting what crossed. Behind its own parameter, like
@@ -2793,6 +2801,84 @@ fn admission_demonstration(boot: &BootInfo) {
             arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
         }
     }
+}
+
+/// `E2-B08`'s boot: a component that serves the objects ring, and this frame
+/// submitting on it.
+///
+/// Two halves, and `kernel/src/objects.rs` argues why neither means anything
+/// alone: `objects=read` submits reads and requires every byte back, and
+/// `objects=quiet` submits nothing and requires the component to report that it
+/// was asked nothing. A delivered count of zero and a component nobody spoke to
+/// are the same number, and only the second half tells them apart.
+///
+/// The verdict is the kernel's rather than the harness's, exactly as `blk`'s is:
+/// it knows which half it asked for and what is in its own buffer afterwards.
+fn objects_datapath(
+    boot: &BootInfo,
+    frames: &mut mem::FrameAllocator,
+    space: &paging::AddressSpace,
+    features: paging::Features,
+    clocks: arch::x86_64::apic::Clocks,
+    tree: u64,
+) -> Option<objects::Report> {
+    let half = if boot.has_parameter(b"objects=read") {
+        objects::Half::Read
+    } else if boot.has_parameter(b"objects=quiet") {
+        objects::Half::Quiet
+    } else if boot.has_parameter(b"objects=provoke") {
+        objects::Half::Provoke
+    } else {
+        return None;
+    };
+
+    // Another core, always. A server and its client are two ends of a ring and
+    // this frame is the client, so a machine with one core has nowhere to put
+    // the server -- `blk_datapath`'s sentence, and the same refusal rather than
+    // a fallback that would be measuring something else.
+    let me = arch::x86_64::current_cpu();
+    let Some(worker) = (smp::started() > 1).then(smp::first_worker).filter(|core| *core != me)
+    else {
+        kprintln!(
+            "FAIL: the objects datapath needs a second core - the component serves from ring 3              and the frame is its client"
+        );
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+
+    // SAFETY: the boot processor, with the kernel's address space in `CR3`,
+    // `frames` rebound onto its direct map, the direct map covering every boot
+    // module, and `worker` a core that is up and idle.
+    let outcome = unsafe {
+        objects::demonstrate(
+            frames,
+            space,
+            features,
+            half,
+            boot,
+            objects::Scheduling {
+                tree,
+                cpu: worker,
+                hz: TIMER_HZ,
+                target: RUNTIME_TICKS,
+                tsc_khz: clocks.tsc_khz,
+            },
+        )
+    };
+
+    let report = match outcome {
+        Ok(report) => report,
+        Err(why) => {
+            kprintln!("FAIL: the objects datapath: {}", why.why());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+    objects::report_lines(&report);
+    if let Err(why) = report.verdict() {
+        kprintln!("FAIL: the objects datapath: {why}");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+    kprintln!("  objects       the {} half held", report.half.name());
+    Some(report)
 }
 
 /// Drive the block datapath through a driver that lives outside the frame, and

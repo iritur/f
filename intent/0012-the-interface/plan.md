@@ -541,7 +541,7 @@ outside the decomposition matches check 2's list exactly, with nothing extra and
 nothing missing. Check 3 holds: no two `*exit:*` lines in E3 share a sentence,
 which steps 7 and 9 are what made true.
 
-**Step 8 is RFC 0090.** Neither of the two contradicting exits won whole. An
+**Step 8 is RFC 0091.** Neither of the two contradicting exits won whole. An
 image may be compared to an image only where the artefact under test is pixels
 and nothing smaller can observe the defect — exactly one place, the text
 conformance corpus behind `E3-B03j` — and `E3-P05` narrows to *no interface

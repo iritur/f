@@ -2538,6 +2538,355 @@ pub unsafe fn prepare_driver(
     ))
 }
 
+/// What a server component is built from, beyond the image itself.
+///
+/// [`DriverPlan`] without a device and with two regions in its place, which is
+/// the whole difference between the two shapes: a driver reaches hardware and a
+/// server reaches its client. Everything else — the text reservation, the two
+/// rings, the board, the four grants — is the same, deliberately, because
+/// `door::Entry::granted(nth)` is arithmetic over one generation and is sound
+/// only while every shape fills the same slots in the same order.
+pub struct ServerPlan {
+    /// The component's image, out of the component file the loader carried.
+    /// May be longer than one page — up to [`TEXT_PAGES`].
+    pub image: &'static [u8],
+    /// Which of the component's lives the frame is asking for. It reaches the
+    /// component in the low half of `f_abi::door::Entry`.
+    /// Unit: none — a selector ordinal.
+    pub selector: u32,
+    /// The physical address of the frame the state tree is published in.
+    /// Unit: bytes, physical.
+    pub tree: u64,
+    /// The rate the core running it arms its own timer at. Unit: hertz.
+    pub hz: u32,
+    /// How many ticks that timer asks for. Unit: timer ticks.
+    pub target: u64,
+    /// Which core the server is allocated. Unit: none — a core index.
+    pub cpu: usize,
+    /// The data ring, physical, with the caller holding the client's end.
+    ///
+    /// The caller's to allocate and to free, for [`DriverPlan::queues`]'
+    /// reason: the frame is the peer on this channel, so it holds one end of a
+    /// region this function must not hand back. Unit: bytes, physical.
+    pub data: u64,
+    /// The client's buffer region, physical.
+    ///
+    /// **The memory this whole shape exists for.** It is the client's, the
+    /// server registers it through `f_ring::registry::Table`, and the content a
+    /// read delivers lands in it and nowhere else — which is what makes
+    /// `copies per read` a count about a datapath rather than about a function
+    /// call. The caller allocates it, maps it at [`BLK_QUEUES`], and reads the
+    /// bytes back out of its own direct map afterwards: a client that could not
+    /// read what landed would be a client that had to take the server's word
+    /// for it. Unit: bytes, physical.
+    pub buffers: u64,
+    /// How many bytes of it, a multiple of [`FRAME_SIZE`]. Unit: bytes.
+    pub buffer_bytes: u64,
+    /// How much heap to map at [`SPAWN_HEAP`], out of frames this function
+    /// allocates and [`reap`] returns.
+    ///
+    /// Unlike the two regions above this one is the frame's, because nothing
+    /// outside the component ever reads it: an allocator's memory is the
+    /// component's alone, and a caller holding a pointer into it would be a
+    /// second thing that believed it knew where a heap's free list is.
+    /// Unit: bytes.
+    pub heap_bytes: u64,
+}
+
+/// Where the frame can reach a server's own pages.
+pub struct ServerPages {
+    /// The control ring, as the frame sees it. Unit: bytes, kernel-virtual.
+    pub control: u64,
+    /// The page that says where everything else is, as the frame sees it.
+    /// Unit: bytes, kernel-virtual.
+    pub board: u64,
+}
+
+/// Build a server on `cpu`'s behalf: an address space, a text reservation, a
+/// stack, two rings, a board, a heap, and the client's own buffer region.
+///
+/// # Why this is a fourth function and not a flag on [`prepare_driver`]
+///
+/// Because what it maps is a different *list*, not a different value in one.
+/// A driver is mapped its device's register pages `UserPage::Device` and its
+/// queue memory; a server is mapped neither, and is mapped a heap instead. A
+/// boolean threading through both would make every reader of either shape check
+/// which one they were in, and `prepare_driver`'s own doc comment already had
+/// to explain why *it* was a third function rather than a flag on [`prepare`].
+///
+/// The two shapes agree on everything a component can observe: the same text
+/// reservation, the same stack, the same two ring addresses, the same board
+/// address, and the same four capability grants in the same order. That
+/// agreement is not tidiness — `f_abi::door::Entry::granted(nth)` resolves a
+/// handle by position, so a shape that granted a fifth object or the same four
+/// in another order would hand a component a capability of the wrong type under
+/// a name it trusts.
+///
+/// # What the heap is for, since no other shape here has one
+///
+/// A server that answers `objects::op::READ` holds a store and an index, and
+/// both are allocating structures. `component::spawn` already maps a heap for a
+/// place's occupant out of the account its manifest declares; this shape is not
+/// a place, so the frame allocates the region itself and describes it before
+/// the first instruction — `f_ring::heap::describe`, the same call the spawn
+/// path makes, at the same address, because `SPAWN_HEAP` is pinned to
+/// `f_ring::heap::AT` by an assertion in this file.
+///
+/// # Errors
+///
+/// [`Error`], every variant of which fails the boot.
+///
+/// # Safety
+///
+/// As [`prepare`], and `plan.data` must name one frame the caller allocated and
+/// holds the far end of, and `plan.buffers` `plan.buffer_bytes` of memory the
+/// caller allocated and holds.
+pub unsafe fn prepare_server(
+    frames: &mut FrameAllocator,
+    kernel: &paging::AddressSpace,
+    features: paging::Features,
+    plan: ServerPlan,
+) -> Result<(Prepared, ServerPages), Error> {
+    let ServerPlan { image, selector, tree, hz, target, cpu, .. } = plan;
+    if image.is_empty() {
+        return Err(Error::NoProgram);
+    }
+    let text_pages = (image.len() as u64).div_ceil(FRAME_SIZE) as usize;
+    if text_pages > TEXT_PAGES {
+        return Err(Error::TooLarge);
+    }
+    // Both regions are refused rather than rounded. A buffer region that is not
+    // a whole number of pages is a region whose last page is partly somebody
+    // else's, and a heap of zero is a component whose first allocation faults
+    // at an address the frame mapped nothing at — which looks like a bug in the
+    // allocator and is a bug in this call.
+    if plan.buffer_bytes == 0 || !plan.buffer_bytes.is_multiple_of(FRAME_SIZE) {
+        return Err(Error::TooLarge);
+    }
+    if plan.heap_bytes == 0 || plan.heap_bytes > HEAP_MAX {
+        return Err(Error::TooLarge);
+    }
+
+    let before = frames.free_count();
+
+    // SAFETY: the caller's guarantee that the kernel's space is live and that
+    // frames are addressable through its direct map.
+    let mut space = unsafe { paging::user_space(frames, kernel) }.map_err(Error::Space)?;
+
+    let order = Order::new(
+        u8::try_from(text_pages.next_power_of_two().trailing_zeros()).unwrap_or(u8::MAX),
+    )
+    .ok_or(Error::NoFrames)?;
+    let text = frames.alloc_zeroed(order).ok_or(Error::NoFrames)?;
+    let stack_order =
+        Order::new(u8::try_from(SPAWN_STACK_PAGES.trailing_zeros()).unwrap_or(u8::MAX))
+            .ok_or(Error::NoFrames)?;
+    let stack = frames.alloc_zeroed(stack_order).ok_or(Error::NoFrames)?;
+    // Zeroed, and it is an obligation rather than tidiness: a channel's cursors
+    // and entry arrays are reinterpreted in place and all-zero is the one bit
+    // pattern every one of those types is valid at.
+    let control = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
+    let board = frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?;
+    // One block, so that `Prepared` can name the heap with one `Frame` and
+    // `reap` can give it back in one call. The allocator's own rounding makes
+    // the slack visible in the free count rather than hiding it in a loop.
+    let heap_pages = plan.heap_bytes.div_ceil(FRAME_SIZE);
+    let heap_order = Order::new(
+        u8::try_from((heap_pages as usize).next_power_of_two().trailing_zeros()).unwrap_or(u8::MAX),
+    )
+    .ok_or(Error::NoFrames)?;
+    let heap = frames.alloc_zeroed(heap_order).ok_or(Error::NoFrames)?;
+
+    let into = frames.virt(text);
+    // SAFETY: `text` was just allocated at an order covering `text_pages`,
+    // nothing else holds it, it is addressable through the direct map, and the
+    // image is no longer than the block.
+    unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), into, image.len()) };
+
+    for page in 0..text_pages as u64 {
+        // SAFETY: as `user_space`, and `space` is not in `CR3` — it has never
+        // been.
+        unsafe {
+            paging::map_user(
+                frames,
+                &mut space,
+                TEXT + page * FRAME_SIZE,
+                text.addr().wrapping_add(page * FRAME_SIZE),
+                paging::UserPage::Text,
+                features,
+            )
+        }
+        .map_err(Error::Space)?;
+    }
+
+    for page in 0..SPAWN_STACK_PAGES as u64 {
+        // SAFETY: as above.
+        unsafe {
+            paging::map_user(
+                frames,
+                &mut space,
+                SPAWN_STACK + page * FRAME_SIZE,
+                stack.addr().wrapping_add(page * FRAME_SIZE),
+                paging::UserPage::Data,
+                features,
+            )
+        }
+        .map_err(Error::Space)?;
+    }
+
+    for (virt, at, kind) in [
+        (SPAWN_CONTROL, control.addr(), paging::UserPage::Data),
+        (BLK_DATA, plan.data, paging::UserPage::Data),
+        (BOARD, board.addr(), paging::UserPage::Data),
+    ] {
+        // SAFETY: as above.
+        unsafe { paging::map_user(frames, &mut space, virt, at, kind, features) }
+            .map_err(Error::Space)?;
+    }
+
+    // The client's region, at the address a driver's queue memory would have
+    // been. Reusing that address rather than minting a fifth is deliberate:
+    // both are *one contiguous granted region the component addresses from a
+    // constant*, `SPAWN_TREE`'s own comment gives the argument for not
+    // inserting a page into this list, and a server and a driver are never the
+    // same instance, so the two meanings never coexist in one address space.
+    for page in 0..plan.buffer_bytes / FRAME_SIZE {
+        // SAFETY: as above, and the caller's guarantee that `buffers` names
+        // `buffer_bytes` of memory it holds.
+        unsafe {
+            paging::map_user(
+                frames,
+                &mut space,
+                BLK_QUEUES + page * FRAME_SIZE,
+                plan.buffers.wrapping_add(page * FRAME_SIZE),
+                paging::UserPage::Data,
+                features,
+            )
+        }
+        .map_err(Error::Space)?;
+    }
+
+    for page in 0..heap_pages {
+        // SAFETY: as above; `heap` was allocated at an order covering
+        // `heap_pages` and nothing else holds it.
+        unsafe {
+            paging::map_user(
+                frames,
+                &mut space,
+                SPAWN_HEAP + page * FRAME_SIZE,
+                heap.addr().wrapping_add(page * FRAME_SIZE),
+                paging::UserPage::Data,
+                features,
+            )
+        }
+        .map_err(Error::Space)?;
+    }
+
+    // The prologue the allocator reads, written before the component's first
+    // instruction for the reason `SPAWN_HEAP` states: a `#[global_allocator]`
+    // answers its first allocation before any line of the component has run, so
+    // there is no moment at which the component could ask for this.
+    //
+    // SAFETY: `heap` was just allocated zeroed at an order covering
+    // `heap_pages`, is addressable through the direct map, and nothing else
+    // holds a pointer into it.
+    unsafe {
+        f_ring::heap::describe(
+            frames.virt(heap) as u64,
+            u32::try_from(plan.heap_bytes).unwrap_or(0),
+        );
+    }
+
+    let pages =
+        ServerPages { control: frames.virt(control) as u64, board: frames.virt(board) as u64 };
+
+    let table = crate::cap::of(cpu);
+    // SAFETY: the table of a core that is idle, with no process running on it,
+    // which is the write `PerCpu::at` exists for.
+    let held = unsafe { &mut *table };
+    held.clear_all();
+    // A server has a control ring, so it is owed notices — and a slot whose
+    // notice field is not quiet is not refilled, so a server that never drains
+    // runs out of table rather than out of memory. RFC 0008.
+    held.owes_notices();
+    let first = held
+        .grant(CapType::AddressSpace, rights::READ | rights::WRITE, space.root(), 0)
+        .map_err(|_| Error::NoSlot)?;
+    // The same four, in the same order, as every other shape this kernel
+    // builds. `prepare_driver` says why the count is load-bearing and the
+    // reason applies here unchanged — and the heap is deliberately **not**
+    // among them: the frame maps it and the component addresses it from a
+    // constant, so there is no handle for a fifth grant to carry.
+    for object in [control.addr(), plan.data] {
+        held.grant(CapType::Frame, rights::READ | rights::WRITE, object, FRAME_SIZE)
+            .map_err(|_| Error::NoSlot)?;
+    }
+    held.grant(CapType::Frame, rights::READ, tree, FRAME_SIZE).map_err(|_| Error::NoSlot)?;
+    let granted_count = held.used();
+
+    let state = STATE.at(cpu);
+    // SAFETY: the slot of an idle core, so neither the fault path nor the
+    // system-call path over there can be holding it.
+    unsafe {
+        state.write(State {
+            announced: false,
+            refused: 0,
+            death: Death::Running,
+            // A server never asks, for `prepare_driver`'s reason: its loop ends
+            // when the frame tells it to stop, on the ring.
+            wanted: 0,
+            giveup: 0,
+            caps: Tally::ZERO,
+            root: space.root(),
+            frames: 0,
+            features,
+        });
+    }
+
+    let ticks = IN_RING3.at(cpu);
+    // SAFETY: volatile through the raw pointer, into the slot of a core whose
+    // timer handler — the only other writer — has nothing to count yet.
+    unsafe { ticks.write_volatile(0) };
+    arm_entries(cpu);
+
+    let outcome = OUTCOME.at(cpu);
+    // SAFETY: as above; the core is idle and has not been given the job.
+    unsafe {
+        outcome.write(Outcome { ended: 0, ticks: 0, held: 0, entries: Entries::ZERO, failed: None })
+    };
+
+    let job = JOB.at(cpu);
+    // SAFETY: as above. Written last, and published to the running core by the
+    // `Release` store `smp::run_on` makes after this returns.
+    unsafe {
+        job.write(Job {
+            root: space.root(),
+            entry: TEXT,
+            stack: SPAWN_STACK_TOP,
+            argument: door::Entry::new(selector, first).bits(),
+            hz,
+            target,
+        })
+    };
+
+    Ok((
+        Prepared {
+            space,
+            // Five, and every one of them allocated here. The data ring and the
+            // client's buffer region are the caller's and are deliberately
+            // absent: a list that held them would free memory this function
+            // never took, which is a corruption rather than a leak.
+            pages: [text, stack, control, board, heap],
+            parts: 5,
+            before,
+            granted: granted_count,
+            generation: first.generation(),
+            cpu,
+        },
+        pages,
+    ))
+}
+
 /// Run the process this core was given, and record what happened.
 ///
 /// # Why this core arms its own timer

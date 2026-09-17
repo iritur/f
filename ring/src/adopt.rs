@@ -331,6 +331,31 @@ impl Server {
         poster.free()
     }
 
+    /// Copy a submission's inline payload out of the channel's arena.
+    ///
+    /// `false` when `offset` and `out` do not name bytes inside the arena, which
+    /// is an entry framing a payload that is not there — refused here and left
+    /// for the caller's decoder to answer, because deciding that an entry is
+    /// malformed in two places is two answers to one question.
+    ///
+    /// # Why this copies rather than lending the arena
+    ///
+    /// Because [`Adopted`] holds no reference into the region and this method
+    /// may not be the one that starts. An `Arena<'m>` borrows the `Mapping` that
+    /// `bind` makes for the length of one call, so handing one back would hand
+    /// back a borrow of a value that is already gone. The copy is also the
+    /// honest shape for what the bytes *are*: a payload a peer wrote, which the
+    /// caller is about to disbelieve field by field, and which must not change
+    /// under it while that happens.
+    ///
+    /// The first user is `user/objects`, whose forty-byte request record is the
+    /// only inline payload any component in this tree reads — the three drivers
+    /// carry everything they need in the entry's own fields and never look.
+    pub fn copy_out(&self, offset: usize, out: &mut [u8]) -> bool {
+        let mapping = self.0.bind();
+        mapping.arena().copy_out(offset, out)
+    }
+
     /// Answer one submission.
     ///
     /// # Errors

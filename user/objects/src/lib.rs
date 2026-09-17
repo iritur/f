@@ -80,16 +80,15 @@
 //! driver checks a real submission against, unchanged — so the question
 //! *was this destination registered* is answered by the same code either way.
 //!
-//! **And there is no ring over it either, which is a different sentence and a
-//! shorter one than it was.** [`service`] answers a real [`f_abi::Sqe`] and
-//! produces a real [`f_abi::Cqe`], through `abi::objects::Request::decode`,
-//! with the count taken at that entry — so what is missing is the *transport*
-//! and no longer the *service*. A mapped channel needs a peer that describes
-//! one, `kernel/src/component.rs` gives a place's occupant a control ring and
-//! nothing else, and the two components in this tree that serve a real data
-//! ring are each stood up by a module written for them in the frame.
-//! [`service`]'s own comment carries the loop that closes it and says why not
-//! one line of the counting moves when somebody writes it.
+//! **There is a ring over it, and that is new.** [`serve`] adopts a mapped
+//! channel the frame described, registers the region its client granted, and
+//! answers `abi::objects::op::READ` off it from ring 3. `cargo xtask objects
+//! read` is that boot: sixty-four entries, 192 000 application bytes into the
+//! client's own memory, zero staged, and every byte checked by the client
+//! against arithmetic it did itself. So the count `E2-B08` is about is now taken
+//! where `intent/0006-state/spec.md` says an application byte is — on the
+//! objects ring, in a boot — and what remains modelled is the device *under* the
+//! store rather than the boundary above it.
 //!
 //! # Determinism
 //!
@@ -157,6 +156,13 @@ static HEAP: f_ring::heap::Heap = f_ring::heap::Heap::COMPONENT;
 // reason, that `user/store/src/lib.rs` draws about the allocator one paragraph up.
 #[cfg(all(target_os = "none", target_arch = "x86_64", feature = "image"))]
 pub mod component;
+
+// The serve loop, behind the same three gates as `component` and for the same
+// reasons: it calls the door, it is the body of an image, and an integration
+// test linking this crate against `std` may not bring a second `panic_impl`
+// with it.
+#[cfg(all(target_os = "none", target_arch = "x86_64", feature = "image"))]
+pub mod serve;
 
 pub mod dma;
 pub mod read;

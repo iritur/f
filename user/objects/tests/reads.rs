@@ -24,16 +24,20 @@
 //! `intent/0006-state/spec.md` says an application byte is. The two must
 //! deliver the same bytes and the second is the one the claims want.
 //!
-//! What is left is the transport, and it is left on purpose rather than
-//! overlooked. An `Sqe` reaches `f_objects::service` as an argument, not off a
-//! mapped channel: `kernel/src/component.rs` gives a place's occupant a control
-//! ring and no data ring, and `user/virtio-blk` answers two of RFC 0060's seven
-//! opcodes, so the boot the spec describes — this component over that driver's
-//! ring — still has nothing to boot. **`E2-B08`'s exit is a count taken across
-//! the objects ring in a boot**, and a request encoded and handed to a function
-//! in the same address space is not one however honest the encoding. The rows
-//! below say which boundary each number came from, because that is the only
-//! thing standing between an honest run and a number called by the exit's name.
+//! **The transport arrived, and this file is deliberately not where it runs.**
+//! `cargo xtask objects` is that boot — a component serving from ring 3, the
+//! frame as its client, a mapped channel and a granted region — and it takes the
+//! same counts a third time. This file stays on the host because it is where the
+//! *workload* is: 256 reads over four zones at 4096-byte blocks, a corruption
+//! control, a short-run control and a residency figure, none of which fit in a
+//! boot that has to finish inside a timeout. Three boundaries, three sets of
+//! rows, one design; `claims/0022` holds all three and says which is which.
+//!
+//! What is still modelled everywhere, including in that boot, is the **device**.
+//! `intent/0006-state/spec.md` describes `user/objects` over the blk driver's
+//! ring; that driver answers two of RFC 0060's seven opcodes, and the store the
+//! boot serves out of is `ZonedMemory` in the component's own heap. The boundary
+//! above the store is crossed for real now. What is under it is not.
 //!
 //! What is **not** modelled away is the thing the count is about. The
 //! registration is `f_ring::registry::Table` — E1-B10's service-side table,

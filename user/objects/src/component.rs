@@ -26,15 +26,18 @@
 //!
 //! # What it does not do yet, said before anybody infers it from the code
 //!
-//! **This body serves nothing.** `f_abi::objects::op::known` admits
-//! `op::READ` now and [`crate::service`] is the body behind it — so the opcode
-//! is answered, and what is missing has moved one layer out. A place's occupant
-//! is given a control ring and no data ring (`kernel/src/component.rs`), so
-//! there is no channel for [`start`] to adopt and no client on the other end of
-//! one. The loop that would close it is four lines and is written out in
-//! [`crate::service`]'s own comment; what it needs is a peer that describes a
-//! channel, which for `user/virtio-blk` and `user/store` is a module in the
-//! frame written for each of them.
+//! **This body serves nothing, and the one that does is a selector away.**
+//! Entered with `board::SERVE` or `board::PROVOKE` this jumps to
+//! [`crate::serve`], which adopts the two rings the frame described and answers
+//! the objects ring from ring 3. Entered with zero — which is what a spawn into
+//! a place passes — it does what it has always done: reads what it holds,
+//! allocates once, announces itself and ends.
+//!
+//! Two lives in one image rather than two component files, which is
+//! `user/store/src/component.rs`'s rule and its reason: the place, the manifest,
+//! the account and the restart policy are all the same component's, and what
+//! differs is whether the frame gave it a core and a client. A second manifest
+//! would be a second place, and a place is a claim about the topology.
 //!
 //! So what this component demonstrates is narrower than what it is for: it
 //! **builds, fits, spawns, allocates and ends**. That was unavailable while the
@@ -77,6 +80,15 @@ pub const DONE: u64 = 0;
 /// It never returns: [`door::EXIT`] does not come back, and the loop after it is
 /// what happens if the frame ever lets it.
 pub fn start(argument: u64) -> ! {
+    // Which of this component's lives the frame asked for. A selector this build
+    // does not name falls through to the announcement rather than inventing a
+    // third, which is `user/store/src/component.rs`'s rule and its reason: the
+    // life a spawn into a place asks for is the one that has always been here.
+    let selector = door::Entry::from_bits(argument).selector();
+    if selector == f_abi::objects::board::SERVE || selector == f_abi::objects::board::PROVOKE {
+        crate::serve::serve(selector)
+    }
+
     // The frame tells a component what it holds rather than letting it assume,
     // and `door::Entry` argues why: a second occupant of a place finds its
     // capabilities at the same indices and a later generation, so a component
