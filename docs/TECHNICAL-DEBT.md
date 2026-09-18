@@ -137,6 +137,8 @@ virtual machine did establish in its place, and what would close it.
 
 | Task | Clause narrowed out of its exit | Blocker | What the VM established instead | What closes it |
 |---|---|---|---|---|
+| `E0-P05` | *“`cargo xtask claims` reports it green; a deliberate 20% regression fails the build”* — the whole exit | `runner-class-A` | The workload runs to completion and the distribution is drawn; `bench` refuses to record it, naming the environment. `claims/0001` is `pending`. | A class-A machine passing the seven-item checklist, F booted on it (`E0-P18`), and `cargo xtask claim ring-submit-latency` recording a number. |
+| `E0-P06` | *“recorded with the reservation conditions from RFC 0007 named in the claim”* — the whole exit | `runner-class-A`, and `tsc-deadline` | 60 000 ticks at 1 kHz with a log-bucketed distribution, p50/p99/p99.9 and an exact maximum; every boot runs a hundred ticks of the same path. The measured path is the APIC one-shot, because TCG refuses `tsc-deadline` by name. | The same machine, with all four RFC 0007 components carved by F’s own frame and each recorded as obtained by partition or by exclusion. |
 
 ## How this page is kept honest
 
