@@ -96,6 +96,34 @@ type   = "endpoint"
 rights = ["write"]
 from   = "supervisor"
 
+# The board: one page, in which the frame writes what this boot found about this
+# driver's device and this component writes what it read back.
+# `user/virtio-blk/src/routing.rs` is the layout, and `kernel/src/blk.rs`
+# asserts at compile time that the address the two sides agree on is one number.
+#
+# **Declared here because a place's occupant can now run.** Until it could, this
+# page was mapped by `prepare_driver` for an instance the frame stood up outside
+# any place — image, account-less, needs unchecked — so no manifest had to
+# mention it. An occupant of a place is built from its manifest and from nothing
+# else, and a driver that cannot be told where its device landed is a driver
+# bound to one machine. Declaring it is what makes the frame map it, and what
+# makes the account pay for it.
+#
+# The cost is one page out of the two mebibytes below, and the reversal is the
+# same page going back: if the day comes when a device's layout reaches a
+# component some other way, this line goes and the hash a spawn names moves
+# with it.
+#
+# Read and write and nothing else. `write`, because the far half of the page is
+# this component's own report; not `derive`, because a board handed on is a
+# second component believing what this one was told.
+[[capability]]
+name   = "board"
+type   = "untyped"
+rights = ["read", "write"]
+from   = "supervisor"
+bytes  = 4_096
+
 # --- Rings: the control ring is implicit; this is the data ring ---------------
 
 # One server ring per client, up to eight clients, each speaking `blk` version

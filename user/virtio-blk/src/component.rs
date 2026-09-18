@@ -56,17 +56,22 @@
 //!
 //! The place's occupant is no longer idle, though, and the difference is worth
 //! keeping exact. On the `blk=place` half that place is supplied with the
-//! device window it cannot carve, and its occupant *is* handed a core: it
-//! enters at [`start`] with [`crate::routing::life::ANNOUNCE`], says so through
-//! a door, and ends. What it does not do is serve, because serving means
-//! running while a client submits and reading a routing board this manifest
-//! declares no need for.
+//! device window it cannot carve, told where the device's four register
+//! structures are on the routing page its manifest now declares a `board` need
+//! for, and handed a core: it enters at [`start`] with
+//! [`crate::routing::life::IDENTIFY`], reads the disk's capacity out of the
+//! device's own configuration structure, writes it back onto the board, and
+//! ends.
+//!
+//! What it does not do is serve, and what is missing is now one thing rather
+//! than two: serving means running *while* a client submits, which is
+//! `smp::start_on` and not the run-to-completion the frame uses there.
 //!
 //! So the sentence this component supports is *the code that serves the
-//! datapath runs at ring 3 in its own loop*, plus *a place's occupant holding
-//! the device window runs at ring 3 too*, and not yet *the occupant of a place
-//! serves the datapath*. `CHAOS_GAP` in xtask is what carries the difference,
-//! and it names what is left.
+//! datapath runs at ring 3 in its own loop*, plus *a place's occupant reads the
+//! device through the window its place was supplied with*, and not yet *the
+//! occupant of a place serves the datapath*. `CHAOS_GAP` in xtask is what
+//! carries the difference, and it names what is left.
 
 use f_abi::control::{is_notice, notice};
 use f_abi::deadline::Admitted;
@@ -99,6 +104,9 @@ pub fn start(argument: u64) -> ! {
     let selector = entry.selector();
     if selector == life::SERVE || selector == life::ESCAPE {
         serve(selector)
+    }
+    if selector == life::IDENTIFY {
+        identify()
     }
 
     // The frame tells a component what it holds rather than letting it assume,
@@ -310,12 +318,19 @@ struct Parts {
     hold_after: u64,
 }
 
-/// Read the routing page and state everything it names.
+/// The four register structures and the notification stride, out of the routing
+/// page.
 ///
-/// `None` for any address that cannot be stated as a window, a region or a
-/// channel — which is a frame that filled this page in wrongly, and is refused
-/// here rather than dereferenced to find out.
-fn laid_out(board: &Window) -> Option<Parts> {
+/// Its own function because two lives need it and only one of them needs
+/// anything else: [`identify`] reads a window and stops, [`serve`] goes on to
+/// state a queue, two rings and two ceilings. A copy of these fifteen lines in
+/// the short life would be a second reading of the same page that could come to
+/// a different answer about where a device's configuration structure is, which
+/// is the class of disagreement `Windows` exists to prevent one argument down.
+///
+/// `None` for any offset that cannot be stated as a window inside the register
+/// span, which is a frame that filled this page in wrongly.
+fn routed(board: &Window) -> Option<Windows> {
     let registers_at = board.read64(at::REGISTERS_AT).ok()?;
     let registers_len = u32::try_from(board.read64(at::REGISTERS_LEN).ok()?).ok()?;
     let registers = Window::at(registers_at, registers_len).ok()?;
@@ -328,13 +343,68 @@ fn laid_out(board: &Window) -> Option<Parts> {
         let bytes = u32::try_from(board.read64(len).ok()?).ok()?;
         registers.slice(at, bytes).ok()
     };
-    let windows = Windows {
+    Some(Windows {
         common: structure(at::COMMON_OFFSET, at::COMMON_LEN)?,
         notify: structure(at::NOTIFY_OFFSET, at::NOTIFY_LEN)?,
         isr: structure(at::ISR_OFFSET, at::ISR_LEN)?,
         config: structure(at::CONFIG_OFFSET, at::CONFIG_LEN)?,
         notify_multiplier: u32::try_from(board.read64(at::NOTIFY_MULTIPLIER).ok()?).ok()?,
+    })
+}
+
+/// Read the device's configuration window, say what it holds, and end.
+///
+/// # What a run of this proves, said exactly
+///
+/// That the register window the frame **supplied** to this component's place —
+/// rather than carving it out of the account, which it cannot do for a device —
+/// is mapped in this component's own address space, at the address the routing
+/// page names, and readable from ring 3. The evidence is a number the device
+/// published and this component could not have invented: the disk's capacity in
+/// sectors, written into [`reported::CAPACITY`] and compared by the boot
+/// against the image it was given.
+///
+/// # What it does not touch, on purpose
+///
+/// The device's status register. This life neither resets nor acknowledges
+/// anything, so a `SERVE` run in the same boot would find the device exactly as
+/// the machine left it. That is what makes this safe to run beside a datapath
+/// that is still stood up the old way.
+fn identify() -> ! {
+    let Ok(board) = Window::at(routing::AT, routing::BYTES) else {
+        // Nothing to report *into*, so the status word is all there is.
+        end(stopped::BAD_ROUTING)
     };
+    if board.read64(at::MAGIC) != Ok(routing::MAGIC) {
+        // R04 again, and here it is the whole point: an occupant whose place was
+        // built and whose board was never filled in reads a page of zeroes, and
+        // a zero capacity taken for a capacity would read as an empty disk.
+        let _ = board.write64(reported::OUTCOME, stopped::NO_ROUTING);
+        let _ = board.write64(reported::MAGIC, routing::MAGIC);
+        end(stopped::NO_ROUTING)
+    }
+    let outcome = match routed(&board).map(|windows| crate::transport::capacity(&windows.config)) {
+        Some(Ok(sectors)) => {
+            let _ = board.write64(reported::CAPACITY, sectors);
+            stopped::IDENTIFIED
+        }
+        Some(Err(_)) => stopped::NO_DEVICE,
+        None => stopped::BAD_ROUTING,
+    };
+    let _ = board.write64(reported::OUTCOME, outcome);
+    // Last, for [`reported::MAGIC`]'s own reason: a frame reading a page this
+    // component never reached finds a zero rather than a plausible tally.
+    let _ = board.write64(reported::MAGIC, routing::MAGIC);
+    end(DONE)
+}
+
+/// Read the routing page and state everything it names.
+///
+/// `None` for any address that cannot be stated as a window, a region or a
+/// channel — which is a frame that filled this page in wrongly, and is refused
+/// here rather than dereferenced to find out.
+fn laid_out(board: &Window) -> Option<Parts> {
+    let windows = routed(board)?;
 
     let queues = Region::at(
         board.read64(at::QUEUES_AT).ok()?,

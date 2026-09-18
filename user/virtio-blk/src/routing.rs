@@ -71,6 +71,27 @@ pub mod life {
     /// to be greppable, and a driver whose data path took a branch on a mode
     /// word would be a data path with a provocation *in* it.
     pub const ESCAPE: u32 = 2;
+    /// Read the device's own configuration window, report what it said, and
+    /// end.
+    ///
+    /// # What this life is for, and what it is not
+    ///
+    /// It is the narrowest thing a component can do with a register window: no
+    /// queue, no ring, no client, no device reset. It reads the capacity the
+    /// device published when the machine was built and writes it into
+    /// [`super::reported::CAPACITY`].
+    ///
+    /// **It exists because a place's occupant can now run.** The frame supplies
+    /// that place with a device window it cannot carve — `kernel/src/component.
+    /// rs`'s `Supplied` — and the log line saying so is the *frame's* account of
+    /// what it did. This is the component's, and the two are different claims: a
+    /// window that was mapped into the wrong address space, at the wrong
+    /// address, or uncached at neither would produce the same frame line and a
+    /// different number here.
+    ///
+    /// A separate selector rather than a flag on [`SERVE`], for [`ESCAPE`]'s
+    /// reason one line up.
+    pub const IDENTIFY: u32 = 3;
 }
 
 /// Where the frame maps this page in the component's address space.
@@ -341,4 +362,12 @@ pub mod stopped {
     /// The zero-copy self-check refused, so the zero it stands behind would
     /// have been a zero nothing could move.
     pub const NO_SELF_CHECK: u64 = 6;
+    /// The component was asked only to identify its device, and did.
+    ///
+    /// An outcome of its own rather than [`TOLD`], because *it ran to the end
+    /// of what it was asked* and *a stop notice arrived* are two different
+    /// things, and a reader who could not tell them apart could not tell an
+    /// `IDENTIFY` run from a `SERVE` run that was stopped before it served
+    /// anything.
+    pub const IDENTIFIED: u64 = 7;
 }

@@ -1006,7 +1006,7 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // SAFETY: the boot processor, with the kernel's space in `CR3`; `remapping`
     // is this boot's own unit and nothing else is walking the bus, so the device
     // lookup inside is the only one this boot makes.
-    let supplied =
+    let (supplied, routing) =
         unsafe { blk_place_supply(&boot, &mut frames, &space, features, &remapping, &mut queues) };
     // SAFETY: the boot processor, once, with the kernel's address space in
     // `CR3`, `frames` rebound onto its direct map, and no process running. The
@@ -1024,6 +1024,7 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             &tree,
             occupant_core,
             &supplied,
+            &routing,
         )
     } {
         Ok(report) => kprintln!(
@@ -2958,6 +2959,21 @@ fn objects_datapath(
 /// and doing it twice in one boot would be two units programmed for one device.
 /// On this half there is exactly one caller, and it is this.
 ///
+/// # What it tells the occupant, beside what it gives it
+///
+/// A supplied window is an address, and an address alone is not enough to read a
+/// device: the four register structures are at offsets the *device* published,
+/// so a component that assumed them would be a component bound to one machine.
+/// Those offsets go on the occupant's routing page, which is the same page
+/// `kernel/src/blk.rs` fills in for the instance it stands up and the same
+/// layout — `f_virtio_blk::routing` — because a second layout for the same facts
+/// is a second thing to keep in step.
+///
+/// Only the part an `IDENTIFY` life reads is written. The queue, the two rings
+/// and the two ceilings are a `SERVE` life's and are not here, because a page
+/// carrying a ring address nothing bound would be the frame telling a component
+/// something untrue.
+///
 /// # What it supplies, and why these two and not the other needs
 ///
 /// `mmio` is a device window: a physical span the firmware chose, which the
@@ -2981,14 +2997,17 @@ unsafe fn blk_place_supply(
     features: paging::Features,
     remapping: &Option<Remapping>,
     queues: &mut Option<mem::Frame>,
-) -> [component::Supplied; 2] {
-    const NONE: [component::Supplied; 2] = [component::Supplied {
-        component: b"",
-        name: b"",
-        at: 0,
-        bytes: 0,
-        map: component::Placement::Unmapped,
-    }; 2];
+) -> ([component::Supplied; 2], [(u32, u64); ROUTED]) {
+    const NONE: ([component::Supplied; 2], [(u32, u64); ROUTED]) = (
+        [component::Supplied {
+            component: b"",
+            name: b"",
+            at: 0,
+            bytes: 0,
+            map: component::Placement::Unmapped,
+        }; 2],
+        [(0, 0); ROUTED],
+    );
 
     if !boot.has_parameter(b"blk=place") {
         return NONE;
@@ -3047,23 +3066,56 @@ unsafe fn blk_place_supply(
         declared.bytes,
     );
 
-    [
-        component::Supplied {
-            component: b"virtio-blk",
-            name: b"mmio",
-            at: registers.base,
-            bytes: u64::from(registers.pages) * mem::FRAME_SIZE,
-            map: component::Placement::Uncached(process::BLK_REGISTERS),
-        },
-        component::Supplied {
-            component: b"virtio-blk",
-            name: b"queues",
-            at: region.addr(),
-            bytes: declared.bytes,
-            map: component::Placement::Cached(process::BLK_QUEUES),
-        },
-    ]
+    // The page the occupant is told on. `MAGIC` is last and the writer keeps the
+    // order, because a component reads the magic first and believes nothing
+    // without it.
+    use f_virtio_blk::routing::at;
+    let each = registers.each;
+    let routing = [
+        (at::REGISTERS_AT, process::BLK_REGISTERS),
+        (at::REGISTERS_LEN, u64::from(registers.pages) * mem::FRAME_SIZE),
+        (at::COMMON_OFFSET, u64::from(each[0].0)),
+        (at::COMMON_LEN, u64::from(each[0].1)),
+        (at::NOTIFY_OFFSET, u64::from(each[1].0)),
+        (at::NOTIFY_LEN, u64::from(each[1].1)),
+        (at::ISR_OFFSET, u64::from(each[2].0)),
+        (at::ISR_LEN, u64::from(each[2].1)),
+        (at::CONFIG_OFFSET, u64::from(each[3].0)),
+        (at::CONFIG_LEN, u64::from(each[3].1)),
+        (at::NOTIFY_MULTIPLIER, u64::from(device.notify_multiplier)),
+        (at::MAGIC, f_virtio_blk::routing::MAGIC),
+    ];
+
+    (
+        [
+            component::Supplied {
+                component: b"virtio-blk",
+                name: b"mmio",
+                at: registers.base,
+                bytes: u64::from(registers.pages) * mem::FRAME_SIZE,
+                map: component::Placement::Uncached(process::BLK_REGISTERS),
+            },
+            component::Supplied {
+                component: b"virtio-blk",
+                name: b"queues",
+                at: region.addr(),
+                bytes: declared.bytes,
+                map: component::Placement::Cached(process::BLK_QUEUES),
+            },
+        ],
+        routing,
+    )
 }
+
+/// How many slots `blk=place` writes onto a driver occupant's routing page.
+///
+/// A length rather than a slice, because the array is built on a stack frame
+/// that outlives nothing: the caller hands a borrow of it straight to
+/// `component::demonstrate` and the page is written before the first core is
+/// given out. Twelve is the register span, the four structures' offsets and
+/// lengths, the notification stride, and the magic that is written last.
+/// Unit: slots.
+const ROUTED: usize = 12;
 
 fn blk_datapath(
     boot: &BootInfo,

@@ -2220,6 +2220,18 @@ const NET_DEVICE: &[&str] = &[
 /// Unit: bytes.
 const BLK_DISK_BYTES: usize = 1024 * 1024;
 
+/// Bytes in a sector, which is the grain a block device publishes its capacity
+/// in.
+///
+/// The same five hundred and twelve `f_virtio_blk::transport::SECTOR_BYTES`
+/// holds, written here rather than imported because `xtask` is a host crate and
+/// importing a bare-metal one for a constant would put a licence-boundary
+/// question in the way of a number. If the two ever disagree, `blk place` fails
+/// on the capacity it reads back, which is the check noticing rather than a
+/// reader.
+/// Unit: bytes.
+const SECTOR_BYTES: usize = 512;
+
 /// Make the disk the block datapath works on, fresh.
 ///
 /// Rewritten on every run rather than created once, and that is what keeps the
@@ -3356,15 +3368,13 @@ fn heap_reading(log: &str) -> Result<(u32, u32, bool), String> {
 ///    may allocate or hand back. `Supplied` and `Placement` in
 ///    `kernel/src/component.rs` are that, and `offer` sources a named need from
 ///    the caller with the extent checked against the manifest;
-/// 2. that occupant scheduled on the worker core. Half of this exists: `cargo
-///    xtask blk place` hands it one and the boot prints `scheduled     place
-///    virtio-blk`, so a driver's place occupant has reached ring 3. What is left
+/// 2. that occupant scheduled on the worker core. This exists: `cargo xtask blk
+///    place` hands it one, tells it where its device landed on a routing board
+///    its manifest now declares a `board` need for, and the occupant reads the
+///    disk's capacity back out of the supplied window from ring 3. What is left
 ///    is the word *concurrently* — that run is `schedule_occupant` followed by
 ///    `run_on`, which waits, and a driver has to be running **while** its client
-///    submits. That is `smp::start_on`, and it brings a second question with it:
-///    the driver reads where its device landed off a routing board, and
-///    `user/virtio-blk/manifest.toml` declares no `board` need, so the manifest
-///    moves and with it the hash a spawn names;
+///    submits. That is `smp::start_on`;
 /// 3. the boot's order, which is the part with the widest blast radius:
 ///    `blk_datapath` runs at `main.rs`'s line 877 and `component::demonstrate`
 ///    at 1005, so today the device is found long before the place exists. One of
@@ -9908,25 +9918,34 @@ fn iommu(kind: Option<&str>) -> Result<(), String> {
 /// driver shape reserves, and the queue memory whole. That is the half of
 /// `CHAOS_GAP` which had no mechanism at all before this.
 ///
-/// And that **the occupant of that place is given a core**: it reaches ring 3,
-/// announces itself through a door, and ends. Until this half there was exactly
-/// one component in this tree whose place occupant had ever run — the
-/// supervisor — and a driver holding a device window is the second.
+/// And that **the occupant of that place is given a core, and reads its own
+/// device through the supplied window**. Until this half there was exactly one
+/// component in this tree whose place occupant had ever run — the supervisor —
+/// and a driver holding a device window is the second.
 ///
-/// What it does **not** assert is the third: that the occupant is the one
-/// serving a client's load. It cannot be yet, and the reason is structural
-/// rather than unfinished — a driver answers entries *while* its client submits
-/// them, which is `smp::start_on` and not the run-to-completion this uses, and
-/// it reads where its device landed off a routing board
-/// `user/virtio-blk/manifest.toml` declares no need for. Saying so is the point:
-/// a half-built path that reported success would be the shape `E0-B16` and
-/// `E0-B12` both record being bitten by.
+/// The second half of that is what makes the first worth anything, and it took
+/// one boot to prove it. The evidence is not the frame's log line: the frame
+/// says *I supplied this window at this address* and would say exactly that
+/// whether or not the mapping reached the component's address space. The
+/// evidence is the number the **component** reports — the disk's capacity in
+/// sectors, read out of the device's own configuration structure at an offset
+/// the device published, and compared here against the image this command made.
+/// A window mapped nowhere produces the same frame line and no number at all,
+/// which is what the first run of this check found.
+///
+/// What it does **not** assert is the third thing `CHAOS_GAP` names: that the
+/// occupant is the one serving a client's load. It cannot be yet, and the reason
+/// is structural rather than unfinished — a driver answers entries *while* its
+/// client submits them, which is `smp::start_on` and not the run-to-completion
+/// this uses. Saying so is the point: a half-built path that reported success
+/// would be the shape `E0-B16` and `E0-B12` both record being bitten by.
 ///
 /// # Errors
 ///
 /// A boot that did not reach `M0 ok`, one whose log does not carry the line
-/// saying the place was supplied, or one where that place's occupant was never
-/// given a core.
+/// saying the place was supplied, one where that place's occupant was never
+/// given a core, and one where the occupant reported a capacity that is not the
+/// disk this command made.
 fn blk_place() -> Result<(), String> {
     println!("--- blk=place: the driver's place is supplied with the window it cannot carve");
     let disk = blk_disk()?;
@@ -9962,13 +9981,31 @@ fn blk_place() -> Result<(), String> {
              without."
             .into());
     }
+    let sectors = BLK_DISK_BYTES / SECTOR_BYTES;
+    let read = format!("read its own device: {sectors} sector(s) of capacity");
+    if !log.contains(&read) {
+        let found = log
+            .lines()
+            .find(|line| line.contains("identified    place virtio-blk"))
+            .unwrap_or("  (no `identified` line at all)");
+        return Err(format!(
+            "the occupant ran and did not report this disk back.\n\n\
+             Expected a line carrying `{read}`, and the boot printed:\n\
+             {}\n\n\
+             This is the check the frame's own supply line cannot make. The frame says\n\
+             where it mapped the window; only the component can say it was there — a\n\
+             window granted and mapped into no address space produces an identical\n\
+             `blk place` line and this failure, which is what the first run of this\n\
+             check found. Suspect `spawn`'s supplied branch before the device.",
+            found.trim_end(),
+        ));
+    }
     println!(
         "\nblk=place: ok — the place holds a real device window, supplied rather than carved,\n\
-         \x20 and its occupant reached ring 3 on a core of its own.\n\
+         \x20 and its occupant read {sectors} sector(s) of capacity back out of it from ring 3.\n\
          \x20 What it does not yet do is serve a client from there, which needs the driver\n\
-         \x20 running concurrently with one and a routing board its manifest does not\n\
-         \x20 declare — so `CHAOS_GAP` keeps its row and the other three halves still run\n\
-         \x20 on `prepare_driver`."
+         \x20 running concurrently with one — so `CHAOS_GAP` keeps its row and the other\n\
+         \x20 three halves still run on `prepare_driver`."
     );
     Ok(())
 }

@@ -105,6 +105,30 @@ const CONFIG_CAPACITY: u32 = 0x00;
 /// Unit: bytes.
 pub const SECTOR_BYTES: u32 = 512;
 
+/// How many sectors the device says it holds, read straight out of a
+/// configuration window.
+///
+/// # Why this is a function and not only [`Transport::capacity`]
+///
+/// Because a started device is not what makes this number readable. The
+/// configuration structure is memory-mapped by the *device*, and its capacity
+/// is set when the machine is built rather than when a driver acknowledges it —
+/// so a component that has been handed the window and nothing else can read it,
+/// and a component that reads it has proved the window is really mapped in its
+/// own address space. That is what `component::identify` is for, and it is the
+/// narrowest thing this crate can do with a register window.
+///
+/// Unit: sectors of [`SECTOR_BYTES`] bytes.
+///
+/// # Errors
+///
+/// [`Trouble::Register`] for a configuration window too short to hold it.
+pub fn capacity(config: &Window) -> Result<u64, Trouble> {
+    let low = config.read32(CONFIG_CAPACITY)?;
+    let high = config.read32(CONFIG_CAPACITY + 4)?;
+    Ok(u64::from(low) | (u64::from(high) << 32))
+}
+
 /// The four windows the supervisor routes, and the one number that is not a
 /// window.
 ///
@@ -321,9 +345,7 @@ impl Transport {
     ///
     /// [`Trouble::Register`] for a configuration window too short to hold it.
     pub fn capacity(&self) -> Result<u64, Trouble> {
-        let low = self.config.read32(CONFIG_CAPACITY)?;
-        let high = self.config.read32(CONFIG_CAPACITY + 4)?;
-        Ok(u64::from(low) | (u64::from(high) << 32))
+        capacity(&self.config)
     }
 
     /// Put the device back in reset.

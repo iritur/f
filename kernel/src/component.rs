@@ -1008,8 +1008,9 @@ pub struct Report {
 #[expect(
     clippy::too_many_arguments,
     reason = "`fill` one function down makes this argument at length and this is that list \
-              plus the two the demonstration itself needs: the core an occupant may be given, \
-              and what this boot found that a place cannot carve for itself. Bundling them \
+              plus the three the demonstration itself needs: the core an occupant may be \
+              given, what this boot found that a place cannot carve for itself, and what it \
+              found that only the frame can tell that occupant. Bundling them \
               would be a type that exists so a lint passes, which `runtime::demonstrate` \
               already declined for this reason"
 )]
@@ -1022,6 +1023,7 @@ pub unsafe fn demonstrate(
     tree: &crate::state::Tree,
     worker: Option<(usize, u64)>,
     supplied: &[Supplied],
+    routing: &[(u32, u64)],
 ) -> Result<Report, Failure> {
     // SAFETY: the caller's guarantee that the direct map is live and covers
     // every module.
@@ -1377,7 +1379,13 @@ pub unsafe fn demonstrate(
         };
         open.place.budget = consulted.budget;
         report.scheduled += 1;
-        scheduled_line(Name(SUPERVISOR), cpu, consulted.announced, consulted.death);
+        scheduled_line(
+            Name(SUPERVISOR),
+            cpu,
+            SUPERVISOR_LIFE,
+            consulted.announced,
+            consulted.death,
+        );
         supervised_line(&consulted, u32::from(open.place.occupant.is_some()));
 
         // The spawn the *supervisor* made, recorded on this side. Everything
@@ -1437,13 +1445,35 @@ pub unsafe fn demonstrate(
         };
         let record = Record::read(extra.place.module).map_err(Failure::Manifest)?;
         let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
+        // Told where its device is before it is told to look, which is the
+        // ordering every board in this tree keeps: the page is complete, magic
+        // last, before any core can read it.
+        //
+        // SAFETY: `occupant.board` is a frame `fill` allocated for this instance
+        // and mapped into its address space and nobody else's; the direct map
+        // covers it and no core is inside this instance.
+        unsafe { write_routing(occupant, routing) }?;
+        let life = f_virtio_blk::routing::life::IDENTIFY;
         // SAFETY: `cpu` is the core `main` vouched is started and idle — the
         // consultation above ran to completion on it, which is what `run_on`
         // returning `Ok` means, so it is idle again — and `occupant` is the
         // instance `fill` spawned a loop ago with its address space live.
-        let (announced, death) = unsafe { run_ring3(occupant, kernel, features, (cpu, tsc_khz)) }?;
+        let ran = unsafe { run_ring3(occupant, kernel, features, (cpu, tsc_khz), life) };
+        let (announced, death) = ran?;
         report.scheduled += 1;
-        scheduled_line(Name(record.label()), cpu, announced, death);
+        scheduled_line(Name(record.label()), cpu, life, announced, death);
+        // SAFETY: the core reported finished, and the page is still mapped — an
+        // address space is torn down by `tear_down` and not here.
+        let identified = unsafe { read_identified(occupant) };
+        identified_line(Name(record.label()), identified);
+        // The component's own account of the supply, required rather than
+        // printed. A boot in which this occupant ran and reported nothing is one
+        // where the window was mapped somewhere it could not reach, which is
+        // precisely the failure the frame's own supply line cannot see.
+        let Some((outcome, _)) = identified else { return Err(Failure::WrongPlace) };
+        if outcome != f_virtio_blk::routing::stopped::IDENTIFIED {
+            return Err(Failure::WrongPlace);
+        }
     }
 
     // -------------------------------------------------------------- connect
@@ -2224,7 +2254,18 @@ unsafe fn fill(
                 supervisor,
                 reservations,
                 offered,
-                &[],
+                // The same list `offer` was given a few lines up, and it has to
+                // be: `offer` decides which needs the account does *not* pay
+                // for and `spawn` decides which of them are mapped, so a caller
+                // that handed one list to the first and an empty one to the
+                // second produces a place holding a capability for a device
+                // window that is in no address space.
+                //
+                // That is not hypothetical. It is what this line said until the
+                // day an occupant of this place was first given a core, and the
+                // symptom was a page fault at the third register page in a boot
+                // whose every log line said the supply had worked.
+                supplied,
             )
         }?;
         report.spawns += 1;
@@ -2254,12 +2295,51 @@ unsafe fn fill(
     Ok(Extra { place, account, region })
 }
 
+/// What a driver occupant said about its own device, read back off its board.
+///
+/// **The component's account and not the frame's**, and the pair is the point.
+/// The `blk place` line a few above this one is the frame saying *I supplied
+/// this window at this address*; this is the occupant saying *I read it*. A
+/// window mapped into the wrong address space, or at the wrong address, or with
+/// the wrong extent produces an identical frame line and nothing here — which is
+/// why the boot refuses rather than printing a blank.
+///
+/// The capacity is in sectors because that is the unit the device publishes it
+/// in, unconverted on purpose: `cargo xtask blk place` knows how large a disk it
+/// made and multiplies, and a frame that did the arithmetic would be a frame
+/// asserting a sector size nothing here reads.
+fn identified_line(what: Name<'_>, identified: Option<(u64, u64)>) {
+    match identified {
+        Some((outcome, sectors)) => crate::kprintln!(
+            "  identified    place {what} read its own device: {sectors} sector(s) of capacity, \
+             outcome {outcome} — through the window its place was supplied with, from ring 3"
+        ),
+        None => crate::kprintln!(
+            "  identified    place {what} left no report on its board, so nothing it was told \
+             can be said to have arrived"
+        ),
+    }
+}
+
 /// A place's occupant handed a core.
 ///
 /// A line of its own rather than a field on `supervisor ok`, because this is the
 /// sentence `kernel/src/runtime.rs` has carried since RFC 0033 becoming false,
 /// and a reader comparing two boots across the change should meet it where it
 /// happened rather than in a summary at the end.
+///
+/// # Why the life is on the line, and how to read `never announced`
+///
+/// Because announcing is what *one* life does. `f_abi::door::ANNOUNCE` is the
+/// first thing a component entered at selector zero says, and for a long time
+/// selector zero was the only selector the frame ever asked for — so *it never
+/// announced itself* meant *it did not get that far*. It does not mean that any
+/// more: a driver asked to read its device and stop announces nothing, and the
+/// line that carries its evidence is [`identified_line`] below.
+///
+/// So the life is printed, and the two readings are: a zero life that never
+/// announced is a component that did not reach its first door, and any other
+/// life that never announced is a component doing what it was asked.
 ///
 /// # Why it names the place, having said `supervisor`
 ///
@@ -2283,10 +2363,16 @@ unsafe fn fill(
 /// two hashes that differed. That is the check working. The number it caught was
 /// never evidence of anything — *did it reach ring 3* is what this line is for,
 /// and `announced` answers that.
-fn scheduled_line(what: Name<'_>, cpu: usize, announced: bool, death: crate::process::Death) {
+fn scheduled_line(
+    what: Name<'_>,
+    cpu: usize,
+    life: u32,
+    announced: bool,
+    death: crate::process::Death,
+) {
     crate::kprintln!(
-        "  scheduled     place {what} on core {cpu} — a place's occupant given a core; it {} \
-         itself from ring 3",
+        "  scheduled     place {what} on core {cpu} for life {life} — a place's occupant given a \
+         core; it {} itself from ring 3",
         if announced { "announced" } else { "never announced" },
     );
     // How it ended, named rather than coded. The first time an occupant was
@@ -2633,6 +2719,92 @@ struct Consulting<'a> {
     on: (usize, u64),
 }
 
+/// The life a consultation asks a supervisor for.
+///
+/// Zero, which `f_abi::door::Entry` calls the life every component has. Named
+/// rather than written as a literal now that the frame asks for more than one,
+/// so that the two call sites cannot be read as the same number by accident.
+const SUPERVISOR_LIFE: u32 = 0;
+
+/// Write what this boot found into a driver occupant's routing page.
+///
+/// # Why the caller hands over a list and not a struct
+///
+/// Because what goes on this page is what *this boot* discovered about a device
+/// on a bus, and the frame's component module has never walked a bus. The list
+/// is built where the device was found — `main.rs` — and written here, where the
+/// page lives. A struct would put the layout in a third place, and the layout is
+/// already agreed in exactly two: `f_virtio_blk::routing` and the const
+/// assertion in `kernel/src/blk.rs` that ties its address to
+/// `process::BOARD`.
+///
+/// **The slots are written in the order given**, and the caller's last one must
+/// be the magic. A component reads the magic first and believes nothing without
+/// it, so a page whose writer stopped half way must not carry one — which is the
+/// same ordering `kernel/src/blk.rs` keeps for the same reason, and the reason
+/// this does not sort or reorder anything.
+///
+/// # Errors
+///
+/// [`Failure::WrongPlace`] for an occupant with no board. A component that
+/// declares no `board` need has no page to be told anything on, and filling in
+/// one it never asked for would be a write into the direct map at an address
+/// this instance does not own.
+///
+/// # Safety
+///
+/// `occupant.board` must be the direct-map address of a frame this instance
+/// owns, and no core may be inside this instance.
+unsafe fn write_routing(occupant: &Instance, slots: &[(u32, u64)]) -> Result<(), Failure> {
+    if occupant.board == 0 {
+        return Err(Failure::WrongPlace);
+    }
+    // SAFETY: the caller's guarantee. One frame, mapped by the direct map, owned
+    // by this instance, and not reachable from any other core.
+    let page =
+        unsafe { core::slice::from_raw_parts_mut(occupant.board as *mut u8, FRAME_SIZE as usize) };
+    for (offset, value) in slots {
+        let start = *offset as usize;
+        let Some(slot) = page.get_mut(start..start + 8) else { return Err(Failure::WrongPlace) };
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
+    Ok(())
+}
+
+/// What a driver occupant wrote back into the far half of its routing page.
+///
+/// Answers the outcome it named and the capacity it read, or `None` for a page
+/// with no report magic on it — which is a component that did not reach the end
+/// of what it was asked, and is a different thing from one that reached it and
+/// found nothing. A zero capacity under a present magic is a real reading of an
+/// empty device; a zero capacity under no magic is no reading at all, and a
+/// frame that could not tell them apart would report an empty disk for a
+/// component that never ran.
+///
+/// # Safety
+///
+/// As [`write_routing`], and the core must have finished rather than not
+/// started.
+unsafe fn read_identified(occupant: &Instance) -> Option<(u64, u64)> {
+    if occupant.board == 0 {
+        return None;
+    }
+    // SAFETY: the caller's guarantee.
+    let page =
+        unsafe { core::slice::from_raw_parts(occupant.board as *const u8, FRAME_SIZE as usize) };
+    let get = |offset: u32| -> Option<u64> {
+        let start = offset as usize;
+        Some(u64::from_le_bytes(page.get(start..start + 8)?.try_into().ok()?))
+    };
+    if get(f_virtio_blk::routing::reported::MAGIC)? != f_virtio_blk::routing::MAGIC {
+        return None;
+    }
+    Some((
+        get(f_virtio_blk::routing::reported::OUTCOME)?,
+        get(f_virtio_blk::routing::reported::CAPACITY)?,
+    ))
+}
+
 /// Hand a place's occupant a core, let it run to completion, and take the core
 /// back.
 ///
@@ -2673,12 +2845,18 @@ unsafe fn run_ring3(
     kernel: &paging::AddressSpace,
     features: Features,
     on: (usize, u64),
+    selector: u32,
 ) -> Result<(bool, crate::process::Death), Failure> {
     let (cpu, tsc_khz) = on;
-    // Selector zero: the life every component has. `first` is the occupant's own
-    // handle for its account, so its first act can be a capability call rather
-    // than a guess about which slot it holds.
-    let argument = f_abi::door::Entry::new(0, occupant.first).bits();
+    // Which of this component's lives the frame is asking for, and `first` is
+    // the occupant's own handle for its account, so its first act can be a
+    // capability call rather than a guess about which slot it holds.
+    //
+    // Zero is the life every component has and is what a consultation asks for.
+    // A component that does not name the selector it was given falls through to
+    // that one, which is why the frame may ask for another without knowing
+    // whether this particular image understands it.
+    let argument = f_abi::door::Entry::new(selector, occupant.first).bits();
     let root = occupant.space.root();
     // SAFETY: `root` is the address space this frame built for this occupant and
     // nothing has torn it down; its text is mapped executable at `process::TEXT`
@@ -2743,7 +2921,8 @@ unsafe fn consult(
 
     // SAFETY: the caller's guarantee, passed down — `cpu` is started and idle
     // and this instance's address space is live.
-    let (announced, death) = unsafe { run_ring3(occupant, kernel, features, (cpu, tsc_khz)) }?;
+    let (announced, death) =
+        unsafe { run_ring3(occupant, kernel, features, (cpu, tsc_khz), SUPERVISOR_LIFE) }?;
     // SAFETY: the core is finished, and the page is still mapped — an address space is torn
     // down by `tear_down` and not here.
     let (told, submitted, unsent, verdict, budget) = unsafe { read_board(occupant) };
@@ -3352,17 +3531,6 @@ unsafe fn spawn(
             unsafe { f_ring::heap::describe(at, u32::try_from(found.extent).unwrap_or(0)) };
         }
 
-        // The board, and it is the second need the frame maps rather than merely
-        // granting — for the first one's reason, one step earlier. A supervisor
-        // has to read this page to know which ring to adopt, so there is no
-        // instruction it could have executed before the page was there.
-        //
-        // It is a *need* and not a fixed part, which is the whole of why this
-        // costs no arithmetic anywhere else: the account pays for it because the
-        // manifest declares it, `admit` already sizes declared needs, and
-        // `cargo xtask lint-manifests` already refuses a manifest that stops
-        // adding up. A component that declares no `board` gets no board and no
-        // mapping — which is every component but one.
         // A need the caller sourced rather than the account. `offer` has
         // already granted the capability and checked the extent against the
         // manifest; what is left is putting it in the occupant's address space,
@@ -3416,6 +3584,19 @@ unsafe fn spawn(
             continue;
         }
 
+        // The board, and it is the second need the frame maps rather than merely
+        // granting — for the first one's reason, one step earlier. A component
+        // that has to read this page to know what it holds has no instruction it
+        // could have executed before the page was there: a supervisor reads it
+        // to know which ring to adopt, and a driver reads it to know where its
+        // device landed.
+        //
+        // It is a *need* and not a fixed part, which is the whole of why this
+        // costs no arithmetic anywhere else: the account pays for it because the
+        // manifest declares it, `admit` already sizes declared needs, and
+        // `cargo xtask lint-manifests` already refuses a manifest that stops
+        // adding up. A component that declares no `board` gets no board and no
+        // mapping — which is three of the six in this tree.
         if named(need, NEED_BOARD) {
             // Exactly one page. A board is a layout both sides hold and
             // `f_supervisor::routing::BYTES` is one frame; a need that declared
