@@ -820,6 +820,7 @@ fn main() -> ExitCode {
         "lint-units" => lint_units(),
         "lint-callbacks" => lint_callbacks(),
         "lint-claim-owners" => lint_claim_owners(),
+        "lint-testing-status" => lint_testing_status(),
         "lint-manifests" => lint_manifests(),
         "lint-components" => lint_components(),
         "lint-datapath" => lint_datapath(),
@@ -1037,6 +1038,7 @@ cargo xtask <command>
   lint-units         R03: every public abi field states its unit
   lint-callbacks     R05: no interface registers a callback
   lint-claim-owners  R09: every claim names the document that owns it
+  lint-testing-status  the TESTING-STATUS claims row says what claims/ holds
   lint-manifests     Every component manifest fits docs/manifest.md; RFC 0005
                      rule 4 and RFC 0008's shape, checked before a spawn does
   lint-components    The components this tree declares are the components it
@@ -12521,6 +12523,12 @@ fn lint_all() -> Result<(), String> {
     lint_units()?;
     lint_callbacks()?;
     lint_claim_owners()?;
+    // Beside `lint_claim_owners` because it reads the same registry and asks the
+    // next question about it: not whether each entry is well formed, but whether
+    // the page that publishes the registry's shape still describes it. That row
+    // had drifted from six gating to seventeen with nothing to notice, in a run
+    // whose own output counted the claims correctly four lines above.
+    lint_testing_status()?;
     // The topology check RFC 0005 promised in the R02 row: every component
     // manifest fits the schema, declares a domain, and does not put an
     // imported image in `shared`. It runs here so a boot is not the first
@@ -12957,6 +12965,139 @@ fn lint_claim_owners() -> Result<(), String> {
         findings.len(),
         findings.join("\n")
     ))
+}
+
+/// The number `docs/TESTING-STATUS.md` publishes about the registry is the
+/// number the registry holds.
+///
+/// # Why this exists, in one sentence with a date on it
+///
+/// Because the row said **"Built, fifteen entries, six gating"** on a tree whose
+/// registry held thirty-three and seventeen, and it had said so for long enough
+/// that nobody could say when it stopped being true. The run that found it
+/// printed `lint-claim-owners: ok  (33 claim(s) name an owner)` four lines
+/// above — the tree could already count, and the page was the one reader not
+/// asking it.
+///
+/// That page is not decoration. `RELEASING.md` makes it stopping condition 4,
+/// so a release consults it about what is measured, and a stale row there is a
+/// release describing a registry that does not exist.
+///
+/// # Why it checks the prose rather than a marker beside it
+///
+/// A machine-readable comment next to the sentence would be a second copy, and
+/// a second copy is a second thing to forget — the defect one level down rather
+/// than a fix for it. So the words themselves are the checked artefact: this
+/// spells the counts the way the page spells them and requires the page to
+/// contain that phrase. The number lives in exactly one place.
+///
+/// The cost is stated rather than discovered: the phrase is load-bearing now,
+/// so rewording that clause fails the build until this function is taught the
+/// new wording. That is the trade this tree makes everywhere else — a sentence
+/// worth gating is a sentence worth pinning.
+///
+/// # What it does not check
+///
+/// Everything else on the page. Six other rows make claims about what is built
+/// and not one is mechanised; the two that carry counts — `L3`'s harness total
+/// and `L4`'s corpora — would each need their own reading of their own subject.
+/// This closes the row that decayed, names the rest as unchecked, and does not
+/// pretend the page is covered.
+///
+/// # Errors
+///
+/// The page missing, or the row disagreeing with `claims/`.
+fn lint_testing_status() -> Result<(), String> {
+    let files = claim_files()?;
+    let mut gating = 0usize;
+    for path in &files {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("reading {}: {e}", relative(path)))?;
+        if claim_value(&text, "status").as_deref() == Some("gating") {
+            gating += 1;
+        }
+    }
+
+    let rel = "docs/TESTING-STATUS.md";
+    let text = std::fs::read_to_string(root().join(rel)).map_err(|e| {
+        format!(
+            "reading {rel}: {e}\n\n\
+             The page RELEASING.md makes stopping condition 4 is not there, so nothing\n\
+             can say whether what it asserts about claims/ is still true."
+        )
+    })?;
+
+    let want = format!("**Built, {} entries, {} gating**", spelled(files.len())?, spelled(gating)?);
+    if text.contains(&want) {
+        println!(
+            "lint-testing-status: ok  (the L7 row says what claims/ holds: {} entries, \
+             {gating} gating)",
+            files.len()
+        );
+        return Ok(());
+    }
+
+    Err(format!(
+        "{rel}'s claims row does not say what claims/ holds.\n\n\
+         The registry has {} entries and {gating} of them gate, so the row should read:\n\n\
+         \x20  {want}\n\n\
+         This is the row that said `**Built, fifteen entries, six gating**` while the\n\
+         registry held thirty-three and seventeen. It is stopping condition 4 in\n\
+         RELEASING.md, so a stale number here is a release describing a registry that\n\
+         does not exist.\n\n\
+         Fix the row rather than this check — and if the sentences around it name which\n\
+         claims gate, they are stale in the same breath: a corrected count above a wrong\n\
+         list is worse than both.",
+        files.len()
+    ))
+}
+
+/// A small count, spelled the way `docs/` spells it.
+///
+/// Prose and not numerals because the page is prose, and a check that demanded
+/// `33` of a page that writes `thirty-three` would be a check that made the
+/// writing worse to keep itself easy.
+///
+/// # Errors
+///
+/// A count past what this table spells — which is a real answer rather than a
+/// limitation: a registry grown past ninety-nine is a day for somebody to
+/// decide whether the page should carry the number in words at all.
+fn spelled(n: usize) -> Result<String, String> {
+    const UNITS: [&str; 20] = [
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+    ];
+    const TENS: [&str; 10] =
+        ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+    match n {
+        0..=19 => Ok(UNITS[n].to_string()),
+        20..=99 if n.is_multiple_of(10) => Ok(TENS[n / 10].to_string()),
+        20..=99 => Ok(format!("{}-{}", TENS[n / 10], UNITS[n % 10])),
+        _ => Err(format!(
+            "{n} is past what `spelled` covers.\n\n\
+             Extend it, or decide that a registry this size should carry its count in\n\
+             numerals and change the page and this check together."
+        )),
+    }
 }
 
 /// Every component manifest in the permissive tree fits `docs/manifest.md`.
