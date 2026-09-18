@@ -174,6 +174,41 @@ const DETERMINISM_ALLOW: &[(&str, &str)] = &[
 /// `[lints] workspace = true` like every other crate, so `unsafe_code =
 /// "forbid"` still applies to it at compile time — the enforcement that
 /// actually matters is unaffected.
+/// The directories every walker in this file steps over, in one place.
+///
+/// `CLAUDE.md` carries the scar this function is the answer to: five walkers
+/// each carried their own copy of this list and four of them forgot `.claude`,
+/// so they read four *other* checkouts of this repository — an agent harness
+/// puts git worktrees under `.claude/worktrees/` — and reported findings that
+/// name paths in this tree and are about a different one. A sixth walker
+/// copying the list would be the same defect with a new name, so walkers call
+/// this instead.
+///
+/// `build` is passed rather than read here because `CARGO_TARGET_DIR` moves the
+/// output directory and it is then not called `target`; see [`target_dir`].
+fn walker_skips(name: &str, path: &Path, build: &Path) -> bool {
+    matches!(name, "target" | ".git" | ".claude" | "third_party" | "docs") || path == build
+}
+
+/// Crates in the permissive tree permitted to carry a build script.
+///
+/// Empty, and that emptiness is the check. A build script can read any file on
+/// the machine and hand its bytes to the crate through `OUT_DIR`, or point the
+/// linker at an imported object with `cargo:rustc-link-search` — neither of
+/// which leaves a route in any source for a matcher to find. Prohibiting the
+/// mechanism closes that whole family at once; inspecting its traces does not.
+/// RFC 0092, whose *What would reverse this* names the first row added here as
+/// the most likely reversal of that entry.
+const BUILD_SCRIPT_ALLOW: &[(&str, &str)] = &[];
+
+/// Paths in the permissive tree permitted to be a symbolic link.
+///
+/// Empty, on the same argument. A symlink reaches the imported tree while
+/// naming it in no file at all: `mod shaper;` resolving through a linked
+/// directory spells nothing a text matcher can match, and the compiler follows
+/// it without comment.
+const SYMLINK_ALLOW: &[(&str, &str)] = &[];
+
 const TOOLING: &[(&str, &str)] = &[(
     "xtask/",
     "build tooling: it runs outside the system under test, and it contains the \
@@ -777,6 +812,7 @@ fn main() -> ExitCode {
         "lint-determinism" => lint_determinism(),
         "lint-stamp" => lint_stamp(),
         "lint-licensing" => lint_licensing(),
+        "lint-boundary" => lint_boundary(),
         "lint-unsafe" => lint_unsafe(),
         "lint-percpu" => lint_percpu(),
         "lint-mutations" => lint_mutations(),
@@ -990,7 +1026,10 @@ cargo xtask <command>
                      correct spelling everywhere in this tree, and on this one
                      path a second correct spelling is the defect. E3-B04a
   lint-licensing     SPDX headers present; no import of third_party from the
-                     permissive tree
+                     permissive tree, read from the source
+  lint-boundary      The same rule read from the build instead: cargo's own
+                     resolved view, every dep-info rustc wrote, and three
+                     prohibited surfaces. Needs a compile first. RFC 0092
   lint-unsafe        No `unsafe` outside the frame crates
   lint-percpu        No kernel-global mutable state outside `PerCpu`
   lint-mutations     No deliberate defect is on by default
@@ -1261,6 +1300,28 @@ fn capture(program: &str, args: &[&str]) -> Result<String, String> {
 /// [`capture`], for output that is not text.
 ///
 /// `git archive` writes a tar to standard output, and a tar is not UTF-8.
+/// [`capture`], run somewhere other than the workspace root.
+///
+/// Separate rather than a parameter on `capture` for the reason
+/// [`capture_with`] gives: every other caller wants the root, and threading it
+/// through them to save one function here would be noise at each site. This one
+/// exists so a fixture can run the real check over a fixture tree rather than
+/// over a copy of the check — a check whose fixture takes a different code path
+/// is a fixture that proves the fixture.
+fn capture_in(dir: &Path, program: &str, args: &[&str]) -> Result<String, String> {
+    let out = Command::new(program)
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("could not run {program}: {e}"))?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        let why = why.lines().find(|l| !l.trim().is_empty()).unwrap_or("no message");
+        return Err(format!("{program} {} failed: {why}", args.join(" ")));
+    }
+    String::from_utf8(out.stdout).map_err(|e| format!("{program} printed non-UTF-8: {e}"))
+}
+
 fn capture_bytes(program: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     let out = Command::new(program)
         .args(args)
@@ -8947,9 +9008,7 @@ fn manifests() -> Result<Vec<PathBuf>, String> {
                 // it was found; this is the same tree and the same argument,
                 // and a walker left out of it is how the finding comes back
                 // wearing a different lint's name.
-                if !matches!(name, "target" | ".git" | ".claude" | "third_party" | "docs")
-                    && path != build
-                {
+                if !walker_skips(name, &path, build) {
                     walk(&path, build, out)?;
                 }
             } else if name == "Cargo.toml" {
@@ -12072,7 +12131,14 @@ fn lint_all() -> Result<(), String> {
     // that is a subset of the gate teaches people the gate is passing when it is
     // not, which is how a formatting failure once reached CI on a tree whose
     // three policy lints were all green.
-    lint_style()
+    lint_style()?;
+    // After `lint_style`, and the order is the whole reason this is not beside
+    // `lint_licensing` at the top. That pass has just clippied both worlds, so
+    // the dep-info this reads is the dep-info of a compile that happened a
+    // second ago. Run first, on a cold tree, it would read nothing and pass
+    // over anything — which is why it refuses an empty walk rather than
+    // reporting ok over one. RFC 0092.
+    lint_boundary()
 }
 
 /// Formatting, and clippy over both of the workspace's worlds.
@@ -12157,9 +12223,7 @@ fn rust_sources() -> Result<Vec<PathBuf>, String> {
                 // tree's source and wants linting. Today it is configuration,
                 // prose and other people's checkouts, none of which this
                 // walker has any business compiling.
-                if !matches!(name, "target" | ".git" | ".claude" | "third_party" | "docs")
-                    && path != build
-                {
+                if !walker_skips(name, &path, build) {
                     walk(&path, build, out)?;
                 }
             } else if path.extension().is_some_and(|e| e == "rs") {
@@ -13876,6 +13940,284 @@ fn path_key_values(code: &str) -> Vec<String> {
 /// the manifest half: this is the third net, and a route that needs two lines
 /// and a conditional attribute to hide is a route a reviewer reading the diff
 /// will see.
+/// Where the fixture trees live under the build directory.
+///
+/// Named here because two places need to agree about it and they fail in
+/// opposite directions: the fixtures write dep-info full of imported
+/// prerequisites, and [`compiled_file_findings`] walks dep-info. Without the
+/// skip, the boundary check reports its own fixtures as violations of the tree
+/// it is checking — the `.claude` worktree scar, one directory over.
+const FIXTURE_DIR: &str = "licence-fixtures";
+
+/// Net one: cargo's own resolved view of the workspace.
+///
+/// `cargo metadata` is parsed by cargo, so every manifest spelling this file
+/// used to chase one pattern at a time — a multi-line string, a dotted key, a
+/// key split across two lines, a member glob, `build =`, `[lib] path`,
+/// `[patch]`, workspace inheritance — closes here at once. RFC 0092.
+///
+/// The token check is deliberately cruder than resolving each path: `third_party`
+/// appearing anywhere in cargo's resolved view of a tree that is supposed to
+/// have no route into it is a finding whatever field it sits in. Measured zero
+/// occurrences on this tree.
+///
+/// **A `cargo metadata` failure is a finding and not an `Ok`.** Once
+/// `third_party/` holds a real crate, a manifest there that does not parse makes
+/// this command fail, and a check that goes quiet when its instrument breaks is
+/// the shape `claims/README.md` exists to prevent. The message says so, because
+/// a stale lock file and a boundary violation arrive here identically and only
+/// one of them is this lint's business.
+fn cargo_view_findings(at: &Path) -> Vec<String> {
+    let args = ["metadata", "--no-deps", "--offline", "--locked", "--format-version", "1"];
+    let view = match capture_in(at, "cargo", &args) {
+        Ok(view) => view,
+        Err(why) => {
+            return vec![format!(
+                "  cargo metadata resolved nothing, so the manifest net checked nothing: {why}\n  \
+                 read the message before treating this as a boundary violation — a lock file \
+                 out of date, a dependency this offline environment cannot resolve, and an \
+                 imported manifest that does not parse all arrive here, and only the last is \
+                 this lint's subject"
+            )];
+        }
+    };
+    let mut findings = Vec::new();
+    let mut from = 0usize;
+    while let Some(hit) = view[from..].find(IMPORTED) {
+        let hit = from + hit;
+        let start = view[..hit].rfind('"').map_or(hit, |i| i + 1);
+        let end = view[hit..].find('"').map_or(view.len(), |i| hit + i);
+        findings.push(format!(
+            "  cargo metadata  cargo's own resolved view of the permissive tree names the \
+             import: `{}`",
+            &view[start..end]
+        ));
+        from = end.max(hit + IMPORTED.len());
+    }
+    findings
+}
+
+/// Net three: the surfaces that are prohibited rather than inspected.
+///
+/// A build script, a symlink and a configuration row each reach the imported
+/// tree without leaving a route in any source, so there is nothing for a matcher
+/// to match. Refusing the mechanism closes the family; chasing its traces closes
+/// one spelling. RFC 0092.
+///
+/// `flags` is passed rather than read from the environment so that a fixture can
+/// hand this function a `RUSTFLAGS` value without mutating the process it runs
+/// in — the test harness is threaded, and a lint that only works when nothing
+/// else is running is not a lint.
+fn build_surface_findings(at: &Path, flags: &[(&str, String)]) -> Vec<String> {
+    let mut findings = Vec::new();
+    let build = target_dir();
+    let mut stack = vec![at.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            let rel = path.strip_prefix(at).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+
+            // Before `is_dir`, which follows the link and would file a linked
+            // directory under the walk rather than under this rule.
+            if entry.file_type().is_ok_and(|kind| kind.is_symlink())
+                && !SYMLINK_ALLOW.iter().any(|(allowed, _)| rel == *allowed)
+            {
+                findings.push(format!(
+                    "  {rel}  is a symbolic link, and a link reaches the import while naming it \
+                     in no file at all"
+                ));
+                continue;
+            }
+            if path.is_dir() {
+                if !walker_skips(&name, &path, &build) {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if name == "build.rs" && !BUILD_SCRIPT_ALLOW.iter().any(|(a, _)| rel == *a) {
+                findings.push(format!(
+                    "  {rel}  is a build script, and a build script can hand any bytes on the \
+                     machine to its crate through `OUT_DIR` or point the linker into the import"
+                ));
+            }
+            if name == "config.toml"
+                && dir.file_name().and_then(|n| n.to_str()) == Some(".cargo")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                for (n, line) in text.lines().enumerate() {
+                    if strip_toml_comment(line).contains(IMPORTED) {
+                        findings.push(format!(
+                            "  {rel}:{}  a cargo configuration row names the import; \
+                             `rustflags`, `[env]`, `paths`, a `[source]` directory, a linker or a \
+                             wrapper all reach it without a line of Rust saying so",
+                            n + 1
+                        ));
+                    }
+                }
+            }
+            if name == "Cargo.toml"
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                for (n, line) in text.lines().enumerate() {
+                    let code = strip_toml_comment(line);
+                    let key = code.trim_start();
+                    if (key.starts_with("build") || key.starts_with("links"))
+                        && key.contains('=')
+                        && !BUILD_SCRIPT_ALLOW.iter().any(|(a, _)| rel == *a)
+                    {
+                        findings.push(format!(
+                            "  {rel}:{}  a `{}` row declares a build script or a native library, \
+                             which is the surface this tree prohibits rather than inspects",
+                            n + 1,
+                            key.split('=').next().unwrap_or("build").trim()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    for (name, value) in flags {
+        if value.contains(IMPORTED) {
+            findings.push(format!(
+                "  ${name}  carries the import into every build in this environment: `{value}`"
+            ));
+        }
+    }
+    findings.sort();
+    findings
+}
+
+/// Net two: what the compiler says it read.
+///
+/// Every rustc invocation writes a dep-info file listing each source it opened.
+/// Reading those instead of reading source is what makes this net
+/// route-independent: `#[path]` in any spelling, a raw string, an escaped
+/// literal, an attribute split across lines, a comment between the key and its
+/// `=`, `include!`, `include_str!`, `include_bytes!`, a macro expanding to any
+/// of them, and a symlink are nine patterns to a matcher and one finding here.
+/// RFC 0092.
+///
+/// **The scoping rule that keeps this honest the day the import lands.** The
+/// imported crate is compiled by its own command into the same build directory
+/// and its dep-info names its own sources, which is not a route. So a dep-info
+/// whose prerequisites are *entirely* under the import is that crate reading
+/// itself; one that mixes is a permissive crate that reached in. Without this,
+/// `cargo xtask lint` goes red on the import task's first build and the repair
+/// under time pressure is to weaken the net.
+///
+/// **A prerequisite that no longer exists is counted and skipped, and the first
+/// draft of this got it backwards.** RFC 0092 said such a path should be judged
+/// lexically rather than skipped, because skipping is how a check reads a
+/// failure as an absence. The first run of this net refuted that in the hour it
+/// was written: a probe that had reached the import, been reverted, and left its
+/// dep-info behind was reported as a live route. Work the cases and the fallback
+/// earns nothing — a file that exists canonicalises and is caught, so the only
+/// entry the lexical path adds is one naming a file that is gone, which is a
+/// route that cannot compile and that cargo rewrites on the next build. The
+/// count is printed rather than dropped, which is what keeps this from being the
+/// silent skip the RFC was right to warn about.
+fn compiled_file_findings(at: &Path, build: &Path) -> Result<(Vec<String>, usize), String> {
+    let mut findings = Vec::new();
+    let mut stale = 0usize;
+    let mut read = 0usize;
+    let mut stack = vec![build.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().and_then(|n| n.to_str()) != Some(FIXTURE_DIR) {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if path.extension().is_some_and(|e| e == "d") {
+                read += 1;
+                findings.extend(dep_info_findings(at, &path, &mut stale));
+            }
+        }
+    }
+    if read == 0 {
+        return Err(format!(
+            "no dep-info under {} — this net read nothing and would have passed over \
+             anything. It runs after a compile for that reason; on a cold tree, build first.",
+            build.display()
+        ));
+    }
+    findings.sort();
+    findings.dedup();
+    Ok((findings, stale))
+}
+
+/// One dep-info file, judged by [`compiled_file_findings`]'s rule.
+fn dep_info_findings(at: &Path, file: &Path, stale: &mut usize) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(file) else { return Vec::new() };
+    let (mut total, mut reached) = (0usize, Vec::new());
+    for line in text.lines() {
+        // `target: prereqs`. A line ending in a bare colon is a phony target
+        // cargo writes so a deleted header does not break the build; it carries
+        // no prerequisites and contributes nothing either way.
+        let Some((_, prereqs)) = line.split_once(": ") else { continue };
+        for prereq in prereqs.split_whitespace() {
+            total += 1;
+            let named = Path::new(prereq);
+            let joined = if named.is_absolute() { named.to_path_buf() } else { at.join(named) };
+            let Ok(resolved) = std::fs::canonicalize(&joined) else {
+                // The file is gone, so whatever this entry describes cannot be
+                // compiled today and the next build rewrites it. Counted so the
+                // skip is visible in the success line.
+                *stale += 1;
+                continue;
+            };
+            if resolved.components().any(|part| part.as_os_str() == IMPORTED) {
+                reached.push(resolved.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    if reached.is_empty() || reached.len() == total {
+        return Vec::new();
+    }
+    reached.sort();
+    reached.dedup();
+    reached
+        .into_iter()
+        .map(|what| {
+            format!(
+                "  {}  compiled a file under the import: {what}",
+                file.file_name().unwrap_or_default().to_string_lossy()
+            )
+        })
+        .collect()
+}
+
+/// Both source-level nets for one file: naming the imported tree, and compiling
+/// it in through a path attribute.
+///
+/// The two are returned together rather than checked separately because that is
+/// how [`lint_licensing`] uses them, and a fixture that drives the pair drives
+/// the wiring as well as the rule. Before this function existed neither net had
+/// one. Fifteen tests stood in `no_route_into_the_import` and not one of them
+/// contained `use third_party` or `third_party::`, so deleting both needles left
+/// the suite green; and every `#[path]` fixture called [`path_attr_findings`]
+/// directly, so deleting the call site left the suite green too. A guard whose
+/// deletion no test notices is not a guard — RFC 0084's defect class, found here
+/// in the licence boundary, which RFC 0003 makes one of three non-negotiables.
+///
+/// Returns `(names the import, compiles the import in)`.
+fn source_findings(rel: &str, text: &str) -> (Vec<String>, Vec<String>) {
+    let mut names = Vec::new();
+    // Whole-text rather than per-line, which is what this check has always
+    // done: a comment naming the import is a false positive rather than a
+    // missed route, and the `is_tooling` exemption is what carries the files
+    // whose prose has to say the words.
+    if text.contains("use third_party") || text.contains("third_party::") {
+        names.push(rel.to_string());
+    }
+    (names, path_attr_findings(rel, text))
+}
+
 fn path_attr_findings(rel: &str, text: &str) -> Vec<String> {
     let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
     let mut findings = Vec::new();
@@ -13936,6 +14278,43 @@ fn toml_array_opens<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     rest.strip_prefix('[')
 }
 
+/// The three nets that read the build rather than the source. RFC 0092.
+///
+/// Separate from [`lint_licensing`] because the two have different costs and
+/// different preconditions: that one is a file read and runs anywhere, this one
+/// is only meaningful after a compile. Keeping them apart means the cheap check
+/// stays cheap and this one can say plainly that it needs a build.
+fn lint_boundary() -> Result<(), String> {
+    let at = root();
+    let build = target_dir();
+    let flags: Vec<(&str, String)> =
+        ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS"]
+            .iter()
+            .filter_map(|name| std::env::var(name).ok().map(|value| (*name, value)))
+            .collect();
+
+    let mut findings = cargo_view_findings(&at);
+    findings.extend(build_surface_findings(&at, &flags));
+    let (compiled, stale) = compiled_file_findings(&at, &build)?;
+    findings.extend(compiled);
+
+    if !findings.is_empty() {
+        return Err(format!(
+            "the permissive tree reaches `{IMPORTED}/` other than over a ring:\n{}\n\n\
+             `LICENSING.md` and RFC 0003: the imported tree is reachable over a ring and by no \
+             other route. RFC 0092 is the mechanism and names the three routes these nets still \
+             cannot see.",
+            findings.join("\n")
+        ));
+    }
+    println!(
+        "lint-boundary: ok  (cargo's resolved view, every dep-info under {}, and three \
+         prohibited surfaces — no build script, no symlink, no configuration naming the \n         import; {stale} prerequisite(s) skipped as stale)",
+        build.file_name().unwrap_or_default().to_string_lossy()
+    );
+    Ok(())
+}
+
 fn lint_licensing() -> Result<(), String> {
     let mut missing = Vec::new();
     let mut leaked = Vec::new();
@@ -13957,10 +14336,9 @@ fn lint_licensing() -> Result<(), String> {
         // for, and the fixtures below contain the attribute.
         if !is_tooling(&rel) {
             sources += 1;
-            if text.contains("use third_party") || text.contains("third_party::") {
-                leaked.push(rel.clone());
-            }
-            compiled_in.extend(path_attr_findings(&rel, &text));
+            let (names, compiles) = source_findings(&rel, &text);
+            leaked.extend(names);
+            compiled_in.extend(compiles);
         }
     }
 
@@ -14034,8 +14412,463 @@ fn lint_licensing() -> Result<(), String> {
 mod no_route_into_the_import {
     use super::{
         licensing_graph_findings, lint_licensing, manifests, path_attr_findings, reaches_import,
-        relative, root, rust_sources, strip_toml_comment, toml_array_opens, toml_strings,
+        relative, root, rust_sources, source_findings, strip_toml_comment, toml_array_opens,
+        toml_strings,
     };
+
+    use super::{
+        FIXTURE_DIR, build_surface_findings, cargo_view_findings, compiled_file_findings,
+        target_dir,
+    };
+    use std::path::{Path, PathBuf};
+
+    /// Materialise a throwaway two-crate tree and hand back its root.
+    ///
+    /// The fixtures below are directories rather than strings, and that is the
+    /// point. A string fixture can only assert that a checker recognises a
+    /// spelling; a tree that **compiles** asserts that the route is a route —
+    /// which is the claim three adversarial rounds showed the string fixtures
+    /// could not make, because a spelling nobody can compile is not a hole.
+    ///
+    /// Under the build directory rather than a temp dir so that
+    /// [`the_fixture_trees_do_not_poison_the_real_lint`] can assert the skip
+    /// that keeps them out of the real walk. `[workspace]` in each manifest
+    /// because the fixture sits inside this repository's own workspace and
+    /// cargo would otherwise refuse it as an unlisted member.
+    fn fixture_tree(name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let at = target_dir().join(FIXTURE_DIR).join(name);
+        let _ = std::fs::remove_dir_all(&at);
+        for (rel, text) in files {
+            let path = at.join(rel);
+            std::fs::create_dir_all(path.parent().expect("a fixture file has a parent"))
+                .expect("creating a fixture directory");
+            std::fs::write(&path, text).expect("writing a fixture file");
+        }
+        at
+    }
+
+    /// The imported crate every fixture reaches for, and the permissive crate
+    /// that reaches. `route` is spliced into the permissive crate's `lib.rs`.
+    fn reaching(name: &str, route: &str) -> PathBuf {
+        fixture_tree(
+            name,
+            &[
+                (
+                    "third_party/shaper/src/lib.rs",
+                    "// SPDX-License-Identifier: GPL-2.0-only\npub fn shape() -> u32 { 7 }\n",
+                ),
+                ("third_party/shaper/text.txt", "not rust, and imported\n"),
+                // The manifest is at the fixture ROOT, and that is load-bearing
+                // rather than tidy. Cargo writes dep-info prerequisites relative
+                // to the workspace root, and [`compiled_file_findings`] resolves
+                // them against the root it is handed — which in the real check is
+                // the workspace root. A fixture whose workspace sits one
+                // directory lower resolves every relative prerequisite against
+                // the wrong base, and the six route fixtures below passed
+                // anyway for a while: the resolution failed, the old lexical
+                // fallback kept a string that still said `third_party`, and the
+                // assertion was satisfied by the spelling it was written to stop
+                // relying on. Removing that fallback is what surfaced it.
+                (
+                    "Cargo.toml",
+                    "[workspace]\n[package]\nname = \"f-fixture\"\nversion = \"0.0.1\"\n\
+                     edition = \"2021\"\n[lib]\npath = \"text/src/lib.rs\"\n",
+                ),
+                ("text/src/lib.rs", route),
+            ],
+        )
+    }
+
+    /// Compile the permissive crate of a fixture tree, so the assertion that
+    /// follows is about a route that exists rather than a string that parses.
+    fn compiled(at: &Path) -> PathBuf {
+        let manifest = at.join("Cargo.toml");
+        let build = at.join("build");
+        let out = super::capture_in(
+            at,
+            "cargo",
+            &[
+                "check",
+                "--offline",
+                "--manifest-path",
+                manifest.to_str().expect("a fixture path is UTF-8"),
+                "--target-dir",
+                build.to_str().expect("a fixture path is UTF-8"),
+            ],
+        );
+        out.expect("a fixture route must compile, or it is not a route");
+        build
+    }
+
+    /// A permissive source that reaches the import by naming it.
+    ///
+    /// This fixture and the three below it are the ones this module did not
+    /// have. Deleting either needle in [`source_findings`] turns the first two
+    /// red; deleting its call to [`path_attr_findings`] turns the fourth red.
+    /// Before them, all three deletions left fifteen tests green.
+    ///
+    /// **The rename form is the fixture on purpose, and the first draft of this
+    /// test got it wrong.** `use third_party::shaper::Face;` contains *both*
+    /// needles, so it is still caught with the first one deleted and the mutant
+    /// survives — a fixture written for one rule that the other rule answers.
+    /// `use third_party as shaper;` contains the first needle and not the
+    /// second, so it is the only spelling that can tell them apart. That is the
+    /// same defect this function exists to remove, committed once more inside
+    /// the repair, and caught by running the mutation rather than by reading
+    /// the test.
+    #[test]
+    fn a_use_declaration_naming_the_import_is_refused() {
+        let (names, compiles) =
+            source_findings("text/src/shape.rs", "use third_party as shaper;\n");
+        assert!(
+            !"use third_party as shaper;".contains("third_party::"),
+            "the other needle would answer for this one"
+        );
+        assert_eq!(names, vec!["text/src/shape.rs".to_string()]);
+        assert_eq!(compiles, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_path_qualified_call_into_the_import_is_refused() {
+        let (names, _) =
+            source_findings("text/src/shape.rs", "fn shape() { third_party::shaper::shape(); }\n");
+        assert_eq!(names, vec!["text/src/shape.rs".to_string()]);
+    }
+
+    #[test]
+    fn a_source_clear_of_the_import_reports_nothing() {
+        let (names, compiles) = source_findings("text/src/metric.rs", "use crate::corpus::Face;\n");
+        assert_eq!(names, Vec::<String>::new());
+        assert_eq!(compiles, Vec::<String>::new());
+    }
+
+    /// The wiring, not the helper. Every other `#[path]` fixture in this module
+    /// calls [`path_attr_findings`] directly, so none of them notices if the
+    /// call site goes away.
+    #[test]
+    fn the_pair_carries_the_path_attribute_net_too() {
+        let (names, compiles) = source_findings(
+            "text/src/lib.rs",
+            "#[path = \"../../third_party/shaper/src/lib.rs\"]\nmod shaper;\n",
+        );
+        assert_eq!(names, Vec::<String>::new());
+        assert_eq!(compiles.len(), 1, "{compiles:?}");
+        assert!(compiles[0].starts_with("  text/src/lib.rs:1"), "{}", compiles[0]);
+    }
+
+    /// Assert that a compiled fixture tree is caught by the dep-info net.
+    fn reaches(name: &str, route: &str) {
+        let at = reaching(name, route);
+        let build = compiled(&at);
+        let (findings, _) =
+            compiled_file_findings(&at, &build).expect("a compile leaves dep-info behind");
+        assert!(!findings.is_empty(), "{name}: the route compiled and was not caught");
+        assert!(
+            findings.iter().any(|f| f.contains("shaper")),
+            "{name}: caught something, but not the import: {findings:?}"
+        );
+    }
+
+    /// The four routes that defeated the textual net, and two that would defeat
+    /// any successor to it.
+    ///
+    /// Each of these is a *spelling*, and the point of the net they test is that
+    /// it does not read spellings. They are separate tests rather than a loop so
+    /// that a failure names the route rather than an index.
+    #[test]
+    fn a_raw_string_path_attribute_is_caught_by_the_build() {
+        reaches(
+            "raw-string-path",
+            "#[path = r\"../../third_party/shaper/src/lib.rs\"]\nmod shaper;\n\
+             pub fn used() -> u32 { shaper::shape() }\n",
+        );
+    }
+
+    #[test]
+    fn a_path_attribute_split_across_two_lines_is_caught_by_the_build() {
+        reaches(
+            "split-path",
+            "#[path\n    = \"../../third_party/shaper/src/lib.rs\"]\nmod shaper;\n\
+             pub fn used() -> u32 { shaper::shape() }\n",
+        );
+    }
+
+    /// The path literal contains no substring a matcher could match: every
+    /// separator and the underscore are escape sequences, and rustc unescapes
+    /// them before opening the file.
+    #[test]
+    fn an_escaped_path_literal_is_caught_by_the_build() {
+        reaches(
+            "escaped-path",
+            "#[path = \"..\\u{2f}..\\u{2f}third\\u{5f}party\\u{2f}shaper\\u{2f}src\\u{2f}lib.rs\"]\n\
+             mod shaper;\npub fn used() -> u32 { shaper::shape() }\n",
+        );
+    }
+
+    #[test]
+    fn an_include_is_caught_by_the_build() {
+        reaches(
+            "include",
+            "include!(\"../../third_party/shaper/src/lib.rs\");\n\
+             pub fn used() -> u32 { shape() }\n",
+        );
+    }
+
+    /// Not compiled but embedded, which is the licence half of the rule rather
+    /// than the linkage half: the imported bytes end up in the artefact.
+    #[test]
+    fn an_include_str_is_caught_by_the_build() {
+        reaches(
+            "include-str",
+            "pub const WHAT: &str = include_str!(\"../../third_party/shaper/text.txt\");\n",
+        );
+    }
+
+    #[test]
+    fn a_macro_expanding_to_a_path_attribute_is_caught_by_the_build() {
+        reaches(
+            "macro-path",
+            "macro_rules! reach {\n    () => {\n        \
+             #[path = \"../../third_party/shaper/src/lib.rs\"]\n        mod shaper;\n    };\n}\n\
+             reach!();\npub fn used() -> u32 { shaper::shape() }\n",
+        );
+    }
+
+    /// The control. Without it, every test above passes on a net that returns a
+    /// finding for everything.
+    #[test]
+    fn a_fixture_tree_with_no_route_is_silent() {
+        let at = reaching("no-route", "pub fn used() -> u32 { 7 }\n");
+        let build = compiled(&at);
+        let (findings, _) =
+            compiled_file_findings(&at, &build).expect("a compile leaves dep-info behind");
+        assert_eq!(findings, Vec::<String>::new());
+    }
+
+    /// The imported crate compiling its own sources is not a route, and this is
+    /// the scoping rule that keeps `cargo xtask lint` from going red on the
+    /// import task's first build.
+    #[test]
+    fn the_import_compiling_itself_is_not_a_route() {
+        let at = fixture_tree(
+            "import-itself",
+            &[
+                // The workspace root is the fixture root here too, for the
+                // reason [`reaching`] gives: prerequisites are relative to the
+                // workspace root, and a fixture rooted one directory lower
+                // resolves none of them — which would make this test pass
+                // vacuously, since what it asserts is silence.
+                ("Cargo.toml", "[workspace]\nmembers = [\"third_party/shaper\"]\n"),
+                (
+                    "third_party/shaper/Cargo.toml",
+                    "[package]\nname = \"f-shaper\"\nversion = \"0.0.1\"\n\
+                     edition = \"2021\"\n[lib]\npath = \"src/lib.rs\"\n",
+                ),
+                (
+                    "third_party/shaper/src/lib.rs",
+                    "// SPDX-License-Identifier: GPL-2.0-only\nmod inner;\n\
+                     pub fn shape() -> u32 { inner::seven() }\n",
+                ),
+                ("third_party/shaper/src/inner.rs", "pub fn seven() -> u32 { 7 }\n"),
+            ],
+        );
+        let manifest = at.join("third_party").join("shaper").join("Cargo.toml");
+        let build = at.join("build");
+        super::capture_in(
+            &at,
+            "cargo",
+            &[
+                "check",
+                "--offline",
+                "--manifest-path",
+                manifest.to_str().unwrap(),
+                "--target-dir",
+                build.to_str().unwrap(),
+            ],
+        )
+        .expect("the imported crate compiles");
+        let (findings, _) = compiled_file_findings(&at, &build).expect("dep-info exists");
+        assert_eq!(findings, Vec::<String>::new(), "the import reading itself is not a reach");
+    }
+
+    #[test]
+    fn a_path_dependency_is_caught_by_cargos_own_view() {
+        let at = fixture_tree(
+            "cargo-view-path-dep",
+            &[
+                ("third_party/shaper/src/lib.rs", "pub fn shape() -> u32 { 7 }\n"),
+                (
+                    "third_party/shaper/Cargo.toml",
+                    "[package]\nname = \"f-shaper\"\nversion = \"0.0.1\"\nedition = \"2021\"\n",
+                ),
+                (
+                    "Cargo.toml",
+                    "[workspace]\n[package]\nname = \"f-fixture\"\nversion = \"0.0.1\"\n\
+                     edition = \"2021\"\n[lib]\npath = \"src/lib.rs\"\n\
+                     [dependencies]\nf-shaper = { path = \"third_party/shaper\" }\n",
+                ),
+                ("src/lib.rs", "pub fn used() -> u32 { f_shaper::shape() }\n"),
+            ],
+        );
+        let findings = cargo_view_findings(&at);
+        assert!(!findings.is_empty(), "cargo resolved a path into the import and said nothing");
+        assert!(findings.iter().any(|f| f.contains("shaper")), "{findings:?}");
+    }
+
+    #[test]
+    fn a_workspace_with_no_route_is_silent_in_cargos_view() {
+        let at = fixture_tree(
+            "cargo-view-clean",
+            &[
+                (
+                    "Cargo.toml",
+                    "[workspace]\n[package]\nname = \"f-fixture\"\nversion = \"0.0.1\"\n\
+                     edition = \"2021\"\n[lib]\npath = \"src/lib.rs\"\n",
+                ),
+                ("src/lib.rs", "pub fn used() -> u32 { 7 }\n"),
+            ],
+        );
+        assert_eq!(cargo_view_findings(&at), Vec::<String>::new());
+    }
+
+    /// A `cargo metadata` that cannot resolve is a finding, not a pass. The day
+    /// the import lands, a manifest there that does not parse arrives here.
+    #[test]
+    fn a_workspace_cargo_cannot_resolve_is_a_finding() {
+        let at = fixture_tree("cargo-view-broken", &[("Cargo.toml", "[package\nname =\n")]);
+        let findings = cargo_view_findings(&at);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("resolved nothing"), "{}", findings[0]);
+    }
+
+    /// The three prohibited surfaces. None of these compiles anything: the
+    /// check is that the mechanism is absent, so the fixture is its presence.
+    #[test]
+    fn a_build_script_is_prohibited_rather_than_inspected() {
+        let at = fixture_tree(
+            "build-script",
+            &[("Cargo.toml", "[package]\nname = \"f-fixture\"\n"), ("build.rs", "fn main() {}\n")],
+        );
+        let findings = build_surface_findings(&at, &[]);
+        assert!(findings.iter().any(|f| f.contains("is a build script")), "{findings:?}");
+    }
+
+    #[test]
+    fn a_build_or_links_row_is_prohibited() {
+        let at = fixture_tree(
+            "build-row",
+            &[(
+                "Cargo.toml",
+                "[package]\nbuild = \"../third_party/shaper/build.rs\"\nlinks = \"shaper\"\n",
+            )],
+        );
+        let findings = build_surface_findings(&at, &[]);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+    }
+
+    #[test]
+    fn a_cargo_configuration_naming_the_import_is_prohibited() {
+        let at = fixture_tree(
+            "cargo-config",
+            &[(".cargo/config.toml", "[build]\nrustflags = [\"-L\", \"../third_party/shaper\"]\n")],
+        );
+        let findings = build_surface_findings(&at, &[]);
+        assert!(findings.iter().any(|f| f.contains("configuration row")), "{findings:?}");
+    }
+
+    #[test]
+    fn an_ambient_rustflags_carrying_the_import_is_a_finding() {
+        let at = fixture_tree("flags", &[("Cargo.toml", "[package]\nname = \"f-fixture\"\n")]);
+        let findings =
+            build_surface_findings(&at, &[("RUSTFLAGS", "-L /x/third_party/shaper".to_string())]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("$RUSTFLAGS"), "{}", findings[0]);
+    }
+
+    #[test]
+    fn a_tree_with_none_of_the_three_surfaces_is_silent() {
+        let at = fixture_tree(
+            "surfaces-clean",
+            &[("Cargo.toml", "[package]\nname = \"f-fixture\"\n"), ("src/lib.rs", "")],
+        );
+        assert_eq!(build_surface_findings(&at, &[]), Vec::<String>::new());
+    }
+
+    /// A walk that read no dep-info has checked nothing, and saying ok over it
+    /// is the one failure this net cannot recover from: on a cold tree it would
+    /// pass over anything at all.
+    #[test]
+    fn a_build_directory_with_no_dep_info_is_refused() {
+        let at = fixture_tree("no-dep-info", &[("Cargo.toml", "[workspace]\n")]);
+        let why = compiled_file_findings(&at, &at.join("never-built"))
+            .expect_err("a walk that read nothing must refuse rather than pass");
+        assert!(why.contains("read nothing"), "{why}");
+    }
+
+    /// A link reaches the import while naming it in no file, so the fixture is
+    /// a real link rather than a string. Unix only: the Windows junction is the
+    /// half this check has not observed, and RFC 0092 says so rather than
+    /// implying the surface is closed on both.
+    #[test]
+    #[cfg(unix)]
+    fn a_symlink_into_the_import_is_prohibited() {
+        let at = fixture_tree(
+            "symlink",
+            &[
+                ("third_party/shaper/src/lib.rs", "pub fn shape() -> u32 { 7 }\n"),
+                ("text/src/lib.rs", "pub fn used() -> u32 { 7 }\n"),
+            ],
+        );
+        let link = at.join("text").join("shaper");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(at.join("third_party").join("shaper"), &link)
+            .expect("creating a fixture symlink");
+        let findings = build_surface_findings(&at, &[]);
+        assert!(findings.iter().any(|f| f.contains("symbolic link")), "{findings:?}");
+    }
+
+    /// The skip itself, driven by a dep-info that names a file which really
+    /// exists under the import.
+    ///
+    /// [`the_fixture_trees_do_not_poison_the_real_lint`] below cannot do this
+    /// job and was found not to: the fixtures' own prerequisites resolve
+    /// against the real root to paths that do not exist, so they are skipped as
+    /// stale whether the fixture skip is there or not, and deleting the skip
+    /// left that test green. This one names `third_party/README.md`, which is a
+    /// real file in this repository, so the skip is the only thing between it
+    /// and a finding.
+    #[test]
+    fn the_fixture_skip_is_what_keeps_the_fixtures_out() {
+        let at = fixture_tree("skip-proof", &[]);
+        let dep_info = at.join("build").join("probe.d");
+        std::fs::create_dir_all(dep_info.parent().expect("a parent")).expect("fixture directory");
+        std::fs::write(&dep_info, "probe.rlib: xtask/src/main.rs third_party/README.md\n")
+            .expect("writing a fixture dep-info");
+        let (findings, _) = compiled_file_findings(&super::root(), &target_dir())
+            .expect("this tree has been compiled");
+        assert_eq!(findings, Vec::<String>::new(), "a fixture's dep-info was read as this tree's");
+    }
+
+    /// The hazard the fixtures create. They write dep-info full of imported
+    /// prerequisites into the build directory, which the real net walks — the
+    /// `.claude` worktree scar, one directory over.
+    #[test]
+    fn the_fixture_trees_do_not_poison_the_real_lint() {
+        reaching(
+            "poison",
+            "#[path = \"../../third_party/shaper/src/lib.rs\"]\nmod shaper;\n\
+             pub fn used() -> u32 { shaper::shape() }\n",
+        );
+        let at = super::root();
+        let build = target_dir();
+        assert!(
+            build.join(FIXTURE_DIR).exists(),
+            "this test is vacuous unless a fixture tree is present"
+        );
+        let (findings, _) =
+            compiled_file_findings(&at, &build).expect("this tree has been compiled");
+        assert_eq!(findings, Vec::<String>::new(), "the fixtures were read as this tree's");
+    }
 
     /// The workspace root as it stands, reduced to the rows this check reads.
     const ROOT_HELD: &str = "\
