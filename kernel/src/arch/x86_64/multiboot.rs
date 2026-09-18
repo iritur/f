@@ -54,17 +54,35 @@ const FB_DIMENSION_MAX: u32 = 16_384;
 
 /// How many loaded modules this kernel will keep track of.
 ///
-/// One is what E0-B10 needs: `user/init`. Eight is room for the handful a
-/// generation might carry without making the handoff structure large enough to
-/// care about, and a ninth is *reported* as dropped rather than silently
-/// ignored — because a module nobody reserved is a module the frame allocator
-/// hands out from underneath its owner.
+/// One is what E0-B10 needs: `user/init`. A module nobody reserved is a module
+/// the frame allocator hands out from underneath its owner, so a module past
+/// this bound is *reported* as dropped rather than silently ignored — and the
+/// boot then fails, which is what makes this number load-bearing rather than
+/// advisory.
+///
+/// **This was eight, and eight was one short.** The arithmetic it was chosen
+/// against counted the modules of a single generation: `user/init`, one file
+/// per component, and one generation record. Six components made that eight
+/// exactly, with no headroom at all — and then `cargo xtask rollback` offered
+/// **two** generations from one boot menu, which is the whole point of a
+/// rollback, and the ninth module was dropped. The boot reported it correctly
+/// and failed; `claims/0030`'s four thresholds then went unprinted, because a
+/// workload that does not finish publishes no rows.
+///
+/// So the bound is now written against what actually varies. It is not the
+/// number of components — it is the number of components **times the number of
+/// generations a boot menu may offer at once**, plus `user/init`. Sixteen is
+/// six components and one init at two generations with room to add components
+/// before it binds again, and a [`Module`] is sixteen bytes, so the whole table
+/// is 256 bytes of a structure copied by value. The next thing to run out is
+/// components rather than generations, and when it does the arithmetic above is
+/// the thing to redo rather than the constant to double.
 ///
 /// Public because `crate::generation` sizes an array by it and asserts the two
 /// are one number: a second array sized by a copy of this bound is a place a
 /// change to it goes unnoticed.
 /// Unit: count of modules.
-pub const MAX_MODULES: usize = 8;
+pub const MAX_MODULES: usize = 16;
 
 /// How much of a command line this kernel will read.
 ///
