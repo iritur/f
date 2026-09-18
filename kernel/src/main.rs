@@ -1007,7 +1007,7 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         Ok(report) => kprintln!(
             "  supervisor    ok — {} place(s), {} spawn(s), {} fault(s), {} restart(s), \
              {} resumed, {} client(s) lost, {} probe(s) refused, {} retired, \
-             {} need(s) bound to nothing, {} tree(s) mounted carrying {} node(s), \
+             {} irq need(s) bound to no vector, {} tree(s) mounted carrying {} node(s), \
              {} refused for declaring none; heap {} B described, peak {} byte(s), starved {}",
             report.places,
             report.spawns,

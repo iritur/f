@@ -776,13 +776,31 @@ pub struct Report {
     /// object this machine has. Unit: capabilities.
     ///
     /// **The gap this change leaves, as a number rather than a paragraph.**
-    /// Today it is the `irq` need in `user/virtio-blk/manifest.toml`: nothing in
-    /// this build routes a device interrupt to a component, so what the spawn
+    /// Today it is the `irq` need each driver manifest declares: nothing in this
+    /// build routes a device interrupt to a component, so what the spawn
     /// supplies is a capability of the right type, carrying the right rights,
-    /// naming no vector. It is enough for the lifecycle — the spawn is real,
-    /// the account is real, the table is real — and it is not enough for the
-    /// component to wait on the device. E1-B09 is what makes it zero.
-    /// [`unbound_needs`] is the arithmetic and [`offer`] is the reason.
+    /// naming no vector. It is enough for the lifecycle — the spawn is real, the
+    /// account is real, the table is real — and it is not enough for the
+    /// component to wait on the device. [`unbound_needs`] is the arithmetic and
+    /// [`offer`] is the reason.
+    ///
+    /// **Who closes it is an open question, and saying so is better than the
+    /// answer this comment used to give.** It named `E1-B09`, which is the
+    /// *user-interrupt doorbell between two ends of a ring* and says nothing
+    /// about device interrupts. That matters more than a misfiled pointer:
+    /// `E1-B09` is owed to silicon under RFC 0093 — QEMU implements no part of
+    /// UINTR — so attributing this to it makes a thing that may well be
+    /// buildable here read as blocked on a purchase. `DATAPATH_GAP` carried the
+    /// same class of error about three of `E1-P10`'s four numbers and it cost
+    /// two corrections to unwind.
+    ///
+    /// What is certain is the sentence above: no vector reaches a component. A
+    /// kernel-side delivery — the frame taking the interrupt and posting a
+    /// notice on the control ring the component already drives — needs no
+    /// hardware this machine lacks, and is the shape `E0-B15`'s `Path::KernelIpi`
+    /// already uses for doorbells. Whether that is the right answer, and which
+    /// task owns it, is for whoever next reads RFC 0024 against this field
+    /// rather than for this comment to assert.
     pub unbound: u32,
     /// Deaths by fault. Unit: deaths.
     pub faults: u32,
