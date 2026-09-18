@@ -1,8 +1,8 @@
 ---
 id: 0010
-status: draft        # draft | accepted | withdrawn | shipped
+status: shipped      # draft | accepted | withdrawn | shipped
 originator: Dmitri Chudinov
-todo:                # TODO.md task IDs, once there are any
+todo: E0-P18
 ---
 
 # One machine refuses the ring-3 stack selector it has already accepted
@@ -78,3 +78,42 @@ reference beside it.
 **Triage is a human step**, and this is filed rather than fixed for that reason:
 there are three candidate causes, they need different fixes, and the boot that
 distinguishes them costs one reboot of a machine somebody owns.
+
+---
+
+## Answered, 2026-09-12 — RFC 0074
+
+Everything above is left as it was written on 2026-09-10, per rule 1 of
+`intent/README.md`: it is the record of what was known before the boot that
+settled it, and rewriting it would destroy the only evidence of whether the
+triage was any good.
+
+**It was the middle branch.** This intent set out three outcomes and what each
+would mean. The boot on 2026-09-12 printed `descriptor 0x00cff3000000ffff` — the
+ring-3 data segment intact, with the accessed bit the processor had set when it
+loaded it, so not memory corruption — and `returning to … cs 0x003b ss 0x0030`.
+A frame whose stack selector is not a ring-3 selector: *"if they show the
+descriptor intact and a frame whose `cs` is not a ring-3 selector, it is a frame
+bug"*, which is the branch that fired, with `ss` in the place this line guessed
+`cs` would be.
+
+**And the frame was wrong because a register was.** `IA32_STAR`'s ring-3 field
+was written `0x28`. AMD's `sysret` loads the field plus eight as written —
+`0x30`, a stack selector requesting ring 0 — while Intel's, and QEMU's under
+every `-cpu`, force the privilege bits and had been supplying them for free
+since the field was first written. Nothing notices until an interrupt arrives
+out of ring 3 and the `iretq` that would resume the process is handed the frame
+the hardware pushed. That is why `enter_user`'s `iretq`, which pushes `0x33` by
+hand, had always worked, and why no emulator in this project's life could have
+shown it.
+
+`docs/rfc/0074-the-ring-3-field-of-star-carries-its-privilege-level.md` is the
+decision, and it carries the mutation that rebuilds the defect so the emulator
+refuses what it cannot otherwise see.
+
+**What this closing does not claim.** That the machine boots. RFC 0074 says so
+itself — the fix is tested on an emulator where the defect it removes is
+invisible, and by a self-test that models the vendor the emulator is not. The
+demonstration is the next boot there and `E0-P18` carries it, which is where it
+belongs: this directory's question was *why did the processor refuse that
+selector*, and that is answered.
