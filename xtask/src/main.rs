@@ -3335,6 +3335,39 @@ fn heap_reading(log: &str) -> Result<(u32, u32, bool), String> {
 /// and it goes when a supervisor spawns and schedules in one act — which is
 /// E1-B05's remaining half and RFC 0008's *restart is the supervisor's*.
 /// RFC 0041 states the shape of the gap; RFC 0047 states what is left of it.
+///
+/// # What a datapath boot actually contains, measured rather than inferred
+///
+/// **Two virtio-blk instances.** `component::demonstrate` builds a place for it
+/// — the boot prints `place virtio-blk: private, on_fault, 8 restart(s) in
+/// 60000 tick(s), 4194304 B account` — and never hands its occupant a core.
+/// `kernel/src/blk.rs` stands a second one up through `prepare_driver`, gives it
+/// a core, and that is the one a client's load goes through. The sentence above
+/// is exact, and this is what it looks like from the log.
+///
+/// **So the work is not a third path.** It is making the place's occupant the
+/// one that serves, which needs three things and the first of them now exists:
+///
+/// 1. the place supplied with the device window and its queue memory — a need
+///    the account cannot answer, because a device window is not memory the frame
+///    may allocate or hand back. `Supplied` and `Placement` in
+///    `kernel/src/component.rs` are that, and `offer` sources a named need from
+///    the caller with the extent checked against the manifest;
+/// 2. that occupant scheduled on the worker core, which is `schedule_occupant`
+///    without the `run_on` that follows it in `consult` — the driver has to run
+///    *concurrently* with the client rather than to completion;
+/// 3. the boot's order, which is the part with the widest blast radius:
+///    `blk_datapath` runs at `main.rs`'s line 877 and `component::demonstrate`
+///    at 1005, so today the device is found long before the place exists. One of
+///    the two has to move, and moving either changes the order of every line in
+///    a log `cargo xtask trace` hashes.
+///
+/// That third item is why this is one piece of work and not three, and why it
+/// belongs to `E1-B05` rather than beside it: a supervisor that spawns and
+/// schedules in one act is exactly a boot in which the place comes first.
+///
+/// *Reversal:* when `prepare_driver(` leaves `kernel/src/blk.rs`, this row goes
+/// and `cargo xtask chaos` says so.
 const CHAOS_GAP: &[Gap] = &[(
     "kernel/src/blk.rs",
     "prepare_driver(",
