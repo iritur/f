@@ -32,6 +32,7 @@
     { "name": "frame-identities-across-boots", "status": "gating", "milestone": "E2", "file": "claims/0032-frame-identities-across-boots.toml" },
     { "name": "raster-cost-per-rung", "status": "pending", "milestone": "E3", "file": "claims/0033-raster-cost-per-rung.toml" },
     { "name": "canvas-escape-rate", "status": "pending", "milestone": "E3", "file": "claims/0034-canvas-escape-rate.toml" },
-    { "name": "theme-refusals", "status": "pending", "milestone": "E3", "file": "claims/0035-theme-refusals.toml" }
+    { "name": "theme-refusals", "status": "pending", "milestone": "E3", "file": "claims/0035-theme-refusals.toml" },
+    { "name": "copies-per-operation", "status": "gating", "milestone": "E1", "file": "claims/0036-copies-per-operation.toml" }
   ]
 }
