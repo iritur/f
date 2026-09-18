@@ -1006,6 +1006,7 @@ pub unsafe fn demonstrate(
     now: u64,
     tree: &crate::state::Tree,
     worker: Option<(usize, u64)>,
+    supplied: &[Supplied],
 ) -> Result<Report, Failure> {
     // SAFETY: the caller's guarantee that the direct map is live and covers
     // every module.
@@ -1274,10 +1275,11 @@ pub unsafe fn demonstrate(
                 tree,
                 index,
                 occupant,
-                // Nothing supplied: the demonstration's places are filled from
-                // their own accounts, and a device window belongs to the boot
-                // that found it rather than to a walk over every module.
-                &[],
+                // Handed the whole list rather than this component's share of
+                // it. Each entry names the component it is for, so the filter
+                // lives where the need is matched and there is no second place
+                // for the two to disagree about which window belongs to whom.
+                supplied,
             )
         }?;
         // This place's own polling point, not the first place's: what a spawn
@@ -2009,16 +2011,25 @@ enum Occupant {
 /// component to be given that frame would be writing to a disk controller. That
 /// is the whole reason this is a separate path rather than a flag on [`carve`].
 #[derive(Clone, Copy)]
-struct Supplied {
+pub struct Supplied {
+    /// Which component this is for, as its manifest labels it.
+    ///
+    /// **Carried here rather than filtered by the caller**, and the reason is a
+    /// hazard rather than convenience: `virtio-blk`, `virtio-net` and
+    /// `virtio-gpu` all declare needs called `mmio` and `queues`. A supply
+    /// matched on the need's name alone would put the block device's register
+    /// window into whichever of the three was filled first, and the symptom
+    /// would be a driver talking fluently to the wrong device.
+    pub component: &'static [u8],
     /// The need's name as the manifest spells it, matched exactly.
-    name: &'static [u8],
+    pub name: &'static [u8],
     /// Where the object starts. Unit: bytes, physical.
-    at: u64,
+    pub at: u64,
     /// How long it is. Must equal what the manifest declares for this need.
     /// Unit: bytes.
-    bytes: u64,
+    pub bytes: u64,
     /// Whether the occupant's address space gets this mapped, and how.
-    map: Placement,
+    pub map: Placement,
 }
 
 /// What a supplied need becomes in the occupant's address space.
@@ -2027,13 +2038,20 @@ struct Supplied {
 /// channel over a region and is in scope here; two types called `Mapping` one
 /// import apart is the kind of collision a reader resolves wrongly once.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Placement {
+pub enum Placement {
     /// Granted as a capability and not mapped. The component maps it itself, or
     /// holds it to hand on.
-    None,
+    Unmapped,
     /// Mapped writable at a fixed user address, with caching left on. Queue
     /// memory: ordinary RAM a device will read.
     Cached(u64),
+    #[allow(
+        dead_code,
+        reason = "the third placement a supplied need can take, \
+        written with the other two because the set is the decision rather than \
+        the two that happen to have a caller today: a need granted and not \
+        mapped is what a component that maps for itself would be given"
+    )]
     /// Mapped writable at a fixed user address with caching **off**. A device
     /// register window, where a stale read is a wrong answer about hardware
     /// state rather than a slow one.
@@ -3234,9 +3252,11 @@ unsafe fn spawn(
         // not yet hold. The capability is granted as well, so the component has
         // authority over what it is using; the mapping is what makes the
         // authority usable before it has run a line.
-        if let Some(item) = supplied.iter().find(|item| named(need, item.name)) {
+        if let Some(item) =
+            supplied.iter().find(|item| item.component == record.label() && named(need, item.name))
+        {
             let (at, kind) = match item.map {
-                Placement::None => (0, UserPage::Data),
+                Placement::Unmapped => (0, UserPage::Data),
                 Placement::Cached(at) => (at, UserPage::Data),
                 // Uncached, and this is the one that is invisible under an
                 // emulator and fatal on a machine: a write-back mapping lets
@@ -3622,7 +3642,8 @@ fn offer(
         // the call site: the manifest is the contract, and a caller that
         // supplied the wrong size would otherwise produce a driver whose device
         // window stops halfway.
-        let given = supplied.iter().find(|item| named(need, item.name));
+        let given =
+            supplied.iter().find(|item| item.component == record.label() && named(need, item.name));
         if let Some(item) = given {
             if item.bytes != least_extent(need) {
                 return Err(Failure::Manifest(Refusal::Value));

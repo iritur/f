@@ -893,6 +893,8 @@ cargo xtask <command>
   iommu [half]       Boot into a real device transfer and check the remapping
                      unit: inside, which must land, or outside, which must
                      fault and land nothing. Both with no argument
+  blk place          E1-B05: the driver's place, supplied with the device window
+                     it cannot carve. Not in `blk` with no argument: unfinished
   blk [half]         Boot the block datapath: a driver component moves a sector
                      through a ring with nothing copied — inside; the same run
                      with the client's grant withdrawn must fault — outside; and
@@ -9887,13 +9889,85 @@ fn iommu(kind: Option<&str>) -> Result<(), String> {
 /// answered — which is the one E1-B01's exit could not observe, because it is
 /// the component's own arithmetic that produces the address. A suite with only
 /// the first would be claiming the second.
+/// `E1-B05`'s half: the driver's place supplied with the device window it
+/// cannot carve, and the boot asked whether the place holds it.
+///
+/// # What this asserts today, stated narrowly on purpose
+///
+/// That a place is filled with a **supplied** need rather than a carved one:
+/// the register span the bus reported, mapped uncached at the address the
+/// driver shape reserves, and the queue memory whole. That is the half of
+/// `CHAOS_GAP` which had no mechanism at all before this.
+///
+/// What it does **not** assert is the other half: that the occupant in that
+/// place is the one serving a client's load. Nothing is scheduled here yet.
+/// Saying so is the point — a half-built path that reported success would be
+/// the shape `E0-B16` and `E0-B12` both record being bitten by.
+///
+/// # Errors
+///
+/// A boot that did not reach `M0 ok`, or one whose log does not carry the line
+/// saying the place was supplied.
+fn blk_place() -> Result<(), String> {
+    println!("--- blk=place: the driver's place is supplied with the window it cannot carve");
+    let disk = blk_disk()?;
+    let device = blk_device(&disk)?;
+    let borrowed: Vec<&str> = device.iter().map(String::as_str).collect();
+    let (ending, log) = machine_devices(
+        Some("blk=place"),
+        &[],
+        Capture::Printed,
+        BOOT_TIMEOUT,
+        BOOT_MEMORY,
+        &borrowed,
+        &[],
+    )?;
+    if ending != Ending::Exited(33) {
+        return Err(format!("the boot {ending}; expected exit 33"));
+    }
+    if !log.contains("blk place     registers") {
+        return Err("the boot reached M0 ok without saying it supplied the place.\n\n\
+             `blk_place_supply` prints one line naming the register span and the queue\n\
+             memory, and it is the only evidence this half produces. A boot that is green\n\
+             and silent here is one where `blk=place` was not read — check the parameter\n\
+             before suspecting the supply."
+            .into());
+    }
+    println!(
+        "\nblk=place: ok — the place holds a real device window, supplied rather than carved.\n\
+         \x20 What it does not yet hold is a scheduled occupant serving a client, which is\n\
+         \x20 why `CHAOS_GAP` still carries its row and the other three halves still run\n\
+         \x20 on `prepare_driver`."
+    );
+    Ok(())
+}
+
 const BLK_PROVOCATIONS: &[(&str, &str)] = &[
     ("inside", "the client's buffer stays in the driver's grant: the sector must come back"),
     ("outside", "it is taken back before the read: the transfer must fault, and nothing may land"),
     ("escape", "the driver points the device past what it was answered: the unit must fault it"),
 ];
 
+/// The half `E1-B05` is being built on, reachable by name and **not** in
+/// [`BLK_PROVOCATIONS`].
+///
+/// # Why it is not in the table
+///
+/// Because the table is what `cargo xtask blk` runs with no argument, and that
+/// is a gate. This half is unfinished by construction: it supplies the place
+/// and does not yet serve a client through it, so putting it in the default set
+/// would either fail the gate or — worse — pass it while asserting less than
+/// the other three do.
+///
+/// It leaves the table on the day it serves a client and survives three kills,
+/// which is also the day `CHAOS_GAP`'s last row goes. Until then the existing
+/// halves keep running on `prepare_driver` and nothing about them has moved.
+const BLK_PLACE: &str = "place";
+
 fn blk(kind: Option<&str>) -> Result<(), String> {
+    if kind == Some(BLK_PLACE) {
+        return blk_place();
+    }
     let chosen: Vec<&(&str, &str)> = match kind {
         None => BLK_PROVOCATIONS.iter().collect(),
         Some(name) => {

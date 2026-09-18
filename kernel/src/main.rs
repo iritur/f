@@ -995,6 +995,18 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // inline rather than beside it.
     let occupant_core =
         if smp::started() > 1 { Some((smp::first_worker(), clocks.tsc_khz)) } else { None };
+    // E1-B05. What this boot found and a place cannot carve for itself.
+    //
+    // Empty on every boot but one, so every other place is filled exactly as it
+    // was: a device window is supplied only where the device was found, and an
+    // ordinary boot has none — `MACHINE` passes `-net none` and the block
+    // device is behind its own parameter.
+    //
+    // SAFETY: the boot processor, with the kernel's space in `CR3`; `remapping`
+    // is this boot's own unit and nothing else is walking the bus.
+    let mut queues = None;
+    let supplied =
+        unsafe { blk_place_supply(&boot, &mut frames, &space, features, &remapping, &mut queues) };
     // SAFETY: the boot processor, once, with the kernel's address space in
     // `CR3`, `frames` rebound onto its direct map, and no process running. The
     // direct map covers every module: `reserved_ranges` put them all in the
@@ -1002,7 +1014,16 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // it is `Some`, names a core `smp` reports started and which nothing else
     // has been given.
     match unsafe {
-        component::demonstrate(&mut frames, &space, features, &boot, now, &tree, occupant_core)
+        component::demonstrate(
+            &mut frames,
+            &space,
+            features,
+            &boot,
+            now,
+            &tree,
+            occupant_core,
+            &supplied,
+        )
     } {
         Ok(report) => kprintln!(
             "  supervisor    ok — {} place(s), {} spawn(s), {} fault(s), {} restart(s), \
@@ -2926,6 +2947,123 @@ fn objects_datapath(
 /// into the state tree from underneath. A boot with no datapath answers `None`,
 /// which is the same absence and a different claim from a datapath that
 /// counted zero.
+/// The two objects `virtio-blk`'s place cannot carve for itself, on the one
+/// boot that asks for them.
+///
+/// # Why this is here and not in `blk`
+///
+/// Because `blk=place` is the half on which `blk_datapath` does **not** run.
+/// The device lookup programs the remapping unit and maps configuration space,
+/// and doing it twice in one boot would be two units programmed for one device.
+/// On this half there is exactly one caller, and it is this.
+///
+/// # What it supplies, and why these two and not the other needs
+///
+/// `mmio` is a device window: a physical span the firmware chose, which the
+/// account cannot answer and `reap` must never hand back. `queues` is ordinary
+/// memory and *could* be carved — it is supplied here so that the frame holds
+/// the same run the driver will point the device at, which is what lets a
+/// later kill-and-refill hand the same queue memory to the next occupant
+/// rather than leaving the device writing into a freed page.
+///
+/// Every other need on that manifest — `notify`, `powerbox` — is left to
+/// `offer`, which already answers them the way it answers every other place's.
+///
+/// # Safety
+///
+/// The boot processor, with the kernel's address space in `CR3`, and
+/// `remapping` this boot's own unit with nothing else walking the bus.
+unsafe fn blk_place_supply(
+    boot: &BootInfo,
+    frames: &mut mem::FrameAllocator,
+    space: &paging::AddressSpace,
+    features: paging::Features,
+    remapping: &Option<Remapping>,
+    queues: &mut Option<mem::Frame>,
+) -> [component::Supplied; 2] {
+    const NONE: [component::Supplied; 2] = [component::Supplied {
+        component: b"",
+        name: b"",
+        at: 0,
+        bytes: 0,
+        map: component::Placement::Unmapped,
+    }; 2];
+
+    if !boot.has_parameter(b"blk=place") {
+        return NONE;
+    }
+    let Some(found) = remapping else {
+        kprintln!("FAIL: blk=place asked for on a machine with no remapping unit");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+    // SAFETY: the caller's guarantee, passed down.
+    let Ok(declared) = (unsafe { supervisor::declared(boot, b"virtio-blk") }) else {
+        kprintln!("FAIL: blk=place found no virtio-blk manifest to read a declaration from");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+    // SAFETY: as above; `window` and `survey` are this boot's own.
+    let device = unsafe {
+        arch::x86_64::virtio::route(
+            frames,
+            space,
+            features,
+            &found.window,
+            &found.survey,
+            arch::x86_64::virtio::VIRTIO_BLK_MODERN,
+            Some(arch::x86_64::virtio::VIRTIO_BLK_TRANSITIONAL),
+        )
+    };
+    let Ok(device) = device else {
+        kprintln!("FAIL: blk=place found no block device on the bus");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+    let Ok(registers) = supervisor::Registers::of(&device, &declared) else {
+        kprintln!("FAIL: blk=place read a register span the manifest does not declare");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+
+    // The queue memory, allocated whole because a virtqueue is one descriptor
+    // table and two rings at fixed offsets from each other.
+    // `account_order`'s arithmetic, on one need rather than on a whole
+    // manifest: pages, rounded up to a power of two, and the order is its
+    // trailing zeros. Written out rather than shared because the two are the
+    // same sum about different things, and a helper spanning both would have to
+    // take a record this one does not have.
+    let pages = declared.bytes.max(mem::FRAME_SIZE).div_ceil(mem::FRAME_SIZE).next_power_of_two();
+    let order = u8::try_from(pages.trailing_zeros()).ok().and_then(mem::Order::new);
+    let Some(region) = order.and_then(|order| frames.alloc_zeroed(order)) else {
+        kprintln!("FAIL: blk=place could not allocate the queue memory the manifest declares");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+    *queues = Some(region);
+
+    kprintln!(
+        "  blk place     registers {:#018x} over {} page(s), queues {:#018x} over {} B — \
+         supplied to the place rather than carved from its account",
+        registers.base,
+        registers.pages,
+        region.addr(),
+        declared.bytes,
+    );
+
+    [
+        component::Supplied {
+            component: b"virtio-blk",
+            name: b"mmio",
+            at: registers.base,
+            bytes: u64::from(registers.pages) * mem::FRAME_SIZE,
+            map: component::Placement::Uncached(process::BLK_REGISTERS),
+        },
+        component::Supplied {
+            component: b"virtio-blk",
+            name: b"queues",
+            at: region.addr(),
+            bytes: declared.bytes,
+            map: component::Placement::Cached(process::BLK_QUEUES),
+        },
+    ]
+}
+
 fn blk_datapath(
     boot: &BootInfo,
     frames: &mut mem::FrameAllocator,
