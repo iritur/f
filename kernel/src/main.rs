@@ -995,6 +995,19 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // inline rather than beside it.
     let occupant_core =
         if smp::started() > 1 { Some((smp::first_worker(), clocks.tsc_khz)) } else { None };
+    // E1-B05. What this boot found and a place cannot carve for itself.
+    //
+    // Empty on every boot but one, so every other place is filled exactly as it
+    // was: a device window is supplied only where the device was found, and an
+    // ordinary boot has none — `MACHINE` passes `-net none` and the block
+    // device is behind its own parameter.
+    //
+    let mut queues = None;
+    // SAFETY: the boot processor, with the kernel's space in `CR3`; `remapping`
+    // is this boot's own unit and nothing else is walking the bus, so the device
+    // lookup inside is the only one this boot makes.
+    let supplied =
+        unsafe { blk_place_supply(&boot, &mut frames, &space, features, &remapping, &mut queues) };
     // SAFETY: the boot processor, once, with the kernel's address space in
     // `CR3`, `frames` rebound onto its direct map, and no process running. The
     // direct map covers every module: `reserved_ranges` put them all in the
@@ -1002,12 +1015,21 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // it is `Some`, names a core `smp` reports started and which nothing else
     // has been given.
     match unsafe {
-        component::demonstrate(&mut frames, &space, features, &boot, now, &tree, occupant_core)
+        component::demonstrate(
+            &mut frames,
+            &space,
+            features,
+            &boot,
+            now,
+            &tree,
+            occupant_core,
+            &supplied,
+        )
     } {
         Ok(report) => kprintln!(
             "  supervisor    ok — {} place(s), {} spawn(s), {} fault(s), {} restart(s), \
              {} resumed, {} client(s) lost, {} probe(s) refused, {} retired, \
-             {} need(s) bound to nothing, {} tree(s) mounted carrying {} node(s), \
+             {} irq need(s) bound to no vector, {} tree(s) mounted carrying {} node(s), \
              {} refused for declaring none; heap {} B described, peak {} byte(s), starved {}",
             report.places,
             report.spawns,
@@ -2553,6 +2575,32 @@ fn runtime_demonstration(
         report.entries.interrupts,
         report.entries.total(),
     );
+    // The same numbers as rows `claims/0037` can read, and **each half prints
+    // only the rows it is the authority for**.
+    //
+    // That split is not tidiness. `entries.hot` is zero on the load half and
+    // two on the provoke half — which is the whole point of having both — so
+    // one name carrying both values would reach `measured_rows` as a row
+    // printed twice with different numbers, which it refuses rather than
+    // averages. The load half owns *what a runtime under load costs the
+    // frame*; the provoke half owns *that the counter can move at all*.
+    //
+    // `operations_completed` is the denominator and is printed by the load half
+    // because that is the half whose zero it divides. Without it the zero above
+    // is satisfied by a runtime that did nothing, which is the failure this
+    // project has now recorded under three different names.
+    match report.half {
+        runtime::Half::Load => {
+            kprintln!("    kernel_entries_on_the_hot_path    {}", report.entries.hot);
+            kprintln!("    kernel_entries_at_the_boundary    {}", report.entries.boundary);
+            kprintln!("    operations_completed              {}", report.tally.completed);
+        }
+        runtime::Half::Provoke => {
+            kprintln!("    kernel_entries_provoked           {}", report.tally.provoked);
+            kprintln!("    kernel_entries_seen_by_the_frame  {}", report.entries.hot);
+        }
+        _ => {}
+    }
     // The component's own tree, read by the frame out of the page it published
     // the schema into, before `reap` took the page back. The two snapshots are
     // the evidence and neither is worth anything alone: the first is this tree
@@ -2900,6 +2948,123 @@ fn objects_datapath(
 /// into the state tree from underneath. A boot with no datapath answers `None`,
 /// which is the same absence and a different claim from a datapath that
 /// counted zero.
+/// The two objects `virtio-blk`'s place cannot carve for itself, on the one
+/// boot that asks for them.
+///
+/// # Why this is here and not in `blk`
+///
+/// Because `blk=place` is the half on which `blk_datapath` does **not** run.
+/// The device lookup programs the remapping unit and maps configuration space,
+/// and doing it twice in one boot would be two units programmed for one device.
+/// On this half there is exactly one caller, and it is this.
+///
+/// # What it supplies, and why these two and not the other needs
+///
+/// `mmio` is a device window: a physical span the firmware chose, which the
+/// account cannot answer and `reap` must never hand back. `queues` is ordinary
+/// memory and *could* be carved — it is supplied here so that the frame holds
+/// the same run the driver will point the device at, which is what lets a
+/// later kill-and-refill hand the same queue memory to the next occupant
+/// rather than leaving the device writing into a freed page.
+///
+/// Every other need on that manifest — `notify`, `powerbox` — is left to
+/// `offer`, which already answers them the way it answers every other place's.
+///
+/// # Safety
+///
+/// The boot processor, with the kernel's address space in `CR3`, and
+/// `remapping` this boot's own unit with nothing else walking the bus.
+unsafe fn blk_place_supply(
+    boot: &BootInfo,
+    frames: &mut mem::FrameAllocator,
+    space: &paging::AddressSpace,
+    features: paging::Features,
+    remapping: &Option<Remapping>,
+    queues: &mut Option<mem::Frame>,
+) -> [component::Supplied; 2] {
+    const NONE: [component::Supplied; 2] = [component::Supplied {
+        component: b"",
+        name: b"",
+        at: 0,
+        bytes: 0,
+        map: component::Placement::Unmapped,
+    }; 2];
+
+    if !boot.has_parameter(b"blk=place") {
+        return NONE;
+    }
+    let Some(found) = remapping else {
+        kprintln!("FAIL: blk=place asked for on a machine with no remapping unit");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+    // SAFETY: the caller's guarantee, passed down.
+    let Ok(declared) = (unsafe { supervisor::declared(boot, b"virtio-blk") }) else {
+        kprintln!("FAIL: blk=place found no virtio-blk manifest to read a declaration from");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+    // SAFETY: as above; `window` and `survey` are this boot's own.
+    let device = unsafe {
+        arch::x86_64::virtio::route(
+            frames,
+            space,
+            features,
+            &found.window,
+            &found.survey,
+            arch::x86_64::virtio::VIRTIO_BLK_MODERN,
+            Some(arch::x86_64::virtio::VIRTIO_BLK_TRANSITIONAL),
+        )
+    };
+    let Ok(device) = device else {
+        kprintln!("FAIL: blk=place found no block device on the bus");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+    let Ok(registers) = supervisor::Registers::of(&device, &declared) else {
+        kprintln!("FAIL: blk=place read a register span the manifest does not declare");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+
+    // The queue memory, allocated whole because a virtqueue is one descriptor
+    // table and two rings at fixed offsets from each other.
+    // `account_order`'s arithmetic, on one need rather than on a whole
+    // manifest: pages, rounded up to a power of two, and the order is its
+    // trailing zeros. Written out rather than shared because the two are the
+    // same sum about different things, and a helper spanning both would have to
+    // take a record this one does not have.
+    let pages = declared.bytes.max(mem::FRAME_SIZE).div_ceil(mem::FRAME_SIZE).next_power_of_two();
+    let order = u8::try_from(pages.trailing_zeros()).ok().and_then(mem::Order::new);
+    let Some(region) = order.and_then(|order| frames.alloc_zeroed(order)) else {
+        kprintln!("FAIL: blk=place could not allocate the queue memory the manifest declares");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+    *queues = Some(region);
+
+    kprintln!(
+        "  blk place     registers {:#018x} over {} page(s), queues {:#018x} over {} B — \
+         supplied to the place rather than carved from its account",
+        registers.base,
+        registers.pages,
+        region.addr(),
+        declared.bytes,
+    );
+
+    [
+        component::Supplied {
+            component: b"virtio-blk",
+            name: b"mmio",
+            at: registers.base,
+            bytes: u64::from(registers.pages) * mem::FRAME_SIZE,
+            map: component::Placement::Uncached(process::BLK_REGISTERS),
+        },
+        component::Supplied {
+            component: b"virtio-blk",
+            name: b"queues",
+            at: region.addr(),
+            bytes: declared.bytes,
+            map: component::Placement::Cached(process::BLK_QUEUES),
+        },
+    ]
+}
+
 fn blk_datapath(
     boot: &BootInfo,
     frames: &mut mem::FrameAllocator,
@@ -3075,6 +3240,28 @@ fn blk_datapath(
         report.counters.bytes,
         report.counters.provoked,
     );
+    // The same three numbers again, as rows a claim can read.
+    //
+    // `claims/0036` compares them against its own `[threshold]` table, and
+    // `claim_compare` parses a row as *first token is a name it knows, second
+    // is a `u64`* — which the sentence above is not, on purpose: a line a
+    // person reads and a line a machine reads want different things, and
+    // making one serve both is how a threshold ends up keyed on a word in a
+    // sentence somebody later rewrites.
+    //
+    // **Only on `Half::Inside`, and that is what stops the rows conflicting.**
+    // Every half of this command moves a different number of bytes — 4096 on
+    // two of them and 3584 on a third — so a denominator printed by all of
+    // them would reach `measured_rows` as one name with two values, which it
+    // refuses rather than averages. The positive control is the half that
+    // moved the client's bytes and got them back, so it is the half with the
+    // authority for *what a working datapath copied*; the others are refusals,
+    // and a refusal has no copies-per-operation to report.
+    if matches!(report.half, crate::blk::Half::Inside) {
+        kprintln!("    blk_copies_on_the_data_path       {}", report.counters.copies);
+        kprintln!("    blk_bytes_transferred             {}", report.counters.bytes);
+        kprintln!("    blk_bytes_moved_on_purpose        {}", report.counters.provoked);
+    }
     // What the driver aimed at, beside where the unit says the transaction
     // went. On `escape` these are a page apart and the second is the address the
     // component's own arithmetic produced; on the other two halves nothing is
@@ -3329,6 +3516,28 @@ fn net_datapath(
         report.counters.bytes,
         report.counters.provoked,
     );
+    // The same three numbers again, as rows a claim can read.
+    //
+    // `claims/0036` compares them against its own `[threshold]` table, and
+    // `claim_compare` parses a row as *first token is a name it knows, second
+    // is a `u64`* — which the sentence above is not, on purpose: a line a
+    // person reads and a line a machine reads want different things, and
+    // making one serve both is how a threshold ends up keyed on a word in a
+    // sentence somebody later rewrites.
+    //
+    // **Only on `Half::Inside`, and that is what stops the rows conflicting.**
+    // Every half of this command moves a different number of bytes — 4096 on
+    // two of them and 3584 on a third — so a denominator printed by all of
+    // them would reach `measured_rows` as one name with two values, which it
+    // refuses rather than averages. The positive control is the half that
+    // moved the client's bytes and got them back, so it is the half with the
+    // authority for *what a working datapath copied*; the others are refusals,
+    // and a refusal has no copies-per-operation to report.
+    if matches!(report.half, crate::net::Half::Inside) {
+        kprintln!("    net_copies_on_the_data_path       {}", report.counters.copies);
+        kprintln!("    net_bytes_transferred             {}", report.counters.bytes);
+        kprintln!("    net_bytes_moved_on_purpose        {}", report.counters.provoked);
+    }
     // The obligation the receive direction creates, as a number. A posted
     // receive is a buffer with no answer owed, so a driver that stopped while
     // holding one would leave its client with an in-flight buffer RFC 0024 gives
@@ -3592,6 +3801,28 @@ fn gpu_datapath(
         report.counters.bytes,
         report.counters.provoked,
     );
+    // The same three numbers again, as rows a claim can read.
+    //
+    // `claims/0036` compares them against its own `[threshold]` table, and
+    // `claim_compare` parses a row as *first token is a name it knows, second
+    // is a `u64`* — which the sentence above is not, on purpose: a line a
+    // person reads and a line a machine reads want different things, and
+    // making one serve both is how a threshold ends up keyed on a word in a
+    // sentence somebody later rewrites.
+    //
+    // **Only on `Half::Inside`, and that is what stops the rows conflicting.**
+    // Every half of this command moves a different number of bytes — 4096 on
+    // two of them and 3584 on a third — so a denominator printed by all of
+    // them would reach `measured_rows` as one name with two values, which it
+    // refuses rather than averages. The positive control is the half that
+    // moved the client's bytes and got them back, so it is the half with the
+    // authority for *what a working datapath copied*; the others are refusals,
+    // and a refusal has no copies-per-operation to report.
+    if matches!(report.half, crate::gpu::Half::Inside) {
+        kprintln!("    gpu_copies_on_the_data_path       {}", report.counters.copies);
+        kprintln!("    gpu_bytes_transferred             {}", report.counters.bytes);
+        kprintln!("    gpu_bytes_moved_on_purpose        {}", report.counters.provoked);
+    }
     if report.half.beyond() == 0 {
         kprintln!(
             "  gpu escape    {} backing entr(ies) pointed past a registration's answer; this \

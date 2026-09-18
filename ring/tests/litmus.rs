@@ -35,9 +35,10 @@
 //! **And when it arrives it will not run the tests in this file.** `cargo
 //! rustmc test` explores a crate's test targets exhaustively, and exhaustive
 //! exploration of 500 000 rounds across two threads is not a long run but a
-//! non-terminating one. What E0-P16 owes is a second, much smaller set — two
-//! threads, one or two entries, a handful of operations — living beside these
-//! rather than replacing them. The two answer different questions: one explores
+//! non-terminating one. The second, much smaller set this predicted — two
+//! threads, one or two entries, a handful of operations — is `ring/tests/model.rs`,
+//! beside this file rather than replacing it. The two answer different questions:
+//! one explores
 //! what RC11 permits, and this one explores what a real store buffer does at a
 //! volume no exhaustive search will reach.
 //!

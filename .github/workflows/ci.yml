@@ -184,6 +184,30 @@ jobs:
       - run: cargo xtask lint-units
       - run: cargo xtask lint-callbacks
       - run: cargo xtask lint-claim-owners
+      # Nine of these ran in `cargo xtask verify` and in no workflow at all, so
+      # nine executable policies were enforced on a laptop and not on a merge.
+      # `lint-registries` is the one that shows the cost: RFC 0089 exists because
+      # three RFCs were numbered 0085 and all three were cited, and says the check
+      # "is what makes the next one a red merge instead of a reader's discovery" —
+      # which it cannot do from a job that does not exist.
+      #
+      # `cargo xtask lint-gate` is what keeps this list complete: it reads
+      # `lint_all`'s own body and requires every check in it to be named here, so
+      # the next one added to `verify` and forgotten here is a red build.
+      - run: cargo xtask lint-stamp
+      - run: cargo xtask lint-manifests
+      - run: cargo xtask lint-generations
+      - run: cargo xtask lint-components
+      - run: cargo xtask lint-datapath
+      - run: cargo xtask lint-registries
+      - run: cargo xtask lint-owed
+      - run: cargo xtask lint-reproduce
+      - run: cargo xtask lint-remap
+      - run: cargo xtask lint-testing-status
+      - run: cargo xtask lint-debt
+      - run: cargo xtask lint-claim-runs
+      - run: cargo xtask lint-boundary
+      - run: cargo xtask lint-gate
       # Formatting and clippy, by calling the definition rather than restating
       # it. This was `cargo fmt --all -- --check` and
       # `cargo clippy --workspace --all-targets` written out here, which is one
@@ -548,6 +572,12 @@ jobs:
       # exactly one display in it. E1-B04, RFC 0054, which records what the frame
       # turned out to owe a third driver and why the harness is part of the check.
       - run: cargo xtask gpu
+      # `claims/0036`'s three rows for this driver, compared against the table
+      # rather than against the boot's own assertions. It runs after the three
+      # datapath jobs' own commands and re-runs all three boots, which is the
+      # cost of the comparison being a separate check from the workload; the
+      # alternative is the boot grading its own homework.
+      - run: cargo xtask claim copies-per-operation
       # The same datapath, asked an ordering rather than an isolation question.
       # Three more boots of one client script: six batch reads are queued, a
       # hard-class read carrying a deadline arrives last, and the driver hands
@@ -560,6 +590,11 @@ jobs:
       # sides of the privilege boundary and the two must agree. E1-B06, RFC
       # 0049, and `claims/0012` gates on the count.
       - run: cargo xtask deadline
+      # The same three boots again, this time compared against what
+      # `claims/0012` publishes rather than against the command's own
+      # assertions. The two are not the same check and the second is the one
+      # `status = "gating"` promises.
+      - run: cargo xtask claim deadline-overtake
       # What it costs to undo the isolation the two jobs above prove. One boot
       # retires forty registered buffer sets — thirty-two register-and-retire
       # cycles, then a driver restart's whole grant in one pass — under each of
@@ -581,6 +616,7 @@ jobs:
       # refusal to appear. E1-B14, RFC 0052, and `claims/0014` gates on the
       # counts while `claims/0015` waits on a machine.
       - run: cargo xtask churn
+      - run: cargo xtask claim unmap-churn
       # The scheduler, and the one exit on this list that is an *absence*. Four
       # boots. A component holds a core, adopts its control ring and its own
       # work ring in safe code — `f_ring::adopt`, RFC 0037 — and puts sixteen
@@ -595,6 +631,13 @@ jobs:
       # before entry and requires the adoption to refuse rather than believe it.
       # E1-B08, RFC 0038.
       - run: cargo xtask runtime
+      # `claims/0037`'s five rows, compared against the table rather than against
+      # the boot's own refusals. The two are different checks: the boot asserts
+      # the load half crossed nothing and the provoke half crossed exactly what
+      # it provoked, and the claim asserts the numbers those halves published
+      # are the numbers the registry says they are. A boot grading its own
+      # homework is the arrangement RFC 0064 decided against.
+      - run: cargo xtask claim kernel-entries-per-operation
       # The other half of E0-P08, and the half that says the suite can fail. A
       # kernel built with one deliberate defect, booted into the forging sweep,
       # required to go red with a panic in the log — and then the same boot
@@ -779,6 +822,7 @@ jobs:
       # `claims/0006` and is `pending` on E0-D10's machine — split rather than
       # weakened. RFC 0041.
       - run: cargo xtask chaos
+      - run: cargo xtask claim driver-restart-blast-radius
       # E1-P08. A run that goes wrong in simulated minute forty, re-entered at
       # minute thirty-nine from a snapshot written while the run passed it, with
       # both wall-clock numbers printed and the ratio gated against a floor. It
@@ -825,6 +869,7 @@ jobs:
       # And the corpus: every run that has ever found something, required to be
       # clean now. Seconds, because a corpus entry is one episode.
       - run: cargo xtask hostile --corpus
+      - run: cargo xtask claim hostile-peer-operations
 
   # E1-P05, and a job of its own for the reason the one above is: the fuzzing
   # half is seconds and the coverage half rebuilds three crates with
@@ -857,6 +902,7 @@ jobs:
       # It is `path_line_coverage` in the claim and this step refuses a figure
       # below it, naming the members that fell short.
       - run: cargo xtask entries --coverage
+      - run: cargo xtask claim entry-validation-coverage
       # Kept with the run for the same reason the coverage job keeps its summary:
       # *the number fell* is a question anyone can answer from two artifacts and
       # nobody can answer from one.
@@ -920,6 +966,28 @@ jobs:
       - run: cargo xtask claims
       - run: cargo xtask lint-claim-owners
       - run: cargo xtask lint-claims
+      # And the question the three lints above do not ask: does anything ever
+      # compare a gating claim to the bounds it publishes? Until this commit,
+      # for sixteen of seventeen, no.
+      #
+      # `status = "gating"` means *fails the build on regression*, and the
+      # comparison lives in one place — `claim_compare`, reached only by a
+      # claim's own `[reproduce] command`. The workloads were running: `chaos`,
+      # `hostile`, `entries`, `deadline` and `churn` are all in this gate and
+      # each asserts its own internal invariants. None of them reads the number
+      # the claim publishes, so a claim could drift past its published bound
+      # with every job green.
+      #
+      # These six are the ones whose comparison needs no boot, so they belong in
+      # the cheapest job that already has the registry in front of it. The
+      # boot-heavy five are in the nightly, and `lint-claim-runs` prints which
+      # workflow enforces each so the split is read rather than assumed.
+      - run: cargo xtask claim admission-refusals
+      - run: cargo xtask claim cut-outcomes
+      - run: cargo xtask claim collector-invariants
+      - run: cargo xtask claim index-blocks-per-query
+      - run: cargo xtask claim chunk-size-distribution
+      - run: cargo xtask claim blob-verification-refusals
       - run: cargo xtask release --dry-run
       # The package, built twice on this runner. It is the weaker half of
       # E0-R01's exit and the comment in `--twice` says so: directory order,

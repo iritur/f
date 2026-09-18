@@ -50,8 +50,14 @@ use crate::kprintln;
 /// Restated from `multiboot::MAX_MODULES` rather than imported, because a
 /// second array sized by that constant is a place a change to it could go
 /// unnoticed; the assertion below is what makes this a copy that cannot drift.
+///
+/// It earned that assertion: the bound moved from eight to sixteen when a boot
+/// menu offering two generations ran one module past it, and this line had to
+/// move in the same diff or the build stops. Which is the entire argument for
+/// restating it rather than importing it — an import would have silently
+/// resized a second array that nobody had thought about.
 /// Unit: count of modules.
-const OFFERED_MAX: usize = 8;
+const OFFERED_MAX: usize = 16;
 
 /// What the frame decided about the generation it was asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

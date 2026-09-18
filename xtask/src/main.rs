@@ -6,7 +6,7 @@
 //! preference: `lint-determinism`, `lint-licensing`, `lint-unsafe` and
 //! `lint-percpu`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -820,6 +820,11 @@ fn main() -> ExitCode {
         "lint-units" => lint_units(),
         "lint-callbacks" => lint_callbacks(),
         "lint-claim-owners" => lint_claim_owners(),
+        "lint-testing-status" => lint_testing_status(),
+        "lint-debt" => lint_debt(),
+        "lint-claim-runs" => lint_claim_runs(),
+        "lint-generations" => generation::fixpoint(),
+        "lint-gate" => lint_gate(),
         "lint-manifests" => lint_manifests(),
         "lint-components" => lint_components(),
         "lint-datapath" => lint_datapath(),
@@ -835,6 +840,7 @@ fn main() -> ExitCode {
         "release" => release(args.get(1).map(String::as_str)),
         "history" => match args.get(1).map(String::as_str) {
             Some("append") => history_append(),
+            Some("--changes") => history_changes(),
             Some(other) => Err(format!("unknown option for history: {other}")),
             None => history(),
         },
@@ -887,6 +893,8 @@ cargo xtask <command>
   iommu [half]       Boot into a real device transfer and check the remapping
                      unit: inside, which must land, or outside, which must
                      fault and land nothing. Both with no argument
+  blk place          E1-B05: the driver's place, supplied with the device window
+                     it cannot carve. Not in `blk` with no argument: unfinished
   blk [half]         Boot the block datapath: a driver component moves a sector
                      through a ring with nothing copied — inside; the same run
                      with the client's grant withdrawn must fault — outside; and
@@ -1037,6 +1045,12 @@ cargo xtask <command>
   lint-units         R03: every public abi field states its unit
   lint-callbacks     R05: no interface registers a callback
   lint-claim-owners  R09: every claim names the document that owns it
+  lint-testing-status  the TESTING-STATUS claims row says what claims/ holds
+  lint-debt          every narrowed exit has a row in docs/TECHNICAL-DEBT.md
+  lint-claim-runs    every gating claim is compared to its bounds by some workflow
+  lint-generations   every generation round-trips to a fixpoint
+  lint-gate          the pull-request gate runs every check `verify` runs
+  history --changes  where the recorded series stepped, rather than what crossed a bound
   lint-manifests     Every component manifest fits docs/manifest.md; RFC 0005
                      rule 4 and RFC 0008's shape, checked before a spawn does
   lint-components    The components this tree declares are the components it
@@ -3323,6 +3337,39 @@ fn heap_reading(log: &str) -> Result<(u32, u32, bool), String> {
 /// and it goes when a supervisor spawns and schedules in one act — which is
 /// E1-B05's remaining half and RFC 0008's *restart is the supervisor's*.
 /// RFC 0041 states the shape of the gap; RFC 0047 states what is left of it.
+///
+/// # What a datapath boot actually contains, measured rather than inferred
+///
+/// **Two virtio-blk instances.** `component::demonstrate` builds a place for it
+/// — the boot prints `place virtio-blk: private, on_fault, 8 restart(s) in
+/// 60000 tick(s), 4194304 B account` — and never hands its occupant a core.
+/// `kernel/src/blk.rs` stands a second one up through `prepare_driver`, gives it
+/// a core, and that is the one a client's load goes through. The sentence above
+/// is exact, and this is what it looks like from the log.
+///
+/// **So the work is not a third path.** It is making the place's occupant the
+/// one that serves, which needs three things and the first of them now exists:
+///
+/// 1. the place supplied with the device window and its queue memory — a need
+///    the account cannot answer, because a device window is not memory the frame
+///    may allocate or hand back. `Supplied` and `Placement` in
+///    `kernel/src/component.rs` are that, and `offer` sources a named need from
+///    the caller with the extent checked against the manifest;
+/// 2. that occupant scheduled on the worker core, which is `schedule_occupant`
+///    without the `run_on` that follows it in `consult` — the driver has to run
+///    *concurrently* with the client rather than to completion;
+/// 3. the boot's order, which is the part with the widest blast radius:
+///    `blk_datapath` runs at `main.rs`'s line 877 and `component::demonstrate`
+///    at 1005, so today the device is found long before the place exists. One of
+///    the two has to move, and moving either changes the order of every line in
+///    a log `cargo xtask trace` hashes.
+///
+/// That third item is why this is one piece of work and not three, and why it
+/// belongs to `E1-B05` rather than beside it: a supervisor that spawns and
+/// schedules in one act is exactly a boot in which the place comes first.
+///
+/// *Reversal:* when `prepare_driver(` leaves `kernel/src/blk.rs`, this row goes
+/// and `cargo xtask chaos` says so.
 const CHAOS_GAP: &[Gap] = &[(
     "kernel/src/blk.rs",
     "prepare_driver(",
@@ -3354,9 +3401,38 @@ const CHAOS_GAP: &[Gap] = &[(
 ///   this project can reach — TCG implements no part of UINTR and no `-cpu`
 ///   model advertises the bit. `E1-B09` needs that path to execute; `E1-P10`
 ///   needs `E1-B09`.
-/// - **There is no machine.** All four are times, and `f_bench::Environment`
-///   refuses to record one where `F_ENVIRONMENT=container`. `E0-D10` owns
-///   obtaining a machine that may.
+/// - **There is no machine.** One of the four is a time — *ring submit under
+///   load* — and `f_bench::Environment` refuses to record one where
+///   `F_ENVIRONMENT=container`. `E0-D10` owns obtaining a machine that may.
+///
+/// **This row said *all four are times*, and it was wrong — but the correction
+/// that replaced it was wrong too, and this is the second attempt.**
+///
+/// The first correction said three of the four are counts *identical on any
+/// host that runs the binary*. Two of them are: copies per operation and kernel
+/// entries per operation are bytes and entries a deterministic kernel produced
+/// against an emulated device, and `claims/0036` gates on the first of those
+/// today. **Doorbells per operation is not**, and its own crate says why: the
+/// number the design cares about is *zero under load*, and whether a producer
+/// needs to ring depends on where the consumer is in its drain — which under
+/// TCG is the emulator's scheduling of two vCPUs. A count whose value depends
+/// on timing is not a count this machine may gate on, whatever its unit says.
+///
+/// `E0-B15` had already reached that conclusion and declined to register the
+/// boot's figure for exactly this reason: *500 per 1000 operations* out of a
+/// two-operation self-test is an artefact of the sample, not a measurement of
+/// suppression. The first correction quoted `E0-B15` approvingly and then
+/// contradicted it one clause later, which is how a fix inherits the shape of
+/// what it fixed.
+///
+/// The correction does not empty this row, and narrowing rather than emptying
+/// is what `gap_holds` asks for: the time is still owed to a machine, so the
+/// row stands over one number instead of four. What it does mean is that three
+/// of these are **work rather than debt** — `E1-P10` can register them from
+/// here, against boots this tree already runs, and `kernel/src/blk.rs` already
+/// asserts `copies == 0` with a provocation behind it on every datapath boot.
+/// A gap whose stated reason is wrong is worse than an undeclared one, because
+/// the reason is what the next reader checks instead of the tree.
 ///
 /// Neither substitutes for the other, and the row that goes first says which
 /// half of the section in `RELEASING.md` has stopped being true. The day both
@@ -6303,6 +6379,29 @@ const MUTATIONS: &[(&str, &str, &str, &str)] = &[
 /// sees it will not have read this.
 const CORE_COST_BYTES: u64 = 64_296;
 
+/// The output sections `kernel/linker.ld` pads to a page boundary **inside** the
+/// section, so `sh_size` is a whole number of pages rather than the size of what
+/// went into it.
+///
+/// # Why this list exists rather than a rule about alignment
+///
+/// Because every output section in that script is page-*aligned* at its start —
+/// `.data ALIGN(4096)` and the rest — and that alignment costs nothing in
+/// `sh_size`. Only these two also carry a `. = ALIGN(4096);` before their end
+/// symbol, and that one is the difference: it rounds the section's own size up.
+/// A check that keyed on the address alignment would have named five sections
+/// and excused the three that grow linearly, which is the check quietly giving
+/// up on the thing it exists to measure.
+///
+/// The reason they are padded is `E0-B19`: the kernel window is mapped in 4 KiB
+/// pages with per-section permissions, text executable and constants neither, so
+/// a section whose size is not a whole number of pages would share its last page
+/// with the next section's permissions.
+///
+/// [`padding_where_declared`] is what stops this list becoming a comment about a
+/// script that has moved.
+const PAGE_PADDED_SECTIONS: &[&str] = &[".text", ".rodata"];
+
 /// The two ceilings [`core_cost`] takes the slope between.
 ///
 /// Unit: cores.
@@ -6425,7 +6524,7 @@ fn core_cost() -> Result<(), String> {
         ));
     }
 
-    let [(low, low_bytes), (high, high_bytes)] = measured?;
+    let [(low, low_bytes, low_sections), (high, high_bytes, high_sections)] = measured?;
     let span = (high - low) as u64;
     let grew = high_bytes.checked_sub(low_bytes).ok_or_else(|| {
         format!(
@@ -6438,29 +6537,22 @@ fn core_cost() -> Result<(), String> {
         )
     })?;
 
-    if grew % span != 0 {
-        return Err(format!(
-            "the image grew {grew} bytes between MAX_CPUS = {low} and MAX_CPUS = {high},\n\
-             which is not a whole number of bytes per core: {grew} / {span} leaves {}.\n\n\
-             The model in the `MAX_CPUS` doc comment is a straight line because the cost\n\
-             is arrays subscripted by the constant plus AP_CORES * AP_STACK_STRIDE, and\n\
-             both of those are exact. A remainder means something now grows with the\n\
-             ceiling in a way that is neither — alignment that rounds at one end and not\n\
-             the other is the likely shape — and the comment needs a third point before\n\
-             it can go on saying what it says. This command takes two.",
-            grew % span
-        ));
-    }
+    // The script is read before the sections are judged, because the judgement
+    // below rests entirely on which sections it pads.
+    padding_where_declared(&script_was)?;
 
-    let slope = grew / span;
+    let Slope { slope, linear, quantised } =
+        slope_from_sections(span, &section_growth(&low_sections, &high_sections)?)?;
+
     let intercept = low_bytes - slope * low as u64;
     if slope != CORE_COST_BYTES {
         return Err(format!(
             "a core costs {slope} bytes and kernel/src/percpu.rs publishes \
              {CORE_COST_BYTES}.\n\n\
-             Measured: MAX_CPUS = {low} is {low_bytes} bytes resident, MAX_CPUS = {high} is\n\
-             {high_bytes}, a difference of {grew} over {span} cores. The line those two\n\
-             imply is resident(N) = {intercept} + {slope} * N, or {} per core.\n\n\
+             Measured, section by section, between MAX_CPUS = {low} and MAX_CPUS = \
+             {high}:\n{}\n\n\
+             The line those imply is resident(N) = {intercept} + {slope} * N, or {} per\n\
+             core.\n\n\
              If the sharding changed on purpose then this is the number moving, and the\n\
              three places that publish it move together:\n\n  \
              1. the model in the `MAX_CPUS` doc comment, kernel/src/percpu.rs\n  \
@@ -6470,22 +6562,281 @@ fn core_cost() -> Result<(), String> {
              two are more work than the third: it is not gated, it is stale far more\n\
              often than this is, and the comment is wrong either way until it has been\n\
              re-measured too. The figure above is that measurement — use it.",
+            linear.join("\n"),
             kibibytes(slope)
         ));
     }
 
     println!(
         "\ncost model: ok — a core costs {slope} bytes ({}), which is what the `MAX_CPUS`\n\
-         \x20           doc comment publishes.\n\
-         \x20           MAX_CPUS = {low}: {low_bytes} bytes resident\n\
-         \x20           MAX_CPUS = {high}: {high_bytes} bytes resident\n\
+         \x20           doc comment publishes.\n{}",
+        kibibytes(slope),
+        linear.join("\n")
+    );
+    if !quantised.is_empty() {
+        println!(
+            "\x20           and {} section(s) sized in whole pages, which carry no slope\n\
+             \x20           to read:\n{}",
+            quantised.len(),
+            quantised.join("\n")
+        );
+    }
+    println!(
+        "\x20           MAX_CPUS = {low}: {low_bytes} bytes resident\n\
+         \x20           MAX_CPUS = {high}: {high_bytes} bytes resident, {grew} more\n\
          \x20           the intercept these two imply is {intercept}, and it is *not*\n\
          \x20           checked: it is the kernel's own size and moves in every commit.\n\
-         \x20           When the doc comment is next touched, this is the number to use.",
-        kibibytes(slope)
+         \x20           When the doc comment is next touched, this is the number to use."
     );
     Ok(())
 }
+
+/// What the per-section reading came to: the slope, and the two ways a section
+/// reached it.
+#[derive(Debug)]
+struct Slope {
+    /// Bytes a core, summed over the sections that carry one.
+    slope: u64,
+    /// One line per section whose growth divided evenly by the span.
+    linear: Vec<String>,
+    /// One line per section sized in whole pages, which carry no slope.
+    quantised: Vec<String>,
+}
+
+/// Read a per-core cost out of how each allocated section grew.
+///
+/// # The rule, and why it is per section rather than over the image
+///
+/// A section `kernel/linker.ld` pads to a page has a size that is a whole
+/// number of pages, so its growth is a step function of the ceiling and there
+/// is no slope in it to read. Every other allocated section grows by an array
+/// subscripted by `MAX_CPUS` or by `AP_CORES * AP_STACK_STRIDE`, and both of
+/// those are exact — so its growth must divide evenly by the span, and the
+/// sum of those quotients is what a core costs.
+///
+/// Summing first and dividing afterwards, which is what this replaced, adds a
+/// model that holds to a quantisation that has nothing to do with it and asks
+/// whether the total divides. It does not, and it has not since `.rodata`
+/// crossed a page boundary somewhere between thirty-two cores and sixty-four:
+/// `3990448 / 62` leaves `4`, and the four bytes are the remainder of one page
+/// of padding, not a defect in the kernel. Measured across five ceilings,
+/// `.data`, `.bss` and `.stacks` grow at 2448, 4504 and 57 344 bytes a core
+/// with no residue at any of them, and `.rodata` is flat at 155 648 bytes until
+/// sixty-four and then steps once.
+///
+/// # Errors
+///
+/// A section that shrank, a padded section that grew by part of a page, or an
+/// unpadded section whose growth does not divide by the span. The message names
+/// every offender and then the sections that did behave, because a report that
+/// names only what failed leaves a reader unable to tell a single moved term
+/// from a model that has stopped describing this kernel.
+fn slope_from_sections(span: u64, growth: &[(String, u64, u64)]) -> Result<Slope, String> {
+    let page = u64::from(PAGE_BYTES);
+    let mut slope = 0u64;
+    let mut linear = Vec::new();
+    let mut quantised = Vec::new();
+    let mut uneven = Vec::new();
+    for (name, from, to) in growth {
+        let Some(delta) = to.checked_sub(*from) else {
+            uneven.push(format!(
+                "  {name:<12} {from} -> {to}, which is smaller at the higher ceiling"
+            ));
+            continue;
+        };
+        if delta == 0 {
+            continue;
+        }
+        if PAGE_PADDED_SECTIONS.contains(&name.as_str()) {
+            // Its size is a whole number of pages by construction, so the most
+            // that can be said is that the step is a whole page: a padded
+            // section growing by anything else would mean the padding is not
+            // where this believes it is.
+            if delta % page != 0 {
+                uneven.push(format!(
+                    "  {name:<12} +{delta}, and kernel/linker.ld pads it to a page, so its\n\
+                     \x20              growth cannot be {} bytes short of one",
+                    page - delta % page
+                ));
+                continue;
+            }
+            quantised.push(format!(
+                "  {name:<12} +{delta} ({} page(s)), page-padded by kernel/linker.ld",
+                delta / page
+            ));
+            continue;
+        }
+        if delta % span != 0 {
+            uneven.push(format!(
+                "  {name:<12} +{delta}, which is not a whole number of bytes per core:\n\
+                 \x20              {delta} / {span} leaves {}",
+                delta % span
+            ));
+            continue;
+        }
+        slope += delta / span;
+        linear.push(format!("  {name:<12} +{delta} = {} bytes a core", delta / span));
+    }
+
+    if !uneven.is_empty() {
+        return Err(format!(
+            "a section grew in a shape the model does not describe:\n\n{}\n\n\
+             The model in the `MAX_CPUS` doc comment is a straight line because the cost is\n\
+             arrays subscripted by the constant plus AP_CORES * AP_STACK_STRIDE, and both\n\
+             of those are exact. A section that grows by something else is either a new\n\
+             per-core term that is neither of those two, or padding that has moved.\n\n\
+             The sections that did behave, for contrast:\n{}",
+            uneven.join("\n"),
+            if linear.is_empty() { "  (none)".to_string() } else { linear.join("\n") }
+        ));
+    }
+    Ok(Slope { slope, linear, quantised })
+}
+
+/// The two section tables, lined up by name.
+///
+/// # Errors
+///
+/// A section present at one ceiling and absent at the other. That is not a
+/// measurement with a hole in it, it is two different kernels — and quietly
+/// skipping the row would subtract its bytes from the slope and report the
+/// difference as a cost model that still holds.
+fn section_growth(
+    low: &[(String, u64)],
+    high: &[(String, u64)],
+) -> Result<Vec<(String, u64, u64)>, String> {
+    let mut out = Vec::new();
+    for (name, from) in low {
+        let Some((_, to)) = high.iter().find(|(other, _)| other == name) else {
+            return Err(format!(
+                "`{name}` is an allocated section at the lower ceiling and not at the\n\
+                 higher one, so the two images are not one kernel built twice."
+            ));
+        };
+        out.push((name.clone(), *from, *to));
+    }
+    for (name, _) in high {
+        if !low.iter().any(|(other, _)| other == name) {
+            return Err(format!(
+                "`{name}` is an allocated section at the higher ceiling and not at the\n\
+                 lower one, so the two images are not one kernel built twice."
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// [`PAGE_PADDED_SECTIONS`] is the set of sections `kernel/linker.ld` actually
+/// pads, and no other.
+///
+/// # Why both directions are checked
+///
+/// A section that gained padding and is not on the list would be asked for a
+/// slope it cannot have and go red over the remainder — which is the failure
+/// this whole change exists to stop happening a second time. A section on the
+/// list that lost its padding would be *excused* from the slope check, which is
+/// the worse direction: the command stays green while no longer looking at a
+/// per-core cost it used to see.
+///
+/// # Errors
+///
+/// The script padding a section this does not name, or not padding one it does.
+fn padding_where_declared(script: &str) -> Result<(), String> {
+    let padded = page_padded_in(script);
+    let declared: BTreeSet<String> =
+        PAGE_PADDED_SECTIONS.iter().map(|s| (*s).to_string()).collect();
+    if padded == declared {
+        return Ok(());
+    }
+    let list = |set: &BTreeSet<String>| {
+        if set.is_empty() {
+            "(none)".to_string()
+        } else {
+            set.iter().cloned().collect::<Vec<_>>().join(" ")
+        }
+    };
+    Err(format!(
+        "kernel/linker.ld pads {} to a page inside the section; PAGE_PADDED_SECTIONS in\n\
+         xtask says {}.\n\n\
+         That list decides which sections `cores` reads a per-core slope from. A section\n\
+         that gained padding and is not named would be asked for a slope it cannot have\n\
+         and go red over the remainder. One that lost its padding and is still named\n\
+         would be excused from the check while still carrying a cost — green, and blind.\n\n\
+         Move the list, in the same diff as the script.",
+        list(&padded),
+        list(&declared)
+    ))
+}
+
+/// Every output section in a linker script that pads its own size to a page.
+///
+/// Reads the script rather than modelling it: an output section is a `.name` at
+/// the start of a line, its body runs to the matching brace, and the padding is
+/// a `. = ALIGN(4096);` inside that body. The alignment of the section's own
+/// *address* — `.data ALIGN(4096) :` — stands on the header line before the
+/// brace and is deliberately not matched, because it costs nothing in `sh_size`.
+/// Telling those two apart is the whole job: keying on the address alignment
+/// would name five sections here and excuse the three that grow linearly.
+fn page_padded_in(script: &str) -> BTreeSet<String> {
+    let chars: Vec<char> = script.chars().collect();
+    let mut out = BTreeSet::new();
+    let mut at = 0usize;
+    while at < chars.len() {
+        if chars[at] != '.' || (at > 0 && !matches!(chars[at - 1], '\n' | ' ' | '\t')) {
+            at += 1;
+            continue;
+        }
+        let name_end = (at + 1..chars.len())
+            .find(|i| !chars[*i].is_ascii_alphanumeric() && chars[*i] != '_' && chars[*i] != '.')
+            .unwrap_or(chars.len());
+        let name: String = chars[at..name_end].iter().collect();
+        if name.len() < 2 {
+            at = name_end.max(at + 1);
+            continue;
+        }
+        // Whatever stands between the name and the brace that opens the body is
+        // the header line. A `.` that does not open an output section reaches
+        // the end of its line first, and is skipped.
+        let Some(open) = (name_end..chars.len()).find(|i| chars[*i] == '{' || chars[*i] == '\n')
+        else {
+            break;
+        };
+        if chars[open] != '{' {
+            at = name_end.max(at + 1);
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut close = chars.len() - 1;
+        for (offset, ch) in chars[open..].iter().enumerate() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = open + offset;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body: String = chars[open..close].iter().collect();
+        if body.contains(". = ALIGN(4096);") {
+            out.insert(name);
+        }
+        at = close.max(at + 1);
+    }
+    out
+}
+
+/// One ceiling, what the image came to, and what each allocated section came to.
+///
+/// A name rather than the tuple written out twice, because it is written out
+/// twice: once as what [`core_cost_builds`] returns and once as the array it
+/// fills. The third field is the itemisation the per-section reading needs, and
+/// it travels with the total so the two cannot come to be about different
+/// images.
+type Measured = (usize, u64, Vec<(String, u64)>);
 
 /// The two builds, and the two numbers they are for.
 ///
@@ -6497,12 +6848,12 @@ fn core_cost_builds(
     percpu_was: &str,
     script: &Path,
     script_was: &str,
-) -> Result<[(usize, u64); 2], String> {
+) -> Result<[Measured; 2], String> {
     let dir = target_dir().join("cores");
     let dir_arg = dir.display().to_string();
     let image = dir.join(KERNEL_TARGET).join("debug").join("f-kernel");
 
-    let mut points = [(0usize, 0u64); 2];
+    let mut points: [Measured; 2] = [(0, 0, Vec::new()), (0, 0, Vec::new())];
     for (slot, ceiling) in CORE_COST_AT.iter().copied().enumerate() {
         let aps = ceiling - 1;
         std::fs::write(percpu, retarget(percpu_was, CEILING_ASSIGNMENT, ceiling, percpu)?)
@@ -6545,9 +6896,15 @@ fn core_cost_builds(
             ));
         }
 
+        // Both readings come off the same image in the same breath. `resident`
+        // is the total the model has always been checked against; `allocated`
+        // is that same sum itemised, and the check below needs the parts
+        // because a whole-image remainder is a model that holds plus a
+        // quantisation that has nothing to do with it.
         let bytes = measure::resident(&image)?;
-        println!("    {bytes} bytes resident across every allocated section");
-        points[slot] = (ceiling, bytes);
+        let sections = measure::allocated(&image)?;
+        println!("    {bytes} bytes resident across {} allocated section(s)", sections.len());
+        points[slot] = (ceiling, bytes, sections);
     }
     Ok(points)
 }
@@ -6608,8 +6965,178 @@ fn kibibytes(bytes: u64) -> String {
 /// test`, in milliseconds, and names the constant to follow it with.
 #[cfg(test)]
 mod core_cost_tests {
-    use super::{AP_CORES_ASSIGNMENT, CEILING_ASSIGNMENT, kibibytes, relative, retarget, root};
+    use super::{
+        AP_CORES_ASSIGNMENT, CEILING_ASSIGNMENT, CORE_COST_BYTES, PAGE_PADDED_SECTIONS, kibibytes,
+        padding_where_declared, page_padded_in, relative, retarget, root, section_growth,
+        slope_from_sections,
+    };
     use std::path::Path;
+
+    /// The five ceilings this model was measured at, and what each allocated
+    /// section came to. Read off `readelf -S` on images built at each, and kept
+    /// here because the numbers are the argument: without them the rule below
+    /// is somebody's opinion about linker scripts.
+    const MEASURED: &[(usize, u64, u64, u64, u64)] = &[
+        // ceiling, .data, .bss, .stacks, .rodata
+        (2, 54_128, 9_016, 212_992, 155_648),
+        (8, 68_816, 36_040, 557_056, 155_648),
+        (16, 88_400, 72_072, 1_015_808, 155_648),
+        (32, 127_568, 144_136, 1_933_312, 155_648),
+        (64, 205_904, 288_264, 3_768_320, 159_744),
+    ];
+
+    fn sections(at: usize) -> Vec<(String, u64)> {
+        let row = MEASURED.iter().find(|r| r.0 == at).expect("a ceiling that was measured");
+        vec![
+            (".bss".to_string(), row.2),
+            (".data".to_string(), row.1),
+            (".rodata".to_string(), row.4),
+            (".stacks".to_string(), row.3),
+            // Flat across all five, and present so the walk has a section that
+            // is padded and does not move.
+            (".text".to_string(), 1_069_056),
+        ]
+    }
+
+    fn slope_between(low: usize, high: usize) -> u64 {
+        let growth = section_growth(&sections(low), &sections(high)).expect("one kernel twice");
+        slope_from_sections((high - low) as u64, &growth).expect("a model that holds").slope
+    }
+
+    /// The failure this whole reading replaced: 2 to 64 is the pair `verify`
+    /// takes, and the total grew by 3 990 448 bytes over 62 cores, which does
+    /// not divide. Per section it does — the four bytes were the remainder of
+    /// one page of `.rodata` padding, and never a cost.
+    #[test]
+    fn the_pair_verify_takes_reads_the_published_cost() {
+        assert_eq!(slope_between(2, 64), CORE_COST_BYTES);
+
+        let total: u64 = sections(64).iter().map(|(_, size)| size).sum::<u64>()
+            - sections(2).iter().map(|(_, size)| size).sum::<u64>();
+        assert_eq!(total, 3_990_448, "the growth the old reading divided");
+        assert_ne!(total % 62, 0, "and it is still not a whole number of bytes per core");
+    }
+
+    /// Two points define a slope and do not establish a line. Every adjacent
+    /// pair, and both ends, give the same number — which is the claim the
+    /// `MAX_CPUS` doc comment makes and the evidence it lacked.
+    #[test]
+    fn every_measured_pair_gives_one_slope() {
+        for pair in MEASURED.windows(2) {
+            let (low, high) = (pair[0].0, pair[1].0);
+            assert_eq!(slope_between(low, high), CORE_COST_BYTES, "between {low} and {high}");
+        }
+        assert_eq!(slope_between(2, 32), CORE_COST_BYTES);
+        assert_eq!(slope_between(8, 64), CORE_COST_BYTES);
+    }
+
+    /// `.rodata` is the section the padding is about, so the test that matters
+    /// is that it is excused for the right reason rather than by being ignored:
+    /// it is reported as quantised, and it contributes nothing to the slope.
+    #[test]
+    fn the_padded_section_is_reported_and_carries_no_slope() {
+        let growth = section_growth(&sections(32), &sections(64)).expect("one kernel twice");
+        let read = slope_from_sections(32, &growth).expect("a model that holds");
+        assert_eq!(read.quantised.len(), 1, "one section stepped: {:?}", read.quantised);
+        assert!(read.quantised[0].contains(".rodata"), "{:?}", read.quantised);
+        assert!(read.quantised[0].contains("1 page(s)"), "{:?}", read.quantised);
+        assert_eq!(read.linear.len(), 3, "and three carried the cost: {:?}", read.linear);
+        assert_eq!(read.slope, CORE_COST_BYTES);
+    }
+
+    /// A new per-core term in an unpadded section is what this exists to catch,
+    /// and the old reading would have caught it too. This is the control that
+    /// stops the per-section split being a way of excusing everything.
+    #[test]
+    fn a_term_that_does_not_divide_is_still_refused() {
+        let low = sections(2);
+        let mut high = sections(64);
+        for entry in &mut high {
+            if entry.0 == ".bss" {
+                entry.1 += 5;
+            }
+        }
+        let growth = section_growth(&low, &high).expect("one kernel twice");
+        let refused = slope_from_sections(62, &growth).expect_err("5 does not divide by 62");
+        assert!(refused.contains(".bss"), "{refused}");
+        assert!(refused.contains("leaves 5"), "{refused}");
+        // And it says what did behave, or a reader cannot tell one moved term
+        // from a model that has stopped describing this kernel.
+        assert!(refused.contains(".stacks"), "{refused}");
+    }
+
+    /// A padded section may step by a page and may not step by part of one.
+    #[test]
+    fn a_padded_section_growing_by_part_of_a_page_is_refused() {
+        let low = sections(2);
+        let mut high = sections(64);
+        for entry in &mut high {
+            if entry.0 == ".rodata" {
+                entry.1 += 8;
+            }
+        }
+        let growth = section_growth(&low, &high).expect("one kernel twice");
+        let refused = slope_from_sections(62, &growth).expect_err("not a whole page");
+        assert!(refused.contains(".rodata"), "{refused}");
+    }
+
+    /// Two images that are not one kernel built twice.
+    #[test]
+    fn a_section_on_one_side_only_is_not_a_measurement() {
+        let mut high = sections(64);
+        high.push((".newthing".to_string(), 16));
+        let refused =
+            section_growth(&sections(2), &high).expect_err("a section at one ceiling only");
+        assert!(refused.contains(".newthing"), "{refused}");
+
+        let refused = section_growth(&high, &sections(2)).expect_err("and in the other direction");
+        assert!(refused.contains(".newthing"), "{refused}");
+    }
+
+    /// The fact the whole split rests on, read from the script rather than
+    /// asserted about it.
+    #[test]
+    fn the_script_pads_exactly_the_two_sections_named() {
+        let script = std::fs::read_to_string(root().join("kernel").join("linker.ld"))
+            .expect("kernel/linker.ld");
+        let padded = page_padded_in(&script);
+        let names: Vec<&str> = padded.iter().map(String::as_str).collect();
+        // Sorted, because the reading returns a set and the constant is written
+        // in the order the script lists them. The set is what the check compares.
+        let mut want: Vec<&str> = PAGE_PADDED_SECTIONS.to_vec();
+        want.sort_unstable();
+        assert_eq!(names, want, "kernel/linker.ld pads {names:?}");
+        assert_eq!(padding_where_declared(&script), Ok(()));
+    }
+
+    /// The trap the reading is written around: every output section in that
+    /// script is page-*aligned* at its start, and only two pad their own size.
+    /// A check that could not tell those apart would name five sections and
+    /// excuse the three that carry the entire per-core cost.
+    #[test]
+    fn an_address_alignment_is_not_padding() {
+        let script = "\n.data ALIGN(4096) : AT(ADDR(.data)) {\n    *(.data)\n}\n";
+        assert!(page_padded_in(script).is_empty(), "a header ALIGN costs nothing in sh_size");
+
+        let padded = "\n.data ALIGN(4096) : {\n    *(.data)\n    . = ALIGN(4096);\n}\n";
+        let found = page_padded_in(padded);
+        assert_eq!(found.iter().map(String::as_str).collect::<Vec<_>>(), vec![".data"]);
+    }
+
+    /// Both directions, because they fail differently and the second is worse:
+    /// a section that lost its padding and is still named is excused from a
+    /// check it used to pass, and nothing goes red.
+    #[test]
+    fn the_declared_padding_set_is_checked_both_ways() {
+        let gained = "\n.text : {\n. = ALIGN(4096);\n}\n.rodata : {\n. = ALIGN(4096);\n}\n\
+                      .data : {\n. = ALIGN(4096);\n}\n";
+        let refused = padding_where_declared(gained).expect_err("a third section is padded");
+        assert!(refused.contains(".data"), "{refused}");
+
+        let lost = "\n.text : {\n. = ALIGN(4096);\n}\n.rodata : {\n*(.rodata)\n}\n";
+        let refused = padding_where_declared(lost).expect_err(".rodata stopped padding");
+        assert!(refused.contains(".rodata"), "{refused}");
+    }
 
     #[test]
     fn the_two_assignments_are_still_where_the_check_reaches_for_them() {
@@ -9362,13 +9889,85 @@ fn iommu(kind: Option<&str>) -> Result<(), String> {
 /// answered — which is the one E1-B01's exit could not observe, because it is
 /// the component's own arithmetic that produces the address. A suite with only
 /// the first would be claiming the second.
+/// `E1-B05`'s half: the driver's place supplied with the device window it
+/// cannot carve, and the boot asked whether the place holds it.
+///
+/// # What this asserts today, stated narrowly on purpose
+///
+/// That a place is filled with a **supplied** need rather than a carved one:
+/// the register span the bus reported, mapped uncached at the address the
+/// driver shape reserves, and the queue memory whole. That is the half of
+/// `CHAOS_GAP` which had no mechanism at all before this.
+///
+/// What it does **not** assert is the other half: that the occupant in that
+/// place is the one serving a client's load. Nothing is scheduled here yet.
+/// Saying so is the point — a half-built path that reported success would be
+/// the shape `E0-B16` and `E0-B12` both record being bitten by.
+///
+/// # Errors
+///
+/// A boot that did not reach `M0 ok`, or one whose log does not carry the line
+/// saying the place was supplied.
+fn blk_place() -> Result<(), String> {
+    println!("--- blk=place: the driver's place is supplied with the window it cannot carve");
+    let disk = blk_disk()?;
+    let device = blk_device(&disk)?;
+    let borrowed: Vec<&str> = device.iter().map(String::as_str).collect();
+    let (ending, log) = machine_devices(
+        Some("blk=place"),
+        &[],
+        Capture::Printed,
+        BOOT_TIMEOUT,
+        BOOT_MEMORY,
+        &borrowed,
+        &[],
+    )?;
+    if ending != Ending::Exited(33) {
+        return Err(format!("the boot {ending}; expected exit 33"));
+    }
+    if !log.contains("blk place     registers") {
+        return Err("the boot reached M0 ok without saying it supplied the place.\n\n\
+             `blk_place_supply` prints one line naming the register span and the queue\n\
+             memory, and it is the only evidence this half produces. A boot that is green\n\
+             and silent here is one where `blk=place` was not read — check the parameter\n\
+             before suspecting the supply."
+            .into());
+    }
+    println!(
+        "\nblk=place: ok — the place holds a real device window, supplied rather than carved.\n\
+         \x20 What it does not yet hold is a scheduled occupant serving a client, which is\n\
+         \x20 why `CHAOS_GAP` still carries its row and the other three halves still run\n\
+         \x20 on `prepare_driver`."
+    );
+    Ok(())
+}
+
 const BLK_PROVOCATIONS: &[(&str, &str)] = &[
     ("inside", "the client's buffer stays in the driver's grant: the sector must come back"),
     ("outside", "it is taken back before the read: the transfer must fault, and nothing may land"),
     ("escape", "the driver points the device past what it was answered: the unit must fault it"),
 ];
 
+/// The half `E1-B05` is being built on, reachable by name and **not** in
+/// [`BLK_PROVOCATIONS`].
+///
+/// # Why it is not in the table
+///
+/// Because the table is what `cargo xtask blk` runs with no argument, and that
+/// is a gate. This half is unfinished by construction: it supplies the place
+/// and does not yet serve a client through it, so putting it in the default set
+/// would either fail the gate or — worse — pass it while asserting less than
+/// the other three do.
+///
+/// It leaves the table on the day it serves a client and survives three kills,
+/// which is also the day `CHAOS_GAP`'s last row goes. Until then the existing
+/// halves keep running on `prepare_driver` and nothing about them has moved.
+const BLK_PLACE: &str = "place";
+
 fn blk(kind: Option<&str>) -> Result<(), String> {
+    if kind == Some(BLK_PLACE) {
+        return blk_place();
+    }
     let chosen: Vec<&(&str, &str)> = match kind {
         None => BLK_PROVOCATIONS.iter().collect(),
         Some(name) => {
@@ -12070,6 +12669,22 @@ fn lint_all() -> Result<(), String> {
     lint_units()?;
     lint_callbacks()?;
     lint_claim_owners()?;
+    // Beside `lint_claim_owners` because it reads the same registry and asks the
+    // next question about it: not whether each entry is well formed, but whether
+    // the page that publishes the registry's shape still describes it. That row
+    // had drifted from six gating to seventeen with nothing to notice, in a run
+    // whose own output counted the claims correctly four lines above.
+    lint_testing_status()?;
+    // And the other half of the same discipline: a criterion a task no longer
+    // has to meet is one somebody has to be able to find. RFC 0093.
+    lint_debt()?;
+    // And the question `lint-claims` does not ask: not whether a document agrees
+    // with the registry, but whether anything in CI ever compares a gating claim
+    // to the bounds it publishes. E0-P01.
+    lint_claim_runs()?;
+    // And the same question about the checks themselves rather than the claims:
+    // does the gate run what this function runs? Nine of them it did not.
+    lint_gate()?;
     // The topology check RFC 0005 promised in the R02 row: every component
     // manifest fits the schema, declares a domain, and does not put an
     // imported image in `shared`. It runs here so a boot is not the first
@@ -12506,6 +13121,530 @@ fn lint_claim_owners() -> Result<(), String> {
         findings.len(),
         findings.join("\n")
     ))
+}
+
+/// The number `docs/TESTING-STATUS.md` publishes about the registry is the
+/// number the registry holds.
+///
+/// # Why this exists, in one sentence with a date on it
+///
+/// Because the row said **"Built, fifteen entries, six gating"** on a tree whose
+/// registry held thirty-three and seventeen, and it had said so for long enough
+/// that nobody could say when it stopped being true. The run that found it
+/// printed `lint-claim-owners: ok  (33 claim(s) name an owner)` four lines
+/// above — the tree could already count, and the page was the one reader not
+/// asking it.
+///
+/// That page is not decoration. `RELEASING.md` makes it stopping condition 4,
+/// so a release consults it about what is measured, and a stale row there is a
+/// release describing a registry that does not exist.
+///
+/// # Why it checks the prose rather than a marker beside it
+///
+/// A machine-readable comment next to the sentence would be a second copy, and
+/// a second copy is a second thing to forget — the defect one level down rather
+/// than a fix for it. So the words themselves are the checked artefact: this
+/// spells the counts the way the page spells them and requires the page to
+/// contain that phrase. The number lives in exactly one place.
+///
+/// The cost is stated rather than discovered: the phrase is load-bearing now,
+/// so rewording that clause fails the build until this function is taught the
+/// new wording. That is the trade this tree makes everywhere else — a sentence
+/// worth gating is a sentence worth pinning.
+///
+/// # What it does not check
+///
+/// Everything else on the page. Six other rows make claims about what is built
+/// and not one is mechanised; the two that carry counts — `L3`'s harness total
+/// and `L4`'s corpora — would each need their own reading of their own subject.
+/// This closes the row that decayed, names the rest as unchecked, and does not
+/// pretend the page is covered.
+///
+/// # Errors
+///
+/// The page missing, or the row disagreeing with `claims/`.
+fn lint_testing_status() -> Result<(), String> {
+    let files = claim_files()?;
+    let mut gating = 0usize;
+    for path in &files {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("reading {}: {e}", relative(path)))?;
+        if claim_value(&text, "status").as_deref() == Some("gating") {
+            gating += 1;
+        }
+    }
+
+    let rel = "docs/TESTING-STATUS.md";
+    let text = std::fs::read_to_string(root().join(rel)).map_err(|e| {
+        format!(
+            "reading {rel}: {e}\n\n\
+             The page RELEASING.md makes stopping condition 4 is not there, so nothing\n\
+             can say whether what it asserts about claims/ is still true."
+        )
+    })?;
+
+    let want = format!("**Built, {} entries, {} gating**", spelled(files.len())?, spelled(gating)?);
+    if text.contains(&want) {
+        println!(
+            "lint-testing-status: ok  (the L7 row says what claims/ holds: {} entries, \
+             {gating} gating)",
+            files.len()
+        );
+        return Ok(());
+    }
+
+    Err(format!(
+        "{rel}'s claims row does not say what claims/ holds.\n\n\
+         The registry has {} entries and {gating} of them gate, so the row should read:\n\n\
+         \x20  {want}\n\n\
+         This is the row that said `**Built, fifteen entries, six gating**` while the\n\
+         registry held thirty-three and seventeen. It is stopping condition 4 in\n\
+         RELEASING.md, so a stale number here is a release describing a registry that\n\
+         does not exist.\n\n\
+         Fix the row rather than this check — and if the sentences around it name which\n\
+         claims gate, they are stale in the same breath: a corrected count above a wrong\n\
+         list is worse than both.",
+        files.len()
+    ))
+}
+
+/// Every check `lint_all` runs is also run by the pull-request gate.
+///
+/// # The gap this was written against
+///
+/// `cargo xtask verify` is what `CLAUDE.md` tells every session to run before
+/// asking for review, and `lint_all` is the policy half of it. The gate's
+/// `policy` job runs a list of verbs written by hand, and the two had drifted:
+/// **nine checks ran in `verify` and in no workflow at all** — `lint-stamp`,
+/// `lint-manifests`, `lint-generations`, `lint-components`, `lint-datapath`,
+/// `lint-registries`, `lint-owed`, `lint-reproduce` and `lint-remap`.
+///
+/// The one that shows what that costs is `lint-registries`. RFC 0089 exists
+/// because three RFCs were numbered 0085 and all three were cited, and it says
+/// the check *"is what makes the next one a red merge instead of a reader's
+/// discovery"*. A check that runs on a laptop and not in the gate cannot make a
+/// red merge. It was doing the second half of its job and none of the first.
+///
+/// # Why it reads `lint_all` rather than a list
+///
+/// Because a list is what drifted. The gate's steps are hand-written and so was
+/// the intent that they match `verify`; nothing compared them. This reads the
+/// body of [`lint_all`] out of this file, turns each call into the verb that
+/// reaches it, and requires the gate to name every one — so a check added to
+/// `verify` and not to the gate is a red build rather than a thing somebody
+/// eventually notices.
+///
+/// Reading its own source is unusual and is the honest option here: the
+/// alternative is a second list, which is the defect one level up.
+///
+/// # What it does not check
+///
+/// That the gate runs them *usefully* — in a job that can fail the run, on the
+/// right container, before the expensive jobs. And it says nothing about `fmt`
+/// or `clippy`, which `lint` runs after `lint_all` and the gate runs in a job of
+/// its own.
+///
+/// # Errors
+///
+/// A check in `lint_all` that no workflow invokes, or either file missing.
+fn lint_gate() -> Result<(), String> {
+    let me = std::fs::read_to_string(root().join("xtask").join("src").join("main.rs"))
+        .map_err(|e| format!("reading xtask/src/main.rs to find what `lint_all` runs: {e}"))?;
+    let body = me
+        .split_once("fn lint_all() -> Result<(), String> {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .ok_or("xtask/src/main.rs no longer contains a `fn lint_all` this can read")?;
+
+    let mut want: Vec<String> = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        let Some(call) = line.strip_suffix("()?;") else { continue };
+        let verb = match call {
+            "generation::fixpoint" => "lint-generations".to_string(),
+            name if name.starts_with("lint_") => name.replace('_', "-"),
+            _ => continue,
+        };
+        if !want.contains(&verb) {
+            want.push(verb);
+        }
+    }
+    if want.is_empty() {
+        return Err("no checks were found in `lint_all`, which cannot be right and means \
+                    this reader no longer matches the function it reads"
+            .into());
+    }
+
+    let gate = root().join(".github").join("workflows").join("ci.yml");
+    let text = std::fs::read_to_string(&gate)
+        .map_err(|e| format!("reading .github/workflows/ci.yml: {e}"))?;
+
+    let absent: Vec<&String> =
+        want.iter().filter(|verb| !text.contains(&format!("cargo xtask {verb}"))).collect();
+
+    if absent.is_empty() {
+        println!(
+            "lint-gate: ok  (the pull-request gate runs all {} check(s) `verify` runs)",
+            want.len()
+        );
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} check(s) run in `cargo xtask verify` and not in the pull-request gate:\n  {}\n\n\
+         `CLAUDE.md` tells every session to run `verify` before asking for review, so a\n\
+         check missing from the gate is a policy the tree enforces on a laptop and not\n\
+         on a merge. `lint-registries` was one of them, and RFC 0089 says of it that it\n\
+         *is what makes the next one a red merge instead of a reader's discovery* — which\n\
+         it cannot do from a job that does not exist.\n\n\
+         Add a step to the `policy` job in .github/workflows/ci.yml for each.",
+        absent.len(),
+        absent.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n  ")
+    ))
+}
+
+/// Every claim that gates is compared to its own `[threshold]` table by some
+/// workflow.
+///
+/// # The defect this was written against
+///
+/// `status = "gating"` means *fails the build on regression*, and seventeen
+/// claims said it. Exactly one of them — `rollback-comparisons` — was invoked
+/// anywhere as `cargo xtask claim <name>`, and that invocation is the only thing
+/// in this tree that reads a `[threshold]` table. `claim_compare` is where the
+/// comparison lives and nothing else calls it.
+///
+/// The other sixteen were not unrun. Their *workloads* run: `cargo xtask chaos`,
+/// `hostile`, `entries`, `deadline`, `churn` are all in the gate, and each
+/// asserts its own internal invariants. What none of them does is read the
+/// number the claim publishes and compare it. So a claim could drift past its
+/// published bound with every job green, which is `status = "gating"` meaning
+/// nothing — a check that cannot fail, which this tree has twice recorded the
+/// fate of.
+///
+/// # Why the reproduction command and not the workload
+///
+/// Because `lint-reproduce` already settled that a claim's `[reproduce] command`
+/// must be `cargo xtask claim <its own name>`, and that command is what compares.
+/// Keying this check on the same string means there is one spelling of *this
+/// claim is enforced*, and the two lints cannot disagree about what enforcement
+/// is.
+///
+/// # What it does not check
+///
+/// **Which** workflow, and therefore how often. A claim invoked only in the
+/// nightly is enforced once a day and not on a pull request, and that is a real
+/// difference this does not gate on — a boot-heavy claim in the pull-request
+/// gate would cost more than the regression it catches. The report prints the
+/// workflow each claim is enforced by so the split is read rather than assumed,
+/// and `E0-P01`'s body says which claims are on which side and why.
+///
+/// # Errors
+///
+/// A gating claim no workflow compares, or a workflow directory that is not
+/// there.
+fn lint_claim_runs() -> Result<(), String> {
+    let dir = root().join(".github").join("workflows");
+    let mut flows: Vec<(String, String)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| {
+        format!(
+            "reading .github/workflows/: {e}\n\n\
+             With no workflows there is nothing enforcing any claim, which is a larger\n\
+             finding than the one this check was written for."
+        )
+    })? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().is_some_and(|e| e == "yml" || e == "yaml") {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let text =
+                std::fs::read_to_string(&path).map_err(|e| format!("reading {name}: {e}"))?;
+            flows.push((name, text));
+        }
+    }
+
+    let mut enforced: Vec<String> = Vec::new();
+    let mut absent: Vec<String> = Vec::new();
+    for path in claim_files()? {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+        if claim_value(&text, "status").as_deref() != Some("gating") {
+            continue;
+        }
+        let name = claim_name(&text, &path);
+        let needle = format!("cargo xtask claim {name}");
+        let found: Vec<&str> = flows
+            .iter()
+            .filter(|(_, body)| body.contains(&needle))
+            .map(|(file, _)| file.as_str())
+            .collect();
+        if found.is_empty() {
+            absent.push(name);
+        } else {
+            enforced.push(format!("  {name:<38} {}", found.join(" ")));
+        }
+    }
+
+    if absent.is_empty() {
+        println!(
+            "lint-claim-runs: ok  ({} gating claim(s), each compared to its bounds by a \
+             workflow)",
+            enforced.len()
+        );
+        for row in &enforced {
+            println!("{row}");
+        }
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} claim(s) say `status = \"gating\"` and no workflow compares them to their\n\
+         bounds:\n  {}\n\n\
+         `gating` means *fails the build on regression*. The comparison lives in\n\
+         `claim_compare`, and the only thing that reaches it is `cargo xtask claim\n\
+         <name>` — a claim's own `[reproduce] command`, which `lint-reproduce` already\n\
+         requires it to carry. A claim whose workload runs is not the same as a claim\n\
+         whose bound is checked: the workload asserts its own invariants and never\n\
+         reads the number the claim publishes.\n\n\
+         Add `cargo xtask claim <name>` to a workflow, or change the status. Both are\n\
+         honest; leaving it is the one option that is not.\n\n\
+         {} claim(s) are enforced today:\n{}",
+        absent.len(),
+        absent.join("\n  "),
+        enforced.len(),
+        if enforced.is_empty() { "  (none)".to_string() } else { enforced.join("\n") }
+    ))
+}
+
+/// A small count, spelled the way `docs/` spells it.
+///
+/// Prose and not numerals because the page is prose, and a check that demanded
+/// `33` of a page that writes `thirty-three` would be a check that made the
+/// writing worse to keep itself easy.
+///
+/// # Errors
+///
+/// A count past what this table spells — which is a real answer rather than a
+/// limitation: a registry grown past ninety-nine is a day for somebody to
+/// decide whether the page should carry the number in words at all.
+fn spelled(n: usize) -> Result<String, String> {
+    const UNITS: [&str; 20] = [
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+    ];
+    const TENS: [&str; 10] =
+        ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+    match n {
+        0..=19 => Ok(UNITS[n].to_string()),
+        20..=99 if n.is_multiple_of(10) => Ok(TENS[n / 10].to_string()),
+        20..=99 => Ok(format!("{}-{}", TENS[n / 10], UNITS[n % 10])),
+        _ => Err(format!(
+            "{n} is past what `spelled` covers.\n\n\
+             Extend it, or decide that a registry this size should carry its count in\n\
+             numerals and change the page and this check together."
+        )),
+    }
+}
+
+/// Every exit narrowed under RFC 0093 has a row in `docs/TECHNICAL-DEBT.md`,
+/// and every row names a task that was narrowed.
+///
+/// # What this is defending
+///
+/// RFC 0093 lets a task close against what a virtual machine can establish, and
+/// moves the clause it could not meet to a register. The whole argument rests on
+/// *moved rather than deleted* — a criterion quietly dropped is
+/// indistinguishable, six months later, from a criterion that was met, which is
+/// what `A-07` forbids. Nothing in a diff enforces that. A narrowing is a
+/// paragraph in one file and a table row in another, and the failure mode is not
+/// somebody lying: it is somebody editing the first and forgetting the second,
+/// which is how `docs/TESTING-STATUS.md` came to publish *fifteen entries, six
+/// gating* against a registry holding thirty-three and seventeen.
+///
+/// So the two sets are compared. A task whose `TODO.md` entry cites RFC 0093 is
+/// a task that lost a clause; a row in the register is a clause that was kept.
+/// They are the same set or somebody is owed an explanation.
+///
+/// # Why the direction is worth stating
+///
+/// The common failure is a narrowing with no row, and its fix is to add the row
+/// — an edit to `docs/TECHNICAL-DEBT.md`, which anybody may make. The other
+/// direction, a row for a task that no longer cites the RFC, is the good news
+/// case: the clause became answerable and the row should go, in the same diff
+/// that answers it.
+///
+/// Neither fix requires editing `TODO.md`, and that is deliberate. `Gap`'s own
+/// documentation warns that a check which can only be satisfied by editing a
+/// file this tree's agents may not touch is a check that gets switched off.
+///
+/// # What it does not check
+///
+/// That the clause in the row is the clause the task actually lost. Nothing
+/// short of a reader can do that, and pretending otherwise would put a tick
+/// beside the one thing on this page that needs a person.
+///
+/// # Errors
+///
+/// A narrowed task with no row, a row naming no narrowed task, or the register
+/// missing.
+fn lint_debt() -> Result<(), String> {
+    let rel = "docs/TECHNICAL-DEBT.md";
+    let register = std::fs::read_to_string(root().join(rel)).map_err(|e| {
+        format!(
+            "reading {rel}: {e}\n\n\
+             RFC 0093 moves a narrowed exit clause here rather than deleting it. With\n\
+             the page gone, every clause moved so far is deleted after all."
+        )
+    })?;
+    let graph = std::fs::read_to_string(root().join("TODO.md"))
+        .map_err(|e| format!("reading TODO.md: {e}"))?;
+
+    let listed = register_rows(&register);
+    let narrowed = narrowed_tasks(&graph);
+
+    let missing: Vec<&String> = narrowed.difference(&listed).collect();
+    let orphaned: Vec<&String> = listed.difference(&narrowed).collect();
+
+    if missing.is_empty() && orphaned.is_empty() {
+        println!(
+            "lint-debt: ok  ({} exit clause(s) narrowed under RFC 0093, each with a row \
+             in {rel})",
+            listed.len()
+        );
+        return Ok(());
+    }
+
+    let mut report = String::new();
+    if !missing.is_empty() {
+        report.push_str(&format!(
+            "These task(s) declare a narrowing under RFC 0093 and have no row in {rel}:\n  {}\n\n\
+             Each one has closed against less than its exit asked for. Add the row: the\n\
+             clause verbatim, the blocker, what the virtual machine established in its\n\
+             place, and what would close it.\n\n",
+            missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
+        ));
+    }
+    if !orphaned.is_empty() {
+        report.push_str(&format!(
+            "These row(s) in {rel} name a task that does not cite RFC 0093:\n  {}\n\n\
+             Either the task was never narrowed and the row is a debt nobody owes, or\n\
+             the clause has been answered and the row should go in the diff that\n\
+             answered it.\n\n",
+            orphaned.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
+        ));
+    }
+    report.push_str(
+        "RFC 0093 rests on the clause being moved rather than dropped, and this is the\n\
+         only thing that checks it.",
+    );
+    Err(report)
+}
+
+/// The task ids named in `docs/TECHNICAL-DEBT.md`'s register table.
+///
+/// A row is a table line whose first cell is a task id. The prose above the
+/// table names task ids too — in sentences, not cells — so the first cell is
+/// what makes a mention a row, and a paragraph discussing `E0-P05` does not
+/// silently become a debt entry.
+fn register_rows(page: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for line in page.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix('|') else { continue };
+        let Some(cell) = rest.split('|').next() else { continue };
+        let cell = cell.trim().trim_matches('`').trim();
+        if is_task_id(cell) {
+            out.insert(cell.to_string());
+        }
+    }
+    out
+}
+
+/// The tasks whose `TODO.md` entry declares that it lost a clause to RFC 0093.
+///
+/// # Why a bare citation is not enough, found by this check going wrong
+///
+/// It used to match any entry containing `RFC 0093`, on the reasoning that the
+/// narrowing is argued in the prose and the exit line is only where it lands.
+/// That was true of every narrowing, and also true of `E1-R02`, which merely
+/// *mentions* the RFC while explaining that two claims it waits on are recorded
+/// under it. The check then demanded a register row for a task that had not been
+/// narrowed at all.
+///
+/// So a narrowing declares itself: `narrowed under RFC 0093` for a task that
+/// kept a half worth closing on, `Owed under RFC 0093` for one that was nothing
+/// but the measurement. Those are the two shapes the RFC names, in the words its
+/// own *What a narrowed task is marked* section uses. A task may then discuss
+/// the RFC freely without being conscripted by it, which is something a graph
+/// entry has to be able to do — `E1-R02`'s whole purpose is naming what a
+/// release does not contain and why.
+///
+/// An entry runs from its `- [ ]` line to the next one, so the declaration may
+/// sit anywhere in the body rather than only on the exit line.
+fn narrowed_tasks(graph: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut current: Option<String> = None;
+    let mut body = String::new();
+    let flush = |id: &Option<String>, body: &str, out: &mut BTreeSet<String>| {
+        if let Some(id) = id
+            && (body.contains("narrowed under RFC 0093")
+                || body.contains("narrowed out under RFC 0093")
+                || body.contains("Owed under RFC 0093"))
+        {
+            out.insert(id.clone());
+        }
+    };
+    for line in graph.lines() {
+        if let Some(id) = task_id_of(line) {
+            flush(&current, &body, &mut out);
+            current = Some(id);
+            body = String::new();
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    flush(&current, &body, &mut out);
+    out
+}
+
+/// The task id a `TODO.md` entry line opens, if it opens one.
+fn task_id_of(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("- [")?;
+    let rest = rest.get(1..)?.strip_prefix("] **")?;
+    let id = rest.split("**").next()?;
+    is_task_id(id).then(|| id.to_string())
+}
+
+/// `E0-B12`, `E2-P10`: an epoch letter, a digit, a dash, a letter, two digits,
+/// and optionally a lowercase suffix as the E3 decomposition uses.
+fn is_task_id(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.len() < 6 || bytes.len() > 8 {
+        return false;
+    }
+    bytes[0] == b'E'
+        && bytes[1].is_ascii_digit()
+        && bytes[2] == b'-'
+        && bytes[3].is_ascii_uppercase()
+        && bytes[4..6].iter().all(u8::is_ascii_digit)
+        && bytes[6..].iter().all(u8::is_ascii_lowercase)
 }
 
 /// Every component manifest in the permissive tree fits `docs/manifest.md`.
@@ -16909,6 +18048,421 @@ fn history_append() -> Result<(), String> {
     Ok(())
 }
 
+/// How many records each side of a candidate split must have.
+///
+/// Five, so a step is judged against five readings rather than against one, and
+/// so the smallest history this can say anything about is ten records. Smaller
+/// windows find steps in noise; larger ones need a history this project will not
+/// have for months. It is a constant rather than a tuned parameter because a
+/// detector whose window moves when a run goes red is a threshold with extra
+/// steps, which is the thing `E2-P09` exists to replace.
+/// Unit: records.
+const WINDOW: usize = 5;
+
+/// How many times the observed spread a shift must exceed before it is called a
+/// change rather than noise.
+///
+/// Three. The spread is a median absolute deviation, so for a series whose
+/// scatter is symmetric this is roughly two deviations — the point at which "it
+/// moved" stops competing with "it wobbled". A detector without this term
+/// reports every series with any scatter in it, which is precisely the failure a
+/// fixed threshold has and the reason this task exists.
+/// Unit: none — a multiplier on a deviation.
+const SPREAD_FACTOR: u64 = 3;
+
+/// A step this detector is willing to call.
+#[derive(Debug, PartialEq, Eq)]
+struct Step {
+    /// The index the series changed at: the first record on the later side.
+    /// Unit: index into the series.
+    at: usize,
+    /// The median of the [`WINDOW`] records before it. Unit: the series' own.
+    before: u64,
+    /// The median of the [`WINDOW`] records from it. Unit: the series' own.
+    after: u64,
+    /// How far it moved, signed, against the earlier median.
+    /// Unit: parts per thousand.
+    per_mille: i64,
+}
+
+/// The largest step in a series, if there is one worth calling.
+///
+/// # Why this replaces a threshold
+///
+/// A threshold answers *is this number bad* and needs somebody to have known
+/// what bad was before the system existed. This answers *did this number
+/// change*, which is a question about the series rather than about anybody's
+/// prior, and `claims/README.md` rule 5 is where the project decided that is the
+/// one worth asking: thresholds *"either miss real regressions or fire until
+/// everyone mutes them"*.
+///
+/// # How it decides, and why the arithmetic is what it is
+///
+/// Medians and a median absolute deviation, both integer, both over sorted
+/// copies of a window. No mean and no variance — and not only because RFC 0004
+/// rules out the arithmetic those usually reach for. A mean is dragged by one
+/// outlier, and a measurement history's outliers are exactly the runs where
+/// something unrelated went wrong on the machine. The median is what makes *one
+/// bad afternoon* not a change point.
+///
+/// A candidate split is called a step when both hold:
+///
+/// 1. it moved by at least `sensitivity_per_mille` against the earlier median,
+///    which is the size a reader asked about; and
+/// 2. it moved by more than [`SPREAD_FACTOR`] times the larger of the two
+///    windows' own scatter, which is what stops a noisy series reporting a step
+///    everywhere.
+///
+/// The second is the one that matters. Without it this is a threshold again,
+/// wearing a different number.
+///
+/// # What it cannot do
+///
+/// Say whether *this system's* run-to-run noise sits below the bar. That needs a
+/// gating claim which has run repeatedly on `runner-class-A`, which begins at
+/// `E0-P06` and is a row in `docs/TECHNICAL-DEBT.md`. What is testable here is
+/// the detector's behaviour against a **stated** noise model, and the tests
+/// state theirs rather than implying the real one is known.
+///
+/// It also finds at most one step — the largest — because a history with two
+/// genuine change points is a history somebody should read rather than one this
+/// should summarise.
+fn change_point(series: &[u64], sensitivity_per_mille: u64) -> Option<Step> {
+    if series.len() < WINDOW * 2 {
+        return None;
+    }
+
+    let mut best: Option<Step> = None;
+    for at in WINDOW..=series.len() - WINDOW {
+        let before = median(&series[at - WINDOW..at]);
+        let after = median(&series[at..at + WINDOW]);
+        if before == 0 {
+            continue;
+        }
+
+        let moved = after.abs_diff(before);
+        let spread = deviation(&series[at - WINDOW..at]).max(deviation(&series[at..at + WINDOW]));
+        if moved <= spread.saturating_mul(SPREAD_FACTOR) {
+            continue;
+        }
+
+        // Against the earlier median, so the number reads as *this much
+        // different from what it was* rather than as a share of where it ended
+        // up.
+        let size = moved.saturating_mul(1000) / before;
+        if size < sensitivity_per_mille {
+            continue;
+        }
+        let size = i64::try_from(size).unwrap_or(i64::MAX);
+        let per_mille = if after < before { -size } else { size };
+
+        if best.as_ref().is_none_or(|found| per_mille.abs() > found.per_mille.abs()) {
+            best = Some(Step { at, before, after, per_mille });
+        }
+    }
+    best
+}
+
+/// The middle value of a window, by value rather than by position.
+///
+/// Sorts a copy: the windows here are five long, and a sort nobody can get wrong
+/// is worth more than an allocation nobody will notice. The even case takes the
+/// lower of the two middles rather than averaging them, because averaging
+/// introduces a value the series never held — a small lie in a function whose
+/// whole job is to be robust about what was actually seen.
+fn median(window: &[u64]) -> u64 {
+    let mut sorted = window.to_vec();
+    sorted.sort_unstable();
+    sorted.get(sorted.len().saturating_sub(1) / 2).copied().unwrap_or(0)
+}
+
+/// The median absolute deviation of a window: how far a typical reading sits
+/// from the typical reading.
+///
+/// The robust counterpart of the usual scatter measure, and chosen for the
+/// reason the median was. One catastrophic run in a window inflates the usual
+/// one enough to hide a real step behind it; it moves this by one place in the
+/// sort.
+fn deviation(window: &[u64]) -> u64 {
+    let middle = median(window);
+    let mut spread: Vec<u64> = window.iter().map(|value| value.abs_diff(middle)).collect();
+    spread.sort_unstable();
+    spread.get(spread.len().saturating_sub(1) / 2).copied().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod change_point_tests {
+    use super::{SPREAD_FACTOR, WINDOW, change_point};
+
+    /// The sensitivity `E2-P09`'s exit names: three per cent.
+    const THREE_PERCENT: u64 = 30;
+
+    /// A repeating wobble, applied to a base so a series has scatter without
+    /// needing randomness.
+    ///
+    /// Deterministic on purpose and not as a concession: RFC 0004 puts every
+    /// source of randomness behind `Env`, and a test whose noise came from a
+    /// generator would be a test whose failures depend on a seed nobody
+    /// recorded. The pattern is stated here so that what "noise" means in these
+    /// tests is a thing a reader can see rather than a distribution they have to
+    /// trust. **Its amplitude is the stated noise model, and it is the only
+    /// noise model this file establishes anything about.**
+    ///
+    /// # Why its period is [`WINDOW`] and what that deliberately excludes
+    ///
+    /// Five values with a median of zero, so every window this test takes has
+    /// the base as its median exactly. That isolates the property under test —
+    /// *does the detector call a step of this size* — from a second one that is
+    /// not: how much the median of a five-sample window wanders when the noise
+    /// is not aligned to it.
+    ///
+    /// That second property is real and was found by getting it wrong. With a
+    /// six-long pattern the windows see different multisets, a nominal
+    /// thirty-unit step came out of the medians as **twenty-nine**, and a test
+    /// asserting "a 3% injection is found at a 3% bar" failed against a detector
+    /// doing exactly what it should. The lesson is kept rather than tidied away:
+    /// *injecting* a 3% step and *the medians differing by* 3% are two claims,
+    /// and only the second is what a detector can act on.
+    ///
+    /// **Real noise is not period-aligned**, so a real 3% regression will
+    /// sometimes measure below any bar set at 3%. How often is a question about
+    /// this system's own scatter, which needs a claim that has run repeatedly on
+    /// `runner-class-A` — one more reason the second half of `E2-P09`'s exit is
+    /// a row in `docs/TECHNICAL-DEBT.md` and not a test here.
+    const WOBBLE: [i64; WINDOW] = [0, 3, -3, 1, -1];
+
+    fn noisy(base: u64, count: usize) -> Vec<u64> {
+        (0..count)
+            .map(|i| {
+                u64::try_from(i64::try_from(base).unwrap() + WOBBLE[i % WOBBLE.len()]).unwrap()
+            })
+            .collect()
+    }
+
+    /// The first half of `E2-P09`'s exit: a 3% regression injected into the
+    /// history is detected.
+    #[test]
+    fn a_three_percent_regression_is_found() {
+        let mut series = noisy(1000, WINDOW * 2);
+        for value in &mut series[WINDOW..] {
+            *value += 30;
+        }
+
+        let step = change_point(&series, THREE_PERCENT).expect("a 3% step is a step");
+        assert_eq!(step.at, WINDOW, "the step is where the injection was");
+        assert!(step.per_mille >= 30, "reported {} per mille", step.per_mille);
+    }
+
+    /// The second half, against the noise model this file states: ordinary
+    /// run-to-run scatter over the same period is not reported.
+    ///
+    /// This is the control, and without it the test above passes against a
+    /// detector that reports a step everywhere. What it does **not** establish
+    /// is that this system's real noise sits below the bar — that needs a claim
+    /// which has run repeatedly on `runner-class-A`, and is a row in
+    /// `docs/TECHNICAL-DEBT.md`.
+    #[test]
+    fn the_same_noise_without_a_step_is_not_reported() {
+        let series = noisy(1000, WINDOW * 4);
+        assert_eq!(
+            change_point(&series, THREE_PERCENT),
+            None,
+            "scatter alone is not a change point, or the spread term is not doing its job"
+        );
+    }
+
+    /// An improvement is a change point too, and is reported as a negative.
+    ///
+    /// A detector that only saw regressions would be a threshold facing one
+    /// direction, and would miss the case this project most wants to catch by
+    /// accident: a number that got better because a workload stopped doing the
+    /// work.
+    #[test]
+    fn a_step_down_is_reported_and_is_signed() {
+        let mut series = noisy(1000, WINDOW * 2);
+        for value in &mut series[WINDOW..] {
+            *value -= 30;
+        }
+
+        let step = change_point(&series, THREE_PERCENT).expect("a 3% fall is a step");
+        assert!(step.per_mille <= -30, "reported {} per mille", step.per_mille);
+        assert!(step.after < step.before);
+    }
+
+    /// The spread term, stated as its own test rather than inferred from the
+    /// control above.
+    ///
+    /// The same 3% step, on a series whose scatter is wide enough to explain it,
+    /// is not reported. This is the property that makes the detector different
+    /// from a threshold, and it is the one a future change is most likely to
+    /// remove without noticing — because removing it makes every other test here
+    /// pass more easily.
+    #[test]
+    fn a_step_inside_the_noise_is_not_reported() {
+        // Scatter of ±40 around 1000: a 30 step is well inside three times a
+        // deviation this wide. Period-aligned for `WOBBLE`'s reason.
+        let wide: [i64; WINDOW] = [0, 40, -35, 25, -40];
+        let mut series: Vec<u64> =
+            (0..WINDOW * 2).map(|i| u64::try_from(1000 + wide[i % wide.len()]).unwrap()).collect();
+        for value in &mut series[WINDOW..] {
+            *value += 30;
+        }
+
+        assert_eq!(
+            change_point(&series, THREE_PERCENT),
+            None,
+            "a step smaller than {SPREAD_FACTOR} deviations is not distinguishable from the \
+             scatter it sits in"
+        );
+    }
+
+    /// A history too short to judge says nothing rather than guessing.
+    ///
+    /// The alternative — a detector that reports on three records — is how a
+    /// trend line gets drawn through a project's first afternoon.
+    #[test]
+    fn too_short_a_history_is_not_a_verdict() {
+        for count in 0..WINDOW * 2 {
+            assert_eq!(
+                change_point(&noisy(1000, count), THREE_PERCENT),
+                None,
+                "{count} record(s) is not enough to call a step"
+            );
+        }
+    }
+
+    /// A flat series has no step, whatever the sensitivity.
+    ///
+    /// The degenerate case, and worth pinning because a deviation of zero makes
+    /// the spread term `0 * SPREAD_FACTOR`, which any positive move exceeds —
+    /// so a flat series with one different reading in it is the shape most
+    /// likely to produce a spurious verdict.
+    #[test]
+    fn a_flat_series_has_no_step() {
+        assert_eq!(change_point(&[1000; WINDOW * 4], THREE_PERCENT), None);
+    }
+
+    /// And the sensitivity is honoured: the same step, asked about at a bar it
+    /// does not clear, is not reported.
+    #[test]
+    fn a_step_below_the_sensitivity_asked_for_is_not_reported() {
+        let mut series = noisy(1000, WINDOW * 2);
+        for value in &mut series[WINDOW..] {
+            *value += 30;
+        }
+
+        assert!(change_point(&series, THREE_PERCENT).is_some(), "3% at a 3% bar");
+        assert_eq!(
+            change_point(&series, 100),
+            None,
+            "the same 3% step asked about at 10% is not a 10% step"
+        );
+    }
+}
+
+/// The sensitivity `E2-P09`'s exit names, and what a reader asking "did this
+/// regress" means by the question.
+///
+/// Three per cent, expressed where the arithmetic is: per thousand. It is not a
+/// threshold on a value — nothing here says what a good coverage percentage is
+/// — it is the size of *move* worth interrupting somebody about.
+/// Unit: parts per thousand.
+const CHANGE_SENSITIVITY: u64 = 30;
+
+/// Read the recorded history and say where it stepped.
+///
+/// # What this is for
+///
+/// `claims/README.md` rule 5: *regression detection is change-point, not
+/// threshold. Thresholds either miss real regressions or fire until everyone
+/// mutes them.* This is that rule with something behind it. `history_append`
+/// has been writing records since `E0-P11` against the day a detector existed,
+/// and its own doc says so — *"meant to be read years later by change-point
+/// detection that does not exist yet"*.
+///
+/// # What it can read today, and what it cannot
+///
+/// `coverage_percent`, because a line count is the same on any machine and is
+/// the one thing a shared runner may contribute. Every distribution in the
+/// registry is a timing or a ratio of timings, and the harness refuses to record
+/// those outside a measurement environment — so on every machine this project
+/// can reach the history holds coverage and stated gaps, not distributions.
+///
+/// That is the honest half of `E2-P09`. The other half of its exit — *ordinary
+/// run-to-run noise over the same period is not* detected — is about **this
+/// system's** noise, which needs a gating claim that has run repeatedly on
+/// `runner-class-A`. It is a row in `docs/TECHNICAL-DEBT.md` rather than a
+/// number invented here.
+///
+/// # Why it reports and does not gate
+///
+/// Because it has nothing to gate on yet: two coverage readings are not a
+/// series. Wiring it into `lint` today would be a check that cannot fail, which
+/// this tree has twice recorded the fate of. The reversal is written here: when
+/// a claim's own series reaches [`WINDOW`] * 2 records on a recording machine,
+/// this stops being a verb somebody runs and becomes a line in the gate.
+///
+/// # Errors
+///
+/// A history file that is there and cannot be read. A history that is absent, or
+/// too short to judge, is an answer rather than a failure.
+fn history_changes() -> Result<(), String> {
+    let path = history_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("history --changes: nothing recorded yet ({})", relative(&path));
+        return Ok(());
+    };
+
+    // One field, and the parse is deliberately narrow: a percentage written as
+    // `87.5`, read as 875 per thousand. Fixed point with its scale in the name,
+    // because RFC 0004 rules out the obvious way to hold a percentage and
+    // because a detector that rounded its own inputs differently from the file
+    // would be comparing two series.
+    let mut series: Vec<u64> = Vec::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let Some(rest) = line.split("\"coverage_percent\":").nth(1) else { continue };
+        let value = rest.trim_start().split([',', '}']).next().unwrap_or("").trim();
+        if value == "null" {
+            continue;
+        }
+        let (whole, fraction) = value.split_once('.').unwrap_or((value, "0"));
+        let Ok(whole) = whole.parse::<u64>() else { continue };
+        let tenths = fraction.as_bytes().first().map_or(0, |b| u64::from(b.saturating_sub(b'0')));
+        series.push(whole.saturating_mul(10).saturating_add(tenths.min(9)));
+    }
+
+    println!(
+        "history --changes: {} record(s), {} with a coverage reading",
+        text.lines().filter(|line| !line.trim().is_empty()).count(),
+        series.len()
+    );
+
+    if series.len() < WINDOW * 2 {
+        println!(
+            "\n{} reading(s) is fewer than the {} this needs to say anything.\n\
+             A trend drawn through a project's first afternoon is not a trend, so\n\
+             this reports the shortfall rather than a verdict.",
+            series.len(),
+            WINDOW * 2
+        );
+        return Ok(());
+    }
+
+    match change_point(&series, CHANGE_SENSITIVITY) {
+        None => println!(
+            "\ncoverage_per_mille: no step of {CHANGE_SENSITIVITY} per thousand or more that \
+             the series' own scatter does not explain."
+        ),
+        Some(step) => println!(
+            "\ncoverage_per_mille: stepped at record {} — {} to {}, {} per thousand.\n\
+             \x20 The bound is not what moved; the series is. Read the commits either side\n\
+             \x20 of that record rather than the number against a threshold.",
+            step.at, step.before, step.after, step.per_mille
+        ),
+    }
+    Ok(())
+}
+
 /// Where the machine-readable snapshot of the registry is written.
 ///
 /// In `claims/` beside the entries rather than in the build directory: it is a
@@ -17581,6 +19135,21 @@ enum Route {
     /// what it read.
     /// E2-B08.
     Reads,
+    /// `claims/0036`'s three datapath boots, against the claim's own table.
+    ///
+    /// Three commands rather than one because *copies per operation* is a
+    /// property of the datapath and the three drivers reach a client's memory by
+    /// three different routes. Each boot prints only the rows it is the
+    /// authority for, so the three feed one table without ever answering the
+    /// same row twice.
+    Copies,
+    /// `claims/0037`'s two runtime halves, against the claim's own table.
+    ///
+    /// Two boots rather than one because the halves are not two configurations
+    /// but one run described twice, and each owns rows the other must not
+    /// print: `entries.hot` is zero on the load half and `PROVOKE` on the
+    /// provoke half, which is the whole point of having both.
+    RuntimeEntries,
     /// `E2-B05`'s two demonstrations over two topologies — the six-component
     /// workload in `user/assembler/tests/assemble.rs`, and the module this tree
     /// would actually boot, instantiated twice by `cargo xtask generation` —
@@ -17771,6 +19340,8 @@ const ROUTES: &[(&str, Route)] = &[
     // `resident-bytes-per-unit-of-work` counts what is resident while that
     // number is being taken. Both are `pending` and say why at length.
     ("copies-per-read", Route::Reads),
+    ("copies-per-operation", Route::Copies),
+    ("kernel-entries-per-operation", Route::RuntimeEntries),
     ("resident-bytes-per-unit-of-work", Route::Reads),
     // Wave 4's two, and neither is a pair: each has one sentence and one
     // workload set. `topology-renderings-per-root` is a count over two
@@ -17924,6 +19495,8 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         Route::Cut => claim_cut(&text, &relative(&file))?,
         Route::Invariants => claim_invariants(&text, &relative(&file))?,
         Route::Reads => claim_reads(&text, &relative(&file))?,
+        Route::Copies => claim_copies(&text, &relative(&file))?,
+        Route::RuntimeEntries => claim_runtime_entries(&text, &relative(&file))?,
         Route::Topology => claim_topology(&text, &relative(&file))?,
         Route::Roots => claim_roots(&text, &relative(&file))?,
         Route::Swap => claim_swap(&text, &relative(&file))?,
@@ -18382,6 +19955,99 @@ fn claim_invariants(claim: &str, file: &str) -> Result<(), String> {
 /// # Errors
 ///
 /// [`claim_compare`]'s.
+/// `claims/0036`'s three datapath boots, against the claim's own table.
+///
+/// # Why the boots and not a host test
+///
+/// The property is what the *frame* did with a client's bytes, and a host test
+/// would be measuring a model of it. Each boot prints its three rows on the
+/// positive-control half only — the half that moved the client's bytes and got
+/// them back — because every other half of those commands moves a different
+/// number of bytes, and a denominator printed by all of them reaches
+/// [`measured_rows`] as one name with two values, which it refuses rather than
+/// averages.
+///
+/// # Ordering
+///
+/// `blk` first, for [`claim_topology`]'s rule: all three build a kernel and six
+/// component images, so there is no cheap one to fail fast on, and the order is
+/// instead the order a reader would debug in — the block path is the one whose
+/// registration machinery the other two borrow.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_copies(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[
+            (
+                "cargo xtask blk: a block transfer into the client's own registered page",
+                "cargo",
+                &["xtask", "blk"][..],
+            ),
+            (
+                "cargo xtask net: a posted receive landing in the client's own buffer",
+                "cargo",
+                &["xtask", "net"][..],
+            ),
+            (
+                "cargo xtask gpu: a display command backed by the client's own pages",
+                "cargo",
+                &["xtask", "gpu"][..],
+            ),
+        ],
+        "A non-zero `*_copies_on_the_data_path` is this claim failing and the driver is\n\
+         named by the row. The quieter reds are the two beside it: a zero\n\
+         `*_bytes_transferred` means the boot copied nothing because it moved nothing,\n\
+         and a zero `*_bytes_moved_on_purpose` means the counter itself cannot move —\n\
+         which makes the zero above it worthless while leaving every other line in the\n\
+         run looking perfect. Read those two before believing the first.",
+    )
+}
+
+/// `claims/0037`'s two runtime halves, against the claim's own table.
+///
+/// # Why two boots of one command
+///
+/// Because the halves are one run described twice. `runtime=load` puts
+/// `report::LOAD` work items through a component's own executor and must cross
+/// into the frame exactly once; `runtime=provoke` is the same load with
+/// `report::PROVOKE` door calls made deliberately in the middle of the work
+/// loop. The first is the claim and the second is what makes it evidence — a
+/// zero from a counter nothing can move is not a measurement.
+///
+/// Each half prints only the rows it is the authority for, so the two feed one
+/// table without ever answering the same row twice. That is a requirement here
+/// rather than a convention: `entries.hot` is zero on one half and `PROVOKE` on
+/// the other, and one name carrying both reaches [`measured_rows`] as a row
+/// printed twice with different values, which it refuses rather than averages.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_runtime_entries(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "cargo xtask runtime: 16 384 work items through a component's own executor, \
+             and the same load with two crossings made on purpose",
+            "cargo",
+            &["xtask", "runtime"][..],
+        )],
+        "A non-zero `kernel_entries_on_the_hot_path` is section 01's claim failing, and the\n\
+         frame counted the crossing so the number is real — what it does not say is which\n\
+         call. The quieter reds are the other three. A short `operations_completed` means\n\
+         the zero is over a shorter run than the one asked for; a\n\
+         `kernel_entries_at_the_boundary` that is not exactly one means every other row\n\
+         here was counted over an unknown interval; and a zero `kernel_entries_provoked`\n\
+         means the counter cannot move at all, which leaves the load half looking perfect\n\
+         while measuring nothing.",
+    )
+}
+
 fn claim_reads(claim: &str, file: &str) -> Result<(), String> {
     claim_compare(
         claim,

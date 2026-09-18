@@ -1,0 +1,113 @@
+# `E1-P10`'s third number: how many bytes the frame copies on a data path that
+# is supposed to move none.
+#
+# **Why this is registered as a count and not as a time, which is the whole
+# reason it exists now rather than after a purchase.** `DATAPATH_GAP` in
+# `xtask/src/main.rs` and `RELEASING.md` both said, of `E1-P10`'s four numbers,
+# *all four are times*, and `RELEASING.md` contradicted itself two sentences
+# earlier by describing the doorbell figure as a count. Three of the four are
+# counts. This is one of them: bytes moved through one function on a
+# deterministic kernel against an emulated device, byte-identical on any host
+# that runs the binary. This project's own rule is that **a count may gate on
+# this machine and a time may not**, so it gates here.
+#
+# **The zero is worth less than the provocation beside it.** A counter that
+# nothing can move publishes the same zero whether the property holds or the
+# code that would have incremented it was deleted, and `claims/0022` records the
+# same trap one epoch on. So every row below comes in a pair: the count that
+# must be zero, and the count from the same function when the boot calls it on
+# purpose, which must not be. The second is what makes the first evidence.
+#
+# **Why three drivers and one claim.** *Copies per operation* is a property of
+# the datapath rather than of a device, and the three drivers reach the client's
+# memory by three different routes — a block request, a posted receive, a
+# display command. One of them going non-zero is the claim failing, and putting
+# them in three files would let a reader fix two and not notice the third.
+
+name       = "copies-per-operation"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E1"
+
+statement  = """
+No byte of a client's data is copied by the frame or by a driver on the way to
+or from a device. The datapath moves bytes by giving the device a translation
+the client already owns, so the number of copies per operation is zero — on all
+three datapaths, counted rather than asserted, with a provocation behind each
+zero so that the count is known to be capable of moving.
+
+Measured by `cargo xtask claim copies-per-operation`, which runs the three
+datapath boots. Each prints the three rows it is the authority for, on the
+positive-control half only:
+
+  blk_copies_on_the_data_path       0
+  blk_bytes_transferred          1024
+  blk_bytes_moved_on_purpose      512
+
+and the same shape for `net_` and `gpu_`. The middle row is the denominator and
+is required to be non-zero for the reason the third row exists: a run that
+transferred nothing copied nothing, and would report a perfect number about an
+operation that did not happen.
+"""
+
+[baseline]
+system  = "none"
+notes   = "There is nothing to compare against, and a comparison would be the wrong instrument. A conventional kernel copies on this path by construction — that is what a page cache and a bounce buffer are — so the honest baseline is not another system's number but this system's own provocation: `bytes_moved_on_purpose` is the same byte-mover called deliberately, and it is what a copying datapath would look like here. `claims/0022` takes the same position one layer up and for the same reason."
+
+[owner]
+subsystem = "the datapath drivers"
+document  = "docs/design/fast-path.html"
+section   = "06"
+notes     = "Section 06's rule is *never dereference anything from shared memory; indices only, bounds-checked against sizes held in your own private memory*, and the copy-free consequence of it is what this counts. The subsystems that own the number are `kernel/src/blk.rs`, `kernel/src/net.rs` and `kernel/src/gpu.rs` for the clients that observe it, and `user/virtio-blk`, `user/virtio-net` and `user/virtio-gpu` for the drivers that would do the copying. RFC 0024 is the registration that makes a translation something a driver can be given rather than something it has to make."
+
+[workload]
+path   = "kernel/src/main.rs"
+notes  = "The rows are printed by the boot rather than by a host test, because the property is about what the *frame* did and a host test would be measuring a model of it. They are printed on `Half::Inside` only, and that is what stops them conflicting: every half of each command moves a different number of bytes, so a denominator printed by all of them would reach `measured_rows` as one name with two values, which it refuses rather than averages. `Half::Inside` is the positive control — the half that moved the client's bytes and got them back — so it is the half with the authority for what a working datapath copied. The others are refusals, and a refusal has no copies-per-operation to report."
+
+[metrics]
+primary   = "blk_copies_on_the_data_path"
+secondary = [
+  "blk_bytes_transferred",
+  "blk_bytes_moved_on_purpose",
+  "net_copies_on_the_data_path",
+  "net_bytes_transferred",
+  "net_bytes_moved_on_purpose",
+  "gpu_copies_on_the_data_path",
+  "gpu_bytes_transferred",
+  "gpu_bytes_moved_on_purpose",
+]
+
+[threshold]
+# Zero, exactly, and on all three. `max = 0` rather than a small number: there
+# is no budget of acceptable copies on a path whose claim is that it has none,
+# and a threshold that admitted one would be a different claim.
+blk_copies_on_the_data_path = { max = 0 }
+net_copies_on_the_data_path = { max = 0 }
+gpu_copies_on_the_data_path = { max = 0 }
+
+# The denominators. A run that moved nothing copied nothing, so without these
+# the three zeros above are satisfied by a boot that did no work at all — which
+# is the failure mode this project has recorded twice under other names.
+blk_bytes_transferred = { min = 1 }
+net_bytes_transferred = { min = 1 }
+gpu_bytes_transferred = { min = 1 }
+
+# And the provocations, which are what make the zeros mean something. Each is
+# the same function the driver would copy through, called by the boot on
+# purpose. A zero here is a counter nothing can move.
+blk_bytes_moved_on_purpose = { min = 1 }
+net_bytes_moved_on_purpose = { min = 1 }
+gpu_bytes_moved_on_purpose = { min = 1 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "**This claim does not need that machine and says so rather than pretending.** Every metric is a count of bytes a deterministic kernel moved through one named function against an emulated device, so it is the same number in a container and on bare metal; `f_bench::Environment` refuses to record a *timing* here and this records none. The runner is named because `lint-reproduce` requires every claim to name one with a specification beside it. The datapath number that *does* need it is `E1-P10`'s fourth — ring submit under load — and it is a time, which is why it is the only one of the four on `docs/TECHNICAL-DEBT.md`."
+
+[reproduce]
+command = "cargo xtask claim copies-per-operation"
+
+[diagnosis]
+# Written while the system is understood rather than at 2 a.m. when it is not.
+a_copies_row_is_non_zero = "a driver copied a client's bytes. This is the claim failing rather than a measurement problem, and the driver's own counter names which one. The place to look is that driver's byte-mover — the single function each driver routes every transfer through, which is why `lint-datapath` requires there to be exactly one — and the likely cause is a path that reads a descriptor to find out how long it is and stages the result. RFC 0024's registration is what removes the need to."
+a_bytes_transferred_row_is_zero = "the boot did no work on the half that reports, so the zero beside it is about an operation that did not happen. Suspect the half selector before the driver: `Half::Inside` is the positive control and a run that reached the rows without transferring anything has usually failed earlier and reported success. Read the transfer line above the rows in the boot log; it says whether the write and the read completed."
+a_bytes_moved_on_purpose_row_is_zero = "the provocation did not run, which makes the zero above it worthless — a counter nothing moved is not a counter. This is the more dangerous red of the two, because everything else in the run looks perfect. Check that the boot still calls the byte-mover deliberately on this half; a refactor that routed the provocation through a second function would take the counter out of the path without changing any assertion."
+one_driver_disagrees_with_the_others = "the three datapaths do not share an implementation, so this is expected to be possible and is the reason they are one claim rather than three. Fix the one that moved; do not relax the threshold to the worst of the three, which would turn a claim about the datapath into a claim about its best case."

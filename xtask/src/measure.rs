@@ -149,6 +149,48 @@ pub fn resident(path: &Path) -> Result<u64, String> {
     Ok(total)
 }
 
+/// The same sum, itemised: every allocated section, by name, with its size.
+///
+/// # Why the breakdown and not only the total
+///
+/// Because the total cannot be checked against a model and the parts can. The
+/// `cores` command asks whether a core costs what `percpu::MAX_CPUS` says, and
+/// answered it by dividing the whole image's growth by the span — which was red
+/// for a year-end's worth of commits over four bytes. The parts say why in one
+/// line: `.data`, `.bss` and `.stacks` grow at exactly 2448, 4504 and 57 344
+/// bytes a core across five ceilings, and `.rodata` is flat until sixty-four
+/// and then steps by a page, because `kernel/linker.ld` pads it to a page
+/// boundary *inside* the section. A whole-image remainder is the sum of a model
+/// that holds and a quantisation that has nothing to do with it.
+///
+/// Sorted by name so two images are compared row against row, and so the output
+/// is stable — a section table's order is the linker's business and not a fact
+/// about the kernel.
+///
+/// # Errors
+///
+/// A file that cannot be read, or an ELF64 this reader does not believe.
+pub fn allocated(path: &Path) -> Result<Vec<(String, u64)>, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("reading {} to itemise it: {e}", crate::relative(path)))?;
+    let elf = Elf::read(&bytes, &crate::relative(path))?;
+    let names = elf.section_at(elf.shstrndx)?;
+
+    let mut out = Vec::new();
+    for index in 0..elf.shnum {
+        let head = elf.header(index)?;
+        // `sh_flags` at 8, and `SHF_ALLOC` is bit one. Same rule as `resident`,
+        // deliberately: the two must agree about what is in the image, or the
+        // itemisation is of a different image than the total.
+        if long(head, 8) & 0x2 != 0 {
+            // `sh_name` at 0, an offset into the section-name string table.
+            out.push((elf.string(&names, word(head, 0)).to_string(), elf.section_at(index)?.size));
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// One linker-exported symbol's value, from a linked image.
 ///
 /// Separate from [`frame`] because the caller is: `cores` builds the kernel at

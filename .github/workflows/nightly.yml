@@ -669,3 +669,48 @@ jobs:
           path: rollback-report.txt
           retention-days: 90
           if-no-files-found: error
+
+  # The other four gating claims whose comparison needs a boot.
+  #
+  # The job above already made this argument for one claim and it generalises:
+  # *a gating claim that nothing in the local loop runs is a claim that gates
+  # nothing*, and RFC 0064 is the entry deciding that a threshold nobody
+  # compares against is not a threshold. What that argument had not been
+  # applied to is the rest of the registry.
+  #
+  # Sixteen of seventeen gating claims were compared to their bounds by nothing
+  # at all. Their workloads ran — `attest`, `swap`, `compare` and the two
+  # generation verbs all exist and all assert their own internal invariants —
+  # but the number the claim publishes was read by no job, so `gating` meant
+  # *fails the build on regression* about claims no build could fail on.
+  # `cargo xtask lint-claim-runs` is what makes that a red build rather than a
+  # thing somebody notices.
+  #
+  # Eleven went into the pull-request gate, where their comparison costs a host
+  # run or a workload the gate already pays for. These four are here for the
+  # rollback job's reason and no other: `attest` is five boots, `compare` is
+  # two, `swap` replaces every component under load, and the two generation
+  # comparisons build a generation each. A pull-request gate is not where five
+  # minutes go for a property that moves when a format moves.
+  #
+  # They are separate steps rather than one script so a red night names the
+  # claim in the step title, and `continue-on-error` is deliberately absent: a
+  # bound this tree publishes and does not meet should stop the night.
+  gating-claims:
+    name: every boot-heavy gating claim, against its own thresholds
+    needs: [environment, image]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: what this machine is running, five boots
+        run: cargo xtask claim frame-identities-across-boots
+      - name: two whole-system states, and the subtree they differ in
+        run: cargo xtask claim whole-system-divergences-localised
+      - name: every component replaced under sustained load
+        run: cargo xtask claim operations-across-a-place-swap
+      - name: one topology rendered from one root
+        run: cargo xtask claim topology-renderings-per-root
+      - name: the generation root across two checkout paths
+        run: cargo xtask claim generation-roots-across-paths
+

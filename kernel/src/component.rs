@@ -776,13 +776,31 @@ pub struct Report {
     /// object this machine has. Unit: capabilities.
     ///
     /// **The gap this change leaves, as a number rather than a paragraph.**
-    /// Today it is the `irq` need in `user/virtio-blk/manifest.toml`: nothing in
-    /// this build routes a device interrupt to a component, so what the spawn
+    /// Today it is the `irq` need each driver manifest declares: nothing in this
+    /// build routes a device interrupt to a component, so what the spawn
     /// supplies is a capability of the right type, carrying the right rights,
-    /// naming no vector. It is enough for the lifecycle — the spawn is real,
-    /// the account is real, the table is real — and it is not enough for the
-    /// component to wait on the device. E1-B09 is what makes it zero.
-    /// [`unbound_needs`] is the arithmetic and [`offer`] is the reason.
+    /// naming no vector. It is enough for the lifecycle — the spawn is real, the
+    /// account is real, the table is real — and it is not enough for the
+    /// component to wait on the device. [`unbound_needs`] is the arithmetic and
+    /// [`offer`] is the reason.
+    ///
+    /// **Who closes it is an open question, and saying so is better than the
+    /// answer this comment used to give.** It named `E1-B09`, which is the
+    /// *user-interrupt doorbell between two ends of a ring* and says nothing
+    /// about device interrupts. That matters more than a misfiled pointer:
+    /// `E1-B09` is owed to silicon under RFC 0093 — QEMU implements no part of
+    /// UINTR — so attributing this to it makes a thing that may well be
+    /// buildable here read as blocked on a purchase. `DATAPATH_GAP` carried the
+    /// same class of error about three of `E1-P10`'s four numbers and it cost
+    /// two corrections to unwind.
+    ///
+    /// What is certain is the sentence above: no vector reaches a component. A
+    /// kernel-side delivery — the frame taking the interrupt and posting a
+    /// notice on the control ring the component already drives — needs no
+    /// hardware this machine lacks, and is the shape `E0-B15`'s `Path::KernelIpi`
+    /// already uses for doorbells. Whether that is the right answer, and which
+    /// task owns it, is for whoever next reads RFC 0024 against this field
+    /// rather than for this comment to assert.
     pub unbound: u32,
     /// Deaths by fault. Unit: deaths.
     pub faults: u32,
@@ -980,6 +998,14 @@ pub struct Report {
 /// `frames` rebound onto its direct map, and the direct map covering every boot
 /// module. No process may be running: this builds address spaces and capability
 /// tables of its own.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "`fill` one function down makes this argument at length and this is that list \
+              plus the two the demonstration itself needs: the core an occupant may be given, \
+              and what this boot found that a place cannot carve for itself. Bundling them \
+              would be a type that exists so a lint passes, which `runtime::demonstrate` \
+              already declined for this reason"
+)]
 pub unsafe fn demonstrate(
     frames: &mut FrameAllocator,
     kernel: &paging::AddressSpace,
@@ -988,6 +1014,7 @@ pub unsafe fn demonstrate(
     now: u64,
     tree: &crate::state::Tree,
     worker: Option<(usize, u64)>,
+    supplied: &[Supplied],
 ) -> Result<Report, Failure> {
     // SAFETY: the caller's guarantee that the direct map is live and covers
     // every module.
@@ -1256,6 +1283,11 @@ pub unsafe fn demonstrate(
                 tree,
                 index,
                 occupant,
+                // Handed the whole list rather than this component's share of
+                // it. Each entry names the component it is for, so the filter
+                // lives where the need is matched and there is no second place
+                // for the two to disagree about which window belongs to whom.
+                supplied,
             )
         }?;
         // This place's own polling point, not the first place's: what a spawn
@@ -1574,7 +1606,11 @@ pub unsafe fn demonstrate(
         // coming back.
         //
         // `cargo xtask cores` is the boot that takes this path.
-        let offered = offer(&mut supervisor, &account, &place, record, frames)?;
+        // Nothing supplied: this is the respawn path on a single-core boot,
+        // and it refills a place from the same account the first spawn used.
+        // A supplied object would have to be carried on the place to be
+        // available here, which is `E1-P06`'s business and not this branch's.
+        let offered = offer(&mut supervisor, &account, &place, record, frames, &[])?;
         // SAFETY: as the first spawn — the caller's guarantee, and the place is
         // empty because the teardown above emptied it.
         unsafe {
@@ -1587,6 +1623,7 @@ pub unsafe fn demonstrate(
                 &mut supervisor,
                 &reservations,
                 offered,
+                &[],
             )
         }?;
         place.restarts += 1;
@@ -1957,6 +1994,71 @@ enum Occupant {
     ByTheSupervisor,
 }
 
+/// One object the caller hands a spawn for a need the account cannot answer.
+///
+/// # Why a need can be unanswerable by an account
+///
+/// Because an account is memory the frame allocated and may take back, and a
+/// device's registers are neither. `user/virtio-blk/manifest.toml` declares
+/// `mmio` as four frames, and what it means by them is *the window the firmware
+/// put this device's configuration in* — a fixed physical address this boot
+/// found by walking the bus. [`carve`] would answer that need with four
+/// arbitrary frames off the account's watermark, which is memory the driver
+/// could read and write and which the device has never heard of.
+///
+/// So a supplied need is sourced by the caller and named by the manifest, and
+/// the two are checked against each other: the extent the manifest declares must
+/// be the extent the caller brings, or the spawn is refused. A need supplied at
+/// the wrong size is the failure this check exists for, because the symptom
+/// otherwise is a driver reading a device window that stops halfway.
+///
+/// # Why it is not charged to the account
+///
+/// A charged object is one `reap` hands back. Handing a device window back to
+/// the frame allocator would put a bus address into the free list, and the next
+/// component to be given that frame would be writing to a disk controller. That
+/// is the whole reason this is a separate path rather than a flag on [`carve`].
+#[derive(Clone, Copy)]
+pub struct Supplied {
+    /// Which component this is for, as its manifest labels it.
+    ///
+    /// **Carried here rather than filtered by the caller**, and the reason is a
+    /// hazard rather than convenience: `virtio-blk`, `virtio-net` and
+    /// `virtio-gpu` all declare needs called `mmio` and `queues`. A supply
+    /// matched on the need's name alone would put the block device's register
+    /// window into whichever of the three was filled first, and the symptom
+    /// would be a driver talking fluently to the wrong device.
+    pub component: &'static [u8],
+    /// The need's name as the manifest spells it, matched exactly.
+    pub name: &'static [u8],
+    /// Where the object starts. Unit: bytes, physical.
+    pub at: u64,
+    /// How long it is. Must equal what the manifest declares for this need.
+    /// Unit: bytes.
+    pub bytes: u64,
+    /// Whether the occupant's address space gets this mapped, and how.
+    pub map: Placement,
+}
+
+/// What a supplied need becomes in the occupant's address space.
+///
+/// Named `Placement` rather than `Mapping` because `f_ring::Mapping` is a
+/// channel over a region and is in scope here; two types called `Mapping` one
+/// import apart is the kind of collision a reader resolves wrongly once.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// Granted as a capability and not mapped. The component maps it itself, or
+    /// holds it to hand on.
+    Unmapped,
+    /// Mapped writable at a fixed user address, with caching left on. Queue
+    /// memory: ordinary RAM a device will read.
+    Cached(u64),
+    /// Mapped writable at a fixed user address with caching **off**. A device
+    /// register window, where a stale read is a wrong answer about hardware
+    /// state rather than a slow one.
+    Uncached(u64),
+}
+
 /// Build a place from one component file, stake it with an account its own
 /// manifest sized, and put its first occupant in.
 ///
@@ -1994,6 +2096,7 @@ unsafe fn fill(
     tree: &crate::state::Tree,
     slot: usize,
     occupant: Occupant,
+    supplied: &[Supplied],
 ) -> Result<Extra, Failure> {
     // `fill` keeps the table by value below; every call it makes downwards
     // takes a shared reference, because a spawn tests and does not keep.
@@ -2042,11 +2145,21 @@ unsafe fn fill(
     admitted_line(record, region.bytes());
 
     if occupant == Occupant::ByTheFrame {
-        let offered = offer(supervisor, &account, &place, record, frames)?;
+        let offered = offer(supervisor, &account, &place, record, frames, supplied)?;
         // SAFETY: the caller's guarantee, passed down. The place was built a few
         // lines ago and is empty.
         let spawned = unsafe {
-            spawn(frames, kernel, features, &mut place, &account, supervisor, reservations, offered)
+            spawn(
+                frames,
+                kernel,
+                features,
+                &mut place,
+                &account,
+                supervisor,
+                reservations,
+                offered,
+                &[],
+            )
         }?;
         report.spawns += 1;
         report.unbound += unbound_needs(record);
@@ -2847,6 +2960,7 @@ unsafe fn spawn(
     supervisor: &mut Table,
     reservations: &Reservations,
     offered: Supply,
+    supplied: &[Supplied],
 ) -> Result<(u32, usize, usize), Failure> {
     if place.occupant.is_some() || place.retired {
         return Err(Failure::WrongPlace);
@@ -3127,6 +3241,59 @@ unsafe fn spawn(
         // `cargo xtask lint-manifests` already refuses a manifest that stops
         // adding up. A component that declares no `board` gets no board and no
         // mapping — which is every component but one.
+        // A need the caller sourced rather than the account. `offer` has
+        // already granted the capability and checked the extent against the
+        // manifest; what is left is putting it in the occupant's address space,
+        // which the manifest cannot say and the caller must.
+        //
+        // **Why the frame maps it rather than the component.** The same reason
+        // the heap is mapped here: a driver's first instruction may touch its
+        // registers, and asking for them would be a capability call, which a
+        // component that forbids `unsafe` cannot make against a window it does
+        // not yet hold. The capability is granted as well, so the component has
+        // authority over what it is using; the mapping is what makes the
+        // authority usable before it has run a line.
+        if let Some(item) =
+            supplied.iter().find(|item| item.component == record.label() && named(need, item.name))
+        {
+            let (at, kind) = match item.map {
+                Placement::Unmapped => (0, UserPage::Data),
+                Placement::Cached(at) => (at, UserPage::Data),
+                // Uncached, and this is the one that is invisible under an
+                // emulator and fatal on a machine: a write-back mapping lets
+                // the processor merge, reorder and delay stores to registers
+                // whose whole meaning is when they were written. `UserPage`'s
+                // own doc makes the argument at length.
+                Placement::Uncached(at) => (at, UserPage::Device),
+            };
+            if at != 0 {
+                for page in 0..item.bytes / FRAME_SIZE {
+                    // SAFETY: as the fixed parts above — `space` is this
+                    // component's and is not in `CR3`. `item.at` names a run of
+                    // `item.bytes` the caller found and holds: for `mmio` a
+                    // device window this boot walked the bus for, for queue
+                    // memory a run the caller allocated. Neither is account
+                    // memory, which is why `reap` never hands it back.
+                    unsafe {
+                        paging::map_user(
+                            frames,
+                            &mut space,
+                            at + page * FRAME_SIZE,
+                            item.at + page * FRAME_SIZE,
+                            kind,
+                            features,
+                        )
+                    }
+                    .map_err(Failure::Space)?;
+                }
+            }
+            // `satisfied` was already incremented above, with the grant: a
+            // supplied need is satisfied by the same capability every other
+            // need is, and differs only in where the object came from. The
+            // `continue` is for the arms below, none of which is this need.
+            continue;
+        }
+
         if named(need, NEED_BOARD) {
             // Exactly one page. A board is a layout both sides hold and
             // `f_supervisor::routing::BYTES` is one frame; a need that declared
@@ -3461,6 +3628,7 @@ fn offer(
     place: &Place,
     record: &Record,
     frames: &FrameAllocator,
+    supplied: &[Supplied],
 ) -> Result<Supply, Failure> {
     let mut out = Supply::EMPTY;
     for need in record.needs() {
@@ -3469,6 +3637,24 @@ fn offer(
         }
         let Some(kind) = need.cap_type() else { return Err(Failure::Manifest(Refusal::Value)) };
         let held = need.rights | OFFERED;
+        // Sourced by the caller before anything is charged, because a supplied
+        // object is one the account must never be debited for and never hand
+        // back. The extent is checked against the manifest here rather than at
+        // the call site: the manifest is the contract, and a caller that
+        // supplied the wrong size would otherwise produce a driver whose device
+        // window stops halfway.
+        let given =
+            supplied.iter().find(|item| item.component == record.label() && named(need, item.name));
+        if let Some(item) = given {
+            if item.bytes != least_extent(need) {
+                return Err(Failure::Manifest(Refusal::Value));
+            }
+            let handle = grant_into(supervisor, frames, kind, held, item.at, item.bytes)?;
+            let Some(slot) = out.handles.get_mut(out.count) else { return Err(Failure::Account) };
+            *slot = handle;
+            out.count += 1;
+            continue;
+        }
         let handle = match kind {
             CapType::Untyped | CapType::Frame => {
                 let (at, bytes) = carve(supervisor, account, frames, least_extent(need), &mut out)?;
@@ -3587,7 +3773,17 @@ unsafe fn probe_refusals(
     // 1. A need not supplied, and not optional.
     // SAFETY: the caller's guarantee, and the place is empty.
     let outcome = unsafe {
-        spawn(frames, kernel, features, place, account, supervisor, reservations, Supply::EMPTY)
+        spawn(
+            frames,
+            kernel,
+            features,
+            place,
+            account,
+            supervisor,
+            reservations,
+            Supply::EMPTY,
+            &[],
+        )
     };
     taken += refused(outcome, error::pack(error::AUTHORITY, error::authority::NO_SUCH_CAP))?;
 
@@ -3598,8 +3794,9 @@ unsafe fn probe_refusals(
     let mut over = Supply::EMPTY;
     over.count = declared + 1;
     // SAFETY: as above.
-    let outcome =
-        unsafe { spawn(frames, kernel, features, place, account, supervisor, reservations, over) };
+    let outcome = unsafe {
+        spawn(frames, kernel, features, place, account, supervisor, reservations, over, &[])
+    };
     taken += refused(outcome, error::pack(error::ARGUMENT, error::argument::RESERVED_NOT_ZERO))?;
 
     // 3. The wrong type. Whichever of the two types that carry an extent the
@@ -3612,8 +3809,9 @@ unsafe fn probe_refusals(
     wrong.handles[0] = held;
     wrong.count = 1;
     // SAFETY: as above.
-    let outcome =
-        unsafe { spawn(frames, kernel, features, place, account, supervisor, reservations, wrong) };
+    let outcome = unsafe {
+        spawn(frames, kernel, features, place, account, supervisor, reservations, wrong, &[])
+    };
     taken += refused(outcome, error::pack(error::AUTHORITY, error::authority::WRONG_TYPE))?;
     supervisor.relinquish(held).map_err(Failure::Capability)?;
 
@@ -3633,7 +3831,7 @@ unsafe fn probe_refusals(
         weak.count = 1;
         // SAFETY: as above.
         let outcome = unsafe {
-            spawn(frames, kernel, features, place, account, supervisor, reservations, weak)
+            spawn(frames, kernel, features, place, account, supervisor, reservations, weak, &[])
         };
         taken += refused(outcome, error::pack(error::AUTHORITY, error::authority::RIGHT_NOT_HELD))?;
         supervisor.relinquish(held).map_err(Failure::Capability)?;
@@ -3648,7 +3846,7 @@ unsafe fn probe_refusals(
         small.count = 1;
         // SAFETY: as above.
         let outcome = unsafe {
-            spawn(frames, kernel, features, place, account, supervisor, reservations, small)
+            spawn(frames, kernel, features, place, account, supervisor, reservations, small, &[])
         };
         taken += refused(outcome, error::pack(error::ADMISSION, error::admission::MEMORY))?;
         supervisor.relinquish(held).map_err(Failure::Capability)?;
@@ -4292,12 +4490,17 @@ impl Serving<'_> {
                 0,
             );
         }
-        let offered = match offer(self.supervisor, self.account, self.place, record, self.frames) {
-            Ok(offered) => offered,
-            Err(failure) => {
-                return f_ring::refusal(entry.user_data, Self::packed(failure), 0, 0);
-            }
-        };
+        // Nothing supplied. A spawn arriving over the control ring is the
+        // supervisor's, and a supervisor at ring 3 has no device window to hand
+        // down — what it can offer is what its own account holds. A supplied
+        // need reaches a place only from the boot that found the device.
+        let offered =
+            match offer(self.supervisor, self.account, self.place, record, self.frames, &[]) {
+                Ok(offered) => offered,
+                Err(failure) => {
+                    return f_ring::refusal(entry.user_data, Self::packed(failure), 0, 0);
+                }
+            };
         // SAFETY: `demonstrate`'s guarantee, which this server is constructed
         // inside: the direct map is live and covers every module, and the
         // address space this builds tables against is the kernel's own.
@@ -4311,6 +4514,7 @@ impl Serving<'_> {
                 self.supervisor,
                 self.reservations,
                 offered,
+                &[],
             )
         };
         match spawned {
