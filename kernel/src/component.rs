@@ -930,12 +930,19 @@ pub struct Report {
     /// indistinguishable from one that cannot — the same argument
     /// `state::node::MEMORY_FORCED` makes about a counter.
     pub mute: u32,
-    /// How many of the places' occupants were handed a core. Unit: components.
+    /// How many times a place's occupant was handed a core. Unit: handings.
     ///
-    /// One, and the one is the supervisor. A count rather than a flag because
-    /// the number this should be is a decision — RFC 0073's bootstrap argument
-    /// says the frame starts exactly one — and a flag would record that it
-    /// happened without recording that it happened *once*.
+    /// **Handings and not components**, which the unit used to get wrong: the
+    /// supervisor is consulted again on every restart and each consultation is
+    /// another core given to the same occupant, so this has counted more than
+    /// one component's worth since the restart path existed.
+    ///
+    /// A count rather than a flag because the number this should be is a
+    /// decision — RFC 0073's bootstrap argument says the frame *starts* exactly
+    /// one component — and a flag would record that it happened without
+    /// recording how often. The set of components in it is the supervisor on
+    /// every boot with a second core, and on the one boot that supplies a place
+    /// with a device window, that place's occupant as well.
     pub scheduled: u32,
 }
 
@@ -1370,7 +1377,7 @@ pub unsafe fn demonstrate(
         };
         open.place.budget = consulted.budget;
         report.scheduled += 1;
-        scheduled_line(cpu, consulted.announced, consulted.death);
+        scheduled_line(Name(SUPERVISOR), cpu, consulted.announced, consulted.death);
         supervised_line(&consulted, u32::from(open.place.occupant.is_some()));
 
         // The spawn the *supervisor* made, recorded on this side. Everything
@@ -1401,6 +1408,42 @@ pub unsafe fn demonstrate(
         let Some(back) = extras.get_mut(index) else { return Err(Failure::WrongPlace) };
         *back = Some(open);
         consulting = Some((at, cpu, tsc_khz, extra));
+    }
+
+    // ------------------------------------------ the supplied place's occupant
+    //
+    // `E1-B05`'s second act, on the one boot that asks for it. The place was
+    // filled above with a device window the frame *supplied* rather than carved;
+    // this is that place's occupant being handed a core, which is the second of
+    // the three things `CHAOS_GAP` says the work needs.
+    //
+    // **To completion, and the limit is the point.** [`run_ring3`] waits for the
+    // core, so this occupant runs, announces itself and ends before the next
+    // line is printed. What it demonstrates is therefore exactly one thing: the
+    // occupant of a place holding a device window it could not carve reaches
+    // ring 3 on a core and comes back. It does not serve a client, and it cannot
+    // — serving needs the driver running *while* a client submits
+    // (`smp::start_on`) and a routing board `user/virtio-blk/manifest.toml`
+    // declares no need for. Both are still owed, and the gap row still says so.
+    //
+    // Guarded on the supply rather than on a parameter, so that every boot with
+    // no supplied place does exactly what it did before: `supplied` is empty on
+    // all of them but one.
+    if let Some((cpu, tsc_khz)) = worker
+        && let Some(index) = supplied_place(&extras, supplied)
+    {
+        let Some(extra) = extras.get_mut(index).and_then(Option::as_mut) else {
+            return Err(Failure::WrongPlace);
+        };
+        let record = Record::read(extra.place.module).map_err(Failure::Manifest)?;
+        let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
+        // SAFETY: `cpu` is the core `main` vouched is started and idle — the
+        // consultation above ran to completion on it, which is what `run_on`
+        // returning `Ok` means, so it is idle again — and `occupant` is the
+        // instance `fill` spawned a loop ago with its address space live.
+        let (announced, death) = unsafe { run_ring3(occupant, kernel, features, (cpu, tsc_khz)) }?;
+        report.scheduled += 1;
+        scheduled_line(Name(record.label()), cpu, announced, death);
     }
 
     // -------------------------------------------------------------- connect
@@ -1949,6 +1992,29 @@ pub unsafe fn demonstrate(
     Ok(report)
 }
 
+/// Which of the unscripted places the caller supplied a need for, if any.
+///
+/// Answers the *first* component named in `supplied` and finds the place whose
+/// manifest carries that label. One component and not a set, because a supply is
+/// what one boot found on the bus and this build has never had two at once; a
+/// second would want this to answer a list, and the day it does is the day the
+/// caller has two device windows to hand over.
+///
+/// Matched on the label rather than on the module pointer, because the supply is
+/// written where the device was found and the modules are the loader's — a match
+/// on an address would be this frame assuming an order
+/// `docs/second-boot-outside-qemu.md` records hardware not keeping.
+fn supplied_place(extras: &[Option<Extra>; PLACES_MAX], supplied: &[Supplied]) -> Option<usize> {
+    let want = supplied.iter().map(|item| item.component).find(|name| !name.is_empty())?;
+    (1..PLACES_MAX).find(|index| {
+        extras
+            .get(*index)
+            .and_then(Option::as_ref)
+            .and_then(|extra| Record::read(extra.place.module).ok())
+            .is_some_and(|record| record.label() == want)
+    })
+}
+
 /// A place the frame fills and holds without scripting it.
 ///
 /// The three things that have to travel together for a place to be given back
@@ -2188,12 +2254,20 @@ unsafe fn fill(
     Ok(Extra { place, account, region })
 }
 
-/// The first occupant of a place ever handed a core.
+/// A place's occupant handed a core.
 ///
 /// A line of its own rather than a field on `supervisor ok`, because this is the
 /// sentence `kernel/src/runtime.rs` has carried since RFC 0033 becoming false,
 /// and a reader comparing two boots across the change should meet it where it
 /// happened rather than in a summary at the end.
+///
+/// # Why it names the place, having said `supervisor`
+///
+/// Because there can be two of these in one boot now. The supervisor's is the
+/// first and is on every boot that has a second core; the other is the occupant
+/// of the place `blk=place` supplies, and it is on that boot alone. A line that
+/// named neither would make a reader count the `scheduled` lines to find out
+/// which occupant reached ring 3 — and not counting is what the name is for.
 /// # Why no tick count, having had one
 ///
 /// Because it is time-derived and this line is in the log `cargo xtask trace`
@@ -2209,10 +2283,10 @@ unsafe fn fill(
 /// two hashes that differed. That is the check working. The number it caught was
 /// never evidence of anything — *did it reach ring 3* is what this line is for,
 /// and `announced` answers that.
-fn scheduled_line(cpu: usize, announced: bool, death: crate::process::Death) {
+fn scheduled_line(what: Name<'_>, cpu: usize, announced: bool, death: crate::process::Death) {
     crate::kprintln!(
-        "  scheduled     place supervisor on core {cpu} — the first occupant of a place given \
-         one; it {} itself from ring 3",
+        "  scheduled     place {what} on core {cpu} — a place's occupant given a core; it {} \
+         itself from ring 3",
         if announced { "announced" } else { "never announced" },
     );
     // How it ended, named rather than coded. The first time an occupant was
@@ -2559,33 +2633,48 @@ struct Consulting<'a> {
     on: (usize, u64),
 }
 
-unsafe fn consult(
-    asking: &mut Consulting,
+/// Hand a place's occupant a core, let it run to completion, and take the core
+/// back.
+///
+/// # Why this is a function and not two copies of eleven lines
+///
+/// Because two callers hand a place's occupant a core now and only one of them
+/// is a consultation. [`consult`] writes a board before and serves a ring after;
+/// the supplied place in [`demonstrate`] does neither — it declares no `board`
+/// need and submits nothing. What the two share is exactly the swap, and the
+/// swap is the part where a mistake is silent rather than loud: a capability
+/// table left behind on the core outlives this run and resolves the *next*
+/// occupant's handles at the wrong generation. `process::schedule_occupant`'s
+/// own comment records that happening and how far the symptom sat from the
+/// cause, which is why the pair belongs in one place with one argument for it.
+///
+/// # To completion, which is a limit and is not a design
+///
+/// [`crate::smp::run_on`] waits for the core to report finished, so an occupant
+/// started here has ended before this returns. That is enough for a component
+/// whose whole life is to announce itself, and it is not enough for one that
+/// serves: a driver answers a client's entries *while* the client submits them,
+/// which is `smp::start_on` and not this. `CHAOS_GAP` in `xtask` carries the
+/// difference and names what closing it costs.
+///
+/// # Errors
+///
+/// [`Failure::NoAnswer`] for a core that was given the occupant and never
+/// reported back. The table is deliberately **not** taken off that core: a core
+/// that did not answer may still be inside the component, and reading its shard
+/// would be the frame guessing about a race it just lost.
+///
+/// # Safety
+///
+/// `cpu` must be a core the caller has vouched is started and idle, and
+/// `occupant` must be an instance this frame built whose address space is live.
+unsafe fn run_ring3(
     occupant: &mut Instance,
-    target: &mut Place,
-    account: &Account,
-    watches: Handle,
-    now: u64,
-) -> Result<Consulted, Failure> {
-    let Consulting { frames, kernel, features, supervisor, reservations, on: (cpu, tsc_khz) } =
-        asking;
-    let (features, cpu, tsc_khz) = (*features, *cpu, *tsc_khz);
-    // Everything the component needs to know that is not a constant: its ring,
-    // the account it may spend, the place it may act on, and the tally the frame
-    // is holding for it. Written *before* the core is told to run, which is the
-    // whole of why it may be believed.
-    // SAFETY: `occupant.board` is a frame this frame allocated for this instance
-    // and mapped into its address space and nobody else's; the direct map covers
-    // it and the core that will read it is idle.
-    unsafe { write_board(frames, occupant, target, account, supervisor, watches, now) }?;
-
-    // What the supervisor holds at the moment it is started, kept for the server
-    // below to resolve its entries against. Taken here — after the grants above
-    // and before the core is told to run — because that is precisely the state
-    // the question *may the submitter spend this?* is about. The table the core
-    // hands back is not it: an occupant's table is cleared when it ends.
-    let submitted_from = occupant.table;
-
+    kernel: &paging::AddressSpace,
+    features: Features,
+    on: (usize, u64),
+) -> Result<(bool, crate::process::Death), Failure> {
+    let (cpu, tsc_khz) = on;
     // Selector zero: the life every component has. `first` is the occupant's own
     // handle for its account, so its first act can be a capability call rather
     // than a guess about which slot it holds.
@@ -2622,7 +2711,40 @@ unsafe fn consult(
     // SAFETY: as above — the core is finished, so nothing over there is holding
     // either table.
     occupant.table = unsafe { crate::process::reclaim_occupant_table(cpu, previous) };
-    // SAFETY: as above, and the page is still mapped — an address space is torn
+    Ok((announced, death))
+}
+
+unsafe fn consult(
+    asking: &mut Consulting,
+    occupant: &mut Instance,
+    target: &mut Place,
+    account: &Account,
+    watches: Handle,
+    now: u64,
+) -> Result<Consulted, Failure> {
+    let Consulting { frames, kernel, features, supervisor, reservations, on: (cpu, tsc_khz) } =
+        asking;
+    let (features, cpu, tsc_khz) = (*features, *cpu, *tsc_khz);
+    // Everything the component needs to know that is not a constant: its ring,
+    // the account it may spend, the place it may act on, and the tally the frame
+    // is holding for it. Written *before* the core is told to run, which is the
+    // whole of why it may be believed.
+    // SAFETY: `occupant.board` is a frame this frame allocated for this instance
+    // and mapped into its address space and nobody else's; the direct map covers
+    // it and the core that will read it is idle.
+    unsafe { write_board(frames, occupant, target, account, supervisor, watches, now) }?;
+
+    // What the supervisor holds at the moment it is started, kept for the server
+    // below to resolve its entries against. Taken here — after the grants above
+    // and before the core is told to run — because that is precisely the state
+    // the question *may the submitter spend this?* is about. The table the core
+    // hands back is not it: an occupant's table is cleared when it ends.
+    let submitted_from = occupant.table;
+
+    // SAFETY: the caller's guarantee, passed down — `cpu` is started and idle
+    // and this instance's address space is live.
+    let (announced, death) = unsafe { run_ring3(occupant, kernel, features, (cpu, tsc_khz)) }?;
+    // SAFETY: the core is finished, and the page is still mapped — an address space is torn
     // down by `tear_down` and not here.
     let (told, submitted, unsent, verdict, budget) = unsafe { read_board(occupant) };
 
