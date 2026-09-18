@@ -70,13 +70,23 @@
 //! function of one hash* is demonstrated here of the **assembly**, and is not
 //! yet a property of the frame's boot path.
 //!
-//! Two things hold it there and neither is an oversight. `E1-B05`'s restart
-//! policy has not left the frame — `cargo xtask lint-owed` reports it — so
-//! there is no supervisor to be this crate's caller; and an image linking this
-//! crate needs a `#[global_allocator]`, that is an `unsafe impl GlobalAlloc`,
-//! and RFC 0001 forbids `unsafe` above the frame, so it waits for the heap
-//! `intent/0006-state/spec.md`'s decision 4 puts in `ring/` — which is
-//! `user/objects/src/lib.rs`'s debt one directory over, unchanged.
+//! Two things held it there. **One of them is gone and the other is not.**
+//!
+//! The allocator is no longer a reason. An image linking this crate needs a
+//! `#[global_allocator]`, that is an `unsafe impl GlobalAlloc`, and RFC 0001
+//! forbids `unsafe` above the frame — so this waited on the heap
+//! `intent/0006-state/spec.md`'s decision 4 puts in `ring/`. `f_ring::heap`
+//! is that heap, `E2-B10` closed on it, and three components already take
+//! `Heap::COMPONENT` as their global allocator. This crate can have one for
+//! the asking.
+//!
+//! What still holds it is the caller. `E1-B05`'s restart policy *has* left the
+//! frame — `f_supervisor::policy::decide` is where it lives, and the RFC 0008
+//! row that said otherwise is paid and gone from `OWED_REVERSALS` — but
+//! nothing in the frame's boot path calls this crate: `kernel/src/component.rs`
+//! still walks boot modules by magic and fills its places itself. A crate with
+//! no caller is what this is, and the sentence above used to give the wrong
+//! reason for it.
 //!
 //! The `alloc` this crate takes is genuine and is one `BTreeMap` and three
 //! `Vec`s: the map is `bind::Bus`, keyed by a device's address, and the
