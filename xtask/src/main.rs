@@ -18580,6 +18580,14 @@ enum Route {
     /// what it read.
     /// E2-B08.
     Reads,
+    /// `claims/0036`'s three datapath boots, against the claim's own table.
+    ///
+    /// Three commands rather than one because *copies per operation* is a
+    /// property of the datapath and the three drivers reach a client's memory by
+    /// three different routes. Each boot prints only the rows it is the
+    /// authority for, so the three feed one table without ever answering the
+    /// same row twice.
+    Copies,
     /// `E2-B05`'s two demonstrations over two topologies — the six-component
     /// workload in `user/assembler/tests/assemble.rs`, and the module this tree
     /// would actually boot, instantiated twice by `cargo xtask generation` —
@@ -18770,6 +18778,7 @@ const ROUTES: &[(&str, Route)] = &[
     // `resident-bytes-per-unit-of-work` counts what is resident while that
     // number is being taken. Both are `pending` and say why at length.
     ("copies-per-read", Route::Reads),
+    ("copies-per-operation", Route::Copies),
     ("resident-bytes-per-unit-of-work", Route::Reads),
     // Wave 4's two, and neither is a pair: each has one sentence and one
     // workload set. `topology-renderings-per-root` is a count over two
@@ -18923,6 +18932,7 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         Route::Cut => claim_cut(&text, &relative(&file))?,
         Route::Invariants => claim_invariants(&text, &relative(&file))?,
         Route::Reads => claim_reads(&text, &relative(&file))?,
+        Route::Copies => claim_copies(&text, &relative(&file))?,
         Route::Topology => claim_topology(&text, &relative(&file))?,
         Route::Roots => claim_roots(&text, &relative(&file))?,
         Route::Swap => claim_swap(&text, &relative(&file))?,
@@ -19381,6 +19391,58 @@ fn claim_invariants(claim: &str, file: &str) -> Result<(), String> {
 /// # Errors
 ///
 /// [`claim_compare`]'s.
+/// `claims/0036`'s three datapath boots, against the claim's own table.
+///
+/// # Why the boots and not a host test
+///
+/// The property is what the *frame* did with a client's bytes, and a host test
+/// would be measuring a model of it. Each boot prints its three rows on the
+/// positive-control half only — the half that moved the client's bytes and got
+/// them back — because every other half of those commands moves a different
+/// number of bytes, and a denominator printed by all of them reaches
+/// [`measured_rows`] as one name with two values, which it refuses rather than
+/// averages.
+///
+/// # Ordering
+///
+/// `blk` first, for [`claim_topology`]'s rule: all three build a kernel and six
+/// component images, so there is no cheap one to fail fast on, and the order is
+/// instead the order a reader would debug in — the block path is the one whose
+/// registration machinery the other two borrow.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_copies(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[
+            (
+                "cargo xtask blk: a block transfer into the client's own registered page",
+                "cargo",
+                &["xtask", "blk"][..],
+            ),
+            (
+                "cargo xtask net: a posted receive landing in the client's own buffer",
+                "cargo",
+                &["xtask", "net"][..],
+            ),
+            (
+                "cargo xtask gpu: a display command backed by the client's own pages",
+                "cargo",
+                &["xtask", "gpu"][..],
+            ),
+        ],
+        "A non-zero `*_copies_on_the_data_path` is this claim failing and the driver is\n\
+         named by the row. The quieter reds are the two beside it: a zero\n\
+         `*_bytes_transferred` means the boot copied nothing because it moved nothing,\n\
+         and a zero `*_bytes_moved_on_purpose` means the counter itself cannot move —\n\
+         which makes the zero above it worthless while leaving every other line in the\n\
+         run looking perfect. Read those two before believing the first.",
+    )
+}
+
 fn claim_reads(claim: &str, file: &str) -> Result<(), String> {
     claim_compare(
         claim,

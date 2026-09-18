@@ -3075,6 +3075,28 @@ fn blk_datapath(
         report.counters.bytes,
         report.counters.provoked,
     );
+    // The same three numbers again, as rows a claim can read.
+    //
+    // `claims/0036` compares them against its own `[threshold]` table, and
+    // `claim_compare` parses a row as *first token is a name it knows, second
+    // is a `u64`* — which the sentence above is not, on purpose: a line a
+    // person reads and a line a machine reads want different things, and
+    // making one serve both is how a threshold ends up keyed on a word in a
+    // sentence somebody later rewrites.
+    //
+    // **Only on `Half::Inside`, and that is what stops the rows conflicting.**
+    // Every half of this command moves a different number of bytes — 4096 on
+    // two of them and 3584 on a third — so a denominator printed by all of
+    // them would reach `measured_rows` as one name with two values, which it
+    // refuses rather than averages. The positive control is the half that
+    // moved the client's bytes and got them back, so it is the half with the
+    // authority for *what a working datapath copied*; the others are refusals,
+    // and a refusal has no copies-per-operation to report.
+    if matches!(report.half, crate::blk::Half::Inside) {
+        kprintln!("    blk_copies_on_the_data_path       {}", report.counters.copies);
+        kprintln!("    blk_bytes_transferred             {}", report.counters.bytes);
+        kprintln!("    blk_bytes_moved_on_purpose        {}", report.counters.provoked);
+    }
     // What the driver aimed at, beside where the unit says the transaction
     // went. On `escape` these are a page apart and the second is the address the
     // component's own arithmetic produced; on the other two halves nothing is
@@ -3329,6 +3351,28 @@ fn net_datapath(
         report.counters.bytes,
         report.counters.provoked,
     );
+    // The same three numbers again, as rows a claim can read.
+    //
+    // `claims/0036` compares them against its own `[threshold]` table, and
+    // `claim_compare` parses a row as *first token is a name it knows, second
+    // is a `u64`* — which the sentence above is not, on purpose: a line a
+    // person reads and a line a machine reads want different things, and
+    // making one serve both is how a threshold ends up keyed on a word in a
+    // sentence somebody later rewrites.
+    //
+    // **Only on `Half::Inside`, and that is what stops the rows conflicting.**
+    // Every half of this command moves a different number of bytes — 4096 on
+    // two of them and 3584 on a third — so a denominator printed by all of
+    // them would reach `measured_rows` as one name with two values, which it
+    // refuses rather than averages. The positive control is the half that
+    // moved the client's bytes and got them back, so it is the half with the
+    // authority for *what a working datapath copied*; the others are refusals,
+    // and a refusal has no copies-per-operation to report.
+    if matches!(report.half, crate::net::Half::Inside) {
+        kprintln!("    net_copies_on_the_data_path       {}", report.counters.copies);
+        kprintln!("    net_bytes_transferred             {}", report.counters.bytes);
+        kprintln!("    net_bytes_moved_on_purpose        {}", report.counters.provoked);
+    }
     // The obligation the receive direction creates, as a number. A posted
     // receive is a buffer with no answer owed, so a driver that stopped while
     // holding one would leave its client with an in-flight buffer RFC 0024 gives
@@ -3592,6 +3636,28 @@ fn gpu_datapath(
         report.counters.bytes,
         report.counters.provoked,
     );
+    // The same three numbers again, as rows a claim can read.
+    //
+    // `claims/0036` compares them against its own `[threshold]` table, and
+    // `claim_compare` parses a row as *first token is a name it knows, second
+    // is a `u64`* — which the sentence above is not, on purpose: a line a
+    // person reads and a line a machine reads want different things, and
+    // making one serve both is how a threshold ends up keyed on a word in a
+    // sentence somebody later rewrites.
+    //
+    // **Only on `Half::Inside`, and that is what stops the rows conflicting.**
+    // Every half of this command moves a different number of bytes — 4096 on
+    // two of them and 3584 on a third — so a denominator printed by all of
+    // them would reach `measured_rows` as one name with two values, which it
+    // refuses rather than averages. The positive control is the half that
+    // moved the client's bytes and got them back, so it is the half with the
+    // authority for *what a working datapath copied*; the others are refusals,
+    // and a refusal has no copies-per-operation to report.
+    if matches!(report.half, crate::gpu::Half::Inside) {
+        kprintln!("    gpu_copies_on_the_data_path       {}", report.counters.copies);
+        kprintln!("    gpu_bytes_transferred             {}", report.counters.bytes);
+        kprintln!("    gpu_bytes_moved_on_purpose        {}", report.counters.provoked);
+    }
     if report.half.beyond() == 0 {
         kprintln!(
             "  gpu escape    {} backing entr(ies) pointed past a registration's answer; this \

@@ -572,6 +572,12 @@ jobs:
       # exactly one display in it. E1-B04, RFC 0054, which records what the frame
       # turned out to owe a third driver and why the harness is part of the check.
       - run: cargo xtask gpu
+      # `claims/0036`'s three rows for this driver, compared against the table
+      # rather than against the boot's own assertions. It runs after the three
+      # datapath jobs' own commands and re-runs all three boots, which is the
+      # cost of the comparison being a separate check from the workload; the
+      # alternative is the boot grading its own homework.
+      - run: cargo xtask claim copies-per-operation
       # The same datapath, asked an ordering rather than an isolation question.
       # Three more boots of one client script: six batch reads are queued, a
       # hard-class read carrying a deadline arrives last, and the driver hands
