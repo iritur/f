@@ -729,9 +729,10 @@ id      = "driver-death-blast-radius"
 group   = "H"
 class   = "Driver death observed by a client (blast radius)"
 layers  = ["L1", "P"]
-check   = "nothing — there is no driver and no supervisor"
-cadence = ["never"]
-status  = "gap"
+check   = "cargo xtask chaos — the simulator kills each driver under sustained load and claims/0005 gates the blast radius; the boot half is CHAOS_GAP"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+notes   = "Two halves and only one runs. The simulator kills a component *serving a client's sustained load* and `claims/0005-driver-restart-blast-radius` is `gating` over five zeros with two floors under them, so a run that killed nothing cannot pass. What a boot kills is a place's occupant that serves nobody, because the driver is scheduled outside the place its manifest is spawned into — `CHAOS_GAP`'s one remaining row, `prepare_driver(` in kernel/src/blk.rs. This row said *nothing — there is no driver and no supervisor*, and there are both."
 scheduled_by = ["E1-P06", "E1-B05"]
 
 [[row]]
@@ -739,9 +740,10 @@ id      = "supervisor-restart-storm"
 group   = "H"
 class   = "Supervisor restart storm"
 layers  = ["L1"]
-check   = "nothing — RFC 0008 declares a restart policy and nothing runs it"
-cadence = ["never"]
-status  = "gap"
+check   = "cargo xtask run — a place spends its restart budget and is retired, with peer-gone notices to the endpoint's holders"
+cadence = ["every-verify", "every-pr"]
+status  = "partially"
+notes   = "This row said *nothing — RFC 0008 declares a restart policy and nothing runs it*, and the policy has been running from ring 3 since RFC 0076: `f_supervisor::policy::decide` is told of a death, decides, and submits the spawn the frame performs. The storm case specifically is in every boot — `retire place store spent its budget of 3 restart(s) — retired, and 1 peer-gone notice(s) went to the endpoint's holders`. What is not covered is a storm against an occupant *serving load*, which is the same CHAOS_GAP row the blast-radius row above waits on."
 scheduled_by = ["E1-B05", "E1-P06"]
 
 [[row]]

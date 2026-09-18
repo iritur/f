@@ -207,6 +207,41 @@ real against real memory: real records, real address spaces, real capability
 tables paying a real account, a real channel carrying a real epoch. Neither half
 claims the other's, and `CHAOS_GAP` is what keeps that honest.
 
+## What this entry got wrong about how its own gap would close
+
+**The reversal condition below names a string that is no longer in the tree, so
+as written it can never fire.** `driver.execute(` left `kernel/src/blk.rs`;
+`grep -c 'Driver::' kernel/src/blk.rs` is zero. `CHAOS_GAP`'s needle is
+`prepare_driver(` and has been for two increments.
+
+The Context section above is left alone and is not wrong: it records what was
+true when this was decided, which is what a Context section is for. What is
+corrected here is the *forward-looking* half, because a reversal condition keyed
+on a vanished string is a condition nobody can meet.
+
+**And the shape of the correction is more interesting than the string.** This
+entry assumed the gap would close the way a light switches off: `driver.execute(`
+leaves, `cargo xtask chaos` goes red on its own declaration, `CHAOS_GAP` becomes
+empty and its emptiness is the evidence. What happened twice instead is that the
+gap **narrowed**. The needle moved from `driver.execute(` to `prepare_driver(`
+and the declared reason moved with it, from *nothing schedules a component's
+polling loop on the datapath* to *the driver is scheduled outside the place its
+manifest is spawned into*. `gap_holds` asks for exactly that and says so in its
+refusal text — *"Narrowing is what to do here rather than emptying: shrink the
+constant to exactly what is still true"* — and the build did go red each time,
+which is the mechanism working rather than failing.
+
+So the condition below should be read as: **when the last row of `CHAOS_GAP`
+goes**, not when one particular call does. The current row is `prepare_driver(`,
+and what removes it is a supervisor that spawns *and schedules* in one act, so
+that the occupant a boot can kill is the occupant serving the datapath. That is
+`E1-B05`'s remaining half and RFC 0008's *restart is the supervisor's*.
+
+What this does not change: the decision, the two halves, or the claim that
+neither half claims the other's. `E1-P06`'s own entry already records the
+shrinking as the argument for declaring gaps at all, and this is that argument
+applied to the entry that declared this one.
+
 ## What would reverse this
 
 **The gap closing, and the build says so.** When `driver.execute(` leaves

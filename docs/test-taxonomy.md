@@ -328,8 +328,8 @@ row saying a person has to apply it, which is a plan.
 
 | Bug class | Layers | Check today | Cadence | Status |
 |---|---|---|---|---|
-| Driver death observed by a client (blast radius) | L1, P | nothing — there is no driver and no supervisor | never | **GAP** |
-| Supervisor restart storm | L1 | nothing — RFC 0008 declares a restart policy and nothing runs it | never | **GAP** |
+| Driver death observed by a client (blast radius) | L1, P | cargo xtask chaos — the simulator kills each driver under sustained load and claims/0005 gates the blast radius; the boot half is CHAOS_GAP | every verify, every PR | partially |
+| Supervisor restart storm | L1 | cargo xtask run — a place spends its restart budget and is retired, with peer-gone notices to the endpoint's holders | every verify, every PR | partially |
 | A component that legitimately outgrows the capability table | P | `cargo xtask cap flood` holds 160 capabilities, five times the fixed count, with the growth debited from its untyped region; `cap quota` holds 32 because it spent that region first | every PR | **catches** |
 | An imported driver reachable other than over a ring | X | `cargo xtask lint-licensing`; `lint-manifests` refuses an imported image in `shared` | every verify, every PR (`lint-licensing`); every verify (`lint-manifests`) | **catches** |
 | A shim diverging from the API it imitates | L4 | nothing — differential fuzzing against Linux is not built | never | **GAP** |
@@ -401,10 +401,10 @@ reversal condition. Nothing is left as "we should probably".
 | An over-subscribed reservation admitted | Closed by `E1-B07`. `f_abi::reserve::Table::admit` refuses in the `ADMISSION` domain naming which of RFC 0007's four components could not be delivered, and `claims/0010` gates on two rows rather than one — a minimum on refusals *and* a maximum of zero on periods run — because a reservation admitted and then missed would satisfy the first alone. The L3 half arrived later and separately: `abi/proofs` proves the refusal over every demand rather than the simulator's, and is the answer to the one thing RFC 0050's single implementation could not have — something independent that disagrees with it |
 | Timer jitter regression | `E0-P06`, itself blocked on `E0-D10` and `E0-P18` |
 | Ring submit latency regression | `E0-P05`; the datapath set is `E1-P10` |
-| A regression too small for a threshold | `E2-P09` — change-point detection over the stored history |
+| A regression too small for a threshold | Closed by `E2-P09`: `cargo xtask history --changes` finds a step the series' own scatter does not explain. What it cannot yet say is whether *this system's* noise sits below the bar — `docs/TECHNICAL-DEBT.md` |
 | A determinism leak that never reaches the boot log | `E1-P01`, `E2-P05` |
 | Correlated streams in a seed sweep | `E1-B11` — a splittable generator, before the sweep multiplies streams |
-| Driver death observed by a client | `E1-P06` — where the blast-radius claim becomes gating |
+| Driver death observed by a client | `E1-P06` — the blast-radius claim is already `gating` as `claims/0005`; what is left is the boot half, `CHAOS_GAP`'s one row |
 | Supervisor restart storm | `E1-B05`, `E1-P06` |
 | `instructions_per_op` and `joules_per_op` absent | `E0-P05` for the PMU, `E5-P03` for the meter |
 | A hardware-only bug | `E0-P18` — open; the first boot outside QEMU was a virtual machine, not metal |
