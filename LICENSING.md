@@ -33,4 +33,27 @@ second, independent one.
 2. Every file in the permissive tree carries `SPDX-License-Identifier: Apache-2.0 OR MIT`.
 3. Every imported tree carries its own `LICENSE` and a `PROVENANCE.md` recording
    upstream URL, commit hash, and the date imported.
-4. `cargo xtask lint-licensing` enforces 1 and 2 in CI.
+4. Two commands enforce rules 1 and 2 in CI, and they read different things.
+   `cargo xtask lint-licensing` reads the **source**: SPDX headers, a permissive
+   file naming the imported tree, and a `#[path]` attribute spelling a route into
+   it. `cargo xtask lint-boundary` reads the **build**: cargo's own resolved view
+   of the workspace, every dep-info rustc wrote, and three surfaces that are
+   prohibited rather than inspected — the permissive tree carries no build
+   script, no symlink, and no `.cargo/config.toml` row or ambient `RUSTFLAGS`
+   naming the import.
+
+   The split is the point rather than an accident of history. A route can be
+   spelled in more ways than a matcher can enumerate — whitespace and comments
+   are admitted between every token of a `#[path]` attribute, an escaped literal
+   spells the underscore without writing it, and a symlink names the imported
+   tree in no file at all — so the second command stops reading spellings and
+   reads what the compiler says it opened. What the first command is still for is
+   the one thing the second cannot do: see code the build never compiled, behind
+   a `cfg` or a feature that `lint` does not enable.
+
+   **What they do not cover is named rather than left as a remainder**, because
+   a rule that claims everything is a rule nobody can check: a route behind a
+   configuration `lint` never compiles, a proc macro that reads an imported file
+   at expansion time, and a copy taken by registry name from somewhere that is
+   not `third_party/` — which is `deny.toml`'s ground rather than this file's.
+   RFC 0092 holds the argument and the reversal conditions.
