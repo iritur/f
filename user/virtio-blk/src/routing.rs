@@ -53,7 +53,13 @@
 /// so a frame that forgot to set one gets an announcement rather than a driver
 /// that drives nothing.
 pub mod life {
-    /// Announce and end. What `component::demonstrate` spawns into a place.
+    /// Announce and end.
+    ///
+    /// What `component::demonstrate` spawns into a place, and — since the
+    /// `blk=place` half — what it then hands a core. So this selector is no
+    /// longer only the life a spawn *names*: it is the one a place's occupant
+    /// has actually run, which is why it stays a selector of its own rather
+    /// than becoming the absence of one.
     pub const ANNOUNCE: u32 = 0;
     /// Serve the data ring until the frame says stop.
     pub const SERVE: u32 = 1;

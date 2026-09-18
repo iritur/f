@@ -49,14 +49,24 @@
 //!
 //! # What it does *not* do, said rather than implied
 //!
-//! It is not spawned into the place `kernel/src/component.rs` builds for it.
-//! The frame stands this instance up the way `kernel/src/runtime.rs` stands a
-//! runtime up — image, account-less, needs unchecked — because the supervisor
-//! that would hand a *place's* occupant a core is the ring-3 supervisor E1-B05
-//! still owes. So the sentence this component now supports is *the code that
-//! serves the datapath runs at ring 3 in its own loop*, and not yet *the
-//! occupant of a place serves the datapath*. `CHAOS_GAP` in xtask is what
-//! carries the difference, shrunk to exactly that.
+//! The instance that serves is not the occupant of the place
+//! `kernel/src/component.rs` builds for it. The frame stands the serving one up
+//! the way `kernel/src/runtime.rs` stands a runtime up — image, account-less,
+//! needs unchecked — and points a client at it.
+//!
+//! The place's occupant is no longer idle, though, and the difference is worth
+//! keeping exact. On the `blk=place` half that place is supplied with the
+//! device window it cannot carve, and its occupant *is* handed a core: it
+//! enters at [`start`] with [`crate::routing::life::ANNOUNCE`], says so through
+//! a door, and ends. What it does not do is serve, because serving means
+//! running while a client submits and reading a routing board this manifest
+//! declares no need for.
+//!
+//! So the sentence this component supports is *the code that serves the
+//! datapath runs at ring 3 in its own loop*, plus *a place's occupant holding
+//! the device window runs at ring 3 too*, and not yet *the occupant of a place
+//! serves the datapath*. `CHAOS_GAP` in xtask is what carries the difference,
+//! and it names what is left.
 
 use f_abi::control::{is_notice, notice};
 use f_abi::deadline::Admitted;

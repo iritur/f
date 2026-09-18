@@ -894,7 +894,8 @@ cargo xtask <command>
                      unit: inside, which must land, or outside, which must
                      fault and land nothing. Both with no argument
   blk place          E1-B05: the driver's place, supplied with the device window
-                     it cannot carve. Not in `blk` with no argument: unfinished
+                     it cannot carve, and its occupant given a core. Not in `blk`
+                     with no argument: it does not serve a client yet
   blk [half]         Boot the block datapath: a driver component moves a sector
                      through a ring with nothing copied — inside; the same run
                      with the client's grant withdrawn must fault — outside; and
@@ -3355,9 +3356,15 @@ fn heap_reading(log: &str) -> Result<(u32, u32, bool), String> {
 ///    may allocate or hand back. `Supplied` and `Placement` in
 ///    `kernel/src/component.rs` are that, and `offer` sources a named need from
 ///    the caller with the extent checked against the manifest;
-/// 2. that occupant scheduled on the worker core, which is `schedule_occupant`
-///    without the `run_on` that follows it in `consult` — the driver has to run
-///    *concurrently* with the client rather than to completion;
+/// 2. that occupant scheduled on the worker core. Half of this exists: `cargo
+///    xtask blk place` hands it one and the boot prints `scheduled     place
+///    virtio-blk`, so a driver's place occupant has reached ring 3. What is left
+///    is the word *concurrently* — that run is `schedule_occupant` followed by
+///    `run_on`, which waits, and a driver has to be running **while** its client
+///    submits. That is `smp::start_on`, and it brings a second question with it:
+///    the driver reads where its device landed off a routing board, and
+///    `user/virtio-blk/manifest.toml` declares no `board` need, so the manifest
+///    moves and with it the hash a spawn names;
 /// 3. the boot's order, which is the part with the widest blast radius:
 ///    `blk_datapath` runs at `main.rs`'s line 877 and `component::demonstrate`
 ///    at 1005, so today the device is found long before the place exists. One of
@@ -9894,20 +9901,32 @@ fn iommu(kind: Option<&str>) -> Result<(), String> {
 ///
 /// # What this asserts today, stated narrowly on purpose
 ///
+/// Two things, and they are the first two of the three `CHAOS_GAP` names.
+///
 /// That a place is filled with a **supplied** need rather than a carved one:
 /// the register span the bus reported, mapped uncached at the address the
 /// driver shape reserves, and the queue memory whole. That is the half of
 /// `CHAOS_GAP` which had no mechanism at all before this.
 ///
-/// What it does **not** assert is the other half: that the occupant in that
-/// place is the one serving a client's load. Nothing is scheduled here yet.
-/// Saying so is the point — a half-built path that reported success would be
-/// the shape `E0-B16` and `E0-B12` both record being bitten by.
+/// And that **the occupant of that place is given a core**: it reaches ring 3,
+/// announces itself through a door, and ends. Until this half there was exactly
+/// one component in this tree whose place occupant had ever run — the
+/// supervisor — and a driver holding a device window is the second.
+///
+/// What it does **not** assert is the third: that the occupant is the one
+/// serving a client's load. It cannot be yet, and the reason is structural
+/// rather than unfinished — a driver answers entries *while* its client submits
+/// them, which is `smp::start_on` and not the run-to-completion this uses, and
+/// it reads where its device landed off a routing board
+/// `user/virtio-blk/manifest.toml` declares no need for. Saying so is the point:
+/// a half-built path that reported success would be the shape `E0-B16` and
+/// `E0-B12` both record being bitten by.
 ///
 /// # Errors
 ///
-/// A boot that did not reach `M0 ok`, or one whose log does not carry the line
-/// saying the place was supplied.
+/// A boot that did not reach `M0 ok`, one whose log does not carry the line
+/// saying the place was supplied, or one where that place's occupant was never
+/// given a core.
 fn blk_place() -> Result<(), String> {
     println!("--- blk=place: the driver's place is supplied with the window it cannot carve");
     let disk = blk_disk()?;
@@ -9933,10 +9952,22 @@ fn blk_place() -> Result<(), String> {
              before suspecting the supply."
             .into());
     }
+    if !log.contains("scheduled     place virtio-blk") {
+        return Err("the place was supplied and its occupant was never given a core.\n\n\
+             These are two separate acts in `component::demonstrate` and this is the\n\
+             second: `supplied_place` finds the place the supply names and `run_ring3`\n\
+             hands its occupant the worker core. A boot that printed the supply line and\n\
+             not this one has a supply whose component label does not match any place's\n\
+             manifest — or no second core, which `cargo xtask blk place` does not run\n\
+             without."
+            .into());
+    }
     println!(
-        "\nblk=place: ok — the place holds a real device window, supplied rather than carved.\n\
-         \x20 What it does not yet hold is a scheduled occupant serving a client, which is\n\
-         \x20 why `CHAOS_GAP` still carries its row and the other three halves still run\n\
+        "\nblk=place: ok — the place holds a real device window, supplied rather than carved,\n\
+         \x20 and its occupant reached ring 3 on a core of its own.\n\
+         \x20 What it does not yet do is serve a client from there, which needs the driver\n\
+         \x20 running concurrently with one and a routing board its manifest does not\n\
+         \x20 declare — so `CHAOS_GAP` keeps its row and the other three halves still run\n\
          \x20 on `prepare_driver`."
     );
     Ok(())
@@ -9955,9 +9986,9 @@ const BLK_PROVOCATIONS: &[(&str, &str)] = &[
 ///
 /// Because the table is what `cargo xtask blk` runs with no argument, and that
 /// is a gate. This half is unfinished by construction: it supplies the place
-/// and does not yet serve a client through it, so putting it in the default set
-/// would either fail the gate or — worse — pass it while asserting less than
-/// the other three do.
+/// and schedules its occupant, and does not yet serve a client through it, so
+/// putting it in the default set would either fail the gate or — worse — pass
+/// it while asserting less than the other three do.
 ///
 /// It leaves the table on the day it serves a client and survives three kills,
 /// which is also the day `CHAOS_GAP`'s last row goes. Until then the existing
