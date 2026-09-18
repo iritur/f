@@ -840,6 +840,7 @@ fn main() -> ExitCode {
         "release" => release(args.get(1).map(String::as_str)),
         "history" => match args.get(1).map(String::as_str) {
             Some("append") => history_append(),
+            Some("--changes") => history_changes(),
             Some(other) => Err(format!("unknown option for history: {other}")),
             None => history(),
         },
@@ -1047,6 +1048,7 @@ cargo xtask <command>
   lint-claim-runs    every gating claim is compared to its bounds by some workflow
   lint-generations   every generation round-trips to a fixpoint
   lint-gate          the pull-request gate runs every check `verify` runs
+  history --changes  where the recorded series stepped, rather than what crossed a bound
   lint-manifests     Every component manifest fits docs/manifest.md; RFC 0005
                      rule 4 and RFC 0008's shape, checked before a spawn does
   lint-components    The components this tree declares are the components it
@@ -13425,7 +13427,7 @@ fn lint_debt() -> Result<(), String> {
     let mut report = String::new();
     if !missing.is_empty() {
         report.push_str(&format!(
-            "These task(s) cite RFC 0093 in TODO.md and have no row in {rel}:\n  {}\n\n\
+            "These task(s) declare a narrowing under RFC 0093 and have no row in {rel}:\n  {}\n\n\
              Each one has closed against less than its exit asked for. Add the row: the\n\
              clause verbatim, the blocker, what the virtual machine established in its\n\
              place, and what would close it.\n\n",
@@ -13468,18 +13470,36 @@ fn register_rows(page: &str) -> BTreeSet<String> {
     out
 }
 
-/// The tasks whose `TODO.md` entry cites RFC 0093.
+/// The tasks whose `TODO.md` entry declares that it lost a clause to RFC 0093.
 ///
-/// An entry runs from its `- [ ]` line to the next one, so a citation anywhere
-/// in the body counts — the narrowing is argued in the prose and the exit line
-/// is only where it lands.
+/// # Why a bare citation is not enough, found by this check going wrong
+///
+/// It used to match any entry containing `RFC 0093`, on the reasoning that the
+/// narrowing is argued in the prose and the exit line is only where it lands.
+/// That was true of every narrowing, and also true of `E1-R02`, which merely
+/// *mentions* the RFC while explaining that two claims it waits on are recorded
+/// under it. The check then demanded a register row for a task that had not been
+/// narrowed at all.
+///
+/// So a narrowing declares itself: `narrowed under RFC 0093` for a task that
+/// kept a half worth closing on, `Owed under RFC 0093` for one that was nothing
+/// but the measurement. Those are the two shapes the RFC names, in the words its
+/// own *What a narrowed task is marked* section uses. A task may then discuss
+/// the RFC freely without being conscripted by it, which is something a graph
+/// entry has to be able to do — `E1-R02`'s whole purpose is naming what a
+/// release does not contain and why.
+///
+/// An entry runs from its `- [ ]` line to the next one, so the declaration may
+/// sit anywhere in the body rather than only on the exit line.
 fn narrowed_tasks(graph: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut current: Option<String> = None;
     let mut body = String::new();
     let flush = |id: &Option<String>, body: &str, out: &mut BTreeSet<String>| {
         if let Some(id) = id
-            && body.contains("RFC 0093")
+            && (body.contains("narrowed under RFC 0093")
+                || body.contains("narrowed out under RFC 0093")
+                || body.contains("Owed under RFC 0093"))
         {
             out.insert(id.clone());
         }
@@ -17917,6 +17937,421 @@ fn history_append() -> Result<(), String> {
              E0-P15. The record still exists, because a gap that is stated is\n\
              something a trend can reason about and a gap that is missing is not."
         );
+    }
+    Ok(())
+}
+
+/// How many records each side of a candidate split must have.
+///
+/// Five, so a step is judged against five readings rather than against one, and
+/// so the smallest history this can say anything about is ten records. Smaller
+/// windows find steps in noise; larger ones need a history this project will not
+/// have for months. It is a constant rather than a tuned parameter because a
+/// detector whose window moves when a run goes red is a threshold with extra
+/// steps, which is the thing `E2-P09` exists to replace.
+/// Unit: records.
+const WINDOW: usize = 5;
+
+/// How many times the observed spread a shift must exceed before it is called a
+/// change rather than noise.
+///
+/// Three. The spread is a median absolute deviation, so for a series whose
+/// scatter is symmetric this is roughly two deviations — the point at which "it
+/// moved" stops competing with "it wobbled". A detector without this term
+/// reports every series with any scatter in it, which is precisely the failure a
+/// fixed threshold has and the reason this task exists.
+/// Unit: none — a multiplier on a deviation.
+const SPREAD_FACTOR: u64 = 3;
+
+/// A step this detector is willing to call.
+#[derive(Debug, PartialEq, Eq)]
+struct Step {
+    /// The index the series changed at: the first record on the later side.
+    /// Unit: index into the series.
+    at: usize,
+    /// The median of the [`WINDOW`] records before it. Unit: the series' own.
+    before: u64,
+    /// The median of the [`WINDOW`] records from it. Unit: the series' own.
+    after: u64,
+    /// How far it moved, signed, against the earlier median.
+    /// Unit: parts per thousand.
+    per_mille: i64,
+}
+
+/// The largest step in a series, if there is one worth calling.
+///
+/// # Why this replaces a threshold
+///
+/// A threshold answers *is this number bad* and needs somebody to have known
+/// what bad was before the system existed. This answers *did this number
+/// change*, which is a question about the series rather than about anybody's
+/// prior, and `claims/README.md` rule 5 is where the project decided that is the
+/// one worth asking: thresholds *"either miss real regressions or fire until
+/// everyone mutes them"*.
+///
+/// # How it decides, and why the arithmetic is what it is
+///
+/// Medians and a median absolute deviation, both integer, both over sorted
+/// copies of a window. No mean and no variance — and not only because RFC 0004
+/// rules out the arithmetic those usually reach for. A mean is dragged by one
+/// outlier, and a measurement history's outliers are exactly the runs where
+/// something unrelated went wrong on the machine. The median is what makes *one
+/// bad afternoon* not a change point.
+///
+/// A candidate split is called a step when both hold:
+///
+/// 1. it moved by at least `sensitivity_per_mille` against the earlier median,
+///    which is the size a reader asked about; and
+/// 2. it moved by more than [`SPREAD_FACTOR`] times the larger of the two
+///    windows' own scatter, which is what stops a noisy series reporting a step
+///    everywhere.
+///
+/// The second is the one that matters. Without it this is a threshold again,
+/// wearing a different number.
+///
+/// # What it cannot do
+///
+/// Say whether *this system's* run-to-run noise sits below the bar. That needs a
+/// gating claim which has run repeatedly on `runner-class-A`, which begins at
+/// `E0-P06` and is a row in `docs/TECHNICAL-DEBT.md`. What is testable here is
+/// the detector's behaviour against a **stated** noise model, and the tests
+/// state theirs rather than implying the real one is known.
+///
+/// It also finds at most one step — the largest — because a history with two
+/// genuine change points is a history somebody should read rather than one this
+/// should summarise.
+fn change_point(series: &[u64], sensitivity_per_mille: u64) -> Option<Step> {
+    if series.len() < WINDOW * 2 {
+        return None;
+    }
+
+    let mut best: Option<Step> = None;
+    for at in WINDOW..=series.len() - WINDOW {
+        let before = median(&series[at - WINDOW..at]);
+        let after = median(&series[at..at + WINDOW]);
+        if before == 0 {
+            continue;
+        }
+
+        let moved = after.abs_diff(before);
+        let spread = deviation(&series[at - WINDOW..at]).max(deviation(&series[at..at + WINDOW]));
+        if moved <= spread.saturating_mul(SPREAD_FACTOR) {
+            continue;
+        }
+
+        // Against the earlier median, so the number reads as *this much
+        // different from what it was* rather than as a share of where it ended
+        // up.
+        let size = moved.saturating_mul(1000) / before;
+        if size < sensitivity_per_mille {
+            continue;
+        }
+        let size = i64::try_from(size).unwrap_or(i64::MAX);
+        let per_mille = if after < before { -size } else { size };
+
+        if best.as_ref().is_none_or(|found| per_mille.abs() > found.per_mille.abs()) {
+            best = Some(Step { at, before, after, per_mille });
+        }
+    }
+    best
+}
+
+/// The middle value of a window, by value rather than by position.
+///
+/// Sorts a copy: the windows here are five long, and a sort nobody can get wrong
+/// is worth more than an allocation nobody will notice. The even case takes the
+/// lower of the two middles rather than averaging them, because averaging
+/// introduces a value the series never held — a small lie in a function whose
+/// whole job is to be robust about what was actually seen.
+fn median(window: &[u64]) -> u64 {
+    let mut sorted = window.to_vec();
+    sorted.sort_unstable();
+    sorted.get(sorted.len().saturating_sub(1) / 2).copied().unwrap_or(0)
+}
+
+/// The median absolute deviation of a window: how far a typical reading sits
+/// from the typical reading.
+///
+/// The robust counterpart of the usual scatter measure, and chosen for the
+/// reason the median was. One catastrophic run in a window inflates the usual
+/// one enough to hide a real step behind it; it moves this by one place in the
+/// sort.
+fn deviation(window: &[u64]) -> u64 {
+    let middle = median(window);
+    let mut spread: Vec<u64> = window.iter().map(|value| value.abs_diff(middle)).collect();
+    spread.sort_unstable();
+    spread.get(spread.len().saturating_sub(1) / 2).copied().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod change_point_tests {
+    use super::{SPREAD_FACTOR, WINDOW, change_point};
+
+    /// The sensitivity `E2-P09`'s exit names: three per cent.
+    const THREE_PERCENT: u64 = 30;
+
+    /// A repeating wobble, applied to a base so a series has scatter without
+    /// needing randomness.
+    ///
+    /// Deterministic on purpose and not as a concession: RFC 0004 puts every
+    /// source of randomness behind `Env`, and a test whose noise came from a
+    /// generator would be a test whose failures depend on a seed nobody
+    /// recorded. The pattern is stated here so that what "noise" means in these
+    /// tests is a thing a reader can see rather than a distribution they have to
+    /// trust. **Its amplitude is the stated noise model, and it is the only
+    /// noise model this file establishes anything about.**
+    ///
+    /// # Why its period is [`WINDOW`] and what that deliberately excludes
+    ///
+    /// Five values with a median of zero, so every window this test takes has
+    /// the base as its median exactly. That isolates the property under test —
+    /// *does the detector call a step of this size* — from a second one that is
+    /// not: how much the median of a five-sample window wanders when the noise
+    /// is not aligned to it.
+    ///
+    /// That second property is real and was found by getting it wrong. With a
+    /// six-long pattern the windows see different multisets, a nominal
+    /// thirty-unit step came out of the medians as **twenty-nine**, and a test
+    /// asserting "a 3% injection is found at a 3% bar" failed against a detector
+    /// doing exactly what it should. The lesson is kept rather than tidied away:
+    /// *injecting* a 3% step and *the medians differing by* 3% are two claims,
+    /// and only the second is what a detector can act on.
+    ///
+    /// **Real noise is not period-aligned**, so a real 3% regression will
+    /// sometimes measure below any bar set at 3%. How often is a question about
+    /// this system's own scatter, which needs a claim that has run repeatedly on
+    /// `runner-class-A` — one more reason the second half of `E2-P09`'s exit is
+    /// a row in `docs/TECHNICAL-DEBT.md` and not a test here.
+    const WOBBLE: [i64; WINDOW] = [0, 3, -3, 1, -1];
+
+    fn noisy(base: u64, count: usize) -> Vec<u64> {
+        (0..count)
+            .map(|i| {
+                u64::try_from(i64::try_from(base).unwrap() + WOBBLE[i % WOBBLE.len()]).unwrap()
+            })
+            .collect()
+    }
+
+    /// The first half of `E2-P09`'s exit: a 3% regression injected into the
+    /// history is detected.
+    #[test]
+    fn a_three_percent_regression_is_found() {
+        let mut series = noisy(1000, WINDOW * 2);
+        for value in &mut series[WINDOW..] {
+            *value += 30;
+        }
+
+        let step = change_point(&series, THREE_PERCENT).expect("a 3% step is a step");
+        assert_eq!(step.at, WINDOW, "the step is where the injection was");
+        assert!(step.per_mille >= 30, "reported {} per mille", step.per_mille);
+    }
+
+    /// The second half, against the noise model this file states: ordinary
+    /// run-to-run scatter over the same period is not reported.
+    ///
+    /// This is the control, and without it the test above passes against a
+    /// detector that reports a step everywhere. What it does **not** establish
+    /// is that this system's real noise sits below the bar — that needs a claim
+    /// which has run repeatedly on `runner-class-A`, and is a row in
+    /// `docs/TECHNICAL-DEBT.md`.
+    #[test]
+    fn the_same_noise_without_a_step_is_not_reported() {
+        let series = noisy(1000, WINDOW * 4);
+        assert_eq!(
+            change_point(&series, THREE_PERCENT),
+            None,
+            "scatter alone is not a change point, or the spread term is not doing its job"
+        );
+    }
+
+    /// An improvement is a change point too, and is reported as a negative.
+    ///
+    /// A detector that only saw regressions would be a threshold facing one
+    /// direction, and would miss the case this project most wants to catch by
+    /// accident: a number that got better because a workload stopped doing the
+    /// work.
+    #[test]
+    fn a_step_down_is_reported_and_is_signed() {
+        let mut series = noisy(1000, WINDOW * 2);
+        for value in &mut series[WINDOW..] {
+            *value -= 30;
+        }
+
+        let step = change_point(&series, THREE_PERCENT).expect("a 3% fall is a step");
+        assert!(step.per_mille <= -30, "reported {} per mille", step.per_mille);
+        assert!(step.after < step.before);
+    }
+
+    /// The spread term, stated as its own test rather than inferred from the
+    /// control above.
+    ///
+    /// The same 3% step, on a series whose scatter is wide enough to explain it,
+    /// is not reported. This is the property that makes the detector different
+    /// from a threshold, and it is the one a future change is most likely to
+    /// remove without noticing — because removing it makes every other test here
+    /// pass more easily.
+    #[test]
+    fn a_step_inside_the_noise_is_not_reported() {
+        // Scatter of ±40 around 1000: a 30 step is well inside three times a
+        // deviation this wide. Period-aligned for `WOBBLE`'s reason.
+        let wide: [i64; WINDOW] = [0, 40, -35, 25, -40];
+        let mut series: Vec<u64> =
+            (0..WINDOW * 2).map(|i| u64::try_from(1000 + wide[i % wide.len()]).unwrap()).collect();
+        for value in &mut series[WINDOW..] {
+            *value += 30;
+        }
+
+        assert_eq!(
+            change_point(&series, THREE_PERCENT),
+            None,
+            "a step smaller than {SPREAD_FACTOR} deviations is not distinguishable from the \
+             scatter it sits in"
+        );
+    }
+
+    /// A history too short to judge says nothing rather than guessing.
+    ///
+    /// The alternative — a detector that reports on three records — is how a
+    /// trend line gets drawn through a project's first afternoon.
+    #[test]
+    fn too_short_a_history_is_not_a_verdict() {
+        for count in 0..WINDOW * 2 {
+            assert_eq!(
+                change_point(&noisy(1000, count), THREE_PERCENT),
+                None,
+                "{count} record(s) is not enough to call a step"
+            );
+        }
+    }
+
+    /// A flat series has no step, whatever the sensitivity.
+    ///
+    /// The degenerate case, and worth pinning because a deviation of zero makes
+    /// the spread term `0 * SPREAD_FACTOR`, which any positive move exceeds —
+    /// so a flat series with one different reading in it is the shape most
+    /// likely to produce a spurious verdict.
+    #[test]
+    fn a_flat_series_has_no_step() {
+        assert_eq!(change_point(&[1000; WINDOW * 4], THREE_PERCENT), None);
+    }
+
+    /// And the sensitivity is honoured: the same step, asked about at a bar it
+    /// does not clear, is not reported.
+    #[test]
+    fn a_step_below_the_sensitivity_asked_for_is_not_reported() {
+        let mut series = noisy(1000, WINDOW * 2);
+        for value in &mut series[WINDOW..] {
+            *value += 30;
+        }
+
+        assert!(change_point(&series, THREE_PERCENT).is_some(), "3% at a 3% bar");
+        assert_eq!(
+            change_point(&series, 100),
+            None,
+            "the same 3% step asked about at 10% is not a 10% step"
+        );
+    }
+}
+
+/// The sensitivity `E2-P09`'s exit names, and what a reader asking "did this
+/// regress" means by the question.
+///
+/// Three per cent, expressed where the arithmetic is: per thousand. It is not a
+/// threshold on a value — nothing here says what a good coverage percentage is
+/// — it is the size of *move* worth interrupting somebody about.
+/// Unit: parts per thousand.
+const CHANGE_SENSITIVITY: u64 = 30;
+
+/// Read the recorded history and say where it stepped.
+///
+/// # What this is for
+///
+/// `claims/README.md` rule 5: *regression detection is change-point, not
+/// threshold. Thresholds either miss real regressions or fire until everyone
+/// mutes them.* This is that rule with something behind it. `history_append`
+/// has been writing records since `E0-P11` against the day a detector existed,
+/// and its own doc says so — *"meant to be read years later by change-point
+/// detection that does not exist yet"*.
+///
+/// # What it can read today, and what it cannot
+///
+/// `coverage_percent`, because a line count is the same on any machine and is
+/// the one thing a shared runner may contribute. Every distribution in the
+/// registry is a timing or a ratio of timings, and the harness refuses to record
+/// those outside a measurement environment — so on every machine this project
+/// can reach the history holds coverage and stated gaps, not distributions.
+///
+/// That is the honest half of `E2-P09`. The other half of its exit — *ordinary
+/// run-to-run noise over the same period is not* detected — is about **this
+/// system's** noise, which needs a gating claim that has run repeatedly on
+/// `runner-class-A`. It is a row in `docs/TECHNICAL-DEBT.md` rather than a
+/// number invented here.
+///
+/// # Why it reports and does not gate
+///
+/// Because it has nothing to gate on yet: two coverage readings are not a
+/// series. Wiring it into `lint` today would be a check that cannot fail, which
+/// this tree has twice recorded the fate of. The reversal is written here: when
+/// a claim's own series reaches [`WINDOW`] * 2 records on a recording machine,
+/// this stops being a verb somebody runs and becomes a line in the gate.
+///
+/// # Errors
+///
+/// A history file that is there and cannot be read. A history that is absent, or
+/// too short to judge, is an answer rather than a failure.
+fn history_changes() -> Result<(), String> {
+    let path = history_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!("history --changes: nothing recorded yet ({})", relative(&path));
+        return Ok(());
+    };
+
+    // One field, and the parse is deliberately narrow: a percentage written as
+    // `87.5`, read as 875 per thousand. Fixed point with its scale in the name,
+    // because RFC 0004 rules out the obvious way to hold a percentage and
+    // because a detector that rounded its own inputs differently from the file
+    // would be comparing two series.
+    let mut series: Vec<u64> = Vec::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let Some(rest) = line.split("\"coverage_percent\":").nth(1) else { continue };
+        let value = rest.trim_start().split([',', '}']).next().unwrap_or("").trim();
+        if value == "null" {
+            continue;
+        }
+        let (whole, fraction) = value.split_once('.').unwrap_or((value, "0"));
+        let Ok(whole) = whole.parse::<u64>() else { continue };
+        let tenths = fraction.as_bytes().first().map_or(0, |b| u64::from(b.saturating_sub(b'0')));
+        series.push(whole.saturating_mul(10).saturating_add(tenths.min(9)));
+    }
+
+    println!(
+        "history --changes: {} record(s), {} with a coverage reading",
+        text.lines().filter(|line| !line.trim().is_empty()).count(),
+        series.len()
+    );
+
+    if series.len() < WINDOW * 2 {
+        println!(
+            "\n{} reading(s) is fewer than the {} this needs to say anything.\n\
+             A trend drawn through a project's first afternoon is not a trend, so\n\
+             this reports the shortfall rather than a verdict.",
+            series.len(),
+            WINDOW * 2
+        );
+        return Ok(());
+    }
+
+    match change_point(&series, CHANGE_SENSITIVITY) {
+        None => println!(
+            "\ncoverage_per_mille: no step of {CHANGE_SENSITIVITY} per thousand or more that \
+             the series' own scatter does not explain."
+        ),
+        Some(step) => println!(
+            "\ncoverage_per_mille: stepped at record {} — {} to {}, {} per thousand.\n\
+             \x20 The bound is not what moved; the series is. Read the commits either side\n\
+             \x20 of that record rather than the number against a threshold.",
+            step.at, step.before, step.after, step.per_mille
+        ),
     }
     Ok(())
 }
