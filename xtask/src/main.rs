@@ -3364,9 +3364,25 @@ const CHAOS_GAP: &[Gap] = &[(
 ///   this project can reach — TCG implements no part of UINTR and no `-cpu`
 ///   model advertises the bit. `E1-B09` needs that path to execute; `E1-P10`
 ///   needs `E1-B09`.
-/// - **There is no machine.** All four are times, and `f_bench::Environment`
-///   refuses to record one where `F_ENVIRONMENT=container`. `E0-D10` owns
-///   obtaining a machine that may.
+/// - **There is no machine.** One of the four is a time — *ring submit under
+///   load* — and `f_bench::Environment` refuses to record one where
+///   `F_ENVIRONMENT=container`. `E0-D10` owns obtaining a machine that may.
+///
+/// **This row said *all four are times*, and three of them are counts.**
+/// Doorbells per operation, copies per operation and kernel entries per
+/// operation are counts, identical on any host that runs the binary, and this
+/// tree's own rule is that *a count may gate on this machine and a time may
+/// not*. `RELEASING.md` carried the same sentence and contradicted it two
+/// sentences earlier, describing the doorbell figure as a count.
+///
+/// The correction does not empty this row, and narrowing rather than emptying
+/// is what `gap_holds` asks for: the time is still owed to a machine, so the
+/// row stands over one number instead of four. What it does mean is that three
+/// of these are **work rather than debt** — `E1-P10` can register them from
+/// here, against boots this tree already runs, and `kernel/src/blk.rs` already
+/// asserts `copies == 0` with a provocation behind it on every datapath boot.
+/// A gap whose stated reason is wrong is worse than an undeclared one, because
+/// the reason is what the next reader checks instead of the tree.
 ///
 /// Neither substitutes for the other, and the row that goes first says which
 /// half of the section in `RELEASING.md` has stopped being true. The day both

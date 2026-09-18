@@ -127,12 +127,22 @@ reports a doorbell count over the two operations a self-test performs, which is
 deliberately not registered as a claim, because a count over two operations is
 not *doorbells per operation under load*.
 
-**There is no machine.** All four are times. `bench/src/lib.rs` refuses to
-record a timing where `F_ENVIRONMENT=container`, and that refusal is the harness
+**There is no machine — for one of them.** `bench/src/lib.rs` refuses to record
+a timing where `F_ENVIRONMENT=container`, and that refusal is the harness
 working rather than failing — a number with no environment attached is how a
 benchmark becomes marketing. `E0-D10` owns obtaining the class-A machine that is
 allowed to record one; it has not been obtained. Every timing claim in the
-registry is `pending` for that single reason, not for four different ones.
+registry is `pending` for that single reason, not for several different ones.
+
+This paragraph said **all four are times**, and it was wrong in a way the
+paragraph above it already shows: *doorbells per operation* is described there
+as a count. Three of the four are counts — doorbells, copies and kernel entries
+per operation — and the rule this project states everywhere else is that **a
+count may gate on this machine and a time may not**. So only *ring submit under
+load* is waiting on `E0-D10`. The other three are waiting on `E1-P10`
+registering them, which is work rather than debt, and `kernel/src/blk.rs`
+already asserts `copies == 0` with a provocation behind it on every datapath
+boot. Saying otherwise turned three buildable claims into a purchase order.
 
 So **the four datapath claims cannot be produced on any machine this project
 currently has**, and 0.2 goes out without them or does not go out. The contract
