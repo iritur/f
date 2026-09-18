@@ -998,6 +998,14 @@ pub struct Report {
 /// `frames` rebound onto its direct map, and the direct map covering every boot
 /// module. No process may be running: this builds address spaces and capability
 /// tables of its own.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "`fill` one function down makes this argument at length and this is that list \
+              plus the two the demonstration itself needs: the core an occupant may be given, \
+              and what this boot found that a place cannot carve for itself. Bundling them \
+              would be a type that exists so a lint passes, which `runtime::demonstrate` \
+              already declined for this reason"
+)]
 pub unsafe fn demonstrate(
     frames: &mut FrameAllocator,
     kernel: &paging::AddressSpace,
@@ -2045,13 +2053,6 @@ pub enum Placement {
     /// Mapped writable at a fixed user address, with caching left on. Queue
     /// memory: ordinary RAM a device will read.
     Cached(u64),
-    #[allow(
-        dead_code,
-        reason = "the third placement a supplied need can take, \
-        written with the other two because the set is the decision rather than \
-        the two that happen to have a caller today: a need granted and not \
-        mapped is what a component that maps for itself would be given"
-    )]
     /// Mapped writable at a fixed user address with caching **off**. A device
     /// register window, where a stale read is a wrong answer about hardware
     /// state rather than a slow one.

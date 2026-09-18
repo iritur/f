@@ -1002,9 +1002,10 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // ordinary boot has none — `MACHINE` passes `-net none` and the block
     // device is behind its own parameter.
     //
-    // SAFETY: the boot processor, with the kernel's space in `CR3`; `remapping`
-    // is this boot's own unit and nothing else is walking the bus.
     let mut queues = None;
+    // SAFETY: the boot processor, with the kernel's space in `CR3`; `remapping`
+    // is this boot's own unit and nothing else is walking the bus, so the device
+    // lookup inside is the only one this boot makes.
     let supplied =
         unsafe { blk_place_supply(&boot, &mut frames, &space, features, &remapping, &mut queues) };
     // SAFETY: the boot processor, once, with the kernel's address space in
