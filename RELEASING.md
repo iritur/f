@@ -134,15 +134,25 @@ benchmark becomes marketing. `E0-D10` owns obtaining the class-A machine that is
 allowed to record one; it has not been obtained. Every timing claim in the
 registry is `pending` for that single reason, not for several different ones.
 
-This paragraph said **all four are times**, and it was wrong in a way the
-paragraph above it already shows: *doorbells per operation* is described there
-as a count. Three of the four are counts — doorbells, copies and kernel entries
-per operation — and the rule this project states everywhere else is that **a
-count may gate on this machine and a time may not**. So only *ring submit under
-load* is waiting on `E0-D10`. The other three are waiting on `E1-P10`
-registering them, which is work rather than debt, and `kernel/src/blk.rs`
-already asserts `copies == 0` with a provocation behind it on every datapath
-boot. Saying otherwise turned three buildable claims into a purchase order.
+This paragraph said **all four are times** and that was wrong; the correction
+that replaced it said three of the four are counts this machine may gate on,
+and that was wrong too. Both are recorded because the second mistake is the
+more instructive one.
+
+**Two** of the four are counts a container may take: *copies per operation* and
+*kernel entries per operation* are bytes and entries a deterministic kernel
+produced against an emulated device. `claims/0036 copies-per-operation` gates
+on the first of those today, so this is measured rather than argued.
+
+*Doorbells per operation* has a count's unit and a time's behaviour. The number
+the design cares about is **zero under load**, and whether a producer needs to
+ring depends on where the consumer is in its drain — which under TCG is the
+emulator's scheduling of two vCPUs against a host clock it does not control.
+`E0-B15` had already declined to register the boot's figure for exactly that
+reason: *500 per 1000 operations* out of a two-operation self-test is an
+artefact of the sample. So it waits on `E0-D10` beside *ring submit under
+load*, and the first correction's error was quoting `E0-B15` approvingly and
+then contradicting it one clause later.
 
 So **the four datapath claims cannot be produced on any machine this project
 currently has**, and 0.2 goes out without them or does not go out. The contract

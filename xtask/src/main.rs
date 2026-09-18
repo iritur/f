@@ -3368,12 +3368,25 @@ const CHAOS_GAP: &[Gap] = &[(
 ///   load* — and `f_bench::Environment` refuses to record one where
 ///   `F_ENVIRONMENT=container`. `E0-D10` owns obtaining a machine that may.
 ///
-/// **This row said *all four are times*, and three of them are counts.**
-/// Doorbells per operation, copies per operation and kernel entries per
-/// operation are counts, identical on any host that runs the binary, and this
-/// tree's own rule is that *a count may gate on this machine and a time may
-/// not*. `RELEASING.md` carried the same sentence and contradicted it two
-/// sentences earlier, describing the doorbell figure as a count.
+/// **This row said *all four are times*, and it was wrong — but the correction
+/// that replaced it was wrong too, and this is the second attempt.**
+///
+/// The first correction said three of the four are counts *identical on any
+/// host that runs the binary*. Two of them are: copies per operation and kernel
+/// entries per operation are bytes and entries a deterministic kernel produced
+/// against an emulated device, and `claims/0036` gates on the first of those
+/// today. **Doorbells per operation is not**, and its own crate says why: the
+/// number the design cares about is *zero under load*, and whether a producer
+/// needs to ring depends on where the consumer is in its drain — which under
+/// TCG is the emulator's scheduling of two vCPUs. A count whose value depends
+/// on timing is not a count this machine may gate on, whatever its unit says.
+///
+/// `E0-B15` had already reached that conclusion and declined to register the
+/// boot's figure for exactly this reason: *500 per 1000 operations* out of a
+/// two-operation self-test is an artefact of the sample, not a measurement of
+/// suppression. The first correction quoted `E0-B15` approvingly and then
+/// contradicted it one clause later, which is how a fix inherits the shape of
+/// what it fixed.
 ///
 /// The correction does not empty this row, and narrowing rather than emptying
 /// is what `gap_holds` asks for: the time is still owed to a machine, so the
