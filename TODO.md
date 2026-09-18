@@ -45,6 +45,16 @@ rather than a plan only its author can execute.
 marked `[~]` with a one-line reason and stay in place; they are not deleted,
 because the reason is the useful part.
 
+`[~]` carries a second meaning since RFC 0093, and the one-line reason is what
+tells them apart. A task that is **owed** rather than dropped is one whose whole
+exit is a measurement no machine this project can reach may take — a time, a
+reservation obtained by partition, an instruction the emulator does not
+implement, a second machine or a second person. Its clause is kept verbatim in
+`docs/TECHNICAL-DEBT.md` rather than deleted, and its reason names the row and
+the machine. A dropped task says why nobody should do it; an owed one says who
+could. `cargo xtask lint-debt` is what keeps the register and this file from
+drifting apart.
+
 ## Ordering
 
 Four rules, in priority order. They exist because "ready" and "next" are
@@ -71,7 +81,7 @@ milestone of work — produced thirteen findings about the tree, including two
 policy lints that reported themselves and a litmus test that raced nothing.
 No amount of prior deciding would have surfaced any of them.
 
-**Status:** `[ ]` todo · `[>]` in progress · `[x]` done · `[~]` dropped.
+**Status:** `[ ]` todo · `[>]` in progress · `[x]` done · `[~]` dropped or owed.
 
 **Sizes:** `S` under a day · `M` under a week · `L` under a month · `XL` longer,
 and an `XL` that is not decomposed by the time it starts is a planning failure.

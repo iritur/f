@@ -821,6 +821,7 @@ fn main() -> ExitCode {
         "lint-callbacks" => lint_callbacks(),
         "lint-claim-owners" => lint_claim_owners(),
         "lint-testing-status" => lint_testing_status(),
+        "lint-debt" => lint_debt(),
         "lint-manifests" => lint_manifests(),
         "lint-components" => lint_components(),
         "lint-datapath" => lint_datapath(),
@@ -1039,6 +1040,7 @@ cargo xtask <command>
   lint-callbacks     R05: no interface registers a callback
   lint-claim-owners  R09: every claim names the document that owns it
   lint-testing-status  the TESTING-STATUS claims row says what claims/ holds
+  lint-debt          every narrowed exit has a row in docs/TECHNICAL-DEBT.md
   lint-manifests     Every component manifest fits docs/manifest.md; RFC 0005
                      rule 4 and RFC 0008's shape, checked before a spawn does
   lint-components    The components this tree declares are the components it
@@ -12529,6 +12531,9 @@ fn lint_all() -> Result<(), String> {
     // had drifted from six gating to seventeen with nothing to notice, in a run
     // whose own output counted the claims correctly four lines above.
     lint_testing_status()?;
+    // And the other half of the same discipline: a criterion a task no longer
+    // has to meet is one somebody has to be able to find. RFC 0093.
+    lint_debt()?;
     // The topology check RFC 0005 promised in the R02 row: every component
     // manifest fits the schema, declares a domain, and does not put an
     // imported image in `shared`. It runs here so a boot is not the first
@@ -13098,6 +13103,172 @@ fn spelled(n: usize) -> Result<String, String> {
              numerals and change the page and this check together."
         )),
     }
+}
+
+/// Every exit narrowed under RFC 0093 has a row in `docs/TECHNICAL-DEBT.md`,
+/// and every row names a task that was narrowed.
+///
+/// # What this is defending
+///
+/// RFC 0093 lets a task close against what a virtual machine can establish, and
+/// moves the clause it could not meet to a register. The whole argument rests on
+/// *moved rather than deleted* — a criterion quietly dropped is
+/// indistinguishable, six months later, from a criterion that was met, which is
+/// what `A-07` forbids. Nothing in a diff enforces that. A narrowing is a
+/// paragraph in one file and a table row in another, and the failure mode is not
+/// somebody lying: it is somebody editing the first and forgetting the second,
+/// which is how `docs/TESTING-STATUS.md` came to publish *fifteen entries, six
+/// gating* against a registry holding thirty-three and seventeen.
+///
+/// So the two sets are compared. A task whose `TODO.md` entry cites RFC 0093 is
+/// a task that lost a clause; a row in the register is a clause that was kept.
+/// They are the same set or somebody is owed an explanation.
+///
+/// # Why the direction is worth stating
+///
+/// The common failure is a narrowing with no row, and its fix is to add the row
+/// — an edit to `docs/TECHNICAL-DEBT.md`, which anybody may make. The other
+/// direction, a row for a task that no longer cites the RFC, is the good news
+/// case: the clause became answerable and the row should go, in the same diff
+/// that answers it.
+///
+/// Neither fix requires editing `TODO.md`, and that is deliberate. `Gap`'s own
+/// documentation warns that a check which can only be satisfied by editing a
+/// file this tree's agents may not touch is a check that gets switched off.
+///
+/// # What it does not check
+///
+/// That the clause in the row is the clause the task actually lost. Nothing
+/// short of a reader can do that, and pretending otherwise would put a tick
+/// beside the one thing on this page that needs a person.
+///
+/// # Errors
+///
+/// A narrowed task with no row, a row naming no narrowed task, or the register
+/// missing.
+fn lint_debt() -> Result<(), String> {
+    let rel = "docs/TECHNICAL-DEBT.md";
+    let register = std::fs::read_to_string(root().join(rel)).map_err(|e| {
+        format!(
+            "reading {rel}: {e}\n\n\
+             RFC 0093 moves a narrowed exit clause here rather than deleting it. With\n\
+             the page gone, every clause moved so far is deleted after all."
+        )
+    })?;
+    let graph = std::fs::read_to_string(root().join("TODO.md"))
+        .map_err(|e| format!("reading TODO.md: {e}"))?;
+
+    let listed = register_rows(&register);
+    let narrowed = narrowed_tasks(&graph);
+
+    let missing: Vec<&String> = narrowed.difference(&listed).collect();
+    let orphaned: Vec<&String> = listed.difference(&narrowed).collect();
+
+    if missing.is_empty() && orphaned.is_empty() {
+        println!(
+            "lint-debt: ok  ({} exit clause(s) narrowed under RFC 0093, each with a row \
+             in {rel})",
+            listed.len()
+        );
+        return Ok(());
+    }
+
+    let mut report = String::new();
+    if !missing.is_empty() {
+        report.push_str(&format!(
+            "These task(s) cite RFC 0093 in TODO.md and have no row in {rel}:\n  {}\n\n\
+             Each one has closed against less than its exit asked for. Add the row: the\n\
+             clause verbatim, the blocker, what the virtual machine established in its\n\
+             place, and what would close it.\n\n",
+            missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
+        ));
+    }
+    if !orphaned.is_empty() {
+        report.push_str(&format!(
+            "These row(s) in {rel} name a task that does not cite RFC 0093:\n  {}\n\n\
+             Either the task was never narrowed and the row is a debt nobody owes, or\n\
+             the clause has been answered and the row should go in the diff that\n\
+             answered it.\n\n",
+            orphaned.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
+        ));
+    }
+    report.push_str(
+        "RFC 0093 rests on the clause being moved rather than dropped, and this is the\n\
+         only thing that checks it.",
+    );
+    Err(report)
+}
+
+/// The task ids named in `docs/TECHNICAL-DEBT.md`'s register table.
+///
+/// A row is a table line whose first cell is a task id. The prose above the
+/// table names task ids too — in sentences, not cells — so the first cell is
+/// what makes a mention a row, and a paragraph discussing `E0-P05` does not
+/// silently become a debt entry.
+fn register_rows(page: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for line in page.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix('|') else { continue };
+        let Some(cell) = rest.split('|').next() else { continue };
+        let cell = cell.trim().trim_matches('`').trim();
+        if is_task_id(cell) {
+            out.insert(cell.to_string());
+        }
+    }
+    out
+}
+
+/// The tasks whose `TODO.md` entry cites RFC 0093.
+///
+/// An entry runs from its `- [ ]` line to the next one, so a citation anywhere
+/// in the body counts — the narrowing is argued in the prose and the exit line
+/// is only where it lands.
+fn narrowed_tasks(graph: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut current: Option<String> = None;
+    let mut body = String::new();
+    let flush = |id: &Option<String>, body: &str, out: &mut BTreeSet<String>| {
+        if let Some(id) = id
+            && body.contains("RFC 0093")
+        {
+            out.insert(id.clone());
+        }
+    };
+    for line in graph.lines() {
+        if let Some(id) = task_id_of(line) {
+            flush(&current, &body, &mut out);
+            current = Some(id);
+            body = String::new();
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    flush(&current, &body, &mut out);
+    out
+}
+
+/// The task id a `TODO.md` entry line opens, if it opens one.
+fn task_id_of(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("- [")?;
+    let rest = rest.get(1..)?.strip_prefix("] **")?;
+    let id = rest.split("**").next()?;
+    is_task_id(id).then(|| id.to_string())
+}
+
+/// `E0-B12`, `E2-P10`: an epoch letter, a digit, a dash, a letter, two digits,
+/// and optionally a lowercase suffix as the E3 decomposition uses.
+fn is_task_id(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.len() < 6 || bytes.len() > 8 {
+        return false;
+    }
+    bytes[0] == b'E'
+        && bytes[1].is_ascii_digit()
+        && bytes[2] == b'-'
+        && bytes[3].is_ascii_uppercase()
+        && bytes[4..6].iter().all(u8::is_ascii_digit)
+        && bytes[6..].iter().all(u8::is_ascii_lowercase)
 }
 
 /// Every component manifest in the permissive tree fits `docs/manifest.md`.
