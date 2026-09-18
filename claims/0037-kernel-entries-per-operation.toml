@@ -1,0 +1,129 @@
+# `E1-P10`'s fourth number: how many times a component's work enters the frame.
+#
+# **Why this is a count and `claims/0036`'s sibling rather than its copy.** Both
+# are datapath numbers `E1-P10` asks for and both are counts a container may
+# take, which is the correction `DATAPATH_GAP` needed twice: the row first said
+# all four of `E1-P10`'s numbers are times, and the correction that replaced it
+# said three are counts this machine may gate on. Two are. This is the second.
+#
+# The other two wait on a machine. *Ring submit under load* is a time. *Doorbells
+# per operation* has a count's unit and a time's behaviour — the number the
+# design cares about is zero under load, and whether a producer needs to ring
+# depends on where the consumer is in its drain, which under TCG is the
+# emulator's scheduling.
+#
+# **What makes this one takeable here** is that a kernel entry is an event the
+# frame observes and counts on its own side of the boundary. It does not depend
+# on when anything happened, only on whether it happened, so the number is the
+# same on any host that runs the binary.
+#
+# **The zero is worth nothing without the provocation, and this claim has an
+# unusually good one.** `Half::Load` runs `report::LOAD` work items with no
+# crossing; `Half::Provoke` is *the same run* with a door call made on purpose
+# in the middle of the work loop. So the pair is not a zero and an assertion —
+# it is a zero and the same counter moving under the same load.
+# `user/store/src/report.rs` states the rule this follows by name: *a counter
+# nothing in a boot can move is indistinguishable from a counter that does not
+# work.*
+#
+# **`report::PROVOKE` is a selector and not a count, and this file said
+# otherwise until the measurement was taken.** Its own doc says *Unit: none —
+# a selector ordinal*; its value is 2 because it is the second half, and the
+# provocation it turns on makes **one** crossing. The first draft of this claim
+# read the 2 as a number of door calls and would have published it. What
+# stopped it was running the boot before writing the thresholds against it
+# rather than after — which is the order `E0-D04` and RFC 0084 both argue for,
+# here costing one wrong sentence instead of one wrong claim.
+
+name       = "kernel-entries-per-operation"
+status     = "gating"           # pending | tracked | gating
+milestone  = "E1"
+
+statement  = """
+A component's asynchronous work does not enter the frame. A runtime holding a
+core puts `report::LOAD` = 16 384 work items through its own executor and
+crosses into the kernel exactly once — at the allocation boundary that ends the
+residency — so kernel entries per operation on the hot path is zero.
+
+Measured by `cargo xtask claim kernel-entries-per-operation`, which runs the two
+halves of `cargo xtask runtime`. Each prints only the rows it is the authority
+for:
+
+  kernel_entries_on_the_hot_path       0      (load)
+  kernel_entries_at_the_boundary       1      (load)
+  operations_completed             16384      (load)
+  kernel_entries_provoked              1      (provoke)
+  kernel_entries_seen_by_the_frame     1      (provoke)
+
+The last two are the provocation: the same run with one deliberate door call in
+the middle of the work loop. They are counted on **opposite sides of the boundary**
+— the component counts what it did, the frame counts what arrived — and the boot
+requires them equal, which is what says the counter counts the thing it is named
+after rather than something correlated with it.
+"""
+
+[baseline]
+system  = "none"
+notes   = "The comparison a reader wants is a thread-per-request server, where every unit of work is a system call and the number is one or more per operation by construction. That is not a configuration of anything in `claims/baselines/`, and inventing one would be writing the opponent's submission for them. What takes its place is this system's own provoke half: one crossing out of 16 384 operations is what a frame-crossing runtime looks like measured by this instrument, and it is one rather than 16 384 only because the provocation is deliberate and small. The useful comparison is not the magnitude but the direction: the load half is zero and this is not, by the same counter over the same work."
+
+[owner]
+subsystem = "the component runtime"
+document  = "docs/design/deadline-all-the-way-down.html"
+section   = "01"
+notes     = "Section 01's claim is that a component schedules its own work and the frame is entered only at boundaries it chooses. The subsystem that owns the number is `kernel/src/runtime.rs` for the frame's side of the count and `user/store/src/report.rs` for the component's; `kernel/src/process.rs`'s `Entries` is the counter itself, which separates hot-path calls, faults, the allocation boundary, timer ticks and other interrupts rather than reporting one total — because a tick and a call are the same event to a total and different events to a design."
+
+[workload]
+path   = "kernel/src/runtime.rs"
+items  = 16384
+notes  = "Two boots of one command, and the halves are not two configurations but one run described twice: `Half::Provoke` is `Half::Load` with one door call added in the middle of the work loop. Both are required to complete the whole load — `tally.completed == report::LOAD` — because a provocation that fired after the executor stopped would still make its calls, still report them, and still pass, while the run it is supposed to be *the same run as* had not happened. The boot checks that; this claim reads the rows it prints."
+
+[metrics]
+primary   = "kernel_entries_on_the_hot_path"
+secondary = [
+  "kernel_entries_at_the_boundary",
+  "operations_completed",
+  "kernel_entries_provoked",
+  "kernel_entries_seen_by_the_frame",
+]
+
+[threshold]
+# Zero, exactly. There is no budget of acceptable crossings on a path whose
+# claim is that it has none, and a threshold admitting one would be a different
+# claim about a different design.
+kernel_entries_on_the_hot_path = { max = 0 }
+
+# Exactly one, both ways. More than one means the residency ended more than
+# once, which is a counter measuring something other than what it is named
+# after; fewer means the counting stopped before the run did, and the zero above
+# is then a zero over an unknown interval rather than over the load.
+kernel_entries_at_the_boundary = { min = 1, max = 1 }
+
+# The denominator. Without it the zero above is satisfied by a runtime that did
+# nothing at all — the failure this project has now recorded under three
+# different names, most recently in `claims/0036`.
+operations_completed = { min = 16384 }
+
+# And the provocation, on the other half. The bound is one rather than the
+# measured value, because what this row has to establish is that the counter
+# *moves*, not that it moves by a particular amount: the amount is a property of
+# how many calls the provocation happens to make, and pinning it here would make
+# this claim go red the day somebody adds a second one for an unrelated reason.
+# What must hold exactly is that the two readings agree, and that is stated
+# between two numbers by the boot rather than against a constant here.
+kernel_entries_provoked = { min = 1 }
+kernel_entries_seen_by_the_frame = { min = 1 }
+
+[hardware]
+runner = "runner-class-A"       # pinned bare metal, thermally stable
+notes  = "**This claim does not need that machine and says so rather than pretending.** A kernel entry is an event the frame observes on its own side of the boundary; it does not depend on when anything happened, only on whether it did, so every row is the same number in a container and on bare metal. `f_bench::Environment` refuses to record a *timing* here and this records none. The runner is named because `lint-reproduce` requires every claim to name one with a specification beside it. `claims/0036` is this claim's sibling and carries the same note; the two of `E1-P10`'s four that genuinely need the machine are on `docs/TECHNICAL-DEBT.md` instead."
+
+[reproduce]
+command = "cargo xtask claim kernel-entries-per-operation"
+
+[diagnosis]
+# Written while the system is understood rather than at 2 a.m. when it is not.
+hot_path_is_non_zero = "a component's asynchronous work entered the frame, which is section 01's claim failing rather than a measurement problem. The frame counts the crossing, so the number is real; what it does not say is which call. Read `kernel/src/runtime.rs`'s work loop for a path that reaches a door call where it used to reach the component's own queue — an allocation is the usual one, because an allocation that outgrows the granted heap becomes a request to the frame."
+operations_completed_is_short = "the runtime did not finish the load, so the zero beside it is over a shorter run than the one asked for. The boot refuses this before the rows are printed, so seeing it here means the refusal was removed or the row is being read from a half that does not own it. `tally.code` says why the runtime stopped."
+boundary_is_not_exactly_one = "the residency ended more than once, or the counting stopped before the run did. Both make every other row in this claim a number over an unknown interval. This is the row to read first when anything else here looks surprising, because it is the one that says the interval the others were counted over is the interval they were supposed to be counted over."
+provoked_is_zero = "the provocation did not run, which makes the zero on the load half worthless — and everything else in that run will look perfect, which is why this row exists. The likely cause is a refactor that routed the deliberate door calls through a path the `Entries` counter does not see, which removes the counter from the measurement without changing any assertion."
+the_two_provoke_rows_disagree = "the component and the frame counted different events. They are taken on opposite sides of the boundary on purpose, so a disagreement is the interesting kind of failure: one of the two is counting something correlated with a crossing rather than a crossing. The boot refuses on this before the rows are printed, so reaching this claim with the two unequal means that check has been weakened."

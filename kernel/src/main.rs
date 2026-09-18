@@ -2553,6 +2553,32 @@ fn runtime_demonstration(
         report.entries.interrupts,
         report.entries.total(),
     );
+    // The same numbers as rows `claims/0037` can read, and **each half prints
+    // only the rows it is the authority for**.
+    //
+    // That split is not tidiness. `entries.hot` is zero on the load half and
+    // two on the provoke half — which is the whole point of having both — so
+    // one name carrying both values would reach `measured_rows` as a row
+    // printed twice with different numbers, which it refuses rather than
+    // averages. The load half owns *what a runtime under load costs the
+    // frame*; the provoke half owns *that the counter can move at all*.
+    //
+    // `operations_completed` is the denominator and is printed by the load half
+    // because that is the half whose zero it divides. Without it the zero above
+    // is satisfied by a runtime that did nothing, which is the failure this
+    // project has now recorded under three different names.
+    match report.half {
+        runtime::Half::Load => {
+            kprintln!("    kernel_entries_on_the_hot_path    {}", report.entries.hot);
+            kprintln!("    kernel_entries_at_the_boundary    {}", report.entries.boundary);
+            kprintln!("    operations_completed              {}", report.tally.completed);
+        }
+        runtime::Half::Provoke => {
+            kprintln!("    kernel_entries_provoked           {}", report.tally.provoked);
+            kprintln!("    kernel_entries_seen_by_the_frame  {}", report.entries.hot);
+        }
+        _ => {}
+    }
     // The component's own tree, read by the frame out of the page it published
     // the schema into, before `reap` took the page back. The two snapshots are
     // the evidence and neither is worth anything alone: the first is this tree

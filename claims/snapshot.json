@@ -33,6 +33,7 @@
     { "name": "raster-cost-per-rung", "status": "pending", "milestone": "E3", "file": "claims/0033-raster-cost-per-rung.toml" },
     { "name": "canvas-escape-rate", "status": "pending", "milestone": "E3", "file": "claims/0034-canvas-escape-rate.toml" },
     { "name": "theme-refusals", "status": "pending", "milestone": "E3", "file": "claims/0035-theme-refusals.toml" },
-    { "name": "copies-per-operation", "status": "gating", "milestone": "E1", "file": "claims/0036-copies-per-operation.toml" }
+    { "name": "copies-per-operation", "status": "gating", "milestone": "E1", "file": "claims/0036-copies-per-operation.toml" },
+    { "name": "kernel-entries-per-operation", "status": "gating", "milestone": "E1", "file": "claims/0037-kernel-entries-per-operation.toml" }
   ]
 }

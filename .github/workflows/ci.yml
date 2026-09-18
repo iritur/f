@@ -631,6 +631,13 @@ jobs:
       # before entry and requires the adoption to refuse rather than believe it.
       # E1-B08, RFC 0038.
       - run: cargo xtask runtime
+      # `claims/0037`'s five rows, compared against the table rather than against
+      # the boot's own refusals. The two are different checks: the boot asserts
+      # the load half crossed nothing and the provoke half crossed exactly what
+      # it provoked, and the claim asserts the numbers those halves published
+      # are the numbers the registry says they are. A boot grading its own
+      # homework is the arrangement RFC 0064 decided against.
+      - run: cargo xtask claim kernel-entries-per-operation
       # The other half of E0-P08, and the half that says the suite can fail. A
       # kernel built with one deliberate defect, booted into the forging sweep,
       # required to go red with a panic in the log — and then the same boot

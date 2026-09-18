@@ -18601,6 +18601,13 @@ enum Route {
     /// authority for, so the three feed one table without ever answering the
     /// same row twice.
     Copies,
+    /// `claims/0037`'s two runtime halves, against the claim's own table.
+    ///
+    /// Two boots rather than one because the halves are not two configurations
+    /// but one run described twice, and each owns rows the other must not
+    /// print: `entries.hot` is zero on the load half and `PROVOKE` on the
+    /// provoke half, which is the whole point of having both.
+    RuntimeEntries,
     /// `E2-B05`'s two demonstrations over two topologies — the six-component
     /// workload in `user/assembler/tests/assemble.rs`, and the module this tree
     /// would actually boot, instantiated twice by `cargo xtask generation` —
@@ -18792,6 +18799,7 @@ const ROUTES: &[(&str, Route)] = &[
     // number is being taken. Both are `pending` and say why at length.
     ("copies-per-read", Route::Reads),
     ("copies-per-operation", Route::Copies),
+    ("kernel-entries-per-operation", Route::RuntimeEntries),
     ("resident-bytes-per-unit-of-work", Route::Reads),
     // Wave 4's two, and neither is a pair: each has one sentence and one
     // workload set. `topology-renderings-per-root` is a count over two
@@ -18946,6 +18954,7 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         Route::Invariants => claim_invariants(&text, &relative(&file))?,
         Route::Reads => claim_reads(&text, &relative(&file))?,
         Route::Copies => claim_copies(&text, &relative(&file))?,
+        Route::RuntimeEntries => claim_runtime_entries(&text, &relative(&file))?,
         Route::Topology => claim_topology(&text, &relative(&file))?,
         Route::Roots => claim_roots(&text, &relative(&file))?,
         Route::Swap => claim_swap(&text, &relative(&file))?,
@@ -19453,6 +19462,47 @@ fn claim_copies(claim: &str, file: &str) -> Result<(), String> {
          and a zero `*_bytes_moved_on_purpose` means the counter itself cannot move —\n\
          which makes the zero above it worthless while leaving every other line in the\n\
          run looking perfect. Read those two before believing the first.",
+    )
+}
+
+/// `claims/0037`'s two runtime halves, against the claim's own table.
+///
+/// # Why two boots of one command
+///
+/// Because the halves are one run described twice. `runtime=load` puts
+/// `report::LOAD` work items through a component's own executor and must cross
+/// into the frame exactly once; `runtime=provoke` is the same load with
+/// `report::PROVOKE` door calls made deliberately in the middle of the work
+/// loop. The first is the claim and the second is what makes it evidence — a
+/// zero from a counter nothing can move is not a measurement.
+///
+/// Each half prints only the rows it is the authority for, so the two feed one
+/// table without ever answering the same row twice. That is a requirement here
+/// rather than a convention: `entries.hot` is zero on one half and `PROVOKE` on
+/// the other, and one name carrying both reaches [`measured_rows`] as a row
+/// printed twice with different values, which it refuses rather than averages.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s.
+fn claim_runtime_entries(claim: &str, file: &str) -> Result<(), String> {
+    claim_compare(
+        claim,
+        file,
+        &[(
+            "cargo xtask runtime: 16 384 work items through a component's own executor, \
+             and the same load with two crossings made on purpose",
+            "cargo",
+            &["xtask", "runtime"][..],
+        )],
+        "A non-zero `kernel_entries_on_the_hot_path` is section 01's claim failing, and the\n\
+         frame counted the crossing so the number is real — what it does not say is which\n\
+         call. The quieter reds are the other three. A short `operations_completed` means\n\
+         the zero is over a shorter run than the one asked for; a\n\
+         `kernel_entries_at_the_boundary` that is not exactly one means every other row\n\
+         here was counted over an unknown interval; and a zero `kernel_entries_provoked`\n\
+         means the counter cannot move at all, which leaves the load half looking perfect\n\
+         while measuring nothing.",
     )
 }
 
