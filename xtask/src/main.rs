@@ -6,7 +6,7 @@
 //! preference: `lint-determinism`, `lint-licensing`, `lint-unsafe` and
 //! `lint-percpu`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -6303,6 +6303,29 @@ const MUTATIONS: &[(&str, &str, &str, &str)] = &[
 /// sees it will not have read this.
 const CORE_COST_BYTES: u64 = 64_296;
 
+/// The output sections `kernel/linker.ld` pads to a page boundary **inside** the
+/// section, so `sh_size` is a whole number of pages rather than the size of what
+/// went into it.
+///
+/// # Why this list exists rather than a rule about alignment
+///
+/// Because every output section in that script is page-*aligned* at its start —
+/// `.data ALIGN(4096)` and the rest — and that alignment costs nothing in
+/// `sh_size`. Only these two also carry a `. = ALIGN(4096);` before their end
+/// symbol, and that one is the difference: it rounds the section's own size up.
+/// A check that keyed on the address alignment would have named five sections
+/// and excused the three that grow linearly, which is the check quietly giving
+/// up on the thing it exists to measure.
+///
+/// The reason they are padded is `E0-B19`: the kernel window is mapped in 4 KiB
+/// pages with per-section permissions, text executable and constants neither, so
+/// a section whose size is not a whole number of pages would share its last page
+/// with the next section's permissions.
+///
+/// [`padding_where_declared`] is what stops this list becoming a comment about a
+/// script that has moved.
+const PAGE_PADDED_SECTIONS: &[&str] = &[".text", ".rodata"];
+
 /// The two ceilings [`core_cost`] takes the slope between.
 ///
 /// Unit: cores.
@@ -6425,7 +6448,7 @@ fn core_cost() -> Result<(), String> {
         ));
     }
 
-    let [(low, low_bytes), (high, high_bytes)] = measured?;
+    let [(low, low_bytes, low_sections), (high, high_bytes, high_sections)] = measured?;
     let span = (high - low) as u64;
     let grew = high_bytes.checked_sub(low_bytes).ok_or_else(|| {
         format!(
@@ -6438,29 +6461,22 @@ fn core_cost() -> Result<(), String> {
         )
     })?;
 
-    if grew % span != 0 {
-        return Err(format!(
-            "the image grew {grew} bytes between MAX_CPUS = {low} and MAX_CPUS = {high},\n\
-             which is not a whole number of bytes per core: {grew} / {span} leaves {}.\n\n\
-             The model in the `MAX_CPUS` doc comment is a straight line because the cost\n\
-             is arrays subscripted by the constant plus AP_CORES * AP_STACK_STRIDE, and\n\
-             both of those are exact. A remainder means something now grows with the\n\
-             ceiling in a way that is neither — alignment that rounds at one end and not\n\
-             the other is the likely shape — and the comment needs a third point before\n\
-             it can go on saying what it says. This command takes two.",
-            grew % span
-        ));
-    }
+    // The script is read before the sections are judged, because the judgement
+    // below rests entirely on which sections it pads.
+    padding_where_declared(&script_was)?;
 
-    let slope = grew / span;
+    let Slope { slope, linear, quantised } =
+        slope_from_sections(span, &section_growth(&low_sections, &high_sections)?)?;
+
     let intercept = low_bytes - slope * low as u64;
     if slope != CORE_COST_BYTES {
         return Err(format!(
             "a core costs {slope} bytes and kernel/src/percpu.rs publishes \
              {CORE_COST_BYTES}.\n\n\
-             Measured: MAX_CPUS = {low} is {low_bytes} bytes resident, MAX_CPUS = {high} is\n\
-             {high_bytes}, a difference of {grew} over {span} cores. The line those two\n\
-             imply is resident(N) = {intercept} + {slope} * N, or {} per core.\n\n\
+             Measured, section by section, between MAX_CPUS = {low} and MAX_CPUS = \
+             {high}:\n{}\n\n\
+             The line those imply is resident(N) = {intercept} + {slope} * N, or {} per\n\
+             core.\n\n\
              If the sharding changed on purpose then this is the number moving, and the\n\
              three places that publish it move together:\n\n  \
              1. the model in the `MAX_CPUS` doc comment, kernel/src/percpu.rs\n  \
@@ -6470,22 +6486,281 @@ fn core_cost() -> Result<(), String> {
              two are more work than the third: it is not gated, it is stale far more\n\
              often than this is, and the comment is wrong either way until it has been\n\
              re-measured too. The figure above is that measurement — use it.",
+            linear.join("\n"),
             kibibytes(slope)
         ));
     }
 
     println!(
         "\ncost model: ok — a core costs {slope} bytes ({}), which is what the `MAX_CPUS`\n\
-         \x20           doc comment publishes.\n\
-         \x20           MAX_CPUS = {low}: {low_bytes} bytes resident\n\
-         \x20           MAX_CPUS = {high}: {high_bytes} bytes resident\n\
+         \x20           doc comment publishes.\n{}",
+        kibibytes(slope),
+        linear.join("\n")
+    );
+    if !quantised.is_empty() {
+        println!(
+            "\x20           and {} section(s) sized in whole pages, which carry no slope\n\
+             \x20           to read:\n{}",
+            quantised.len(),
+            quantised.join("\n")
+        );
+    }
+    println!(
+        "\x20           MAX_CPUS = {low}: {low_bytes} bytes resident\n\
+         \x20           MAX_CPUS = {high}: {high_bytes} bytes resident, {grew} more\n\
          \x20           the intercept these two imply is {intercept}, and it is *not*\n\
          \x20           checked: it is the kernel's own size and moves in every commit.\n\
-         \x20           When the doc comment is next touched, this is the number to use.",
-        kibibytes(slope)
+         \x20           When the doc comment is next touched, this is the number to use."
     );
     Ok(())
 }
+
+/// What the per-section reading came to: the slope, and the two ways a section
+/// reached it.
+#[derive(Debug)]
+struct Slope {
+    /// Bytes a core, summed over the sections that carry one.
+    slope: u64,
+    /// One line per section whose growth divided evenly by the span.
+    linear: Vec<String>,
+    /// One line per section sized in whole pages, which carry no slope.
+    quantised: Vec<String>,
+}
+
+/// Read a per-core cost out of how each allocated section grew.
+///
+/// # The rule, and why it is per section rather than over the image
+///
+/// A section `kernel/linker.ld` pads to a page has a size that is a whole
+/// number of pages, so its growth is a step function of the ceiling and there
+/// is no slope in it to read. Every other allocated section grows by an array
+/// subscripted by `MAX_CPUS` or by `AP_CORES * AP_STACK_STRIDE`, and both of
+/// those are exact — so its growth must divide evenly by the span, and the
+/// sum of those quotients is what a core costs.
+///
+/// Summing first and dividing afterwards, which is what this replaced, adds a
+/// model that holds to a quantisation that has nothing to do with it and asks
+/// whether the total divides. It does not, and it has not since `.rodata`
+/// crossed a page boundary somewhere between thirty-two cores and sixty-four:
+/// `3990448 / 62` leaves `4`, and the four bytes are the remainder of one page
+/// of padding, not a defect in the kernel. Measured across five ceilings,
+/// `.data`, `.bss` and `.stacks` grow at 2448, 4504 and 57 344 bytes a core
+/// with no residue at any of them, and `.rodata` is flat at 155 648 bytes until
+/// sixty-four and then steps once.
+///
+/// # Errors
+///
+/// A section that shrank, a padded section that grew by part of a page, or an
+/// unpadded section whose growth does not divide by the span. The message names
+/// every offender and then the sections that did behave, because a report that
+/// names only what failed leaves a reader unable to tell a single moved term
+/// from a model that has stopped describing this kernel.
+fn slope_from_sections(span: u64, growth: &[(String, u64, u64)]) -> Result<Slope, String> {
+    let page = u64::from(PAGE_BYTES);
+    let mut slope = 0u64;
+    let mut linear = Vec::new();
+    let mut quantised = Vec::new();
+    let mut uneven = Vec::new();
+    for (name, from, to) in growth {
+        let Some(delta) = to.checked_sub(*from) else {
+            uneven.push(format!(
+                "  {name:<12} {from} -> {to}, which is smaller at the higher ceiling"
+            ));
+            continue;
+        };
+        if delta == 0 {
+            continue;
+        }
+        if PAGE_PADDED_SECTIONS.contains(&name.as_str()) {
+            // Its size is a whole number of pages by construction, so the most
+            // that can be said is that the step is a whole page: a padded
+            // section growing by anything else would mean the padding is not
+            // where this believes it is.
+            if delta % page != 0 {
+                uneven.push(format!(
+                    "  {name:<12} +{delta}, and kernel/linker.ld pads it to a page, so its\n\
+                     \x20              growth cannot be {} bytes short of one",
+                    page - delta % page
+                ));
+                continue;
+            }
+            quantised.push(format!(
+                "  {name:<12} +{delta} ({} page(s)), page-padded by kernel/linker.ld",
+                delta / page
+            ));
+            continue;
+        }
+        if delta % span != 0 {
+            uneven.push(format!(
+                "  {name:<12} +{delta}, which is not a whole number of bytes per core:\n\
+                 \x20              {delta} / {span} leaves {}",
+                delta % span
+            ));
+            continue;
+        }
+        slope += delta / span;
+        linear.push(format!("  {name:<12} +{delta} = {} bytes a core", delta / span));
+    }
+
+    if !uneven.is_empty() {
+        return Err(format!(
+            "a section grew in a shape the model does not describe:\n\n{}\n\n\
+             The model in the `MAX_CPUS` doc comment is a straight line because the cost is\n\
+             arrays subscripted by the constant plus AP_CORES * AP_STACK_STRIDE, and both\n\
+             of those are exact. A section that grows by something else is either a new\n\
+             per-core term that is neither of those two, or padding that has moved.\n\n\
+             The sections that did behave, for contrast:\n{}",
+            uneven.join("\n"),
+            if linear.is_empty() { "  (none)".to_string() } else { linear.join("\n") }
+        ));
+    }
+    Ok(Slope { slope, linear, quantised })
+}
+
+/// The two section tables, lined up by name.
+///
+/// # Errors
+///
+/// A section present at one ceiling and absent at the other. That is not a
+/// measurement with a hole in it, it is two different kernels — and quietly
+/// skipping the row would subtract its bytes from the slope and report the
+/// difference as a cost model that still holds.
+fn section_growth(
+    low: &[(String, u64)],
+    high: &[(String, u64)],
+) -> Result<Vec<(String, u64, u64)>, String> {
+    let mut out = Vec::new();
+    for (name, from) in low {
+        let Some((_, to)) = high.iter().find(|(other, _)| other == name) else {
+            return Err(format!(
+                "`{name}` is an allocated section at the lower ceiling and not at the\n\
+                 higher one, so the two images are not one kernel built twice."
+            ));
+        };
+        out.push((name.clone(), *from, *to));
+    }
+    for (name, _) in high {
+        if !low.iter().any(|(other, _)| other == name) {
+            return Err(format!(
+                "`{name}` is an allocated section at the higher ceiling and not at the\n\
+                 lower one, so the two images are not one kernel built twice."
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// [`PAGE_PADDED_SECTIONS`] is the set of sections `kernel/linker.ld` actually
+/// pads, and no other.
+///
+/// # Why both directions are checked
+///
+/// A section that gained padding and is not on the list would be asked for a
+/// slope it cannot have and go red over the remainder — which is the failure
+/// this whole change exists to stop happening a second time. A section on the
+/// list that lost its padding would be *excused* from the slope check, which is
+/// the worse direction: the command stays green while no longer looking at a
+/// per-core cost it used to see.
+///
+/// # Errors
+///
+/// The script padding a section this does not name, or not padding one it does.
+fn padding_where_declared(script: &str) -> Result<(), String> {
+    let padded = page_padded_in(script);
+    let declared: BTreeSet<String> =
+        PAGE_PADDED_SECTIONS.iter().map(|s| (*s).to_string()).collect();
+    if padded == declared {
+        return Ok(());
+    }
+    let list = |set: &BTreeSet<String>| {
+        if set.is_empty() {
+            "(none)".to_string()
+        } else {
+            set.iter().cloned().collect::<Vec<_>>().join(" ")
+        }
+    };
+    Err(format!(
+        "kernel/linker.ld pads {} to a page inside the section; PAGE_PADDED_SECTIONS in\n\
+         xtask says {}.\n\n\
+         That list decides which sections `cores` reads a per-core slope from. A section\n\
+         that gained padding and is not named would be asked for a slope it cannot have\n\
+         and go red over the remainder. One that lost its padding and is still named\n\
+         would be excused from the check while still carrying a cost — green, and blind.\n\n\
+         Move the list, in the same diff as the script.",
+        list(&padded),
+        list(&declared)
+    ))
+}
+
+/// Every output section in a linker script that pads its own size to a page.
+///
+/// Reads the script rather than modelling it: an output section is a `.name` at
+/// the start of a line, its body runs to the matching brace, and the padding is
+/// a `. = ALIGN(4096);` inside that body. The alignment of the section's own
+/// *address* — `.data ALIGN(4096) :` — stands on the header line before the
+/// brace and is deliberately not matched, because it costs nothing in `sh_size`.
+/// Telling those two apart is the whole job: keying on the address alignment
+/// would name five sections here and excuse the three that grow linearly.
+fn page_padded_in(script: &str) -> BTreeSet<String> {
+    let chars: Vec<char> = script.chars().collect();
+    let mut out = BTreeSet::new();
+    let mut at = 0usize;
+    while at < chars.len() {
+        if chars[at] != '.' || (at > 0 && !matches!(chars[at - 1], '\n' | ' ' | '\t')) {
+            at += 1;
+            continue;
+        }
+        let name_end = (at + 1..chars.len())
+            .find(|i| !chars[*i].is_ascii_alphanumeric() && chars[*i] != '_' && chars[*i] != '.')
+            .unwrap_or(chars.len());
+        let name: String = chars[at..name_end].iter().collect();
+        if name.len() < 2 {
+            at = name_end.max(at + 1);
+            continue;
+        }
+        // Whatever stands between the name and the brace that opens the body is
+        // the header line. A `.` that does not open an output section reaches
+        // the end of its line first, and is skipped.
+        let Some(open) = (name_end..chars.len()).find(|i| chars[*i] == '{' || chars[*i] == '\n')
+        else {
+            break;
+        };
+        if chars[open] != '{' {
+            at = name_end.max(at + 1);
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut close = chars.len() - 1;
+        for (offset, ch) in chars[open..].iter().enumerate() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = open + offset;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body: String = chars[open..close].iter().collect();
+        if body.contains(". = ALIGN(4096);") {
+            out.insert(name);
+        }
+        at = close.max(at + 1);
+    }
+    out
+}
+
+/// One ceiling, what the image came to, and what each allocated section came to.
+///
+/// A name rather than the tuple written out twice, because it is written out
+/// twice: once as what [`core_cost_builds`] returns and once as the array it
+/// fills. The third field is the itemisation the per-section reading needs, and
+/// it travels with the total so the two cannot come to be about different
+/// images.
+type Measured = (usize, u64, Vec<(String, u64)>);
 
 /// The two builds, and the two numbers they are for.
 ///
@@ -6497,12 +6772,12 @@ fn core_cost_builds(
     percpu_was: &str,
     script: &Path,
     script_was: &str,
-) -> Result<[(usize, u64); 2], String> {
+) -> Result<[Measured; 2], String> {
     let dir = target_dir().join("cores");
     let dir_arg = dir.display().to_string();
     let image = dir.join(KERNEL_TARGET).join("debug").join("f-kernel");
 
-    let mut points = [(0usize, 0u64); 2];
+    let mut points: [Measured; 2] = [(0, 0, Vec::new()), (0, 0, Vec::new())];
     for (slot, ceiling) in CORE_COST_AT.iter().copied().enumerate() {
         let aps = ceiling - 1;
         std::fs::write(percpu, retarget(percpu_was, CEILING_ASSIGNMENT, ceiling, percpu)?)
@@ -6545,9 +6820,15 @@ fn core_cost_builds(
             ));
         }
 
+        // Both readings come off the same image in the same breath. `resident`
+        // is the total the model has always been checked against; `allocated`
+        // is that same sum itemised, and the check below needs the parts
+        // because a whole-image remainder is a model that holds plus a
+        // quantisation that has nothing to do with it.
         let bytes = measure::resident(&image)?;
-        println!("    {bytes} bytes resident across every allocated section");
-        points[slot] = (ceiling, bytes);
+        let sections = measure::allocated(&image)?;
+        println!("    {bytes} bytes resident across {} allocated section(s)", sections.len());
+        points[slot] = (ceiling, bytes, sections);
     }
     Ok(points)
 }
@@ -6608,8 +6889,178 @@ fn kibibytes(bytes: u64) -> String {
 /// test`, in milliseconds, and names the constant to follow it with.
 #[cfg(test)]
 mod core_cost_tests {
-    use super::{AP_CORES_ASSIGNMENT, CEILING_ASSIGNMENT, kibibytes, relative, retarget, root};
+    use super::{
+        AP_CORES_ASSIGNMENT, CEILING_ASSIGNMENT, CORE_COST_BYTES, PAGE_PADDED_SECTIONS, kibibytes,
+        padding_where_declared, page_padded_in, relative, retarget, root, section_growth,
+        slope_from_sections,
+    };
     use std::path::Path;
+
+    /// The five ceilings this model was measured at, and what each allocated
+    /// section came to. Read off `readelf -S` on images built at each, and kept
+    /// here because the numbers are the argument: without them the rule below
+    /// is somebody's opinion about linker scripts.
+    const MEASURED: &[(usize, u64, u64, u64, u64)] = &[
+        // ceiling, .data, .bss, .stacks, .rodata
+        (2, 54_128, 9_016, 212_992, 155_648),
+        (8, 68_816, 36_040, 557_056, 155_648),
+        (16, 88_400, 72_072, 1_015_808, 155_648),
+        (32, 127_568, 144_136, 1_933_312, 155_648),
+        (64, 205_904, 288_264, 3_768_320, 159_744),
+    ];
+
+    fn sections(at: usize) -> Vec<(String, u64)> {
+        let row = MEASURED.iter().find(|r| r.0 == at).expect("a ceiling that was measured");
+        vec![
+            (".bss".to_string(), row.2),
+            (".data".to_string(), row.1),
+            (".rodata".to_string(), row.4),
+            (".stacks".to_string(), row.3),
+            // Flat across all five, and present so the walk has a section that
+            // is padded and does not move.
+            (".text".to_string(), 1_069_056),
+        ]
+    }
+
+    fn slope_between(low: usize, high: usize) -> u64 {
+        let growth = section_growth(&sections(low), &sections(high)).expect("one kernel twice");
+        slope_from_sections((high - low) as u64, &growth).expect("a model that holds").slope
+    }
+
+    /// The failure this whole reading replaced: 2 to 64 is the pair `verify`
+    /// takes, and the total grew by 3 990 448 bytes over 62 cores, which does
+    /// not divide. Per section it does — the four bytes were the remainder of
+    /// one page of `.rodata` padding, and never a cost.
+    #[test]
+    fn the_pair_verify_takes_reads_the_published_cost() {
+        assert_eq!(slope_between(2, 64), CORE_COST_BYTES);
+
+        let total: u64 = sections(64).iter().map(|(_, size)| size).sum::<u64>()
+            - sections(2).iter().map(|(_, size)| size).sum::<u64>();
+        assert_eq!(total, 3_990_448, "the growth the old reading divided");
+        assert_ne!(total % 62, 0, "and it is still not a whole number of bytes per core");
+    }
+
+    /// Two points define a slope and do not establish a line. Every adjacent
+    /// pair, and both ends, give the same number — which is the claim the
+    /// `MAX_CPUS` doc comment makes and the evidence it lacked.
+    #[test]
+    fn every_measured_pair_gives_one_slope() {
+        for pair in MEASURED.windows(2) {
+            let (low, high) = (pair[0].0, pair[1].0);
+            assert_eq!(slope_between(low, high), CORE_COST_BYTES, "between {low} and {high}");
+        }
+        assert_eq!(slope_between(2, 32), CORE_COST_BYTES);
+        assert_eq!(slope_between(8, 64), CORE_COST_BYTES);
+    }
+
+    /// `.rodata` is the section the padding is about, so the test that matters
+    /// is that it is excused for the right reason rather than by being ignored:
+    /// it is reported as quantised, and it contributes nothing to the slope.
+    #[test]
+    fn the_padded_section_is_reported_and_carries_no_slope() {
+        let growth = section_growth(&sections(32), &sections(64)).expect("one kernel twice");
+        let read = slope_from_sections(32, &growth).expect("a model that holds");
+        assert_eq!(read.quantised.len(), 1, "one section stepped: {:?}", read.quantised);
+        assert!(read.quantised[0].contains(".rodata"), "{:?}", read.quantised);
+        assert!(read.quantised[0].contains("1 page(s)"), "{:?}", read.quantised);
+        assert_eq!(read.linear.len(), 3, "and three carried the cost: {:?}", read.linear);
+        assert_eq!(read.slope, CORE_COST_BYTES);
+    }
+
+    /// A new per-core term in an unpadded section is what this exists to catch,
+    /// and the old reading would have caught it too. This is the control that
+    /// stops the per-section split being a way of excusing everything.
+    #[test]
+    fn a_term_that_does_not_divide_is_still_refused() {
+        let low = sections(2);
+        let mut high = sections(64);
+        for entry in &mut high {
+            if entry.0 == ".bss" {
+                entry.1 += 5;
+            }
+        }
+        let growth = section_growth(&low, &high).expect("one kernel twice");
+        let refused = slope_from_sections(62, &growth).expect_err("5 does not divide by 62");
+        assert!(refused.contains(".bss"), "{refused}");
+        assert!(refused.contains("leaves 5"), "{refused}");
+        // And it says what did behave, or a reader cannot tell one moved term
+        // from a model that has stopped describing this kernel.
+        assert!(refused.contains(".stacks"), "{refused}");
+    }
+
+    /// A padded section may step by a page and may not step by part of one.
+    #[test]
+    fn a_padded_section_growing_by_part_of_a_page_is_refused() {
+        let low = sections(2);
+        let mut high = sections(64);
+        for entry in &mut high {
+            if entry.0 == ".rodata" {
+                entry.1 += 8;
+            }
+        }
+        let growth = section_growth(&low, &high).expect("one kernel twice");
+        let refused = slope_from_sections(62, &growth).expect_err("not a whole page");
+        assert!(refused.contains(".rodata"), "{refused}");
+    }
+
+    /// Two images that are not one kernel built twice.
+    #[test]
+    fn a_section_on_one_side_only_is_not_a_measurement() {
+        let mut high = sections(64);
+        high.push((".newthing".to_string(), 16));
+        let refused =
+            section_growth(&sections(2), &high).expect_err("a section at one ceiling only");
+        assert!(refused.contains(".newthing"), "{refused}");
+
+        let refused = section_growth(&high, &sections(2)).expect_err("and in the other direction");
+        assert!(refused.contains(".newthing"), "{refused}");
+    }
+
+    /// The fact the whole split rests on, read from the script rather than
+    /// asserted about it.
+    #[test]
+    fn the_script_pads_exactly_the_two_sections_named() {
+        let script = std::fs::read_to_string(root().join("kernel").join("linker.ld"))
+            .expect("kernel/linker.ld");
+        let padded = page_padded_in(&script);
+        let names: Vec<&str> = padded.iter().map(String::as_str).collect();
+        // Sorted, because the reading returns a set and the constant is written
+        // in the order the script lists them. The set is what the check compares.
+        let mut want: Vec<&str> = PAGE_PADDED_SECTIONS.to_vec();
+        want.sort_unstable();
+        assert_eq!(names, want, "kernel/linker.ld pads {names:?}");
+        assert_eq!(padding_where_declared(&script), Ok(()));
+    }
+
+    /// The trap the reading is written around: every output section in that
+    /// script is page-*aligned* at its start, and only two pad their own size.
+    /// A check that could not tell those apart would name five sections and
+    /// excuse the three that carry the entire per-core cost.
+    #[test]
+    fn an_address_alignment_is_not_padding() {
+        let script = "\n.data ALIGN(4096) : AT(ADDR(.data)) {\n    *(.data)\n}\n";
+        assert!(page_padded_in(script).is_empty(), "a header ALIGN costs nothing in sh_size");
+
+        let padded = "\n.data ALIGN(4096) : {\n    *(.data)\n    . = ALIGN(4096);\n}\n";
+        let found = page_padded_in(padded);
+        assert_eq!(found.iter().map(String::as_str).collect::<Vec<_>>(), vec![".data"]);
+    }
+
+    /// Both directions, because they fail differently and the second is worse:
+    /// a section that lost its padding and is still named is excused from a
+    /// check it used to pass, and nothing goes red.
+    #[test]
+    fn the_declared_padding_set_is_checked_both_ways() {
+        let gained = "\n.text : {\n. = ALIGN(4096);\n}\n.rodata : {\n. = ALIGN(4096);\n}\n\
+                      .data : {\n. = ALIGN(4096);\n}\n";
+        let refused = padding_where_declared(gained).expect_err("a third section is padded");
+        assert!(refused.contains(".data"), "{refused}");
+
+        let lost = "\n.text : {\n. = ALIGN(4096);\n}\n.rodata : {\n*(.rodata)\n}\n";
+        let refused = padding_where_declared(lost).expect_err(".rodata stopped padding");
+        assert!(refused.contains(".rodata"), "{refused}");
+    }
 
     #[test]
     fn the_two_assignments_are_still_where_the_check_reaches_for_them() {
