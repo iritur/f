@@ -822,6 +822,9 @@ fn main() -> ExitCode {
         "lint-claim-owners" => lint_claim_owners(),
         "lint-testing-status" => lint_testing_status(),
         "lint-debt" => lint_debt(),
+        "lint-claim-runs" => lint_claim_runs(),
+        "lint-generations" => generation::fixpoint(),
+        "lint-gate" => lint_gate(),
         "lint-manifests" => lint_manifests(),
         "lint-components" => lint_components(),
         "lint-datapath" => lint_datapath(),
@@ -1041,6 +1044,9 @@ cargo xtask <command>
   lint-claim-owners  R09: every claim names the document that owns it
   lint-testing-status  the TESTING-STATUS claims row says what claims/ holds
   lint-debt          every narrowed exit has a row in docs/TECHNICAL-DEBT.md
+  lint-claim-runs    every gating claim is compared to its bounds by some workflow
+  lint-generations   every generation round-trips to a fixpoint
+  lint-gate          the pull-request gate runs every check `verify` runs
   lint-manifests     Every component manifest fits docs/manifest.md; RFC 0005
                      rule 4 and RFC 0008's shape, checked before a spawn does
   lint-components    The components this tree declares are the components it
@@ -12534,6 +12540,13 @@ fn lint_all() -> Result<(), String> {
     // And the other half of the same discipline: a criterion a task no longer
     // has to meet is one somebody has to be able to find. RFC 0093.
     lint_debt()?;
+    // And the question `lint-claims` does not ask: not whether a document agrees
+    // with the registry, but whether anything in CI ever compares a gating claim
+    // to the bounds it publishes. E0-P01.
+    lint_claim_runs()?;
+    // And the same question about the checks themselves rather than the claims:
+    // does the gate run what this function runs? Nine of them it did not.
+    lint_gate()?;
     // The topology check RFC 0005 promised in the R02 row: every component
     // manifest fits the schema, declares a domain, and does not put an
     // imported image in `shared`. It runs here so a boot is not the first
@@ -13054,6 +13067,213 @@ fn lint_testing_status() -> Result<(), String> {
          claims gate, they are stale in the same breath: a corrected count above a wrong\n\
          list is worse than both.",
         files.len()
+    ))
+}
+
+/// Every check `lint_all` runs is also run by the pull-request gate.
+///
+/// # The gap this was written against
+///
+/// `cargo xtask verify` is what `CLAUDE.md` tells every session to run before
+/// asking for review, and `lint_all` is the policy half of it. The gate's
+/// `policy` job runs a list of verbs written by hand, and the two had drifted:
+/// **nine checks ran in `verify` and in no workflow at all** — `lint-stamp`,
+/// `lint-manifests`, `lint-generations`, `lint-components`, `lint-datapath`,
+/// `lint-registries`, `lint-owed`, `lint-reproduce` and `lint-remap`.
+///
+/// The one that shows what that costs is `lint-registries`. RFC 0089 exists
+/// because three RFCs were numbered 0085 and all three were cited, and it says
+/// the check *"is what makes the next one a red merge instead of a reader's
+/// discovery"*. A check that runs on a laptop and not in the gate cannot make a
+/// red merge. It was doing the second half of its job and none of the first.
+///
+/// # Why it reads `lint_all` rather than a list
+///
+/// Because a list is what drifted. The gate's steps are hand-written and so was
+/// the intent that they match `verify`; nothing compared them. This reads the
+/// body of [`lint_all`] out of this file, turns each call into the verb that
+/// reaches it, and requires the gate to name every one — so a check added to
+/// `verify` and not to the gate is a red build rather than a thing somebody
+/// eventually notices.
+///
+/// Reading its own source is unusual and is the honest option here: the
+/// alternative is a second list, which is the defect one level up.
+///
+/// # What it does not check
+///
+/// That the gate runs them *usefully* — in a job that can fail the run, on the
+/// right container, before the expensive jobs. And it says nothing about `fmt`
+/// or `clippy`, which `lint` runs after `lint_all` and the gate runs in a job of
+/// its own.
+///
+/// # Errors
+///
+/// A check in `lint_all` that no workflow invokes, or either file missing.
+fn lint_gate() -> Result<(), String> {
+    let me = std::fs::read_to_string(root().join("xtask").join("src").join("main.rs"))
+        .map_err(|e| format!("reading xtask/src/main.rs to find what `lint_all` runs: {e}"))?;
+    let body = me
+        .split_once("fn lint_all() -> Result<(), String> {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .ok_or("xtask/src/main.rs no longer contains a `fn lint_all` this can read")?;
+
+    let mut want: Vec<String> = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        let Some(call) = line.strip_suffix("()?;") else { continue };
+        let verb = match call {
+            "generation::fixpoint" => "lint-generations".to_string(),
+            name if name.starts_with("lint_") => name.replace('_', "-"),
+            _ => continue,
+        };
+        if !want.contains(&verb) {
+            want.push(verb);
+        }
+    }
+    if want.is_empty() {
+        return Err("no checks were found in `lint_all`, which cannot be right and means \
+                    this reader no longer matches the function it reads"
+            .into());
+    }
+
+    let gate = root().join(".github").join("workflows").join("ci.yml");
+    let text = std::fs::read_to_string(&gate)
+        .map_err(|e| format!("reading .github/workflows/ci.yml: {e}"))?;
+
+    let absent: Vec<&String> =
+        want.iter().filter(|verb| !text.contains(&format!("cargo xtask {verb}"))).collect();
+
+    if absent.is_empty() {
+        println!(
+            "lint-gate: ok  (the pull-request gate runs all {} check(s) `verify` runs)",
+            want.len()
+        );
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} check(s) run in `cargo xtask verify` and not in the pull-request gate:\n  {}\n\n\
+         `CLAUDE.md` tells every session to run `verify` before asking for review, so a\n\
+         check missing from the gate is a policy the tree enforces on a laptop and not\n\
+         on a merge. `lint-registries` was one of them, and RFC 0089 says of it that it\n\
+         *is what makes the next one a red merge instead of a reader's discovery* — which\n\
+         it cannot do from a job that does not exist.\n\n\
+         Add a step to the `policy` job in .github/workflows/ci.yml for each.",
+        absent.len(),
+        absent.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n  ")
+    ))
+}
+
+/// Every claim that gates is compared to its own `[threshold]` table by some
+/// workflow.
+///
+/// # The defect this was written against
+///
+/// `status = "gating"` means *fails the build on regression*, and seventeen
+/// claims said it. Exactly one of them — `rollback-comparisons` — was invoked
+/// anywhere as `cargo xtask claim <name>`, and that invocation is the only thing
+/// in this tree that reads a `[threshold]` table. `claim_compare` is where the
+/// comparison lives and nothing else calls it.
+///
+/// The other sixteen were not unrun. Their *workloads* run: `cargo xtask chaos`,
+/// `hostile`, `entries`, `deadline`, `churn` are all in the gate, and each
+/// asserts its own internal invariants. What none of them does is read the
+/// number the claim publishes and compare it. So a claim could drift past its
+/// published bound with every job green, which is `status = "gating"` meaning
+/// nothing — a check that cannot fail, which this tree has twice recorded the
+/// fate of.
+///
+/// # Why the reproduction command and not the workload
+///
+/// Because `lint-reproduce` already settled that a claim's `[reproduce] command`
+/// must be `cargo xtask claim <its own name>`, and that command is what compares.
+/// Keying this check on the same string means there is one spelling of *this
+/// claim is enforced*, and the two lints cannot disagree about what enforcement
+/// is.
+///
+/// # What it does not check
+///
+/// **Which** workflow, and therefore how often. A claim invoked only in the
+/// nightly is enforced once a day and not on a pull request, and that is a real
+/// difference this does not gate on — a boot-heavy claim in the pull-request
+/// gate would cost more than the regression it catches. The report prints the
+/// workflow each claim is enforced by so the split is read rather than assumed,
+/// and `E0-P01`'s body says which claims are on which side and why.
+///
+/// # Errors
+///
+/// A gating claim no workflow compares, or a workflow directory that is not
+/// there.
+fn lint_claim_runs() -> Result<(), String> {
+    let dir = root().join(".github").join("workflows");
+    let mut flows: Vec<(String, String)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| {
+        format!(
+            "reading .github/workflows/: {e}\n\n\
+             With no workflows there is nothing enforcing any claim, which is a larger\n\
+             finding than the one this check was written for."
+        )
+    })? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().is_some_and(|e| e == "yml" || e == "yaml") {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let text =
+                std::fs::read_to_string(&path).map_err(|e| format!("reading {name}: {e}"))?;
+            flows.push((name, text));
+        }
+    }
+
+    let mut enforced: Vec<String> = Vec::new();
+    let mut absent: Vec<String> = Vec::new();
+    for path in claim_files()? {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+        if claim_value(&text, "status").as_deref() != Some("gating") {
+            continue;
+        }
+        let name = claim_name(&text, &path);
+        let needle = format!("cargo xtask claim {name}");
+        let found: Vec<&str> = flows
+            .iter()
+            .filter(|(_, body)| body.contains(&needle))
+            .map(|(file, _)| file.as_str())
+            .collect();
+        if found.is_empty() {
+            absent.push(name);
+        } else {
+            enforced.push(format!("  {name:<38} {}", found.join(" ")));
+        }
+    }
+
+    if absent.is_empty() {
+        println!(
+            "lint-claim-runs: ok  ({} gating claim(s), each compared to its bounds by a \
+             workflow)",
+            enforced.len()
+        );
+        for row in &enforced {
+            println!("{row}");
+        }
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} claim(s) say `status = \"gating\"` and no workflow compares them to their\n\
+         bounds:\n  {}\n\n\
+         `gating` means *fails the build on regression*. The comparison lives in\n\
+         `claim_compare`, and the only thing that reaches it is `cargo xtask claim\n\
+         <name>` — a claim's own `[reproduce] command`, which `lint-reproduce` already\n\
+         requires it to carry. A claim whose workload runs is not the same as a claim\n\
+         whose bound is checked: the workload asserts its own invariants and never\n\
+         reads the number the claim publishes.\n\n\
+         Add `cargo xtask claim <name>` to a workflow, or change the status. Both are\n\
+         honest; leaving it is the one option that is not.\n\n\
+         {} claim(s) are enforced today:\n{}",
+        absent.len(),
+        absent.join("\n  "),
+        enforced.len(),
+        if enforced.is_empty() { "  (none)".to_string() } else { enforced.join("\n") }
     ))
 }
 
