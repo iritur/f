@@ -726,6 +726,32 @@ impl PeerGone {
             RingError::Full | RingError::Corrupt => None,
         }
     }
+
+    /// The evidence a peer-gone notice constitutes, if any.
+    ///
+    /// **The second source this type's own comment said would arrive with
+    /// `E1-B05`, and it has.** A component that ends is ended by the frame, and
+    /// RFC 0008 has the frame post `f_abi::control::notice::PEER_GONE` to every
+    /// holder of the endpoint that named it. A holder told that has been told
+    /// precisely what [`Self::of`] infers from an epoch change: the tokens it is
+    /// still waiting on are void.
+    ///
+    /// What makes it sound is the same thing that makes the other one sound, and
+    /// it is not this function — it is what the frame does *before* it posts.
+    /// Ending a component revokes its buffer sets and tears down its remapping
+    /// domain, so a transfer the dead peer had started faults rather than landing
+    /// in memory this side is about to reuse. `E1-B01`'s guarantee, and the
+    /// reason a notice this side merely *read* would not be enough: the caller
+    /// has to be the one that knows the teardown happened, which is why the
+    /// argument is the notice rather than a `bool` and why nothing here accepts
+    /// `GRANTED` or `STOP`.
+    ///
+    /// Any other notice is `None`. A peer that was granted something, or asked
+    /// to stop, or that reported pressure, is a peer that is still there.
+    #[must_use]
+    pub const fn told(notice: i32) -> Option<Self> {
+        if notice == f_abi::control::notice::PEER_GONE { Some(Self(())) } else { None }
+    }
 }
 
 #[cfg(test)]

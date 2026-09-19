@@ -898,7 +898,11 @@ cargo xtask <command>
                      with. Not in `blk` with no argument: it serves no client
   blk served         E1-B05's third act: that same occupant serving a client
                      from ring 3 on its own core while the client submits. Not
-                     in `blk` with no argument: it has not survived a kill yet
+                     in `blk` with no argument: the three provocations still run
+                     against an instance the frame stands up outside any place
+  blk killed         E1-P06: that same occupant killed under its client's load,
+                     its place refilled with the same device window, and the
+                     client losing nothing but its registrations
   blk [half]         Boot the block datapath: a driver component moves a sector
                      through a ring with nothing copied — inside; the same run
                      with the client's grant withdrawn must fault — outside; and
@@ -10180,6 +10184,161 @@ fn blk_served() -> Result<(), String> {
     Ok(())
 }
 
+/// A driver killed under a client's load, and the client observing only latency.
+///
+/// **`E1-P06`'s missing half.** `claims/0005-driver-restart-blast-radius` has
+/// been gating since E1, measured in the simulator against a modelled occupant
+/// of a real place. What this adds is the sentence that entry's exit says is
+/// missing: *what is killed is still a modelled occupant rather than the
+/// occupant serving the datapath*. Here it is the occupant serving the datapath.
+///
+/// # What is killed, and why it is a kill rather than a stop
+///
+/// Everything else that ends a component in this tree is something the component
+/// did: a fault it took, an exit it chose, a stop it agreed to. All of those are
+/// cooperative in the one way that matters — the component reached a point of its
+/// own choosing. A driver that crashes under load does not. So the frame takes
+/// the occupant's text away and shoots down the translation, and the next
+/// instruction it fetches faults at ring 3. The boot log carries the death, and
+/// `Killed` with vector 14 is what says the kill landed where it was aimed: an
+/// `Exited` there would mean the component had gone before the frame reached it,
+/// which would make every number below it a measurement of something else.
+///
+/// # The four things asserted, and whose word each one is
+///
+/// 1. **the kill arrived under load** — the client's own count of what it had
+///    submitted and not been answered, required to be at least one. A kill with
+///    nothing outstanding is a restart, and a restart demonstrates nothing about
+///    a blast radius;
+/// 2. **the place was refilled** — a second occupant of the *same* place, given
+///    the same device window and the same queue memory, supplied again rather
+///    than carved. A boot that built a second place would be demonstrating that
+///    two drivers can exist, which nobody doubted;
+/// 3. **the second occupant served** — its own tally off its own routing page,
+///    which the frame did not write;
+/// 4. **nothing was lost** — and this one is in bytes rather than in counters.
+///    Every buffer the client ever submitted is checked for the poison it was
+///    filled with before the device was told anything. A byte the disk cannot
+///    produce is still there only if that read never landed, across the kill and
+///    the restart and the re-registration.
+///
+/// # Errors
+///
+/// A sentence naming which of the four did not hold.
+fn blk_killed() -> Result<(), String> {
+    println!("--- blk=killed: the driver serving a client is killed under its load");
+    let disk = blk_disk()?;
+    let device = blk_device(&disk)?;
+    let borrowed: Vec<&str> = device.iter().map(String::as_str).collect();
+    let (ending, log) = machine_devices(
+        Some("blk=killed"),
+        &[],
+        Capture::Printed,
+        BOOT_TIMEOUT,
+        BOOT_MEMORY,
+        &borrowed,
+        &[],
+    )?;
+    if ending != Ending::Exited(33) {
+        return Err(format!("the boot {ending}; expected exit 33"));
+    }
+
+    let killed = log.lines().find(|line| line.contains("killed        place virtio-blk"));
+    let Some(killed) = killed else {
+        return Err("the boot ran and killed nothing.\n\n\
+             `component::serve_ring3` kills only when the client asks, and the client asks\n\
+             only when it has work outstanding. A boot that printed a `served` line and not\n\
+             this one is one where `blk=killed` was not read — `blk_place_supply` turns it\n\
+             into `Placed::kills`, and without it this is `blk served` under another name."
+            .into());
+    };
+    if killed.contains("with 0 operation(s) outstanding") {
+        return Err(format!(
+            "the driver was killed with nothing in flight, which is a restart.\n\n\
+             {}\n\n\
+             `claims/0005` requires at least one operation outstanding at the kill, because\n\
+             a harness that killed an idle driver would pass every other check here and\n\
+             assert nothing about a blast radius.",
+            killed.trim_end(),
+        ));
+    }
+    // The kind of death, and it is the evidence the kill landed where it was
+    // aimed rather than the component having gone on its own.
+    if !killed.contains("Killed") {
+        return Err(format!(
+            "the occupant ended, and not by the kill.\n\n\
+             {}\n\n\
+             `component::fault_occupant` unmaps all of `process::TEXT_PAGES` and shoots the\n\
+             translation down, so the death should be a `Killed` with vector 14 — a page\n\
+             fault at ring 3 on the instruction after its text stopped being mapped. An\n\
+             `Exited` here means the component had already gone, and every number below\n\
+             this line is then about a driver that was never killed.",
+            killed.trim_end(),
+        ));
+    }
+
+    if !log.contains("refilled      place virtio-blk epoch 1") {
+        return Err("the driver was killed and its place was not refilled.\n\n\
+             The refill is `tear_down` followed by `offer` and `spawn` against the *same*\n\
+             place, with the same supply the first occupant was given — a device window is\n\
+             not memory a fresh account can carve. Epoch 1 is what says it is the same\n\
+             place: a second place would have printed epoch 0 again."
+            .into());
+    }
+
+    // One `served` line, and it has to be **after** the refill. The killed
+    // occupant leaves none, and that is not a gap: writing that report is a
+    // component's last act and this one did not get one. So the line that
+    // matters is the second occupant's, and a check that merely counted them
+    // would pass on a boot where the refill served nothing and the corpse had
+    // somehow reported.
+    let after = log
+        .lines()
+        .skip_while(|line| !line.contains("refilled      place virtio-blk"))
+        .any(|line| line.contains("served        place virtio-blk"));
+    if !after {
+        return Err("the refilled occupant did not report serving anything.\n\n\
+             The second occupant is handed a new table, a new control ring and a new data\n\
+             ring, so the client has to register again before it can submit. Suspect the\n\
+             queue memory before the device: it is *supplied* rather than carved, so it is\n\
+             the one thing a new occupant could inherit from the dead one, and a virtqueue\n\
+             laid out over a dead driver's rings reads indices that have already gone by —\n\
+             which is exactly what this half found the first time it got this far."
+            .into());
+    }
+
+    let survived = log.lines().find(|line| line.contains("blk survived"));
+    let Some(survived) = survived else {
+        return Err("the client did not report what it lost.\n\n\
+             `main` prints this line whenever the client had anything in flight at the\n\
+             kill, so a boot with a `killed` line and not this one is a client that never\n\
+             came back — check for a FAIL line between them."
+            .into());
+    };
+    if !survived.contains("and 0 buffer(s) never got their bytes") {
+        return Err(format!(
+            "an operation was lost across the kill.\n\n\
+             {}\n\n\
+             This is the check the counters cannot make. Every buffer is filled with a\n\
+             byte the disk cannot produce before the device is told anything, so a buffer\n\
+             still holding it is a read that never landed — across the kill, the restart,\n\
+             and the re-registration the client had to do because a `SetId` names a slot\n\
+             in the dead instance's table.",
+            survived.trim_end(),
+        ));
+    }
+
+    println!(
+        "\nblk=killed: ok — a driver serving a client from ring 3 on its own core was killed\n\
+         \x20 with work outstanding, its place was refilled with the same device window, and\n\
+         \x20 the client got every byte it ever asked for.\n\
+         \x20 `claims/0005`'s rows are still taken in the simulator, which is where this\n\
+         \x20 project's fault and load numbers are taken; what this adds is that the thing\n\
+         \x20 being killed is now the thing serving the datapath."
+    );
+    Ok(())
+}
+
 const BLK_PROVOCATIONS: &[(&str, &str)] = &[
     ("inside", "the client's buffer stays in the driver's grant: the sector must come back"),
     ("outside", "it is taken back before the read: the transfer must fault, and nothing may land"),
@@ -10208,12 +10367,23 @@ const BLK_PLACE: &str = "place";
 /// [`blk_served`] says why at length.
 const BLK_SERVED: &str = "served";
 
+/// And that half with the driver killed under the client's load, which is
+/// `E1-P06`. Still outside [`BLK_PROVOCATIONS`]: what the default set asserts is
+/// a *datapath*, and these three halves each assert one thing about the place
+/// path that the datapath halves do not. They join the table on the day the
+/// three provocations run on the place path, which is also the day
+/// `CHAOS_GAP`'s needle goes.
+const BLK_KILLED: &str = "killed";
+
 fn blk(kind: Option<&str>) -> Result<(), String> {
     if kind == Some(BLK_PLACE) {
         return blk_place();
     }
     if kind == Some(BLK_SERVED) {
         return blk_served();
+    }
+    if kind == Some(BLK_KILLED) {
+        return blk_killed();
     }
     let chosen: Vec<&(&str, &str)> = match kind {
         None => BLK_PROVOCATIONS.iter().collect(),

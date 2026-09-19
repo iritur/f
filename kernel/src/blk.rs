@@ -129,7 +129,7 @@ use f_abi::cap::{CapType, rights};
 use f_abi::{ABI_VERSION, Negotiated, cflags, class, error, feature};
 use f_ring::device::Window;
 use f_ring::registry::{Domains, registration};
-use f_ring::{BufferSet, Collector, Consumer, Fixed, InFlight, Mapping, Poster, Producer};
+use f_ring::{BufferSet, Collector, Consumer, Fixed, Idle, InFlight, Mapping, Poster, Producer};
 use f_virtio_blk::driver;
 use f_virtio_blk::pending;
 use f_virtio_blk::routing;
@@ -1516,6 +1516,18 @@ pub struct Served {
     pub answered: u32,
 }
 
+/// How many reads the kill half submits, and how many buffers it carves.
+///
+/// Two, and the number is a floor rather than a workload. What `E1-P06` requires
+/// is that at least one operation is outstanding when the driver dies, so what
+/// this needs is enough reads that one can come back while another has not — and
+/// two is that. A larger burst would make the same point at the cost of a longer
+/// script, and `sim/src/chaos.rs` is where the number is a workload rather than
+/// a floor: it runs this against every component the build produced, at a depth
+/// this boot has no reason to reach.
+/// Unit: buffers.
+const KILL_READS: usize = 2;
+
 /// The frame being a client to an occupant of a place, from the core that
 /// spawned it.
 ///
@@ -1570,6 +1582,32 @@ pub struct Placed<'a> {
     /// and is still holding can be reported as a number rather than inferred.
     /// Zero until the first `drive`. Unit: frames.
     free_before: u64,
+    /// Whether this client is the one that has its server killed under it.
+    killing: bool,
+    /// Which generation of the occupant this client is about to be run against,
+    /// counting from zero. Unit: none — an ordinal.
+    generation: u32,
+    /// Which of [`KILL_READS`] reads have **not** been answered, as a bitmask.
+    /// What a restart costs a client, held across the kill because the client is
+    /// the only thing that survives it.
+    outstanding: u32,
+    /// How many operations were outstanding at the moment of the kill.
+    /// `E1-P06`'s floor: a kill with none is a restart, and a restart
+    /// demonstrates nothing about a blast radius. Unit: operations.
+    in_flight_at_kill: u32,
+    /// How many completions this client has reaped, over every generation.
+    /// Unit: completions.
+    reaped: u32,
+    /// Where the device saw the client's page, from the last registration.
+    /// Unit: bytes, in the device's address space.
+    registered_at: u64,
+    /// Whether a registration without `GRANT` was refused, which the kill half
+    /// provokes on its first generation.
+    refused_without_grant: bool,
+    /// Buffers still holding the poison when the run ended — operations the
+    /// client submitted and never got its bytes for. Required to be zero, and it
+    /// is the row `claims/0005` calls *operations lost*. Unit: buffers.
+    poisoned: u32,
     /// What the client saw, once it has run.
     served: Option<Served>,
     /// How many translations the frame has answered so far. Unit: operations.
@@ -1666,6 +1704,14 @@ impl<'a> Placed<'a> {
                 control: 0,
                 data: 0,
                 free_before: 0,
+                killing: false,
+                generation: 0,
+                registered_at: 0,
+                refused_without_grant: false,
+                outstanding: 0,
+                in_flight_at_kill: 0,
+                reaped: 0,
+                poisoned: 0,
                 served: None,
                 answered: 0,
             },
@@ -1677,6 +1723,24 @@ impl<'a> Placed<'a> {
     #[must_use]
     pub const fn served(&self) -> Option<Served> {
         self.served
+    }
+
+    /// Have this client's server killed under it, once, with work outstanding.
+    pub const fn kills(&mut self) {
+        self.killing = true;
+    }
+
+    /// What survived the kill, for the boot to assert on and the log to carry.
+    ///
+    /// The four numbers `claims/0005` is decomposed into, taken on the client's
+    /// side of the boundary because that is the side the claim is about: *no
+    /// client observes anything except added latency* is a sentence about a
+    /// client, and a driver's own tally of what it served cannot say it.
+    ///
+    /// `(in flight at the kill, completions reaped, buffers still poisoned)`.
+    #[must_use]
+    pub const fn survived(&self) -> (u32, u32, u32) {
+        (self.in_flight_at_kill, self.reaped, self.poisoned)
     }
 
     /// Give the device's domain back, after the demonstration has counted its
@@ -1715,17 +1779,329 @@ impl<'a> Placed<'a> {
     }
 }
 
+/// Give up on buffers the device may still hold, without completing or
+/// reclaiming them.
+///
+/// **The third thing that can happen to an `f_ring::InFlight`, and it is the
+/// only sound one on a path that has gone wrong.** A buffer comes back through
+/// its completion, or through `reclaim` against evidence the completion is never
+/// coming. On an error path there is neither: the peer may be alive, may be
+/// mid-transfer, and the frame has just stopped being able to find out. Dropping
+/// one is a panic on purpose — `ring/src/buffers.rs` argues why — and reclaiming
+/// one would be asserting the evidence this path does not have.
+///
+/// So the marker is leaked and the bytes stay the device's forever. That is a
+/// real cost and it is the right one: the page is never handed to anybody else,
+/// because the boot this is reached from is about to fail and say why. A system
+/// that wanted to carry on here would have to revoke the registration and tear
+/// the domain down first, which is `E1-B01`'s guarantee and is exactly what
+/// `Placed::tear_down` does on the path where the frame *is* still in control.
+fn abandon(flying: &mut [Option<InFlight<'_, Fixed>>]) {
+    for slot in flying {
+        if let Some(sent) = slot.take() {
+            core::mem::forget(sent);
+        }
+    }
+}
+
+/// The three ends of the two rings the frame holds, in one bundle.
+///
+/// A struct because they travel together and are borrowed together: two of them
+/// are the occupant's control ring seen from the producer's side, and the third
+/// is the client's end of the data ring. Passing them as three arguments is what
+/// [`client`] does, and this exists so the function below can take the allocator
+/// back between calls without re-deriving them.
+struct Ends<'a, 'm> {
+    asks: &'a Consumer<'m>,
+    answers: &'a Poster<'m>,
+    reaper: &'a Collector<'m>,
+}
+
+impl Placed<'_> {
+    /// Submit, be killed, and come back — the client's half of `E1-P06`.
+    ///
+    /// # What this asserts, and why it is a client rather than a harness
+    ///
+    /// *No client observes anything except added latency.* That sentence is
+    /// about a client, so the thing that has to survive is a client: something
+    /// holding buffers a device is writing into, with operations outstanding, at
+    /// the moment its server stops existing. A harness watching from outside can
+    /// say the driver came back; only the thing that was talking to it can say
+    /// nothing was lost.
+    ///
+    /// # The two generations
+    ///
+    /// **Generation zero** registers the client's page, poisons every buffer with
+    /// a byte the disk cannot produce, submits [`KILL_READS`] reads, and waits
+    /// until one has come back and one has not. Then it pulls
+    /// [`component::Killer`], which takes the occupant's text away, waits for its
+    /// core, and answers with evidence that its outstanding tokens are void. The
+    /// buffers the device still held are reclaimed against that evidence — the
+    /// one path `f_ring::InFlight` offers for a completion that is never coming —
+    /// and the registration is withdrawn from the device's domain, because a dead
+    /// driver's device must not still be able to reach this page.
+    ///
+    /// **Generation one** is handed a new occupant of the same place: new table,
+    /// new control ring, new data ring. Every registration the client held is
+    /// gone, so it registers again and resubmits exactly what was never answered.
+    /// What it checks at the end is not a count but the *bytes* — every buffer
+    /// must have lost its poison, which is true only if every read the client
+    /// ever submitted eventually landed.
+    ///
+    /// # Errors
+    ///
+    /// A message for the boot log, naming which step did not hold.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the allocator, the domain and the ring ends are what a client of a component \
+                  is, and the last three are which run this is: `client` above takes the same \
+                  set for the same reason"
+    )]
+    fn survive(
+        &mut self,
+        frames: &mut FrameAllocator,
+        domain: &mut crate::arch::x86_64::vtd::Domain,
+        ends: Ends<'_, '_>,
+        producer: &mut Producer<'_>,
+        page: &mut [u8],
+        asking: Asking,
+        killer: &mut dyn component::Killer,
+        generation: u32,
+    ) -> Result<component::Drove, &'static str> {
+        let first = generation == 0;
+        let token = u64::from(generation) * 100;
+
+        // --- the refusal, once, before anything is registered ----------------
+        //
+        // Provoked on the first generation for the reason `client` provokes it on
+        // every run: a check nobody has watched fail is indistinguishable from
+        // one that cannot fail, and this is the check standing between a
+        // component's clients and each other's memory.
+        if first {
+            let probe =
+                registration(token + 1, self.ungrantable_cap, asking.bytes, KILL_READS as u32);
+            if producer.submit(probe).is_err() {
+                return Err(Trouble::Channel(0).message());
+            }
+            let mut supervising = self.supervising(frames, domain, &ends);
+            let answer =
+                supervising.awaited(asking.tsc_khz).map_err(|why| Trouble::from(why).message())?;
+            self.answered = supervising.answered;
+            let refused = matches!(
+                answer.error(),
+                Some((error::AUTHORITY, error::authority::RIGHT_NOT_HELD))
+            );
+            if !refused {
+                return Err(Trouble::NotRefused.message());
+            }
+            self.refused_without_grant = true;
+        }
+
+        // --- the registration, once per generation ---------------------------
+        //
+        // Again on the second, and that is the cost rather than an oversight: a
+        // `SetId` names a slot in *this instance's* table, and a fresh instance's
+        // table has never been filled. `user/virtio-blk/manifest.toml` argues it
+        // at length under `[transfer]`, and it is why that manifest declares
+        // `in_place` — a swap keeps the table, a restart does not.
+        let asked = registration(token + 2, self.owned_cap, asking.bytes, KILL_READS as u32);
+        if producer.submit(asked).is_err() {
+            return Err(Trouble::Channel(0).message());
+        }
+        let (naming, registered_at) = {
+            let mut supervising = self.supervising(frames, domain, &ends);
+            let answer =
+                supervising.awaited(asking.tsc_khz).map_err(|why| Trouble::from(why).message())?;
+            let at = supervising.answered_at();
+            self.answered = supervising.answered;
+            let naming = Fixed::from_completion(&answer).map_err(|(refused, code)| {
+                Trouble::Registration(error::pack(refused, code)).message()
+            })?;
+            (naming, at)
+        };
+        self.registered_at = registered_at;
+
+        let mut set = BufferSet::bind(naming, asking.negotiated, page)
+            .map_err(|why| Trouble::Channel(why).message())?;
+        let carved = set.carve::<KILL_READS>().map_err(|_| Trouble::Geometry.message())?;
+
+        // --- what to submit ---------------------------------------------------
+        //
+        // Everything, the first time. Only what was never answered, the second —
+        // which is the whole of what a restart costs a client, and the whole of
+        // what this run measures.
+        let wanted = if first { (1u32 << KILL_READS) - 1 } else { self.outstanding };
+        let mut flying: [Option<InFlight<'_, Fixed>>; KILL_READS] = [const { None }; KILL_READS];
+        let mut idle: [Option<Idle<'_, Fixed>>; KILL_READS] = [const { None }; KILL_READS];
+        // Zipped rather than indexed, because this crate denies
+        // `clippy::indexing_slicing` and it is right to: the three arrays are the
+        // same length by construction and an index is a way of saying so that the
+        // compiler cannot check.
+        let paired = carved.into_iter().zip(flying.iter_mut()).zip(idle.iter_mut());
+        for (index, ((mut buffer, fly), rest)) in paired.enumerate() {
+            if wanted & (1 << index) == 0 {
+                *rest = Some(buffer);
+                continue;
+            }
+            // A byte the disk cannot produce, laid down before the device is told
+            // anything. A read that never landed leaves it behind, which is how
+            // this run tells *answered* from *lost* without believing a counter.
+            for byte in buffer.bytes_mut().iter_mut().take(TRANSFER as usize) {
+                *byte = POISON;
+            }
+            let at = index as u64 * u64::from(TRANSFER);
+            let entry = driver::read(token + 10 + index as u64, at, TRANSFER);
+            match buffer.submit(&mut *producer, entry) {
+                Ok((sent, _)) => *fly = Some(sent),
+                // The submission did not happen, so this buffer did not move and
+                // the ones already flying did. `Idle::submit` hands the buffer
+                // back with its refusal, which is why this arm drops one buffer
+                // safely and abandons the rest.
+                Err(_) => break,
+            }
+        }
+        let submitted = wanted.count_ones();
+
+        // --- reap, to the point this generation is for ------------------------
+        //
+        // The first stops one short, because *one answered and one outstanding*
+        // is the state the kill has to arrive in. The second waits for all of
+        // them, because that is the state the boot has to end in.
+        let stop_at = if first { submitted.saturating_sub(1) } else { submitted };
+        let mut got = 0u32;
+        while got < stop_at {
+            let answer = {
+                let mut supervising = self.supervising(frames, domain, &ends);
+                let answer = supervising.awaited(asking.tsc_khz);
+                self.answered = supervising.answered;
+                match answer {
+                    Ok(answer) => answer,
+                    Err(why) => {
+                        abandon(&mut flying);
+                        return Err(Trouble::from(why).message());
+                    }
+                }
+            };
+            let mut landed = false;
+            for (fly, rest) in flying.iter_mut().zip(idle.iter_mut()) {
+                let Some(sent) = fly.take() else { continue };
+                match sent.complete(&answer) {
+                    Ok(back) => {
+                        *rest = Some(back);
+                        landed = true;
+                        break;
+                    }
+                    // Not this one's token. Put it back and keep looking, which
+                    // is what makes this loop indifferent to completion order —
+                    // and a driver is entitled to answer in any order it likes.
+                    Err(still) => *fly = Some(still),
+                }
+            }
+            if !landed {
+                abandon(&mut flying);
+                return Err(Trouble::Channel(0).message());
+            }
+            got += 1;
+            self.reaped += 1;
+        }
+
+        if first {
+            // --- the kill -----------------------------------------------------
+            let outstanding = flying.iter().filter(|slot| slot.is_some()).count() as u32;
+            let Some(gone) = killer.kill(frames) else {
+                // Nothing may be reclaimed. A core that said nothing may still be
+                // inside the component, and until it is not, these buffers are
+                // the device's — so they are abandoned rather than taken back,
+                // and the boot fails saying so.
+                abandon(&mut flying);
+                return Err(Trouble::Overdue(0).message());
+            };
+            self.in_flight_at_kill = outstanding;
+            self.outstanding = 0;
+            for (index, (fly, rest)) in flying.iter_mut().zip(idle.iter_mut()).enumerate() {
+                let Some(sent) = fly.take() else { continue };
+                *rest = Some(sent.reclaim(gone));
+                self.outstanding |= 1 << index;
+            }
+            // The device's route to this page, withdrawn now that the driver
+            // which asked for it is gone. `E1-B01`'s guarantee made explicit at
+            // the one site that depends on it: nothing the dead peer had started
+            // can land in a page the next generation is about to be given again.
+            let owned_cap = self.owned_cap;
+            let mut supervising = self.supervising(frames, domain, &ends);
+            supervising.withdraw(owned_cap, registered_at, asking.bytes);
+            self.answered = supervising.answered;
+            return Ok(component::Drove::Kill { in_flight: outstanding });
+        }
+
+        // --- the verdict, in bytes rather than in counters ---------------------
+        //
+        // Every buffer, not only the resubmitted ones: the claim is that the
+        // client got everything it ever asked for, and a check that looked only
+        // at what this generation submitted would pass on a run which lost
+        // generation zero's answers entirely.
+        self.poisoned = 0;
+        for slot in &mut idle {
+            let Some(buffer) = slot.as_mut() else {
+                self.poisoned += 1;
+                continue;
+            };
+            if buffer.bytes_mut().iter().take(TRANSFER as usize).any(|byte| *byte == POISON) {
+                self.poisoned += 1;
+            }
+        }
+        self.served = Some(Served {
+            registered_at,
+            refused_without_grant: self.refused_without_grant,
+            matched: self.poisoned == 0,
+            answered: self.answered,
+        });
+        // Told to stop, as every other client here does: a driver left serving a
+        // client that has gone is a core this boot never gets back.
+        let supervising = self.supervising(frames, domain, &ends);
+        supervising.stop().map_err(|why| Trouble::from(why).message())?;
+        Ok(component::Drove::Finished)
+    }
+
+    /// The frame's authority over one occupant, rebuilt per use.
+    ///
+    /// A bundle of borrows and nothing else, which is why it is made and dropped
+    /// around every call that needs the allocator back — and needing it back is
+    /// not incidental: [`component::Killer::kill`] takes it, because unmapping a
+    /// page walks tables. `f_ring::adopt` makes the same argument about
+    /// re-adoption: a handle assembled from what is already held costs nothing
+    /// and cannot go stale.
+    fn supervising<'a, 'm>(
+        &'a mut self,
+        frames: &'a mut FrameAllocator,
+        domain: &'a mut crate::arch::x86_64::vtd::Domain,
+        ends: &Ends<'a, 'm>,
+    ) -> Supervising<'a, 'm> {
+        Supervising {
+            asks: ends.asks,
+            answers: ends.answers,
+            reaper: ends.reaper,
+            unit: &mut *self.unit,
+            domain,
+            frames,
+            table: &self.table,
+            answered_at: 0,
+            answered: self.answered,
+        }
+    }
+}
+
 impl component::Datapath for Placed<'_> {
     fn drive(
         &mut self,
         frames: &mut FrameAllocator,
         wired: component::Wired,
-    ) -> Result<(), &'static str> {
+        killer: &mut dyn component::Killer,
+    ) -> Result<component::Drove, &'static str> {
         self.control = wired.control;
         self.data = wired.data;
         self.free_before = frames.free_count();
         let Ok(bytes) = u32::try_from(FRAME_SIZE) else { return Err(Trouble::Authority.message()) };
-        let Some(domain) = self.domain.as_mut() else { return Err(Trouble::Authority.message()) };
 
         // Both ends adopted rather than described, because the frame is not the
         // grantor here: `component::spawn` wrote the control ring's header out of
@@ -1778,6 +2154,32 @@ impl component::Datapath for Placed<'_> {
             negotiated: Negotiated { version: ABI_VERSION, features: 0 },
         };
 
+        // The domain is taken out rather than borrowed, because the script below
+        // is a method on this client and cannot hold a borrow of one of its own
+        // fields across the call. Put back on every path, including the ones
+        // that refuse: `tear_down` is what releases it, and a domain left in a
+        // local would be a device still attached to tables nothing frees.
+        if self.killing {
+            let generation = self.generation;
+            self.generation += 1;
+            let Some(mut taken) = self.domain.take() else {
+                return Err(Trouble::Authority.message());
+            };
+            let out = self.survive(
+                frames,
+                &mut taken,
+                Ends { asks: &asks, answers: &answers, reaper: &reaper },
+                &mut producer,
+                page,
+                asking,
+                killer,
+                generation,
+            );
+            self.domain = Some(taken);
+            return out;
+        }
+
+        let Some(domain) = self.domain.as_mut() else { return Err(Trouble::Authority.message()) };
         let mut supervising = Supervising {
             asks: &asks,
             answers: &answers,
@@ -1809,7 +2211,8 @@ impl component::Datapath for Placed<'_> {
             matched: observed.matched,
             answered: self.answered,
         });
-        told.map_err(|why| Trouble::from(why).message())
+        told.map_err(|why| Trouble::from(why).message())?;
+        Ok(component::Drove::Finished)
     }
 
     fn serve(&mut self, frames: &mut FrameAllocator) {

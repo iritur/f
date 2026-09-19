@@ -1114,6 +1114,27 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
         }
     }
+    // And what survived the kill, on the one boot that arranges one. Three
+    // numbers, and every one of them is the *client's* — which is the side
+    // `claims/0005`'s sentence is about, because *no client observes anything
+    // except added latency* is a claim a server cannot make on its own behalf.
+    if let Some((in_flight, reaped, poisoned)) = placed.as_ref().map(blk::Placed::survived)
+        && in_flight > 0
+    {
+        kprintln!(
+            "  blk survived  the client had {in_flight} operation(s) in flight when its driver \
+             was killed, reaped {reaped} completion(s) across both occupants, and {poisoned} \
+             buffer(s) never got their bytes — a restart costs a client its registrations and \
+             nothing else"
+        );
+        if poisoned != 0 {
+            kprintln!(
+                "FAIL: an operation was lost across the kill: {poisoned} buffer(s) still hold \
+                 the poison, which is a byte the disk cannot produce"
+            );
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
     // Last of the frame's own numbers, because the allocator is still handing
     // out frames until the line above. The self-test is what says the hash
     // works: two readings with nothing in between must agree, and a reading
@@ -3074,7 +3095,18 @@ unsafe fn blk_place_supply<'a>(
     // separate words rather than one with an argument because
     // `BootInfo::has_parameter` is a substring search, so a name that contained
     // the other would answer true for both and silently take the shorter path.
-    let serving = boot.has_parameter(b"blk=served");
+    // Three parameters and one path, and they are separate words rather than
+    // one with an argument because `BootInfo::has_parameter` is a substring
+    // search: a name containing another would answer true for both and silently
+    // take the shorter path.
+    //
+    // `blk=place` stops at the identify life. `blk=served` goes on to give that
+    // occupant a client. `blk=killed` has that client's server taken away from
+    // under it with work outstanding, and gives the place a second occupant —
+    // which is `E1-P06`, and the first time in this tree that the component a
+    // boot kills is the component a client's load was going through.
+    let killing = boot.has_parameter(b"blk=killed");
+    let serving = killing || boot.has_parameter(b"blk=served");
     if !boot.has_parameter(b"blk=place") && !serving {
         return NONE;
     }
@@ -3162,7 +3194,12 @@ unsafe fn blk_place_supply<'a>(
                 blk::Placed::stand_up(&mut found.unit, frames, device, region, page, tsc_khz)
             };
             match stood {
-                Ok((placed, at)) => (Some(placed), at),
+                Ok((mut placed, at)) => {
+                    if killing {
+                        placed.kills();
+                    }
+                    (Some(placed), at)
+                }
                 Err(why) => {
                     kprintln!("FAIL: blk=served could not stand its client up: {}", why.message());
                     arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
