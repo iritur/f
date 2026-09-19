@@ -89,7 +89,7 @@ use f_abi::control::{is_notice, notice};
 use f_abi::deadline::Admitted;
 use f_abi::{Cqe, Negotiated, Sqe, door, error, feature};
 use f_ring::adopt::{Adopted, Client};
-use f_ring::device::{Region, Window};
+use f_ring::device::{Granted, Region, Window};
 use f_ring::refusal;
 use f_ring::registry::{Domains, Refusal};
 
@@ -155,7 +155,7 @@ fn serve(selector: u32) -> ! {
         end(stopped::NO_ROUTING)
     }
 
-    let Some(parts) = laid_out(&board) else {
+    let Some(mut parts) = laid_out(&board) else {
         report(&board, None, None, 0, stopped::BAD_ROUTING);
         end(stopped::BAD_ROUTING)
     };
@@ -178,6 +178,40 @@ fn serve(selector: u32) -> ! {
     }
 
     let mut route = Route { control: parts.control, token: 0, told: false };
+
+    // --- what this instance inherited, replayed before it serves anybody -----
+    //
+    // **The incoming half of RFC 0063's phase A**, and the ordering is the whole
+    // of it: before the first entry is taken off any ring, because a client
+    // whose `SetId` resolved against an empty table would be told `NO_SUCH_CAP`
+    // for a registration it never lost.
+    //
+    // Replayed through this instance's *own* `Driver::execute`, which is why the
+    // transfer is a history and not a table. Each deed is re-executed — the
+    // frame is asked for its own translations, this table issues its own slots —
+    // and what makes the `SetId` a client still holds keep working is that the
+    // deeds arrive in the order they were done. A table copied across would have
+    // been somebody else's device addresses wearing this instance's slots.
+    if parts.replay > 0 {
+        let taken = parts
+            .window
+            .as_ref()
+            .map(|window| replay(&mut driver, &mut route, window, parts.replay));
+        match taken {
+            Some(replayed) => {
+                let _ = board.write64(reported::REPLAYED, u64::from(replayed));
+            }
+            // Told there were records and given no window to read them from.
+            // Refused rather than served: an instance that carried on would be
+            // one whose clients think they inherited a table it never received,
+            // which is the `amnesiac` control in `sim/src/swap.rs` arriving as
+            // ordinary behaviour.
+            None => {
+                report(&board, Some(&driver), None, 0, stopped::BAD_ROUTING);
+                end(stopped::BAD_ROUTING)
+            }
+        }
+    }
     // What has been taken off the ring and not yet handed to the device. This
     // is the whole of `E1-B06` in this component: the ring is drained into it in
     // arrival order and the device is fed out of it in the order
@@ -257,6 +291,25 @@ fn serve(selector: u32) -> ! {
         }
 
         if queue.is_empty() {
+            // --- the quiescent point, and the swap is asked for here ---------
+            //
+            // `user/virtio-blk/manifest.toml`'s `[transfer]` table named this
+            // line in advance: *the driver needs a point in its own loop where
+            // it holds nothing, and it has one already.* An empty `Pending` is
+            // the whole of what this component has accepted and not answered,
+            // because `pending::IN_FLIGHT` is one and `Driver::execute` polls
+            // its chain back out of the device before it returns.
+            //
+            // That has a named expiry and it is worth restating where the code
+            // relies on it: `E1-B09` waits on the interrupt instead of spinning
+            // and raises `IN_FLIGHT` above one, and on that day an empty queue
+            // stops meaning an empty driver. The assertion below then grows a
+            // second term over the used ring, and this comment is what tells the
+            // next reader that the single term was a decision rather than an
+            // oversight.
+            if parts.hand_over {
+                break hand_over(&board, &driver, parts.window.as_mut());
+            }
             core::hint::spin_loop();
             continue;
         }
@@ -328,6 +381,94 @@ struct Parts {
     hold: u64,
     /// How many to serve before that hold applies. Unit: requests.
     hold_after: u64,
+    /// The transfer window, where there is one. `None` for every instance
+    /// nobody is swapping, which is every instance in every boot but one.
+    window: Option<Granted>,
+    /// Whether this instance is being asked to hand over at its next quiescent
+    /// point.
+    hand_over: bool,
+    /// How many records are waiting in the window for this instance to replay
+    /// before it serves anybody. Unit: records.
+    replay: u32,
+}
+
+/// Replay a predecessor's history into this instance's own table.
+///
+/// Answers how many deeds were re-executed without refusal. The count is
+/// reported and compared against what the outgoing instance said it wrote, which
+/// is two tallies of one number with neither derived from the other.
+///
+/// A record whose check word does not hold is **skipped and not replayed**, and
+/// the count is what says so. That is the `garble` control in `sim/src/swap.rs`
+/// as ordinary behaviour: a window that did not cross intact is a window this
+/// instance may not act on, and acting on part of one would be a table half
+/// inherited — which is worse than an empty one, because an empty one is
+/// visible to every client at once.
+fn replay(
+    driver: &mut crate::driver::Driver,
+    route: &mut Route,
+    window: &Granted,
+    records: u32,
+) -> u32 {
+    let bytes = window.bytes();
+    let mut done = 0;
+    for index in 0..records as usize {
+        let at = index * crate::state::RECORD_BYTES as usize;
+        let Some(slice) = bytes.get(at..at + crate::state::RECORD_BYTES as usize) else { break };
+        let Ok(eight) = <[u8; crate::state::RECORD_BYTES as usize]>::try_from(slice) else { break };
+        let record = crate::state::Record::from_bytes(&eight);
+        if !record.intact() {
+            continue;
+        }
+        let Some(entry) = record.replay() else { continue };
+        let Ok(order) = driver.admit(&entry, 0) else { continue };
+        if !driver.execute(&entry, order, route, 0).is_error() {
+            done += 1;
+        }
+    }
+    done
+}
+
+/// Write this instance's history into the transfer window and stop.
+///
+/// The outgoing half, and it answers the `stopped` value the loop breaks with so
+/// that the frame can tell the two outcomes apart: a hand-over that happened and
+/// one that could not.
+///
+/// **A journal that overflowed refuses.** The history it would hand on is
+/// shorter than the history it lived, so a successor replaying it would believe
+/// it inherited a table it did not. Abandoning costs every client its
+/// registrations — the place restarts — and costs nothing else, which is
+/// strictly better than a successor that is quietly wrong.
+fn hand_over(board: &Window, driver: &crate::driver::Driver, window: Option<&mut Granted>) -> u64 {
+    if driver.overflowed() {
+        let _ = board.write64(reported::QUIESCENT, 1);
+        return stopped::CANNOT_HAND_OVER;
+    }
+    let Some(window) = window else {
+        let _ = board.write64(reported::QUIESCENT, 1);
+        return stopped::BAD_ROUTING;
+    };
+    let deeds = driver.deeds();
+    let room = window.len() as usize / crate::state::RECORD_BYTES as usize;
+    if deeds.len() > room {
+        let _ = board.write64(reported::QUIESCENT, 1);
+        return stopped::CANNOT_HAND_OVER;
+    }
+    let bytes = window.bytes_mut();
+    let mut written = 0u64;
+    for (index, deed) in deeds.iter().enumerate() {
+        let at = index * crate::state::RECORD_BYTES as usize;
+        let Some(slot) = bytes.get_mut(at..at + crate::state::RECORD_BYTES as usize) else { break };
+        slot.copy_from_slice(&deed.to_bytes());
+        written += 1;
+    }
+    // The count last, after the bytes, for the reason every board in this tree
+    // writes its magic last: a reader that saw the count before the records
+    // would read whatever was in the window before this instance touched it.
+    let _ = board.write64(reported::RECORDS, written);
+    let _ = board.write64(reported::QUIESCENT, 1);
+    stopped::HANDED_OVER
 }
 
 /// The four register structures and the notification stride, out of the routing
@@ -478,6 +619,17 @@ fn laid_out(board: &Window) -> Option<Parts> {
         admission,
         hold,
         hold_after: board.read64(at::HOLD_AFTER).ok()?,
+        // Zero on every page no swap wrote, which reads as *there is no window*
+        // rather than as a window at address zero — `Granted::at` refuses that
+        // address by name, so the `Option` is the refusal rather than a second
+        // test of the same thing.
+        window: Granted::at(
+            board.read64(at::WINDOW_AT).ok()?,
+            u32::try_from(board.read64(at::WINDOW_LEN).ok()?).ok()?,
+        )
+        .ok(),
+        hand_over: board.read64(at::HAND_OVER).ok()? != 0,
+        replay: u32::try_from(board.read64(at::REPLAY).ok()?).ok()?,
     })
 }
 

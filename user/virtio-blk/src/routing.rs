@@ -250,6 +250,50 @@ pub mod at {
     /// client has not sent yet — a deadlock arrived at through a fixture. So
     /// the frame says how long its own prelude is, and the hold arms after it.
     pub const HOLD_AFTER: u32 = 216;
+
+    // --- what a generation swap is told, and it is told before it runs -------
+    //
+    // **The frame cannot ask a running component anything.** R05 is why: nothing
+    // is delivered to a component while it holds a core, so there is no message
+    // that means *stop at your next quiescent point*. What there is instead is
+    // this page, written before the core is given out and read by the component
+    // whenever it likes — which is exactly the arrangement every other field
+    // here has, and is why the swap protocol needs no new opcode and no new
+    // ring.
+    //
+    // `user/virtio-blk/manifest.toml` predicted the point this is read at, in
+    // advance and by name: *the driver needs a point in its own loop where it
+    // holds nothing, and it has one already — at the top of that loop
+    // `Pending::is_empty()` is the whole of what this component has accepted and
+    // not answered.* RFC 0063.
+
+    /// Where the transfer window is in this component's address space, or zero
+    /// for an instance nobody is swapping.
+    ///
+    /// Bought out of the **incoming** instance's account, never the outgoing
+    /// one's — `abi/src/swap.rs` is explicit that the account which pays is the
+    /// account which survives — and mapped into both for the length of phase A.
+    /// Unit: bytes.
+    pub const WINDOW_AT: u32 = 224;
+
+    /// How many bytes of it. Unit: bytes.
+    pub const WINDOW_LEN: u32 = 232;
+
+    /// Non-zero when this instance is being asked to hand over.
+    ///
+    /// Read at the quiescent point and nowhere else. An instance told this
+    /// writes its journal into the window, reports what it wrote, and ends —
+    /// which is the *outgoing* half of RFC 0063's phase A.
+    /// Unit: none — a flag.
+    pub const HAND_OVER: u32 = 240;
+
+    /// How many records are waiting in the window for this instance to replay.
+    ///
+    /// Read once, before the first entry is taken off any ring, which is the
+    /// *incoming* half. Zero for an instance that is not succeeding anybody,
+    /// which is every instance in every boot that is not swapping.
+    /// Unit: records.
+    pub const REPLAY: u32 = 248;
 }
 
 /// Where the component's own half of the page starts.
@@ -336,6 +380,32 @@ pub mod reported {
     /// ordering it was supposed to be a control for would pass every check that
     /// compares the two halves.
     pub const ORDERED: u32 = super::REPORT + 120;
+
+    /// Whether this instance held nothing it had accepted and not answered at
+    /// the moment it was asked to hand over.
+    ///
+    /// **The occupant's own assertion, and the half no cursor can supply.** RFC
+    /// 0018's cursors say the rings are empty; they cannot say the *driver* is,
+    /// because an entry taken off a ring and not yet answered is in neither. The
+    /// frame asks this only after its own ring-empty check has agreed, so an
+    /// instance that answered yes unconditionally still could not be swapped
+    /// with work on the wire.
+    /// Unit: none — a flag.
+    pub const QUIESCENT: u32 = super::REPORT + 128;
+
+    /// How many records this instance wrote into the transfer window.
+    /// Unit: records.
+    pub const RECORDS: u32 = super::REPORT + 136;
+
+    /// How many records the incoming instance replayed into its own table.
+    ///
+    /// Counted on this side of the boundary and compared against what the
+    /// outgoing instance said it wrote. Two tallies of one number, neither
+    /// derived from the other, which is `claims/0012`'s discipline and the
+    /// reason a swap can say *nothing was lost* rather than *nothing was
+    /// reported lost*.
+    /// Unit: records.
+    pub const REPLAYED: u32 = super::REPORT + 144;
 }
 
 /// Why the component's loop ended.
@@ -370,4 +440,22 @@ pub mod stopped {
     /// `IDENTIFY` run from a `SERVE` run that was stopped before it served
     /// anything.
     pub const IDENTIFIED: u64 = 7;
+
+    /// The instance reached a quiescent point, wrote its journal into the
+    /// transfer window, and ended so that its successor could take the place.
+    ///
+    /// Distinct from [`TOLD`], which is an instance that was asked to stop and
+    /// did. A swap is not a stop: the place keeps its clients, its endpoint and
+    /// its reservation, and what ends is one occupant of it. RFC 0012 requires
+    /// the two never be summed and this is where they stop being the same word.
+    pub const HANDED_OVER: u64 = 8;
+
+    /// The instance was asked to hand over and could not honestly do it.
+    ///
+    /// Its journal had overflowed, so the history it would have handed on is
+    /// shorter than the history it lived. The frame abandons the swap and the
+    /// place restarts, which costs every client its registrations and costs
+    /// nothing else — and is strictly better than a successor that believes it
+    /// inherited a table it did not.
+    pub const CANNOT_HAND_OVER: u64 = 9;
 }
