@@ -3398,13 +3398,22 @@ fn heap_reading(log: &str) -> Result<(u32, u32, bool), String> {
 ///
 /// # So why the row is still here
 ///
-/// Because the gate has not moved. `cargo xtask blk` with no argument runs
-/// `BLK_PROVOCATIONS`, all three of which stand an instance up through
-/// `prepare_driver`, as do the three `deadline=` halves — so the occupant a boot
-/// can kill is still not the occupant those six halves' load goes through, and
-/// *under sustained load* is still a sentence only the simulator makes true.
-/// `blk served` is deliberately outside the table until it survives three kills,
-/// which is `E1-P06`.
+/// Because the gate has not moved, and that is now the whole of it. `cargo xtask
+/// blk` with no argument runs `BLK_PROVOCATIONS`, all three of which stand an
+/// instance up through `prepare_driver`, as do the three `deadline=` halves — so
+/// the occupant *those six halves* could kill is still not the occupant their
+/// load goes through.
+///
+/// What is no longer true is the sentence that used to follow. This said *under
+/// sustained load is a sentence only the simulator makes true*, and `cargo xtask
+/// blk killed` makes it true in a boot: the occupant of the place, serving the
+/// frame from ring 3 on a core of its own, is taken away with work outstanding
+/// and its client loses nothing. `E1-P06` is `[x]` on that.
+///
+/// So the row is down to its last clause, and it is a clause about which
+/// instance six commands point at rather than about anything being unbuilt. The
+/// path exists — `blk place`, `blk served`, `blk killed` — and the day the
+/// provocations take it, the needle goes.
 ///
 /// *Reversal:* when `prepare_driver(` leaves `kernel/src/blk.rs`, this row goes
 /// and `cargo xtask chaos` says so.
@@ -10062,11 +10071,12 @@ fn blk_place() -> Result<(), String> {
 ///
 /// # Why it is not in `BLK_PROVOCATIONS` either
 ///
-/// For [`BLK_PLACE`]'s reason, one clause further on. That doc says this half
-/// leaves the table on the day it serves a client **and survives three kills**;
-/// this is the first half of that sentence and `E1-P06` is the second. A gate
-/// that adopted it now would be asserting a served datapath and calling it a
-/// restartable one.
+/// For [`BLK_PLACE`]'s reason, one clause further on, and the reason is now
+/// about the *table* rather than about this half. It serves a client and
+/// [`blk_killed`] survives a kill, so what kept these out of the default set has
+/// been paid; what has not happened is the three provocations moving onto this
+/// path, and a gate holding both sets would run the same device twice per
+/// command to assert less the second time.
 ///
 /// # Errors
 ///
@@ -10177,9 +10187,9 @@ fn blk_served() -> Result<(), String> {
          \x20 with every need checked, held a device window it could not carve, ran at ring 3\n\
          \x20 on a core of its own while the frame submitted to it, answered the frame's\n\
          \x20 entries and asked the frame for the one translation it may not make itself.\n\
-         \x20 What it has not yet done is survive being killed under that load, which is\n\
-         \x20 `E1-P06` — so `CHAOS_GAP` keeps its row and the three provocation halves still\n\
-         \x20 run on `prepare_driver`."
+         \x20 Surviving a kill under that load is `cargo xtask blk killed`, one half on.\n\
+         \x20 `CHAOS_GAP` keeps its row because the three provocation halves still run on\n\
+         \x20 `prepare_driver`, which is a sentence about the gate rather than the path."
     );
     Ok(())
 }
@@ -10357,10 +10367,12 @@ const BLK_PROVOCATIONS: &[(&str, &str)] = &[
 /// it while asserting less than the other three do.
 ///
 /// It leaves the table on the day it serves a client and survives three kills.
-/// The first half of that sentence is [`BLK_SERVED`], one act on; the second is
-/// `E1-P06`, and it is also the day `CHAOS_GAP`'s last row goes. Until then the
-/// existing halves keep running on `prepare_driver` and nothing about them has
-/// moved.
+/// Both halves of that sentence are paid — [`BLK_SERVED`] one act on, and
+/// [`BLK_KILLED`] after it — so what is left is the move itself: the three
+/// provocations running against a place's occupant rather than against an
+/// instance stood up outside one. That is the day `CHAOS_GAP`'s last row goes.
+/// Until then the existing halves keep running on `prepare_driver` and nothing
+/// about them has moved.
 const BLK_PLACE: &str = "place";
 
 /// The half above it, one act on. Also **not** in [`BLK_PROVOCATIONS`], and

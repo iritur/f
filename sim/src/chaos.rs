@@ -107,13 +107,22 @@
 //! place's occupant a core while the frame submits to it, and the occupant's own
 //! tally of what it answered comes back off its routing page.
 //!
-//! What is left is narrower again and is about the *gate* rather than the
-//! mechanism. Six halves are gates — `blk=inside`, `outside`, `escape` and the
-//! three `deadline=` halves — and all six still run against an instance the
-//! frame stands up outside any place, so the occupant those halves can kill is
-//! not the occupant their load goes through. `CHAOS_GAP` in xtask is that
-//! residue, `cargo xtask chaos` checks it on every run, and it goes red the day
-//! it stops being true.
+//! It has since narrowed a third time. `cargo xtask blk killed` takes that
+//! place's occupant away from its client with work outstanding and the client
+//! loses nothing, so *a boot cannot kill the thing that serves* is no longer
+//! true either, and `E1-P06` closed on it.
+//!
+//! What is left is about the *gate* rather than the mechanism. Six halves are
+//! gates — `blk=inside`, `outside`, `escape` and the three `deadline=` halves —
+//! and all six still run against an instance the frame stands up outside any
+//! place, so the occupant *those* halves could kill is not the occupant their
+//! load goes through. `CHAOS_GAP` in xtask is that residue, `cargo xtask chaos`
+//! checks it on every run, and it goes red the day it stops being true.
+//!
+//! What this file still owns, and it is not a residue: the *count*. A boot kills
+//! once, and this kills every component the build produced, three times each, at
+//! a depth no boot has a reason to reach. `claims/0005` is measured here for that
+//! reason and not because a boot could not host it.
 
 use std::collections::{BTreeMap, VecDeque};
 
