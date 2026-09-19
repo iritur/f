@@ -406,6 +406,18 @@ pub mod reported {
     /// reported lost*.
     /// Unit: records.
     pub const REPLAYED: u32 = super::REPORT + 144;
+
+    /// Which build of this component wrote this page.
+    ///
+    /// One for the ordinary image and two for the one built with the
+    /// `successor` feature. It is the only difference between them, and its
+    /// whole purpose is to let a boot say *the occupant of this place is not the
+    /// one that was in it a moment ago* — which a content address in the frame's
+    /// log also says, but from the frame's side. This is the component's own
+    /// answer, and a swap that reported one and not the other would be a swap
+    /// nobody had checked from both ends.
+    /// Unit: none — an ordinal.
+    pub const GENERATION: u32 = super::REPORT + 152;
 }
 
 /// Why the component's loop ended.

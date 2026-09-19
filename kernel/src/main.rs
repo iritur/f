@@ -3149,7 +3149,12 @@ unsafe fn blk_place_supply<'a>(
     // which is `E1-P06`, and the first time in this tree that the component a
     // boot kills is the component a client's load was going through.
     let killing = boot.has_parameter(b"blk=killed");
-    let serving = killing || boot.has_parameter(b"blk=served");
+    // `blk=swapped`: the same client, the same script, and one different answer
+    // at the moment it has work to protect. What the two halves compare is what
+    // a client loses — a restart costs it every registration it holds, and a
+    // swap costs it none.
+    let swapping = boot.has_parameter(b"blk=swapped");
+    let serving = killing || swapping || boot.has_parameter(b"blk=served");
     if !boot.has_parameter(b"blk=place") && !serving {
         return NONE;
     }
@@ -3238,7 +3243,9 @@ unsafe fn blk_place_supply<'a>(
             };
             match stood {
                 Ok((mut placed, at)) => {
-                    if killing {
+                    if swapping {
+                        placed.swaps();
+                    } else if killing {
                         placed.kills();
                     }
                     (Some(placed), at)

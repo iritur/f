@@ -387,23 +387,81 @@ impl Failure {
 /// and is the same one `main::component` discharges for module one.
 #[must_use]
 pub unsafe fn modules(boot: &BootInfo) -> ([&'static [u8]; PLACES_MAX], usize) {
+    // SAFETY: the caller's guarantee, passed down.
+    let (found, count, _) = unsafe { generations(boot) };
+    (found, count)
+}
+
+/// Every component file the loader placed, split into **places and their
+/// successors**.
+///
+/// # Why a second module with one name is not a second place
+///
+/// Because a place is a name and an account and an endpoint, and RFC 0041 says
+/// it survives its occupant. Two builds of one component are two *occupants* a
+/// place may have, one after the other — which is the whole of what a generation
+/// swap is — and giving the second one a place of its own would produce two
+/// drivers for one device, each with its own clients, neither of them the other's
+/// successor.
+///
+/// So the first module carrying a given `Record::name` is that component's
+/// place, and any later module carrying the same name is a *successor*: a
+/// generation the frame has been handed and has not installed. `E2-B06` is what
+/// installs one.
+///
+/// Grouped by the manifest's declared name and not by its content address,
+/// deliberately. Two generations of one component differ in content by
+/// construction — that is what makes them two — so a content address is exactly
+/// the wrong key. The name is the thing they share, and `cargo xtask
+/// lint-manifests` already refuses two manifests claiming one device, which is
+/// the confusion this could otherwise create.
+///
+/// # Safety
+///
+/// As [`modules`].
+unsafe fn generations(
+    boot: &BootInfo,
+) -> ([&'static [u8]; PLACES_MAX], usize, [&'static [u8]; PLACES_MAX]) {
     let mut found: [&'static [u8]; PLACES_MAX] = [&[]; PLACES_MAX];
+    let mut next: [&'static [u8]; PLACES_MAX] = [&[]; PLACES_MAX];
     let mut count = 0;
     for module in boot.modules() {
-        if count == PLACES_MAX {
-            break;
-        }
+        // **Not `break` on a full list**, and the difference cost a boot. A
+        // successor arrives *after* the places it succeeds — it is the last
+        // module on the list — so a loop that stopped as soon as it had
+        // `PLACES_MAX` places would stop exactly one module before the only
+        // module a swap needs. What is full is the *place* list, and that is
+        // tested where a place would be added.
         // SAFETY: the caller's guarantee, and every module is in the reserved
         // list — see `main::reserved_ranges` — so nothing else owns these bytes.
         let bytes = unsafe { module.bytes() };
-        if Record::read(bytes).is_ok()
-            && let Some(slot) = found.get_mut(count)
-        {
+        let Ok(record) = Record::read(bytes) else { continue };
+        let label = record.label();
+        // A name already taken is a successor for that place, and is kept
+        // beside it rather than after it: the index is the place's, so a
+        // demonstration holding a place index has the module that would
+        // replace its occupant without searching for it.
+        let seen = (0..count).find(|index| {
+            found
+                .get(*index)
+                .and_then(|module| Record::read(module).ok())
+                .is_some_and(|held| held.label() == label)
+        });
+        if let Some(index) = seen {
+            if let Some(slot) = next.get_mut(index) {
+                *slot = bytes;
+            }
+            continue;
+        }
+        if count == PLACES_MAX {
+            continue;
+        }
+        if let Some(slot) = found.get_mut(count) {
             *slot = bytes;
             count += 1;
         }
     }
-    (found, count)
+    (found, count, next)
 }
 
 /// The two numbers a supervisor's restart policy counts with, stored by the
@@ -776,6 +834,30 @@ struct Place {
     stops: u32,
     /// Restarts performed.
     restarts: u32,
+    /// Which generation of its occupant this place is delivering to, or
+    /// [`f_abi::swap::PAUSED`] while a swap is in flight.
+    ///
+    /// **RFC 0016's fifth cross-core word**, and `abi/src/swap.rs` carries the
+    /// argument rather than restating it here: one `Release` store when a
+    /// generation is committed, one `Acquire` load at every delivery, and a
+    /// paused word *pends* a submission rather than refusing it — which is the
+    /// same mechanism RFC 0008's pending connect already rests on.
+    ///
+    /// On the place and not on the occupant, for [`Place::reservation`]'s
+    /// reason: a client that submitted across a swap is submitting to the
+    /// *place*, and the word is what makes the gap between two occupants a wait
+    /// rather than a refusal.
+    ///
+    /// Its ordering is unobservable on x86-64 by construction, which is why
+    /// `ring/tests/litmus.rs` and the AArch64 job are where it means anything.
+    routing: f_abi::swap::Routing,
+    /// Swaps this place has completed. Unit: swaps.
+    swaps: u32,
+    /// Swaps this place began and abandoned. **Never summed with
+    /// [`Place::restarts`]**, which RFC 0012 requires: an abandoned swap leaves
+    /// the occupant it already had, and charging one to a restart budget would
+    /// let failed updates retire a healthy component. Unit: swaps.
+    abandoned: u32,
 }
 
 /// A connect that has not been answered yet.
@@ -806,6 +888,11 @@ pub struct Report {
     pub places: usize,
     /// Instances spawned, across every place. Unit: instances.
     pub spawns: u32,
+    /// Generation swaps that reached `commit`. **Never summed with restarts**,
+    /// which RFC 0012 requires: a restart gives a client a component that has
+    /// never heard of it, and a swap hands the successor the history its
+    /// predecessor lived. Unit: swaps.
+    pub swaps: u32,
     /// Needs satisfied with a capability of the declared type that names no
     /// object this machine has. Unit: capabilities.
     ///
@@ -1065,7 +1152,7 @@ pub unsafe fn demonstrate(
 ) -> Result<Report, Failure> {
     // SAFETY: the caller's guarantee that the direct map is live and covers
     // every module.
-    let (modules, count) = unsafe { modules(boot) };
+    let (modules, count, successors) = unsafe { generations(boot) };
     let module = *modules.first().filter(|_| count > 0).ok_or(Failure::NoComponent)?;
     let record = Record::read(module).map_err(Failure::Manifest)?;
 
@@ -1198,6 +1285,9 @@ pub unsafe fn demonstrate(
         retired: false,
         reservation: None,
         budget: Budget::default(),
+        routing: f_abi::swap::Routing::new(f_abi::swap::PAUSED),
+        swaps: 0,
+        abandoned: 0,
         faults: 0,
         exits: 0,
         stops: 0,
@@ -1560,6 +1650,19 @@ pub unsafe fn demonstrate(
                 // condition is the client's word for it is a demonstration that
                 // hangs when the client is wrong.
                 let mut generation = 0u32;
+                // The window, allocated once and freed at the end of the loop
+                // whether a swap happened or not. A page nobody used costs a
+                // page; a page allocated inside the branch that needs it would
+                // be a page the outgoing occupant is told about after it has
+                // already been asked to write into it.
+                let window = frames.alloc_zeroed(Order::FRAME).ok_or(Failure::NoMemory)?;
+                let window_at = crate::process::SWAP_WINDOW;
+                let window_bytes = crate::process::SWAP_WINDOW_MAX;
+                // The half of the protocol that outlives one pass: a swap is
+                // planned and staged against the occupant on its way out, and
+                // acknowledged against the one that replaced it.
+                let mut swapping: Option<f_abi::swap::Swap> = None;
+                let mut replaying = 0u32;
                 loop {
                     let Some(extra) = extras.get_mut(index).and_then(Option::as_mut) else {
                         return Err(Failure::WrongPlace);
@@ -1575,6 +1678,17 @@ pub unsafe fn demonstrate(
                     // else's; the direct map covers it and no core is inside
                     // this instance.
                     unsafe { write_routing(occupant, routing) }?;
+                    // The transfer window, in this occupant's space and at the
+                    // address both generations know it by. Mapped for every
+                    // occupant rather than only for the ones a swap touches: a
+                    // window mapped when the swap is decided would be a mapping
+                    // made while the component holds a core.
+                    // SAFETY: the instance `fill` or `spawn` built, with its
+                    // address space live and no core inside it yet.
+                    unsafe { show_window(occupant, frames, features, window) }?;
+                    // SAFETY: as above.
+                    unsafe { write_swap(occupant, window_at, window_bytes, replaying) }?;
+                    replaying = 0;
                     // The data ring's header, written by the *grantor* and
                     // adopted by the occupant, which is `f_ring::adopt` and RFC
                     // 0037: the component believes nothing it is handed and would
@@ -1610,6 +1724,127 @@ pub unsafe fn demonstrate(
                     // The client's news, after the join and never instead of it.
                     let drove = driven.map_err(Failure::Datapath)?;
 
+                    // --- the generation swap -----------------------------
+                    //
+                    // **`E2-B06`'s own sentence, at the boot.** That task is met
+                    // in `sim/src/swap.rs` and was unpaid here, because no boot
+                    // could put two generations of one component in front of the
+                    // frame. `generations` finds the successor the loader placed,
+                    // and this is what installs it.
+                    //
+                    // The order is `abi/src/swap.rs`'s and `sim/src/swap.rs`'s,
+                    // step for step, because two implementors of one protocol
+                    // that agree only in outline are two protocols.
+                    if let Drove::Swap { in_flight } = drove {
+                        let Some(&module) = successors.get(index).filter(|it| !it.is_empty())
+                        else {
+                            // Asked to swap on a boot that was handed no second
+                            // generation. A refusal and not a restart: the client
+                            // asked for something this machine was not given.
+                            return Err(Failure::WrongPlace);
+                        };
+                        let next = Record::read(module).map_err(Failure::Manifest)?;
+                        let held = Record::read(extra.place.module).map_err(Failure::Manifest)?;
+                        // Planned from the two *declarations* and nothing else,
+                        // which is the sentence `kernel/src/component.rs`'s
+                        // refusal is being replaced by. `Incompatible` is not an
+                        // abandonment — it is a pair that never should have been
+                        // offered — so it fails the boot rather than restarting
+                        // the place.
+                        let mut swap = f_abi::swap::Swap::plan(&held.transfer, &next.transfer)
+                            .map_err(|_| Failure::WrongPlace)?;
+
+                        // What the occupant said on its way out. The frame asked
+                        // it to hand over while it ran; this is the answer, and
+                        // the order below is what turns two readings into a
+                        // protocol rather than a pair of hopes.
+                        // SAFETY: the core reported finished and the page is
+                        // still mapped.
+                        let (quiescent, records) = unsafe { read_handed(occupant) };
+                        // SAFETY: as above.
+                        let was = unsafe { read_generation(occupant) };
+
+                        extra.place.routing.pause();
+                        // The rings are empty because the client stopped
+                        // submitting before it asked, which is what `drive`
+                        // answering `Swap` means. RFC 0018's cursors are the
+                        // other half and are the *frame's* to check; this is the
+                        // frame checking it.
+                        let staged = swap
+                            .drained(true)
+                            .and_then(|()| swap.asserted(quiescent))
+                            .and_then(|()| swap.wrote(records));
+                        if let Err(why) = staged {
+                            abandoned_line(Name(record.label()), why);
+                            extra.place.routing.commit(extra.place.epoch);
+                            return Err(Failure::WrongPlace);
+                        }
+
+                        handed_line(Name(record.label()), was, in_flight, records);
+
+                        // --- the place takes its successor -------------------
+                        //
+                        // `place.module` and `place.manifest` move **together**,
+                        // and that is what keeps `spawn`'s refusal fail-closed
+                        // rather than deleted: it compares the module it is given
+                        // against the manifest the place holds, and both are now
+                        // the successor's. A different manifest is still refused
+                        // everywhere else, and is reachable here only through a
+                        // plan made from two declarations.
+                        let cause = cause::pack(cause::STOPPED, 0);
+                        tear_down(
+                            frames,
+                            &mut extra.place,
+                            &mut supervisor,
+                            &extra.account,
+                            cause,
+                            &mut report,
+                            tree,
+                        )?;
+                        extra.place.module = module;
+                        extra.place.manifest = ContentId::of(module);
+                        let offered = offer(
+                            &mut supervisor,
+                            &extra.account,
+                            &extra.place,
+                            next,
+                            frames,
+                            supplied,
+                        )?;
+                        // SAFETY: as the first spawn — the caller's guarantee,
+                        // and the place is empty because the teardown emptied it.
+                        unsafe {
+                            spawn(
+                                frames,
+                                kernel,
+                                features,
+                                &mut extra.place,
+                                &extra.account,
+                                &mut supervisor,
+                                &reservations,
+                                offered,
+                                supplied,
+                            )
+                        }?;
+                        report.spawns += 1;
+                        mounted_line(next, &extra.place, mount(tree, &extra.place, &mut report)?);
+                        let epoch = extra.place.occupant.as_ref().map_or(0, |it| it.epoch);
+                        swapped_line(Name(next.label()), epoch, records);
+                        // The window, and where the records are, told to the new
+                        // occupant before it is given a core.
+                        let taking = extra.place.occupant.as_ref().ok_or(Failure::WrongPlace)?;
+                        // SAFETY: the instance `spawn` just built, with its
+                        // address space live and no core inside it.
+                        unsafe { write_swap(taking, window_at, window_bytes, records) }?;
+                        generation += 1;
+                        if generation > KILLS_MAX {
+                            return Err(Failure::WrongPlace);
+                        }
+                        swapping = Some(swap);
+                        replaying = records;
+                        continue;
+                    }
+
                     let Drove::Kill { in_flight } = drove else {
                         // --- the generation that ended by agreement ----------
                         //
@@ -1627,6 +1862,33 @@ pub unsafe fn demonstrate(
                         };
                         if outcome != f_virtio_blk::routing::stopped::TOLD || entries == 0 {
                             return Err(Failure::WrongPlace);
+                        }
+                        // --- the swap's far end ---------------------------
+                        //
+                        // Acknowledged and committed against the occupant that
+                        // *replaced* the one that handed over, which is why the
+                        // `Swap` outlives a pass of this loop. `Swap::commit`
+                        // refuses from any phase but `Acknowledged`, and is the
+                        // only guard on the ordering — the retire-after-commit
+                        // half is guarded by nothing but this code.
+                        if let Some(mut swap) = swapping.take() {
+                            // SAFETY: the core reported finished and the page is
+                            // still mapped.
+                            let replayed = unsafe { read_replayed(occupant) };
+                            let taken = swap.records();
+                            let done = swap
+                                .acknowledged(replayed == taken)
+                                .and_then(|()| swap.commit(&extra.place.routing, generation));
+                            if let Err(why) = done {
+                                abandoned_line(Name(record.label()), why);
+                                extra.place.abandoned += 1;
+                                return Err(Failure::WrongPlace);
+                            }
+                            extra.place.swaps += 1;
+                            report.swaps += 1;
+                            // SAFETY: as above.
+                            let now = unsafe { read_generation(occupant) };
+                            committed_line(Name(record.label()), now, replayed, taken);
                         }
                         break;
                     };
@@ -1716,6 +1978,10 @@ pub unsafe fn demonstrate(
                     let epoch = extra.place.occupant.as_ref().map_or(0, |next| next.epoch);
                     refilled_line(Name(record.label()), epoch);
                 }
+                // SAFETY: allocated a few lines up, mapped only into address
+                // spaces `tear_down` has taken down or is about to, and named by
+                // nothing else.
+                unsafe { frames.free(window) };
             }
         }
     }
@@ -2516,6 +2782,9 @@ unsafe fn fill(
         retired: false,
         reservation: None,
         budget: Budget::default(),
+        routing: f_abi::swap::Routing::new(f_abi::swap::PAUSED),
+        swaps: 0,
+        abandoned: 0,
         faults: 0,
         exits: 0,
         stops: 0,
@@ -2643,6 +2912,56 @@ fn killed_line(what: Name<'_>, in_flight: u32, death: crate::process::Death) {
         "  killed        place {what} was taken away from its client with {in_flight} \
          operation(s) outstanding: {death:?} — a driver dying under load, which is the one \
          death in this boot the component did not choose"
+    );
+}
+
+/// An occupant that handed its history over and stopped.
+///
+/// **The one line in this boot that reports a component ending while it was
+/// working and being succeeded rather than replaced.** The generation is the
+/// component's own answer — `user/virtio-blk` writes which build it is on every
+/// report — so a swap that printed the frame's content address alone would be a
+/// swap checked from one end.
+fn handed_line(what: Name<'_>, was: u64, in_flight: u32, records: u32) {
+    crate::kprintln!(
+        "  handed over   place {what} generation {was} reached a quiescent point with \
+         {in_flight} operation(s) outstanding and wrote {records} record(s) into the transfer \
+         window — its own history, for its successor to replay"
+    );
+}
+
+/// A place whose occupant is now the generation that succeeded the last one.
+fn swapped_line(what: Name<'_>, epoch: u32, records: u32) {
+    crate::kprintln!(
+        "  swapped       place {what} epoch {epoch} — a second generation of the same \
+         component in the same place, holding the same account, the same endpoint and the same \
+         reservation, with {records} record(s) to replay"
+    );
+}
+
+/// A swap that was planned and did not happen.
+///
+/// Reported and **not** charged to the restart budget. `abi/src/swap.rs` is
+/// explicit: routing an abandonment through the restart path lets `max_restarts`
+/// failed updates retire a healthy component's place, with the manifest's own
+/// budget as the mechanism.
+fn abandoned_line(what: Name<'_>, why: f_abi::swap::Abandoned) {
+    crate::kprintln!(
+        "  abandoned     place {what} kept the occupant it had: {} — a swap that did not \
+         happen is not a restart, and this line is counted apart from one",
+        why.label(),
+    );
+}
+
+/// A swap that reached its far end: the successor replayed what it was handed.
+///
+/// The two counts are the whole verdict and they come from opposite sides. The
+/// outgoing occupant said how many records it wrote; the incoming one says how
+/// many it replayed; and `f_abi::swap::Swap::acknowledged` is refused unless they
+/// agree. A single count, taken once, would be a swap reporting on itself.
+fn committed_line(what: Name<'_>, now: u64, replayed: u32, taken: u32) {
+    crate::kprintln!(
+        "  committed     place {what} is generation {now} and replayed {replayed} of {taken} \n         record(s) its predecessor wrote — the routing word is open again, and a client \n         that submitted across the gap waited rather than being refused"
     );
 }
 
@@ -3475,6 +3794,20 @@ unsafe fn collect_ring3(
 pub enum Drove {
     /// The client has nothing more to submit and the occupant may end.
     Finished,
+    /// The client has work outstanding and wants the occupant **swapped** for
+    /// its successor rather than killed.
+    ///
+    /// The difference between this and [`Self::Kill`] is the whole of RFC 0012's
+    /// distinction, and it is what the two are never summed for: a kill takes a
+    /// component away and a restart gives the clients a new one that has never
+    /// heard of them, while a swap hands the successor the history its
+    /// predecessor lived. A client observes a restart as *every registration I
+    /// hold is gone*; it observes a swap as a pause.
+    Swap {
+        /// How many operations the client had submitted and not been answered.
+        /// Unit: operations.
+        in_flight: u32,
+    },
     /// The client has operations the occupant has not answered, and wants it
     /// killed with them outstanding. Carries how many, which the boot requires
     /// to be at least one — a run that killed an idle driver would pass every
@@ -3614,6 +3947,190 @@ pub struct Wired {
     /// This machine's timestamp-counter rate, for bounding a wait.
     /// Unit: kilohertz.
     pub tsc_khz: u64,
+}
+
+/// Map the transfer window into an occupant's address space.
+///
+/// Called for **both** generations, which is the whole of what a window is: one
+/// run of memory at one address in two address spaces, for the length of phase A
+/// and no longer.
+///
+/// # Where the memory comes from, and where RFC 0063 says it should
+///
+/// The frame allocates it here and frees it after the swap. RFC 0063 says it
+/// should be bought out of the **incoming** instance's account — *the account
+/// that pays is the account that survives* — and this build does not do that,
+/// for an ordering reason rather than a principled one: the outgoing instance
+/// writes the window before the incoming instance exists, so an account that has
+/// not been staked yet cannot have paid for it.
+///
+/// A place keeps its account across generations, so the honest fix is to carve
+/// the window from *that* — which needs the charge to reach the incoming
+/// occupant's refund list rather than the frame's, and that is a change to
+/// `spawn`'s charging rather than to this function. Stated here rather than left
+/// for a reader to notice: **this is a deviation with an owner**, and the day it
+/// is paid this comment goes with it.
+///
+/// # Errors
+///
+/// [`Failure::Space`] for a mapping that could not be made.
+///
+/// # Safety
+///
+/// `occupant` must be an instance this frame built whose address space is not in
+/// any core's `CR3`, and `window` must be a frame the caller allocated and holds.
+unsafe fn show_window(
+    occupant: &mut Instance,
+    frames: &mut FrameAllocator,
+    features: Features,
+    window: Frame,
+) -> Result<(), Failure> {
+    // SAFETY: the caller's guarantee. One frame, into a space this frame built
+    // and nothing is executing in.
+    unsafe {
+        paging::map_user(
+            frames,
+            &mut occupant.space,
+            crate::process::SWAP_WINDOW,
+            window.addr(),
+            UserPage::Data,
+            features,
+        )
+    }
+    .map_err(Failure::Space)
+}
+
+/// Ask a running occupant to hand over at its next quiescent point.
+///
+/// **One word, written while the component holds a core**, and that is not a
+/// race: the page is shared memory, the component polls it at a point of its own
+/// choosing, and nothing here waits for an answer. R05 is why it has to work this
+/// way — nothing is *delivered* to a component while it runs, so the only thing
+/// a frame can do is leave something where the component will look.
+///
+/// `user/virtio-blk/manifest.toml`'s `[transfer]` table named the point it looks
+/// at, in advance: the top of the serve loop, where an empty `Pending` is the
+/// whole of what the component has accepted and not answered.
+///
+/// # Errors
+///
+/// [`Failure::WrongPlace`] for an occupant with no board, which is a component
+/// nobody can ask anything.
+///
+/// # Safety
+///
+/// As [`write_routing`], except that a core **may** be inside this instance —
+/// which is the point. The word written is one the component only reads.
+unsafe fn ask_hand_over(occupant: &Instance) -> Result<(), Failure> {
+    if occupant.board == 0 {
+        return Err(Failure::WrongPlace);
+    }
+    let at = f_virtio_blk::routing::at::HAND_OVER as usize;
+    // SAFETY: the caller's guarantee. One eight-byte word inside a frame this
+    // instance owns and the direct map covers, written volatile because the
+    // reader is another core.
+    // SAFETY: `board` is a frame this instance owns and the direct map covers;
+    // `at` is inside it and eight-byte aligned, so the offset stays in the page.
+    let slot = unsafe { (occupant.board as *mut u8).add(at).cast::<u64>() };
+    // SAFETY: as above. Volatile because the reader is another core, and one
+    // word because a component reading a half-written flag is a component told
+    // something nobody said.
+    unsafe { slot.write_volatile(1) };
+    Ok(())
+}
+
+/// Tell an occupant where its transfer window is and how much to replay out of
+/// it.
+///
+/// Written after [`write_routing`] and before the core is started, which is
+/// after the magic rather than before it. That is safe for the one reason the
+/// magic exists: it guards against a component reading a page the frame *did not
+/// finish*, and this page is finished — nothing has run yet, and the component
+/// that will read it has not been given a core.
+///
+/// # Errors
+///
+/// As [`ask_hand_over`].
+///
+/// # Safety
+///
+/// As [`write_routing`].
+unsafe fn write_swap(occupant: &Instance, at: u64, bytes: u64, replay: u32) -> Result<(), Failure> {
+    use f_virtio_blk::routing::at as slot;
+    // SAFETY: the caller's guarantee, and every offset below is inside the page.
+    unsafe {
+        write_routing(
+            occupant,
+            &[(slot::WINDOW_AT, at), (slot::WINDOW_LEN, bytes), (slot::REPLAY, u64::from(replay))],
+        )
+    }
+}
+
+/// What a component said about a hand-over it was asked for.
+///
+/// `(it held nothing, records it wrote)`. Read off the far half of its board
+/// after its core has come back.
+///
+/// # Safety
+///
+/// As [`read_served`].
+unsafe fn read_handed(occupant: &Instance) -> (bool, u32) {
+    if occupant.board == 0 {
+        return (false, 0);
+    }
+    use f_virtio_blk::routing::reported;
+    // SAFETY: the caller's guarantee.
+    let page =
+        unsafe { core::slice::from_raw_parts(occupant.board as *const u8, FRAME_SIZE as usize) };
+    let get = |offset: u32| -> u64 {
+        let start = offset as usize;
+        page.get(start..start + 8)
+            .and_then(|slot| slot.try_into().ok())
+            .map_or(0, u64::from_le_bytes)
+    };
+    (get(reported::QUIESCENT) != 0, u32::try_from(get(reported::RECORDS)).unwrap_or(0))
+}
+
+/// How many records the incoming occupant replayed into its own table.
+///
+/// **Counted on the far side of the boundary** and compared against what the
+/// outgoing occupant said it wrote. Two tallies of one number, neither derived
+/// from the other, which is `claims/0012`'s discipline: a swap that compared a
+/// count against itself would report *nothing was lost* on a build where nothing
+/// was transferred either.
+///
+/// # Safety
+///
+/// As [`read_served`].
+unsafe fn read_replayed(occupant: &Instance) -> u32 {
+    if occupant.board == 0 {
+        return 0;
+    }
+    // SAFETY: the caller's guarantee.
+    let page =
+        unsafe { core::slice::from_raw_parts(occupant.board as *const u8, FRAME_SIZE as usize) };
+    let start = f_virtio_blk::routing::reported::REPLAYED as usize;
+    let word = page
+        .get(start..start + 8)
+        .and_then(|slot| slot.try_into().ok())
+        .map_or(0, u64::from_le_bytes);
+    u32::try_from(word).unwrap_or(0)
+}
+
+/// Which build of a component wrote a board, as the component itself says.
+///
+/// # Safety
+///
+/// As [`read_served`].
+unsafe fn read_generation(occupant: &Instance) -> u64 {
+    if occupant.board == 0 {
+        return 0;
+    }
+    // SAFETY: the caller's guarantee.
+    let page =
+        unsafe { core::slice::from_raw_parts(occupant.board as *const u8, FRAME_SIZE as usize) };
+    let start = f_virtio_blk::routing::reported::GENERATION as usize;
+    page.get(start..start + 8).and_then(|slot| slot.try_into().ok()).map_or(0, u64::from_le_bytes)
 }
 
 /// Take an occupant's text away from it while it is running, so that its next
@@ -3771,6 +4288,18 @@ unsafe fn serve_ring3(
     // component while it is still useful.
     let mut killer = Killing { root: occupant.space.root(), cpu, tsc_khz, joined: false };
     let driven = client.drive(frames, wired, &mut killer);
+    // And the hand-over, if that is what it asked for. Asked and not taken
+    // away: the occupant ends itself, at a point it chose, having written what
+    // its successor needs — which is the whole difference between a swap and
+    // the kill `Killing` performs.
+    //
+    // SAFETY: `occupant` is the instance the caller vouched for. A core is
+    // inside it, which is exactly the case `ask_hand_over` is written for.
+    if matches!(driven, Ok(Drove::Swap { .. })) {
+        // SAFETY: `occupant` is the instance the caller vouched for, and a core
+        // being inside it is exactly the case this function is written for.
+        unsafe { ask_hand_over(occupant) }?;
+    }
 
     // Joined here only if the client did not have it joined for it. A second
     // `join_serviced` on a core already put back to `READY` would read the

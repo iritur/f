@@ -1595,7 +1595,24 @@ fn component_path(name: &str) -> PathBuf {
 /// failure naming the field rather than a component the frame refuses much
 /// later. RFC 0030.
 fn component_image(name: &str) -> Result<(PathBuf, u64, usize), String> {
-    let image = flat_image(&format!("f-{name}"), name)?;
+    component_generation(name, &[])
+}
+
+/// One component file, for the generation `features` names.
+///
+/// **The manifest is the same file for both**, and that is the point rather than
+/// a shortcut: `f_abi::swap::Declaration::transfers_to` compares the schema, the
+/// record width and the record count, and two generations that disagreed about
+/// any of them are two components rather than two generations of one. Compiling
+/// one `manifest.toml` against two images is what makes the declarations equal by
+/// construction instead of by review.
+///
+/// What differs is the content address, because the image differs — which is
+/// exactly what `kernel::component`'s refusal to refill a place from a different
+/// manifest is about, and what `E2-B06` exists to replace with a transfer decided
+/// from two declarations.
+fn component_generation(name: &str, features: &[&str]) -> Result<(PathBuf, u64, usize), String> {
+    let image = flat_image_with(&format!("f-{name}"), name, features)?;
     let bytes = std::fs::read(&image).map_err(|e| format!("reading {}: {e}", relative(&image)))?;
 
     let rel = format!("user/{name}/{}", manifest::FILE_NAME);
@@ -1604,7 +1621,11 @@ fn component_image(name: &str) -> Result<(PathBuf, u64, usize), String> {
     let file = manifest::compile(&rel, &text, &bytes)
         .map_err(|findings| format!("{rel} does not fit the schema:\n\n{}", findings.join("\n")))?;
 
-    let out = component_path(name);
+    let out = if features.is_empty() {
+        component_path(name)
+    } else {
+        component_path(&format!("{name}{SUCCESSOR_SUFFIX}"))
+    };
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("creating {}: {e}", relative(parent)))?;
@@ -1625,6 +1646,18 @@ fn components() -> Result<Vec<PathBuf>, String> {
         let (path, id, image) = component_image(name)?;
         println!("  {name:<12} {id:#018x}  record + {image} byte image  {}", relative(&path));
         built.push(path);
+        if *name != SUCCESSOR_OF {
+            continue;
+        }
+        // The second generation, and it is **not** pushed onto `built`. That
+        // list is what the loader is handed and what `kernel::component` builds
+        // a place per; a successor among them would be a seventh place holding
+        // a second copy of this driver, which is two components rather than two
+        // generations of one. `E2-B06`'s swap hands it over as a *module* the
+        // frame is told about, not as one it walks into.
+        let (path, id, image) = component_generation(name, &["successor"])?;
+        let label = format!("{name}{SUCCESSOR_SUFFIX}");
+        println!("  {label:<12} {id:#018x}  record + {image} byte image  {}", relative(&path));
     }
     Ok(built)
 }
@@ -1804,7 +1837,36 @@ fn artefacts(emitted: &str, own: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// The component whose second generation this tree builds, and the feature that
+/// makes it one.
+///
+/// **One component and not all six**, because a second generation costs a second
+/// compile of everything under it and buys, per component, exactly the same
+/// thing. `virtio-blk` is the one because it is the one that declares
+/// `mode = "in_place"` with a `[transfer]` window and a registration table to
+/// carry across it — `user/store` declares `restart_only`, and a swap of a
+/// component that declares that is a restart wearing a longer word.
+///
+/// *Reversal:* a second component declaring `in_place` with state a client can
+/// observe. Then this stops being a constant and becomes the manifest's own
+/// `mode` field, read the way `declared_components` reads the tree.
+const SUCCESSOR_OF: &str = "virtio-blk";
+
+/// What the successor build is called, beside the component it succeeds.
+const SUCCESSOR_SUFFIX: &str = ".next";
+
 fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
+    flat_image_with(package, dir, &[])
+}
+
+/// As [`flat_image`], with cargo features and a target directory of its own.
+///
+/// The separate target directory is not tidiness: two builds of one package that
+/// differ only in a feature share a fingerprint directory, so building them in
+/// turn rebuilds each from scratch and — worse — leaves whichever ran last in the
+/// place the linker reads. Two directories is what makes *both* artefacts exist
+/// at once, which is the whole requirement here.
+fn flat_image_with(package: &str, dir: &str, features: &[&str]) -> Result<PathBuf, String> {
     let lld = llvm_tool("rust-lld")?;
     let objcopy = llvm_tool("llvm-objcopy")?;
     let nm = llvm_tool("llvm-nm")?;
@@ -1816,7 +1878,11 @@ fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
     // and an artefact whose name is only meaningful relative to its directory
     // is one a script names wrongly the first time somebody moves it.
     let name = dir;
-    let dir = image_dir(dir);
+    let dir = if features.is_empty() {
+        image_dir(dir)
+    } else {
+        image_dir(&format!("{dir}{SUCCESSOR_SUFFIX}"))
+    };
     let target =
         dir.to_str().ok_or("a flat image target directory is not valid UTF-8")?.to_string();
 
@@ -1859,6 +1925,9 @@ fn flat_image(package: &str, dir: &str) -> Result<PathBuf, String> {
             &target,
             "--message-format=json",
         ])
+        .args(
+            features.iter().flat_map(|feature| ["--features".to_string(), (*feature).to_string()]),
+        )
         // `relocation-model=static` for the reason above.
         //
         // `panic=immediate-abort` because a component has no way to report a
@@ -2414,7 +2483,21 @@ fn emulator(
         return Err(format!("kernel image not found at {}", kernel.display()));
     }
     let init = init_image()?;
-    let components = components()?;
+    let mut components = components()?;
+    // The successor, on every boot rather than on the one that swaps.
+    //
+    // **It is not a seventh place and cannot become one.** `component::generations`
+    // groups boot modules by the name their manifest declares: the first module
+    // carrying a name is that component's place, and a later one carrying the
+    // same name is a *successor* the frame has been handed and has not installed.
+    // So a machine that never swaps carries a generation it never uses, which
+    // costs a module and is the honest arrangement — the alternative is a module
+    // list that differs between the boot that swaps and every other boot, and
+    // then the thing being demonstrated is a different machine.
+    let successor = component_path(&format!("{SUCCESSOR_OF}{SUCCESSOR_SUFFIX}"));
+    if successor.exists() {
+        components.push(successor);
+    }
 
     // What this machine is, decided before the module list because half of the
     // answer goes on that list. RFC 0012 and `E2-B07`: `f.root=` selects a
@@ -3792,25 +3875,52 @@ fn churn_counts(log: &str, marker: &str) -> Option<(u64, u64)> {
 /// the exact text whose *presence* keeps it open, and the day it goes this verb
 /// goes red and hands whoever closed it the list of documents to update.
 ///
-/// One entry, and it is the precise line rather than an area. **A swap needs two
-/// generations of one component in one boot module set**, and there is exactly
-/// one file per component: `cargo xtask component` writes `<name>.fc`, the
-/// loader hands the frame that set, and `kernel/src/component.rs` builds one
-/// place per file. The line below is what that costs — a place refuses to be
-/// refilled from anything but the content hash it already holds, which is
-/// correct today and is precisely the refusal a generation swap exists to
-/// replace with a *transfer decided from two declarations*. RFC 0063's phase A
-/// is what would go in its place, and `f_abi::swap` is already the protocol both
-/// halves would drive.
+/// One entry, and it has **narrowed once**. What it said, and what happened to
+/// it, is worth keeping because the row is the same row:
 ///
-/// The needle is deliberately the comparison and not the `Failure::WrongPlace`
-/// beside it: that value has other callers, and a gap whose needle is shared
-/// with an unrelated branch is a gap that closes when somebody refactors.
+/// > *A swap needs two generations of one component in one boot module set, and
+/// > there is exactly one file per component. A place refuses to be refilled
+/// > from anything but the content hash it already holds, so no boot can put a
+/// > newer generation into an existing place.*
+///
+/// Both halves of that have gone. `cargo xtask component` writes
+/// `virtio-blk.next.fc` beside `virtio-blk.fc` — the same manifest, a different
+/// image, therefore a different content address — and `component::generations`
+/// tells a successor from a place by the name the record declares. `cargo xtask
+/// blk swapped` puts both in front of the frame and the place takes the second:
+/// the outgoing occupant reaches a quiescent point of its own, writes its history
+/// into a transfer window, and the successor replays it into a table of its own,
+/// after which a client submits against a `SetId` an instance that no longer
+/// exists answered, and gets its bytes.
+///
+/// **The needle stays, and is not the thing that closed.** The refusal below is
+/// still there and still fail-closed: a spawn is refused a module whose content
+/// address is not the one its place holds. A swap reaches it by moving
+/// `place.module` and `place.manifest` *together*, after a plan made from two
+/// `f_abi::swap::Declaration`s — which is exactly the *transfer decided from two
+/// declarations* this row said would replace it. Deleting the line would have
+/// made every other refill path stop checking.
+///
+/// # What is still owed, which is one clause of four
+///
+/// `E2-B06`'s sentence is *instantiate alongside, transfer state, swap routing
+/// at a quiescent point, retire*. Three are paid. **Alongside is not**: the frame
+/// tears the outgoing occupant down and *then* spawns the incoming one, so the
+/// two never exist at the same moment and the history crosses a window rather
+/// than two live instances. That is why the second needle below is the line that
+/// changes a place's identity while it is empty.
+///
+/// What it costs is real rather than cosmetic: a swap that instantiated
+/// alongside could abandon phase A and keep the occupant it had, and this one
+/// cannot — once the outgoing instance is gone, an abandonment is a restart.
+/// `f_abi::swap::Abandoned` has five variants and this build can honour them
+/// only before the teardown.
 const SWAP_GAP: &[Gap] = &[(
     "kernel/src/component.rs",
-    "if ContentId::of(place.module) != place.manifest {",
-    "a place refuses to be refilled from anything but the manifest it already \
-     holds, so no boot can put a newer generation into an existing place",
+    "extra.place.module = module;",
+    "a place changes its identity while it is empty, so the two generations of \
+     one component never exist at the same moment and RFC 0063's *instantiate \
+     alongside* is unpaid — an abandonment after the teardown is a restart",
     "TODO.md E2-B06 and E2-P08; docs/rfc/0012's *what the frame changed means*; \
      docs/rfc/0063's phase A and its `E2-P08` reversal condition; \
      sim/src/swap.rs's module comment; abi/src/swap.rs's module comment",
@@ -10252,6 +10362,134 @@ fn blk_served() -> Result<(), String> {
 /// # Errors
 ///
 /// A sentence naming which of the four did not hold.
+/// Two generations of one component in one place, and a client that keeps its
+/// registration across them.
+///
+/// **`E2-B06`'s own sentence, at a boot.** That task is met in `sim/src/swap.rs`
+/// and its exit was met "as written and not as meant": `E2-P08 passes` is a
+/// clause about another task, and what the task itself asks for — *instantiate
+/// alongside, transfer state, swap routing at a quiescent point, retire* — had no
+/// boot that could do it, because `kernel/src/component.rs` refused to refill a
+/// place from anything but the manifest it already held.
+///
+/// # What it asserts, and whose word each part is
+///
+/// 1. **the outgoing occupant chose the moment** — it was asked, at a word on its
+///    board, and ended at a quiescent point of its own with its history written.
+///    Not killed: a kill is `cargo xtask blk killed`, and RFC 0012 requires the
+///    two never be summed;
+/// 2. **the place took a different generation** — the same place, the same
+///    account, the same endpoint, and a build the component itself says is not
+///    the one that was there;
+/// 3. **the successor replayed what it was handed** — counted on the far side of
+///    the boundary and required to equal what the outgoing occupant said it
+///    wrote, which `f_abi::swap::Swap::acknowledged` refuses otherwise;
+/// 4. **the client never registered again** — and this is what makes the other
+///    three worth anything. It submits against a `SetId` an instance that no
+///    longer exists answered, and gets its bytes. A restart answers `NO_SUCH_CAP`.
+///
+/// # Errors
+///
+/// A sentence naming which of the four did not hold.
+fn blk_swapped() -> Result<(), String> {
+    println!("--- blk=swapped: one place, two generations, and a client that keeps its set");
+    let disk = blk_disk()?;
+    let device = blk_device(&disk)?;
+    let borrowed: Vec<&str> = device.iter().map(String::as_str).collect();
+    let (ending, log) = machine_devices(
+        Some("blk=swapped"),
+        &[],
+        Capture::Printed,
+        BOOT_TIMEOUT,
+        BOOT_MEMORY,
+        &borrowed,
+        &[],
+    )?;
+    if ending != Ending::Exited(33) {
+        return Err(format!("the boot {ending}; expected exit 33"));
+    }
+
+    let handed = log.lines().find(|line| line.contains("handed over   place virtio-blk"));
+    let Some(handed) = handed else {
+        return Err("the occupant was never asked to hand over, or never did.\n\n\
+             `component::ask_hand_over` writes one word onto the board while the component\n\
+             holds a core, and the component reads it at the top of its serve loop where\n\
+             `Pending::is_empty()`. A boot that printed a `served` line and not this one is\n\
+             one where `blk=swapped` was not read, or where the component never reached a\n\
+             quiescent point."
+            .into());
+    };
+    if handed.contains("wrote 0 record(s)") {
+        return Err(format!(
+            "the occupant handed over an empty history.\n\n\
+             {}\n\n\
+             That is what a swap looked like before the journal had a producer, and what\n\
+             `sim/src/swap.rs`'s `amnesiac` control provokes on purpose. Suspect\n\
+             `Driver::remember`: a deed is recorded after the table answered, and only\n\
+             where it answered without error.",
+            handed.trim_end(),
+        ));
+    }
+
+    if !log.contains("swapped       place virtio-blk") {
+        return Err("the place did not take a second generation.\n\n\
+             `generations` finds the successor by manifest name — `virtio-blk.next.fc`, built\n\
+             by `cargo xtask component` with the `successor` feature — and the swap moves\n\
+             `place.module` and `place.manifest` together so that `spawn`'s refusal stays\n\
+             fail-closed rather than being deleted. A boot missing this line was handed no\n\
+             second generation."
+            .into());
+    }
+
+    let committed = log.lines().find(|line| line.contains("committed     place virtio-blk"));
+    let Some(committed) = committed else {
+        return Err("the swap was never committed.\n\n\
+             `Swap::commit` refuses from any phase but `Acknowledged`, and `acknowledged` is\n\
+             refused unless the successor replayed exactly what its predecessor wrote. A\n\
+             boot that handed over and did not commit has two counts that disagree."
+            .into());
+    };
+    if committed.contains("is generation 1 ") {
+        return Err(format!(
+            "the place took a second occupant of the same build.\n\n\
+             {}\n\n\
+             The component reports which build it is, and generation 1 here means the\n\
+             successor module was the ordinary image rather than the one built with the\n\
+             `successor` feature. Two identical images have one content address and are one\n\
+             generation, so there would be nothing to swap to.",
+            committed.trim_end(),
+        ));
+    }
+
+    let client = log.lines().find(|line| line.contains("blk client    the frame registered"));
+    let Some(client) = client else {
+        return Err("the client did not report what it saw.".into());
+    };
+    if client.contains("read back what it wrote: false") {
+        return Err(format!(
+            "the client did not get its bytes after the swap.\n\n\
+             {}\n\n\
+             It submitted against a `SetId` the outgoing occupant answered and never\n\
+             registered again. Bytes that did not land mean the successor's table does not\n\
+             hold that registration — which is what a restart costs and what a swap is for.\n\
+             Suspect the replay: a record whose check word does not hold is skipped, and\n\
+             `Swap::acknowledged` refuses a count that does not match.",
+            client.trim_end(),
+        ));
+    }
+
+    println!(
+        "\nblk=swapped: ok — one place held two generations of one component. The outgoing\n\
+         \x20 occupant chose its moment and wrote its history; the successor replayed it into\n\
+         \x20 a table of its own; and the client submitted against a registration an instance\n\
+         \x20 that no longer exists had answered, and got its bytes.\n\
+         \x20 `claims/0029`'s rows are still the simulator's, which is where this project's\n\
+         \x20 fault and load numbers are taken; what this adds is that the thing being\n\
+         \x20 swapped is a place in a boot."
+    );
+    Ok(())
+}
+
 fn blk_killed() -> Result<(), String> {
     println!("--- blk=killed: the driver serving a client is killed under its load");
     let disk = blk_disk()?;
@@ -10404,6 +10642,11 @@ const BLK_SERVED: &str = "served";
 /// `CHAOS_GAP`'s needle goes.
 const BLK_KILLED: &str = "killed";
 
+/// And that half with the driver **swapped** rather than killed, which is
+/// `E2-B06`. Outside [`BLK_PROVOCATIONS`] for the same reason as the other
+/// three.
+const BLK_SWAPPED: &str = "swapped";
+
 fn blk(kind: Option<&str>) -> Result<(), String> {
     if kind == Some(BLK_PLACE) {
         return blk_place();
@@ -10413,6 +10656,9 @@ fn blk(kind: Option<&str>) -> Result<(), String> {
     }
     if kind == Some(BLK_KILLED) {
         return blk_killed();
+    }
+    if kind == Some(BLK_SWAPPED) {
+        return blk_swapped();
     }
     let chosen: Vec<&(&str, &str)> = match kind {
         None => BLK_PROVOCATIONS.iter().collect(),

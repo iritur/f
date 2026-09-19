@@ -479,6 +479,27 @@ pub const MODULE_MAX: u64 = 64 * FRAME_SIZE;
 // Inside the one page table that covers `TEXT`, like everything above it.
 const _: () = assert!(SPAWN_MODULE + MODULE_MAX <= TEXT + 2 * 1024 * 1024);
 
+/// Where the two generations of one component meet during a swap.
+///
+/// **Mapped into both at once, and that is the whole of what it is for.** RFC
+/// 0063's phase A has an outgoing instance write its history somewhere an
+/// incoming instance can read it, and neither may reach into the other's address
+/// space — so the frame maps one run of memory into both, at one address, for the
+/// length of the phase and no longer.
+///
+/// One page today, which is `f_virtio_blk`'s sixteen registration records at
+/// thirty-two bytes with room to spare. It is a ceiling rather than a size:
+/// `Declaration::window_bytes` is what a swap actually asks for, computed from
+/// the two declarations, and a swap wanting more than this is refused rather
+/// than truncated.
+/// Unit: bytes.
+pub const SWAP_WINDOW: u64 = SPAWN_MODULE + MODULE_MAX;
+
+/// The most of one this build will map. Unit: bytes.
+pub const SWAP_WINDOW_MAX: u64 = FRAME_SIZE;
+
+const _: () = assert!(SWAP_WINDOW + SWAP_WINDOW_MAX <= TEXT + 2 * 1024 * 1024);
+
 // One page table covers two mebibytes, and every address above has to be inside
 // the one that covers `TEXT` — otherwise a component mapping its own tree costs
 // the frame a page table it did not budget for, which is the sentence

@@ -307,7 +307,15 @@ fn serve(selector: u32) -> ! {
             // second term over the used ring, and this comment is what tells the
             // next reader that the single term was a decision rather than an
             // oversight.
-            if parts.hand_over {
+            // **Read here and not at start-up**, which is the whole of what
+            // makes it a question rather than a setting. The frame writes this
+            // word while this component holds a core — it is the only thing it
+            // *can* do, because R05 delivers nothing to a running component — so
+            // a value captured when the page was first read is a value that can
+            // never become true. The first boot of this path hung for exactly
+            // that reason: the frame asked, and the component was still looking
+            // at the answer it had read before the question.
+            if board.read64(at::HAND_OVER).unwrap_or(0) != 0 {
                 break hand_over(&board, &driver, parts.window.as_mut());
             }
             core::hint::spin_loop();
@@ -384,13 +392,17 @@ struct Parts {
     /// The transfer window, where there is one. `None` for every instance
     /// nobody is swapping, which is every instance in every boot but one.
     window: Option<Granted>,
-    /// Whether this instance is being asked to hand over at its next quiescent
-    /// point.
-    hand_over: bool,
     /// How many records are waiting in the window for this instance to replay
     /// before it serves anybody. Unit: records.
     replay: u32,
 }
+
+/// Which build of this component this is.
+///
+/// One, or two for the image built with the `successor` feature — the only
+/// difference between the two, and `user/virtio-blk/Cargo.toml` argues at length
+/// why it is the only one.
+const GENERATION: u64 = if cfg!(feature = "successor") { 2 } else { 1 };
 
 /// Replay a predecessor's history into this instance's own table.
 ///
@@ -417,6 +429,8 @@ fn replay(
         let Some(slice) = bytes.get(at..at + crate::state::RECORD_BYTES as usize) else { break };
         let Ok(eight) = <[u8; crate::state::RECORD_BYTES as usize]>::try_from(slice) else { break };
         let record = crate::state::Record::from_bytes(&eight);
+        // A record that did not cross intact is skipped and the count says so.
+        // `sim/src/swap.rs`'s `garble` control as ordinary behaviour.
         if !record.intact() {
             continue;
         }
@@ -628,7 +642,6 @@ fn laid_out(board: &Window) -> Option<Parts> {
             u32::try_from(board.read64(at::WINDOW_LEN).ok()?).ok()?,
         )
         .ok(),
-        hand_over: board.read64(at::HAND_OVER).ok()? != 0,
         replay: u32::try_from(board.read64(at::REPLAY).ok()?).ok()?,
     })
 }
@@ -648,6 +661,10 @@ fn report(
     drained: u64,
     outcome: u64,
 ) {
+    // Which build this is, written on every report and not only on a swap. A
+    // number that appeared only when somebody was looking for it would be a
+    // number nobody could use to notice a swap they had not expected.
+    let _ = board.write64(reported::GENERATION, GENERATION);
     if let Some(driver) = driver {
         let counters = driver.counters();
         let _ = board.write64(reported::SERVED, u64::from(counters.served));
