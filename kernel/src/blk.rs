@@ -1349,6 +1349,12 @@ unsafe fn run(
         (routing::at::FLOOR, FLOOR_NS),
         (routing::at::HOLD, half.hold()),
         (routing::at::HOLD_AFTER, half.hold_after()),
+        // No state tree on this path, said rather than left zero by omission.
+        // `process::prepare_driver` maps the control ring, the board, the
+        // registers and the queues; `SPAWN_TREE` is `component::spawn`'s and
+        // this shape never gets one. A component reads this slot and publishes
+        // only when it is non-zero.
+        (routing::at::TREE_AT, 0),
     ] {
         board.write64(offset, value).map_err(Trouble::Channel)?;
     }
@@ -1481,15 +1487,21 @@ unsafe fn run(
 /// outlives nothing: it is handed straight to `component::demonstrate` and
 /// written onto the page before the first core is given out.
 ///
-/// **Twenty-eight and not twelve, which is the count that mattered.** The
+/// **Twenty-nine and not twelve, which is the count that mattered.** The
 /// identify life reads the register span and the four structures, and twelve
 /// slots answered it. A serving life reads the queue region, both rings, both
 /// ceilings, the floor, the ordering, the hold and what was negotiated — and
 /// `laid_out` answers `None` for any one of them that is missing, which the
 /// component turns into `stopped::BAD_ROUTING`. A page filled in three-eighths
 /// of the way is a driver that refuses before it touches the device.
+///
+/// The twenty-ninth is `at::TREE_AT`, and it is the one slot here whose value
+/// is *zero on this path and non-zero on the other*: only `component::spawn`
+/// maps a state tree, so the account-less driver says there is none and the
+/// place says where it is. Written rather than left out, for the reason
+/// `at::HOLD` is written as an explicit zero one line up.
 /// Unit: slots.
-pub const ROUTED: usize = 28;
+pub const ROUTED: usize = 29;
 
 /// What the frame saw while it was a client of a place's occupant.
 ///

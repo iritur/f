@@ -1068,6 +1068,10 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // counts, so there is no *after* in which a served datapath could happen.
     let serving: Option<&mut dyn component::Datapath> =
         placed.as_mut().map(|client| client as &mut dyn component::Datapath);
+    // RFC 0065's closing measurement, carried out of the match so the tree can
+    // publish it beside the frame's own counts. One word rather than the whole
+    // report, because the report is a boot-log shape and a node is a live word.
+    let mut components_moved = 0u32;
     // SAFETY: the boot processor, once, with the kernel's address space in
     // `CR3`, `frames` rebound onto its direct map, and no process running. The
     // direct map covers every module: `reserved_ranges` put them all in the
@@ -1089,27 +1093,30 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             generation.map(|(_, bytes, root)| component::Generation { bytes, root }),
         )
     } {
-        Ok(report) => kprintln!(
-            "  supervisor    ok — {} place(s), {} spawn(s), {} fault(s), {} restart(s), \
+        Ok(report) => {
+            components_moved = report.moved;
+            kprintln!(
+                "  supervisor    ok — {} place(s), {} spawn(s), {} fault(s), {} restart(s), \
              {} resumed, {} client(s) lost, {} probe(s) refused, {} retired, \
              {} irq need(s) bound to no vector, {} tree(s) mounted carrying {} node(s), \
              {} refused for declaring none; heap {} B described, peak {} byte(s), starved {}",
-            report.places,
-            report.spawns,
-            report.faults,
-            report.restarts,
-            report.resumed,
-            report.lost,
-            report.probed,
-            report.retired,
-            report.unbound,
-            report.mounted,
-            report.nodes,
-            report.mute,
-            report.heap_bytes,
-            report.heap_peak,
-            report.heap_starved,
-        ),
+                report.places,
+                report.spawns,
+                report.faults,
+                report.restarts,
+                report.resumed,
+                report.lost,
+                report.probed,
+                report.retired,
+                report.unbound,
+                report.mounted,
+                report.nodes,
+                report.mute,
+                report.heap_bytes,
+                report.heap_peak,
+                report.heap_starved,
+            );
+        }
         // A machine that carried no component file is not a broken machine.
         // `docs/booting-on-hardware.md` makes every component file optional and
         // the first boot outside QEMU carried none at all, so a demonstration
@@ -1201,6 +1208,11 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     tree.set(state::node::MEMORY_REFILL, frames.refill_count());
     tree.set(state::node::MEMORY_REMOTE, frames.remote_count());
     tree.set(state::node::MEMORY_FORCED, allocator.steals);
+    // RFC 0065's closing measurement, published where it was taken. Zero on a
+    // boot whose occupants never ran, which is most of them, and the row that
+    // makes it evidence is `state after` in the log — printed per mounted tree
+    // beside the `state mount` reading it is compared against.
+    tree.set(state::node::COMPONENTS_MOVED, u64::from(components_moved));
     // The remapping unit's three numbers, *after* the provocation above and not
     // before it. That ordering is the whole of what makes them instruments: a
     // fault count written before the only code on this boot that can produce a
@@ -3308,6 +3320,13 @@ unsafe fn blk_place_supply<'a>(
         (at::FLOOR, blk::FLOOR_NS),
         (at::HOLD, 0),
         (at::HOLD_AFTER, 0),
+        // Where this occupant's own state tree is. **Only the place path can
+        // say a non-zero here**: `component::spawn` maps `SPAWN_TREE` writable
+        // and the two ring-3 shapes in `process` do not map it at all, so a
+        // component that took the address as a constant would fault on every
+        // boot that is not a place. The zero beside it in `blk.rs` is the same
+        // sentence from the other side.
+        (at::TREE_AT, crate::process::SPAWN_TREE),
         (at::MAGIC, f_virtio_blk::routing::MAGIC),
     ];
 

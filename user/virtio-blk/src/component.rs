@@ -654,6 +654,53 @@ fn laid_out(board: &Window) -> Option<Parts> {
 /// plausible tally. RFC 0013's *read, never delivered* — the frame takes these
 /// numbers out of memory it granted, and this component is never asked for
 /// them.
+/// The ids `user/virtio-blk/manifest.toml`'s `[[state]]` table declares.
+///
+/// Four leaves under one subtree, and every one of them a count this driver
+/// already keeps: nothing here is minted for the tree's benefit. `id = 1` is
+/// the `blk` subtree itself and carries no word, which is why the list starts
+/// at two.
+mod node {
+    /// Entries answered without a refusal.
+    pub const SERVED: u32 = 2;
+    /// Entries refused.
+    pub const REFUSED: u32 = 3;
+    /// Bytes the device transferred for clients.
+    pub const BYTES: u32 = 4;
+    /// Bytes this component copied on the data path, which is required zero.
+    pub const COPIES: u32 = 5;
+}
+
+/// Store this run's counts into the tree the frame mounted for this instance.
+///
+/// **The address comes off the board and is never assumed.** Only
+/// `component::spawn` maps `process::SPAWN_TREE`; the two ring-3 shapes in
+/// `kernel/src/process.rs` map the control ring, the board, the registers and
+/// the queues and not this page. So `at::TREE_AT` is zero on every boot that is
+/// not a place, and a zero means *do not write* rather than *write to zero*.
+/// Taking the constant instead would fault at ring 3 on six boots with nothing
+/// in the fault naming the cause.
+///
+/// A tree that will not bind is skipped, and that is not a silent skip: the
+/// frame reads this page before this instance's first instruction and again
+/// after its core comes back, and an instance that stored nothing leaves the
+/// two readings equal. The failure is reported by the reader on the far side
+/// rather than claimed by the writer on this one — RFC 0013's arrangement, and
+/// `user/store/src/runtime.rs` makes the same argument at length.
+///
+/// Nothing here is `unsafe` and nothing here could be: `f_abi::state::Writer`
+/// is why that type has a write side.
+fn publish(tree_at: u64, counters: &crate::driver::Counters) {
+    if tree_at == 0 {
+        return;
+    }
+    let Ok(tree) = f_abi::state::Writer::at(tree_at, routing::TREE_BYTES) else { return };
+    tree.set(node::SERVED, u64::from(counters.served));
+    tree.set(node::REFUSED, u64::from(counters.refused));
+    tree.set(node::BYTES, counters.bytes);
+    tree.set(node::COPIES, counters.copies);
+}
+
 fn report(
     board: &Window,
     driver: Option<&crate::driver::Driver>,
@@ -676,6 +723,12 @@ fn report(
         let _ = board.write64(reported::CAPACITY, driver.capacity());
         let _ = board.write64(reported::SHORTFALL, u64::from(counters.shortfall));
         let _ = board.write64(reported::UNADMITTED, u64::from(counters.unadmitted));
+        // The same four counts, into the region the frame mounted under its own
+        // root. The board is this component's answer to *what did you do*; the
+        // tree is the machine's answer to *what is it running*, and RFC 0013
+        // wants the second read rather than delivered. Both, from one set of
+        // counters, so the two cannot disagree without one of them being wrong.
+        publish(board.read64(at::TREE_AT).unwrap_or(0), &counters);
     }
     if let Some((queue, order)) = queue {
         let _ = board.write64(reported::OVERTAKEN, u64::from(queue.overtaken()));

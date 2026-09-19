@@ -888,6 +888,11 @@ pub struct Report {
     pub places: usize,
     /// Instances spawned, across every place. Unit: instances.
     pub spawns: u32,
+    /// Mounted trees whose snapshot moved while their occupant held a core.
+    ///
+    /// RFC 0065's closing measurement. See `crate::state::node::COMPONENTS_MOVED`
+    /// for why it counts trees rather than words. Unit: trees.
+    pub moved: u32,
     /// Generation swaps that reached `commit`. **Never summed with restarts**,
     /// which RFC 0012 requires: a restart gives a client a component that has
     /// never heard of it, and a swap hands the successor the history its
@@ -1623,6 +1628,13 @@ pub unsafe fn demonstrate(
                 // SAFETY: the core reported finished, and the page is still
                 // mapped — an address space is torn down by `tear_down` and not
                 // here.
+                let after = tree_after(occupant);
+                let before = occupant.tree_snapshot;
+                if state_after_line(Name(record.label()), before, after) {
+                    report.moved = report.moved.saturating_add(1);
+                }
+                // SAFETY: the core reported finished and the page is still
+                // mapped, as above.
                 let identified = unsafe { read_identified(occupant) };
                 identified_line(Name(record.label()), identified);
                 // The component's own account of the supply, required rather
@@ -1720,6 +1732,11 @@ pub unsafe fn demonstrate(
                     let (announced, death, driven) = ran?;
                     report.scheduled += 1;
                     scheduled_line(Name(record.label()), cpu, life, announced, death);
+                    let after = tree_after(occupant);
+                    let before = occupant.tree_snapshot;
+                    if state_after_line(Name(record.label()), before, after) {
+                        report.moved = report.moved.saturating_add(1);
+                    }
                     retained = retained.saturating_add(client.retained(frames));
                     // The client's news, after the join and never instead of it.
                     let drove = driven.map_err(Failure::Datapath)?;
@@ -2961,11 +2978,7 @@ fn abandoned_line(what: Name<'_>, why: f_abi::swap::Abandoned) {
 /// agree. A single count, taken once, would be a swap reporting on itself.
 fn committed_line(what: Name<'_>, now: u64, replayed: u32, taken: u32) {
     crate::kprintln!(
-        "  committed     place {what} is generation {now} and replayed {replayed} of {taken} \n\
-         record(s) its predecessor wrote, and a client that submitted across the gap \n\
-         waited rather than being refused. The routing word is stored open here and \n\
-         read by nobody: delivery resolves the place's one occupant directly, \n\
-         and the word begins to choose the day a place holds two"
+        "  committed     place {what} is generation {now} and replayed {replayed} of {taken} record(s)\n                its predecessor wrote, and a client that submitted across the gap waited rather\n                than being refused. The routing word is stored open here and read by nobody:\n                delivery resolves the place's one occupant directly, and the word begins to\n                choose the day a place holds two"
     );
 }
 
@@ -4627,6 +4640,50 @@ fn spawned_line(record: &Record, place: &Place, spawned: (u32, usize, usize)) {
         spawned.2,
         FRAME_SIZE,
     );
+}
+
+/// What a component left in the tree the frame mounted for it.
+///
+/// The same call [`mount`] makes, made a second time: the region is the
+/// frame's own page, reachable through the direct map, and reading it is
+/// neither a grant nor a delivery — RFC 0013's *read, never delivered*, which
+/// is the whole reason a component's answer to *what are you running* can be
+/// taken while the component is not running.
+///
+/// `None` is a region that no longer validates, which is a component that
+/// scribbled over its own schema. That is worth a line and is not worth a
+/// refusal: the tree is the component's to ruin and the frame has already
+/// taken what it needed from it.
+fn tree_after(occupant: &Instance) -> Option<(u32, u64)> {
+    let reader = f_abi::state::Reader::at(occupant.tree, FRAME_SIZE as u32).ok()?;
+    Some((reader.nodes(), reader.snapshot()))
+}
+
+/// The second reading of a mounted tree, beside the first.
+///
+/// **This is the line [`mounted_line`] said would come.** That one prints the
+/// snapshot of a tree whose component has not run — a constant for a manifest,
+/// and deliberately a fixture so the boot log stays reproducible. This one is
+/// printed after the occupant's core came back, and whether the two differ is
+/// the evidence that a declared state tree is a live region rather than a
+/// shape. A boot where an occupant ran and this says `unmoved` is one where a
+/// component was handed a writable page under the frame's root and wrote
+/// nothing into it.
+///
+/// Returns whether it moved, so the caller counts rather than re-deriving.
+fn state_after_line(what: Name<'_>, before: u64, after: Option<(u32, u64)>) -> bool {
+    let Some((nodes, snapshot)) = after else {
+        crate::kprintln!(
+            "  state after   place {what}: the region no longer validates its own schema — the\n                occupant wrote outside the nodes it declared"
+        );
+        return false;
+    };
+    let moved = snapshot != before;
+    let verdict = if moved { "moved" } else { "unmoved" };
+    crate::kprintln!(
+        "  state after   place {what}: {nodes} node(s), snapshot {snapshot:#018x}, {verdict}\n                since the mount read {before:#018x} — read through the frame's own root after the\n                core came back, and never asked of the component"
+    );
+    moved
 }
 
 /// What the frame found when it followed its own root into a component's tree.

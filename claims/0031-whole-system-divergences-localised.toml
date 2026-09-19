@@ -11,15 +11,28 @@
 # report agreement about a pair that demonstrably does not agree.
 # `generation/src/diff.rs` made the same argument one layer up.
 #
-# **What it is not: a boot's whole-system state.** The frame publishes a tree and
-# mounts one region per component under it, and nothing writes a word into those
-# regions — the frame lays out the header and the schema from the manifest and
-# stops there (RFC 0065, `E1-B15`). So a boot's component subtrees are constants,
-# and a comparison over constants cannot diverge. Every number here is taken over
-# the *simulator's* components, whose counters live in the published region.
-# `compare::WHOLE_SYSTEM_GAP` prints that on every green run rather than leaving
-# it in a file, and whoever teaches a component to write into its own region
-# deletes the constant in the same diff.
+# **What it is not: a boot's whole-system state — and that sentence narrowed on
+# 2026-09-19 rather than staying put.** It used to read: nothing writes a word
+# into the regions the frame mounts, so a boot's component subtrees are constants
+# and a comparison over constants cannot diverge. That is no longer true.
+# `user/virtio-blk` writes the four counts it already keeps into the region
+# mounted for it, the frame reads that region back through its own root after the
+# occupant's core comes back, and `kernel/src/state.rs`'s `COMPONENTS_MOVED`
+# counts the trees whose snapshot moved. RFC 0065's closing measurement is met and
+# `cargo xtask blk served` prints it as `state after … moved`.
+#
+# What is still true is narrower and is about **breadth, not liveness**:
+# `supplied_place` gives a core to exactly one place's occupant, so one mounted
+# subtree of five is live and four are still constants. Two boots compared would
+# diverge on one subtree and be blind on four.
+#
+# **No boot row is added to this claim, deliberately.** Every number below is
+# taken over the *simulator's* components, 64 injections localised 64 times, and
+# a boot row taken over one live subtree is a different measurement wearing the
+# same name — `E2-P08`'s entry in `TODO.md` records what happened the last time
+# two harnesses counting different things were summed. What would earn a row here
+# is a boot in which every mounted subtree moves. `compare::WHOLE_SYSTEM_GAP`
+# carries the narrowed text and prints it on every green run.
 name       = "whole-system-divergences-localised"
 status     = "gating"           # pending | tracked | gating
 milestone  = "E2"

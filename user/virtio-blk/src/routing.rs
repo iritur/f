@@ -294,7 +294,30 @@ pub mod at {
     /// which is every instance in every boot that is not swapping.
     /// Unit: records.
     pub const REPLAY: u32 = 248;
+
+    /// Where this instance's own state tree is mapped, or zero if it has none.
+    ///
+    /// **Zero is the common case and is why this is a slot rather than a
+    /// constant.** The tree page exists only on the `component::spawn` path:
+    /// `process::prepare_driver` and `process::prepare_server` map the control
+    /// ring, the board, the registers, the queues and the heap, and not this.
+    /// A component that assumed the address would fault at ring 3 on every
+    /// boot that is not a place, with nothing in the fault naming the cause.
+    /// So the frame says where it is, or says there is none, and the component
+    /// publishes only when told.
+    ///
+    /// Unit: bytes — a virtual address in this instance's own space.
+    pub const TREE_AT: u32 = 256;
 }
+
+/// How much of the state-tree page this component may write.
+///
+/// One frame, which is what `component::spawn` maps at `process::SPAWN_TREE`
+/// and what `process::MODULE_MAX`'s neighbours are all sized in. It is here
+/// rather than in the component because it is a fact about the mapping the
+/// frame makes, and the component is the party that must not invent it.
+/// Unit: bytes.
+pub const TREE_BYTES: u32 = 4096;
 
 /// Where the component's own half of the page starts.
 ///
