@@ -107,6 +107,27 @@ swappable, or to give it a field of its own beside `frame` — and either is an
 RFC, because "a reboot only when the frame changed" stops being true the moment
 the condition has an *and* in it.
 
+> **Case 1 has a boot behind it as of 2026-09-19, and the paragraph above is
+> kept rather than edited because the distinction it draws is the one that had
+> to be demonstrated.** `cargo xtask blk swapped` takes one place of one running
+> machine from generation 1 of `user/virtio-blk` to generation 2 — the same
+> manifest, a different image, therefore a different component leaf — without a
+> reboot, and a client that registered with the first submits against that
+> registration after the second and gets its bytes. The frame hash did not move
+> and was not consulted, which is case 1 behaving as written rather than as
+> asserted. `cargo xtask blk killed` is the control beside it: the same client,
+> the same script, one branch different, and every registration lost. Those two
+> numbers are the *only* place outside the simulator where this RFC's central
+> sentence is the same counter over the same client for both routes.
+>
+> **What is not demonstrated is the machine.** This RFC says a generation swap
+> is atomic at a place and not at the machine, and that the published root
+> follows the last place. One place has swapped; no run has taken a machine from
+> one root to another by swapping every place that differs, and the generation
+> counter's zero window has therefore never been observed by a reader. That is
+> still `E2-P08`'s and the rollback row's, and it is what `claims/0021` remains
+> a reservation for.
+
 ### Swap
 
 Per place, under RFC 0041 and RFC 0008: the place stops delivering, client

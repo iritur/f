@@ -186,6 +186,41 @@ transferred state lost because the instance that owned it died. That is the
 fifth cross-core word RFC 0016 says needs an argument, and `E2-B06` owes the
 argument and the litmus test.
 
+> **Phase A is reversible in the simulator and reversible only up to a point in
+> the frame, as of 2026-09-19.** `cargo xtask blk swapped` pays *retire*
+> outright at a boot and pays *transfer state* and *swap routing at a quiescent
+> point* in part: the occupant is asked at a word on its own board, reaches
+> `Pending::is_empty()` under its own loop, writes its records into a window,
+> and the successor replays them into a table of its own before anybody is
+> served. What it does **not** pay is *instantiate alongside* — the frame tears
+> the outgoing occupant down and then spawns the incoming one, so the two never
+> hold state at the same moment.
+>
+> **Two of this section's own rules are declared and not yet honoured by the
+> frame, and they are recorded here rather than in a task because this is where
+> they are stated.** First, the window: RFC 0063 says the incoming instance buys
+> it out of its own account, `abi/src/manifest.rs` repeats it, and
+> `cargo xtask lint-manifests` checks `record_bytes * records_max <=
+> memory_bytes` against the declaration — but `kernel/src/component.rs:1658`
+> takes one page from the global frame allocator, charged to nobody, and sizes
+> it `process::SWAP_WINDOW_MAX` rather than calling `Swap::window_bytes()`,
+> which has no caller under `kernel/`. Second, the routing word: `Routing` is
+> `pause()`d and `commit()`ted by the frame and never *read* by it —
+> `delivering()` and `open()` have no caller under `kernel/` — so delivery
+> decides by `place.occupant` instead. Neither is wrong today, because a place
+> holds one occupant and there is nothing for the word to choose between and no
+> second instance contending for the account. Both become load-bearing at the
+> same moment, which is *instantiate alongside*.
+>
+> The consequence is exactly the one this section is about. Everything above
+> the teardown abandons as written; nothing below it can, because the occupant
+> the place would resume delivering to is gone and what this RFC calls an
+> abandonment would be a restart. So of [`Abandoned`]'s five reasons, a boot can
+> honour only those decided before the frame spawns the successor, and
+> `SWAP_GAP` in `xtask/src/main.rs` is that deviation as a checked needle rather
+> than a paragraph. This is a gap in one implementor and not a change to this
+> decision: the simulator has the full window and abandons for all five.
+
 **Why an abandonment is not the fault path the supervisor already has.** They
 answer different questions. The restart path answers *the occupant died*: it
 spends one of `max_restarts`, waits a backoff, and retires the place when the
@@ -314,6 +349,18 @@ swap.** The E2 spec named this as the observation that would turn
 `f_abi::transfer` from a record into a protocol, and it still is. The three
 labels are RFC 0041's and `sim/src/chaos.rs` already refuses on each separately,
 so the evidence would arrive named.
+
+> **Read against a boot on 2026-09-19 and still not met, which is a reading and
+> not a default.** This condition has now been checked in the one place it could
+> not be checked when it was written: a real place, a real occupant, a real
+> device. `cargo xtask blk swapped` submits against a registration the outgoing
+> instance answered and the successor replayed, and the bytes land — no drop, no
+> double, no wrong answer, with `cargo xtask blk killed` as the control that
+> shows the same client losing everything when the occupant dies instead. One
+> client and two operations is a much smaller observation than the simulator's
+> 384 under load, and it is deliberately not summed with them; what it adds is
+> that the thing observed is a place in a boot. The condition stands unfired on
+> both.
 
 **An abandonment rate high enough to be a policy question.** This RFC says an
 abandonment costs a client latency and nothing else, and that it spends no

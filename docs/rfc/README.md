@@ -145,9 +145,22 @@ argued. Its stated reversal is that same task *observing a dropped, doubled or
 wrongly-answered operation across a swap*, and the run observed none of the
 three with three negative controls in shipped source proving each counter can
 move. So the decision closes and what stays open is its implementation in the
-frame: no boot can put two generations of one component in front of the frame,
-`SWAP_GAP` in `xtask/src/main.rs` is the checked line, and `E2-B06` is where a
-reader meets it.
+frame. **That residue was measured again on 2026-09-19 and it shrank, though
+not as far as a first reading of it claimed.** A boot *can* put two generations of one component in front of
+the frame — `cargo xtask blk swapped` — and the occupant chooses its own
+quiescent point, writes its history, and is succeeded by an instance that
+replays it while a client keeps the `SetId` it already held. What the frame does
+not do is *instantiate alongside*: it tears the outgoing occupant down before it
+spawns the incoming one, so the two never hold state at once and an abandonment
+after the teardown is a restart rather than the reversal 0063 defines.
+Two smaller rules of 0063's travel with it and are declared rather than
+honoured: the window is a page of the frame's own at a fixed size rather than
+one bought out of the incoming account through `Swap::window_bytes()`, and the
+routing word is stored by the frame and never read by it. Neither is a fault
+while a place holds one occupant, and all three come due together. `SWAP_GAP`
+in `xtask/src/main.rs` narrowed rather than closed, its needle moved from the
+refusal to the line that changes a place's identity while it is empty, and
+`E2-B06` is still where a reader meets it.
 
 **0064 is the third entry on one bound and the first produced by a workload the
 registry could not reach.** 0061 was falsified by a property test, 0062 by 0061's

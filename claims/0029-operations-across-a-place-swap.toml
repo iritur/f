@@ -9,10 +9,16 @@
 # record written and no reboot decided. The three metrics RFC 0012 names for
 # that whole — `generation_swaps`, `reboots`, `frame_changed` — are deliberately
 # absent rather than printed as zeros, because a zero under those names would
-# read as *this ran and found none* when the truth is *this cannot run yet*:
-# `SWAP_GAP` in `xtask/src/main.rs` is the checked reason, and it is one line of
-# `kernel/src/component.rs` refusing to refill a place from anything but the
-# manifest it already holds. The four names that *are* RFC 0012's —
+# read as *this ran and found none* when the truth is that nothing here is a
+# whole machine changing generation. **That reason was narrowed on 2026-09-19
+# and it is a narrower reason now rather than a gone one.** It used to be *this
+# cannot run yet*, pointing at `SWAP_GAP` and one line of
+# `kernel/src/component.rs`; a boot can swap a place now — `cargo xtask blk
+# swapped` — so *cannot run yet* is withdrawn. What is left is the reason that
+# was always the stronger one: RFC 0012 counts a generation swap as complete
+# when its root record is durable and counts it over every place that differs,
+# and no run in this tree, in a process or on a machine, has taken one root to
+# another. One place is not a machine. The four names that *are* RFC 0012's —
 # `places_swapped`, `places_restarted`, `operations_dropped` and the two
 # `operations_redone` halves — are spelled exactly as that RFC spells them, so
 # that this claim is the beginning of its metric row and not a second vocabulary
@@ -106,7 +112,7 @@ notes   = "There is no other system to compare against, and the comparison that 
 # R09: every headline claim names the subsystem that owns it.
 document = "docs/design/fast-path.html"
 section  = "10"
-notes    = "Section 10's metrics table carries the row RFC 0012 reversed — *full system rollback: not possible / 1 reboot* — and this claim is the half of the replacement that reversal promised: a component replaced without one. The subsystems that own the number are `abi/src/swap.rs` for the protocol as a state machine over two declarations and the routing word between them, `abi/src/transfer.rs` for what a manifest declares, `user/virtio-blk/src/state.rs` for the thirty-two-byte record that actually crosses, `sim/src/swap.rs` for the sweep, the three negative controls and the verdict, and `kernel/src/component.rs` for the place that cannot yet be refilled — which is `SWAP_GAP`, and is why this number is taken in a process rather than on a machine."
+notes    = "Section 10's metrics table carries the row RFC 0012 reversed — *full system rollback: not possible / 1 reboot* — and this claim is the half of the replacement that reversal promised: a component replaced without one. The subsystems that own the number are `abi/src/swap.rs` for the protocol as a state machine over two declarations and the routing word between them, `abi/src/transfer.rs` for what a manifest declares, `user/virtio-blk/src/state.rs` for the thirty-two-byte record that actually crosses, `sim/src/swap.rs` for the sweep, the three negative controls and the verdict, and `kernel/src/component.rs` for the place itself, which as of 2026-09-19 can be refilled with a second generation at a boot — `cargo xtask blk swapped`. This number is still taken in a process and not on a machine, and that is now a statement about the sweep rather than about the frame: the load, the seeds, the 8 replacements and the five ways phase A may be abandoned are all this crate's, and the boot carries one client over two operations with the teardown happening before the spawn, so `f_abi::swap::Abandoned` is only partly available to it. The two are not summed."
 
 [workload]
 path        = "sim/src/swap.rs"
@@ -114,7 +120,7 @@ second      = "xtask/src/main.rs"
 components  = 4
 replacements = 8
 phases      = 96
-notes       = "Four components, two replacements each, 96 phases of a client's work across each, and a control run beside every one of them with nothing replaced — which is what makes a survival evidence rather than an absence of trouble. The client is `chaos::Load` unchanged, deliberately: *dropped*, *doubled* and *answered wrongly* already have definitions in that crate, and a second client would be a second opinion about what a client observes. About fifteen seconds in the development container, including the two-process reproduction check that precedes it. — What stands in: this is the simulator's component set and not a boot's. No boot in this tree can put two generations of one component in front of the frame at once — `SWAP_GAP` is the exact line — so a swap on a machine is not available to be measured, and the day it is, this claim's `[workload]` gains a second row rather than this one being reinterpreted."
+notes       = "Four components, two replacements each, 96 phases of a client's work across each, and a control run beside every one of them with nothing replaced — which is what makes a survival evidence rather than an absence of trouble. The client is `chaos::Load` unchanged, deliberately: *dropped*, *doubled* and *answered wrongly* already have definitions in that crate, and a second client would be a second opinion about what a client observes. About fifteen seconds in the development container, including the two-process reproduction check that precedes it. — What stands in: this is the simulator's component set and not a boot's, and that sentence has been re-read now that a boot can swap. `cargo xtask blk swapped` puts two generations of one component in front of the frame and a client keeps its `SetId` across them, so *not available to be measured* is withdrawn — but this claim does **not** gain a row from it, because one client over two reads is not the same measurement as 384 operations under sustained load across 8 replacements and adding it here would make the threshold a reading about whichever run was last. What would earn a second row is the boot carrying this workload: a client under load, several replacements, and the abandonment cases the frame cannot reach until it instantiates alongside."
 
 [metrics]
 # Counts, every one of them, and no duration anywhere — which is why this may

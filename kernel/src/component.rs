@@ -2961,7 +2961,11 @@ fn abandoned_line(what: Name<'_>, why: f_abi::swap::Abandoned) {
 /// agree. A single count, taken once, would be a swap reporting on itself.
 fn committed_line(what: Name<'_>, now: u64, replayed: u32, taken: u32) {
     crate::kprintln!(
-        "  committed     place {what} is generation {now} and replayed {replayed} of {taken} \n         record(s) its predecessor wrote — the routing word is open again, and a client \n         that submitted across the gap waited rather than being refused"
+        "  committed     place {what} is generation {now} and replayed {replayed} of {taken} \n\
+         record(s) its predecessor wrote, and a client that submitted across the gap \n\
+         waited rather than being refused. The routing word is stored open here and \n\
+         read by nobody: delivery resolves the place's one occupant directly, \n\
+         and the word begins to choose the day a place holds two"
     );
 }
 
