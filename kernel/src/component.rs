@@ -323,6 +323,16 @@ pub enum Failure {
     /// component half-built is worse than no component, and one nobody can read
     /// is exactly what RFC 0013 says this mechanism exists to prevent.
     StateTree(i32),
+    /// The client the frame ran against a serving occupant refused. Carries
+    /// that client's own message, because the client is the one that knows what
+    /// it was doing — this file has never submitted a block request and would be
+    /// paraphrasing.
+    ///
+    /// Distinct from [`Self::NoAnswer`] on purpose: the occupant answered, and
+    /// what went wrong is on the near side of the boundary. A boot that
+    /// collapsed the two would report a wedged driver for a client that could
+    /// not register a buffer.
+    Datapath(&'static str),
     /// A core was handed an occupant to run and did not report finished inside
     /// the bound.
     ///
@@ -354,6 +364,7 @@ impl Failure {
             Self::Notice(_) => "a notice could not be published on a control ring",
             Self::Leaked => "a component's frames did not all come back",
             Self::StateTree(_) => "a component's state tree could not be published or read back",
+            Self::Datapath(why) => why,
             Self::NoAnswer => "a core was given a place's occupant to run and never reported back",
         }
     }
@@ -493,7 +504,7 @@ struct Instance {
     /// taking the component's word for it. Unit: bytes.
     heap: u64,
     /// Where its board is, as a kernel address, or zero for a component that
-    /// declared no `board` need — which is every component but the supervisor.
+    /// declared no `board` need.
     ///
     /// Written by the frame before the first instruction and read by it after
     /// the last one, which is the two halves `f_supervisor::routing` describes.
@@ -501,6 +512,17 @@ struct Instance {
     /// through the direct map and never through the component's page tables.
     /// Unit: bytes.
     board: u64,
+    /// Where its data ring is, as a kernel address, or zero for a component
+    /// that declared no `data` need.
+    ///
+    /// The frame's end over these bytes is **not** held here, and that is the
+    /// difference between this field and `ring` above. A control ring has the
+    /// frame as its only producer for the life of the instance, so the frame
+    /// keeps its end. A data ring's client is whoever the boot gives this
+    /// component, which today is the frame and tomorrow is not — so the address
+    /// is kept and the end is adopted by the client at the moment there is one.
+    /// Unit: bytes.
+    data: u64,
     /// The snapshot the frame read back off that tree the moment it published
     /// it, through `f_abi::state::Reader` and not from what it had just
     /// written.
@@ -573,6 +595,18 @@ const NEED_HEAP: &[u8] = b"heap";
 /// layout and a component that asked for two pages of one would be a component
 /// disagreeing with the crate that reads it.
 const NEED_BOARD: &[u8] = b"board";
+
+/// The need a component declares when it serves a client on a ring of its own.
+///
+/// Mapped rather than only granted, for the board's reason one step earlier and
+/// at the next step of the same story: the frame writes the header and the
+/// component adopts the server end over it, and a component that forbids
+/// `unsafe` cannot map a page for itself. `f_ring::adopt`, RFC 0037.
+///
+/// One page, refused at any other size. It is the ring's *memory*; how deep the
+/// ring is and what it speaks are the manifest's `[[ring]]` table, which the
+/// frame does not read here.
+const NEED_DATA: &[u8] = b"data";
 
 /// Does this need carry `wanted` as its whole name?
 ///
@@ -1008,8 +1042,10 @@ pub struct Report {
 #[expect(
     clippy::too_many_arguments,
     reason = "`fill` one function down makes this argument at length and this is that list \
-              plus the two the demonstration itself needs: the core an occupant may be given, \
-              and what this boot found that a place cannot carve for itself. Bundling them \
+              plus the four the demonstration itself needs: the core an occupant may be \
+              given, what this boot found that a place cannot carve for itself, what it \
+              found that only the frame can tell that occupant, and the client that occupant \
+              is to be given something to answer. Bundling them \
               would be a type that exists so a lint passes, which `runtime::demonstrate` \
               already declined for this reason"
 )]
@@ -1022,6 +1058,8 @@ pub unsafe fn demonstrate(
     tree: &crate::state::Tree,
     worker: Option<(usize, u64)>,
     supplied: &[Supplied],
+    routing: &[(u32, u64)],
+    datapath: Option<&mut dyn Datapath>,
 ) -> Result<Report, Failure> {
     // SAFETY: the caller's guarantee that the direct map is live and covers
     // every module.
@@ -1030,6 +1068,15 @@ pub unsafe fn demonstrate(
     let record = Record::read(module).map_err(Failure::Manifest)?;
 
     let before = frames.free_count();
+    // What a *client* keeps, as opposed to what the demonstration spends, and it
+    // is subtracted rather than tolerated. A remapping unit holds a bus's
+    // context table for the life of the machine — `Unit::detach` says why it is
+    // not freed and is right — so a free-count comparison alone would report the
+    // first attach on a bus as a leak, every time, and be ignored within a week.
+    // Two numbers rather than a tolerance: a check with slack in it is a check
+    // that stops noticing the first frame. `blk::demonstrate` makes the same
+    // subtraction one file over, for the same reason and in the same words.
+    let mut retained = 0u64;
     let mut report = Report { components: count, places: count, ..Report::default() };
     // Every place after the first: built, filled, held for the whole of this
     // function, and given back at the end. They are here rather than in an array
@@ -1377,7 +1424,13 @@ pub unsafe fn demonstrate(
         };
         open.place.budget = consulted.budget;
         report.scheduled += 1;
-        scheduled_line(Name(SUPERVISOR), cpu, consulted.announced, consulted.death);
+        scheduled_line(
+            Name(SUPERVISOR),
+            cpu,
+            SUPERVISOR_LIFE,
+            consulted.announced,
+            consulted.death,
+        );
         supervised_line(&consulted, u32::from(open.place.occupant.is_some()));
 
         // The spawn the *supervisor* made, recorded on this side. Everything
@@ -1414,36 +1467,243 @@ pub unsafe fn demonstrate(
     //
     // `E1-B05`'s second act, on the one boot that asks for it. The place was
     // filled above with a device window the frame *supplied* rather than carved;
-    // this is that place's occupant being handed a core, which is the second of
-    // the three things `CHAOS_GAP` says the work needs.
+    // this is that place's occupant being handed a core, which is the second and
+    // third of the three things `CHAOS_GAP` says the work needs.
     //
-    // **To completion, and the limit is the point.** [`run_ring3`] waits for the
-    // core, so this occupant runs, announces itself and ends before the next
-    // line is printed. What it demonstrates is therefore exactly one thing: the
-    // occupant of a place holding a device window it could not carve reaches
-    // ring 3 on a core and comes back. It does not serve a client, and it cannot
-    // — serving needs the driver running *while* a client submits
-    // (`smp::start_on`) and a routing board `user/virtio-blk/manifest.toml`
-    // declares no need for. Both are still owed, and the gap row still says so.
+    // **Two shapes, and which one a boot takes is decided by whether it brought
+    // a client.** Without one, [`run_ring3`] waits: the occupant runs, reads its
+    // own device and ends before the next line is printed, which is the whole of
+    // what `cargo xtask blk place` asserts and is unchanged. With one,
+    // [`serve_ring3`] starts the core and does *not* wait, the client submits
+    // from here while the occupant answers over there, and the frame serves the
+    // occupant's control ring for the whole of the join. That second shape is
+    // `E1-B05`'s third act and the word `CHAOS_GAP` spent two epochs calling
+    // *concurrently*.
     //
     // Guarded on the supply rather than on a parameter, so that every boot with
     // no supplied place does exactly what it did before: `supplied` is empty on
-    // all of them but one.
+    // all of them but two.
     if let Some((cpu, tsc_khz)) = worker
         && let Some(index) = supplied_place(&extras, supplied)
     {
-        let Some(extra) = extras.get_mut(index).and_then(Option::as_mut) else {
-            return Err(Failure::WrongPlace);
+        let record = {
+            let Some(extra) = extras.get(index).and_then(Option::as_ref) else {
+                return Err(Failure::WrongPlace);
+            };
+            Record::read(extra.place.module).map_err(Failure::Manifest)?
         };
-        let record = Record::read(extra.place.module).map_err(Failure::Manifest)?;
-        let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
-        // SAFETY: `cpu` is the core `main` vouched is started and idle — the
-        // consultation above ran to completion on it, which is what `run_on`
-        // returning `Ok` means, so it is idle again — and `occupant` is the
-        // instance `fill` spawned a loop ago with its address space live.
-        let (announced, death) = unsafe { run_ring3(occupant, kernel, features, (cpu, tsc_khz)) }?;
-        report.scheduled += 1;
-        scheduled_line(Name(record.label()), cpu, announced, death);
+        match datapath {
+            None => {
+                let Some(extra) = extras.get_mut(index).and_then(Option::as_mut) else {
+                    return Err(Failure::WrongPlace);
+                };
+                let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
+                // Told where its device is before it is told to look, which is
+                // the ordering every board in this tree keeps: the page is
+                // complete, magic last, before any core can read it.
+                //
+                // SAFETY: `occupant.board` is a frame `fill` allocated for this
+                // instance and mapped into its address space and nobody else's;
+                // the direct map covers it and no core is inside this instance.
+                unsafe { write_routing(occupant, routing) }?;
+                let life = f_virtio_blk::routing::life::IDENTIFY;
+                // SAFETY: `cpu` is the core `main` vouched is started and idle —
+                // the consultation above ran to completion on it, which is what
+                // `run_on` returning `Ok` means, so it is idle again — and
+                // `occupant` is the instance `fill` spawned a loop ago with its
+                // address space live.
+                let ran = unsafe { run_ring3(occupant, kernel, features, (cpu, tsc_khz), life) };
+                let (announced, death) = ran?;
+                report.scheduled += 1;
+                scheduled_line(Name(record.label()), cpu, life, announced, death);
+                // SAFETY: the core reported finished, and the page is still
+                // mapped — an address space is torn down by `tear_down` and not
+                // here.
+                let identified = unsafe { read_identified(occupant) };
+                identified_line(Name(record.label()), identified);
+                // The component's own account of the supply, required rather
+                // than printed. A boot in which this occupant ran and reported
+                // nothing is one where the window was mapped somewhere it could
+                // not reach, which is precisely the failure the frame's own
+                // supply line cannot see.
+                let Some((outcome, _)) = identified else { return Err(Failure::WrongPlace) };
+                if outcome != f_virtio_blk::routing::stopped::IDENTIFIED {
+                    return Err(Failure::WrongPlace);
+                }
+            }
+            Some(client) => {
+                // **One pass per generation of the occupant**, and the loop is
+                // `E1-P06`. A client that answers `Drove::Kill` has work
+                // outstanding and wants the driver taken away from under it; the
+                // frame does that inside `serve_ring3`, tears the dead occupant
+                // down, refills the place *from the same supply*, and runs the
+                // client again against the new one. What the client holds across
+                // that boundary is its own — a restart means a new table, so
+                // every registration it had is gone and every entry that was in
+                // flight is unanswered.
+                //
+                // Bounded rather than open, because a demonstration whose exit
+                // condition is the client's word for it is a demonstration that
+                // hangs when the client is wrong.
+                let mut generation = 0u32;
+                loop {
+                    let Some(extra) = extras.get_mut(index).and_then(Option::as_mut) else {
+                        return Err(Failure::WrongPlace);
+                    };
+                    let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
+                    // Told where its device is before it is told to look, and
+                    // told again on every generation: a refilled place has a new
+                    // board, zeroed, because the account it was carved from was
+                    // handed back and taken again.
+                    //
+                    // SAFETY: `occupant.board` is a frame `fill` allocated for
+                    // this instance and mapped into its address space and nobody
+                    // else's; the direct map covers it and no core is inside
+                    // this instance.
+                    unsafe { write_routing(occupant, routing) }?;
+                    // The data ring's header, written by the *grantor* and
+                    // adopted by the occupant, which is `f_ring::adopt` and RFC
+                    // 0037: the component believes nothing it is handed and would
+                    // do exactly this if its peer were hostile. Written here
+                    // rather than in `spawn` because the entry count is the
+                    // client's business and `spawn` has no client.
+                    if occupant.data == 0 {
+                        return Err(Failure::WrongPlace);
+                    }
+                    let bytes = u32::try_from(FRAME_SIZE).map_err(|_| Failure::WrongPlace)?;
+                    // SAFETY: `occupant.data` is a frame `fill` allocated zeroed
+                    // for this instance out of its own account, mapped into its
+                    // address space and nobody else's, frame-aligned and
+                    // `FRAME_SIZE` long, with no reference into it held anywhere.
+                    // The core is idle until `serve_ring3` starts it.
+                    let described = unsafe {
+                        Mapping::describe(occupant.data as *mut u8, bytes, CONTROL_ENTRIES, 0, 0, 0)
+                    };
+                    described.map_err(Failure::Ring)?;
+
+                    let life = f_virtio_blk::routing::life::SERVE;
+                    // SAFETY: as the `None` arm's `run_ring3` — the core is
+                    // started and idle and this instance's address space is live
+                    // — and `client` serves only the occupant's control ring,
+                    // whose two ends are single-producer and single-consumer.
+                    let ran = unsafe {
+                        serve_ring3(occupant, frames, features, (cpu, tsc_khz), life, client)
+                    };
+                    let (announced, death, driven) = ran?;
+                    report.scheduled += 1;
+                    scheduled_line(Name(record.label()), cpu, life, announced, death);
+                    retained = retained.saturating_add(client.retained(frames));
+                    // The client's news, after the join and never instead of it.
+                    let drove = driven.map_err(Failure::Datapath)?;
+
+                    let Drove::Kill { in_flight } = drove else {
+                        // --- the generation that ended by agreement ----------
+                        //
+                        // SAFETY: the core reported finished, and the page is
+                        // still mapped.
+                        let served = unsafe { read_served(occupant) };
+                        served_line(Name(record.label()), served);
+                        // What makes this a demonstration rather than a log line:
+                        // the count is the *occupant's* and the frame did not
+                        // write it. A boot whose client submitted into a ring
+                        // nobody was reading prints an identical `scheduled` line
+                        // and a zero here.
+                        let Some((outcome, entries, _)) = served else {
+                            return Err(Failure::WrongPlace);
+                        };
+                        if outcome != f_virtio_blk::routing::stopped::TOLD || entries == 0 {
+                            return Err(Failure::WrongPlace);
+                        }
+                        break;
+                    };
+
+                    // --- the generation that was killed -----------------------
+                    //
+                    // **No report is read here, and the absence is the point.**
+                    // Writing that report is a component's last act: it fills in
+                    // the far half of its board and then ends. An occupant taken
+                    // away mid-serve never reaches it, so a frame that required
+                    // one would be requiring the component to have finished —
+                    // which is precisely what this generation did not do.
+                    //
+                    // What is believed about this generation instead is the
+                    // client's, and it is the only thing that can be: the
+                    // operations it had outstanding, counted on its own side.
+                    //
+                    // A kill with nothing outstanding is a restart, and a restart
+                    // demonstrates nothing about a blast radius. Refused here
+                    // rather than reported, because the whole claim rests on it.
+                    if in_flight == 0 {
+                        return Err(Failure::WrongPlace);
+                    }
+                    generation += 1;
+                    if generation > KILLS_MAX {
+                        return Err(Failure::WrongPlace);
+                    }
+                    killed_line(Name(record.label()), in_flight, death);
+                    report.faults += 1;
+
+                    // --- the refill, from the same supply --------------------
+                    //
+                    // The single-core respawn branch below has carried a comment
+                    // for two epochs saying a supplied object would have to reach
+                    // it before this could work, *and that this was `E1-P06`'s
+                    // business*. It is, and the answer turned out not to need the
+                    // place to carry anything: `demonstrate` was handed the
+                    // supply as an argument and still holds it, so the refill
+                    // offers the same window and the same queue memory the first
+                    // spawn was given. A device window carved out of a fresh
+                    // account would be a different device.
+                    let cause = cause::pack(cause::FAULT, u64::from(error::argument::BAD_ADDRESS));
+                    tear_down(
+                        frames,
+                        &mut extra.place,
+                        &mut supervisor,
+                        &extra.account,
+                        cause,
+                        &mut report,
+                        tree,
+                    )?;
+                    let offered = offer(
+                        &mut supervisor,
+                        &extra.account,
+                        &extra.place,
+                        record,
+                        frames,
+                        supplied,
+                    )?;
+                    // SAFETY: as the first spawn — the caller's guarantee, and
+                    // the place is empty because the teardown above emptied it.
+                    unsafe {
+                        spawn(
+                            frames,
+                            kernel,
+                            features,
+                            &mut extra.place,
+                            &extra.account,
+                            &mut supervisor,
+                            &reservations,
+                            offered,
+                            supplied,
+                        )
+                    }?;
+                    extra.place.restarts += 1;
+                    report.restarts += 1;
+                    report.spawns += 1;
+                    // The new occupant's tree, into the same slot the dead one
+                    // published through. `Place::slot` is on the place and not on
+                    // the occupant for exactly this: a reader watching one node
+                    // across a kill is watching *this place* refill, rather than
+                    // two unrelated components that happened to be given one
+                    // address. It is also what keeps this function's own closing
+                    // equality — every spawn published a tree — true across a
+                    // restart.
+                    mounted_line(record, &extra.place, mount(tree, &extra.place, &mut report)?);
+                    let epoch = extra.place.occupant.as_ref().map_or(0, |next| next.epoch);
+                    refilled_line(Name(record.label()), epoch);
+                }
+            }
+        }
     }
 
     // -------------------------------------------------------------- connect
@@ -1963,7 +2223,7 @@ pub unsafe fn demonstrate(
     // the publish above is the last thing that touched it.
     unsafe { frames.free(ledger) };
 
-    if frames.free_count() != before {
+    if frames.free_count().saturating_add(retained) != before {
         return Err(Failure::Leaked);
     }
 
@@ -2224,7 +2484,18 @@ unsafe fn fill(
                 supervisor,
                 reservations,
                 offered,
-                &[],
+                // The same list `offer` was given a few lines up, and it has to
+                // be: `offer` decides which needs the account does *not* pay
+                // for and `spawn` decides which of them are mapped, so a caller
+                // that handed one list to the first and an empty one to the
+                // second produces a place holding a capability for a device
+                // window that is in no address space.
+                //
+                // That is not hypothetical. It is what this line said until the
+                // day an occupant of this place was first given a core, and the
+                // symptom was a page fault at the third register page in a boot
+                // whose every log line said the supply had worked.
+                supplied,
             )
         }?;
         report.spawns += 1;
@@ -2254,12 +2525,120 @@ unsafe fn fill(
     Ok(Extra { place, account, region })
 }
 
+/// What a driver occupant said about its own device, read back off its board.
+///
+/// **The component's account and not the frame's**, and the pair is the point.
+/// The `blk place` line a few above this one is the frame saying *I supplied
+/// this window at this address*; this is the occupant saying *I read it*. A
+/// window mapped into the wrong address space, or at the wrong address, or with
+/// the wrong extent produces an identical frame line and nothing here — which is
+/// why the boot refuses rather than printing a blank.
+///
+/// The capacity is in sectors because that is the unit the device publishes it
+/// in, unconverted on purpose: `cargo xtask blk place` knows how large a disk it
+/// made and multiplies, and a frame that did the arithmetic would be a frame
+/// asserting a sector size nothing here reads.
+fn identified_line(what: Name<'_>, identified: Option<(u64, u64)>) {
+    match identified {
+        Some((outcome, sectors)) => crate::kprintln!(
+            "  identified    place {what} read its own device: {sectors} sector(s) of capacity, \
+             outcome {outcome} — through the window its place was supplied with, from ring 3"
+        ),
+        None => crate::kprintln!(
+            "  identified    place {what} left no report on its board, so nothing it was told \
+             can be said to have arrived"
+        ),
+    }
+}
+
+/// How many times one boot may kill and refill a serving place.
+///
+/// One, today, and the number is a bound rather than a schedule: the client
+/// decides when to ask, and this is what stops a client that keeps asking from
+/// turning a demonstration into a loop with no exit. It rises when a half wants
+/// more kills than one, and the thing that would have to rise with it is the
+/// manifest's restart budget — eight in sixty thousand ticks — which is the
+/// number that says how many a *supervisor* would allow.
+/// Unit: kills.
+const KILLS_MAX: u32 = 4;
+
+/// A serving occupant taken away from its client on purpose.
+///
+/// **The one line in this boot that reports a component dying while it was
+/// useful.** Everything else that ends a component here ended because the
+/// component reached a point of its own choosing; this one did not, which is the
+/// whole of what `E1-P06` is about and why the count of what was outstanding is
+/// on the line rather than in a tally somewhere.
+///
+/// The death is printed because the *kind* of death is the evidence that the
+/// kill worked: a `Killed` with vector 14 is a page fault taken at ring 3 on the
+/// instruction after its text stopped being mapped, and an `Exited` here would
+/// mean the component had gone before the frame got to it — which would make
+/// every number below this line a measurement of something else.
+fn killed_line(what: Name<'_>, in_flight: u32, death: crate::process::Death) {
+    crate::kprintln!(
+        "  killed        place {what} was taken away from its client with {in_flight} \
+         operation(s) outstanding: {death:?} — a driver dying under load, which is the one \
+         death in this boot the component did not choose"
+    );
+}
+
+/// A place refilled after a kill, and which occupant is in it now.
+fn refilled_line(what: Name<'_>, epoch: u32) {
+    crate::kprintln!(
+        "  refilled      place {what} epoch {epoch} — the same device window and the same queue \
+         memory, supplied again rather than carved: a new occupant of the same place, which is \
+         what a client that held an endpoint across the kill comes back to"
+    );
+}
+
+/// What a serving occupant said it did for its client, read back off its board.
+///
+/// **The third act's evidence, and it is the component's own account.** The
+/// `scheduled` line above says the frame started a core; this says the occupant
+/// on it took entries off a ring and answered them. A boot in which the client
+/// submitted into a ring nobody was reading prints an identical `scheduled` line
+/// and a zero here, which is precisely the failure the frame's own lines cannot
+/// see — the same argument [`identified_line`] makes about a window mapped
+/// nowhere, one act later.
+///
+/// The entries are counted and the bytes are reported beside them, never alone:
+/// *nothing was refused* is a claim about a driver, and a driver that answered
+/// nothing refused nothing either. `user/virtio-blk/manifest.toml` says the same
+/// thing about the two state nodes these come from.
+fn served_line(what: Name<'_>, served: Option<(u64, u64, u64)>) {
+    match served {
+        Some((outcome, entries, bytes)) => crate::kprintln!(
+            "  served        place {what} answered {entries} entr(ies) and moved {bytes} B for a \
+             client of the frame's, outcome {outcome} — from ring 3, on its own core, while the \
+             client submitted"
+        ),
+        None => crate::kprintln!(
+            "  served        place {what} left no report on its board, so nothing it was given \
+             can be said to have been answered"
+        ),
+    }
+}
+
 /// A place's occupant handed a core.
 ///
 /// A line of its own rather than a field on `supervisor ok`, because this is the
 /// sentence `kernel/src/runtime.rs` has carried since RFC 0033 becoming false,
 /// and a reader comparing two boots across the change should meet it where it
 /// happened rather than in a summary at the end.
+///
+/// # Why the life is on the line, and how to read `never announced`
+///
+/// Because announcing is what *one* life does. `f_abi::door::ANNOUNCE` is the
+/// first thing a component entered at selector zero says, and for a long time
+/// selector zero was the only selector the frame ever asked for — so *it never
+/// announced itself* meant *it did not get that far*. It does not mean that any
+/// more: a driver asked to read its device and stop announces nothing, and the
+/// line that carries its evidence is [`identified_line`] below.
+///
+/// So the life is printed, and the two readings are: a zero life that never
+/// announced is a component that did not reach its first door, and any other
+/// life that never announced is a component doing what it was asked.
 ///
 /// # Why it names the place, having said `supervisor`
 ///
@@ -2283,10 +2662,16 @@ unsafe fn fill(
 /// two hashes that differed. That is the check working. The number it caught was
 /// never evidence of anything — *did it reach ring 3* is what this line is for,
 /// and `announced` answers that.
-fn scheduled_line(what: Name<'_>, cpu: usize, announced: bool, death: crate::process::Death) {
+fn scheduled_line(
+    what: Name<'_>,
+    cpu: usize,
+    life: u32,
+    announced: bool,
+    death: crate::process::Death,
+) {
     crate::kprintln!(
-        "  scheduled     place {what} on core {cpu} — a place's occupant given a core; it {} \
-         itself from ring 3",
+        "  scheduled     place {what} on core {cpu} for life {life} — a place's occupant given a \
+         core; it {} itself from ring 3",
         if announced { "announced" } else { "never announced" },
     );
     // How it ended, named rather than coded. The first time an occupant was
@@ -2633,6 +3018,130 @@ struct Consulting<'a> {
     on: (usize, u64),
 }
 
+/// The life a consultation asks a supervisor for.
+///
+/// Zero, which `f_abi::door::Entry` calls the life every component has. Named
+/// rather than written as a literal now that the frame asks for more than one,
+/// so that the two call sites cannot be read as the same number by accident.
+const SUPERVISOR_LIFE: u32 = 0;
+
+/// Write what this boot found into a driver occupant's routing page.
+///
+/// # Why the caller hands over a list and not a struct
+///
+/// Because what goes on this page is what *this boot* discovered about a device
+/// on a bus, and the frame's component module has never walked a bus. The list
+/// is built where the device was found — `main.rs` — and written here, where the
+/// page lives. A struct would put the layout in a third place, and the layout is
+/// already agreed in exactly two: `f_virtio_blk::routing` and the const
+/// assertion in `kernel/src/blk.rs` that ties its address to
+/// `process::BOARD`.
+///
+/// **The slots are written in the order given**, and the caller's last one must
+/// be the magic. A component reads the magic first and believes nothing without
+/// it, so a page whose writer stopped half way must not carry one — which is the
+/// same ordering `kernel/src/blk.rs` keeps for the same reason, and the reason
+/// this does not sort or reorder anything.
+///
+/// # Errors
+///
+/// [`Failure::WrongPlace`] for an occupant with no board. A component that
+/// declares no `board` need has no page to be told anything on, and filling in
+/// one it never asked for would be a write into the direct map at an address
+/// this instance does not own.
+///
+/// # Safety
+///
+/// `occupant.board` must be the direct-map address of a frame this instance
+/// owns, and no core may be inside this instance.
+unsafe fn write_routing(occupant: &Instance, slots: &[(u32, u64)]) -> Result<(), Failure> {
+    if occupant.board == 0 {
+        return Err(Failure::WrongPlace);
+    }
+    // SAFETY: the caller's guarantee. One frame, mapped by the direct map, owned
+    // by this instance, and not reachable from any other core.
+    let page =
+        unsafe { core::slice::from_raw_parts_mut(occupant.board as *mut u8, FRAME_SIZE as usize) };
+    for (offset, value) in slots {
+        let start = *offset as usize;
+        let Some(slot) = page.get_mut(start..start + 8) else { return Err(Failure::WrongPlace) };
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
+    Ok(())
+}
+
+/// What a driver occupant wrote back into the far half of its routing page.
+///
+/// Answers the outcome it named and the capacity it read, or `None` for a page
+/// with no report magic on it — which is a component that did not reach the end
+/// of what it was asked, and is a different thing from one that reached it and
+/// found nothing. A zero capacity under a present magic is a real reading of an
+/// empty device; a zero capacity under no magic is no reading at all, and a
+/// frame that could not tell them apart would report an empty disk for a
+/// component that never ran.
+///
+/// # Safety
+///
+/// As [`write_routing`], and the core must have finished rather than not
+/// started.
+unsafe fn read_identified(occupant: &Instance) -> Option<(u64, u64)> {
+    if occupant.board == 0 {
+        return None;
+    }
+    // SAFETY: the caller's guarantee.
+    let page =
+        unsafe { core::slice::from_raw_parts(occupant.board as *const u8, FRAME_SIZE as usize) };
+    let get = |offset: u32| -> Option<u64> {
+        let start = offset as usize;
+        Some(u64::from_le_bytes(page.get(start..start + 8)?.try_into().ok()?))
+    };
+    if get(f_virtio_blk::routing::reported::MAGIC)? != f_virtio_blk::routing::MAGIC {
+        return None;
+    }
+    Some((
+        get(f_virtio_blk::routing::reported::OUTCOME)?,
+        get(f_virtio_blk::routing::reported::CAPACITY)?,
+    ))
+}
+
+/// What a serving occupant tallied, read back off the far half of its routing
+/// page.
+///
+/// The outcome it named, the entries it answered and the bytes it moved for its
+/// client, or `None` for a page with no report magic on it — [`read_identified`]
+/// argues that distinction one function up and it is the same one here: a zero
+/// under a present magic is a driver that served nothing, and a zero under no
+/// magic is no reading at all.
+///
+/// **These are the occupant's numbers and not the frame's**, which is the whole
+/// of why the boot requires them. The frame can say it described two rings and
+/// started a core; only the component can say it took entries off one of them.
+///
+/// # Safety
+///
+/// As [`write_routing`], and the core must have finished rather than not
+/// started.
+unsafe fn read_served(occupant: &Instance) -> Option<(u64, u64, u64)> {
+    if occupant.board == 0 {
+        return None;
+    }
+    // SAFETY: the caller's guarantee.
+    let page =
+        unsafe { core::slice::from_raw_parts(occupant.board as *const u8, FRAME_SIZE as usize) };
+    let get = |offset: u32| -> Option<u64> {
+        let start = offset as usize;
+        Some(u64::from_le_bytes(page.get(start..start + 8)?.try_into().ok()?))
+    };
+    if get(f_virtio_blk::routing::reported::MAGIC)? != f_virtio_blk::routing::MAGIC {
+        return None;
+    }
+    Some((
+        get(f_virtio_blk::routing::reported::OUTCOME)?,
+        get(f_virtio_blk::routing::reported::SERVED)?,
+        get(f_virtio_blk::routing::reported::BYTES)?,
+    ))
+}
+
 /// Hand a place's occupant a core, let it run to completion, and take the core
 /// back.
 ///
@@ -2673,19 +3182,64 @@ unsafe fn run_ring3(
     kernel: &paging::AddressSpace,
     features: Features,
     on: (usize, u64),
+    selector: u32,
 ) -> Result<(bool, crate::process::Death), Failure> {
     let (cpu, tsc_khz) = on;
-    // Selector zero: the life every component has. `first` is the occupant's own
-    // handle for its account, so its first act can be a capability call rather
-    // than a guess about which slot it holds.
-    let argument = f_abi::door::Entry::new(0, occupant.first).bits();
+    // Which of this component's lives the frame is asking for, and `first` is
+    // the occupant's own handle for its account, so its first act can be a
+    // capability call rather than a guess about which slot it holds.
+    //
+    // Zero is the life every component has and is what a consultation asks for.
+    // A component that does not name the selector it was given falls through to
+    // that one, which is why the frame may ask for another without knowing
+    // whether this particular image understands it.
+    // SAFETY: the caller's guarantee, passed down unchanged — this function is
+    // the two halves below in sequence and adds nothing to what either asks.
+    let previous = unsafe { post_ring3(occupant, features, cpu, selector) };
+    // SAFETY: the boot processor, with the kernel's space in `CR3` and the job
+    // published into `cpu`'s own shard above. `run_on` makes the `Release` store
+    // that publishes it.
+    let ran = unsafe { crate::smp::run_on(cpu, kernel.root(), tsc_khz, OCCUPANT_MICROS) };
+    ran.map_err(|_| Failure::NoAnswer)?;
+
+    // SAFETY: the core reported finished, which is what `Ok` above means.
+    Ok(unsafe { collect_ring3(occupant, cpu, previous) })
+}
+
+/// Put an occupant's job in a core's shards and answer the table that was
+/// there.
+///
+/// The half of [`run_ring3`] that happens *before* a core is told anything, and
+/// it is split out because the two callers differ only in what they do between
+/// this and [`collect_ring3`]: one waits, and one has a client to run.
+///
+/// # Safety
+///
+/// As [`run_ring3`], and the answer must be handed to [`collect_ring3`] for
+/// this same core before this instance is touched again — a table left on a
+/// core is the next occupant's handles resolving at the wrong generation.
+unsafe fn post_ring3(
+    occupant: &mut Instance,
+    features: Features,
+    cpu: usize,
+    selector: u32,
+) -> crate::cap::Table {
+    // Which of this component's lives the frame is asking for, and `first` is
+    // the occupant's own handle for its account, so its first act can be a
+    // capability call rather than a guess about which slot it holds.
+    //
+    // Zero is the life every component has and is what a consultation asks for.
+    // A component that does not name the selector it was given falls through to
+    // that one, which is why the frame may ask for another without knowing
+    // whether this particular image understands it.
+    let argument = f_abi::door::Entry::new(selector, occupant.first).bits();
     let root = occupant.space.root();
     // SAFETY: `root` is the address space this frame built for this occupant and
     // nothing has torn it down; its text is mapped executable at `process::TEXT`
     // and its stack is writable below `process::SPAWN_STACK_TOP`, both by
-    // `spawn`. `cpu` is the caller's, and the table handed over is taken back
-    // below before this instance is touched again.
-    let previous = unsafe {
+    // `spawn`. `cpu` is the caller's, and the table handed over is taken back by
+    // `collect_ring3` before this instance is touched again.
+    unsafe {
         crate::process::schedule_occupant(
             cpu,
             root,
@@ -2695,15 +3249,71 @@ unsafe fn run_ring3(
             OCCUPANT_HZ,
             OCCUPANT_TICKS,
         )
-    };
-    // SAFETY: the boot processor, with the kernel's space in `CR3` and the job
-    // published into `cpu`'s own shard above. `run_on` makes the `Release` store
-    // that publishes it.
-    let ran = unsafe { crate::smp::run_on(cpu, kernel.root(), tsc_khz, OCCUPANT_MICROS) };
-    ran.map_err(|_| Failure::NoAnswer)?;
+    }
+}
 
+/// The frame's side of [`Killer`], for one occupant on one core.
+///
+/// Holds the address space root rather than the instance, because the instance
+/// is borrowed by the caller for the whole of the run and this has to be handed
+/// to the client at the same time. A root is what `fault_occupant` needs and is
+/// all it needs.
+struct Killing {
+    /// The occupant's address space. Unit: bytes, physical.
+    root: u64,
+    /// The core it is on. Unit: none — a core index.
+    cpu: usize,
+    /// Unit: kilohertz.
+    tsc_khz: u64,
+    /// Whether the core has been joined, so the caller does not join it twice.
+    joined: bool,
+}
+
+impl Killer for Killing {
+    fn kill(&mut self, frames: &mut FrameAllocator) -> Option<f_ring::PeerGone> {
+        if self.joined {
+            return None;
+        }
+        // SAFETY: `root` is the address space `post_ring3` scheduled, this core
+        // holds the kernel's space, and `frames` is on the direct map.
+        unsafe { fault_occupant(self.root, frames) }.ok()?;
+        // Served by nothing while it dies, and that is deliberate rather than a
+        // shortcut. The one thing this core answers for a driver is a
+        // translation, and a driver whose text has just been taken away is not
+        // going to ask for one: it faults on the instruction after, whatever it
+        // was doing. A `serve` here would be the frame answering a component
+        // that no longer exists.
+        //
+        // SAFETY: `start_on` was called for this core by `serve_ring3` and
+        // nothing else has joined it.
+        let joined = unsafe {
+            crate::smp::join_serviced(self.cpu, self.tsc_khz, OCCUPANT_MICROS, &mut || {})
+        };
+        joined.ok()?;
+        self.joined = true;
+        // The core has reported finished, so nothing of this component is
+        // running anywhere. That is what the notice below says, and it is true
+        // before it is said rather than because it was.
+        f_ring::PeerGone::told(f_abi::control::notice::PEER_GONE)
+    }
+}
+
+/// Read what the core recorded and take this instance's table back off it.
+///
+/// # Safety
+///
+/// The core must have **reported finished** rather than merely been asked to
+/// stop: `smp::run_on` or `smp::join_serviced` returning `Ok` is what that
+/// means. A core that did not answer may still be inside the component, and
+/// both reads below would be the frame guessing about a race it just lost —
+/// which is why neither caller reaches this on the path where it did not.
+unsafe fn collect_ring3(
+    occupant: &mut Instance,
+    cpu: usize,
+    previous: crate::cap::Table,
+) -> (bool, crate::process::Death) {
     // What the core recorded, read before the shards are reused.
-    // SAFETY: the core reported finished, which is what `Ok` above means.
+    // SAFETY: the caller's guarantee that the core reported finished.
     let (announced, death, _ticks) = unsafe { crate::process::occupant_outcome(cpu) };
     // The other half of the swap, taken back *before* anything else looks at
     // this instance. What comes back is not what went in: a component may have
@@ -2711,7 +3321,336 @@ unsafe fn run_ring3(
     // SAFETY: as above — the core is finished, so nothing over there is holding
     // either table.
     occupant.table = unsafe { crate::process::reclaim_occupant_table(cpu, previous) };
-    Ok((announced, death))
+    (announced, death)
+}
+
+/// What a client wants done with the occupant it has just been run against.
+///
+/// # Why the client asks and the frame acts
+///
+/// Because only the client knows when there is work outstanding, and only the
+/// frame may take a component's world away. `E1-P06` kills a driver **under
+/// sustained load**, and the word that costs something is *under*: a kill
+/// delivered when nothing is in flight is a restart, and a restart demonstrates
+/// nothing about a blast radius. So the client says *now, and I have this many
+/// outstanding*, and [`fault_occupant`] is what makes it true.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Drove {
+    /// The client has nothing more to submit and the occupant may end.
+    Finished,
+    /// The client has operations the occupant has not answered, and wants it
+    /// killed with them outstanding. Carries how many, which the boot requires
+    /// to be at least one — a run that killed an idle driver would pass every
+    /// other check in this demonstration and assert nothing.
+    /// Unit: operations.
+    Kill {
+        /// How many operations the client had submitted and not been answered.
+        /// Unit: operations.
+        in_flight: u32,
+    },
+}
+
+/// What a client calls to have the occupant it is talking to taken away.
+///
+/// # Why the client holds the trigger and the frame holds the authority
+///
+/// Because of a constraint the ring's own types impose, and it is worth stating
+/// rather than working around. A buffer the device holds is an
+/// `f_ring::InFlight`, and dropping one is a panic: a client that walked away
+/// from a buffer a device was writing into would be a client whose page the
+/// device scribbles on after it has been handed to somebody else. The only ways
+/// out are the completion, which is not coming, and `InFlight::reclaim`, which
+/// demands an `f_ring::PeerGone` — *evidence* the peer's outstanding tokens are
+/// void.
+///
+/// So the reclaim has to happen while the client still holds its buffers, which
+/// is inside one `drive` call, which means the kill has to happen there too. The
+/// client says when; this says what it costs. [`Self::kill`] does not return
+/// until the occupant's core has reported finished, so a client that gets a
+/// `PeerGone` back is holding evidence rather than an assumption.
+pub trait Killer {
+    /// End the occupant now and wait for its core.
+    ///
+    /// `None` when the occupant could not be ended, or when its core did not
+    /// report back inside the bound — in which case the client must **not**
+    /// reclaim anything, because a core that said nothing may still be inside
+    /// the component.
+    fn kill(&mut self, frames: &mut FrameAllocator) -> Option<f_ring::PeerGone>;
+}
+
+/// A client the frame runs against a place's occupant while that occupant is
+/// on a core.
+///
+/// # Why this is a trait and not a function in this file
+///
+/// Because this file has no business knowing what a block request is. What it
+/// knows is the sequence — post the job, start the core, be the client, join
+/// the core while serving it — and that sequence is the same whatever the
+/// occupant serves. What the client *is* lives where its protocol does:
+/// `kernel/src/blk.rs` for a disk, and the day a second driver serves from a
+/// place, beside that one.
+///
+/// It is dependency injection rather than a callback, the distinction
+/// `cargo xtask lint-callbacks` draws for `f_env::Env`: the implementor is
+/// chosen by `main` at boot and called by this file, and nothing a peer sends
+/// registers anything.
+///
+/// # Why every method is handed the allocator
+///
+/// Because [`demonstrate`] holds the only `&mut FrameAllocator` there is, and an
+/// implementor that held its own would be a second borrow of it for the whole of
+/// a demonstration that is still building and tearing down places around it.
+/// Passing it per call is what keeps the frame's one allocator one.
+pub trait Datapath {
+    /// Be the client, once, while the occupant runs.
+    ///
+    /// Returns when the client has nothing more to submit. The occupant is
+    /// still on its core at that moment and is joined afterwards, so a `drive`
+    /// that returns without telling the occupant to stop is a core the boot
+    /// never gets back — telling it is this method's job, for the same reason
+    /// the entries were.
+    ///
+    /// Called once per *generation* of the occupant. A client that answers
+    /// [`Drove::Kill`] is called again against the next one, with that
+    /// generation's own ring addresses, and everything it still holds is its own
+    /// to resubmit — which is the whole of what a restart costs a client, and
+    /// the whole of what `E1-P06` measures.
+    ///
+    /// # Errors
+    ///
+    /// A message for the boot log. It is reported *after* the join rather than
+    /// instead of it: a client that gave up does not entitle the frame to
+    /// abandon a core that is still inside a component.
+    fn drive(
+        &mut self,
+        frames: &mut FrameAllocator,
+        wired: Wired,
+        killer: &mut dyn Killer,
+    ) -> Result<Drove, &'static str>;
+
+    /// Answer whatever the occupant has asked the frame for, and nothing else.
+    ///
+    /// Called between mailbox polls for the whole of the join. The one thing a
+    /// driver cannot do for itself is turn a client's capability into an address
+    /// its device may use — it does not own the remapping unit — so it asks, and
+    /// this is what answers. RFC 0047.
+    fn serve(&mut self, frames: &mut FrameAllocator);
+
+    /// What this client took while it ran and is still holding, in frames.
+    ///
+    /// Taken out of [`demonstrate`]'s leak check rather than added to it, and
+    /// **reported rather than given back**. A translation the driver asked for is
+    /// a walk that allocates page tables in the device's domain, and those
+    /// frames are the domain's until the domain is released — which happens
+    /// after this function returns, outside the window this check covers,
+    /// because the domain was also built outside it. A client that freed them
+    /// here would leave the demonstration with *more* frames than it started
+    /// with, which the same equality catches and which is the harder direction
+    /// to read.
+    ///
+    /// Two numbers rather than a tolerance, which is this file's habit and
+    /// `blk::demonstrate`'s: a check with slack in it is a check that stops
+    /// noticing the first frame.
+    ///
+    /// Unit: frames.
+    fn retained(&mut self, frames: &mut FrameAllocator) -> u64;
+}
+
+/// Where a serving occupant's two rings and its board are, as kernel addresses.
+///
+/// Handed to [`Datapath::drive`] rather than found by it, because these are
+/// `spawn`'s answers: the pages were mapped out of the occupant's own account
+/// and the frame reaches them through the direct map. A client that went looking
+/// would be a second thing that knows where a component's ring is.
+#[derive(Clone, Copy)]
+pub struct Wired {
+    /// The occupant's control ring, which the frame produces on and the
+    /// occupant consumes. Unit: bytes, a kernel address.
+    pub control: u64,
+    /// The occupant's data ring, whose server end is the occupant's and whose
+    /// client end is this client's. Unit: bytes, a kernel address.
+    pub data: u64,
+    /// The occupant's routing page. Unit: bytes, a kernel address.
+    pub board: u64,
+    /// The core the occupant is running on. Unit: none — a core index.
+    pub cpu: usize,
+    /// This machine's timestamp-counter rate, for bounding a wait.
+    /// Unit: kilohertz.
+    pub tsc_khz: u64,
+}
+
+/// Take an occupant's text away from it while it is running, so that its next
+/// instruction faults.
+///
+/// **This is the kill `E1-P06` is about, and it is asynchronous by
+/// construction.** Everything else in this tree that ends a component is
+/// something the component did: a fault it took, an exit it chose, a stop it was
+/// asked for and agreed to. None of those is a driver dying under a client's
+/// load, because all of them are cooperative in the one way that matters — the
+/// component reached a point of its own choosing. A driver that crashes does
+/// not.
+///
+/// So the frame withdraws the mapping and tells every other core to forget it.
+/// The running core's next instruction fetch faults, `process::kill` records a
+/// `Death::Killed` in that core's own shard, and the core reports finished —
+/// which is what `smp::join_serviced` is already waiting for. Nothing new
+/// happens on the far side at all: this is the ordinary ring-3 fault path,
+/// reached on purpose.
+///
+/// # Why the text and not the rings
+///
+/// Because the point is to kill the *component*, not to corrupt its work. Taking
+/// a ring away would fault it too, and would also destroy the evidence — the
+/// client's outstanding entries are on those pages, and a demonstration that
+/// unmapped them could not then say whether the entries were lost by the kill or
+/// by the killer. Text is the one thing a running component touches that holds
+/// none of its state.
+///
+/// All sixteen pages, and not the first: `process::TEXT_PAGES` is the whole
+/// mapping and a serving loop is not obliged to be in the first page of it. One
+/// page would make this a kill that usually works, which is the worst kind.
+///
+/// # Errors
+///
+/// [`Failure::Space`] where the mapping was not there to withdraw, and
+/// [`Failure::NoAnswer`] where a core did not acknowledge the shootdown — which
+/// a caller cannot recover from, because an unacknowledged shootdown is a core
+/// still executing through a translation that has been taken away.
+///
+/// # Safety
+///
+/// `occupant` must be an instance this frame built, `frames` must be rebound
+/// onto the direct map, and this core must hold the kernel's address space —
+/// the space being edited is the occupant's and is not in this core's `CR3`.
+unsafe fn fault_occupant(root: u64, frames: &FrameAllocator) -> Result<(), Failure> {
+    // **Every page that is there, and a component's text is shorter than the
+    // reservation.** `process::TEXT_PAGES` is how much address space the frame
+    // sets aside for text; `spawn` maps as many pages as the image actually
+    // occupies, which for every component in this tree is fewer. So a page that
+    // was never mapped is not a failure here — it is the end of the image — and
+    // a version of this function that refused on the first one killed nothing at
+    // all and reported that the core had wedged.
+    let mut withdrawn = 0;
+    for page in 0..crate::process::TEXT_PAGES as u64 {
+        let at = crate::process::TEXT + page * FRAME_SIZE;
+        // SAFETY: the caller's guarantee. `root` is a top-level table this
+        // module built for this occupant, `frames` is on the direct map, and
+        // this core holds the kernel's space.
+        if unsafe { paging::unmap_user_live(frames, root, at) }.is_err() {
+            continue;
+        }
+        withdrawn += 1;
+        // Told after each page rather than once at the end, because a core that
+        // faulted on page three while page four was still cached would be a kill
+        // that landed for a reason this function cannot name.
+        // SAFETY: the boot processor, with interrupts enabled — which is what
+        // lets the core being told answer.
+        unsafe { crate::smp::shootdown(at) }.map_err(|_| Failure::NoAnswer)?;
+    }
+    // Nothing withdrawn is nothing killed, and it must not be reported as a
+    // component that wedged: an occupant whose text was already gone is a frame
+    // bug one step earlier.
+    if withdrawn == 0 {
+        return Err(Failure::WrongPlace);
+    }
+    Ok(())
+}
+
+/// Hand a place's occupant a core, run a client against it, and take the core
+/// back.
+///
+/// The other shape of [`run_ring3`], and the difference is the whole of
+/// `E1-B05`'s third act: `run_on` waits, so an occupant scheduled through that
+/// function has ended before its caller's next line. A driver is not
+/// self-contained and cannot be — it answers entries *while* its client submits
+/// them — so this posts the job, hands control back to the caller to be the
+/// client, and then joins the core while **serving** it, which is
+/// `smp::join_serviced` and the reason that function takes a closure.
+///
+/// # Why the client is a closure and not a second core
+///
+/// Because the frame is the client here, and the frame is this core. `drive` is
+/// called with the occupant already running on `cpu`, so the two make progress
+/// against each other over the two rings the routing page named — which is
+/// exactly what `kernel/src/blk.rs` does for the instance it stands up outside
+/// any place, and is the sequence this function exists to make available to an
+/// instance that is *in* one.
+///
+/// `serve` is then called between mailbox polls for the whole of the join. The
+/// one thing a driver cannot do for itself is turn a client's capability into
+/// an address its device may use — it does not own the remapping unit — so it
+/// asks on its control ring, and that ask is answered here, on the core where
+/// the unit and the client's table already are. RFC 0047.
+///
+/// # Errors
+///
+/// [`Failure::NoAnswer`] for a core that never reported finished, whether
+/// because the occupant wedged or because the bound was shorter than the work.
+/// As [`run_ring3`], the table is deliberately **not** taken back on that path.
+/// A `drive` that refused is answered *beside* the outcome rather than instead
+/// of it: a client that gave up does not entitle the frame to abandon a core
+/// that is still inside a component, so the join happens either way and the
+/// caller decides which news matters.
+///
+/// # Safety
+///
+/// As [`run_ring3`], and [`Datapath::serve`] must touch nothing the running core
+/// is writing — which for the one implementor means the occupant's control ring,
+/// whose two ends are single-producer and single-consumer by construction.
+unsafe fn serve_ring3(
+    occupant: &mut Instance,
+    frames: &mut FrameAllocator,
+    features: Features,
+    on: (usize, u64),
+    selector: u32,
+    client: &mut dyn Datapath,
+) -> Result<(bool, crate::process::Death, Result<Drove, &'static str>), Failure> {
+    let (cpu, tsc_khz) = on;
+    let wired = Wired {
+        control: occupant.control,
+        data: occupant.data,
+        board: occupant.board,
+        cpu,
+        tsc_khz,
+    };
+    // SAFETY: the caller's guarantee.
+    let previous = unsafe { post_ring3(occupant, features, cpu, selector) };
+    // SAFETY: `cpu` is a core the caller vouched is started and idle, and the
+    // job it is about to take was published into its own shard above. The core
+    // is not this one — `start_on` refuses that case rather than deadlocking.
+    let started = unsafe { crate::smp::start_on(cpu) };
+    if started.is_err() {
+        // Nothing was taken, so nothing is holding the table: put it back before
+        // answering, or this instance's handles stay on a core that never ran
+        // and the teardown revokes the wrong set.
+        // SAFETY: the core never took the job, so it is not inside this
+        // component and its shards are the frame's to read.
+        let _ = unsafe { collect_ring3(occupant, cpu, previous) };
+        return Err(Failure::NoAnswer);
+    }
+
+    // The client, on this core, while the occupant runs on that one — and the
+    // trigger it may pull, which is the only thing in this file that ends a
+    // component while it is still useful.
+    let mut killer = Killing { root: occupant.space.root(), cpu, tsc_khz, joined: false };
+    let driven = client.drive(frames, wired, &mut killer);
+
+    // Joined here only if the client did not have it joined for it. A second
+    // `join_serviced` on a core already put back to `READY` would read the
+    // mailbox as a refusal and turn a successful kill into `NoAnswer`.
+    if !killer.joined {
+        // SAFETY: `start_on` was called for this core and nothing else has
+        // joined it; `serve` touches only the occupant's control ring, whose two
+        // ends are single-producer and single-consumer by construction.
+        let joined = unsafe {
+            crate::smp::join_serviced(cpu, tsc_khz, OCCUPANT_MICROS, &mut || client.serve(frames))
+        };
+        joined.map_err(|_| Failure::NoAnswer)?;
+    }
+
+    // SAFETY: the core reported finished, which is what `Ok` above means.
+    let (announced, death) = unsafe { collect_ring3(occupant, cpu, previous) };
+    Ok((announced, death, driven))
 }
 
 unsafe fn consult(
@@ -2743,7 +3682,8 @@ unsafe fn consult(
 
     // SAFETY: the caller's guarantee, passed down — `cpu` is started and idle
     // and this instance's address space is live.
-    let (announced, death) = unsafe { run_ring3(occupant, kernel, features, (cpu, tsc_khz)) }?;
+    let (announced, death) =
+        unsafe { run_ring3(occupant, kernel, features, (cpu, tsc_khz), SUPERVISOR_LIFE) }?;
     // SAFETY: the core is finished, and the page is still mapped — an address space is torn
     // down by `tear_down` and not here.
     let (told, submitted, unsent, verdict, budget) = unsafe { read_board(occupant) };
@@ -3266,12 +4206,15 @@ unsafe fn spawn(
     // Where this component's heap landed, for the instance below. Zero when it
     // declared no `heap` need, which is every component but one today.
     let mut heap_at = 0u64;
-    // And its board, on the same terms. Zero for every component that is not the
-    // supervisor, which is what makes `write_board` refusing on zero a real
-    // check rather than a formality: a frame that tried to fill in a board for a
-    // component with no `board` need would be writing into the direct map at
-    // offset zero.
+    // And its board, on the same terms. Zero for every component that declares
+    // no `board` need, which is what makes `write_board` and `write_routing`
+    // refusing on zero a real check rather than a formality: a frame that tried
+    // to fill in a board for a component that asked for none would be writing
+    // into the direct map at offset zero.
     let mut board_at = 0u64;
+    // And its data ring, on the same terms again. Zero for the five components
+    // that serve nobody from a place.
+    let mut data_at = 0u64;
     // The first capability the child is given, for the word it is entered with.
     let mut first = Handle::NULL;
     for need in record.needs() {
@@ -3352,17 +4295,6 @@ unsafe fn spawn(
             unsafe { f_ring::heap::describe(at, u32::try_from(found.extent).unwrap_or(0)) };
         }
 
-        // The board, and it is the second need the frame maps rather than merely
-        // granting — for the first one's reason, one step earlier. A supervisor
-        // has to read this page to know which ring to adopt, so there is no
-        // instruction it could have executed before the page was there.
-        //
-        // It is a *need* and not a fixed part, which is the whole of why this
-        // costs no arithmetic anywhere else: the account pays for it because the
-        // manifest declares it, `admit` already sizes declared needs, and
-        // `cargo xtask lint-manifests` already refuses a manifest that stops
-        // adding up. A component that declares no `board` gets no board and no
-        // mapping — which is every component but one.
         // A need the caller sourced rather than the account. `offer` has
         // already granted the capability and checked the extent against the
         // manifest; what is left is putting it in the occupant's address space,
@@ -3380,7 +4312,41 @@ unsafe fn spawn(
         {
             let (at, kind) = match item.map {
                 Placement::Unmapped => (0, UserPage::Data),
-                Placement::Cached(at) => (at, UserPage::Data),
+                Placement::Cached(at) => {
+                    // **Zeroed, because a new occupant inherits nothing.** That
+                    // is what the restart line says in as many words — *nothing
+                    // carried over: new table, new memory, new control ring, new
+                    // state tree* — and everything the account pays for gets it
+                    // for free, because `fill` allocates zeroed and `tear_down`
+                    // hands the frames back. Supplied memory does not: the caller
+                    // holds it across the life of the boot precisely so that the
+                    // *same* run can be given to the next occupant, and the same
+                    // run is the previous occupant's leavings.
+                    //
+                    // `E1-P06` found this by being refused. A virtqueue is a
+                    // descriptor table and two rings at fixed offsets, and a
+                    // driver that lays one out over memory already holding a dead
+                    // driver's rings reads indices that have already gone by. The
+                    // device answered the first read of the second occupant with
+                    // `DEVICE`, and every log line up to it said the refill had
+                    // worked.
+                    //
+                    // Only `Cached`. Writing zeroes over a device window is not
+                    // clearing memory, it is a sequence of register writes, and
+                    // `Uncached` is exactly how this file knows the difference.
+                    //
+                    // SAFETY: `item.at` names a run of `item.bytes` the caller
+                    // allocated and holds, the direct map covers it, and no core
+                    // is inside this instance — it does not exist yet.
+                    unsafe {
+                        core::ptr::write_bytes(
+                            frames.virt(Frame::from_addr(item.at)),
+                            0,
+                            item.bytes as usize,
+                        );
+                    }
+                    (at, UserPage::Data)
+                }
                 // Uncached, and this is the one that is invisible under an
                 // emulator and fatal on a machine: a write-back mapping lets
                 // the processor merge, reorder and delay stores to registers
@@ -3416,6 +4382,19 @@ unsafe fn spawn(
             continue;
         }
 
+        // The board, and it is the second need the frame maps rather than merely
+        // granting — for the first one's reason, one step earlier. A component
+        // that has to read this page to know what it holds has no instruction it
+        // could have executed before the page was there: a supervisor reads it
+        // to know which ring to adopt, and a driver reads it to know where its
+        // device landed.
+        //
+        // It is a *need* and not a fixed part, which is the whole of why this
+        // costs no arithmetic anywhere else: the account pays for it because the
+        // manifest declares it, `admit` already sizes declared needs, and
+        // `cargo xtask lint-manifests` already refuses a manifest that stops
+        // adding up. A component that declares no `board` gets no board and no
+        // mapping — which is three of the six in this tree.
         if named(need, NEED_BOARD) {
             // Exactly one page. A board is a layout both sides hold and
             // `f_supervisor::routing::BYTES` is one frame; a need that declared
@@ -3442,6 +4421,45 @@ unsafe fn spawn(
             }
             .map_err(Failure::Space)?;
             board_at = frames.virt(Frame::from_addr(found.object)) as u64;
+        }
+
+        // The data ring, and it is the third the frame maps rather than merely
+        // granting. The argument is the board's, one step on: a component that
+        // serves a client adopts the server end over a page whose header the
+        // *grantor* wrote, and it cannot be the one to map that page, because
+        // mapping is a capability call and the first entry may be waiting
+        // before it could make one.
+        //
+        // Nothing is written into it here. The header is the grantor's and the
+        // grantor is whoever holds the client's end — for a boot that is
+        // `component::demonstrate`, which describes it in the same breath as it
+        // fills in the routing page and before any core can read either.
+        if named(need, NEED_DATA) {
+            // Exactly one page, and refused at any other size for the board's
+            // reason: `f_ring::Mapping` lays a ring out over a region both ends
+            // agree the size of, and a need that declared two pages would be a
+            // second page the header does not describe.
+            if found.extent != FRAME_SIZE {
+                return Err(Failure::Capability(error::pack(
+                    error::ARGUMENT,
+                    error::argument::BAD_ADDRESS,
+                )));
+            }
+            // SAFETY: as the board above — `space` is this component's and is
+            // not in `CR3`, and `found.object` names a frame the supervisor
+            // carved out of this component's own account.
+            unsafe {
+                paging::map_user(
+                    frames,
+                    &mut space,
+                    crate::process::BLK_DATA,
+                    found.object,
+                    UserPage::Data,
+                    features,
+                )
+            }
+            .map_err(Failure::Space)?;
+            data_at = frames.virt(Frame::from_addr(found.object)) as u64;
         }
     }
 
@@ -3488,6 +4506,7 @@ unsafe fn spawn(
         tree_physical: published,
         heap: heap_at,
         board: board_at,
+        data: data_at,
         tree_nodes,
         tree_snapshot: reader.snapshot(),
         first,

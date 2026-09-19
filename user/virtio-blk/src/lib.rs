@@ -71,11 +71,16 @@
 //! frame links this crate for its manifest-facing constants and for
 //! [`routing`], and calls none of it.
 //!
-//! What is still owed, and it is one sentence: this instance is *scheduled* and
-//! not *spawned into a place*. `kernel/src/component.rs` builds a place for
-//! this manifest on every boot and never hands its occupant a core, because the
-//! supervisor that would is the ring-3 supervisor E1-B05 owes. `CHAOS_GAP` in
-//! xtask carries exactly that difference and nothing wider.
+//! What is still owed is narrower than it was and is a sentence about the
+//! *gate* rather than about this crate. An occupant of a place built from this
+//! manifest does serve a client now — `cargo xtask blk served`, on its own core,
+//! while the client submits — so *spawned into a place* is no longer the thing
+//! that is missing. What is missing is that the six halves which are gates
+//! (`blk=inside`, `outside`, `escape` and the three `deadline=` halves) still
+//! run against an instance the frame stands up outside any place, so the
+//! occupant those halves can kill is not the occupant their load goes through.
+//! `CHAOS_GAP` in xtask carries exactly that difference and nothing wider, and
+//! `E1-P06` is what moves them.
 
 #![no_std]
 

@@ -39,10 +39,49 @@ list is for.
 
 ## What is deliberately *not* here
 
-**`E2-B02` and `E2-P10`.** Zoned virtio-blk emulation needs QEMU 8, and the
-tuned-Linux zoned baseline needs a directory that does not exist yet. Both are
-real blockers and neither is a machine: a development image is a change to
-`docker/Dockerfile`. Work, not debt.
+**`E2-B02` and `E2-P10`**, and this entry is kept on the page it does not
+belong to because **it was wrong and the correction is worth more than the
+row**.
+
+It used to read: *zoned virtio-blk emulation needs QEMU 8, and the tuned-Linux
+zoned baseline needs a directory that does not exist yet. Both are real blockers
+and neither is a machine: a development image is a change to
+`docker/Dockerfile`. Work, not debt.*
+
+Both halves have been settled by looking rather than by reasoning, and they went
+opposite ways.
+
+The baseline directory **exists** — `claims/baselines/linux-6.x-tuned-zoned/`,
+nine files, with the workload dials cross-checked against `zone/tests/cycle.rs`
+by its own `verify.sh`. That sentence was stale, and `E2-P10`'s body said the
+same thing for as long.
+
+The image change **was made** — `docker/Dockerfile`'s base is trixie and QEMU is
+10.0 — and it is not what the exit was waiting for. QEMU has no zoned emulation
+for virtio-blk in any version: `-device virtio-blk-pci,help` lists eighty
+properties and not one is zone-related, and `zoned=on` on a file-backed blockdev
+is refused as unexpected. What QEMU's zoned virtio-blk support *is* is
+passthrough of a **host zoned block device**. What it synthesises from a plain
+file is zoned NVMe, which this tree has no driver for and which would be an
+epoch of work to acquire one for.
+
+So the blocker is a host that can present a zoned block device. That is not
+special hardware — `modprobe null_blk zoned=1 zone_size=64 nr_zones=48
+zone_nr_conv=4 blocksize=4096` matches `device.conf` exactly — and it is
+therefore still **work rather than debt**, which is why there is no row for it
+below. It is work that cannot be done from *this* host: the kernel under Docker
+Desktop here is WSL2's, and it reports `CONFIG_BLK_DEV_ZONED=y` with
+`CONFIG_BLK_DEV_NULL_BLK` and `CONFIG_BLK_DEV_ZONED_LOOP` both unset, so there
+is no module to load and the container is not privileged either way.
+
+**Why that distinction is worth a paragraph rather than a row.** RFC 0093's four
+categories are what a *virtual machine* may not answer for, and a zoned device is
+not one of them: any ordinary Linux host or CI runner settles it, with no
+hardware anybody has to buy. A row here would say this project cannot know
+something about itself, and that would be the scope cut this page exists to
+prevent. What is true is narrower and belongs in `TODO.md`: `E2-B02` closes on a
+machine that is not this one, and the list of what to run there is written down
+rather than left to be rediscovered.
 
 **`claims/0022 copies-per-read`.** It is `pending`, and its `[hardware] runner`
 says `runner-class-A` like every other pending claim — but its own note says

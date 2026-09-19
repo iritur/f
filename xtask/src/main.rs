@@ -894,8 +894,15 @@ cargo xtask <command>
                      unit: inside, which must land, or outside, which must
                      fault and land nothing. Both with no argument
   blk place          E1-B05: the driver's place, supplied with the device window
-                     it cannot carve, and its occupant given a core. Not in `blk`
-                     with no argument: it does not serve a client yet
+                     it cannot carve, and its occupant given a core to read it
+                     with. Not in `blk` with no argument: it serves no client
+  blk served         E1-B05's third act: that same occupant serving a client
+                     from ring 3 on its own core while the client submits. Not
+                     in `blk` with no argument: the three provocations still run
+                     against an instance the frame stands up outside any place
+  blk killed         E1-P06: that same occupant killed under its client's load,
+                     its place refilled with the same device window, and the
+                     client losing nothing but its registrations
   blk [half]         Boot the block datapath: a driver component moves a sector
                      through a ring with nothing copied — inside; the same run
                      with the client's grant withdrawn must fault — outside; and
@@ -2220,6 +2227,18 @@ const NET_DEVICE: &[&str] = &[
 /// Unit: bytes.
 const BLK_DISK_BYTES: usize = 1024 * 1024;
 
+/// Bytes in a sector, which is the grain a block device publishes its capacity
+/// in.
+///
+/// The same five hundred and twelve `f_virtio_blk::transport::SECTOR_BYTES`
+/// holds, written here rather than imported because `xtask` is a host crate and
+/// importing a bare-metal one for a constant would put a licence-boundary
+/// question in the way of a number. If the two ever disagree, `blk place` fails
+/// on the capacity it reads back, which is the check noticing rather than a
+/// reader.
+/// Unit: bytes.
+const SECTOR_BYTES: usize = 512;
+
 /// Make the disk the block datapath works on, fresh.
 ///
 /// Rewritten on every run rather than created once, and that is what keeps the
@@ -3330,50 +3349,71 @@ fn heap_reading(log: &str) -> Result<(u32, u32, bool), String> {
 /// What it did not close is the sentence beside it, and the two are easy to
 /// read as one. `kernel/src/component.rs` builds a **place** for this manifest
 /// on every boot — an account, needs checked handle by handle, an endpoint
-/// clients hold, a restart policy — and never hands its occupant a core;
-/// `kernel/src/blk.rs` hands a core to an instance that is in no place. So the
-/// occupant a boot can kill is still not the occupant that serves a client's
-/// load, and *under sustained load* is still a sentence only the simulator
-/// makes true. The needle is the call that stands a driver up outside a place,
-/// and it goes when a supervisor spawns and schedules in one act — which is
-/// E1-B05's remaining half and RFC 0008's *restart is the supervisor's*.
-/// RFC 0041 states the shape of the gap; RFC 0047 states what is left of it.
+/// clients hold, a restart policy — and on the six halves that are gates, the
+/// instance a client's load goes through is not that place's occupant but one
+/// `kernel/src/blk.rs` stands up outside any place. So the occupant a boot can
+/// kill is still not the occupant that serves those halves' load, and *under
+/// sustained load* is still a sentence only the simulator makes true. The needle
+/// is the call that stands a driver up outside a place, and it goes when every
+/// half runs on the place path — which is `E1-P06`'s to demonstrate, now that
+/// `blk served` has shown the path exists. RFC 0041 states the shape of the gap;
+/// RFC 0047 states what is left of it.
 ///
 /// # What a datapath boot actually contains, measured rather than inferred
 ///
-/// **Two virtio-blk instances.** `component::demonstrate` builds a place for it
-/// — the boot prints `place virtio-blk: private, on_fault, 8 restart(s) in
-/// 60000 tick(s), 4194304 B account` — and never hands its occupant a core.
-/// `kernel/src/blk.rs` stands a second one up through `prepare_driver`, gives it
-/// a core, and that is the one a client's load goes through. The sentence above
-/// is exact, and this is what it looks like from the log.
+/// **Two virtio-blk instances, and which one serves is now a parameter.**
+/// `component::demonstrate` builds a place for it on every boot — the log prints
+/// `place virtio-blk: private, on_fault, 8 restart(s) in 60000 tick(s), 4194304
+/// B account`. `kernel/src/blk.rs` stands a second one up through
+/// `prepare_driver`, and on the three provocation halves and the three
+/// `deadline=` halves that second one is where a client's load goes.
 ///
-/// **So the work is not a third path.** It is making the place's occupant the
-/// one that serves, which needs three things and the first of them now exists:
+/// **The three things this needed all exist.** They are listed here because the
+/// list is what made the work one piece rather than three, and because the last
+/// of them is the one the row still turns on:
 ///
 /// 1. the place supplied with the device window and its queue memory — a need
 ///    the account cannot answer, because a device window is not memory the frame
 ///    may allocate or hand back. `Supplied` and `Placement` in
 ///    `kernel/src/component.rs` are that, and `offer` sources a named need from
 ///    the caller with the extent checked against the manifest;
-/// 2. that occupant scheduled on the worker core. Half of this exists: `cargo
-///    xtask blk place` hands it one and the boot prints `scheduled     place
-///    virtio-blk`, so a driver's place occupant has reached ring 3. What is left
-///    is the word *concurrently* — that run is `schedule_occupant` followed by
-///    `run_on`, which waits, and a driver has to be running **while** its client
-///    submits. That is `smp::start_on`, and it brings a second question with it:
-///    the driver reads where its device landed off a routing board, and
-///    `user/virtio-blk/manifest.toml` declares no `board` need, so the manifest
-///    moves and with it the hash a spawn names;
-/// 3. the boot's order, which is the part with the widest blast radius:
-///    `blk_datapath` runs at `main.rs`'s line 877 and `component::demonstrate`
-///    at 1005, so today the device is found long before the place exists. One of
-///    the two has to move, and moving either changes the order of every line in
-///    a log `cargo xtask trace` hashes.
+/// 2. that occupant scheduled on the worker core. `cargo xtask blk place` hands
+///    it one, tells it where its device landed on a routing board its manifest
+///    declares a `board` need for, and the occupant reads the disk's capacity
+///    back out of the supplied window from ring 3;
+/// 3. **that occupant serving a client concurrently.** `cargo xtask blk served`
+///    is that: `component::serve_ring3` posts the job, `smp::start_on` starts the
+///    core without waiting, the frame is the client on its own core, and
+///    `smp::join_serviced` answers the driver's translation requests for the
+///    whole of the join. The occupant's own tally comes back off the far half of
+///    its routing page — `answered 3 entr(ies) and moved 1024 B` — beside the
+///    frame's count of the translations it was asked for, which is a number no
+///    amount of moving bytes produces by accident.
 ///
-/// That third item is why this is one piece of work and not three, and why it
-/// belongs to `E1-B05` rather than beside it: a supervisor that spawns and
-/// schedules in one act is exactly a boot in which the place comes first.
+/// The boot's order turned out not to be the obstacle the third item was feared
+/// to be. `blk_datapath` still runs before `component::demonstrate`; what moved
+/// instead is the *client*, which now runs from **inside** `demonstrate` through
+/// `component::Datapath`, because a place does not outlive that function and
+/// there is therefore no *after* in which a served datapath could happen.
+///
+/// # So why the row is still here
+///
+/// Because the gate has not moved, and that is now the whole of it. `cargo xtask
+/// blk` with no argument runs `BLK_PROVOCATIONS`, all three of which stand an
+/// instance up through `prepare_driver`, as do the three `deadline=` halves — so
+/// the occupant *those six halves* could kill is still not the occupant their
+/// load goes through.
+///
+/// What is no longer true is the sentence that used to follow. This said *under
+/// sustained load is a sentence only the simulator makes true*, and `cargo xtask
+/// blk killed` makes it true in a boot: the occupant of the place, serving the
+/// frame from ring 3 on a core of its own, is taken away with work outstanding
+/// and its client loses nothing. `E1-P06` is `[x]` on that.
+///
+/// So the row is down to its last clause, and it is a clause about which
+/// instance six commands point at rather than about anything being unbuilt. The
+/// path exists — `blk place`, `blk served`, `blk killed` — and the day the
+/// provocations take it, the needle goes.
 ///
 /// *Reversal:* when `prepare_driver(` leaves `kernel/src/blk.rs`, this row goes
 /// and `cargo xtask chaos` says so.
@@ -9908,25 +9948,34 @@ fn iommu(kind: Option<&str>) -> Result<(), String> {
 /// driver shape reserves, and the queue memory whole. That is the half of
 /// `CHAOS_GAP` which had no mechanism at all before this.
 ///
-/// And that **the occupant of that place is given a core**: it reaches ring 3,
-/// announces itself through a door, and ends. Until this half there was exactly
-/// one component in this tree whose place occupant had ever run — the
-/// supervisor — and a driver holding a device window is the second.
+/// And that **the occupant of that place is given a core, and reads its own
+/// device through the supplied window**. Until this half there was exactly one
+/// component in this tree whose place occupant had ever run — the supervisor —
+/// and a driver holding a device window is the second.
 ///
-/// What it does **not** assert is the third: that the occupant is the one
-/// serving a client's load. It cannot be yet, and the reason is structural
-/// rather than unfinished — a driver answers entries *while* its client submits
-/// them, which is `smp::start_on` and not the run-to-completion this uses, and
-/// it reads where its device landed off a routing board
-/// `user/virtio-blk/manifest.toml` declares no need for. Saying so is the point:
-/// a half-built path that reported success would be the shape `E0-B16` and
-/// `E0-B12` both record being bitten by.
+/// The second half of that is what makes the first worth anything, and it took
+/// one boot to prove it. The evidence is not the frame's log line: the frame
+/// says *I supplied this window at this address* and would say exactly that
+/// whether or not the mapping reached the component's address space. The
+/// evidence is the number the **component** reports — the disk's capacity in
+/// sectors, read out of the device's own configuration structure at an offset
+/// the device published, and compared here against the image this command made.
+/// A window mapped nowhere produces the same frame line and no number at all,
+/// which is what the first run of this check found.
+///
+/// What it does **not** assert is the third thing `CHAOS_GAP` names: that the
+/// occupant is the one serving a client's load. It cannot be yet, and the reason
+/// is structural rather than unfinished — a driver answers entries *while* its
+/// client submits them, which is `smp::start_on` and not the run-to-completion
+/// this uses. Saying so is the point: a half-built path that reported success
+/// would be the shape `E0-B16` and `E0-B12` both record being bitten by.
 ///
 /// # Errors
 ///
 /// A boot that did not reach `M0 ok`, one whose log does not carry the line
-/// saying the place was supplied, or one where that place's occupant was never
-/// given a core.
+/// saying the place was supplied, one where that place's occupant was never
+/// given a core, and one where the occupant reported a capacity that is not the
+/// disk this command made.
 fn blk_place() -> Result<(), String> {
     println!("--- blk=place: the driver's place is supplied with the window it cannot carve");
     let disk = blk_disk()?;
@@ -9962,13 +10011,340 @@ fn blk_place() -> Result<(), String> {
              without."
             .into());
     }
+    let sectors = BLK_DISK_BYTES / SECTOR_BYTES;
+    let read = format!("read its own device: {sectors} sector(s) of capacity");
+    if !log.contains(&read) {
+        let found = log
+            .lines()
+            .find(|line| line.contains("identified    place virtio-blk"))
+            .unwrap_or("  (no `identified` line at all)");
+        return Err(format!(
+            "the occupant ran and did not report this disk back.\n\n\
+             Expected a line carrying `{read}`, and the boot printed:\n\
+             {}\n\n\
+             This is the check the frame's own supply line cannot make. The frame says\n\
+             where it mapped the window; only the component can say it was there — a\n\
+             window granted and mapped into no address space produces an identical\n\
+             `blk place` line and this failure, which is what the first run of this\n\
+             check found. Suspect `spawn`'s supplied branch before the device.",
+            found.trim_end(),
+        ));
+    }
     println!(
         "\nblk=place: ok — the place holds a real device window, supplied rather than carved,\n\
-         \x20 and its occupant reached ring 3 on a core of its own.\n\
-         \x20 What it does not yet do is serve a client from there, which needs the driver\n\
-         \x20 running concurrently with one and a routing board its manifest does not\n\
-         \x20 declare — so `CHAOS_GAP` keeps its row and the other three halves still run\n\
-         \x20 on `prepare_driver`."
+         \x20 and its occupant read {sectors} sector(s) of capacity back out of it from ring 3.\n\
+         \x20 What this half does not do is serve a client from there — that is\n\
+         \x20 `cargo xtask blk served`, one act on — so `CHAOS_GAP` keeps its row and the\n\
+         \x20 other three halves still run on `prepare_driver`."
+    );
+    Ok(())
+}
+
+/// A place's occupant serves a client, from ring 3, on its own core, while the
+/// client submits.
+///
+/// **`E1-B05`'s third act, and the only half in this file where the two halves
+/// of one datapath are two different privilege levels of one *place*.** The
+/// other three provocations and the identify half above all leave one of those
+/// two things out: the provocations run a driver the frame stood up outside any
+/// place, and the identify half runs a place's occupant that answers nobody.
+///
+/// # What it asserts that `blk place` cannot
+///
+/// Four things, and each one is a different party's word:
+///
+/// 1. **the frame started a core and did not wait** — `scheduled     place
+///    virtio-blk on core N for life 1`, where life 1 is `routing::life::SERVE`
+///    and the life the identify half prints is 3. A boot that took the waiting
+///    path prints a different number here and nothing at all below;
+/// 2. **the occupant answered entries** — its own tally off the far half of its
+///    routing page, which the frame did not write. A client submitting into a
+///    ring nobody was reading produces an identical `scheduled` line and a zero
+///    here;
+/// 3. **the frame was asked for a translation** — counted on the frame's side of
+///    the boundary. It is the one thing a driver cannot do for itself, so a
+///    build in which that route had quietly stopped being used would still move
+///    bytes and would publish zero here. RFC 0047;
+/// 4. **the client read back what it wrote** — through a buffer the device
+///    reached directly, which is what makes the three counts above about a
+///    datapath rather than about a handshake.
+///
+/// # Why it is not in `BLK_PROVOCATIONS` either
+///
+/// For [`BLK_PLACE`]'s reason, one clause further on, and the reason is now
+/// about the *table* rather than about this half. It serves a client and
+/// [`blk_killed`] survives a kill, so what kept these out of the default set has
+/// been paid; what has not happened is the three provocations moving onto this
+/// path, and a gate holding both sets would run the same device twice per
+/// command to assert less the second time.
+///
+/// # Errors
+///
+/// A sentence naming which of the four did not hold, and what to suspect.
+fn blk_served() -> Result<(), String> {
+    println!("--- blk=served: the occupant of that place serves a client while the client submits");
+    let disk = blk_disk()?;
+    let device = blk_device(&disk)?;
+    let borrowed: Vec<&str> = device.iter().map(String::as_str).collect();
+    let (ending, log) = machine_devices(
+        Some("blk=served"),
+        &[],
+        Capture::Printed,
+        BOOT_TIMEOUT,
+        BOOT_MEMORY,
+        &borrowed,
+        &[],
+    )?;
+    if ending != Ending::Exited(33) {
+        return Err(format!("the boot {ending}; expected exit 33"));
+    }
+    if !log.contains("blk place     registers") {
+        return Err("the boot reached M0 ok without saying it supplied the place.\n\n\
+             `blk_place_supply` prints one line naming the register span and the queue\n\
+             memory, and it is the first evidence this half produces. A boot that is green\n\
+             and silent here is one where `blk=served` was not read."
+            .into());
+    }
+    // Life 1 and not life 3, which is the whole difference between this half and
+    // the one above: `routing::life::SERVE` against `routing::life::IDENTIFY`.
+    let scheduled = "scheduled     place virtio-blk";
+    let serving = "for life 1";
+    let line = log.lines().find(|line| line.contains(scheduled));
+    match line {
+        None => {
+            return Err("the place was supplied and its occupant was never given a core.\n\n\
+                 `supplied_place` finds the place the supply names and `serve_ring3` hands\n\
+                 its occupant the worker core. A boot that printed the supply line and not\n\
+                 this one has a supply whose component label does not match any place's\n\
+                 manifest — or no second core, which this half does not run without."
+                .into());
+        }
+        Some(line) if !line.contains(serving) => {
+            return Err(format!(
+                "the occupant was given a core for the wrong life.\n\n\
+                 Expected `{serving}` — `f_virtio_blk::routing::life::SERVE` — and the boot\n\
+                 printed:\n\
+                 {}\n\n\
+                 Life 3 here means `component::demonstrate` took the `None` arm and waited\n\
+                 for the occupant instead of starting it beside a client, which is the\n\
+                 boot having been handed no datapath. Suspect `blk_place_supply`'s\n\
+                 `serving` test before anything in the component.",
+                line.trim_end(),
+            ));
+        }
+        Some(_) => {}
+    }
+    // The occupant's own account of what it answered. The frame did not write
+    // this number and cannot: it is read back off the far half of the routing
+    // page, under a magic the component writes last.
+    let served = log.lines().find(|line| line.contains("served        place virtio-blk"));
+    let Some(served) = served else {
+        return Err("the occupant ran on its own core and left no report on its board.\n\n\
+             `component::read_served` answers `None` for a page with no report magic on\n\
+             it, which is a component that did not reach the end of what it was asked —\n\
+             a different thing from one that reached it and answered nothing. Suspect\n\
+             the routing page: `laid_out` refuses a page missing any of its 28 slots and\n\
+             stops with `BAD_ROUTING` before it touches the device."
+            .into());
+    };
+    if served.contains("answered 0 entr") {
+        return Err(format!(
+            "the occupant served nothing, and the client submitted.\n\n\
+             {}\n\n\
+             This is the check the frame's own lines cannot make. A client submitting\n\
+             into a ring nobody was reading prints an identical `scheduled` line and this\n\
+             zero — so suspect the data ring before the device: `component::spawn` maps\n\
+             it at `process::BLK_DATA` from the manifest's `data` need, and\n\
+             `demonstrate` writes its header. A component whose manifest lost that need\n\
+             gets no page and adopts nothing.",
+            served.trim_end(),
+        ));
+    }
+    // The frame's own side of the same run, and the translation count is the one
+    // number on it that no amount of moving bytes can produce by accident.
+    let client = log.lines().find(|line| line.contains("blk client    the frame registered"));
+    let Some(client) = client else {
+        return Err("the occupant reported serving a client and the frame reported no client.\n\n\
+             `main` prints this line whenever `blk::Placed` ran, so a boot with the one\n\
+             above and not this one is a client that never returned — check for a FAIL\n\
+             line between them."
+            .into());
+    };
+    if client.contains("read back what it wrote: false") {
+        return Err(format!(
+            "the client did not read back what it wrote.\n\n\
+             {}\n\n\
+             The bytes crossed a real device and came back wrong, which is a datapath\n\
+             failure and not a plumbing one. The same comparison passes on the three\n\
+             `prepare_driver` halves, so suspect what is different here: the queue\n\
+             region's device address, which is the one routing slot `blk::Placed` computes\n\
+             and `blk=place` leaves at zero.",
+            client.trim_end(),
+        ));
+    }
+    println!(
+        "\nblk=served: ok — the occupant of a place, spawned from a manifest into an account\n\
+         \x20 with every need checked, held a device window it could not carve, ran at ring 3\n\
+         \x20 on a core of its own while the frame submitted to it, answered the frame's\n\
+         \x20 entries and asked the frame for the one translation it may not make itself.\n\
+         \x20 Surviving a kill under that load is `cargo xtask blk killed`, one half on.\n\
+         \x20 `CHAOS_GAP` keeps its row because the three provocation halves still run on\n\
+         \x20 `prepare_driver`, which is a sentence about the gate rather than the path."
+    );
+    Ok(())
+}
+
+/// A driver killed under a client's load, and the client observing only latency.
+///
+/// **`E1-P06`'s missing half.** `claims/0005-driver-restart-blast-radius` has
+/// been gating since E1, measured in the simulator against a modelled occupant
+/// of a real place. What this adds is the sentence that entry's exit says is
+/// missing: *what is killed is still a modelled occupant rather than the
+/// occupant serving the datapath*. Here it is the occupant serving the datapath.
+///
+/// # What is killed, and why it is a kill rather than a stop
+///
+/// Everything else that ends a component in this tree is something the component
+/// did: a fault it took, an exit it chose, a stop it agreed to. All of those are
+/// cooperative in the one way that matters — the component reached a point of its
+/// own choosing. A driver that crashes under load does not. So the frame takes
+/// the occupant's text away and shoots down the translation, and the next
+/// instruction it fetches faults at ring 3. The boot log carries the death, and
+/// `Killed` with vector 14 is what says the kill landed where it was aimed: an
+/// `Exited` there would mean the component had gone before the frame reached it,
+/// which would make every number below it a measurement of something else.
+///
+/// # The four things asserted, and whose word each one is
+///
+/// 1. **the kill arrived under load** — the client's own count of what it had
+///    submitted and not been answered, required to be at least one. A kill with
+///    nothing outstanding is a restart, and a restart demonstrates nothing about
+///    a blast radius;
+/// 2. **the place was refilled** — a second occupant of the *same* place, given
+///    the same device window and the same queue memory, supplied again rather
+///    than carved. A boot that built a second place would be demonstrating that
+///    two drivers can exist, which nobody doubted;
+/// 3. **the second occupant served** — its own tally off its own routing page,
+///    which the frame did not write;
+/// 4. **nothing was lost** — and this one is in bytes rather than in counters.
+///    Every buffer the client ever submitted is checked for the poison it was
+///    filled with before the device was told anything. A byte the disk cannot
+///    produce is still there only if that read never landed, across the kill and
+///    the restart and the re-registration.
+///
+/// # Errors
+///
+/// A sentence naming which of the four did not hold.
+fn blk_killed() -> Result<(), String> {
+    println!("--- blk=killed: the driver serving a client is killed under its load");
+    let disk = blk_disk()?;
+    let device = blk_device(&disk)?;
+    let borrowed: Vec<&str> = device.iter().map(String::as_str).collect();
+    let (ending, log) = machine_devices(
+        Some("blk=killed"),
+        &[],
+        Capture::Printed,
+        BOOT_TIMEOUT,
+        BOOT_MEMORY,
+        &borrowed,
+        &[],
+    )?;
+    if ending != Ending::Exited(33) {
+        return Err(format!("the boot {ending}; expected exit 33"));
+    }
+
+    let killed = log.lines().find(|line| line.contains("killed        place virtio-blk"));
+    let Some(killed) = killed else {
+        return Err("the boot ran and killed nothing.\n\n\
+             `component::serve_ring3` kills only when the client asks, and the client asks\n\
+             only when it has work outstanding. A boot that printed a `served` line and not\n\
+             this one is one where `blk=killed` was not read — `blk_place_supply` turns it\n\
+             into `Placed::kills`, and without it this is `blk served` under another name."
+            .into());
+    };
+    if killed.contains("with 0 operation(s) outstanding") {
+        return Err(format!(
+            "the driver was killed with nothing in flight, which is a restart.\n\n\
+             {}\n\n\
+             `claims/0005` requires at least one operation outstanding at the kill, because\n\
+             a harness that killed an idle driver would pass every other check here and\n\
+             assert nothing about a blast radius.",
+            killed.trim_end(),
+        ));
+    }
+    // The kind of death, and it is the evidence the kill landed where it was
+    // aimed rather than the component having gone on its own.
+    if !killed.contains("Killed") {
+        return Err(format!(
+            "the occupant ended, and not by the kill.\n\n\
+             {}\n\n\
+             `component::fault_occupant` unmaps all of `process::TEXT_PAGES` and shoots the\n\
+             translation down, so the death should be a `Killed` with vector 14 — a page\n\
+             fault at ring 3 on the instruction after its text stopped being mapped. An\n\
+             `Exited` here means the component had already gone, and every number below\n\
+             this line is then about a driver that was never killed.",
+            killed.trim_end(),
+        ));
+    }
+
+    if !log.contains("refilled      place virtio-blk epoch 1") {
+        return Err("the driver was killed and its place was not refilled.\n\n\
+             The refill is `tear_down` followed by `offer` and `spawn` against the *same*\n\
+             place, with the same supply the first occupant was given — a device window is\n\
+             not memory a fresh account can carve. Epoch 1 is what says it is the same\n\
+             place: a second place would have printed epoch 0 again."
+            .into());
+    }
+
+    // One `served` line, and it has to be **after** the refill. The killed
+    // occupant leaves none, and that is not a gap: writing that report is a
+    // component's last act and this one did not get one. So the line that
+    // matters is the second occupant's, and a check that merely counted them
+    // would pass on a boot where the refill served nothing and the corpse had
+    // somehow reported.
+    let after = log
+        .lines()
+        .skip_while(|line| !line.contains("refilled      place virtio-blk"))
+        .any(|line| line.contains("served        place virtio-blk"));
+    if !after {
+        return Err("the refilled occupant did not report serving anything.\n\n\
+             The second occupant is handed a new table, a new control ring and a new data\n\
+             ring, so the client has to register again before it can submit. Suspect the\n\
+             queue memory before the device: it is *supplied* rather than carved, so it is\n\
+             the one thing a new occupant could inherit from the dead one, and a virtqueue\n\
+             laid out over a dead driver's rings reads indices that have already gone by —\n\
+             which is exactly what this half found the first time it got this far."
+            .into());
+    }
+
+    let survived = log.lines().find(|line| line.contains("blk survived"));
+    let Some(survived) = survived else {
+        return Err("the client did not report what it lost.\n\n\
+             `main` prints this line whenever the client had anything in flight at the\n\
+             kill, so a boot with a `killed` line and not this one is a client that never\n\
+             came back — check for a FAIL line between them."
+            .into());
+    };
+    if !survived.contains("and 0 buffer(s) never got their bytes") {
+        return Err(format!(
+            "an operation was lost across the kill.\n\n\
+             {}\n\n\
+             This is the check the counters cannot make. Every buffer is filled with a\n\
+             byte the disk cannot produce before the device is told anything, so a buffer\n\
+             still holding it is a read that never landed — across the kill, the restart,\n\
+             and the re-registration the client had to do because a `SetId` names a slot\n\
+             in the dead instance's table.",
+            survived.trim_end(),
+        ));
+    }
+
+    println!(
+        "\nblk=killed: ok — a driver serving a client from ring 3 on its own core was killed\n\
+         \x20 with work outstanding, its place was refilled with the same device window, and\n\
+         \x20 the client got every byte it ever asked for.\n\
+         \x20 `claims/0005`'s rows are still taken in the simulator, which is where this\n\
+         \x20 project's fault and load numbers are taken; what this adds is that the thing\n\
+         \x20 being killed is now the thing serving the datapath."
     );
     Ok(())
 }
@@ -9990,14 +10366,36 @@ const BLK_PROVOCATIONS: &[(&str, &str)] = &[
 /// putting it in the default set would either fail the gate or — worse — pass
 /// it while asserting less than the other three do.
 ///
-/// It leaves the table on the day it serves a client and survives three kills,
-/// which is also the day `CHAOS_GAP`'s last row goes. Until then the existing
-/// halves keep running on `prepare_driver` and nothing about them has moved.
+/// It leaves the table on the day it serves a client and survives three kills.
+/// Both halves of that sentence are paid — [`BLK_SERVED`] one act on, and
+/// [`BLK_KILLED`] after it — so what is left is the move itself: the three
+/// provocations running against a place's occupant rather than against an
+/// instance stood up outside one. That is the day `CHAOS_GAP`'s last row goes.
+/// Until then the existing halves keep running on `prepare_driver` and nothing
+/// about them has moved.
 const BLK_PLACE: &str = "place";
+
+/// The half above it, one act on. Also **not** in [`BLK_PROVOCATIONS`], and
+/// [`blk_served`] says why at length.
+const BLK_SERVED: &str = "served";
+
+/// And that half with the driver killed under the client's load, which is
+/// `E1-P06`. Still outside [`BLK_PROVOCATIONS`]: what the default set asserts is
+/// a *datapath*, and these three halves each assert one thing about the place
+/// path that the datapath halves do not. They join the table on the day the
+/// three provocations run on the place path, which is also the day
+/// `CHAOS_GAP`'s needle goes.
+const BLK_KILLED: &str = "killed";
 
 fn blk(kind: Option<&str>) -> Result<(), String> {
     if kind == Some(BLK_PLACE) {
         return blk_place();
+    }
+    if kind == Some(BLK_SERVED) {
+        return blk_served();
+    }
+    if kind == Some(BLK_KILLED) {
+        return blk_killed();
     }
     let chosen: Vec<&(&str, &str)> = match kind {
         None => BLK_PROVOCATIONS.iter().collect(),

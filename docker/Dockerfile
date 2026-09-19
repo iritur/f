@@ -16,7 +16,16 @@
 #
 # Build context is one file: see .dockerignore.
 
-ARG BASE=debian:bookworm-slim
+# Trixie, and the storage epoch is what moved it. `E2-B02` needs a QEMU that
+# knows about zoned block devices at all, and bookworm's is 7.2, which does not.
+# Trixie's is 10.0, which does — with a limit this file is not the place to
+# state and `docs/TECHNICAL-DEBT.md` is.
+#
+# It brings a second thing with it, and that one was already written down as a
+# reversal condition: see the Kani block in the `full` stage, whose own
+# *what would reverse this* is "this image's base moving past 2.39". Trixie
+# carries glibc 2.41, so it has.
+ARG BASE=debian:trixie-slim
 
 # ---------------------------------------------------------------------------
 # base — system packages only. Nothing here changes when the toolchain moves.
@@ -251,51 +260,45 @@ RUN --mount=type=cache,target=/opt/cargo/registry,sharing=locked \
 # invalidates nothing in `claims/` — the checker produces a verdict, not a
 # number, which is RFC 0022's own argument for why a second toolchain is
 # affordable at all.
-# **On AArch64 the checker is not installed, and the reason is glibc rather than
-# a policy.** `cargo kani setup` downloads a prebuilt release bundle, and the
-# `aarch64-unknown-linux-gnu` one is linked against GLIBC_2.39 while this image's
-# base is bookworm, which carries 2.36. Setup *succeeds* and then `kani
-# --version` fails, so the break lands at the end of a two-minute layer and
-# reads as a broken image rather than as an unavailable tool — which is exactly
-# how it arrived: the arm64 half of the pull-request gate went red on a change
-# that had nothing to do with it.
+# **Installed on both architectures, and the exception that used to be here is
+# gone because its own reversal condition arrived.**
 #
-# Nothing wants it there. `cargo xtask prove` runs on amd64 in
-# `.github/workflows/nightly.yml`, which builds its own `full-...-amd64` tag,
-# and the one pull-request job that needs this image — dependency policy — is
-# amd64 too. What the arm64 `full` image is for is `cargo-deny`,
-# `cargo-llvm-cov` and `cargo-nextest`, all of which build and run there.
+# What stood here said the `aarch64-unknown-linux-gnu` Kani bundle is linked
+# against GLIBC_2.39 while this image's base was bookworm, which carries 2.36 —
+# so setup *succeeded* and `kani --version` then failed at the end of a
+# two-minute layer, reading as a broken image rather than as an unavailable
+# tool. That is how it arrived: the arm64 half of the pull-request gate went red
+# on a change that had nothing to do with it.
 #
-# The asymmetry is stated rather than hidden, because a multi-architecture tag
-# whose two halves quietly differ is the failure the manifest job below exists
-# to prevent: **`full` means the extra tooling on both architectures, plus the
-# checker on the one whose bundle runs.** `kani --version` is still asserted
-# where it is installed, so a bundle that stops working is still a red layer.
+# The paragraph ended with *what would reverse this: Kani publishing an aarch64
+# bundle against an older glibc, or this image's base moving past 2.39*. The base
+# moved to trixie for `E2-B02`, trixie carries 2.41, and the second clause is
+# met — so the `case` on `TARGETARCH` goes and the `RUN` is unconditional again,
+# which is what that sentence said should happen.
 #
-# *What would reverse this:* Kani publishing an aarch64 bundle against an older
-# glibc, or this image's base moving past 2.39. Either makes the condition go
-# away and the `RUN` unconditional again, and neither is worth pre-empting.
+# Kept from the old paragraph because it is still true and still the reason this
+# is in `full` rather than `dev`: `cargo xtask prove` runs on amd64 in
+# `.github/workflows/nightly.yml`, which builds its own `full-...-amd64` tag, and
+# the one pull-request job that needs this image — dependency policy — is amd64
+# too. What the arm64 `full` image is for is `cargo-deny`, `cargo-llvm-cov` and
+# `cargo-nextest`. The difference now is that the tag's two halves no longer
+# quietly differ, which is the failure the manifest job exists to prevent.
 #
-# The default is to install. `TARGETARCH` is set by buildx and empty under a
-# plain `docker build`, so an unlabelled build gets the checker rather than
-# silently losing it: the hazard being guarded against is a missing tool, and a
-# missing tool should never be the quiet outcome.
+# `kani --version` is still asserted, so a bundle that stops working is still a
+# red layer — on both architectures now rather than on one.
+#
+# *What would reverse this:* an aarch64 bundle that needs a glibc newer than the
+# base carries. The guard would come back, and it would come back with a number
+# in it rather than an architecture.
 ARG KANI_VERSION=0.67.0
 ARG TARGETARCH
 ENV KANI_HOME=/opt/kani
 
 RUN set -eux; \
-    case "${TARGETARCH:-amd64}" in \
-      arm64|aarch64) \
-        echo "kani: not installed on ${TARGETARCH}; the aarch64 bundle needs GLIBC_2.39 and this base carries 2.36, and nothing on this architecture runs the checker"; \
-        ;; \
-      *) \
-        cargo install --locked kani-verifier --version "${KANI_VERSION}"; \
-        cargo kani setup; \
-        chmod -R a+rX /opt/kani; \
-        kani --version; \
-        ;; \
-    esac; \
+    cargo install --locked kani-verifier --version "${KANI_VERSION}"; \
+    cargo kani setup; \
+    chmod -R a+rX /opt/kani; \
+    kani --version; \
     chmod -R a+rX /opt/cargo /opt/rustup
 
 ENV F_UID=1000 F_GID=1000

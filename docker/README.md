@@ -162,17 +162,30 @@ crates the first time it does so. After that it is cached in the registry
 volume and the build is offline. If it fails with `spurious network error`,
 that is what it is; retry, and consider `CARGO_NET_RETRY=10`.
 
-**QEMU here is Debian bookworm's 7.2.** Fine for everything through `E1`. The
-storage epoch is where it stops being fine: zoned-device emulation, which
-`E2-P10`'s write-amplification claim needs, is materially better in QEMU 8 and
-9. When that day comes the fix is one line — build with a newer base:
+**QEMU here is Debian trixie's 10.0.** It was bookworm's 7.2 until `E2-B02`,
+and the move is one line in the Dockerfile's `ARG BASE`.
 
-```powershell
-docker compose -f docker/compose.yaml build --build-arg BASE=debian:trixie-slim dev
+**What the move did not fix, and this paragraph is a correction.** What stood
+here said zoned-device emulation "is materially better in QEMU 8 and 9" and that
+the fix for `E2-P10`'s write-amplification claim was one line. The first half is
+true and the second is not, and the difference was found by asking the new image
+rather than by reading a changelog:
+
+```
+$ qemu-system-x86_64 -device virtio-blk-pci,help | grep -i zone
+$ qemu-system-x86_64 -blockdev driver=file,node-name=f,filename=/dev/null,zoned=on
+qemu-system-x86_64: ... Parameter 'zoned' is unexpected
 ```
 
-Left as bookworm for now because the older, more widely deployed base is the
-better default until a task actually needs the newer emulator.
+Eighty properties on `virtio-blk-pci` and not one of them is zone-related.
+QEMU's zoned virtio-blk support is **passthrough of a host zoned block device**,
+not emulation from a file — it never was emulation from a file, in any version.
+What *is* synthesised from a plain file is zoned **NVMe** (`nvme-ns,zoned=on`),
+which this tree has no driver for.
+
+So the base move is still right — QEMU 10, and the Kani aarch64 exception
+dissolved with it — and it is not what `E2-B02`'s exit was waiting for.
+`docs/TECHNICAL-DEBT.md` carries what is.
 
 ## Windows specifics
 
