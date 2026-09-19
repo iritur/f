@@ -188,9 +188,23 @@ fn supervise() -> u64 {
         }
     }
 
+    // --- the generation ------------------------------------------------------
+    //
+    // **RFC 0094, and the act this component was missing.** Between the drain and
+    // the decision, because the two answer different questions and only one of
+    // them is about a death: the assembler answers *what does this generation say
+    // to start*, and `policy::decide` answers *should this place be refilled now
+    // that its occupant has died*. They meet at a row, and a row the assembler
+    // started is one the loop below finds already filled.
+    //
+    // `None` on every boot that selected no generation, which is every boot with
+    // no `f.root=` — the fault boots, the datapath boots, `cargo xtask user`.
+    // Those run exactly the loop they ran before this landed.
+    let assembled = crate::assemble::assemble(&board, &control);
+
     // --- the decision --------------------------------------------------------
     let mut said = [(crate::policy::Verdict::Leave, crate::policy::Budget::default()); PLACES_MAX];
-    let mut submitted = 0;
+    let mut submitted = assembled.as_ref().map_or(0, |it| it.submitted);
     let mut refused = 0;
     for (index, row) in board.rows.iter().enumerate().take(board.places) {
         let mut budget = row.budget;
@@ -200,7 +214,22 @@ fn supervise() -> u64 {
         // death arrived, and by the tally being untouched. A flag on the board
         // saying *fill this* would be the frame deciding and this component
         // typing, which is the thing RFC 0008 refuses.
-        let verdict = if died.get(index).copied().unwrap_or(false) {
+        // A row the assembler already submitted a spawn for is not a row with
+        // nothing in it. Without this the loop below would see an untouched
+        // tally, read it as *the frame built this place and never filled it*,
+        // and submit a second spawn the frame answers by refusing — which would
+        // be this component arguing with itself in the boot log.
+        //
+        // Asked of the row rather than of the run: a run that skipped every
+        // member leaves every tally exactly as it found it, so *the assembler
+        // ran* cannot tell a taken row from an untouched one. The first attempt
+        // at this asked the run, and the boot it produced left the held-open
+        // place empty and failed with `a spawn named a place it may not occupy`.
+        let taken =
+            assembled.as_ref().and_then(|it| it.filled.get(index)).copied().unwrap_or(false);
+        let verdict = if taken {
+            crate::policy::Verdict::Leave
+        } else if died.get(index).copied().unwrap_or(false) {
             // `faulted`: an occupant the frame tore down is a death this
             // supervisor treats as a fault. A stop is the supervisor's own act
             // and never arrives here as something to decide about.
@@ -238,6 +267,9 @@ fn supervise() -> u64 {
     }
 
     crate::routing::Board::report((submitted, refused, told), &said[..board.places]);
+    if let Some(assembled) = assembled.as_ref() {
+        crate::routing::Board::assembled(assembled);
+    }
     if refused == 0 { DONE } else { i64::from(RING_FULL) as u64 }
 }
 

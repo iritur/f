@@ -116,6 +116,34 @@ pub unsafe fn selected(boot: &BootInfo) -> Selected {
     if chosen.at.is_some() { Selected::Ran(chosen) } else { Selected::Missing(chosen) }
 }
 
+/// The bytes of the module [`selected`] chose, and the root it folds to.
+///
+/// **`selected` throws these away and this is what keeps them.** That function
+/// walks the loader's modules into a fixed array, folds each one, and answers a
+/// `Chosen` whose `at` indexes an array that has gone out of scope by the time
+/// the caller sees it. Nothing needed the bytes until RFC 0094, when the
+/// supervisor started instantiating the topology from them.
+///
+/// A second walk rather than a wider `Selected`, and the reason is that `Chosen`
+/// is `f_generation`'s type and shared with the host side: widening it for one
+/// caller in the frame would put a `&'static [u8]` in a struct `xtask` also
+/// builds. The walk is a dozen lines over a list of at most [`OFFERED_MAX`]
+/// entries, in the same order, so `at` indexes the same module.
+///
+/// `None` for every boot that did not select one, which is every boot with no
+/// `f.root=` on its command line.
+///
+/// Answers the module's **physical** extent rather than a slice, because the one
+/// caller supplies it to a component rather than reading it: a `Supplied` names
+/// a physical run, and a slice would have to be turned back into one.
+#[must_use]
+pub fn chosen(boot: &BootInfo, selected: Selected) -> Option<(u64, u64, [u8; 32])> {
+    let Selected::Ran(chosen) = selected else { return None };
+    let (at, found) = (chosen.at?, chosen.found?);
+    let module = boot.modules().get(at)?;
+    Some((module.start, module.len(), found.root))
+}
+
 /// Print it, and say whether the boot may continue.
 ///
 /// Returns `false` for a machine that was asked to be a generation it cannot

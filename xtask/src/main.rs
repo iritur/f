@@ -1672,6 +1672,23 @@ const IMAGE_MAX: &[(&str, u64)] = &[
     // reservation: it stops a spawn-shape component being measured against a
     // runtime-shape bound.
     ("objects", 16 * 4096),
+    // `supervisor`, and the row exists for the reason the one above it does
+    // rather than for a new one: it is a **spawn-shape** component and was being
+    // measured against the init shape's default. What made that visible is RFC
+    // 0094 — linking `f-assembler` took the image from 8 056 bytes to 36 736,
+    // past `INIT_MAX`'s 16 384 and nowhere near the sixteen pages
+    // `kernel::process::TEXT_PAGES` already reserves for it.
+    //
+    // So this moves no reservation either. The frame mapped sixteen pages for
+    // this component before this line existed and maps sixteen after it; what
+    // changes is which bound `xtask` compares against, and the old one belonged
+    // to a shape this component is not.
+    //
+    // The margin is worth writing down because it is the one a topology grows
+    // into: 36 736 against 65 536. An assembler is linear in nothing a
+    // generation contains — it reads the module rather than embedding it — so
+    // this number moves with the crate and not with the topology.
+    ("supervisor", 16 * 4096),
 ];
 
 /// What a component whose shape [`IMAGE_MAX`] does not name may be.

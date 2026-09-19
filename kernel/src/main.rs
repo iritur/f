@@ -753,9 +753,17 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // it, with the direct map live and `frames` rebound onto it. That is
     // `multiboot::Module::bytes`'s obligation, discharged here rather than by
     // `component::demonstrate`, which now discharges it later for itself.
-    if !generation::report(unsafe { generation::selected(&boot) }) {
+    // SAFETY: as the comment above.
+    let selected = unsafe { generation::selected(&boot) };
+    if !generation::report(selected) {
         arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
     }
+    // Kept rather than dropped, which is RFC 0094: the supervisor instantiates
+    // the topology it is part of out of these bytes, and until now the frame
+    // folded them, printed a line and let them go. Nothing is read here — a
+    // physical extent and a root, handed to `component::demonstrate` for the one
+    // place whose manifest declares a `module` need.
+    let generation = generation::chosen(&boot, selected);
 
     // RFC 0013, and E0-B14. Published *before* the subsystems that fill it,
     // because a node names a live word rather than a value copied in later —
@@ -1019,6 +1027,40 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             clocks.tsc_khz,
         )
     };
+    // And the generation, on every boot that selected one. A third supply beside
+    // the two above, and a different kind of thing: those are a device this boot
+    // found, and this is a fact about the machine — the bytes the frame folded to
+    // decide it is the generation it was asked to be. RFC 0094.
+    //
+    // `Shown` and not `Cached`: read-only, because a component that could write
+    // this could rewrite the generation it was measured from, and never zeroed,
+    // because the bytes are the point rather than memory the occupant owns.
+    //
+    // Rounded up to whole pages, because a mapping is pages. The component is
+    // told the module's real length on its board and reads that; the rounding is
+    // the frame's business and reaches nothing above it.
+    let supplied = {
+        let mut all = [component::Supplied {
+            component: b"",
+            name: b"",
+            at: 0,
+            bytes: 0,
+            map: component::Placement::Unmapped,
+        }; 3];
+        let [first, second] = supplied;
+        all[0] = first;
+        all[1] = second;
+        if let Some((at, bytes, _)) = generation {
+            all[2] = component::Supplied {
+                component: b"supervisor",
+                name: b"module",
+                at,
+                bytes: bytes.div_ceil(mem::FRAME_SIZE) * mem::FRAME_SIZE,
+                map: component::Placement::Shown(process::SPAWN_MODULE),
+            };
+        }
+        all
+    };
     // E1-B05's third act, and it is `Some` on exactly one parameter. A client
     // the frame runs against the place's occupant *while* that occupant holds a
     // core, from inside `demonstrate`, because a place does not outlive it —
@@ -1044,6 +1086,7 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             &supplied,
             &routing,
             serving,
+            generation.map(|(_, bytes, root)| component::Generation { bytes, root }),
         )
     } {
         Ok(report) => kprintln!(

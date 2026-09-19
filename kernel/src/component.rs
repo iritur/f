@@ -1042,10 +1042,11 @@ pub struct Report {
 #[expect(
     clippy::too_many_arguments,
     reason = "`fill` one function down makes this argument at length and this is that list \
-              plus the four the demonstration itself needs: the core an occupant may be \
+              plus the five the demonstration itself needs: the core an occupant may be \
               given, what this boot found that a place cannot carve for itself, what it \
               found that only the frame can tell that occupant, and the client that occupant \
-              is to be given something to answer. Bundling them \
+              is to be given something to answer, and the generation this machine was asked to be. \
+              Bundling them \
               would be a type that exists so a lint passes, which `runtime::demonstrate` \
               already declined for this reason"
 )]
@@ -1060,6 +1061,7 @@ pub unsafe fn demonstrate(
     supplied: &[Supplied],
     routing: &[(u32, u64)],
     datapath: Option<&mut dyn Datapath>,
+    generation: Option<Generation>,
 ) -> Result<Report, Failure> {
     // SAFETY: the caller's guarantee that the direct map is live and covers
     // every module.
@@ -1410,6 +1412,7 @@ pub unsafe fn demonstrate(
             // could ever be attributed to.
             let watches = watch(occupant, frames)?;
             let mut asking = Consulting {
+                generation,
                 frames,
                 kernel,
                 features,
@@ -1432,6 +1435,17 @@ pub unsafe fn demonstrate(
             consulted.death,
         );
         supervised_line(&consulted, u32::from(open.place.occupant.is_some()));
+        // What it made of the generation, on the one boot in this file that
+        // shows it one. Read after the core came back, off the far half of the
+        // same page the frame wrote the root onto.
+        if let Some(occupant) = extra.place.occupant.as_ref() {
+            // SAFETY: the core reported finished — `consult` waits for it — and
+            // the page is still mapped; an address space is torn down by
+            // `tear_down` and not here.
+            if let Some((digest, counts)) = unsafe { read_assembled(occupant) } {
+                assembled_line(digest, counts);
+            }
+        }
 
         // The spawn the *supervisor* made, recorded on this side. Everything
         // below is what `fill` does after its own spawn and for the same
@@ -1867,6 +1881,7 @@ pub unsafe fn demonstrate(
         publish_only(&mut extra.place, &mut supervisor, &ledger_ring, &mut report)?;
         let occupant = extra.place.occupant.as_mut().ok_or(Failure::WrongPlace)?;
         let mut asking = Consulting {
+            generation,
             frames,
             kernel,
             features,
@@ -2383,6 +2398,54 @@ pub enum Placement {
     /// register window, where a stale read is a wrong answer about hardware
     /// state rather than a slow one.
     Uncached(u64),
+    /// Mapped **read-only** at a fixed user address, and never zeroed.
+    ///
+    /// The frame *showing* a component something rather than giving it
+    /// something, and the two halves of that sentence are the two ways this
+    /// differs from [`Placement::Cached`].
+    ///
+    /// **Read-only**, because the one thing shown this way is the boot module,
+    /// and a component that could write it could rewrite the generation it was
+    /// measured from — at which point `kernel/src/measure.rs` is attesting to
+    /// bytes that have since changed. `UserPage::ReadOnly` exists for exactly
+    /// this: a rights bitmap the mapping cannot express is a rights bitmap that
+    /// is not enforced.
+    ///
+    /// **Never zeroed**, because the bytes are the point. Every other supplied
+    /// need is memory, and memory handed to a new occupant is zeroed so that
+    /// *nothing carried over* stays true across a restart — which is what
+    /// `E1-P06` found by being refused. A generation is not memory the occupant
+    /// owns; it is a fact about the machine, and a fact blanked between
+    /// occupants would be a supervisor told nothing about the topology it is
+    /// part of. RFC 0094.
+    Shown(u64),
+}
+
+/// The generation this machine was asked to be, for the component that
+/// instantiates it.
+///
+/// Three facts and no bytes: where the boot module was supplied at, how long it
+/// is, and the root it folds to. The frame holds all three already — it folded
+/// the module to decide whether this machine is the generation `f.root=` named —
+/// and until RFC 0094 it printed a line and let them go.
+///
+/// **The root is on the board and not recomputed by the reader**, which is the
+/// whole of why it is carried. `f_assembler::Assembly::instantiate` refolds the
+/// module and compares; a component that folded the module to get the root it
+/// then compared against would be checking the bytes against themselves.
+#[derive(Clone, Copy)]
+pub struct Generation {
+    /// How long the module is — its own length, not the extent it was mapped
+    /// over.
+    ///
+    /// The two differ because a mapping is pages and a module is bytes. A reader
+    /// given the mapped extent would read past the module into whatever the
+    /// loader put after it, and `f_abi::boot::Module::read` would refuse — a
+    /// refusal that is correct and says nothing about why.
+    /// Unit: bytes.
+    pub bytes: u64,
+    /// What it folds to. Unit: none — a SHA-256.
+    pub root: [u8; 32],
 }
 
 /// Build a place from one component file, stake it with an account its own
@@ -2620,6 +2683,47 @@ fn served_line(what: Name<'_>, served: Option<(u64, u64, u64)>) {
     }
 }
 
+/// What the supervisor made of the generation it was shown, read back off its
+/// board.
+///
+/// **The component's account and not the frame's**, which is the same pairing
+/// every other line in this file makes. The frame wrote the module's extent and
+/// its root onto that page; this is what came back — a digest over the topology
+/// the component assembled, and five counts of what it did with it.
+///
+/// `None` for a board with no digest on it, which is every boot that selected no
+/// generation and every boot whose supervisor was refused before it got that far.
+/// Zero is a real digest and would be indistinguishable from *there was none*,
+/// so the test is the counts rather than the hash: a run that produced nothing
+/// started nothing, skipped nothing and refused nothing.
+unsafe fn read_assembled(occupant: &Instance) -> Option<(u64, [u64; 6])> {
+    if occupant.board == 0 {
+        return None;
+    }
+    use f_supervisor::routing::at;
+    // SAFETY: the caller's guarantee.
+    let page =
+        unsafe { core::slice::from_raw_parts(occupant.board as *const u8, FRAME_SIZE as usize) };
+    let get = |offset: u32| -> u64 {
+        let start = offset as usize;
+        page.get(start..start + 8)
+            .and_then(|slot| slot.try_into().ok())
+            .map_or(0, u64::from_le_bytes)
+    };
+    let counts = [
+        get(at::STARTED),
+        get(at::FAILED),
+        get(at::ABSENT),
+        get(at::UNSTARTED),
+        get(at::SKIPPED),
+        get(at::REFUSAL),
+    ];
+    if counts.iter().all(|count| *count == 0) {
+        return None;
+    }
+    Some((get(at::DIGEST), counts))
+}
+
 /// A place's occupant handed a core.
 ///
 /// A line of its own rather than a field on `supervisor ok`, because this is the
@@ -2796,6 +2900,14 @@ fn watch(occupant: &mut Instance, frames: &FrameAllocator) -> Result<Handle, Fai
 /// `occupant.board` must be the direct-map address of a frame this instance owns
 /// and nothing else references, and the core that will read it must not have
 /// been started yet.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "seven are what a consultation is made of — the allocator, the occupant, the place \
+              it is about, the account it may spend, the table the grants land in, the endpoint \
+              it watches and the tick it is stamped with — and the eighth is the generation this \
+              machine was asked to be. A struct would be a type that exists so that a lint passes, \
+              unpacked at the only call site there is"
+)]
 unsafe fn write_board(
     frames: &FrameAllocator,
     occupant: &mut Instance,
@@ -2804,6 +2916,7 @@ unsafe fn write_board(
     supervisor: &Table,
     watches: Handle,
     now: u64,
+    generation: Option<Generation>,
 ) -> Result<(), Failure> {
     use f_supervisor::routing::at;
 
@@ -2881,6 +2994,27 @@ unsafe fn write_board(
     // says so beside the field.
     put(at::ROW + at::ROW_USED, u64::from(target.budget.used));
     put(at::ROW + at::ROW_OPENED, target.budget.opened);
+    // The generation, where this boot selected one. RFC 0094: the frame folded
+    // these bytes to decide whether this machine is the generation `f.root=`
+    // named, and the component that instantiates the topology needs the same
+    // three facts — where, how long, and what it folds to.
+    //
+    // Written whether or not the occupant declared a `module` need. A supervisor
+    // with no need has nothing mapped at `at`, and reads a length beside an
+    // address it cannot reach; what stops it acting on that is its own
+    // `module_len == 0` test, not the frame withholding the number. The frame
+    // saying less than it knows is how a component comes to guess.
+    if let Some(generation) = generation {
+        // The *component's* address, which is a constant, and not
+        // `generation.at`, which is the frame's. The two name the same bytes
+        // through two page tables and a board carrying the wrong one would be a
+        // component told to read the direct map.
+        put(at::MODULE_AT, crate::process::SPAWN_MODULE);
+        put(at::MODULE_LEN, generation.bytes);
+        for (index, chunk) in generation.root.as_chunks::<8>().0.iter().enumerate() {
+            put(at::ROOT + index as u32 * 8, u64::from_le_bytes(*chunk));
+        }
+    }
     // Last, so that a component reading a page this function did not finish
     // finds a zero rather than a plausible layout. Nothing here races — the core
     // is idle until `run_on` — and the order is kept anyway, because the day
@@ -3001,6 +3135,9 @@ struct Consulted {
 /// are about *this* consultation (which place, which tally) were lost among the
 /// ten that are about the machine.
 struct Consulting<'a> {
+    /// The generation this machine is, for the board. `None` on a boot that
+    /// selected none, which is every boot with no `f.root=`.
+    generation: Option<Generation>,
     /// Where the frames a spawn charges come from.
     frames: &'a mut FrameAllocator,
     /// The kernel's address space, which a new instance's tables are built
@@ -3661,8 +3798,16 @@ unsafe fn consult(
     watches: Handle,
     now: u64,
 ) -> Result<Consulted, Failure> {
-    let Consulting { frames, kernel, features, supervisor, reservations, on: (cpu, tsc_khz) } =
-        asking;
+    let Consulting {
+        generation,
+        frames,
+        kernel,
+        features,
+        supervisor,
+        reservations,
+        on: (cpu, tsc_khz),
+    } = asking;
+    let generation = *generation;
     let (features, cpu, tsc_khz) = (*features, *cpu, *tsc_khz);
     // Everything the component needs to know that is not a constant: its ring,
     // the account it may spend, the place it may act on, and the tally the frame
@@ -3671,7 +3816,9 @@ unsafe fn consult(
     // SAFETY: `occupant.board` is a frame this frame allocated for this instance
     // and mapped into its address space and nobody else's; the direct map covers
     // it and the core that will read it is idle.
-    unsafe { write_board(frames, occupant, target, account, supervisor, watches, now) }?;
+    unsafe {
+        write_board(frames, occupant, target, account, supervisor, watches, now, generation)
+    }?;
 
     // What the supervisor holds at the moment it is started, kept for the server
     // below to resolve its entries against. Taken here — after the grants above
@@ -3767,6 +3914,33 @@ fn serve(asks: &Consumer, answers: &Poster, serving: &mut Serving) -> Result<(u3
 /// own account of itself out of its board. A boot where they disagree has a
 /// supervisor that cannot see its own ring or a frame that answered something
 /// nobody asked — and a line carrying only one of them could not tell you which.
+/// What the supervisor assembled, and what it did with it.
+///
+/// **`E2-B05`'s exit, as a line a boot prints.** That task's first clause is
+/// *boot is a pure function of one hash — the same root produces a byte-identical
+/// topology*, and it has been demonstrated since E2 over an assembly built on a
+/// host. What it was not was a property of a *boot*: nothing on the machine
+/// instantiated anything, and `user/assembler`'s own module head said so.
+///
+/// The digest is `f_assembler::render::digest` over the topology the component
+/// assembled — its decisions, not its input. A digest over the module would be
+/// the module's own hash arriving by a longer route, which is the comparison
+/// `user/assembler/src/render.rs` spends a page refusing.
+///
+/// Skipped is printed beside started and never folded into it. The frame holds
+/// one place open and fills the rest itself, so most of a six-member topology is
+/// a member this component correctly did not try — and a count that summed the
+/// two would make a boot that started nothing look like a boot that started
+/// everything.
+fn assembled_line(digest: u64, counts: [u64; 6]) {
+    let [started, failed, absent, unstarted, skipped, refusal] = counts;
+    crate::kprintln!(
+        "  assembled     topology {digest:#018x} — {started} started, {failed} failed, \
+         {absent} with no device, {unstarted} left unstarted behind one, {skipped} skipped \
+         as already filled by the frame; refusal {refusal}"
+    );
+}
+
 fn supervised_line(consulted: &Consulted, filled: u32) {
     crate::kprintln!(
         "  supervised    told of {} death(s); decided {}; submitted {} spawn(s) from ring 3 and \
@@ -4312,6 +4486,9 @@ unsafe fn spawn(
         {
             let (at, kind) = match item.map {
                 Placement::Unmapped => (0, UserPage::Data),
+                // Not zeroed, and the arm is above `Cached` so that a reader
+                // looking for the exception finds it before the rule.
+                Placement::Shown(at) => (at, UserPage::ReadOnly),
                 Placement::Cached(at) => {
                     // **Zeroed, because a new occupant inherits nothing.** That
                     // is what the restart line says in as many words — *nothing
@@ -4784,10 +4961,24 @@ fn offer(
         // the call site: the manifest is the contract, and a caller that
         // supplied the wrong size would otherwise produce a driver whose device
         // window stops halfway.
+        //
+        // **A least and not an equality**, which is what [`least_extent`] is
+        // called and what `check_needs` has always compared. This read `!=`
+        // until RFC 0094, and the comment above is the argument for `<`: a
+        // window that stops halfway is a supply that is *too small*, and a
+        // supply larger than the manifest asks for stops nothing. What made the
+        // difference matter is a need whose size the component cannot know in
+        // advance — the boot module is as large as the topology it contains, so
+        // a manifest declaring its exact size would be a manifest rewritten by
+        // every change to any component in the generation.
+        //
+        // The component is told the real extent on its board. A manifest's
+        // number is what the account is sized against and what a spawn is
+        // refused under; it was never the number the component reads.
         let given =
             supplied.iter().find(|item| item.component == record.label() && named(need, item.name));
         if let Some(item) = given {
-            if item.bytes != least_extent(need) {
+            if item.bytes < least_extent(need) {
                 return Err(Failure::Manifest(Refusal::Value));
             }
             let handle = grant_into(supervisor, frames, kind, held, item.at, item.bytes)?;

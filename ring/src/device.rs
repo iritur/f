@@ -664,6 +664,31 @@ impl Granted {
         // cannot outlive the binding the contract is about.
         unsafe { core::slice::from_raw_parts_mut(self.base, self.len as usize) }
     }
+
+    /// The bytes, to read.
+    ///
+    /// The shared half of [`Self::bytes_mut`], and it exists because a region
+    /// the frame granted is not always one the component may write. RFC 0094's
+    /// `module` need is mapped `UserPage::ReadOnly` — a component that could
+    /// write the generation it was measured from could rewrite what the
+    /// attestation attested to — so `bytes_mut` over it would be a `&mut [u8]`
+    /// pointing at pages the processor faults on.
+    ///
+    /// Nothing here checks that. The mapping does, which is the point of having
+    /// the rights expressible in it: this function is the one a reader of
+    /// read-only memory reaches for, and taking `&self` is what makes reaching
+    /// for the other one a compile error where the binding is not `mut`.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        // SAFETY: `at`'s contract supplies every obligation and this function
+        // adds none. `base` names `len` mapped bytes the frame granted this
+        // component, no device is attached to them so nothing outside this
+        // address space writes them, alignment is one and is therefore
+        // satisfied, and `&self` means no mutable reference derived from this
+        // value is live. The slice borrows `self` for its own lifetime, so it
+        // cannot outlive the binding the contract is about.
+        unsafe { core::slice::from_raw_parts(self.base, self.len as usize) }
+    }
 }
 
 #[cfg(test)]
