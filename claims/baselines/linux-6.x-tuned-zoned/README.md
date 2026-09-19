@@ -191,13 +191,21 @@ could not reach `static.crates.io` until the registry volume was seeded from an
 already-warm one. An image build needs the base image, `apt` and `rustup`, and
 none of the three is reachable from here.
 
-**And the device would still not be free after that.** `device.conf` records the
-question this could not settle: whether QEMU can synthesise a zoned virtio-blk
-from a plain file, or whether its zoned support is passthrough of a host zoned
-device only. On the second reading — which is what `backing = null_blk` assumes,
-because it is the route that works either way — the host needs
-`CONFIG_BLK_DEV_ZONED` and a privileged `modprobe null_blk zoned=1`. Under
-Docker Desktop that is the WSL2 kernel, and this container is not privileged.
+**And the device is still not free after that, which is now measured rather
+than assumed.** This paragraph used to record an open question — whether QEMU can
+synthesise a zoned virtio-blk from a plain file, or whether its zoned support is
+passthrough only. The development image moved to trixie for `E2-B02` and its
+QEMU is 10.0, so the question was put to it: `-device virtio-blk-pci,help` lists
+eighty properties and no `zone` among them, and `zoned=on` on a file-backed
+blockdev is refused as unexpected. **Passthrough, in the newest QEMU Debian
+ships, and the version was never the obstacle.**
+
+So `backing = null_blk` is the route rather than the hedge, and it costs a host
+kernel with `CONFIG_BLK_DEV_ZONED` *and* `CONFIG_BLK_DEV_NULL_BLK`, plus a
+privileged `modprobe null_blk zoned=1`. Under Docker Desktop that is the WSL2
+kernel, which reports the first set and the second unset — along with
+`CONFIG_BLK_DEV_ZONED_LOOP`, the other route, also unset — and this container is
+not privileged either way.
 
 **The other half has nothing to measure yet either, and this is the larger
 debt.** `ratio_vs_baseline` needs a numerator, and F has no boot that drives a
