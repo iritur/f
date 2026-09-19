@@ -3345,48 +3345,62 @@ fn heap_reading(log: &str) -> Result<(u32, u32, bool), String> {
 /// What it did not close is the sentence beside it, and the two are easy to
 /// read as one. `kernel/src/component.rs` builds a **place** for this manifest
 /// on every boot — an account, needs checked handle by handle, an endpoint
-/// clients hold, a restart policy — and never hands its occupant a core;
-/// `kernel/src/blk.rs` hands a core to an instance that is in no place. So the
-/// occupant a boot can kill is still not the occupant that serves a client's
-/// load, and *under sustained load* is still a sentence only the simulator
-/// makes true. The needle is the call that stands a driver up outside a place,
-/// and it goes when a supervisor spawns and schedules in one act — which is
-/// E1-B05's remaining half and RFC 0008's *restart is the supervisor's*.
-/// RFC 0041 states the shape of the gap; RFC 0047 states what is left of it.
+/// clients hold, a restart policy — and on the six halves that are gates, the
+/// instance a client's load goes through is not that place's occupant but one
+/// `kernel/src/blk.rs` stands up outside any place. So the occupant a boot can
+/// kill is still not the occupant that serves those halves' load, and *under
+/// sustained load* is still a sentence only the simulator makes true. The needle
+/// is the call that stands a driver up outside a place, and it goes when every
+/// half runs on the place path — which is `E1-P06`'s to demonstrate, now that
+/// `blk served` has shown the path exists. RFC 0041 states the shape of the gap;
+/// RFC 0047 states what is left of it.
 ///
 /// # What a datapath boot actually contains, measured rather than inferred
 ///
-/// **Two virtio-blk instances.** `component::demonstrate` builds a place for it
-/// — the boot prints `place virtio-blk: private, on_fault, 8 restart(s) in
-/// 60000 tick(s), 4194304 B account` — and never hands its occupant a core.
-/// `kernel/src/blk.rs` stands a second one up through `prepare_driver`, gives it
-/// a core, and that is the one a client's load goes through. The sentence above
-/// is exact, and this is what it looks like from the log.
+/// **Two virtio-blk instances, and which one serves is now a parameter.**
+/// `component::demonstrate` builds a place for it on every boot — the log prints
+/// `place virtio-blk: private, on_fault, 8 restart(s) in 60000 tick(s), 4194304
+/// B account`. `kernel/src/blk.rs` stands a second one up through
+/// `prepare_driver`, and on the three provocation halves and the three
+/// `deadline=` halves that second one is where a client's load goes.
 ///
-/// **So the work is not a third path.** It is making the place's occupant the
-/// one that serves, which needs three things and the first of them now exists:
+/// **The three things this needed all exist.** They are listed here because the
+/// list is what made the work one piece rather than three, and because the last
+/// of them is the one the row still turns on:
 ///
 /// 1. the place supplied with the device window and its queue memory — a need
 ///    the account cannot answer, because a device window is not memory the frame
 ///    may allocate or hand back. `Supplied` and `Placement` in
 ///    `kernel/src/component.rs` are that, and `offer` sources a named need from
 ///    the caller with the extent checked against the manifest;
-/// 2. that occupant scheduled on the worker core. This exists: `cargo xtask blk
-///    place` hands it one, tells it where its device landed on a routing board
-///    its manifest now declares a `board` need for, and the occupant reads the
-///    disk's capacity back out of the supplied window from ring 3. What is left
-///    is the word *concurrently* — that run is `schedule_occupant` followed by
-///    `run_on`, which waits, and a driver has to be running **while** its client
-///    submits. That is `smp::start_on`;
-/// 3. the boot's order, which is the part with the widest blast radius:
-///    `blk_datapath` runs at `main.rs`'s line 877 and `component::demonstrate`
-///    at 1005, so today the device is found long before the place exists. One of
-///    the two has to move, and moving either changes the order of every line in
-///    a log `cargo xtask trace` hashes.
+/// 2. that occupant scheduled on the worker core. `cargo xtask blk place` hands
+///    it one, tells it where its device landed on a routing board its manifest
+///    declares a `board` need for, and the occupant reads the disk's capacity
+///    back out of the supplied window from ring 3;
+/// 3. **that occupant serving a client concurrently.** `cargo xtask blk served`
+///    is that: `component::serve_ring3` posts the job, `smp::start_on` starts the
+///    core without waiting, the frame is the client on its own core, and
+///    `smp::join_serviced` answers the driver's translation requests for the
+///    whole of the join. The occupant's own tally comes back off the far half of
+///    its routing page — `answered 3 entr(ies) and moved 1024 B` — beside the
+///    frame's count of the translations it was asked for, which is a number no
+///    amount of moving bytes produces by accident.
 ///
-/// That third item is why this is one piece of work and not three, and why it
-/// belongs to `E1-B05` rather than beside it: a supervisor that spawns and
-/// schedules in one act is exactly a boot in which the place comes first.
+/// The boot's order turned out not to be the obstacle the third item was feared
+/// to be. `blk_datapath` still runs before `component::demonstrate`; what moved
+/// instead is the *client*, which now runs from **inside** `demonstrate` through
+/// `component::Datapath`, because a place does not outlive that function and
+/// there is therefore no *after* in which a served datapath could happen.
+///
+/// # So why the row is still here
+///
+/// Because the gate has not moved. `cargo xtask blk` with no argument runs
+/// `BLK_PROVOCATIONS`, all three of which stand an instance up through
+/// `prepare_driver`, as do the three `deadline=` halves — so the occupant a boot
+/// can kill is still not the occupant those six halves' load goes through, and
+/// *under sustained load* is still a sentence only the simulator makes true.
+/// `blk served` is deliberately outside the table until it survives three kills,
+/// which is `E1-P06`.
 ///
 /// *Reversal:* when `prepare_driver(` leaves `kernel/src/blk.rs`, this row goes
 /// and `cargo xtask chaos` says so.
@@ -10006,9 +10020,9 @@ fn blk_place() -> Result<(), String> {
     println!(
         "\nblk=place: ok — the place holds a real device window, supplied rather than carved,\n\
          \x20 and its occupant read {sectors} sector(s) of capacity back out of it from ring 3.\n\
-         \x20 What it does not yet do is serve a client from there, which needs the driver\n\
-         \x20 running concurrently with one — so `CHAOS_GAP` keeps its row and the other\n\
-         \x20 three halves still run on `prepare_driver`."
+         \x20 What this half does not do is serve a client from there — that is\n\
+         \x20 `cargo xtask blk served`, one act on — so `CHAOS_GAP` keeps its row and the\n\
+         \x20 other three halves still run on `prepare_driver`."
     );
     Ok(())
 }
@@ -10183,9 +10197,11 @@ const BLK_PROVOCATIONS: &[(&str, &str)] = &[
 /// putting it in the default set would either fail the gate or — worse — pass
 /// it while asserting less than the other three do.
 ///
-/// It leaves the table on the day it serves a client and survives three kills,
-/// which is also the day `CHAOS_GAP`'s last row goes. Until then the existing
-/// halves keep running on `prepare_driver` and nothing about them has moved.
+/// It leaves the table on the day it serves a client and survives three kills.
+/// The first half of that sentence is [`BLK_SERVED`], one act on; the second is
+/// `E1-P06`, and it is also the day `CHAOS_GAP`'s last row goes. Until then the
+/// existing halves keep running on `prepare_driver` and nothing about them has
+/// moved.
 const BLK_PLACE: &str = "place";
 
 /// The half above it, one act on. Also **not** in [`BLK_PROVOCATIONS`], and

@@ -233,9 +233,23 @@ which is the mechanism working rather than failing.
 
 So the condition below should be read as: **when the last row of `CHAOS_GAP`
 goes**, not when one particular call does. The current row is `prepare_driver(`,
-and what removes it is a supervisor that spawns *and schedules* in one act, so
-that the occupant a boot can kill is the occupant serving the datapath. That is
-`E1-B05`'s remaining half and RFC 0008's *restart is the supervisor's*.
+and what removes it is every datapath half running against a place's occupant.
+
+That is narrower than it was when this section was written, and the narrowing is
+worth recording because it is the second time this row has shrunk without going
+away. This paragraph used to say what removes the row is *a supervisor that
+spawns and schedules in one act* — and that now exists: `cargo xtask blk served`
+supplies a place with a device window, maps its occupant a data ring out of its
+own account, hands it a core without waiting for it, and has the frame submit to
+it from inside `component::demonstrate`, because a place does not outlive that
+function. The occupant answers, and its own count of what it answered is read
+back off its routing page rather than taken from the frame's word for it.
+
+What keeps the row is the *gate*: six halves — `blk=inside`, `outside`, `escape`
+and the three `deadline=` halves — still stand an instance up outside any place,
+so the occupant those halves can kill is not the occupant their load goes
+through. Moving them is `E1-P06`'s, and RFC 0008's *restart is the supervisor's*
+is still the sentence behind it.
 
 What this does not change: the decision, the two halves, or the claim that
 neither half claims the other's. `E1-P06`'s own entry already records the

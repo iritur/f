@@ -47,31 +47,43 @@
 //! supervisor says so, and this one ends on a `STOP` notice drained at the same
 //! polling point as everything else — R05, there is no second path in.
 //!
-//! # What it does *not* do, said rather than implied
+//! # Which instance serves, and on which boot
 //!
-//! The instance that serves is not the occupant of the place
-//! `kernel/src/component.rs` builds for it. The frame stands the serving one up
-//! the way `kernel/src/runtime.rs` stands a runtime up — image, account-less,
-//! needs unchecked — and points a client at it.
+//! Two, and which one a boot uses is a parameter rather than a design. On the
+//! three `blk=` provocation halves and the three `deadline=` halves, the frame
+//! stands the serving instance up the way `kernel/src/runtime.rs` stands a
+//! runtime up — image, account-less, needs unchecked — and points a client at
+//! it. On `blk=place` and `blk=served` the instance is the occupant of the place
+//! `kernel/src/component.rs` builds from this manifest, and the difference
+//! between those two is the life it is entered at.
 //!
-//! The place's occupant is no longer idle, though, and the difference is worth
-//! keeping exact. On the `blk=place` half that place is supplied with the
-//! device window it cannot carve, told where the device's four register
-//! structures are on the routing page its manifest now declares a `board` need
-//! for, and handed a core: it enters at [`start`] with
-//! [`crate::routing::life::IDENTIFY`], reads the disk's capacity out of the
-//! device's own configuration structure, writes it back onto the board, and
-//! ends.
+//! `blk=place` supplies that place with the device window it cannot carve, tells
+//! it where the device's four register structures are on the routing page its
+//! manifest declares a `board` need for, and hands it a core to *read* with: it
+//! enters at [`start`] with [`crate::routing::life::IDENTIFY`], reads the disk's
+//! capacity out of the device's own configuration structure, writes it back onto
+//! the board, and ends.
 //!
-//! What it does not do is serve, and what is missing is now one thing rather
-//! than two: serving means running *while* a client submits, which is
-//! `smp::start_on` and not the run-to-completion the frame uses there.
+//! `blk=served` supplies the same place, fills in all twenty-eight routing slots
+//! rather than the twelve an identify life reads, maps it a data ring out of its
+//! own account from the `data` need this manifest declares, and enters it at
+//! [`crate::routing::life::SERVE`] on a core the frame does **not** wait for.
+//! The frame is the client on its own core for the length of that run, and
+//! answers this component's translation requests on the control ring while it
+//! waits — `smp::start_on` and `smp::join_serviced`, which is what *serving*
+//! means and what the run-to-completion path could not do.
 //!
-//! So the sentence this component supports is *the code that serves the
-//! datapath runs at ring 3 in its own loop*, plus *a place's occupant reads the
-//! device through the window its place was supplied with*, and not yet *the
-//! occupant of a place serves the datapath*. `CHAOS_GAP` in xtask is what
-//! carries the difference, and it names what is left.
+//! # What that leaves, said rather than implied
+//!
+//! So all three of the sentences `CHAOS_GAP` names are supported by this
+//! component: *the code that serves the datapath runs at ring 3 in its own
+//! loop*, *a place's occupant reads the device through the window its place was
+//! supplied with*, and *the occupant of a place serves a client concurrently*.
+//! What is not yet true is the sentence about the *gate*: `cargo xtask blk` with
+//! no argument still runs its three halves on the account-less instance, and
+//! `CHAOS_GAP`'s needle is the call that stands that one up. It goes when the
+//! provocations move onto the place path and survive being killed there, which
+//! is `E1-P06`.
 
 use f_abi::control::{is_notice, notice};
 use f_abi::deadline::Admitted;
