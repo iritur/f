@@ -1003,11 +1003,29 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // device is behind its own parameter.
     //
     let mut queues = None;
+    let mut owned = None;
     // SAFETY: the boot processor, with the kernel's space in `CR3`; `remapping`
     // is this boot's own unit and nothing else is walking the bus, so the device
     // lookup inside is the only one this boot makes.
-    let (supplied, routing) =
-        unsafe { blk_place_supply(&boot, &mut frames, &space, features, &remapping, &mut queues) };
+    let (supplied, routing, mut placed) = unsafe {
+        blk_place_supply(
+            &boot,
+            &mut frames,
+            &space,
+            features,
+            remapping.as_mut(),
+            &mut queues,
+            &mut owned,
+            clocks.tsc_khz,
+        )
+    };
+    // E1-B05's third act, and it is `Some` on exactly one parameter. A client
+    // the frame runs against the place's occupant *while* that occupant holds a
+    // core, from inside `demonstrate`, because a place does not outlive it —
+    // the tail of that function tears every place down and then compares free
+    // counts, so there is no *after* in which a served datapath could happen.
+    let serving: Option<&mut dyn component::Datapath> =
+        placed.as_mut().map(|client| client as &mut dyn component::Datapath);
     // SAFETY: the boot processor, once, with the kernel's address space in
     // `CR3`, `frames` rebound onto its direct map, and no process running. The
     // direct map covers every module: `reserved_ranges` put them all in the
@@ -1025,6 +1043,7 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             occupant_core,
             &supplied,
             &routing,
+            serving,
         )
     } {
         Ok(report) => kprintln!(
@@ -1065,6 +1084,36 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         }
     }
 
+    // The device's domain, given back now that the demonstration has counted its
+    // frames. `blk::Placed::tear_down` says why it is here and not inside.
+    if let Some(client) = placed.as_mut() {
+        // SAFETY: the boot processor; `demonstrate` has returned, so no core is
+        // inside the occupant this served, and nothing else drives the device.
+        unsafe { client.tear_down(&mut frames) };
+    }
+
+    // What the frame saw from the near side of that boundary, printed beside
+    // what the occupant said about itself. The pair is the whole point: the
+    // component's line is the one that cannot be faked by the frame, and this
+    // one is the one the component cannot fake.
+    if let Some(client) = placed.as_ref().and_then(blk::Placed::served) {
+        kprintln!(
+            "  blk client    the frame registered its page at {:#018x} in the device's address \
+             space, {} translation(s) answered on the occupant's control ring, read back what it \
+             wrote: {}; a registration without GRANT was refused: {}",
+            client.registered_at,
+            client.answered,
+            client.matched,
+            client.refused_without_grant,
+        );
+        if !client.matched || !client.refused_without_grant || client.answered == 0 {
+            kprintln!(
+                "FAIL: the place's occupant served a client and the client did not get back what \
+                 it put in, or was never asked for a translation"
+            );
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    }
     // Last of the frame's own numbers, because the allocator is still handing
     // out frames until the line above. The self-test is what says the hash
     // works: two readings with nothing in between must agree, and a reading
@@ -2990,15 +3039,25 @@ fn objects_datapath(
 ///
 /// The boot processor, with the kernel's address space in `CR3`, and
 /// `remapping` this boot's own unit with nothing else walking the bus.
-unsafe fn blk_place_supply(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "four are what every boot-path function here takes — the modules, the allocator, the \
+              address space and its features — and the other four are this one's subject: the unit \
+              the device is isolated behind, the two frames it hands back so the boot can hold \
+              them, and the counter rate a client bounds its waits by. A struct would be a type \
+              that exists so that a lint passes"
+)]
+unsafe fn blk_place_supply<'a>(
     boot: &BootInfo,
     frames: &mut mem::FrameAllocator,
     space: &paging::AddressSpace,
     features: paging::Features,
-    remapping: &Option<Remapping>,
+    remapping: Option<&'a mut Remapping>,
     queues: &mut Option<mem::Frame>,
-) -> ([component::Supplied; 2], [(u32, u64); ROUTED]) {
-    const NONE: ([component::Supplied; 2], [(u32, u64); ROUTED]) = (
+    owned: &mut Option<mem::Frame>,
+    tsc_khz: u64,
+) -> ([component::Supplied; 2], [(u32, u64); blk::ROUTED], Option<blk::Placed<'a>>) {
+    const NONE: ([component::Supplied; 2], [(u32, u64); blk::ROUTED], Option<blk::Placed<'_>>) = (
         [component::Supplied {
             component: b"",
             name: b"",
@@ -3006,10 +3065,17 @@ unsafe fn blk_place_supply(
             bytes: 0,
             map: component::Placement::Unmapped,
         }; 2],
-        [(0, 0); ROUTED],
+        [(0, 0); blk::ROUTED],
+        None,
     );
 
-    if !boot.has_parameter(b"blk=place") {
+    // Two parameters and one path. `blk=place` stops at the identify life;
+    // `blk=served` goes on to give that same occupant a client. They are
+    // separate words rather than one with an argument because
+    // `BootInfo::has_parameter` is a substring search, so a name that contained
+    // the other would answer true for both and silently take the shorter path.
+    let serving = boot.has_parameter(b"blk=served");
+    if !boot.has_parameter(b"blk=place") && !serving {
         return NONE;
     }
     let Some(found) = remapping else {
@@ -3056,6 +3122,20 @@ unsafe fn blk_place_supply(
         arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
     };
     *queues = Some(region);
+    // The client's page, on a boot that brought a client. One frame, which the
+    // device transfers into and out of and which the driver never holds: the
+    // whole of RFC 0024's zero-copy claim is that these bytes are the client's
+    // and are reached by the device rather than by the server.
+    let client_page = if serving {
+        let Some(page) = frames.alloc_zeroed(mem::Order::FRAME) else {
+            kprintln!("FAIL: blk=served could not allocate the client's page");
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        };
+        *owned = Some(page);
+        Some(page)
+    } else {
+        None
+    };
 
     kprintln!(
         "  blk place     registers {:#018x} over {} page(s), queues {:#018x} over {} B — \
@@ -3065,6 +3145,34 @@ unsafe fn blk_place_supply(
         region.addr(),
         declared.bytes,
     );
+
+    // The client, where there is one, and with it the device address the queue
+    // region landed at. Standing it up *here* rather than after `demonstrate`
+    // has started anything is what makes `QUEUES_DEVICE_AT` a fact on the page
+    // before the occupant can read it — and attaching the device to a domain
+    // before bus mastering is what stops it addressing memory nobody gave it.
+    let (placed, queues_device_at) = match client_page {
+        Some(page) => {
+            // SAFETY: the boot processor with the kernel's space in `CR3`; the
+            // two frames were allocated above and handed to nobody, and nothing
+            // else in this kernel is driving the device this boot found — the
+            // other datapath stages run on different parameters and this
+            // function has already returned if none of them asked for this one.
+            let stood = unsafe {
+                blk::Placed::stand_up(&mut found.unit, frames, device, region, page, tsc_khz)
+            };
+            match stood {
+                Ok((placed, at)) => (Some(placed), at),
+                Err(why) => {
+                    kprintln!("FAIL: blk=served could not stand its client up: {}", why.message());
+                    arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+                }
+            }
+        }
+        // No client, no domain and no attach: `blk=place` is exactly the boot it
+        // was, and a zero here is a slot the identify life does not read.
+        None => (None, 0),
+    };
 
     // The page the occupant is told on. `MAGIC` is last and the writer keeps the
     // order, because a component reads the magic first and believes nothing
@@ -3083,6 +3191,36 @@ unsafe fn blk_place_supply(
         (at::CONFIG_OFFSET, u64::from(each[3].0)),
         (at::CONFIG_LEN, u64::from(each[3].1)),
         (at::NOTIFY_MULTIPLIER, u64::from(device.notify_multiplier)),
+        // What a serving life reads and an identify life does not. Every value
+        // is `kernel/src/blk.rs`'s for the instance it stands up outside a
+        // place, because two answers to one question is how the two instances
+        // would come to disagree about the same device.
+        (at::QUEUES_AT, process::BLK_QUEUES),
+        (at::QUEUES_DEVICE_AT, queues_device_at),
+        (at::QUEUES_LEN, declared.bytes),
+        (at::CONTROL_AT, process::SPAWN_CONTROL),
+        (at::CONTROL_LEN, mem::FRAME_SIZE),
+        (at::DATA_AT, process::BLK_DATA),
+        (at::DATA_LEN, mem::FRAME_SIZE),
+        (at::NEGOTIATED_VERSION, u64::from(f_abi::ABI_VERSION)),
+        (at::NEGOTIATED_FEATURES, 0),
+        // Nothing beyond what it was answered. `BEYOND` is the escape half's
+        // provocation and this is not it.
+        (at::BEYOND, 0),
+        // By arrival, which is what a half that submits one request at a time
+        // means: `E1-B06`'s deadline ordering is exercised by `cargo xtask
+        // deadline` on the `prepare_driver` path and is not what this act is
+        // about.
+        (at::ORDERING, 0),
+        // The two ceilings, written explicitly and never left to fall out of a
+        // zeroed page. Zero is `class::HARD` rather than a refusal, so a
+        // forgotten slot here would be a driver quietly serving at the wrong
+        // ceiling instead of a component saying `BAD_ROUTING`.
+        (at::ADMITTED, u64::from(declared.admitted)),
+        (at::CLIENT_ADMITTED, u64::from(f_abi::class::HARD)),
+        (at::FLOOR, blk::FLOOR_NS),
+        (at::HOLD, 0),
+        (at::HOLD_AFTER, 0),
         (at::MAGIC, f_virtio_blk::routing::MAGIC),
     ];
 
@@ -3104,18 +3242,9 @@ unsafe fn blk_place_supply(
             },
         ],
         routing,
+        placed,
     )
 }
-
-/// How many slots `blk=place` writes onto a driver occupant's routing page.
-///
-/// A length rather than a slice, because the array is built on a stack frame
-/// that outlives nothing: the caller hands a borrow of it straight to
-/// `component::demonstrate` and the page is written before the first core is
-/// given out. Twelve is the register span, the four structures' offsets and
-/// lengths, the notification stride, and the magic that is written last.
-/// Unit: slots.
-const ROUTED: usize = 12;
 
 fn blk_datapath(
     boot: &BootInfo,

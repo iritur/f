@@ -124,6 +124,35 @@ rights = ["read", "write"]
 from   = "supervisor"
 bytes  = 4_096
 
+# The data ring's page. One page, in which this component serves the one client
+# a boot gives it: the frame writes the header and this component adopts the
+# server end, which is `f_ring::adopt` and RFC 0037 — two ends of one region on
+# two sides of a privilege boundary.
+#
+# **Declared here for the `board` need's reason one entry up, at the next step
+# of the same story.** A place's occupant could be handed a core and told where
+# its device was; what it could not do was answer anybody, because the page its
+# client's entries arrive on was mapped by `prepare_driver` for the instance the
+# frame stands up outside any place and by nothing else. An occupant of a place
+# is built from its manifest, so a driver that is to serve from a place has to
+# say here that it serves.
+#
+# It is the ring's *memory* and not the ring's *protocol*: the `[[ring]]` table
+# below is what this component speaks and how many entries deep, and this is the
+# page it speaks on. The two are separate because a component may declare a ring
+# it is given a page for by a client rather than by its account, and the day one
+# does, this need goes and that table stays.
+#
+# Read and write and nothing else, the board's rights for the board's reason: a
+# ring handed on is a second component posting entries this one will answer as
+# if they were its client's.
+[[capability]]
+name   = "data"
+type   = "untyped"
+rights = ["read", "write"]
+from   = "supervisor"
+bytes  = 4_096
+
 # --- Rings: the control ring is implicit; this is the data ring ---------------
 
 # One server ring per client, up to eight clients, each speaking `blk` version

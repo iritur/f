@@ -894,8 +894,11 @@ cargo xtask <command>
                      unit: inside, which must land, or outside, which must
                      fault and land nothing. Both with no argument
   blk place          E1-B05: the driver's place, supplied with the device window
-                     it cannot carve, and its occupant given a core. Not in `blk`
-                     with no argument: it does not serve a client yet
+                     it cannot carve, and its occupant given a core to read it
+                     with. Not in `blk` with no argument: it serves no client
+  blk served         E1-B05's third act: that same occupant serving a client
+                     from ring 3 on its own core while the client submits. Not
+                     in `blk` with no argument: it has not survived a kill yet
   blk [half]         Boot the block datapath: a driver component moves a sector
                      through a ring with nothing copied — inside; the same run
                      with the client's grant withdrawn must fault — outside; and
@@ -10010,6 +10013,159 @@ fn blk_place() -> Result<(), String> {
     Ok(())
 }
 
+/// A place's occupant serves a client, from ring 3, on its own core, while the
+/// client submits.
+///
+/// **`E1-B05`'s third act, and the only half in this file where the two halves
+/// of one datapath are two different privilege levels of one *place*.** The
+/// other three provocations and the identify half above all leave one of those
+/// two things out: the provocations run a driver the frame stood up outside any
+/// place, and the identify half runs a place's occupant that answers nobody.
+///
+/// # What it asserts that `blk place` cannot
+///
+/// Four things, and each one is a different party's word:
+///
+/// 1. **the frame started a core and did not wait** — `scheduled     place
+///    virtio-blk on core N for life 1`, where life 1 is `routing::life::SERVE`
+///    and the life the identify half prints is 3. A boot that took the waiting
+///    path prints a different number here and nothing at all below;
+/// 2. **the occupant answered entries** — its own tally off the far half of its
+///    routing page, which the frame did not write. A client submitting into a
+///    ring nobody was reading produces an identical `scheduled` line and a zero
+///    here;
+/// 3. **the frame was asked for a translation** — counted on the frame's side of
+///    the boundary. It is the one thing a driver cannot do for itself, so a
+///    build in which that route had quietly stopped being used would still move
+///    bytes and would publish zero here. RFC 0047;
+/// 4. **the client read back what it wrote** — through a buffer the device
+///    reached directly, which is what makes the three counts above about a
+///    datapath rather than about a handshake.
+///
+/// # Why it is not in `BLK_PROVOCATIONS` either
+///
+/// For [`BLK_PLACE`]'s reason, one clause further on. That doc says this half
+/// leaves the table on the day it serves a client **and survives three kills**;
+/// this is the first half of that sentence and `E1-P06` is the second. A gate
+/// that adopted it now would be asserting a served datapath and calling it a
+/// restartable one.
+///
+/// # Errors
+///
+/// A sentence naming which of the four did not hold, and what to suspect.
+fn blk_served() -> Result<(), String> {
+    println!("--- blk=served: the occupant of that place serves a client while the client submits");
+    let disk = blk_disk()?;
+    let device = blk_device(&disk)?;
+    let borrowed: Vec<&str> = device.iter().map(String::as_str).collect();
+    let (ending, log) = machine_devices(
+        Some("blk=served"),
+        &[],
+        Capture::Printed,
+        BOOT_TIMEOUT,
+        BOOT_MEMORY,
+        &borrowed,
+        &[],
+    )?;
+    if ending != Ending::Exited(33) {
+        return Err(format!("the boot {ending}; expected exit 33"));
+    }
+    if !log.contains("blk place     registers") {
+        return Err("the boot reached M0 ok without saying it supplied the place.\n\n\
+             `blk_place_supply` prints one line naming the register span and the queue\n\
+             memory, and it is the first evidence this half produces. A boot that is green\n\
+             and silent here is one where `blk=served` was not read."
+            .into());
+    }
+    // Life 1 and not life 3, which is the whole difference between this half and
+    // the one above: `routing::life::SERVE` against `routing::life::IDENTIFY`.
+    let scheduled = "scheduled     place virtio-blk";
+    let serving = "for life 1";
+    let line = log.lines().find(|line| line.contains(scheduled));
+    match line {
+        None => {
+            return Err("the place was supplied and its occupant was never given a core.\n\n\
+                 `supplied_place` finds the place the supply names and `serve_ring3` hands\n\
+                 its occupant the worker core. A boot that printed the supply line and not\n\
+                 this one has a supply whose component label does not match any place's\n\
+                 manifest — or no second core, which this half does not run without."
+                .into());
+        }
+        Some(line) if !line.contains(serving) => {
+            return Err(format!(
+                "the occupant was given a core for the wrong life.\n\n\
+                 Expected `{serving}` — `f_virtio_blk::routing::life::SERVE` — and the boot\n\
+                 printed:\n\
+                 {}\n\n\
+                 Life 3 here means `component::demonstrate` took the `None` arm and waited\n\
+                 for the occupant instead of starting it beside a client, which is the\n\
+                 boot having been handed no datapath. Suspect `blk_place_supply`'s\n\
+                 `serving` test before anything in the component.",
+                line.trim_end(),
+            ));
+        }
+        Some(_) => {}
+    }
+    // The occupant's own account of what it answered. The frame did not write
+    // this number and cannot: it is read back off the far half of the routing
+    // page, under a magic the component writes last.
+    let served = log.lines().find(|line| line.contains("served        place virtio-blk"));
+    let Some(served) = served else {
+        return Err("the occupant ran on its own core and left no report on its board.\n\n\
+             `component::read_served` answers `None` for a page with no report magic on\n\
+             it, which is a component that did not reach the end of what it was asked —\n\
+             a different thing from one that reached it and answered nothing. Suspect\n\
+             the routing page: `laid_out` refuses a page missing any of its 28 slots and\n\
+             stops with `BAD_ROUTING` before it touches the device."
+            .into());
+    };
+    if served.contains("answered 0 entr") {
+        return Err(format!(
+            "the occupant served nothing, and the client submitted.\n\n\
+             {}\n\n\
+             This is the check the frame's own lines cannot make. A client submitting\n\
+             into a ring nobody was reading prints an identical `scheduled` line and this\n\
+             zero — so suspect the data ring before the device: `component::spawn` maps\n\
+             it at `process::BLK_DATA` from the manifest's `data` need, and\n\
+             `demonstrate` writes its header. A component whose manifest lost that need\n\
+             gets no page and adopts nothing.",
+            served.trim_end(),
+        ));
+    }
+    // The frame's own side of the same run, and the translation count is the one
+    // number on it that no amount of moving bytes can produce by accident.
+    let client = log.lines().find(|line| line.contains("blk client    the frame registered"));
+    let Some(client) = client else {
+        return Err("the occupant reported serving a client and the frame reported no client.\n\n\
+             `main` prints this line whenever `blk::Placed` ran, so a boot with the one\n\
+             above and not this one is a client that never returned — check for a FAIL\n\
+             line between them."
+            .into());
+    };
+    if client.contains("read back what it wrote: false") {
+        return Err(format!(
+            "the client did not read back what it wrote.\n\n\
+             {}\n\n\
+             The bytes crossed a real device and came back wrong, which is a datapath\n\
+             failure and not a plumbing one. The same comparison passes on the three\n\
+             `prepare_driver` halves, so suspect what is different here: the queue\n\
+             region's device address, which is the one routing slot `blk::Placed` computes\n\
+             and `blk=place` leaves at zero.",
+            client.trim_end(),
+        ));
+    }
+    println!(
+        "\nblk=served: ok — the occupant of a place, spawned from a manifest into an account\n\
+         \x20 with every need checked, held a device window it could not carve, ran at ring 3\n\
+         \x20 on a core of its own while the frame submitted to it, answered the frame's\n\
+         \x20 entries and asked the frame for the one translation it may not make itself.\n\
+         \x20 What it has not yet done is survive being killed under that load, which is\n\
+         \x20 `E1-P06` — so `CHAOS_GAP` keeps its row and the three provocation halves still\n\
+         \x20 run on `prepare_driver`."
+    );
+    Ok(())
+}
+
 const BLK_PROVOCATIONS: &[(&str, &str)] = &[
     ("inside", "the client's buffer stays in the driver's grant: the sector must come back"),
     ("outside", "it is taken back before the read: the transfer must fault, and nothing may land"),
@@ -10032,9 +10188,16 @@ const BLK_PROVOCATIONS: &[(&str, &str)] = &[
 /// halves keep running on `prepare_driver` and nothing about them has moved.
 const BLK_PLACE: &str = "place";
 
+/// The half above it, one act on. Also **not** in [`BLK_PROVOCATIONS`], and
+/// [`blk_served`] says why at length.
+const BLK_SERVED: &str = "served";
+
 fn blk(kind: Option<&str>) -> Result<(), String> {
     if kind == Some(BLK_PLACE) {
         return blk_place();
+    }
+    if kind == Some(BLK_SERVED) {
+        return blk_served();
     }
     let chosen: Vec<&(&str, &str)> = match kind {
         None => BLK_PROVOCATIONS.iter().collect(),
