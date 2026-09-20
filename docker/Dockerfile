@@ -321,9 +321,26 @@ RUN set -eux; \
 # rather than a checking job that silently verifies nothing — which is the
 # failure mode a verifier has and a compiler does not.
 #
-# *What would reverse this:* a Verus that needs a newer glibc than the base
-# carries, which is what took the Kani aarch64 case out on trixie. It would come
-# back as a number rather than as an architecture.
+# **x86-64 only, and the layer skips rather than fails.** Verus publishes
+# `arm64-macos`, `x86-linux`, `x86-macos` and `x86-win` — there is no
+# arm64-linux bundle — and the first cut of this made that absence fatal, which
+# took the `environment image (arm64)` job red with `no Verus bundle for
+# aarch64`. The image is built for both architectures and one checker not
+# existing for one of them is not a broken image, so the layer stands down and
+# says so.
+#
+# What it costs is stated rather than hidden: an arm64 `full` image has Kani and
+# not Verus, so a deductive proof cannot be run there. That is the same shape as
+# the Kani aarch64 guard this file used to carry, arrived at from the other
+# direction — and it is why `verus --version` below is asserted only where the
+# bundle was installed, because an assertion that cannot run is not an
+# assertion.
+#
+# *What would reverse this:* an arm64-linux release, at which point the `if`
+# becomes a `case` with two arms and the arm64 proof job stops being a gap. A
+# Verus needing a newer glibc than the base carries would reverse it the other
+# way, and would come back as a number rather than as an architecture — which
+# is what took the Kani aarch64 case out on trixie.
 ARG VERUS_VERSION=0.2026.09.13.671956e
 # The rustc Verus pins, installed beside this tree's and never instead of it.
 #
@@ -351,10 +368,11 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends unzip; \
     rm -rf /var/lib/apt/lists/*; \
-    case "$(uname -m)" in \
-      x86_64) asset="verus-${VERUS_VERSION#release/}-x86-linux.zip" ;; \
-      *) echo "no Verus bundle for $(uname -m)" >&2; exit 1 ;; \
-    esac; \
+    if [ "$(uname -m)" != "x86_64" ]; then \
+      echo "no Verus bundle for $(uname -m); this image has Kani and not Verus" >&2; \
+      exit 0; \
+    fi; \
+    asset="verus-${VERUS_VERSION#release/}-x86-linux.zip"; \
     url="https://github.com/verus-lang/verus/releases/download/release%2F${VERUS_VERSION}/${asset}"; \
     tmp="$(mktemp -d)"; \
     curl -fsSL -o "${tmp}/verus.zip" "${url}"; \
