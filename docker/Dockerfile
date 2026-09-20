@@ -301,6 +301,72 @@ RUN set -eux; \
     kani --version; \
     chmod -R a+rX /opt/cargo /opt/rustup
 
+# --- Verus, the second checker, and it is second on purpose ----------------
+#
+# RFC 0022 decided a checker's toolchain is the checker's business and RFC 0053
+# put a bounded proof over *the file the kernel ships*. RFC 0096 is what happens
+# when those two meet Verus: its `#[path]` mechanism does not transfer, because
+# Kani verifies ordinary Rust while Verus verifies only what is written inside
+# `verus!{ … }`. So the shipped file carries the annotations, and `f-kernel`
+# takes `verus_builtin` and `verus_builtin_macros` as ordinary dependencies —
+# both of which were checked to compile for `x86_64-unknown-none` under this
+# image's pinned nightly before the decision was taken.
+#
+# The binary release rather than a build from source, for the same reason the
+# Kani layer takes a bundle: Verus pins a rustc of its own, and building it here
+# would make this image's pin and the checker's pin one decision when they are
+# deliberately two.
+#
+# `verus --version` is asserted, so a release that stops working is a red layer
+# rather than a checking job that silently verifies nothing — which is the
+# failure mode a verifier has and a compiler does not.
+#
+# *What would reverse this:* a Verus that needs a newer glibc than the base
+# carries, which is what took the Kani aarch64 case out on trixie. It would come
+# back as a number rather than as an architecture.
+ARG VERUS_VERSION=0.2026.09.13.671956e
+# The rustc Verus pins, installed beside this tree's and never instead of it.
+#
+# RFC 0022 decided a checker's toolchain is the checker's business, and this
+# is that decision arriving as a number: the bundle drives rustc through the
+# rustup shim and asks for **stable 1.98.1**, so an image without it fails at
+# `verus --version` with `toolchain is not installed` rather than at anything
+# resembling a proof. `rust-toolchain.toml`'s nightly is untouched — RFC 0096
+# names "two rustc versions must coexist" as a cost of annotating the shipped
+# file, and this line is what that cost looks like.
+#
+# Pinned rather than read out of the bundle so that a Verus release which
+# moved its compiler is a red layer with a version in the message, instead of
+# an image that quietly fetched a different one.
+ARG VERUS_TOOLCHAIN=1.98.1
+ENV VERUS_HOME=/opt/verus
+ENV PATH=/opt/verus:$PATH
+
+RUN set -eux; \
+    # `unzip` in this stage and not the base: it is the checker's business,
+    # and a package added to the base invalidates every layer under it —
+    # including the Kani bundle, a 483 MB download this image would then take
+    # again for the sake of one unarchiver. The first attempt at this layer
+    # put it in the base and rebuilt from `apt-get update`.
+    apt-get update; \
+    apt-get install -y --no-install-recommends unzip; \
+    rm -rf /var/lib/apt/lists/*; \
+    case "$(uname -m)" in \
+      x86_64) asset="verus-${VERUS_VERSION#release/}-x86-linux.zip" ;; \
+      *) echo "no Verus bundle for $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/verus-lang/verus/releases/download/release%2F${VERUS_VERSION}/${asset}"; \
+    tmp="$(mktemp -d)"; \
+    curl -fsSL -o "${tmp}/verus.zip" "${url}"; \
+    mkdir -p /opt/verus; \
+    unzip -q "${tmp}/verus.zip" -d "${tmp}"; \
+    cp -r "${tmp}"/verus-*/. /opt/verus/; \
+    rm -rf "${tmp}"; \
+    chmod -R a+rX /opt/verus; \
+    rustup toolchain install "${VERUS_TOOLCHAIN}" --profile minimal; \
+    chmod -R a+rX /opt/rustup; \
+    verus --version
+
 ENV F_UID=1000 F_GID=1000
 
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint

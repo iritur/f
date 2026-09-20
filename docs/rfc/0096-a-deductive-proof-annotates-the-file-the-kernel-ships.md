@@ -95,6 +95,59 @@ Not established, and each is a way this decision fails:
   RFC 0053's *the file the kernel ships* exists to prevent, arrived at from the
   inside.
 
+## What the checker did when it was finally run, on 2026-09-20
+
+The two questions this RFC left open were whether `verus!{ … }` around a
+`#![no_std]` module verifies rather than merely parses, and whether any of the
+properties Kani already proves are expressible without restructuring the
+functions they are about. The first is answered, and the answer came with
+something better than a yes.
+
+The subject was `kernel/src/cap.rs`'s `refund`, reduced to its arithmetic and
+given two postconditions — one that should hold and one that should not:
+
+```text
+verification results:: 1 verified, 1 errors
+
+error: postcondition not satisfied
+  --> probe.rs:46:9
+46 |         out.0 + out.1 == object + extent,
+   |         failed this postcondition
+```
+
+**The floor property verified. The conservation property was refuted.** `refund`
+does `slot.extent = slot.extent.saturating_add(bytes)`, so `object + extent` is
+*not* preserved: a refund whose `extent + bytes` would pass `u64::MAX` loses the
+difference silently. Verus found it over all `u64`.
+
+**Kani cannot reach it**, and that is the whole justification for a second
+checker rather than a faster one. `kernel/proofs/src/mem.rs` sets `FRAME_SIZE`
+to 256 and the harnesses run an eight-slot table; `u64` overflow is not in that
+space and never will be. RFC 0053's own reversal condition says a bounded check
+is *a weaker statement kept for its speed rather than for its content*, and this
+is the first thing in this tree that shows the difference as a result rather
+than as an argument.
+
+Whether the overflow is *reachable* in a running frame is a separate question
+and this note does not claim it is: `extent` is bytes remaining in an untyped
+region, and a region that large does not exist on any machine here. What the
+refutation establishes is that the precondition was never written down, and the
+day an account's arithmetic changes there is now something that will say so.
+
+## What the layer cost, which is two facts rather than an estimate
+
+**Verus pins its own rustc and demands it through the rustup shim.** The first
+build of the layer failed at `verus --version` with `toolchain '1.98.1-x86_64-
+unknown-linux-gnu' is not installed`. This RFC listed *two rustc versions must
+coexist* as the sharpest technical risk; it is now a pinned `ARG` in
+`docker/Dockerfile` installing stable 1.98.1 beside this tree's nightly.
+Pinned rather than read out of the bundle, so a Verus release that moved its
+compiler is a red layer with a version in the message.
+
+**`unzip` belongs in the `full` stage and not the base.** Putting it in the base
+invalidated every layer under it — including the Kani bundle, a 483 MB download
+the image then took again for the sake of one unarchiver.
+
 ## Why Kani is not deleted
 
 RFC 0053 named its own reversal: *Verus arriving on the frame at phase 02 — if
