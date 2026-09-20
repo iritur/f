@@ -305,6 +305,15 @@ pub struct Report {
     /// Reads whose bytes the client checked against its own arithmetic and
     /// found equal. Unit: count of reads.
     pub verified: u64,
+    /// Frames the allocator gave up to build this component. Unit: frames.
+    ///
+    /// **`claims/0019`'s *resident pages*, taken by the frame rather than
+    /// asked of the component.** The spec defines the number that way and this
+    /// is why: pages are a fact about what the allocator handed over, and the
+    /// component can only honestly count its own payload bytes. Read as a
+    /// difference across `process::prepare_server`, so a build that mapped a
+    /// page without charging for it changes it.
+    pub resident_frames: u64,
     /// Entries the component answered. Unit: count of entries.
     pub entries: u64,
     /// Reads it completed. Unit: count of reads.
@@ -504,6 +513,18 @@ pub unsafe fn demonstrate(
     // accessor hands out atomics and `UnsafeCell`s rather than references.
     let client_end = unsafe { Mapping::adopt(at, bytes, 0, 0) }.map_err(Trouble::Channel)?;
 
+    // What this component costs the machine, measured by the machine.
+    //
+    // **`claims/0019`'s number is defined as resident pages and this is where
+    // pages exist.** `user/objects/src/resident.rs` counts *payload bytes* —
+    // entries in a map, records in a store — because payload bytes are what a
+    // component can honestly count about itself. Pages are the frame's: it is
+    // the allocator that gave them up, and asking a component how many pages it
+    // occupies is asking it to report on a decision somebody else made. So the
+    // difference across `prepare_server` is taken here, out of the allocator's
+    // own free count, and it is a reading rather than a sum of constants: a
+    // build that mapped a page it did not charge for moves it.
+    let free_before = frames.free_count();
     // SAFETY: the caller's guarantee about `kernel`, `frames` and `cpu`, plus
     // `wire` and `owned` being frames this function allocated and holds.
     let (prepared, pages) = unsafe {
@@ -530,6 +551,18 @@ pub unsafe fn demonstrate(
     }
     .map_err(Trouble::Process)?;
 
+    // What the component cost, read **while it still holds it**. Taken after
+    // `prepare_server` and before anything is given back: the teardown refunds
+    // every frame, so the same subtraction after it is a measurement of zero —
+    // which is exactly what the first draft of this printed, and is the reason
+    // the reading is here rather than beside the other counts.
+    //
+    // The heap is in it. `ServerPlan::heap_bytes` is mapped by the frame at
+    // preparation, so a component that grows its store inside that heap costs
+    // no further frames and the number does not move while it serves. That is
+    // a property of the arrangement rather than of this reading, and it is why
+    // `claims/0019` can take one figure per boot rather than a high-water mark.
+    let resident_frames = free_before.saturating_sub(frames.free_count());
     // SAFETY: `pages.control` is the kernel address of a frame `prepare_server`
     // allocated zeroed for this run and handed to nobody else.
     let control = unsafe {
@@ -607,6 +640,7 @@ pub unsafe fn demonstrate(
 
     Ok(Report {
         half,
+        resident_frames,
         submitted: seen.submitted,
         completed: seen.completed,
         verified: seen.verified,
@@ -1001,6 +1035,14 @@ pub fn report_lines(report: &Report) {
             crate::kprintln!("    copies_per_read_in_a_boot                  {per_read}");
             crate::kprintln!("    staged_bytes_in_a_boot                     {}", report.staged);
             crate::kprintln!("    reads_verified_by_the_client               {}", report.verified);
+            // `claims/0019`'s row, and the one its spec names rather than the
+            // one the component can count about itself. Printed on the read
+            // half because that is the half with a denominator: resident pages
+            // beside the application bytes they were resident for.
+            crate::kprintln!(
+                "    resident_frames_in_a_boot                  {}",
+                report.resident_frames
+            );
         }
         Half::Provoke => {
             crate::kprintln!("  the row claims/0022 thresholds with a floor");

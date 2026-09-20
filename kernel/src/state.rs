@@ -296,6 +296,20 @@ pub mod node {
     /// this node answers is whether anything at all is alive down there.
     /// Unit: trees.
     pub const COMPONENTS_MOVED: u32 = 53;
+    /// Frames the allocator gave up to build `user/objects`.
+    ///
+    /// **`claims/0019`'s *resident pages*, in the frame's own tree, which is
+    /// where that claim's spec says to read it.** `user/objects` counts its own
+    /// payload bytes and cannot honestly count pages: a page is what the
+    /// allocator handed over, and asking a component how many it occupies is
+    /// asking it to report on somebody else's decision. So this is a difference
+    /// across `process::prepare_server`, taken out of `FrameAllocator`'s free
+    /// count after the component has formed its store, and a build that mapped
+    /// a page without charging for it moves it.
+    ///
+    /// Zero on every boot that does not run the objects demonstration, which is
+    /// most of them. Unit: frames.
+    pub const OBJECTS_RESIDENT: u32 = 54;
     /// What this machine is running. RFC 0012.
     ///
     /// The node the exit of `E2-B07` is about: *the machine answers "what are
@@ -425,7 +439,7 @@ pub mod node {
 }
 
 /// How many nodes this build publishes.
-pub const NODES: usize = 54;
+pub const NODES: usize = 55;
 
 /// The schema, written once and never again for a generation.
 ///
@@ -806,7 +820,15 @@ const SCHEMA: [SchemaEntry; NODES] = [
         unit::NONE,
         b"moved",
     ),
-    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 53 * WORD, 0xEE, unit::NONE, b"reserved"),
+    SchemaEntry::new(
+        node::OBJECTS_RESIDENT,
+        node::COMPONENTS,
+        53 * WORD,
+        kind::GAUGE,
+        unit::FRAMES,
+        b"resident",
+    ),
+    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 54 * WORD, 0xEE, unit::NONE, b"reserved"),
 ];
 
 /// Where the schema block starts: immediately after the header, on the

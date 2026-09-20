@@ -897,7 +897,11 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // for `blk_datapath`'s reason: an ordinary boot has nobody to serve, and a
     // default boot that ran it would stop being the fixture `cargo xtask trace`
     // hashes.
-    let _objects = objects_datapath(&boot, &mut frames, &space, features, clocks, tree.physical());
+    let objects_report =
+        objects_datapath(&boot, &mut frames, &space, features, clocks, tree.physical());
+    // `claims/0019`'s resident pages, carried to the tree publish below. Zero
+    // on a boot with no `objects=` parameter, which is every ordinary one.
+    let objects_resident = objects_report.as_ref().map_or(0, |report| report.resident_frames);
 
     // E1-B08. A component that holds a core and schedules its own work inside
     // it, with the frame counting what crossed. Behind its own parameter, like
@@ -1213,6 +1217,10 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // makes it evidence is `state after` in the log — printed per mounted tree
     // beside the `state mount` reading it is compared against.
     tree.set(state::node::COMPONENTS_MOVED, u64::from(components_moved));
+    // `claims/0019`'s resident pages, where that claim's spec says to read
+    // them: the frame's own tree, from the frame's own accounting. Zero on a
+    // boot that did not run the objects demonstration.
+    tree.set(state::node::OBJECTS_RESIDENT, objects_resident);
     // The remapping unit's three numbers, *after* the provocation above and not
     // before it. That ordering is the whole of what makes them instruments: a
     // fault count written before the only code on this boot that can produce a

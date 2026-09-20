@@ -25,6 +25,40 @@
 # reservation outranks a landing. Two of the four claims registered in this diff
 # take reserved numbers and two take the next free ones, which is that rule
 # applied in both directions on one afternoon.
+
+# **Resident *pages*, taken by the frame, and the bound does not hold at this
+# workload — recorded on 2026-09-20 rather than rounded off.**
+#
+# This claim's spec defines the number as *resident pages of `user/objects`,
+# read from the frame's state tree*, and every row below is in payload bytes
+# from the component's own accounting, because until now no page count existed
+# anywhere. One does. `kernel/src/objects.rs` reads `FrameAllocator::free_count`
+# across `process::prepare_server` while the component still holds its frames,
+# `kernel/src/state.rs`'s `OBJECTS_RESIDENT` publishes it in the frame's own
+# tree, and `cargo xtask objects read` prints it.
+#
+# The reading is **58 frames — 237 568 bytes — against 192 000 application bytes
+# delivered, which is 1.237 bytes resident per byte delivered.** The spec's bound
+# is 1.0 and its sentence is *a page cache holding a second copy would make it at
+# least 2*.
+#
+# **It is not a second copy, and this file says so rather than leaving a reader
+# to assume either way.** `copies_per_read_in_a_boot` is 0 in the same run and
+# `held_bytes_per_read_byte_micro` is 0 — the two rows that move when this
+# component starts holding what it read. What 58 frames are is *fixed cost*:
+# text, stack, both rings, the board and a 128 KiB heap, resident whether the
+# component delivers 192 kilobytes or 192 megabytes. A ratio with a fixed
+# numerator falls as the denominator grows, so the figure is a statement about
+# this workload's size and not about the datapath's shape.
+#
+# **So it is recorded and does not gate, and it does not replace anything.**
+# Promoting it over `resident_bytes_per_read_byte_micro` would be answering a
+# question about payload bytes with a measurement in pages — the mistake
+# `claims/0016`'s `modelled_*` rows and `claims/0022`'s device paragraph each
+# already exist to prevent. What would make a page-denominated bound meaningful
+# is a workload large enough to amortise the component, and that is the same
+# heap-and-account question `claims/0017` is waiting on.
+
 name       = "resident-bytes-per-unit-of-work"
 status     = "pending"          # pending | tracked | gating
 milestone  = "E2"
