@@ -3940,14 +3940,19 @@ fn churn_counts(log: &str, marker: &str) -> Option<(u64, u64)> {
 /// tick. That decision says a failed phase A costs a client added latency and
 /// nothing else. It costs more here, for two separable reasons:
 ///
-/// - **The frame acknowledges too late.** RFC 0063 has the incoming instance
-///   acknowledge the records *before* the routing word swaps and before it
-///   serves anybody. This frame gives the successor a core, lets it replay and
-///   serve, and checks the acknowledgement afterwards — so a successor that
-///   replayed nothing has already refused the client by the time the frame
-///   notices. `blk abandoned` asserts `read back what it wrote: false`, which
-///   is asserting the defect on purpose: the day the ordering is repaired that
-///   assertion is the stale one.
+/// - **The frame acknowledged too late, and that is paid.** It gave the
+///   successor a core, let it replay *and serve*, and checked the count
+///   afterwards — so a successor that replayed nothing had already refused the
+///   client. `serve_ring3` now waits on `reported::REPLAY_DONE`, reads
+///   `reported::REPLAYED`, and refuses to drive a client against an instance
+///   whose count is not what its predecessor wrote, so `cargo xtask blk
+///   abandoned` has no `blk client` line at all and asserts that absence.
+///   Three things had to come with it, each found by a boot rather than by
+///   reading: the wait must **serve** the ring it waits on, or the replay
+///   blocks on a frame that is blocked on the replay; the client must be
+///   **wired** before it is driven, or it serves nothing; and the leak
+///   baseline must be **per generation**, or `retained` measures one
+///   generation's frames twice and the check calls the difference a leak.
 /// - **The outgoing component ends rather than pauses.**
 ///   `f_virtio_blk::component::hand_over` returns `stopped::HANDED_OVER` and
 ///   the loop returns, so the instance the frame puts back is one whose
@@ -3964,12 +3969,15 @@ fn churn_counts(log: &str, marker: &str) -> Option<(u64, u64)> {
 /// client is hurt. Repair the ordering and the guard is unnecessary, which is
 /// what makes it self-clearing.
 const SWAP_GAP: &[Gap] = &[(
-    "kernel/src/component.rs",
-    "if !client.abandons()",
-    "the frame acknowledges a swap after its successor has served rather than \
-     before, so an abandonment reverses the place and cannot spare the client — \
-     and the outgoing component ends at its hand-over rather than pausing, so \
-     what is put back cannot serve",
+    // The residue moved crates when the ordering was paid: what is left is a
+    // component that ends where it should pause, so the needle is in the
+    // component rather than in the frame.
+    "user/virtio-blk/src/component.rs",
+    "stopped::HANDED_OVER",
+    "a component ends at its hand-over rather than pausing, so the instance \
+     an abandonment puts back is one whose loop has returned: the frame keeps \
+     its memory, its table and its client's registrations and cannot make it \
+     serve again",
     "TODO.md E2-B06 and E2-P08; docs/rfc/0012's *what the frame changed means*; \
      docs/rfc/0063's phase A and its `E2-P08` reversal condition; \
      sim/src/swap.rs's module comment; abi/src/swap.rs's module comment",
@@ -10543,27 +10551,27 @@ fn blk_abandoned() -> Result<(), String> {
         ));
     }
 
-    let client = log.lines().find(|line| line.contains("blk client    the frame registered"));
-    let Some(client) = client else {
-        return Err("the client did not report what it saw.".into());
-    };
-    // **This asserts the defect, deliberately, and goes red when it is fixed.**
-    // The successor replayed nothing, so the `SetId` this client holds names a
-    // slot in a table that was never filled and the client is refused. RFC 0063
-    // says a failed phase A costs a client added latency and nothing else; this
-    // frame acknowledges *after* the successor has served, so it costs more. A
-    // run where the client kept its bytes would mean the ordering had been
-    // repaired — at which point this line is what says so.
-    if !client.contains("read back what it wrote: false") {
-        return Err(format!(
-            "the client kept its bytes across an abandoned swap.\n\n{}\n\n\
-             That is better than this build can do, and this check is what noticed. The frame \
-             acknowledges a swap only after the successor has been given a core and served, so a \
-             successor that replayed nothing refuses the client before the frame reverses. If the \
-             acknowledgement now happens first, this assertion is the stale one: invert it, and \
-             take the ordering sentence out of `SWAP_GAP`.",
-            client.trim_end(),
-        ));
+    // **The client was never handed to the successor, and its silence is the
+    // assertion.** An earlier draft of this half asserted the opposite — `read
+    // back what it wrote: false` — because the frame acknowledged a swap only
+    // after the successor had been given a core and served, so a successor that
+    // replayed nothing refused the client before the frame noticed. That draft
+    // said in its own failure text that the day the ordering was repaired it
+    // would be the stale one. It was repaired, and this replaced it.
+    //
+    // `serve_ring3` waits for the successor's replay, compares it against what
+    // the predecessor wrote, and refuses to drive a client against an instance
+    // whose count does not match. So there is no `blk client` line at all:
+    // nothing was submitted, nothing was lost, and RFC 0063's *the client
+    // observes added latency and nothing else* is true of the frame rather than
+    // of a simulation of it.
+    if log.contains("blk client    the frame registered") {
+        return Err("a client was driven against a successor whose replay did not match.\n\n\
+             `serve_ring3` waits for `reported::REPLAY_DONE`, reads `reported::REPLAYED`, and \
+             hands the client over only when that count is what the predecessor wrote. A boot \
+             with this line let a client submit into an instance the frame was about to \
+             abandon, which costs that client its table — the thing RFC 0063 exists to prevent."
+            .into());
     }
 
     println!(
@@ -10572,17 +10580,18 @@ fn blk_abandoned() -> Result<(), String> {
          \x20 handed over, with its table, its memory and its client's registrations standing,\n\
          \x20 and the successor is what was retired.\n\
          \x20 {}\n\
-         \x20 **And the client lost its bytes anyway, which this half asserts rather than\n\
-         \x20 hides.** RFC 0063 says a failed phase A costs a client added latency and nothing\n\
-         \x20 else. It costs more here, for two reasons this run separates. The frame\n\
-         \x20 acknowledges *after* the successor has been given a core and served, so a\n\
-         \x20 successor that replayed nothing refuses the client before the frame reverses.\n\
-         \x20 And `hand_over` ends the outgoing component's loop, so the instance the frame\n\
-         \x20 puts back is one whose component has exited: the frame keeps its memory, its\n\
-         \x20 table and its registrations, and cannot make it serve.\n\
-         \x20 The reversal is real and the promise is not yet paid — the bookkeeping is the\n\
-         \x20 frame's, the ordering is not, and the pause is the component's. `SWAP_GAP`\n\
-         \x20 carries all three.",
+         \x20 **And the client was never handed to it**, which is what makes the reversal\n\
+         \x20 worth what RFC 0063 promises. The frame waits for the successor's replay,\n\
+         \x20 compares it against what the predecessor wrote, and refuses to drive a client\n\
+         \x20 against an instance it is about to abandon — so nothing was submitted and\n\
+         \x20 nothing was lost. There is no `blk client` line in this boot, and its absence\n\
+         \x20 is what this half asserts.\n\
+         \x20 What is still owed is the *pause*. `hand_over` ends the outgoing component's\n\
+         \x20 loop, so the instance the frame puts back is one whose component has exited:\n\
+         \x20 the frame keeps its memory, its table and its client's registrations and\n\
+         \x20 cannot make it serve again. *The place resumes delivering to the occupant it\n\
+         \x20 already had* is paid in the frame and not in the component. `SWAP_GAP`\n\
+         \x20 carries it.",
         abandoned.trim_end(),
     );
     Ok(())

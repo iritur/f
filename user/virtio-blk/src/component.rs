@@ -200,6 +200,13 @@ fn serve(selector: u32) -> ! {
         match taken {
             Some(replayed) => {
                 let _ = board.write64(reported::REPLAYED, u64::from(replayed));
+                // The count first and the flag second, which is the same
+                // discipline `report` keeps with its magic: a frame that read
+                // the flag before the number would read whatever the board held
+                // before this instance touched it. After this store the frame
+                // may acknowledge, and until it does this instance has served
+                // nobody.
+                let _ = board.write64(reported::REPLAY_DONE, 1);
             }
             // Told there were records and given no window to read them from.
             // Refused rather than served: an instance that carried on would be
