@@ -805,6 +805,32 @@ struct Place {
     occupant: Option<Instance>,
     /// Whether the budget ran out.
     retired: bool,
+    /// The transfer window, bought out of this place's account at `fill`.
+    ///
+    /// **On the place and not on the occupant, and the lifetime is the whole
+    /// argument.** RFC 0063 buys the window out of the incoming instance's
+    /// `Untyped`; the account is the place's and both generations share it, so
+    /// *the incoming instance's account* and *the outgoing one's* name one
+    /// region. What forces it onto the place is `Table::refund`: an account is
+    /// a watermark and a refund can only take the top, so a page that has to
+    /// outlive a generation must sit **under** that generation's frames. A
+    /// window charged after the first occupant is refunded out from under
+    /// itself when that occupant is torn down, and the next one is handed the
+    /// same page as its board.
+    ///
+    /// That is not a hypothesis. It is what the first draft of this did, and
+    /// the symptom was the successor reporting `stopped::NO_ROUTING` — a
+    /// component reading its board and finding the transfer window's bytes.
+    /// It is the same failure `Table::refund`'s doc comment describes and the
+    /// same one that keeps *instantiate alongside* unpaid, met here in
+    /// miniature and at one page.
+    ///
+    /// `Handle::NULL` for a place whose manifest declares `restart_only`,
+    /// which hands nothing over and is charged nothing for the privilege.
+    window: Handle,
+    /// Where that window is, physically, or zero if there is none.
+    /// Unit: bytes, a physical address.
+    window_object: u64,
     /// The reservation this **place** holds, once its first occupant has been
     /// admitted.
     ///
@@ -1282,6 +1308,11 @@ pub unsafe fn demonstrate(
     let mut place = Place {
         // The scripted place, and slot zero of the frame's mount nodes.
         slot: 0,
+        // No window. This place is the frame's own script rather than a
+        // component file's, nothing swaps it, and a page charged for a
+        // transfer that cannot happen is a page spent on nothing.
+        window: Handle::NULL,
+        window_object: 0,
         manifest: ContentId::of(module),
         module,
         endpoint,
@@ -1667,9 +1698,61 @@ pub unsafe fn demonstrate(
                 // page; a page allocated inside the branch that needs it would
                 // be a page the outgoing occupant is told about after it has
                 // already been asked to write into it.
-                let window = frames.alloc_zeroed(Order::FRAME).ok_or(Failure::NoMemory)?;
+                // **Bought out of the account, which is what RFC 0063 says and
+                // what the frame did not do.** That decision, `abi::manifest`'s
+                // own doc and `user/virtio-blk/manifest.toml`'s `[transfer]`
+                // arithmetic all say the window is paid for out of the incoming
+                // instance's `Untyped`, and `cargo xtask lint-manifests` checks
+                // `record_bytes * records_max <= memory_bytes` against that
+                // declaration. Until this line the frame took a page from the
+                // global allocator, charged to nobody, and the lint was checking
+                // arithmetic against a window nobody sized from it.
+                //
+                // The account is the place's and both generations share it,
+                // which is why *the incoming instance's* account and *the
+                // outgoing instance's* are the same words for one region. What
+                // changes is that a component's declared transfer now costs its
+                // own quota.
+                //
+                // **Charged before the occupant's own frames and refunded after
+                // them**, which is the watermark discipline `Table::refund`
+                // states: a refund can only take the top, so the page that
+                // outlives every generation has to sit under all of them.
+                // The two words rather than the struct: `Account` is not
+                // `Copy` on purpose — it names authority, and a type that
+                // copies itself is one a caller can hold two of — so the
+                // handle and the floor are read out while the borrow is short
+                // and rebuilt here, which is a value and not a second claim.
+                let window_object = {
+                    let Some(extra) = extras.get(index).and_then(Option::as_ref) else {
+                        return Err(Failure::WrongPlace);
+                    };
+                    extra.place.window_object
+                };
+                // A place whose manifest says `restart_only` has no window and
+                // cannot be swapped — the declaration deciding, rather than the
+                // frame discovering it halfway through a hand-over.
+                if window_object == 0 {
+                    return Err(Failure::WrongPlace);
+                }
+                let window = Frame::from_addr(window_object);
                 let window_at = crate::process::SWAP_WINDOW;
-                let window_bytes = crate::process::SWAP_WINDOW_MAX;
+                // Sized by the **declaration** rather than by the frame's own
+                // ceiling. `Declaration::window_bytes` is `record_bytes *
+                // records_max` out of the manifest the place holds, and the
+                // ceiling is what one page can carry — a component asking for
+                // more than that is refused at `lint-manifests`, so the `min`
+                // here is a belt the build already wears.
+                // Sized by the **declaration** rather than by the frame's own
+                // ceiling. `Declaration::window_bytes` is `record_bytes *
+                // records_max` out of the manifest this place holds, which is
+                // the arithmetic `cargo xtask lint-manifests` already checks
+                // against `memory_bytes` — so until this line that lint was
+                // checking a number nothing sized a window from. The ceiling
+                // is what one page can carry and stays as a bound rather than
+                // as the value.
+                let window_bytes =
+                    record.transfer.window_bytes().min(crate::process::SWAP_WINDOW_MAX);
                 // The half of the protocol that outlives one pass: a swap is
                 // planned and staged against the occupant on its way out, and
                 // acknowledged against the one that replaced it.
@@ -1995,10 +2078,12 @@ pub unsafe fn demonstrate(
                     let epoch = extra.place.occupant.as_ref().map_or(0, |next| next.epoch);
                     refilled_line(Name(record.label()), epoch);
                 }
-                // SAFETY: allocated a few lines up, mapped only into address
-                // spaces `tear_down` has taken down or is about to, and named by
-                // nothing else.
-                unsafe { frames.free(window) };
+                // Nothing to free here. The window is a page **inside the
+                // account's own region**, which this module allocated whole and
+                // gives back whole, and it belongs to the place rather than to
+                // this loop — so it outlives every generation that used it.
+                // Freeing it would hand the allocator a page it never gave out
+                // on its own.
             }
         }
     }
@@ -2797,6 +2882,8 @@ unsafe fn fill(
         epoch: 0,
         occupant: None,
         retired: false,
+        window: Handle::NULL,
+        window_object: 0,
         reservation: None,
         budget: Budget::default(),
         routing: f_abi::swap::Routing::new(f_abi::swap::PAUSED),
@@ -2807,6 +2894,17 @@ unsafe fn fill(
         stops: 0,
         restarts: 0,
     };
+
+    // The window, before the first occupant and therefore under it. Only for a
+    // manifest that declares `in_place`: a component that hands nothing over
+    // needs no window, and charging every place a page for one it will never
+    // use would be the frame spending a component's quota on the frame's own
+    // convenience.
+    if record.transfer.in_place() {
+        let (handle, object) = charge(supervisor, &account, frames)?;
+        place.window = handle;
+        place.window_object = object;
+    }
 
     declared_line(record, region.bytes());
     admit(
@@ -5259,6 +5357,18 @@ unsafe fn spawn(
     }
 
     let epoch = place.epoch;
+    // The place begins delivering, and the word says so. **This is what makes
+    // `Routing` a routing word rather than a field**: before it, the place was
+    // constructed `PAUSED` and only a swap ever committed it, so the only
+    // reader that could have existed would have found every ordinary place
+    // paused forever. A place delivers when it has an occupant and stops when
+    // it does not, and the two writes are here and in `tear_down`.
+    //
+    // `epoch + 1` because `PAUSED` is zero and an epoch counts from zero, so
+    // the first occupant of a place would otherwise be indistinguishable from
+    // no occupant at all — `f_abi::swap`'s own words: *`generation` is an
+    // ordinal counting from one*.
+    place.routing.commit(epoch.saturating_add(1));
     place.occupant = Some(Instance {
         epoch,
         space,
@@ -6145,10 +6255,25 @@ fn connect(
         }
         return Ok(Answer::Refused(error::pack(error::PEER, error::peer::GONE)));
     }
-    let Some(occupant) = place.occupant.as_ref() else {
+    // **The routing word, read.** Until this line the frame stored it and never
+    // loaded it: `Routing::pause` and `Routing::commit` had callers and
+    // `Routing::delivering` had none under `kernel/`, so the word RFC 0016
+    // counts as the fifth thing crossing a core was a store with no load, and
+    // delivery decided by whether `place.occupant` happened to be `Some`.
+    //
+    // It is load-bearing now and it changes behaviour: during phase A of a swap
+    // the place is paused while its outgoing occupant is still in the slot, so
+    // a connect arriving then used to be handed a channel to an instance that
+    // was in the middle of handing over its state. It pends instead, which is
+    // what RFC 0063 means by *the client observes added latency and nothing
+    // else* — and it is the same pend an empty place gives, because from a
+    // client's side those two are the same wait.
+    let delivering = place.routing.delivering() != f_abi::swap::PAUSED;
+    let Some(occupant) = place.occupant.as_ref().filter(|_| delivering) else {
         // Not a failure either. RFC 0008: a connect on an empty place pends,
         // and the three outcomes are a refill, a retirement and this connect's
-        // own deadline passing.
+        // own deadline passing. A paused place is the fourth, and it resolves
+        // the same way a refill does.
         *pending = Some(PendingConnect { place: 0, endpoint, deadline });
         return Ok(Answer::Pending);
     };
@@ -6580,6 +6705,10 @@ fn tear_down(
     //    step 5 is: an empty place has nothing mounted, and clearing a word
     //    that is already zero costs one store.
     unmount(tree, place);
+    // Stops delivering before anything is taken apart, and in that order: a
+    // connect that arrives while this runs pends rather than being handed a
+    // channel to an instance whose address space is being dismantled.
+    place.routing.pause();
     if let Some(mut occupant) = place.occupant.take() {
         // 1. Revoke the table. Every slot, in slot order, and the mappings a
         //    revoked capability authorised go with the names — which for this
