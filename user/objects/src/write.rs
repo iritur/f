@@ -24,6 +24,22 @@
 //! 4 KiB write is 4096 whether it lands aligned or straddling, whether the
 //! piece was already dirty, and whatever the device does underneath.
 //!
+//! # What a write means here, which RFC 0098 decided
+//!
+//! It edits the object its channel is about, at `Write::offset`, and answers
+//! with that object's new content address. The channel carries the subject
+//! because the ABI leaves no alternative: a `Read` names its object by content
+//! address and fits — `32 + 4 = 36` against a `PAYLOAD_BYTES` of 40 — and a
+//! `Write` cannot, `32 + 8 + 4 = 44`, with the payload one stride for every
+//! opcode.
+//!
+//! This service **establishes** objects and does not **edit** them, and the
+//! difference is a mebibyte: `Extent::write` allocates a piece buffer of
+//! `EXTENT_BYTES` whatever the object's size, against a 128 KiB heap. A
+//! non-zero offset is refused rather than approximated, because a service that
+//! met an edit it could not afford by storing the submitted bytes would answer
+//! `Ok` to a client whose object it had silently replaced.
+//!
 //! **The numerator is deliberately not here.** Bytes re-chunked and re-hashed
 //! are `f_blob`'s to count, across the geometry `claims/0017` names — 8 MiB and
 //! 128 MiB objects, five mixtures, two seeds — and that geometry cannot run in
@@ -77,36 +93,38 @@ pub struct Written {
 impl<Z: Zoned, I: Device> WritePath<'_, Z, I> {
     /// Put a client's bytes into the object store.
     ///
-    /// # What `at` may be, and why a non-zero one is refused
+    /// # What `at` means, and why this service refuses a non-zero one
     ///
-    /// **Zero.** `f_abi::objects::Write::offset` is documented as *bytes from
-    /// the start of the object*, and honouring it means editing an object that
-    /// already exists — a read-modify-write through `f_blob::extent::Extent`,
-    /// which is a thing this service does not hold. What it does is store the
-    /// bytes it was handed as a whole object, so the only offset that means
-    /// anything here is the one at the beginning.
+    /// **RFC 0098.** A `WRITE` edits the object its channel is about, at `at`,
+    /// and answers with that object's *new* content address — a name is its
+    /// content, so an edit produces a different object and a client that could
+    /// not learn the new name would have lost the old one. Where the channel
+    /// has no object yet, a write at offset zero **establishes** one, which is
+    /// what this service does.
     ///
-    /// Refused rather than ignored, and the distinction is the point: a field
-    /// on the wire that the far side quietly drops is a contract a client
-    /// cannot discover it is breaking. The first draft of this accepted any
-    /// offset and stored a new object regardless, so a client asking to write
-    /// at 4096 was answered `Ok` and got something else.
+    /// It cannot do the other half, and the gap is a mebibyte rather than a
+    /// matter of degree. `Extent::create` chunks what it is given and stores
+    /// each piece, allocating no piece-sized buffer. `Extent::write` allocates
+    /// `vec![0u8; piece_bytes]`, and `piece_bytes` is `EXTENT_BYTES` — a
+    /// compile-time mebibyte — **whatever the object's size**, because
+    /// `blob/src/extent.rs` argues that a piece size a reader has to be told is
+    /// a format with a dial in it. `kernel/src/objects.rs` gives this component
+    /// a 128 KiB heap.
     ///
-    /// **This is also what `claims/0017` is waiting for.** That claim measures
-    /// bytes re-chunked per application byte over *edits* at drawn offsets into
-    /// an 8 MiB and a 128 MiB object, and an application byte is defined as one
-    /// the client submitted on this ring. The ring carries whole-object writes;
-    /// the claim's workload is edits. Closing that means this path holding an
-    /// `Extent` and returning `f_blob::extent::Cost`, at which point both
-    /// halves of the ratio are taken at the boundary the spec names.
+    /// So an edit is **refused**, and refusing is the decision rather than a
+    /// shortcut around it: a service that met an edit it could not afford by
+    /// storing the submitted bytes as a fresh object would answer `Ok` to a
+    /// client whose object it had silently replaced. The first cut of this arm
+    /// dropped `at` entirely and did exactly that.
     ///
     /// # Errors
     ///
-    /// [`f_abi::store::refusal::ADDRESS`] for a non-zero `at`, and
-    /// `Store::put_object`'s unchanged otherwise — `NO_SPACE` where the device
-    /// is full, `UNKNOWN` for a kind the format does not name. A refusal a
-    /// client sees is one the store made, so a client chasing it reads
-    /// `f_blob`'s rules and not this crate's paraphrase of them.
+    /// [`f_abi::store::refusal::ADDRESS`] for an edit — a non-zero `at` — which
+    /// this service cannot afford and will not approximate. `Store::put_object`'s
+    /// unchanged otherwise: `NO_SPACE` where the device is full, `UNKNOWN` for a
+    /// kind the format does not name. A refusal a client sees is one the store
+    /// made, so a client chasing it reads `f_blob`'s rules rather than this
+    /// crate's paraphrase of them.
     pub fn apply(&mut self, at: u64, bytes: &[u8]) -> Result<Written, i32> {
         if at != 0 {
             return Err(f_abi::store::refusal::ADDRESS);

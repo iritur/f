@@ -862,12 +862,13 @@ fn write_back(
         if !fill_owned(frames, owned, WRITE_BYTES, seen.written) {
             return Err(Trouble::Refused);
         }
-        // **Offset zero, and the reason is a refusal rather than a choice.**
-        // `f_abi::objects::Write::offset` means *bytes from the start of the
-        // object*, and honouring it means editing one — a read-modify-write
-        // through `f_blob::extent::Extent`, which this service does not hold.
-        // So it refuses a non-zero offset rather than storing a new object and
-        // answering `Ok`, which is what the first draft did.
+        // Offset zero, because this half **establishes** objects rather than
+        // editing them — RFC 0098. A write at zero into a channel with no
+        // object is a create, which `Extent::create` does without a piece
+        // buffer; an edit allocates `EXTENT_BYTES` whatever the object's size,
+        // and this place has a 128 KiB heap. The service refuses a non-zero
+        // offset rather than storing the bytes elsewhere and answering `Ok`,
+        // which is what the first draft of that arm did.
         let at = 0;
         let request = Request {
             user_data: 0x1000 + seen.written,
