@@ -1234,8 +1234,13 @@ fn swap(asked: &Asked, hash_only: bool) -> Result<bool, String> {
     // deliberately **not** here: they are counts over a whole machine changing
     // generation, this sweep replaces occupants one place at a time inside one
     // process, and a zero printed under those names would read as *this ran and
-    // found none* rather than as *this cannot run at all yet*. `SWAP_GAP` in
-    // xtask is where that is said, and the claim says it again.
+    // found none*. The reason used to end *rather than as this cannot run at
+    // all yet*, pointing at `SWAP_GAP`; a boot can swap a place now — `cargo
+    // xtask blk swapped` — so that half is withdrawn and the half that is left
+    // is the one that always did the work. RFC 0012 counts a swap as complete
+    // when its root record is durable, over every place whose leaf differs, and
+    // nothing in this tree has taken one root to another: one place is not a
+    // machine, in a process or on one.
     //
     // `operations_redone_by_restart` is the control and not a decoration: RFC
     // 0063's whole justification for `in_place` is that a client re-registers

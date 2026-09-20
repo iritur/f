@@ -168,6 +168,7 @@ pub mod dma;
 pub mod read;
 pub mod resident;
 pub mod service;
+pub mod write;
 
 pub use dma::{Landed, Landing};
 pub use read::{Counters, Placement, Read, ReadPath, mount};

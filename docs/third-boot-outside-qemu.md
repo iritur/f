@@ -192,6 +192,16 @@ spawn(s)`, the capability line, the ring line, the doorbell line, `user caps`,
 `user frames`, `timer`, `process layout ok`, `init process`, and `state tree 51
 nodes`. That last one is also what identifies the image: this is that commit.
 
+> **The node count has moved since, and this page keeps 51 rather than being
+> updated to match.** A boot log on this page is evidence about the day it was
+> taken, and rewriting the number would destroy exactly the property the
+> sentence above claims for it. The frame published 51 nodes at `a0b0ad2`; it
+> publishes 54 today, the last of them `moved`, which counts the mounted
+> component trees whose snapshot changed while their occupant held a core
+> (RFC 0065, `E2-P05`). A reader re-running this comparison against a current
+> build should expect the count and the snapshot to differ, and should compare
+> against a boot of the same commit — which is what *this is that commit* means.
+
 Five structural differences, and every one of them is accounted for.
 
 | difference | why |

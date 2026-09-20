@@ -27,16 +27,23 @@
 //!
 //! # What this command does *not* cover, and where that is written down
 //!
-//! The frame's own tree. `kernel/src/state.rs` publishes one and mounts a
-//! region per component under it, but a spawned component's words are written by
-//! nobody — the frame lays out the header and the schema and writes no word
-//! after that (RFC 0065, `E1-B15`). So a boot's component subtrees are constants,
-//! and a comparison over constants is a comparison that cannot diverge. The
-//! simulator's components are where the counters actually live —
-//! `sim/src/state.rs` argues why they live *in* the published region — which is
-//! why the two-hash comparison is asked of a run and not yet of a boot. That is
-//! a gap in the system and not in this command, and [`WHOLE_SYSTEM_GAP`] is
-//! where a reader meets it rather than having to infer it.
+//! The frame's own tree, and **the sentence that used to stand here has been
+//! paid**. It said a spawned component's words are written by nobody, so a
+//! boot's component subtrees are constants and a comparison over constants
+//! cannot diverge. `user/virtio-blk` writes four counts into the region the
+//! frame mounted for it, the frame reads that region back through its own root
+//! after the occupant's core comes back, and `cargo xtask blk served` prints
+//! `state after … moved` beside the `state mount` reading it is compared
+//! against. `kernel/src/state.rs`'s `COMPONENTS_MOVED` is the count as a node.
+//! That is RFC 0065's own closing measurement and it is met.
+//!
+//! What is left is narrower and is [`WHOLE_SYSTEM_GAP`]'s new text: **one**
+//! subtree moves. `supplied_place` gives a core to exactly one place's
+//! occupant, so a boot's whole-system state is the frame's nodes beside one
+//! live subtree and four constant ones, and calling that a whole system would
+//! be this command's old overreach arrived at from the other side. The
+//! simulator's components are still where the counters live for the comparison
+//! below — `sim/src/state.rs` argues why they live *in* the published region.
 
 use crate::{capture, capture_echoing, component_dir};
 
@@ -82,25 +89,35 @@ const OTHER_SEED: &str = "0x5eed0000000005ee";
 ///
 /// The frame publishes a tree and mounts one region per component under it, and
 /// **the component regions are all zeros**: `E1-B15` has the frame write the
-/// header and the schema out of the manifest and write no word after that. A
-/// component that has run has published nothing into its own mapping, so a
-/// boot's whole-system state is the frame's own nodes beside four constant
-/// subtrees — and two of those compared is a comparison that cannot diverge.
+/// header and the schema out of the manifest and write no word after that.
+///
+/// **It fired, and this constant narrowed rather than went.** A component does
+/// write into its own mounted region now, the frame reads it back, and
+/// `kernel/src/state.rs`'s `COMPONENTS_MOVED` counts the trees whose snapshot
+/// moved. What survives is the *breadth*: one occupant is scheduled per boot,
+/// so one subtree of five is live and the other four are still the constants
+/// the old text was about. A comparison of two boots would diverge on that one
+/// and be blind on the rest, and reporting it as a whole system would be this
+/// command's old overreach reached from the other side.
 ///
 /// It is printed on every green run for `CHAOS_GAP`'s reason: a limitation
 /// stated in a commit message is one nobody re-reads, and the failure that
 /// matters is not that it is never closed but that it is closed and the
-/// command goes on describing it. Whoever teaches a component to write into its
-/// own region deletes this constant in the same diff.
+/// command goes on describing it. Whoever gives a second place's occupant a
+/// core narrows this again; whoever gives every place one deletes it.
 pub const WHOLE_SYSTEM_GAP: &str = "\
-The frame's half is not in this. `kernel/src/state.rs` mounts one region per
-component under the frame's root, and nothing writes a word into those regions:
-the frame lays out the header and the schema from the manifest and stops there
-(RFC 0065). So a boot's component subtrees are constants, and a comparison over
-constants cannot diverge. What is compared above is the simulator's components,
-whose counters live *in* the published region — `sim/src/state.rs` argues why —
-which is the only place in this tree where a whole-system state has numbers in
-it that two runs can disagree about.";
+The frame's half is in this now, and it is one subtree wide. A component writes
+into the region `kernel/src/state.rs` mounted for it — `user/virtio-blk` stores
+four counts it already keeps — and the frame reads that region back through its
+own root after the occupant's core comes back: `cargo xtask blk served` prints
+`state after … moved` against the `state mount` reading, and the frame's own
+`moved` node counts it. RFC 0065's closing measurement is met.
+
+What is not in this is breadth. `supplied_place` gives a core to exactly one
+place's occupant, so four of five mounted subtrees are still the constants this
+text used to be entirely about, and two boots compared would diverge on one
+subtree and be blind on four. The comparison above is still asked of a run
+rather than of a boot for that reason and not for the old one.";
 
 /// One whole-system root, as a subprocess.
 fn root(scenario: &str, seed: &str) -> Result<String, String> {

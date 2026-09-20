@@ -99,17 +99,31 @@
 //!
 //! # What this does not cover, said rather than left to be inferred
 //!
-//! **There is no boot.** RFC 0032 puts the frame's own instructions in QEMU and
-//! this crate above them, so the swap here is a swap of *modelled occupants in a
-//! modelled place*, driven by the real protocol in `f_abi::swap` and handing
-//! over the real state records `user/virtio-blk/src/state.rs` declares. The
-//! frame's own half — `kernel/src/component.rs`, where a place lives — cannot
-//! run it yet for a reason that is structural rather than unfinished, and
-//! `SWAP_GAP` in `xtask/src/main.rs` is that residue as a checked quantity
-//! rather than a paragraph: a swap needs *two generations of one component* in
-//! one boot module set, and `cargo xtask component` produces one file per
-//! component. It is the same shape as `CHAOS_GAP` one task back, for the same
-//! reason, and it goes red the day it stops being true.
+//! **There is no boot here, and there is now a boot elsewhere.** RFC 0032 puts
+//! the frame's own instructions in QEMU and this crate above them, so the swap
+//! in this file is a swap of *modelled occupants in a modelled place*, driven by
+//! the real protocol in `f_abi::swap` and handing over the real state records
+//! `user/virtio-blk/src/state.rs` declares. That has not changed and is not a
+//! deficiency: this is where the load is, where the seeds are, and where 384
+//! operations settle across 8 replacements.
+//!
+//! What has changed is the sentence that used to stand here — *the frame's own
+//! half cannot run it yet*. It can. `cargo xtask blk swapped` puts
+//! `virtio-blk.fc` and `virtio-blk.next.fc` in front of one place, the occupant
+//! is asked at a word on its board and hands over at a quiescent point of its
+//! own, and a client submits afterwards against a `SetId` an instance that no
+//! longer exists answered. `SWAP_GAP` **narrowed rather than closed**: what it
+//! names now is that the frame tears the outgoing occupant down before spawning
+//! the incoming one, so RFC 0063's *instantiate alongside* is unpaid and an
+//! abandonment after the teardown is a restart.
+//!
+//! Two smaller deviations travel with it, and this crate is the side that does
+//! them as written: the window here is sized by `Swap::window_bytes()` out of
+//! the incoming declaration, and the routing word here is *read* —
+//! `Routing::delivering()` at the delivery point. The frame does neither yet.
+//! So this harness is the only place in the tree where an abandonment is a real
+//! reversal, which is why [`Swap::garble`]'s control is a simulator control and
+//! could not be a boot.
 //!
 //! **Both declarations are the same manifest.** There is one build of each
 //! component in this tree, so what varies across the swap is the *instance* and
@@ -1185,8 +1199,9 @@ impl Swap {
         let world = sim.world();
         world.cover("f-sim artefact 1 — a component replaced under sustained load");
         world.cover("covers      a place, its routing word, two occupants and the state between");
-        world.cover("not covered the frame's own swap: no boot carries two generations of one");
-        world.cover("            component, and SWAP_GAP in xtask is that residue as a check");
+        world.cover("not covered the frame's own swap — `cargo xtask blk swapped` — where the");
+        world.cover("            teardown happens before the spawn — so the load, the seeds");
+        world.cover("            and all five abandonments are this crate's, not that boot's");
         world.cover(&format!("component   {}", self.name));
         world.cover(&format!("modelled    as {}", self.peer.label()));
         world.cover(&format!(

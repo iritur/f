@@ -18,6 +18,33 @@
 //! record; it is the order the steps happen in and the set of ways they may
 //! stop.
 //!
+//! **Both implementors exist now, which is what that paragraph was written in
+//! advance of.** `sim/src/swap.rs` drives one under sustained load;
+//! `kernel/src/component.rs` drives one at a boot, where `cargo xtask blk
+//! swapped` replaces a place's occupant with a second generation of the same
+//! component and a client keeps the `SetId` across it. They do not yet drive it
+//! the same way, and this module is where each difference shows:
+//!
+//! - The frame tears the outgoing occupant down before it spawns the incoming
+//!   one, so it reaches [`Swap::commit`] with no live predecessor and the
+//!   reversals [`Abandoned`] enumerates are open to it only before that
+//!   teardown. The simulator keeps both and abandons for all five reasons.
+//! - [`Swap::window_bytes`] is what sizes the window out of the incoming
+//!   instance's own declaration. The simulator calls it; the frame does not —
+//!   it takes a page from its own allocator at a fixed size. The rule is
+//!   declared in `crate::manifest` and checked by `cargo xtask
+//!   lint-manifests`, so today the arithmetic is verified against a window
+//!   nobody sizes from it.
+//! - [`Routing`] is stored by the frame and never loaded by it:
+//!   [`Routing::delivering`] and [`Routing::open`] have no caller under
+//!   `kernel/`, and delivery there resolves the place's one occupant directly.
+//!
+//! None of the three is a fault while a place holds one occupant — there is
+//! nothing for the word to choose between, and no second instance contending
+//! for the account. All three become load-bearing at one moment, which is why
+//! *instantiate alongside* is one piece of work and not three. `SWAP_GAP` in
+//! `xtask/src/main.rs` is where that residue is checked rather than described.
+//!
 //! It is not a wire type and it is deliberately not `repr(C)`. Nothing here
 //! crosses a trust boundary — the [`Declaration`]s it compares already did, as
 //! bytes inside [`crate::manifest::Record`] — so making it a layout would be

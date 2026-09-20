@@ -478,6 +478,16 @@ pub struct Deployment {
 }
 
 impl Deployment {
+    /// What a second generation of one component is called, beside the
+    /// component it succeeds.
+    ///
+    /// Stated here as well as in `xtask` because the two are linked separately
+    /// and there is nothing to share a constant through — the same arrangement
+    /// `INIT_TEXT` has, and with the same risk. If they disagree, this simulator
+    /// refuses the directory with `Refusal::Twice`, which is a loud failure and
+    /// not a silent one.
+    pub const SUCCESSOR_SUFFIX: &'static str = ".next";
+
     /// Read every component file in `dir`.
     ///
     /// # Errors
@@ -498,9 +508,34 @@ impl Deployment {
             let entry = entry
                 .map_err(|why| Refusal::Unreadable { file: at.clone(), why: why.to_string() })?;
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some(EXTENSION) {
-                files.push(path.display().to_string());
+            if path.extension().and_then(|e| e.to_str()) != Some(EXTENSION) {
+                continue;
             }
+            // A **successor** is not a second component, and this is where the
+            // difference has to be made rather than at `Refusal::Twice`.
+            //
+            // `cargo xtask component` writes a second generation of one
+            // component as `<name>.next.fc` for `E2-B06`: the same manifest, a
+            // different image, and therefore a different content address. The
+            // frame tells them apart by the name their records declare — the
+            // first module carrying a name is a place, a later one is a
+            // generation it has not installed — and this simulator has no
+            // loader to make that distinction with, because it is handed a
+            // directory rather than a module list.
+            //
+            // So it skips them, and says so rather than silently taking the
+            // first of two. What this file models is a *deployment*, and a
+            // generation nothing has installed is not part of one; the swap this
+            // simulator runs is modelled in `sim/src/swap.rs` against the
+            // components it did take.
+            if path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem.ends_with(Self::SUCCESSOR_SUFFIX))
+            {
+                continue;
+            }
+            files.push(path.display().to_string());
         }
         files.sort();
         if files.is_empty() {

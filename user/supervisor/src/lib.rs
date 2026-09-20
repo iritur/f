@@ -60,14 +60,17 @@
 
 #![no_std]
 
-// The allocator, and it is the *image's* rather than the crate's, for the reason
-// `user/store/src/lib.rs` states at length: `f_ring::heap::Heap::COMPONENT`
-// names one address, and that address means something only inside a component
-// the frame built and granted a `heap` need to. An allocator that is merely
-// *present* in a host test binary takes every allocation the harness makes and
-// the binary dies before it runs a test — which is why the gate is
-// `target_os = "none"` and not `target_arch`.
-#[cfg(all(target_os = "none", feature = "image"))]
+// The `alloc` crate, linked wherever `assemble` is compiled — which is the host
+// test build too, because `component::supervise` calls it and `component`
+// compiles there.
+//
+// **This gate and the allocator's below it are two gates, and they used to be
+// one.** Bringing `alloc` into scope links a crate; installing a
+// `#[global_allocator]` decides who answers every allocation in the artefact.
+// Only the second is dangerous off the metal, and RFC 0094 is where the
+// difference started to matter: `f-assembler` needs `alloc::vec::Vec` in scope
+// and does not care who allocates.
+#[cfg(feature = "image")]
 extern crate alloc;
 
 #[cfg(all(target_os = "none", feature = "image"))]
@@ -81,6 +84,15 @@ static HEAP: f_ring::heap::Heap = f_ring::heap::Heap::COMPONENT;
 // item may appear once per linked artefact.
 #[cfg(all(target_arch = "x86_64", feature = "image"))]
 pub mod component;
+
+/// Instantiating the generation this machine is, and starting what it says to
+/// start.
+///
+/// Behind the same gate as [`component`] and for one more reason besides: it is
+/// the only module here that needs `alloc`, and the crate the frame links takes
+/// `default-features = false`. RFC 0094.
+#[cfg(all(target_arch = "x86_64", feature = "image"))]
+pub mod assemble;
 
 // Architecture-independent, and compiled everywhere: a layout wants its
 // arithmetic checked on whatever machine is running the tests, and the frame

@@ -451,6 +451,55 @@ pub const HEAP_MAX: u64 = 64 * FRAME_SIZE;
 // The frame's address and the component's, required to agree by the machine.
 const _: () = assert!(SPAWN_HEAP == f_ring::heap::AT);
 
+/// Where a component is shown the generation it is part of.
+///
+/// **Above the heap and not among the addresses below it**, which is a rule
+/// about this file rather than about this constant: every address between
+/// [`SPAWN_CONTROL`] and [`BLK_QUEUES`] is a number a component holds, so a new
+/// one inserted among them moves all of them. Appended, always.
+///
+/// The one need mapped here is `module`, and exactly one component declares it:
+/// the supervisor, which reads the boot module to instantiate the topology it is
+/// part of. RFC 0094 is why that is a component's job and not the frame's — the
+/// crate that does it allocates, and the frame has no allocator.
+pub const SPAWN_MODULE: u64 = SPAWN_HEAP + HEAP_MAX;
+
+/// The most of a generation one component may be shown.
+///
+/// Two hundred and fifty-six kibibytes, against a boot module that is 130 772
+/// bytes for the six components this tree builds. The headroom is deliberate and
+/// it is also finite: a module is linear in the topology, so this is a ceiling on
+/// how large a generation a supervisor may be handed rather than a number with
+/// slack in it. `Record::read` refusing a need larger than the manifest declares
+/// is what turns exceeding it into a refusal at admission instead of a mapping
+/// that runs off the end.
+/// Unit: bytes.
+pub const MODULE_MAX: u64 = 64 * FRAME_SIZE;
+
+// Inside the one page table that covers `TEXT`, like everything above it.
+const _: () = assert!(SPAWN_MODULE + MODULE_MAX <= TEXT + 2 * 1024 * 1024);
+
+/// Where the two generations of one component meet during a swap.
+///
+/// **Mapped into both at once, and that is the whole of what it is for.** RFC
+/// 0063's phase A has an outgoing instance write its history somewhere an
+/// incoming instance can read it, and neither may reach into the other's address
+/// space — so the frame maps one run of memory into both, at one address, for the
+/// length of the phase and no longer.
+///
+/// One page today, which is `f_virtio_blk`'s sixteen registration records at
+/// thirty-two bytes with room to spare. It is a ceiling rather than a size:
+/// `Declaration::window_bytes` is what a swap actually asks for, computed from
+/// the two declarations, and a swap wanting more than this is refused rather
+/// than truncated.
+/// Unit: bytes.
+pub const SWAP_WINDOW: u64 = SPAWN_MODULE + MODULE_MAX;
+
+/// The most of one this build will map. Unit: bytes.
+pub const SWAP_WINDOW_MAX: u64 = FRAME_SIZE;
+
+const _: () = assert!(SWAP_WINDOW + SWAP_WINDOW_MAX <= TEXT + 2 * 1024 * 1024);
+
 // One page table covers two mebibytes, and every address above has to be inside
 // the one that covers `TEXT` — otherwise a component mapping its own tree costs
 // the frame a page table it did not budget for, which is the sentence

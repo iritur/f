@@ -77,7 +77,14 @@ and RFC 0012's *one generation swap, and a reboot only when the frame changed*
 is `claims/0029`'s half and is measured in a process rather than on a machine.
 The frame here changed, so a reboot is the correct outcome and not a limitation
 — but a rollback that did **not** change the frame would still be a reboot in
-this tree, and that is a limitation, owned by `SWAP_GAP`.
+this tree, and that is a limitation. **It is a narrower limitation as of
+2026-09-19 and is no longer owned by `SWAP_GAP`'s original clause.** A place
+*can* now take a second generation without a reboot — `cargo xtask blk swapped`
+— so the mechanism RFC 0012's case 1 requires exists. What this command does not
+do is use it: `cargo xtask rollback` selects a root at the boot menu and reboots,
+because that is what it is for, and nothing yet walks a generation's differing
+leaves and swaps each one's place. That walk is `E2-B06`'s remaining half and
+this claim's row would follow it.
 """
 
 [baseline]

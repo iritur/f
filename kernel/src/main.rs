@@ -753,9 +753,17 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // it, with the direct map live and `frames` rebound onto it. That is
     // `multiboot::Module::bytes`'s obligation, discharged here rather than by
     // `component::demonstrate`, which now discharges it later for itself.
-    if !generation::report(unsafe { generation::selected(&boot) }) {
+    // SAFETY: as the comment above.
+    let selected = unsafe { generation::selected(&boot) };
+    if !generation::report(selected) {
         arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
     }
+    // Kept rather than dropped, which is RFC 0094: the supervisor instantiates
+    // the topology it is part of out of these bytes, and until now the frame
+    // folded them, printed a line and let them go. Nothing is read here — a
+    // physical extent and a root, handed to `component::demonstrate` for the one
+    // place whose manifest declares a `module` need.
+    let generation = generation::chosen(&boot, selected);
 
     // RFC 0013, and E0-B14. Published *before* the subsystems that fill it,
     // because a node names a live word rather than a value copied in later —
@@ -889,7 +897,11 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // for `blk_datapath`'s reason: an ordinary boot has nobody to serve, and a
     // default boot that ran it would stop being the fixture `cargo xtask trace`
     // hashes.
-    let _objects = objects_datapath(&boot, &mut frames, &space, features, clocks, tree.physical());
+    let objects_report =
+        objects_datapath(&boot, &mut frames, &space, features, clocks, tree.physical());
+    // `claims/0019`'s resident pages, carried to the tree publish below. Zero
+    // on a boot with no `objects=` parameter, which is every ordinary one.
+    let objects_resident = objects_report.as_ref().map_or(0, |report| report.resident_frames);
 
     // E1-B08. A component that holds a core and schedules its own work inside
     // it, with the frame counting what crossed. Behind its own parameter, like
@@ -1019,6 +1031,40 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             clocks.tsc_khz,
         )
     };
+    // And the generation, on every boot that selected one. A third supply beside
+    // the two above, and a different kind of thing: those are a device this boot
+    // found, and this is a fact about the machine — the bytes the frame folded to
+    // decide it is the generation it was asked to be. RFC 0094.
+    //
+    // `Shown` and not `Cached`: read-only, because a component that could write
+    // this could rewrite the generation it was measured from, and never zeroed,
+    // because the bytes are the point rather than memory the occupant owns.
+    //
+    // Rounded up to whole pages, because a mapping is pages. The component is
+    // told the module's real length on its board and reads that; the rounding is
+    // the frame's business and reaches nothing above it.
+    let supplied = {
+        let mut all = [component::Supplied {
+            component: b"",
+            name: b"",
+            at: 0,
+            bytes: 0,
+            map: component::Placement::Unmapped,
+        }; 3];
+        let [first, second] = supplied;
+        all[0] = first;
+        all[1] = second;
+        if let Some((at, bytes, _)) = generation {
+            all[2] = component::Supplied {
+                component: b"supervisor",
+                name: b"module",
+                at,
+                bytes: bytes.div_ceil(mem::FRAME_SIZE) * mem::FRAME_SIZE,
+                map: component::Placement::Shown(process::SPAWN_MODULE),
+            };
+        }
+        all
+    };
     // E1-B05's third act, and it is `Some` on exactly one parameter. A client
     // the frame runs against the place's occupant *while* that occupant holds a
     // core, from inside `demonstrate`, because a place does not outlive it —
@@ -1026,6 +1072,10 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // counts, so there is no *after* in which a served datapath could happen.
     let serving: Option<&mut dyn component::Datapath> =
         placed.as_mut().map(|client| client as &mut dyn component::Datapath);
+    // RFC 0065's closing measurement, carried out of the match so the tree can
+    // publish it beside the frame's own counts. One word rather than the whole
+    // report, because the report is a boot-log shape and a node is a live word.
+    let mut components_moved = 0u32;
     // SAFETY: the boot processor, once, with the kernel's address space in
     // `CR3`, `frames` rebound onto its direct map, and no process running. The
     // direct map covers every module: `reserved_ranges` put them all in the
@@ -1044,29 +1094,33 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             &supplied,
             &routing,
             serving,
+            generation.map(|(_, bytes, root)| component::Generation { bytes, root }),
         )
     } {
-        Ok(report) => kprintln!(
-            "  supervisor    ok — {} place(s), {} spawn(s), {} fault(s), {} restart(s), \
+        Ok(report) => {
+            components_moved = report.moved;
+            kprintln!(
+                "  supervisor    ok — {} place(s), {} spawn(s), {} fault(s), {} restart(s), \
              {} resumed, {} client(s) lost, {} probe(s) refused, {} retired, \
              {} irq need(s) bound to no vector, {} tree(s) mounted carrying {} node(s), \
              {} refused for declaring none; heap {} B described, peak {} byte(s), starved {}",
-            report.places,
-            report.spawns,
-            report.faults,
-            report.restarts,
-            report.resumed,
-            report.lost,
-            report.probed,
-            report.retired,
-            report.unbound,
-            report.mounted,
-            report.nodes,
-            report.mute,
-            report.heap_bytes,
-            report.heap_peak,
-            report.heap_starved,
-        ),
+                report.places,
+                report.spawns,
+                report.faults,
+                report.restarts,
+                report.resumed,
+                report.lost,
+                report.probed,
+                report.retired,
+                report.unbound,
+                report.mounted,
+                report.nodes,
+                report.mute,
+                report.heap_bytes,
+                report.heap_peak,
+                report.heap_starved,
+            );
+        }
         // A machine that carried no component file is not a broken machine.
         // `docs/booting-on-hardware.md` makes every component file optional and
         // the first boot outside QEMU carried none at all, so a demonstration
@@ -1158,6 +1212,15 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     tree.set(state::node::MEMORY_REFILL, frames.refill_count());
     tree.set(state::node::MEMORY_REMOTE, frames.remote_count());
     tree.set(state::node::MEMORY_FORCED, allocator.steals);
+    // RFC 0065's closing measurement, published where it was taken. Zero on a
+    // boot whose occupants never ran, which is most of them, and the row that
+    // makes it evidence is `state after` in the log — printed per mounted tree
+    // beside the `state mount` reading it is compared against.
+    tree.set(state::node::COMPONENTS_MOVED, u64::from(components_moved));
+    // `claims/0019`'s resident pages, where that claim's spec says to read
+    // them: the frame's own tree, from the frame's own accounting. Zero on a
+    // boot that did not run the objects demonstration.
+    tree.set(state::node::OBJECTS_RESIDENT, objects_resident);
     // The remapping unit's three numbers, *after* the provocation above and not
     // before it. That ordering is the whole of what makes them instruments: a
     // fault count written before the only code on this boot that can produce a
@@ -2947,6 +3010,8 @@ fn objects_datapath(
         objects::Half::Quiet
     } else if boot.has_parameter(b"objects=provoke") {
         objects::Half::Provoke
+    } else if boot.has_parameter(b"objects=written") {
+        objects::Half::Written
     } else {
         return None;
     };
@@ -3106,7 +3171,12 @@ unsafe fn blk_place_supply<'a>(
     // which is `E1-P06`, and the first time in this tree that the component a
     // boot kills is the component a client's load was going through.
     let killing = boot.has_parameter(b"blk=killed");
-    let serving = killing || boot.has_parameter(b"blk=served");
+    // `blk=swapped`: the same client, the same script, and one different answer
+    // at the moment it has work to protect. What the two halves compare is what
+    // a client loses — a restart costs it every registration it holds, and a
+    // swap costs it none.
+    let swapping = boot.has_parameter(b"blk=swapped");
+    let serving = killing || swapping || boot.has_parameter(b"blk=served");
     if !boot.has_parameter(b"blk=place") && !serving {
         return NONE;
     }
@@ -3195,7 +3265,9 @@ unsafe fn blk_place_supply<'a>(
             };
             match stood {
                 Ok((mut placed, at)) => {
-                    if killing {
+                    if swapping {
+                        placed.swaps();
+                    } else if killing {
                         placed.kills();
                     }
                     (Some(placed), at)
@@ -3258,6 +3330,13 @@ unsafe fn blk_place_supply<'a>(
         (at::FLOOR, blk::FLOOR_NS),
         (at::HOLD, 0),
         (at::HOLD_AFTER, 0),
+        // Where this occupant's own state tree is. **Only the place path can
+        // say a non-zero here**: `component::spawn` maps `SPAWN_TREE` writable
+        // and the two ring-3 shapes in `process` do not map it at all, so a
+        // component that took the address as a constant would fault on every
+        // boot that is not a place. The zero beside it in `blk.rs` is the same
+        // sentence from the other side.
+        (at::TREE_AT, crate::process::SPAWN_TREE),
         (at::MAGIC, f_virtio_blk::routing::MAGIC),
     ];
 

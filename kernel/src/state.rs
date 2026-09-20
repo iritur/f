@@ -276,6 +276,40 @@ pub mod node {
     /// design caught the same omission the same way, which is more than either
     /// occurrence says alone.
     pub const COMPONENT_TREE_5: u32 = 52;
+    /// Mounted component trees whose snapshot moved while their occupant ran.
+    ///
+    /// **RFC 0065's own closing measurement, as a word rather than a
+    /// paragraph.** That decision says a component declares its state tree and
+    /// a spawn refuses one that does not; what it left owed was evidence that
+    /// the declaration is a live region and not a fixture. The frame reads a
+    /// mounted tree once at the mount and again after its occupant's core comes
+    /// back, and this counts the trees where the two readings differ.
+    ///
+    /// Zero is the honest answer on most boots and is not a defect: a tree only
+    /// moves if its occupant both ran and published, and `supplied_place` gives
+    /// a core to one place's occupant. A boot where it is zero *and* an occupant
+    /// ran is the interesting one, because it means a component was handed a
+    /// writable region under the frame's root and wrote nothing into it.
+    ///
+    /// It is deliberately a count of trees and not of words: a word count would
+    /// move when a component changed how much it publishes, and the question
+    /// this node answers is whether anything at all is alive down there.
+    /// Unit: trees.
+    pub const COMPONENTS_MOVED: u32 = 53;
+    /// Frames the allocator gave up to build `user/objects`.
+    ///
+    /// **`claims/0019`'s *resident pages*, in the frame's own tree, which is
+    /// where that claim's spec says to read it.** `user/objects` counts its own
+    /// payload bytes and cannot honestly count pages: a page is what the
+    /// allocator handed over, and asking a component how many it occupies is
+    /// asking it to report on somebody else's decision. So this is a difference
+    /// across `process::prepare_server`, taken out of `FrameAllocator`'s free
+    /// count after the component has formed its store, and a build that mapped
+    /// a page without charging for it moves it.
+    ///
+    /// Zero on every boot that does not run the objects demonstration, which is
+    /// most of them. Unit: frames.
+    pub const OBJECTS_RESIDENT: u32 = 54;
     /// What this machine is running. RFC 0012.
     ///
     /// The node the exit of `E2-B07` is about: *the machine answers "what are
@@ -405,7 +439,7 @@ pub mod node {
 }
 
 /// How many nodes this build publishes.
-pub const NODES: usize = 53;
+pub const NODES: usize = 55;
 
 /// The schema, written once and never again for a generation.
 ///
@@ -778,7 +812,23 @@ const SCHEMA: [SchemaEntry; NODES] = [
         unit::ADDRESS,
         b"place5",
     ),
-    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 52 * WORD, 0xEE, unit::NONE, b"reserved"),
+    SchemaEntry::new(
+        node::COMPONENTS_MOVED,
+        node::COMPONENTS,
+        52 * WORD,
+        kind::COUNTER,
+        unit::NONE,
+        b"moved",
+    ),
+    SchemaEntry::new(
+        node::OBJECTS_RESIDENT,
+        node::COMPONENTS,
+        53 * WORD,
+        kind::GAUGE,
+        unit::FRAMES,
+        b"resident",
+    ),
+    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 54 * WORD, 0xEE, unit::NONE, b"reserved"),
 ];
 
 /// Where the schema block starts: immediately after the header, on the

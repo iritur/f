@@ -11,15 +11,32 @@
 # the next reader needs: it was a reservation and not a withdrawal, which the
 # RFC directory spent two epochs teaching about the number 0012.
 #
-# **Why this is still `pending` now that the denominator exists.** The claim's
-# own subject is *bytes re-chunked per application byte written*, and an
+# **Why this is still `pending`, and the reason changed on 2026-09-20.** The
+# claim's own subject is *bytes re-chunked per application byte written*, and an
 # application byte is defined once, in the spec, as a byte the client submitted
-# **on the objects ring**. `bench/src/bin/rechunk.rs` now exists and writes 4096
-# bytes at a drawn offset through a real `Store` over a modelled device, which
-# is a write path and a denominator — and it is not a client on a ring, because
-# `user/objects` is `E2-B08` and has not been built. So the ratio below is
-# counted at a boundary one layer under the one the claim names, and the claim
-# says so rather than promoting itself.
+# **on the objects ring**.
+#
+# The reason used to be that no such byte existed: `abi::objects::op::known`
+# admitted `READ` alone, so nothing a client submitted could be written, and the
+# bench's denominator was a 4096-byte write through a real `Store` over a
+# modelled device — a write path and not a client. **That is paid.** `op::known`
+# admits `WRITE`, `user/objects` answers it through `f_objects::write::WritePath`,
+# and `cargo xtask objects written` puts four client writes across a real ring at
+# a boot: 8192 bytes counted by the client and 8192 counted by the component, two
+# sums on opposite sides neither derived from the other, with the store's content
+# address for them agreeing between the completion and the component's board.
+#
+# What keeps it `pending` now is **geometry, not boundary**. This claim is
+# defined over 8 MiB and 128 MiB objects across five mixtures and two seeds;
+# `f_blob::extent::EXTENT_BYTES` is a mebibyte and `Extent::write` allocates a
+# piece of it, against the 128 KiB heap `kernel/src/objects.rs` gives that place.
+# So the boot can carry the denominator's *boundary* and cannot carry this
+# claim's *workload*, and a ratio taken over 8 KiB and published under this name
+# would be a measurement from one geometry answering a question about another —
+# which `claims/0016` and `claims/0019` each already carry a paragraph about.
+# `user/objects/src/write.rs` states the same limit where a reader of the code
+# will meet it. What closes this row is a place whose account can fund the
+# geometry, and that is an account and a heap rather than a boundary.
 #
 # **What the two workloads each supply.** `blob/tests/chunker.rs` measures the
 # numerator's worst case directly — the distance from an edit to the first

@@ -414,6 +414,16 @@ fn report(board: &Window, served: Option<(&Service<ZonedMemory, Memory>, u64)>, 
         let _ = board.write64(reported::STAGED, counts.staged_bytes);
         let _ = board.write64(reported::REFUSED, counts.refused);
         let _ = board.write64(reported::NOTICES, notices);
+        let _ = board.write64(reported::WRITES, counts.writes);
+        let _ = board.write64(reported::WRITTEN, counts.written_bytes);
+        // Four words of the address the store gave the last client write. The
+        // client holds the first eight bytes already, out of the completion,
+        // and compares — so an address published here that the store never
+        // produced has to be the same lie told twice through two mechanisms.
+        for (word, chunk) in counts.written_hash.as_chunks::<8>().0.iter().enumerate() {
+            let at = reported::WRITTEN_HASH + (word as u32) * 8;
+            let _ = board.write64(at, u64::from_le_bytes(*chunk));
+        }
     }
     let _ = board.write64(reported::OUTCOME, outcome);
     let _ = board.write64(reported::MAGIC, routing::REPORTED_MAGIC);

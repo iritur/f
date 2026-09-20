@@ -130,6 +130,19 @@ pub mod at {
 
     // --- one row per place, written by the frame ------------------------------
 
+    /// Where the generation this machine is was mapped, in this component's own
+    /// address space, or zero for a boot that selected none.
+    ///
+    /// **In the gap between [`NOW`] and [`ROW`] rather than after the rows**, so
+    /// that nothing existing moves: a field added inside the row block would
+    /// shift every row after the first, and a row's offset is arithmetic both
+    /// sides do. RFC 0094.
+    /// Unit: bytes.
+    pub const MODULE_AT: u32 = 48;
+
+    /// How long it is. Unit: bytes.
+    pub const MODULE_LEN: u32 = 56;
+
     /// Where the rows begin. Unit: bytes.
     pub const ROW: u32 = 64;
     /// How far apart two rows are. Unit: bytes.
@@ -166,6 +179,25 @@ pub mod at {
     /// When that window opened, in [`NOW`]'s ticks. Unit: timer ticks.
     pub const ROW_OPENED: u32 = 24;
 
+    /// The root the module folds to, thirty-two bytes.
+    ///
+    /// **Written by the frame and never computed by the reader**, which is the
+    /// whole reason it is here. `f_assembler::Assembly::instantiate` refolds the
+    /// module and compares it against this; a component that folded the module
+    /// to get the root it then compared against would be checking the bytes
+    /// against themselves, and the check would pass for any module at all.
+    ///
+    /// In the gap that begins where the four rows end (64 + 4 × 40 = 224) and
+    /// runs to [`SUBMITTED`], so nothing existing moves.
+    /// Unit: none — a SHA-256.
+    pub const ROOT: u32 = 224;
+
+    /// How many bytes of it. A length beside an address, because a reader that
+    /// took the length from a constant would be a reader that stops agreeing the
+    /// day the hash does.
+    /// Unit: bytes.
+    pub const ROOT_BYTES: usize = 32;
+
     // --- what the component writes, and the frame reads afterwards ------------
 
     /// How many spawns this supervisor put on its control ring. Unit: entries.
@@ -191,6 +223,58 @@ pub mod at {
     pub const SAID: u32 = 448;
     /// How far apart two of those are. Unit: bytes.
     pub const SAID_STRIDE: u32 = 24;
+
+    /// What the component made of the generation it was shown, written back.
+    ///
+    /// `f_assembler::render::digest` over the assembly — the topology's own
+    /// rendering, not the module it came from. That distinction is
+    /// `user/assembler/src/render.rs`'s central one: the module is the *input*,
+    /// and a digest over the input would be a hash comparison wearing an
+    /// assembler's clothes.
+    ///
+    /// **This is what turns `E2-B05`'s exit from a property of an assembly into
+    /// a property of a boot.** *Boot is a pure function of one hash* is a claim
+    /// about what a machine did, and until something on the machine published
+    /// this number it was a claim about a host-side test.
+    /// Unit: none — a SHA-256.
+    pub const DIGEST: u32 = 544;
+
+    /// How many members the assembler started, failed, found no device for, and
+    /// left unstarted because something they depend on did not start.
+    ///
+    /// Four counts in the order [`f_assembler::start::Report`] declares them, so
+    /// a reader comparing the two does not have to hold a mapping in their head.
+    /// Unit: members.
+    pub const STARTED: u32 = 576;
+    /// See [`STARTED`]. Unit: members.
+    pub const FAILED: u32 = 584;
+    /// See [`STARTED`]. Unit: members.
+    pub const ABSENT: u32 = 592;
+    /// See [`STARTED`]. Unit: members.
+    pub const UNSTARTED: u32 = 600;
+
+    /// Members the supervisor did not try, because the frame had already filled
+    /// their places.
+    ///
+    /// **Not a failure, and counted apart so that it cannot be read as one.**
+    /// The frame holds exactly one place open today; every other member of the
+    /// topology is a place it filled itself before the supervisor ran. A `Start`
+    /// implementation that answered `Err` for those would mark each one's whole
+    /// subtree `Unstarted` and make the rendered topology claim a boot failed
+    /// that did not. RFC 0094 states the distinction as the load-bearing one.
+    /// Unit: members.
+    pub const SKIPPED: u32 = 608;
+
+    /// Why the assembler refused, if it did, as `f_assembler::Refusal`'s
+    /// discriminant plus one — zero being *it did not*.
+    ///
+    /// A refusal does not fail the boot. The supervisor falls back to the row
+    /// loop it ran before RFC 0094, because a malformed module must not turn a
+    /// machine that boots into one that does not: `docs/booting-on-hardware.md`
+    /// makes every component file optional and this is the same argument one
+    /// level up.
+    /// Unit: none — an ordinal.
+    pub const REFUSAL: u32 = 616;
     /// What this supervisor decided about the row, as
     /// `crate::policy::Verdict::to_wire`. Offset within a said-row.
     ///
@@ -240,6 +324,22 @@ pub struct Board {
     pub account: u32,
     /// The logical tick this consultation is stamped with.
     pub now: u64,
+    /// Where the generation this machine is was mapped, or zero for a boot that
+    /// selected none. Unit: bytes, in this address space.
+    pub module_at: u64,
+    /// How long it is — the module's own length, not the extent it was mapped
+    /// over. Reading the second would read past the module into whatever the
+    /// loader put after it. Unit: bytes.
+    pub module_len: u32,
+    /// What it folds to.
+    ///
+    /// **The frame's answer and never this component's**, which is the whole
+    /// reason it crosses the board: `f_assembler::Assembly::instantiate` refolds
+    /// the module and compares against this, and a reader that folded the module
+    /// to get the root it then compared against would be checking the bytes
+    /// against themselves.
+    /// Unit: none — a SHA-256.
+    pub root: [u8; at::ROOT_BYTES],
     /// The places it may act on, in the frame's order.
     pub rows: [Row; PLACES_MAX],
     /// How many of `rows` are real. Unit: places.
@@ -285,7 +385,15 @@ impl Board {
                 opened: page.read64(base + at::ROW_OPENED)?,
             };
         }
+        let mut root = [0u8; at::ROOT_BYTES];
+        for (index, chunk) in root.as_chunks_mut::<8>().0.iter_mut().enumerate() {
+            let word = page.read64(at::ROOT + u32::try_from(index).map_err(|_| quota)? * 8)?;
+            *chunk = word.to_le_bytes();
+        }
         Ok(Self {
+            module_at: page.read64(at::MODULE_AT)?,
+            module_len: u32::try_from(page.read64(at::MODULE_LEN)?).unwrap_or(0),
+            root,
             control_at: page.read64(at::CONTROL_AT)?,
             control_len: u32::try_from(page.read64(at::CONTROL_LEN)?).unwrap_or(0),
             account: u32::try_from(page.read64(at::ACCOUNT)?).unwrap_or(0),
@@ -318,5 +426,27 @@ impl Board {
             let _ = page.write64(base + at::SAID_USED, u64::from(budget.used));
             let _ = page.write64(base + at::SAID_OPENED, budget.opened);
         }
+    }
+
+    /// Write back what the assembler made of the generation.
+    ///
+    /// **This is what turns `E2-B05`'s exit from a property of an assembly into
+    /// a property of a boot.** *Boot is a pure function of one hash* is a claim
+    /// about what a machine did, and until a machine published this number it
+    /// was a claim about a host-side test. The frame reads it off this page after
+    /// the core comes back and puts it in the boot log.
+    #[cfg(all(target_arch = "x86_64", feature = "image"))]
+    pub fn assembled(assembled: &crate::assemble::Assembled) {
+        let Ok(page) = f_ring::device::Window::at(AT, BYTES) else { return };
+        for (index, chunk) in assembled.digest.as_chunks::<8>().0.iter().enumerate() {
+            let Ok(index) = u32::try_from(index) else { return };
+            let _ = page.write64(at::DIGEST + index * 8, u64::from_le_bytes(*chunk));
+        }
+        let _ = page.write64(at::STARTED, assembled.report.started as u64);
+        let _ = page.write64(at::FAILED, assembled.report.failed as u64);
+        let _ = page.write64(at::ABSENT, assembled.report.absent as u64);
+        let _ = page.write64(at::UNSTARTED, assembled.report.unstarted as u64);
+        let _ = page.write64(at::SKIPPED, assembled.skipped);
+        let _ = page.write64(at::REFUSAL, assembled.refusal);
     }
 }

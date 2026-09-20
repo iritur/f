@@ -219,6 +219,30 @@ pub mod op {
     }
 }
 
+/// The deed a registration entry did, or `None` for an entry that is not one.
+///
+/// A function of the entry alone, which is what makes it testable and is also
+/// what makes it *right*: the deed is what was asked for, and the caller has
+/// already established that the table answered it without error. Reaching into
+/// the completion for a field the entry also carries would be two accounts of
+/// one fact.
+///
+/// Read through `f_abi::buf::Request::read` rather than off the entry's fields,
+/// because that reader is the one place the registration layout is stated. A
+/// second reading here is the two-readers problem this crate keeps refusing.
+#[must_use]
+pub fn deed_of(entry: &Sqe) -> Option<crate::state::Record> {
+    match f_abi::buf::Request::read(entry) {
+        Ok(f_abi::buf::Request::Register { cap, len, buffers }) => {
+            Some(crate::state::Record::registered(entry.user_data, cap, len, buffers))
+        }
+        Ok(f_abi::buf::Request::Unregister { set }) => {
+            Some(crate::state::Record::unregistered(entry.user_data, set.bits()))
+        }
+        Err(_) => None,
+    }
+}
+
 /// Bytes of the granted region this driver keeps for its own request headers.
 ///
 /// One page. It holds a sixteen-byte block request header, the status byte the
@@ -394,6 +418,17 @@ pub struct Driver {
     /// Sectors the device says it holds. Unit: sectors of [`SECTOR_BYTES`].
     capacity: u64,
     counters: Counters,
+    /// Every registration deed this instance has done, in the order it did
+    /// them, for a successor to be told.
+    ///
+    /// **Beside the table rather than derived from it**, and the distinction is
+    /// RFC 0063's. A table is a *state*: what is live now. A journal is a
+    /// *history*: what was done, including the unregistrations, which a live
+    /// table no longer remembers. An incoming instance replaying a table would
+    /// have to be handed slots; replaying a journal it re-executes the deeds
+    /// through its own `Table::execute`, which is what makes the `SetId` a
+    /// client still holds mean the same thing on the other side.
+    journal: crate::state::Journal,
 }
 
 impl Driver {
@@ -447,6 +482,7 @@ impl Driver {
             admission,
             capacity,
             counters: Counters::default(),
+            journal: crate::state::Journal::new(),
         })
     }
 
@@ -584,6 +620,54 @@ impl Driver {
         self.answer(entry, order, domains, now, beyond)
     }
 
+    /// Record what this entry did, so that a successor can be told.
+    ///
+    /// **`E2-B06`'s missing producer.** `f_virtio_blk::state` has carried the
+    /// record format, the deed ordinals and a `Journal` since `E2-D04`, and
+    /// nothing outside that file's own tests ever wrote one — so a generation
+    /// swap would have handed over an empty window and every client would have
+    /// had to register again, which is precisely what the `amnesiac` control in
+    /// `sim/src/swap.rs` provokes on purpose.
+    ///
+    /// Read structurally rather than by reaching into the entry's fields:
+    /// `f_abi::buf::Request::read` is what says which of the two registration
+    /// shapes this is, and a second reading of those offsets here would be the
+    /// two-readers problem this crate keeps refusing.
+    ///
+    /// A journal that has filled is not a failure *here* — it is a failure at
+    /// the hand-over, which is where it can be acted on. [`Journal::overflowed`]
+    /// is what carries it there, and this is why: a driver that refused a
+    /// client's registration because its own transfer window was full would be
+    /// charging a client for a supervisor's decision.
+    fn remember(&mut self, entry: &Sqe) {
+        if let Some(deed) = deed_of(entry) {
+            self.journal.record(deed);
+        }
+    }
+
+    /// What this instance has done, for a successor to be told.
+    ///
+    /// Borrowed rather than copied, because the caller writes these into the
+    /// transfer window and has no reason to hold a second copy of them.
+    #[must_use]
+    pub fn deeds(&self) -> &[crate::state::Record] {
+        self.journal.records()
+    }
+
+    /// Whether more deeds happened than the journal could hold.
+    ///
+    /// **The hand-over's business and not a client's.** A journal that filled is
+    /// a transfer that cannot be faithful, and the honest answer at that point is
+    /// to abandon the swap and let the place restart — which costs the clients
+    /// their registrations and costs nothing else. What it must *not* do is
+    /// refuse the registration that overflowed it: that would charge a client
+    /// for a supervisor's decision, and the client has no way to know what it
+    /// did wrong because it did nothing wrong.
+    #[must_use]
+    pub const fn overflowed(&self) -> bool {
+        self.journal.overflowed()
+    }
+
     fn answer<D: Domains>(
         &mut self,
         entry: &Sqe,
@@ -598,6 +682,15 @@ impl Driver {
                 self.counters.refused += 1;
             } else {
                 self.counters.served += 1;
+                // **Journalled after the table answered, and only on success.**
+                // The ordering is the whole of what makes a replay faithful: a
+                // deed recorded before `Table::execute` ran would be a deed the
+                // outgoing instance never did, and an incoming instance
+                // replaying it would issue a `SetId` its predecessor never
+                // issued. `sim/src/service.rs` states the same rule for the
+                // modelled service and answers `None` where it cannot honour
+                // it; here the refusal branch above simply records nothing.
+                self.remember(entry);
             }
             cqe
         } else {
@@ -919,6 +1012,42 @@ mod tests {
             Region::at(self.0.as_mut_ptr() as usize as u64, 0x5000_0000, CONTROL_BYTES)
                 .expect("an aligned region")
         }
+    }
+
+    /// `E2-B06` transfers a history and not a table, so the history has to be
+    /// recorded in the same shape it will be replayed in.
+    #[test]
+    fn a_registration_becomes_the_deed_that_replays_it() {
+        let entry = f_ring::registry::registration(7, 3, 4096, 2);
+        let deed = deed_of(&entry).expect("a registration is a deed");
+        assert!(deed.intact(), "the check word is written by the constructor");
+        assert_eq!(deed.token, 7, "the token is the client's own and survives the swap");
+        assert_eq!(deed.kind, crate::state::deed::REGISTER);
+        assert_eq!(deed.buffers, 2);
+        let replayed = deed.replay().expect("a register deed replays as an entry");
+        assert_eq!(replayed.opcode, f_abi::buf::opcode::REGISTER);
+        assert_eq!(replayed.user_data, 7);
+    }
+
+    /// The other deed, and it matters more than it looks: a *table* forgets an
+    /// unregistration and a *journal* does not, which is the whole reason the
+    /// transfer is a history.
+    #[test]
+    fn an_unregistration_is_a_deed_a_live_table_no_longer_remembers() {
+        let set = f_abi::buf::SetId::new(1, 1);
+        let entry = f_ring::registry::unregistration(9, set);
+        let deed = deed_of(&entry).expect("an unregistration is a deed");
+        assert_eq!(deed.kind, crate::state::deed::UNREGISTER);
+        assert_eq!(deed.token, 9);
+        assert!(deed.intact());
+    }
+
+    /// Everything else is not a deed, and answering `None` is what keeps the
+    /// journal a record of registrations rather than of traffic.
+    #[test]
+    fn a_read_is_not_a_deed() {
+        assert!(deed_of(&read(1, 0, 512)).is_none());
+        assert!(deed_of(&write(2, 0, 512)).is_none());
     }
 
     #[test]

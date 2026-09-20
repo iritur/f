@@ -84,6 +84,17 @@ pub struct Landed {
     /// `unregistered_bytes = 0` too, and this is what tells the two apart.
     /// Unit: bytes.
     pub registered_bytes: u64,
+    /// Bytes read *out of* a caller's registered buffer, answering a write.
+    ///
+    /// The other direction, counted under its own name. [`registered_bytes`]
+    /// is documented as *bytes the device wrote*, and summing the two would
+    /// make `claims/0022`'s zero a statement about nothing in particular —
+    /// it is a claim about what the read path does not copy, and a write is
+    /// not the read path. [`Landing::fetch`] is the only thing that moves it.
+    ///
+    /// [`registered_bytes`]: Landed::registered_bytes
+    /// Unit: bytes.
+    pub fetched_bytes: u64,
     /// Bytes that moved through a buffer that is not the caller's registered
     /// one.
     ///
@@ -203,6 +214,37 @@ impl<'m> Landing<'m> {
         let window = self.region.get_mut(at..end).ok_or(refusal::ADDRESS)?;
         self.landed.registered_bytes = self.landed.registered_bytes.saturating_add(len as u64);
         self.landed.transfers = self.landed.transfers.saturating_add(1);
+        Ok(window)
+    }
+
+    /// One buffer of the set, read for its **contents** rather than lent for
+    /// the device to fill.
+    ///
+    /// **Deliberately not [`Self::lend`], and the reason is an accounting one
+    /// rather than a borrow-checker one.** `lend`'s
+    /// [`Landed::registered_bytes`] is documented as *bytes the device wrote*,
+    /// and a field that meant two directions at once is exactly the defect
+    /// this crate is arranged against — `claims/0022`'s zero is a statement
+    /// about one direction and would become unreadable the day the counter
+    /// under it summed both. So this has a tally of its own and moves nothing
+    /// that the read path publishes.
+    ///
+    /// The resolution is identical: the same `f_ring::registry::Table`, the
+    /// same refusals, the same region check. A client cannot name a bare
+    /// offset here any more than it can there.
+    ///
+    /// # Errors
+    ///
+    /// `Table::resolve`'s, unchanged, and [`refusal::ADDRESS`] for an address
+    /// the table answered that this model's region does not cover.
+    pub fn fetch(&mut self, set: SetId, index: u32, len: usize) -> Result<&[u8], i32> {
+        let wanted = u32::try_from(len).map_err(|_| refusal::SHORT_BUFFER)?;
+        let reach = self.table.resolve(set, index, wanted).map_err(|(code, _)| code)?;
+        let at = usize::try_from(reach.address.wrapping_sub(DEVICE_BASE))
+            .map_err(|_| refusal::ADDRESS)?;
+        let end = at.checked_add(len).ok_or(refusal::ADDRESS)?;
+        let window = self.region.get(at..end).ok_or(refusal::ADDRESS)?;
+        self.landed.fetched_bytes = self.landed.fetched_bytes.saturating_add(len as u64);
         Ok(window)
     }
 

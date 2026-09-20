@@ -20,6 +20,14 @@ f-abi.workspace = true
 # and `f_ring::adopt` (RFC 0037) is what makes driving a control ring
 # expressible in a crate that forbids `unsafe`.
 f-ring.workspace = true
+# The assembler, and it is **optional** for a mechanical reason rather than a
+# taste one. `f-assembler` declares `extern crate alloc` unconditionally, and
+# the frame links *this* crate — with `default-features = false`, for `routing`
+# and `policy` — into an artefact that has no `#[global_allocator]` and may not
+# have one. An unconditional row here would put an allocating crate in the
+# kernel's graph the first time anybody built it, and the failure would land in
+# the linker rather than anywhere that names the cause. RFC 0094.
+f-assembler = { workspace = true, optional = true }
 
 # No override. This crate inherits `unsafe_code = "forbid"` from the workspace,
 # which is what makes RFC 0008's *restart is the supervisor's act* land above
@@ -35,4 +43,7 @@ workspace = true
 # artefact.
 [features]
 default = ["image"]
-image = []
+# `dep:f-assembler` and not a bare `f-assembler`, so that enabling the image does
+# not also create an implicit `assembler` feature somebody could turn on without
+# the image — which would be the allocating crate arriving by the other door.
+image = ["dep:f-assembler"]

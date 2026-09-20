@@ -1349,6 +1349,12 @@ unsafe fn run(
         (routing::at::FLOOR, FLOOR_NS),
         (routing::at::HOLD, half.hold()),
         (routing::at::HOLD_AFTER, half.hold_after()),
+        // No state tree on this path, said rather than left zero by omission.
+        // `process::prepare_driver` maps the control ring, the board, the
+        // registers and the queues; `SPAWN_TREE` is `component::spawn`'s and
+        // this shape never gets one. A component reads this slot and publishes
+        // only when it is non-zero.
+        (routing::at::TREE_AT, 0),
     ] {
         board.write64(offset, value).map_err(Trouble::Channel)?;
     }
@@ -1481,15 +1487,21 @@ unsafe fn run(
 /// outlives nothing: it is handed straight to `component::demonstrate` and
 /// written onto the page before the first core is given out.
 ///
-/// **Twenty-eight and not twelve, which is the count that mattered.** The
+/// **Twenty-nine and not twelve, which is the count that mattered.** The
 /// identify life reads the register span and the four structures, and twelve
 /// slots answered it. A serving life reads the queue region, both rings, both
 /// ceilings, the floor, the ordering, the hold and what was negotiated — and
 /// `laid_out` answers `None` for any one of them that is missing, which the
 /// component turns into `stopped::BAD_ROUTING`. A page filled in three-eighths
 /// of the way is a driver that refuses before it touches the device.
+///
+/// The twenty-ninth is `at::TREE_AT`, and it is the one slot here whose value
+/// is *zero on this path and non-zero on the other*: only `component::spawn`
+/// maps a state tree, so the account-less driver says there is none and the
+/// place says where it is. Written rather than left out, for the reason
+/// `at::HOLD` is written as an explicit zero one line up.
 /// Unit: slots.
-pub const ROUTED: usize = 28;
+pub const ROUTED: usize = 29;
 
 /// What the frame saw while it was a client of a place's occupant.
 ///
@@ -1584,6 +1596,23 @@ pub struct Placed<'a> {
     free_before: u64,
     /// Whether this client is the one that has its server killed under it.
     killing: bool,
+    /// Whether it is the one that has its server **swapped** under it.
+    ///
+    /// One script with one branch, and that is the point rather than an economy:
+    /// *no client observes anything except added latency* has to be the same
+    /// client saying it about a restart and about a swap, or the comparison
+    /// between them is a comparison between two harnesses.
+    swapping: bool,
+    /// The naming the registration answered with, kept across a swap.
+    ///
+    /// **This is what a swap is for.** A `SetId` names a slot in *an instance's*
+    /// table; a restart gives the place an instance whose table has never been
+    /// filled, so every id a client holds is answered `NO_SUCH_CAP` and it must
+    /// register again. A swap hands the successor its predecessor's history, the
+    /// successor replays it into its own table, and the id keeps meaning what it
+    /// meant. Holding the naming across the boundary and submitting against it
+    /// afterwards is the whole demonstration.
+    naming: Option<Fixed>,
     /// Which generation of the occupant this client is about to be run against,
     /// counting from zero. Unit: none — an ordinal.
     generation: u32,
@@ -1705,6 +1734,8 @@ impl<'a> Placed<'a> {
                 data: 0,
                 free_before: 0,
                 killing: false,
+                swapping: false,
+                naming: None,
                 generation: 0,
                 registered_at: 0,
                 refused_without_grant: false,
@@ -1728,6 +1759,23 @@ impl<'a> Placed<'a> {
     /// Have this client's server killed under it, once, with work outstanding.
     pub const fn kills(&mut self) {
         self.killing = true;
+    }
+
+    /// Have this client's server swapped for its successor under it.
+    ///
+    /// The same script as [`Self::kills`] and a different answer at one line.
+    /// What the boot compares is what the client lost: a restart costs it every
+    /// registration it held, and a swap costs it none.
+    pub const fn swaps(&mut self) {
+        self.killing = true;
+        self.swapping = true;
+    }
+
+    /// Whether this client held a registration across a swap and used it
+    /// afterwards without registering again.
+    #[must_use]
+    pub const fn carried(&self) -> bool {
+        self.swapping && self.naming.is_some()
     }
 
     /// What survived the kill, for the boot to assert on and the log to carry.
@@ -1904,6 +1952,18 @@ impl Placed<'_> {
         // table has never been filled. `user/virtio-blk/manifest.toml` argues it
         // at length under `[transfer]`, and it is why that manifest declares
         // `in_place` — a swap keeps the table, a restart does not.
+        // **The generation that inherited one does not register**, and that is
+        // the whole assertion. Everything below it — the carve, the submissions,
+        // the byte comparison — runs against a `SetId` this client was answered
+        // by an instance that no longer exists, and it works only if the
+        // successor replayed the history it was handed.
+        //
+        // A run that registered again here would pass every other check in this
+        // file and assert nothing about a swap, because registering again is
+        // exactly what a *restart* costs.
+        if let Some(inherited) = self.naming.filter(|_| !first) {
+            return self.after_swap(frames, domain, &ends, producer, page, asking, inherited);
+        }
         let asked = registration(token + 2, self.owned_cap, asking.bytes, KILL_READS as u32);
         if producer.submit(asked).is_err() {
             return Err(Trouble::Channel(0).message());
@@ -1967,7 +2027,14 @@ impl Placed<'_> {
         // The first stops one short, because *one answered and one outstanding*
         // is the state the kill has to arrive in. The second waits for all of
         // them, because that is the state the boot has to end in.
-        let stop_at = if first { submitted.saturating_sub(1) } else { submitted };
+        // A swap waits for **all** of them before it asks, and a kill leaves one
+        // outstanding. The difference is not a preference: a kill is about work
+        // in flight when a component dies, and a swap is about a registration
+        // surviving one that did not die — and an entry still on the data ring
+        // at a hand-over is lost either way, because the ring is the occupant's
+        // and goes back to the account with it. Claiming otherwise would be this
+        // harness asserting something the mechanism does not do.
+        let stop_at = if first && !self.swapping { submitted.saturating_sub(1) } else { submitted };
         let mut got = 0u32;
         while got < stop_at {
             let answer = {
@@ -2005,6 +2072,33 @@ impl Placed<'_> {
             self.reaped += 1;
         }
 
+        if first && self.swapping {
+            // --- the swap -----------------------------------------------------
+            //
+            // Every buffer is back — `stop_at` waited for all of them — so
+            // nothing is abandoned, nothing is reclaimed, and the registration
+            // stays live. What crosses the boundary is `naming`, and the next
+            // generation submits against it without registering.
+            self.naming = Some(naming);
+            // The device's route to this page, withdrawn before the successor
+            // replays the registration that establishes it again.
+            //
+            // **Not a detail.** A domain belongs to the client and outlives the
+            // occupant, so the translation the outgoing instance asked for is
+            // still in it; a successor replaying the same deed asks the frame to
+            // map an address the domain already holds, and the frame answers
+            // `ARGUMENT/BAD_ADDRESS`. The first boot of this path failed exactly
+            // there, with a replay count of zero and every other line green.
+            //
+            // Withdrawing keeps one mechanism rather than two: the replay is the
+            // *same* deed the client submitted the first time, answered the same
+            // way, which is what makes a replayed history equal to a lived one.
+            let owned_cap = self.owned_cap;
+            let mut supervising = self.supervising(frames, domain, &ends);
+            supervising.withdraw(owned_cap, registered_at, asking.bytes);
+            self.answered = supervising.answered;
+            return Ok(component::Drove::Swap { in_flight: 1 });
+        }
         if first {
             // --- the kill -----------------------------------------------------
             let outstanding = flying.iter().filter(|slot| slot.is_some()).count() as u32;
@@ -2059,6 +2153,113 @@ impl Placed<'_> {
         // Told to stop, as every other client here does: a driver left serving a
         // client that has gone is a core this boot never gets back.
         let supervising = self.supervising(frames, domain, &ends);
+        supervising.stop().map_err(|why| Trouble::from(why).message())?;
+        Ok(component::Drove::Finished)
+    }
+
+    /// Submit against a registration made by an instance that no longer exists.
+    ///
+    /// **The far end of a swap, and the only thing in this tree that asserts
+    /// what one is worth.** No registration is made here. The `SetId` this binds
+    /// against was answered by the outgoing occupant, and it resolves only
+    /// because the successor replayed the history it was handed into its own
+    /// table — which is what `f_abi::swap`'s phase A is for and what a *restart*
+    /// cannot do.
+    ///
+    /// The verdict is in bytes, as the kill half's is: every buffer is poisoned
+    /// before the device is told anything, and a buffer still holding the poison
+    /// is a read that never landed.
+    ///
+    /// # Errors
+    ///
+    /// A message for the boot log. `NO_SUCH_CAP` here is the interesting one: it
+    /// is what a client sees when it is handed a successor that inherited
+    /// nothing, and it is exactly what a restart would have produced.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the same set `survive` takes, for the same reason, minus the generation it no \
+                  longer branches on"
+    )]
+    fn after_swap(
+        &mut self,
+        frames: &mut FrameAllocator,
+        domain: &mut crate::arch::x86_64::vtd::Domain,
+        ends: &Ends<'_, '_>,
+        producer: &mut Producer<'_>,
+        page: &mut [u8],
+        asking: Asking,
+        naming: Fixed,
+    ) -> Result<component::Drove, &'static str> {
+        let mut set = BufferSet::bind(naming, asking.negotiated, page)
+            .map_err(|why| Trouble::Channel(why).message())?;
+        let carved = set.carve::<KILL_READS>().map_err(|_| Trouble::Geometry.message())?;
+
+        let mut flying: [Option<InFlight<'_, Fixed>>; KILL_READS] = [const { None }; KILL_READS];
+        let mut idle: [Option<Idle<'_, Fixed>>; KILL_READS] = [const { None }; KILL_READS];
+        let paired = carved.into_iter().zip(flying.iter_mut()).zip(idle.iter_mut());
+        for (index, ((mut buffer, fly), _rest)) in paired.enumerate() {
+            for byte in buffer.bytes_mut().iter_mut().take(TRANSFER as usize) {
+                *byte = POISON;
+            }
+            let at = index as u64 * u64::from(TRANSFER);
+            let entry = driver::read(900 + index as u64, at, TRANSFER);
+            match buffer.submit(&mut *producer, entry) {
+                Ok((sent, _)) => *fly = Some(sent),
+                Err(_) => break,
+            }
+        }
+
+        let mut got = 0;
+        while got < KILL_READS {
+            let answer = {
+                let mut supervising = self.supervising(frames, domain, ends);
+                let answer = supervising.awaited(asking.tsc_khz);
+                self.answered = supervising.answered;
+                match answer {
+                    Ok(answer) => answer,
+                    Err(why) => {
+                        abandon(&mut flying);
+                        return Err(Trouble::from(why).message());
+                    }
+                }
+            };
+            let mut landed = false;
+            for (fly, rest) in flying.iter_mut().zip(idle.iter_mut()) {
+                let Some(sent) = fly.take() else { continue };
+                match sent.complete(&answer) {
+                    Ok(back) => {
+                        *rest = Some(back);
+                        landed = true;
+                        break;
+                    }
+                    Err(still) => *fly = Some(still),
+                }
+            }
+            if !landed {
+                abandon(&mut flying);
+                return Err(Trouble::Channel(0).message());
+            }
+            got += 1;
+            self.reaped += 1;
+        }
+
+        self.poisoned = 0;
+        for slot in &mut idle {
+            let Some(buffer) = slot.as_mut() else {
+                self.poisoned += 1;
+                continue;
+            };
+            if buffer.bytes_mut().iter().take(TRANSFER as usize).any(|byte| *byte == POISON) {
+                self.poisoned += 1;
+            }
+        }
+        self.served = Some(Served {
+            registered_at: self.registered_at,
+            refused_without_grant: self.refused_without_grant,
+            matched: self.poisoned == 0,
+            answered: self.answered,
+        });
+        let supervising = self.supervising(frames, domain, ends);
         supervising.stop().map_err(|why| Trouble::from(why).message())?;
         Ok(component::Drove::Finished)
     }

@@ -41,4 +41,20 @@ workspace = true
 # its keep.
 [features]
 default = ["image"]
+
+# A second generation of this component, for `E2-B06` to swap to.
+#
+# **A feature and not a `--cfg`**, because a bare cfg is a name `rustc` has never
+# heard of and `unexpected_cfgs` says so on every ordinary build — and silencing
+# that would mean a `[lints.rust]` table overriding the workspace's, which is a
+# much larger thing to do for a one-line difference.
+#
+# What it changes is one number: the generation this image reports on its board.
+# That is deliberately the smallest observable difference there can be. The two
+# images have to differ *somewhere*, because a content address over identical
+# bytes is the same address and there would be no second generation to swap to;
+# and they have to differ *nowhere else*, because a swap is only interesting
+# between two builds a client cannot otherwise tell apart. The manifest is
+# untouched, so `Declaration::transfers_to` holds between them by construction.
+successor = []
 image = []

@@ -76,7 +76,24 @@ name   = "heap"
 type   = "untyped"
 rights = ["read", "write"]
 from   = "supervisor"
-bytes  = 8_192
+# Sixty-four kibibytes, and it was eight until RFC 0094 put an assembler behind
+# this component's door.
+#
+# **The number is set by one type rather than by a workload.** An
+# `f_assembler::topology::Instance` owns an `f_abi::manifest::Record`, which is
+# 2 696 bytes by a compile-time assertion, so instantiating a six-member
+# generation allocates sixteen kibibytes before it has resolved a single route.
+# Add the route list, the start order, the `BTreeMap` the bus is keyed by and the
+# rendering `render::topology` returns, and eight kibibytes is not close.
+#
+# What eight bought was the old boot's measured peak of sixty-four bytes, which
+# is what a component that submits one spawn needs. The first boot of the
+# assembler with that number died at ring 3 with exception 6 — the allocation
+# failed, the handler panicked, and `ud2` is what a panic compiles to. That is
+# the honest failure mode and it is also an unreadable one, which is why
+# `f_ring::heap`'s prologue records `starved` and the frame reads it back at
+# teardown rather than taking the component's word for anything.
+bytes  = 65_536
 
 # This place's own endpoint, routed back to it. `write` to connect and `grant`
 # to hand it on, which together let a supervisor introduce a client to itself
@@ -116,6 +133,48 @@ from   = "supervisor"
 name   = "board"
 type   = "untyped"
 rights = ["read", "write"]
+from   = "supervisor"
+bytes  = 4_096
+
+# The generation this machine was asked to be: the boot module, copied into
+# memory this account paid for and mapped read-only.
+#
+# **This is the need that makes RFC 0066's decision spend itself.** That RFC
+# landed `user/assembler` above the frame with no caller, because the frame
+# cannot link a crate that allocates and nothing above the frame could be asked
+# to. Both halves of that have gone — there is a heap in `ring/` and this
+# component drives a control ring — so what was missing was the bytes. RFC 0094.
+#
+# `read` and nothing else, which is the whole of what makes it safe to show: a
+# component that could write this could rewrite the generation it was measured
+# from, and `kernel/src/measure.rs` would be attesting to bytes that had since
+# changed. The frame maps it `UserPage::ReadOnly` because the rights say so, and
+# a rights bitmap the mapping cannot express is a rights bitmap that is not
+# enforced.
+#
+# **A floor and not a size, and the distinction is load-bearing here.** A boot
+# module is 130 772 bytes for the six components this tree builds today and a
+# different number tomorrow, because it contains them — so an exact number here
+# would be a manifest rewritten by every change to any component in the
+# generation. `least_extent` in the frame is what this declares: the least a
+# handle satisfying it may name. One page, because a generation smaller than a
+# page is not one.
+#
+# The supply is what decides the real extent, and this component is told it on
+# its board rather than reading it here. That split is the same one every routed
+# need has: the manifest is what the account is sized against and what a spawn is
+# refused under, and the board is what the component reads.
+#
+# The account below does not grow by the module, and that is the point of
+# supplying it rather than carving it. A carved need is charged a frame at a
+# time against `CHARGED_MAX`, which is sixty-four; a module of thirty-two pages
+# would spend half that list on one need and a larger topology would exhaust it.
+# `reap` never hands a supplied object back, which is correct here twice over —
+# the module is the loader's memory and the frame does not own it either.
+[[capability]]
+name   = "module"
+type   = "untyped"
+rights = ["read"]
 from   = "supervisor"
 bytes  = 4_096
 

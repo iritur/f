@@ -150,6 +150,7 @@ name = "f-supervisor"
 version = "0.0.1"
 dependencies = [
  "f-abi",
+ "f-assembler",
  "f-ring",
 ]
 

@@ -184,6 +184,21 @@ pub enum Half {
     /// boot can move — which is indistinguishable from a tally that was deleted,
     /// and is the whole reason `dma.rs` has a provocation of its own.
     Provoke,
+    /// Write bytes across the ring, then read them back by the address the
+    /// component answered with.
+    ///
+    /// **`E2-B09`'s boundary, as a boot.** That task's denominator is defined
+    /// once, in `intent/0006-state/spec.md`, as *a byte the client submitted on
+    /// the objects ring*, and until `op::known` admitted `WRITE` there was no
+    /// such byte in the tree — `bench/src/bin/rechunk.rs` writes into a `Store`
+    /// in a host process, which is a write path wearing a client's name.
+    ///
+    /// The assertion is deliberately the round trip and not the completion. A
+    /// component that counted the bytes and dropped them would answer this
+    /// write exactly as a working one does; what it could not do is answer the
+    /// *read* that follows, because the read names the content address the
+    /// write returned and nothing else in this boot knows it.
+    Written,
 }
 
 impl Half {
@@ -194,6 +209,7 @@ impl Half {
             Self::Read => "read",
             Self::Quiet => "quiet",
             Self::Provoke => "provoke",
+            Self::Written => "written",
         }
     }
 
@@ -203,9 +219,44 @@ impl Half {
         match self {
             Self::Read | Self::Provoke => READS,
             Self::Quiet => 0,
+            // One read, and it is the read-back. The write half's evidence is
+            // that this one read can be asked at all: its hash is the one the
+            // component answered the write with.
+            Self::Written => 1,
+        }
+    }
+
+    /// How many writes this half submits. Unit: count of writes.
+    ///
+    /// `claims/0017`'s denominator is `WRITES * WRITE_BYTES` on this half and
+    /// zero everywhere else, which is what makes the row a reading rather than
+    /// a constant: a half that submits none must publish none.
+    #[must_use]
+    pub const fn writes(self) -> u64 {
+        match self {
+            Self::Written => WRITES,
+            Self::Read | Self::Quiet | Self::Provoke => 0,
         }
     }
 }
+
+/// How many writes the write half submits. Unit: count of writes.
+///
+/// Four rather than one, so that the denominator is a sum and not a single
+/// figure that a build could produce by accident, and so that the store is
+/// asked to hold more than one client object at a time.
+pub const WRITES: u64 = 4;
+
+/// How many bytes each of those writes carries. Unit: bytes.
+///
+/// One block. Deliberately **not** `claims/0017`'s geometry: that claim is
+/// defined over 8 MiB and 128 MiB objects and cannot be taken here —
+/// `f_blob::extent::EXTENT_BYTES` is a mebibyte and `Extent::write` allocates a
+/// piece of it, against the 128 KiB heap this place is given. What this boot
+/// establishes is the *boundary*, and `user/objects/src/write.rs` says at
+/// length why a ratio taken over four kibibytes must not be published under
+/// that claim's name.
+pub const WRITE_BYTES: u32 = BLOCK_BYTES as u32;
 
 /// What went wrong, in terms a boot can print.
 #[derive(Clone, Copy, Debug)]
@@ -254,6 +305,15 @@ pub struct Report {
     /// Reads whose bytes the client checked against its own arithmetic and
     /// found equal. Unit: count of reads.
     pub verified: u64,
+    /// Frames the allocator gave up to build this component. Unit: frames.
+    ///
+    /// **`claims/0019`'s *resident pages*, taken by the frame rather than
+    /// asked of the component.** The spec defines the number that way and this
+    /// is why: pages are a fact about what the allocator handed over, and the
+    /// component can only honestly count its own payload bytes. Read as a
+    /// difference across `process::prepare_server`, so a build that mapped a
+    /// page without charging for it changes it.
+    pub resident_frames: u64,
     /// Entries the component answered. Unit: count of entries.
     pub entries: u64,
     /// Reads it completed. Unit: count of reads.
@@ -264,6 +324,21 @@ pub struct Report {
     /// Bytes that went anywhere but the client's registered buffer.
     /// Unit: bytes.
     pub staged: u64,
+    /// Application bytes the **client** submitted to be written.
+    ///
+    /// `claims/0017`'s denominator, on this side of the ring. Unit: bytes.
+    pub submitted_bytes: u64,
+    /// Writes the component answered. Unit: count of writes.
+    pub written: u64,
+    /// Application bytes it counted at the entry. Unit: bytes.
+    ///
+    /// Required equal to [`Report::submitted_bytes`] and derived from nothing
+    /// it shares with that field.
+    pub written_bytes: u64,
+    /// The low word of the address the last completion carried. Unit: bytes.
+    pub named: u64,
+    /// The low word of the address the component published. Unit: bytes.
+    pub published_low: u64,
     /// Entries it refused. Unit: count of entries.
     pub refused: u64,
     /// Notices it drained. Unit: count of events.
@@ -291,7 +366,10 @@ impl Report {
         if self.refused != 0 {
             return Err("the component refused an entry this client believes was well formed");
         }
-        if self.entries != self.submitted {
+        // Reads **and** writes. A half that submits both and compared only one
+        // would pass while the component silently dropped the other kind,
+        // which is the failure this line exists to catch.
+        if self.entries != self.submitted + self.written {
             return Err("the component answered a different number of entries than were submitted");
         }
         match self.half {
@@ -313,6 +391,42 @@ impl Report {
             Half::Quiet => {
                 if self.delivered != 0 || self.reads != 0 {
                     return Err("the quiet half delivered bytes nobody asked for");
+                }
+                if self.written != 0 || self.written_bytes != 0 {
+                    return Err("the quiet half wrote bytes nobody submitted");
+                }
+            }
+            Half::Written => {
+                // The two sums, on opposite sides, neither derived from the
+                // other. This is the whole of what `E2-B09` was blocked on:
+                // an application byte is one a client submitted on this ring,
+                // and until now there was no such byte to count.
+                if self.written_bytes != self.submitted_bytes {
+                    return Err(
+                        "the component's count of written bytes is not the client's — two sums \
+                         that must agree, and do not",
+                    );
+                }
+                if self.written_bytes == 0 {
+                    return Err(
+                        "nothing was written, so the agreement above is two zeros agreeing",
+                    );
+                }
+                if self.written != WRITES {
+                    return Err("the component answered a different number of writes");
+                }
+                // The address, cross-checked. `Store::put_object` computed it
+                // over the bytes it was handed, so an address at all is
+                // evidence they reached the store; the client holds the low
+                // word out of the completion and the component published all
+                // four, so a digest it never computed is the same lie told
+                // twice through two mechanisms in one run.
+                if self.named == 0 {
+                    return Err("the store answered no address for what the client wrote");
+                }
+                if self.named != self.published_low {
+                    return Err("the address in the completion is not the one on the board — the \
+                         component published a digest it did not answer with");
                 }
             }
             Half::Provoke => {
@@ -399,6 +513,18 @@ pub unsafe fn demonstrate(
     // accessor hands out atomics and `UnsafeCell`s rather than references.
     let client_end = unsafe { Mapping::adopt(at, bytes, 0, 0) }.map_err(Trouble::Channel)?;
 
+    // What this component costs the machine, measured by the machine.
+    //
+    // **`claims/0019`'s number is defined as resident pages and this is where
+    // pages exist.** `user/objects/src/resident.rs` counts *payload bytes* —
+    // entries in a map, records in a store — because payload bytes are what a
+    // component can honestly count about itself. Pages are the frame's: it is
+    // the allocator that gave them up, and asking a component how many pages it
+    // occupies is asking it to report on a decision somebody else made. So the
+    // difference across `prepare_server` is taken here, out of the allocator's
+    // own free count, and it is a reading rather than a sum of constants: a
+    // build that mapped a page it did not charge for moves it.
+    let free_before = frames.free_count();
     // SAFETY: the caller's guarantee about `kernel`, `frames` and `cpu`, plus
     // `wire` and `owned` being frames this function allocated and holds.
     let (prepared, pages) = unsafe {
@@ -410,7 +536,7 @@ pub unsafe fn demonstrate(
                 image,
                 selector: match half {
                     Half::Provoke => routing::PROVOKE,
-                    Half::Read | Half::Quiet => routing::SERVE,
+                    Half::Read | Half::Quiet | Half::Written => routing::SERVE,
                 },
                 tree,
                 hz,
@@ -425,6 +551,18 @@ pub unsafe fn demonstrate(
     }
     .map_err(Trouble::Process)?;
 
+    // What the component cost, read **while it still holds it**. Taken after
+    // `prepare_server` and before anything is given back: the teardown refunds
+    // every frame, so the same subtraction after it is a measurement of zero —
+    // which is exactly what the first draft of this printed, and is the reason
+    // the reading is here rather than beside the other counts.
+    //
+    // The heap is in it. `ServerPlan::heap_bytes` is mapped by the frame at
+    // preparation, so a component that grows its store inside that heap costs
+    // no further frames and the number does not move while it serves. That is
+    // a property of the arrangement rather than of this reading, and it is why
+    // `claims/0019` can take one figure per boot rather than a high-water mark.
+    let resident_frames = free_before.saturating_sub(frames.free_count());
     // SAFETY: `pages.control` is the kernel address of a frame `prepare_server`
     // allocated zeroed for this run and handed to nobody else.
     let control = unsafe {
@@ -502,6 +640,7 @@ pub unsafe fn demonstrate(
 
     Ok(Report {
         half,
+        resident_frames,
         submitted: seen.submitted,
         completed: seen.completed,
         verified: seen.verified,
@@ -509,6 +648,11 @@ pub unsafe fn demonstrate(
         reads: report.reads,
         delivered: report.delivered,
         staged: report.staged,
+        submitted_bytes: seen.written_bytes,
+        written: report.writes,
+        written_bytes: report.written,
+        named: seen.named,
+        published_low: report.hash_low,
         refused: report.refused,
         notices: report.notices,
         outcome: report.outcome,
@@ -549,6 +693,24 @@ struct Seen {
     submitted: u64,
     completed: u64,
     verified: u64,
+    /// Writes this client submitted. Unit: count of writes.
+    written: u64,
+    /// Application bytes this client submitted to be written. Unit: bytes.
+    ///
+    /// `claims/0017`'s denominator, taken on the client's side of the ring.
+    /// The component publishes its own sum on the board and the boot requires
+    /// the two to agree — two counts, on opposite sides, neither derived from
+    /// the other, which is `claims/0012`'s discipline and the reason a single
+    /// figure taken once would be this harness reporting on itself.
+    written_bytes: u64,
+    /// The registration these writes bind against.
+    set: u32,
+    /// The low word of the address the store gave the last write.
+    ///
+    /// Compared against what the component publishes at
+    /// `reported::WRITTEN_HASH`, so an address it never computed has to be the
+    /// same lie told twice through two mechanisms in one run.
+    named: u64,
 }
 
 /// Wait for the registration, submit, reap and check.
@@ -587,8 +749,24 @@ fn drive(
         hash[start..start + 8].copy_from_slice(&value.to_le_bytes());
     }
 
-    let mut seen = Seen { submitted: 0, completed: 0, verified: 0 };
+    let mut seen = Seen {
+        submitted: 0,
+        completed: 0,
+        verified: 0,
+        written: 0,
+        written_bytes: 0,
+        set,
+        named: 0,
+    };
     let wanted = half.reads();
+
+    // The write half, and it runs first because the read that follows names
+    // what it produced. `hash` is replaced by the address the component
+    // answered with, so the read-back cannot accidentally be answered out of
+    // the blob the component stocked itself at start-up.
+    if half.writes() > 0 {
+        write_back(&mut seen, half, producer, reaper, arena, frames, owned)?;
+    }
 
     while seen.completed < wanted {
         // Submit while there is room, so the ring fills and drains rather than
@@ -633,6 +811,113 @@ fn drive(
     Ok(seen)
 }
 
+/// Submit this half's writes and count what crossed.
+///
+/// **The bytes are the client's own and are never received from anybody.**
+/// [`content_byte`] is a function of a seed and an offset, so this side fills
+/// its buffer from a rule it computes and the component stores whatever it is
+/// handed.
+///
+/// # What this establishes, and the stronger thing it does not
+///
+/// It establishes the **boundary**: `f_abi::objects::Write::bytes` crosses a
+/// real ring from a real client, both sides count it, and
+/// [`drive`]'s caller requires the two sums to agree. That is what `E2-B09`
+/// was blocked on — `intent/0006-state/spec.md` defines an application byte as
+/// one the client submitted on the objects ring, and until `op::known` admitted
+/// `WRITE` there was no such byte in the tree.
+///
+/// What it does **not** do is read the bytes back. A component that counted
+/// them and dropped them would answer these completions exactly as a working
+/// one does, and the only thing standing against that here is the content
+/// address: the store computed it over the bytes it was handed, so an address
+/// is evidence the bytes reached `Store::put_object`, and the boot requires the
+/// component's published digest to agree with the completion's own low word.
+/// That is weaker than a read-back and is the assertion this half makes.
+/// `sim/src/swap.rs`'s `amnesiac` control is the shape of what a read-back
+/// would catch and this does not, and `E2-B09`'s line says so rather than
+/// leaving a reader to assume the round trip happened.
+///
+/// # Errors
+///
+/// [`Trouble::Refused`] where the ring will not take the entry or a completion
+/// does not arrive, and [`Trouble::BadReport`] where a completion states a
+/// count that is not what was asked.
+fn write_back(
+    seen: &mut Seen,
+    half: Half,
+    producer: &Producer<'_>,
+    reaper: &Collector<'_>,
+    arena: &Arena<'_>,
+    frames: &FrameAllocator,
+    owned: crate::mem::Frame,
+) -> Result<(), Trouble> {
+    while seen.written < half.writes() {
+        if !fill_owned(frames, owned, WRITE_BYTES) {
+            return Err(Trouble::Refused);
+        }
+        let at = seen.written * u64::from(WRITE_BYTES);
+        let request = Request {
+            user_data: 0x1000 + seen.written,
+            cap: 0,
+            class: 0,
+            deadline: 0,
+            payload_offset: 0,
+            buf_set: seen.set,
+            buf_index: 0,
+            flags: f_abi::flags::FIXED_BUF,
+            body: objects::Entry::Write(objects::Write { offset: at, bytes: WRITE_BYTES }),
+        };
+        let (entry, payload) = request.encode();
+        if !arena.copy_in(0, &payload) {
+            return Err(Trouble::Refused);
+        }
+        if producer.submit(entry).is_err() {
+            return Err(Trouble::Refused);
+        }
+        loop {
+            match reaper.take() {
+                Ok(Some(answer)) => {
+                    if answer.error().is_some() || answer.result != WRITE_BYTES as i32 {
+                        return Err(Trouble::BadReport);
+                    }
+                    seen.named = answer.ext;
+                    break;
+                }
+                Ok(None) => core::hint::spin_loop(),
+                Err(_) => return Err(Trouble::Refused),
+            }
+        }
+        seen.written += 1;
+        seen.written_bytes += u64::from(WRITE_BYTES);
+    }
+    Ok(())
+}
+
+/// Fill the client's own buffer from the content rule.
+///
+/// Written through the direct map, which is the frame reaching its own memory
+/// and not the component's: `owned` is a block this caller allocated and lent,
+/// and nothing is inside it while this runs because no entry naming it is in
+/// flight.
+fn fill_owned(frames: &FrameAllocator, owned: crate::mem::Frame, bytes: u32) -> bool {
+    let base = frames.virt(owned);
+    let span = (BUFFER_PAGES * FRAME_SIZE) as usize;
+    let Ok(len) = usize::try_from(bytes) else { return false };
+    if len > span {
+        return false;
+    }
+    // SAFETY: `owned` is a block this caller allocated and holds, addressable
+    // through the direct map for the whole of this call, with no entry naming
+    // it in flight — the submission that lends it has not been made yet.
+    let region = unsafe { core::slice::from_raw_parts_mut(base, span) };
+    let Some(window) = region.get_mut(..len) else { return false };
+    for (offset, byte) in window.iter_mut().enumerate() {
+        *byte = content_byte(SEED, offset);
+    }
+    true
+}
+
 /// Is what landed in the client's own memory what the client asked for?
 ///
 /// The bytes are read out of the frame's direct map over the same physical
@@ -662,6 +947,9 @@ fn verified(answer: &Cqe, frames: &FrameAllocator, owned: crate::mem::Frame, tok
 
 /// What the component published, believed once.
 struct Reported {
+    writes: u64,
+    written: u64,
+    hash_low: u64,
     entries: u64,
     reads: u64,
     delivered: u64,
@@ -686,6 +974,9 @@ impl Reported {
             reads: board.read64(reported::READS).ok()?,
             delivered: board.read64(reported::DELIVERED).ok()?,
             staged: board.read64(reported::STAGED).ok()?,
+            writes: board.read64(reported::WRITES).ok()?,
+            written: board.read64(reported::WRITTEN).ok()?,
+            hash_low: board.read64(reported::WRITTEN_HASH).ok()?,
             refused: board.read64(reported::REFUSED).ok()?,
             notices: board.read64(reported::NOTICES).ok()?,
             outcome: board.read64(reported::OUTCOME).ok()?,
@@ -708,6 +999,9 @@ pub fn report_lines(report: &Report) {
         report.half.name(),
         match report.half {
             Half::Read => "the client submits reads and checks every byte it gets back",
+            Half::Written => {
+                "the client writes across the ring and both sides count the same bytes"
+            }
             Half::Quiet => "the client submits nothing, and the component must say so",
             Half::Provoke =>
                 "every read goes through a page cache: the staged count must move, and the                  bytes must still be right",
@@ -741,10 +1035,36 @@ pub fn report_lines(report: &Report) {
             crate::kprintln!("    copies_per_read_in_a_boot                  {per_read}");
             crate::kprintln!("    staged_bytes_in_a_boot                     {}", report.staged);
             crate::kprintln!("    reads_verified_by_the_client               {}", report.verified);
+            // `claims/0019`'s row, and the one its spec names rather than the
+            // one the component can count about itself. Printed on the read
+            // half because that is the half with a denominator: resident pages
+            // beside the application bytes they were resident for.
+            crate::kprintln!(
+                "    resident_frames_in_a_boot                  {}",
+                report.resident_frames
+            );
         }
         Half::Provoke => {
             crate::kprintln!("  the row claims/0022 thresholds with a floor");
             crate::kprintln!("    provoked_staged_bytes_in_a_boot            {}", report.staged);
+        }
+        Half::Written => {
+            // `claims/0017`'s denominator, and deliberately *only* the
+            // denominator. The numerator is bytes re-chunked and re-hashed
+            // across that claim's own geometry — 8 MiB and 128 MiB objects —
+            // and this place has a 128 KiB heap, so a ratio printed here would
+            // be a measurement from one geometry wearing another's name.
+            // `user/objects/src/write.rs` argues it at length.
+            crate::kprintln!("  the row claims/0017's denominator is defined against");
+            crate::kprintln!(
+                "    application_bytes_written_in_a_boot        {}",
+                report.written_bytes
+            );
+            crate::kprintln!("    writes_answered_in_a_boot                  {}", report.written);
+            crate::kprintln!(
+                "    client_submitted_bytes_in_a_boot           {}",
+                report.submitted_bytes
+            );
         }
     }
 }
