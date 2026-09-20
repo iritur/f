@@ -853,10 +853,22 @@ fn write_back(
     owned: crate::mem::Frame,
 ) -> Result<(), Trouble> {
     while seen.written < half.writes() {
-        if !fill_owned(frames, owned, WRITE_BYTES) {
+        // A different object each time, and it has to be: `Store::put`
+        // answers an address it already holds without storing anything, so four
+        // writes of one content would be one object and three no-ops — a run
+        // whose count says four and whose device did one. The write's index is
+        // the only thing that varies, which keeps the content a *function*
+        // rather than a draw, for `content_byte`'s stated reason.
+        if !fill_owned(frames, owned, WRITE_BYTES, seen.written) {
             return Err(Trouble::Refused);
         }
-        let at = seen.written * u64::from(WRITE_BYTES);
+        // **Offset zero, and the reason is a refusal rather than a choice.**
+        // `f_abi::objects::Write::offset` means *bytes from the start of the
+        // object*, and honouring it means editing one — a read-modify-write
+        // through `f_blob::extent::Extent`, which this service does not hold.
+        // So it refuses a non-zero offset rather than storing a new object and
+        // answering `Ok`, which is what the first draft did.
+        let at = 0;
         let request = Request {
             user_data: 0x1000 + seen.written,
             cap: 0,
@@ -900,7 +912,7 @@ fn write_back(
 /// and not the component's: `owned` is a block this caller allocated and lent,
 /// and nothing is inside it while this runs because no entry naming it is in
 /// flight.
-fn fill_owned(frames: &FrameAllocator, owned: crate::mem::Frame, bytes: u32) -> bool {
+fn fill_owned(frames: &FrameAllocator, owned: crate::mem::Frame, bytes: u32, nonce: u64) -> bool {
     let base = frames.virt(owned);
     let span = (BUFFER_PAGES * FRAME_SIZE) as usize;
     let Ok(len) = usize::try_from(bytes) else { return false };
@@ -913,7 +925,7 @@ fn fill_owned(frames: &FrameAllocator, owned: crate::mem::Frame, bytes: u32) -> 
     let region = unsafe { core::slice::from_raw_parts_mut(base, span) };
     let Some(window) = region.get_mut(..len) else { return false };
     for (offset, byte) in window.iter_mut().enumerate() {
-        *byte = content_byte(SEED, offset);
+        *byte = content_byte(SEED.wrapping_add(nonce), offset);
     }
     true
 }

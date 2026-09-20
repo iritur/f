@@ -55,6 +55,39 @@
 # reproduction ran the test alone, the bench was unreachable from
 # `cargo xtask claim`, and a threshold breach inside it went unobserved inside a
 # green `verify`. A threshold nothing compares against is a number in a file.
+#
+# **Where the workload has to run, settled on 2026-09-20.** The reason this
+# claim was `pending` is now one sentence rather than two, and the sentence is
+# about *where* and not about *whether*.
+#
+# `f_blob::extent::EXTENT_BYTES` is a compile-time constant of one mebibyte and
+# `Extent::create` chunks by it — deliberately, and that file argues for it: a
+# piece size is a property of the writer and not a dial. So an edit allocates a
+# mebibyte, and `kernel/src/objects.rs` gives `user/objects` a 128 KiB heap.
+# **The edit workload therefore cannot run in a boot**, and raising the heap
+# past a mebibyte to suit a benchmark would be a component sized by its
+# measurement.
+#
+# It does not need to. `intent/0006-state/spec.md` defines an application byte
+# as one the client submitted **on the objects ring** — a ring, not a boot — and
+# `f-objects` is a workspace member whose library builds and tests on the host,
+# with only its image half gated on `target_os = "none"`. So the boundary this
+# claim names is reachable in a host process at this claim's own geometry, which
+# is where its numbers already come from.
+#
+# What closes this row, with no unknowns left in it: `bench` takes `f-objects`
+# as a dependency, `bench/src/bin/rechunk.rs` submits `objects::op::WRITE`
+# through `Service::answer` against a `Landing` — the shape
+# `user/objects/tests/reads.rs` already sets up — the service's write path holds
+# an `f_blob::extent::Extent` and answers with its `Cost`, and the denominator
+# becomes `Served::written_bytes` rather than a sum of `WRITE_BYTES` the bench
+# computed for itself. Both halves of the ratio then come off the ring.
+#
+# Until then the ring carries **whole-object** writes: `f_abi::objects::Write`'s
+# `offset` is refused when it is not zero, because honouring it means editing an
+# object and a field the far side silently drops is a contract a client cannot
+# discover it is breaking.
+
 name       = "bytes-rechunked-per-byte"
 status     = "pending"          # pending | tracked | gating
 milestone  = "E2"

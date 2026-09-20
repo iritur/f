@@ -77,14 +77,40 @@ pub struct Written {
 impl<Z: Zoned, I: Device> WritePath<'_, Z, I> {
     /// Put a client's bytes into the object store.
     ///
+    /// # What `at` may be, and why a non-zero one is refused
+    ///
+    /// **Zero.** `f_abi::objects::Write::offset` is documented as *bytes from
+    /// the start of the object*, and honouring it means editing an object that
+    /// already exists — a read-modify-write through `f_blob::extent::Extent`,
+    /// which is a thing this service does not hold. What it does is store the
+    /// bytes it was handed as a whole object, so the only offset that means
+    /// anything here is the one at the beginning.
+    ///
+    /// Refused rather than ignored, and the distinction is the point: a field
+    /// on the wire that the far side quietly drops is a contract a client
+    /// cannot discover it is breaking. The first draft of this accepted any
+    /// offset and stored a new object regardless, so a client asking to write
+    /// at 4096 was answered `Ok` and got something else.
+    ///
+    /// **This is also what `claims/0017` is waiting for.** That claim measures
+    /// bytes re-chunked per application byte over *edits* at drawn offsets into
+    /// an 8 MiB and a 128 MiB object, and an application byte is defined as one
+    /// the client submitted on this ring. The ring carries whole-object writes;
+    /// the claim's workload is edits. Closing that means this path holding an
+    /// `Extent` and returning `f_blob::extent::Cost`, at which point both
+    /// halves of the ratio are taken at the boundary the spec names.
+    ///
     /// # Errors
     ///
-    /// `Store::put_object`'s, unchanged — `f_abi::store::refusal::NO_SPACE`
-    /// where the device is full, `UNKNOWN` for a kind the format does not
-    /// name. Nothing is invented here: a refusal a client sees is one the
-    /// store made, so that a client chasing it reads `f_blob`'s rules and not
-    /// this crate's paraphrase of them.
-    pub fn apply(&mut self, bytes: &[u8]) -> Result<Written, i32> {
+    /// [`f_abi::store::refusal::ADDRESS`] for a non-zero `at`, and
+    /// `Store::put_object`'s unchanged otherwise — `NO_SPACE` where the device
+    /// is full, `UNKNOWN` for a kind the format does not name. A refusal a
+    /// client sees is one the store made, so a client chasing it reads
+    /// `f_blob`'s rules and not this crate's paraphrase of them.
+    pub fn apply(&mut self, at: u64, bytes: &[u8]) -> Result<Written, i32> {
+        if at != 0 {
+            return Err(f_abi::store::refusal::ADDRESS);
+        }
         let hash = self.path.store_mut().put_object(bytes)?;
         Ok(Written { bytes: bytes.len() as u64, hash })
     }
