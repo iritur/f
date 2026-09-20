@@ -944,6 +944,11 @@ pub struct Report {
     /// never heard of it, and a swap hands the successor the history its
     /// predecessor lived. Unit: swaps.
     pub swaps: u32,
+    /// Swaps that reached phase A and were reversed. **Never summed with
+    /// [`Report::swaps`] or with restarts**: RFC 0063 counts an abandonment
+    /// under its own name because the occupant it would otherwise penalise is
+    /// the one that behaved correctly. Unit: abandonments.
+    pub abandoned: u32,
     /// Needs satisfied with a capability of the declared type that names no
     /// object this machine has. Unit: capabilities.
     ///
@@ -1823,6 +1828,12 @@ pub unsafe fn demonstrate(
                     unsafe { show_window(occupant, frames, features, window) }?;
                     // SAFETY: as above.
                     unsafe { write_swap(occupant, window_at, window_bytes, replaying) }?;
+                    // What this generation was told to replay, kept for the
+                    // wait below. `replaying` is cleared here so the *next*
+                    // generation is not told to replay a window nobody wrote
+                    // into, and reading it after that reset is how the first
+                    // draft of this waited on every occupant and none.
+                    let handed = replaying;
                     replaying = 0;
                     // The data ring's header, written by the *grantor* and
                     // adopted by the occupant, which is `f_ring::adopt` and RFC
@@ -1850,7 +1861,20 @@ pub unsafe fn demonstrate(
                     // — and `client` serves only the occupant's control ring,
                     // whose two ends are single-producer and single-consumer.
                     let ran = unsafe {
-                        serve_ring3(occupant, frames, features, (cpu, tsc_khz), life, client)
+                        serve_ring3(
+                            occupant,
+                            frames,
+                            features,
+                            (cpu, tsc_khz),
+                            life,
+                            client,
+                            // Non-zero only for a generation that was handed
+                            // records, which is the successor of a swap and
+                            // nothing else. `replaying` is cleared to zero
+                            // every pass, so an ordinary occupant is never
+                            // waited on.
+                            (handed != 0).then_some(handed),
+                        )
                     };
                     let (announced, death, driven) = ran?;
                     report.scheduled += 1;
@@ -1921,6 +1945,28 @@ pub unsafe fn demonstrate(
                         }
 
                         handed_line(Name(record.label()), was, in_flight, records);
+
+                        // The negative control, armed by the client and applied
+                        // by the frame because the window is the frame's page.
+                        // One byte, in the middle of what the outgoing occupant
+                        // just wrote, so the successor's reader is what refuses
+                        // it rather than this line deciding the outcome.
+                        if client.abandons() {
+                            let at = frames.virt(window);
+                            // SAFETY: `window` is a frame this place was
+                            // charged at `fill` and reachable through the
+                            // direct map; no core is inside the occupant,
+                            // which has ended, and the successor does not
+                            // exist yet, so nothing else reads this byte.
+                            let was = unsafe { at.read() };
+                            // SAFETY: the same frame and the same argument,
+                            // one write of the byte just read. Split from the
+                            // read because a block may hold one unsafe
+                            // operation, which is the rule that makes each
+                            // `SAFETY:` discharge one obligation.
+                            unsafe { at.write(was ^ 0xFF) };
+                            garbled_line(Name(record.label()));
+                        }
 
                         // --- the place takes its successor -------------------
                         //
@@ -2054,7 +2100,27 @@ pub unsafe fn demonstrate(
                         let Some((outcome, entries, _)) = served else {
                             return Err(Failure::WrongPlace);
                         };
-                        if outcome != f_virtio_blk::routing::stopped::TOLD || entries == 0 {
+                        // **A client that asked for an abandonment is excused
+                        // this, and the reason is a finding rather than a
+                        // convenience.** RFC 0063 has the incoming instance
+                        // acknowledge the records *before* the routing word
+                        // swaps and before it serves anybody. This frame gives
+                        // the successor a core, lets it replay *and serve*, and
+                        // checks the acknowledgement afterwards — so a
+                        // successor that replayed nothing has already refused
+                        // the client by the time the frame notices. The zero
+                        // below is that refusal, and asserting on it here would
+                        // stop the run before it reached the reversal it exists
+                        // to demonstrate.
+                        //
+                        // The ordering is the frame's and not the protocol's,
+                        // and `SWAP_GAP` carries it: acknowledging before the
+                        // successor serves is what makes *the client observes
+                        // added latency and nothing else* true of a failed
+                        // swap, and this build does not do it yet.
+                        if !client.abandons()
+                            && (outcome != f_virtio_blk::routing::stopped::TOLD || entries == 0)
+                        {
                             return Err(Failure::WrongPlace);
                         }
                         // --- the swap's far end ---------------------------
@@ -2084,6 +2150,7 @@ pub unsafe fn demonstrate(
                                 // unreachable while the frame tore down first.
                                 abandoned_line(Name(record.label()), why);
                                 extra.place.abandoned += 1;
+                                report.abandoned += 1;
                                 if let Some(back) = outgoing.take() {
                                     let mut failed = extra
                                         .place
@@ -2103,6 +2170,19 @@ pub unsafe fn demonstrate(
                                         extra.place.manifest = held;
                                     }
                                     extra.place.routing.commit(extra.place.epoch.saturating_add(1));
+                                }
+                                // **An abandonment the client asked for is an
+                                // outcome and not a fault.** The frame did what
+                                // RFC 0063 says a failed phase A does: it
+                                // reversed. Returning an error would make the
+                                // one boot that demonstrates the reversal the
+                                // one boot that cannot finish, and a control
+                                // that fails the run it belongs to proves
+                                // nothing about that run. An abandonment nobody
+                                // asked for is still a failure, which is the
+                                // line after this one.
+                                if client.abandons() {
+                                    break;
                                 }
                                 return Err(Failure::WrongPlace);
                             }
@@ -3227,6 +3307,19 @@ fn abandoned_line(what: Name<'_>, why: f_abi::swap::Abandoned) {
     );
 }
 
+/// A byte of the transfer window, flipped on purpose.
+///
+/// Printed where it happens rather than summarised afterwards, because a
+/// control whose arming is invisible is a control a reader has to take on
+/// trust. `sim/src/swap.rs`'s `garble` is the same provocation one layer up.
+fn garbled_line(what: Name<'_>) {
+    crate::kprintln!(
+        "  garbled       place {what} transfer window \u{2014} one byte flipped after the \n\
+         \u{20}               outgoing occupant wrote its history, so the successor's own \n\
+         \u{20}               record reader is what refuses it"
+    );
+}
+
 /// A swap that reached its far end: the successor replayed what it was handed.
 ///
 /// The two counts are the whole verdict and they come from opposite sides. The
@@ -4198,6 +4291,51 @@ pub trait Datapath {
     ///
     /// Unit: frames.
     fn retained(&mut self, frames: &mut FrameAllocator) -> u64;
+
+    /// Take this instance's wiring before anything is submitted.
+    ///
+    /// **Split out of [`Datapath::drive`] because a client has to be able to
+    /// *serve* before it *drives*.** A replaying successor asks the frame for
+    /// translations over its control ring while it replays, so the frame has to
+    /// answer that ring before it has given the client anything to submit — and
+    /// a client whose ring addresses only arrive with the first submission
+    /// cannot answer anything. `Placed::serve` returns early on a zero
+    /// `control`, which is exactly that, and the boot it produced died as *a
+    /// core was given a place's occupant to run and never reported back*.
+    ///
+    /// Idempotent, and `drive` still takes its own `Wired` — this does not
+    /// replace that, it happens earlier.
+    fn wire(&mut self, _wired: Wired, _frames: &FrameAllocator) {}
+
+    /// Tell this instance to stop, without ever having driven it.
+    ///
+    /// The one caller is the frame refusing to hand a client to a successor
+    /// whose replay did not match. That instance is sitting in its serve loop
+    /// waiting for entries nobody is going to submit, and a driver left serving
+    /// a client that has gone is a core the boot never gets back — which is
+    /// `Placed::drive`'s own sentence about why it stops whatever happened.
+    fn stop(&mut self, _frames: &mut FrameAllocator) {}
+
+    /// Whether this client wants the swap it asked for to be **abandoned**.
+    ///
+    /// **A negative control, and it is a client's to ask for.** RFC 0063 says a
+    /// swap that fails in phase A costs the client latency and nothing else,
+    /// and a frame that can abandon but has never been asked to is a frame
+    /// whose abandonment is untested — `sim/src/swap.rs` abandons for all five
+    /// of `f_abi::swap::Abandoned`'s reasons and the frame abandoned for none.
+    ///
+    /// The frame's instrument is the same one the simulator's `garble` control
+    /// uses: a byte of the transfer window, flipped after the outgoing occupant
+    /// wrote its history and before the successor reads it. The successor's own
+    /// record reader refuses what did not cross intact, replays fewer records
+    /// than it was told to, and `Swap::acknowledged` refuses a count that does
+    /// not match. Nothing is special-cased: the abandonment is the protocol's.
+    ///
+    /// Default `false`, so every existing client is unaffected and a half that
+    /// wants this has to say so.
+    fn abandons(&self) -> bool {
+        false
+    }
 }
 
 /// Where a serving occupant's two rings and its board are, as kernel addresses.
@@ -4376,6 +4514,75 @@ unsafe fn read_handed(occupant: &Instance) -> (bool, u32) {
 /// # Safety
 ///
 /// As [`read_served`].
+unsafe fn replay_finished(occupant: &Instance) -> bool {
+    if occupant.board == 0 {
+        return false;
+    }
+    let at = occupant.board + u64::from(f_virtio_blk::routing::reported::REPLAY_DONE);
+    // **Volatile, and that is the whole of why this is not `read_replayed` with
+    // a different offset.** This is read in a loop while *another core* is
+    // inside the component that writes it, and an ordinary read of a plain
+    // slice is one the compiler may hoist out of the loop — which it did: the
+    // first draft spun on a value fetched once and the boot died with *a core
+    // was given a place's occupant to run and never reported back*.
+    //
+    // A single naturally-aligned word, so the read is atomic on this
+    // architecture and the flag is either the old value or the new one. RFC
+    // 0016's ordering argument is not needed here because nothing is published
+    // *through* this word: the component writes the count first and the flag
+    // second, and the frame reads them in that order.
+    //
+    // SAFETY: the caller's guarantee — a board this frame allocated for this
+    // instance, mapped nowhere else, eight bytes inside a frame-sized page at a
+    // naturally aligned offset.
+    unsafe { core::ptr::read_volatile(at as *const u64) != 0 }
+}
+
+/// Wait for a replaying successor to finish **while serving it**, and answer
+/// what it replayed.
+///
+/// **RFC 0063 has the incoming instance acknowledge before it serves anybody,
+/// and this is what makes that orderable from the frame's side.** Without it
+/// the frame gives the successor a core, lets it replay *and serve*, and reads
+/// the count afterwards — so a successor that replayed nothing has already
+/// refused the client by the time the frame notices, and an abandonment costs
+/// that client its table rather than the latency the decision promises.
+///
+/// **It serves while it waits, and the first draft did not — which deadlocked.**
+/// A replay is not a quiet computation: `Driver::execute` re-does each deed,
+/// and re-doing a registration asks the *frame* for a translation over the
+/// occupant's control ring. So a frame that spun on the flag without answering
+/// that ring was waiting for a component that was waiting for it. The boot died
+/// as *a core was given a place's occupant to run and never reported back*,
+/// which is what a deadlock looks like from the outside of a watchdog.
+///
+/// That is the same shape `join_serviced` already has and for the same reason;
+/// this is a second instance of it with a different exit condition, and the
+/// `serve` it is handed is the client's own.
+///
+/// Bounded rather than open, for the reason every wait in this file is: the
+/// condition is the component's word for it, and a demonstration that hangs
+/// when the component is wrong is a demonstration that cannot fail. `None` is a
+/// successor that did not finish in time, which the caller treats exactly as a
+/// count that does not match — it is a swap that cannot be acknowledged either
+/// way.
+unsafe fn await_replay(occupant: &Instance, tsc_khz: u64, serve: &mut dyn FnMut()) -> Option<u32> {
+    let deadline = crate::smp::deadline_after(tsc_khz, OCCUPANT_MICROS);
+    loop {
+        // SAFETY: the caller's guarantee, as `read_replayed`.
+        if unsafe { replay_finished(occupant) } {
+            // SAFETY: as above, and the flag orders this read after the count
+            // was written.
+            return Some(unsafe { read_replayed(occupant) });
+        }
+        if crate::smp::past(deadline) {
+            return None;
+        }
+        serve();
+        core::hint::spin_loop();
+    }
+}
+
 unsafe fn read_replayed(occupant: &Instance) -> u32 {
     if occupant.board == 0 {
         return 0;
@@ -4532,6 +4739,7 @@ unsafe fn serve_ring3(
     on: (usize, u64),
     selector: u32,
     client: &mut dyn Datapath,
+    replaying: Option<u32>,
 ) -> Result<(bool, crate::process::Death, Result<Drove, &'static str>), Failure> {
     let (cpu, tsc_khz) = on;
     let wired = Wired {
@@ -4560,6 +4768,49 @@ unsafe fn serve_ring3(
     // The client, on this core, while the occupant runs on that one — and the
     // trigger it may pull, which is the only thing in this file that ends a
     // component while it is still useful.
+    // **The acknowledgement's half that has to happen before a client submits.**
+    // A successor that was handed records replays them before it serves
+    // anybody, and until this loop the frame did not look until afterwards — so
+    // a replay that failed was discovered after the client had already been
+    // refused, and RFC 0063's *the client observes added latency and nothing
+    // else* was false of the frame by a whole table.
+    //
+    // The comparison itself stays where the protocol is, in `Swap::acknowledged`
+    // one level up; what happens here is the *waiting*, and the refusal to hand
+    // this instance a client when the number it published is not the number its
+    // predecessor wrote.
+    if let Some(wrote) = replaying {
+        // Told where the rings are before it is asked to answer them. Without
+        // this the serving wait below serves nothing, which is the deadlock its
+        // own comment describes.
+        client.wire(wired, frames);
+        // SAFETY: the instance whose core this function started, spinning in
+        // its own loop with its board mapped and nothing else reading it.
+        let replayed = unsafe { await_replay(occupant, tsc_khz, &mut || client.serve(frames)) };
+        if replayed != Some(wrote) {
+            // No client is driven. The instance is told to stop — it is
+            // sitting in its serve loop waiting for entries that are never
+            // coming — the caller sees `Drove::Finished` against a count that
+            // will not acknowledge, and the swap is abandoned with the client
+            // never having submitted anything to lose.
+            client.stop(frames);
+            // SAFETY: the core this function started, which is inside this
+            // instance and has just been told to stop; the closure serves only
+            // this occupant's own two rings, whose far ends it alone holds.
+            let joined = unsafe {
+                crate::smp::join_serviced(cpu, tsc_khz, OCCUPANT_MICROS, &mut || {
+                    client.serve(frames);
+                })
+            };
+            joined.map_err(|_| Failure::NoAnswer)?;
+            // SAFETY: the join above returned, so the core is idle and out of
+            // this instance, and `previous` is the table this function's own
+            // `post_ring3` displaced a few lines up.
+            let (announced, death) = unsafe { collect_ring3(occupant, cpu, previous) };
+            return Ok((announced, death, Ok(Drove::Finished)));
+        }
+    }
+
     let mut killer = Killing { root: occupant.space.root(), cpu, tsc_khz, joined: false };
     let driven = client.drive(frames, wired, &mut killer);
     // And the hand-over, if that is what it asked for. Asked and not taken

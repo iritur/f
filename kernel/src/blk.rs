@@ -1594,8 +1594,30 @@ pub struct Placed<'a> {
     /// and is still holding can be reported as a number rather than inferred.
     /// Zero until the first `drive`. Unit: frames.
     free_before: u64,
+    /// Whether [`Placed::wire`] already took this generation's baseline.
+    ///
+    /// **`free_before` is per generation, not per client**, and that is what a
+    /// first draft of the swap ordering broke: it guarded the assignment on
+    /// `free_before == 0`, so generation 2 kept generation 1's reading and
+    /// `retained` — a difference against that reading — counted generation 1's
+    /// frames a second time. `demonstrate`'s leak check is an equality, so
+    /// double-counting reads as a leak and the boot blamed the component.
+    ///
+    /// Cleared by [`Placed::retained`], which is called exactly once per
+    /// generation and is the moment the baseline has been spent.
+    baseline_taken: bool,
     /// Whether this client is the one that has its server killed under it.
     killing: bool,
+    /// Whether the swap it asks for is to be **abandoned** rather than
+    /// committed.
+    ///
+    /// The negative control `sim/src/swap.rs` has had all along and the frame
+    /// has not: a swap that fails in phase A, so that RFC 0063's *an
+    /// abandonment is not a restart* is a sentence about a run rather than
+    /// about a design. It rides on [`Self::swapping`] — the same script, the
+    /// same client, one more branch — because a control with a harness of its
+    /// own is a second opinion about what a client observes.
+    abandoning: bool,
     /// Whether it is the one that has its server **swapped** under it.
     ///
     /// One script with one branch, and that is the point rather than an economy:
@@ -1733,8 +1755,10 @@ impl<'a> Placed<'a> {
                 control: 0,
                 data: 0,
                 free_before: 0,
+                baseline_taken: false,
                 killing: false,
                 swapping: false,
+                abandoning: false,
                 naming: None,
                 generation: 0,
                 registered_at: 0,
@@ -1769,6 +1793,17 @@ impl<'a> Placed<'a> {
     pub const fn swaps(&mut self) {
         self.killing = true;
         self.swapping = true;
+    }
+
+    /// Have this client's swap abandoned instead of committed.
+    ///
+    /// Implies [`Self::swaps`], because an abandonment is something that
+    /// happens *to* a swap and a run that never asked for one has nothing to
+    /// abandon.
+    pub const fn abandons(&mut self) {
+        self.killing = true;
+        self.swapping = true;
+        self.abandoning = true;
     }
 
     /// Whether this client held a registration across a swap and used it
@@ -2293,6 +2328,26 @@ impl Placed<'_> {
 }
 
 impl component::Datapath for Placed<'_> {
+    fn abandons(&self) -> bool {
+        self.abandoning
+    }
+
+    fn wire(&mut self, wired: component::Wired, frames: &FrameAllocator) {
+        self.control = wired.control;
+        self.data = wired.data;
+        // **The leak check's baseline, moved here from `drive`.** Serving a
+        // successor's replay walks the device's domain, and the walk allocates
+        // frames that are the domain's until `tear_down` releases it. On the
+        // path where a client is never driven — a replay that did not match —
+        // `drive` never runs, so a baseline taken there is never taken at all
+        // and `demonstrate`'s free-count check sees frames it cannot explain.
+        // This is the first moment the client can spend anything.
+        if !self.baseline_taken {
+            self.free_before = frames.free_count();
+            self.baseline_taken = true;
+        }
+    }
+
     fn drive(
         &mut self,
         frames: &mut FrameAllocator,
@@ -2301,7 +2356,13 @@ impl component::Datapath for Placed<'_> {
     ) -> Result<component::Drove, &'static str> {
         self.control = wired.control;
         self.data = wired.data;
-        self.free_before = frames.free_count();
+        // Only if `wire` has not already taken it this generation: on a swap
+        // the client is wired before it drives, and that earlier reading is the
+        // one that covers the domain walks a replay causes.
+        if !self.baseline_taken {
+            self.free_before = frames.free_count();
+            self.baseline_taken = true;
+        }
         let Ok(bytes) = u32::try_from(FRAME_SIZE) else { return Err(Trouble::Authority.message()) };
 
         // Both ends adopted rather than described, because the frame is not the
@@ -2459,6 +2520,48 @@ impl component::Datapath for Placed<'_> {
         self.answered = supervising.answered;
     }
 
+    fn stop(&mut self, frames: &mut FrameAllocator) {
+        if self.control == 0 || self.data == 0 {
+            return;
+        }
+        let Ok(bytes) = u32::try_from(FRAME_SIZE) else { return };
+        let Some(domain) = self.domain.as_mut() else { return };
+        // SAFETY: as `serve` — the occupant's two rings, one frame each, reached
+        // through the direct map, with the occupant holding the only other end.
+        let control = unsafe {
+            Mapping::adopt(
+                self.control as *mut u8,
+                bytes,
+                feature::CONTROL_EVENTS,
+                feature::CONTROL_EVENTS,
+            )
+        };
+        let Ok(control) = control else { return };
+        // SAFETY: as above.
+        let client_end = unsafe { Mapping::adopt(self.data as *mut u8, bytes, 0, 0) };
+        let Ok(client_end) = client_end else { return };
+        let (Some(asks), Some(answers), Some(reaper)) = (
+            Consumer::new(control.channel()),
+            Poster::new(control.completions()),
+            Collector::new(client_end.completions()),
+        ) else {
+            return;
+        };
+        let supervising = Supervising {
+            asks: &asks,
+            answers: &answers,
+            reaper: &reaper,
+            unit: &mut *self.unit,
+            domain,
+            frames: &mut *frames,
+            table: &self.table,
+            answered_at: 0,
+            answered: self.answered,
+        };
+        let _ = supervising.stop();
+        self.answered = supervising.answered;
+    }
+
     fn retained(&mut self, frames: &mut FrameAllocator) -> u64 {
         // What the walk took. A registration the driver asked the frame to
         // translate is a page-table walk in the device's domain, and the frames
@@ -2468,6 +2571,9 @@ impl component::Datapath for Placed<'_> {
         // bookkeeping, because the number this check wants is *frames the
         // allocator handed out and has not had back*, and that is what the
         // allocator itself is the authority on.
+        // Once per generation, and reading it spends it: the next generation
+        // takes its own baseline, or this one's frames are measured twice.
+        self.baseline_taken = false;
         self.free_before.saturating_sub(frames.free_count())
     }
 }

@@ -441,6 +441,24 @@ pub mod reported {
     /// nobody had checked from both ends.
     /// Unit: none — an ordinal.
     pub const GENERATION: u32 = super::REPORT + 152;
+
+    /// Non-zero once this instance has finished replaying and **before it has
+    /// served anybody**.
+    ///
+    /// **A count is not enough and that is the whole reason this exists.**
+    /// [`REPLAYED`] is a number, and zero is both *replayed nothing* and *has
+    /// not started* — which are the two cases a frame most needs to tell apart,
+    /// because the first is a swap that must be abandoned and the second is a
+    /// swap still in progress. So the instance writes this after the replay and
+    /// before the first entry it takes off any ring, and a frame that sees it
+    /// knows the number beside it is final.
+    ///
+    /// RFC 0063 has the incoming instance acknowledge before it serves anybody.
+    /// This word is what makes that orderable from the frame's side: it can
+    /// read the count, acknowledge or abandon, and only then let a client
+    /// submit — so a swap that fails costs the client latency and nothing else.
+    /// Unit: none — a flag.
+    pub const REPLAY_DONE: u32 = super::REPORT + 160;
 }
 
 /// Why the component's loop ended.

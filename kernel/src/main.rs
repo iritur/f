@@ -1160,7 +1160,24 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
             client.matched,
             client.refused_without_grant,
         );
-        if !client.matched || !client.refused_without_grant || client.answered == 0 {
+        // **An abandoned swap is excused this, and the excusal is the
+        // finding.** On `blk=abandoned` the successor replayed nothing, so the
+        // registration this client holds names a slot in a table that was
+        // never filled and the client is refused — which is exactly
+        // `sim/src/swap.rs`'s `amnesiac` outcome and is what the run provokes.
+        // Asserting the client got its bytes would be asserting the
+        // provocation failed.
+        //
+        // That it can happen at all is the thing to read, not the excusal: RFC
+        // 0063 has the incoming instance acknowledge *before* it serves
+        // anybody, and this frame lets it serve first and checks afterwards.
+        // So a failed swap here costs a client more than latency, the promise
+        // is paid in the frame's bookkeeping and not yet in its ordering, and
+        // `SWAP_GAP` is where that is written down.
+        let refused_by_design = boot.has_parameter(b"blk=abandoned") && !client.matched;
+        if !refused_by_design
+            && (!client.matched || !client.refused_without_grant || client.answered == 0)
+        {
             kprintln!(
                 "FAIL: the place's occupant served a client and the client did not get back what \
                  it put in, or was never asked for a translation"
@@ -3176,7 +3193,13 @@ unsafe fn blk_place_supply<'a>(
     // a client loses — a restart costs it every registration it holds, and a
     // swap costs it none.
     let swapping = boot.has_parameter(b"blk=swapped");
-    let serving = killing || swapping || boot.has_parameter(b"blk=served");
+    // `blk=abandoned`: the same swap, provoked to fail in phase A. The frame
+    // reverses — it puts the place's occupant back and retires the successor
+    // instead — and what the boot asserts is that the reversal happened and
+    // cost the place nothing it was holding. RFC 0063 counts an abandonment
+    // under its own name, and until this half nothing in a boot made it move.
+    let abandoning = boot.has_parameter(b"blk=abandoned");
+    let serving = killing || swapping || abandoning || boot.has_parameter(b"blk=served");
     if !boot.has_parameter(b"blk=place") && !serving {
         return NONE;
     }
@@ -3265,7 +3288,9 @@ unsafe fn blk_place_supply<'a>(
             };
             match stood {
                 Ok((mut placed, at)) => {
-                    if swapping {
+                    if abandoning {
+                        placed.abandons();
+                    } else if swapping {
                         placed.swaps();
                     } else if killing {
                         placed.kills();
