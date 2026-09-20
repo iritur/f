@@ -206,7 +206,10 @@ impl<Z: Zoned, I: Device> ReadPath<Z, I> {
     }
 
     /// The store, for a caller with business there — a workload writing the
-    /// blobs it is about to read, a control that corrupts a byte.
+    /// blobs it is about to read, a control that corrupts a byte, and as of
+    /// `E2-B09` the write half: `crate::write::WritePath` borrows it for the
+    /// length of one entry and gives it back, so the object a client writes is
+    /// the object a client reads and there is never a second owner.
     pub fn store_mut(&mut self) -> &mut Store<ZoneMap<Z>> {
         &mut self.store
     }

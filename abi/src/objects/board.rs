@@ -198,6 +198,30 @@ pub mod reported {
     /// Notices drained off the control ring at a polling point.
     /// Unit: count of events.
     pub const NOTICES: u32 = 0x170;
+    /// Writes this component answered. Unit: count of writes.
+    pub const WRITES: u32 = 0x178;
+
+    /// Application bytes a client submitted to be written.
+    ///
+    /// **`claims/0017`'s denominator, on the component's side of the ring.**
+    /// The client keeps its own sum and the boot requires the two to agree:
+    /// two counts, on opposite sides, neither derived from the other, which is
+    /// `claims/0012`'s discipline. A single figure taken once would be the
+    /// harness reporting on itself.
+    /// Unit: bytes.
+    pub const WRITTEN: u32 = 0x180;
+
+    /// The store's address for the last client write, four words of it.
+    ///
+    /// The completion carries the first eight bytes in `Cqe::ext` and a read
+    /// needs all thirty-two, so the rest is here. That the two agree on the
+    /// word they share is the cross-check, and it is why the client does not
+    /// simply take all four from here: a component that published an address
+    /// it had not written would have to publish the same lie twice, through
+    /// two different mechanisms, in the same run.
+    /// Unit: bytes of a SHA-256 digest, little-endian per word.
+    pub const WRITTEN_HASH: u32 = 0x188;
+
     /// [`super::REPORTED_MAGIC`], written **last**. Unit: none.
     pub const MAGIC: u32 = 0x1F8;
 }

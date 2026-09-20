@@ -3002,6 +3002,8 @@ fn objects_datapath(
         objects::Half::Quiet
     } else if boot.has_parameter(b"objects=provoke") {
         objects::Half::Provoke
+    } else if boot.has_parameter(b"objects=written") {
+        objects::Half::Written
     } else {
         return None;
     };

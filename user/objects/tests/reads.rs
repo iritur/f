@@ -784,8 +784,17 @@ fn main() {
             )),
         }
     }
-    if unanswered != op::COUNT - 1 {
-        fail(&format!("{unanswered} opcodes are unanswered; exactly one should be answered"));
+    // Two are answered now — `READ` and, as of `E2-B09`, `WRITE`. Counted
+    // against `op::known` rather than against a literal, so this stays a
+    // statement about *this build* answering what it declares it answers: the
+    // day a third opcode gets a service, the line that widens `op::known` is
+    // the only line that has to change.
+    let answered = Asked::SPECIMENS.iter().filter(|s| op::known(s.opcode())).count();
+    if unanswered + answered != op::COUNT {
+        fail(&format!(
+            "{unanswered} unanswered and {answered} answered do not account for              {} opcodes",
+            op::COUNT
+        ));
     }
     println!("    the {unanswered} opcodes with no body    refused UNKNOWN_OPCODE");
 

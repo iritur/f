@@ -11776,6 +11776,10 @@ const OBJECTS_HALVES: &[(&str, &str)] = &[
         "every read answered through a page cache: the staged count must move and the bytes \
          must still be right",
     ),
+    (
+        "written",
+        "the client writes across the ring; both sides count the same bytes, and the\n         store's address for them agrees through two mechanisms",
+    ),
 ];
 
 /// Boot the objects datapath: a component serving a ring from ring 3, and the

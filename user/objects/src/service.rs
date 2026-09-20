@@ -78,7 +78,7 @@
 //! read a clock here would make every recorded number a function of the host.
 
 use f_abi::buf::SetId;
-use f_abi::objects::{Entry, PAYLOAD_BYTES, Read as ReadRecord, Request, op};
+use f_abi::objects::{Entry, PAYLOAD_BYTES, Read as ReadRecord, Request, Write as WriteRecord, op};
 use f_abi::store::refusal;
 use f_abi::{Cqe, Sqe, error};
 use f_blob::device::Device;
@@ -139,6 +139,37 @@ pub struct Served {
     /// [`Service::answer`]'s completion states the ask; this states the
     /// transfer. Unit: bytes.
     pub delivered_bytes: u64,
+    /// Writes completed, counted at the entry.
+    ///
+    /// The same discipline [`Served::reads`] keeps, one direction over: it
+    /// moves only in [`Service::answer`] and never in
+    /// [`crate::write::WritePath`], so a provocation that drove the path
+    /// directly cannot be mistaken for a client that submitted.
+    /// Unit: count of writes.
+    pub writes: u64,
+    /// Application bytes a client submitted to be written.
+    ///
+    /// **`claims/0017`'s denominator, at the boundary that claim defines it
+    /// at.** It is the sum of `f_abi::objects::Write::bytes` — what the client
+    /// *asked to write*, per RFC 0058, and not what the store then moved
+    /// underneath. `intent/0006-state/spec.md` defines an application byte as
+    /// one the client submitted on the objects ring; this is that sum and
+    /// there is no other in the tree.
+    ///
+    /// Deliberately not summed with [`Served::delivered_bytes`]. One is what
+    /// landed in a caller's buffer and the other is what left it, the two
+    /// claims that rest on them are about different directions, and a single
+    /// `bytes` field would make both unreadable.
+    /// Unit: bytes.
+    pub written_bytes: u64,
+    /// The store's address for the most recent client write.
+    ///
+    /// Published so a client can read back what it wrote: the completion
+    /// carries eight bytes of it and a read needs thirty-two. Zero before any
+    /// write, which is distinguishable from a real address because SHA-256
+    /// over any input is not zero.
+    /// Unit: bytes of a SHA-256 digest.
+    pub written_hash: [u8; 32],
     /// Bytes that went through any buffer that was **not** the caller's
     /// registered one, while answering an entry.
     ///
@@ -161,6 +192,19 @@ pub struct Served {
     pub refused: u64,
 }
 
+/// What an entry turned out to ask for, once it was believed.
+///
+/// Two arms and not a boolean, for `believed`'s own stated reason: what
+/// follows differs, and differs in a named function. A third arm arrives with
+/// a third service and not before — `op::known` is the gate and this is the
+/// shape that makes forgetting one a compile error rather than a silence.
+enum Wanted {
+    /// Content out of the store and into the caller's buffer.
+    Read(ReadRecord),
+    /// The caller's bytes into the store.
+    Write(WriteRecord),
+}
+
 /// The objects service: a read path, and the entries that reach it.
 ///
 /// It owns the [`ReadPath`] rather than borrowing one, because the counts on
@@ -181,6 +225,9 @@ impl<Z: Zoned, I: Device> Service<Z, I> {
                 entries: 0,
                 reads: 0,
                 delivered_bytes: 0,
+                writes: 0,
+                written_bytes: 0,
+                written_hash: [0; 32],
                 staged_bytes: 0,
                 refused: 0,
             },
@@ -248,8 +295,62 @@ impl<Z: Zoned, I: Device> Service<Z, I> {
             Err(refusal) => return refusal,
         };
         let set = SetId::from_bits(request.buf_set);
-        let outcome = self.read(&wanted, landing, set, request.buf_index);
-        self.completed(&request, &wanted, outcome, now)
+        match wanted {
+            Wanted::Read(wanted) => {
+                let outcome = self.read(&wanted, landing, set, request.buf_index);
+                self.completed(&request, &wanted, outcome, now)
+            }
+            Wanted::Write(asked) => self.written(&request, &asked, landing, set, now),
+        }
+    }
+
+    /// Answer one `WRITE`: the client's bytes, out of its own registered
+    /// buffer and into the object store.
+    ///
+    /// **The completion carries the content address in its detail word**, so a
+    /// client can ask for what it just wrote without this component holding a
+    /// name on its behalf. Eight bytes of a thirty-two byte hash, which is
+    /// enough to name it back to a store that has it and deliberately not
+    /// enough to be treated as the address itself — RFC 0013 charges a word
+    /// per node for the same reason and this is the same arithmetic.
+    fn written(
+        &mut self,
+        request: &Request,
+        asked: &WriteRecord,
+        landing: &mut Landing<'_>,
+        set: SetId,
+        now: u64,
+    ) -> Cqe {
+        let len = asked.bytes as usize;
+        // The bytes, resolved through the caller's own registration. A write
+        // whose buffer the table will not answer for is refused before the
+        // store is touched, so a refused write costs the object nothing.
+        let fetched = match landing.fetch(set, request.buf_index, len) {
+            Ok(bytes) => bytes,
+            Err(code) => return self.refuse(request.user_data, code, 0, now),
+        };
+        let applied = crate::write::over(&mut self.path).apply(fetched);
+        // Given back before anything else happens, and **before the refusal
+        // below can return**. `Table::resolve` marks a buffer lent and
+        // `Table::release` is what unmarks it, so a write path that kept the
+        // borrow would refuse its own second entry with `BAD_ADDRESS` — which
+        // is exactly what the first draft of this did, and the symptom was a
+        // boot that wrote once and then refused every write after it.
+        if landing.release(set, request.buf_index).is_err() {
+            return self.refuse(request.user_data, refusal::ADDRESS, 0, now);
+        }
+        let written = match applied {
+            Ok(written) => written,
+            Err(code) => return self.refuse(request.user_data, code, 0, now),
+        };
+        self.served.writes = self.served.writes.saturating_add(1);
+        self.served.written_bytes = self.served.written_bytes.saturating_add(written.bytes);
+        self.served.written_hash = written.hash;
+        let named = written.hash.first_chunk::<8>().map_or(0, |head| u64::from_le_bytes(*head));
+        let Ok(stated) = i32::try_from(asked.bytes) else {
+            return self.refuse(request.user_data, refusal::SHORT_BUFFER, 0, now);
+        };
+        completion(request.user_data, stated, now).with_ext(named)
     }
 
     /// Answer one submission the way a page cache would have: the first block
@@ -290,6 +391,15 @@ impl<Z: Zoned, I: Device> Service<Z, I> {
             Err(refusal) => return refusal,
         };
         let set = SetId::from_bits(request.buf_set);
+        // A read provocation, and it stays one. `WRITE` has no staged variant
+        // because there is no second copy to model on that side: the store
+        // copies the client's bytes into the record it builds and says so, so
+        // a *provoked* extra copy there would be modelling a cache that does
+        // not exist rather than one that works.
+        let Wanted::Read(wanted) = wanted else {
+            let packed = error::pack(error::ARGUMENT, error::argument::UNKNOWN_OPCODE);
+            return self.refuse(request.user_data, packed, u64::from(request.opcode()), now);
+        };
         let outcome = self.staged_read(&wanted, landing, request.buf_index, set);
         self.completed(&request, &wanted, outcome, now)
     }
@@ -305,7 +415,7 @@ impl<Z: Zoned, I: Device> Service<Z, I> {
         entry: &Sqe,
         payload: &[u8; PAYLOAD_BYTES],
         now: u64,
-    ) -> Result<(Request, ReadRecord), Cqe> {
+    ) -> Result<(Request, Wanted), Cqe> {
         self.served.entries = self.served.entries.saturating_add(1);
 
         let request = match Request::decode(entry, payload) {
@@ -321,12 +431,13 @@ impl<Z: Zoned, I: Device> Service<Z, I> {
             return Err(self.refuse(entry.user_data, packed, u64::from(request.opcode()), now));
         }
         match request.body {
-            Entry::Read(wanted) => Ok((request, wanted)),
-            // Unreachable: `op::known` admits `READ` alone and the decode
-            // already matched the opcode to the body. Refused rather than
-            // panicked, for `f_ring::execute`'s stated reason — an opcode is
-            // the most peer-controlled field there is, and *cannot happen* is
-            // how a panic gets into a drain loop.
+            Entry::Read(wanted) => Ok((request, Wanted::Read(wanted))),
+            Entry::Write(asked) => Ok((request, Wanted::Write(asked))),
+            // Unreachable: `op::known` admits `READ` and `WRITE`, and the
+            // decode already matched the opcode to the body. Refused rather
+            // than panicked, for `f_ring::execute`'s stated reason — an opcode
+            // is the most peer-controlled field there is, and *cannot happen*
+            // is how a panic gets into a drain loop.
             _ => {
                 let packed = error::pack(error::ARGUMENT, error::argument::UNKNOWN_OPCODE);
                 Err(self.refuse(entry.user_data, packed, u64::from(request.opcode()), now))

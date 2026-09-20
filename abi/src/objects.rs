@@ -537,9 +537,17 @@ macro_rules! entries {
             /// being declared. This line is the widening `E2-B08` owed,
             /// written by hand, and `known_admits_read_and_nothing_else` went
             /// red in the same diff — which is what makes it a decision
-            /// somebody took rather than a silence. The next four are four
+            /// somebody took rather than a silence. The next three are three
             /// more decisions, each with a service behind it, and none of them
             /// is this line growing an arm on its own.
+            ///
+            /// **`WRITE` is the second, taken for `E2-B09`.** Its service is
+            /// `f_objects::write::WritePath`, and the reason it had to be a
+            /// decision rather than a declaration is the one `claims/0017`
+            /// rests on: that claim's denominator is *a byte the client
+            /// submitted on the objects ring*, and until an opcode carried one
+            /// across, the denominator was a write through a `Store` in a host
+            /// harness wearing a client's name.
             ///
             /// It also cannot outlive its own opcode: `READ` here is the
             /// constant the list above emits, so deleting that line from the
@@ -547,7 +555,7 @@ macro_rules! entries {
             /// answering for a number nobody declares any more.
             #[must_use]
             pub const fn known(opcode: u8) -> bool {
-                matches!(opcode, READ)
+                matches!(opcode, READ | WRITE)
             }
 
             /// A word for a log or a trace.
@@ -1276,7 +1284,7 @@ mod tests {
     }
 
     #[test]
-    fn known_admits_read_and_nothing_else() {
+    fn known_admits_read_and_write_and_nothing_else() {
         // The assertion that makes this module honest rather than decorative,
         // and it is the one this diff rewrote rather than deleted. It used to
         // say *none of the five*, which was true while the numbers were
@@ -1290,11 +1298,18 @@ mod tests {
         // which is what `op::known`'s own comment says must not be possible by
         // accident, and which this loop is what catches.
         //
-        // The edit that makes this fail: widen `known` to admit a second
-        // opcode, or narrow it back to none. Both are decisions, both are red
-        // here, and a diff that answers `WRITE` fixes this test by naming
-        // `WRITE` beside `READ` — one line, in the same diff as the body.
-        const ANSWERED: [u8; 1] = [op::READ];
+        // The edit that makes this fail: widen `known` to admit a further
+        // opcode, or narrow it back. Both are decisions and both are red here.
+        //
+        // **That happened, exactly as this comment said it would.** The text
+        // above read *a diff that answers `WRITE` fixes this test by naming
+        // `WRITE` beside `READ` — one line, in the same diff as the body*, and
+        // that is the diff `E2-B09` is: `f_objects::write::WritePath` is the
+        // body, and this is the line. The sentence is kept rather than edited
+        // away because a prediction that came true is worth more standing than
+        // rewritten, and the same sentence now governs `PIN`, `UNPIN` and
+        // `COLLECT` — three numbers with no service behind them.
+        const ANSWERED: [u8; 2] = [op::READ, op::WRITE];
 
         for opcode in op::ALL {
             assert!(op::defined(opcode), "{} is not in its own vocabulary", op::label(opcode));
