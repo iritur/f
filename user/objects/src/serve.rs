@@ -103,6 +103,25 @@ const DATA_FROM: u32 = 3;
 /// Unit: count of blocks.
 const ZONE_BLOCKS: u64 = 4;
 
+/// Zones kept for objects a **client** writes, above the one the component
+/// stocked itself with.
+///
+/// **A device sized only for what this component put there is a device where a
+/// client's first write fails**, and that is what the first run of
+/// `cargo xtask objects written` did: four writes of one content deduplicated
+/// to a single object and fitted, and the moment the run was fixed to write
+/// four *distinct* objects — which it has to, or `Store::put` answers an
+/// address it already holds and three of the four writes move no bytes — the
+/// third was refused `NO_SPACE`.
+///
+/// Two rather than one so that a run which grows a write or two does not have
+/// to come back here, and a constant rather than a number derived from the
+/// client's intentions because the component is not told them: a client says
+/// how many bytes it is writing one entry at a time, and a device is formatted
+/// once, before any of them.
+/// Unit: zones.
+const WRITE_ZONES: u32 = 2;
+
 /// Blocks the index's log region is given.
 ///
 /// Sixteen, for [`ZONE_BLOCKS`]' reason and with the same failure mode: this is
@@ -324,8 +343,9 @@ fn stocked(
     seed: u64,
 ) -> Option<(Service<ZonedMemory, Memory>, [u8; 32])> {
     let record_blocks = (f_abi::store::Header::BYTES + blob_bytes).div_ceil(block_bytes);
-    // One zone for the record plus a spare, above the three the format reserves.
-    let data_zones = (record_blocks as u64 + 1).div_ceil(ZONE_BLOCKS) as u32 + 1;
+    // One zone for the record plus a spare, above the three the format reserves,
+    // and [`WRITE_ZONES`] more for what a client may write.
+    let data_zones = (record_blocks as u64 + 1).div_ceil(ZONE_BLOCKS) as u32 + 1 + WRITE_ZONES;
     let zones = DATA_FROM + data_zones;
 
     let device = ZonedMemory::new(block_bytes, ZONE_BLOCKS, zones);

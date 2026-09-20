@@ -329,7 +329,7 @@ impl<Z: Zoned, I: Device> Service<Z, I> {
             Ok(bytes) => bytes,
             Err(code) => return self.refuse(request.user_data, code, 0, now),
         };
-        let applied = crate::write::over(&mut self.path).apply(fetched);
+        let applied = crate::write::over(&mut self.path).apply(asked.offset, fetched);
         // Given back before anything else happens, and **before the refusal
         // below can return**. `Table::resolve` marks a buffer lent and
         // `Table::release` is what unmarks it, so a write path that kept the
