@@ -805,6 +805,26 @@ struct Place {
     occupant: Option<Instance>,
     /// Whether the budget ran out.
     retired: bool,
+    /// Bytes an instance gave back that the account's watermark could not take.
+    ///
+    /// **RFC 0095.** `Table::refund` rewinds a watermark and can only give back
+    /// the top, which is sound while a place has one occupant at a time — the
+    /// frames an instance was made of are then the last ones retyped. *Instantiate
+    /// alongside* makes that false: the incoming instance is charged above the
+    /// outgoing one, so when the outgoing one is retired its frames are in the
+    /// middle and refunding them would rewind over memory the successor is
+    /// running in.
+    ///
+    /// So the refund is deferred here and applied when the frames above it have
+    /// gone, which is when the successor is itself retired. At most one swap is
+    /// in flight per place — `f_abi::swap` admits one incoming instance — so
+    /// this is one number and not a list, and a second deferral against a place
+    /// that already holds one is a refusal rather than an addition: two would
+    /// mean a third instance or a teardown that ran twice, and both are bugs
+    /// whose symptom would otherwise be an account quietly losing memory it
+    /// believes it gave back.
+    /// Unit: bytes.
+    deferred_refund: u64,
     /// The transfer window, bought out of this place's account at `fill`.
     ///
     /// **On the place and not on the occupant, and the lifetime is the whole
@@ -1313,6 +1333,7 @@ pub unsafe fn demonstrate(
         // transfer that cannot happen is a page spent on nothing.
         window: Handle::NULL,
         window_object: 0,
+        deferred_refund: 0,
         manifest: ContentId::of(module),
         module,
         endpoint,
@@ -1758,6 +1779,25 @@ pub unsafe fn demonstrate(
                 // acknowledged against the one that replaced it.
                 let mut swapping: Option<f_abi::swap::Swap> = None;
                 let mut replaying = 0u32;
+                // **The instance a swap displaced, kept alive until the swap
+                // commits.** RFC 0063's phase A is *drain, write, acknowledge*
+                // and is reversible for the whole of it, because the outgoing
+                // occupant is alive and still holds all its state — so it has
+                // to be alive at the acknowledgement, which happens a pass
+                // later than the spawn that displaced it.
+                //
+                // Hoisted out of the pass rather than held inside it for that
+                // reason alone. One slot, because `f_abi::swap` admits one
+                // incoming instance at a time and this is the outgoing half of
+                // the same bound.
+                let mut outgoing: Option<Instance> = None;
+                // The identity the place had before the swap moved it, kept
+                // beside the instance that is still running it. A place that
+                // abandoned and kept the successor's manifest would be a place
+                // whose `spawn` refusal compares against a module its occupant
+                // is not running — which is the refusal still being fail-closed
+                // and pointing at the wrong thing.
+                let mut displaced: Option<(&'static [u8], ContentId)> = None;
                 loop {
                     let Some(extra) = extras.get_mut(index).and_then(Option::as_mut) else {
                         return Err(Failure::WrongPlace);
@@ -1891,16 +1931,36 @@ pub unsafe fn demonstrate(
                         // the successor's. A different manifest is still refused
                         // everywhere else, and is reachable here only through a
                         // plan made from two declarations.
-                        let cause = cause::pack(cause::STOPPED, 0);
-                        tear_down(
-                            frames,
-                            &mut extra.place,
-                            &mut supervisor,
-                            &extra.account,
-                            cause,
-                            &mut report,
-                            tree,
-                        )?;
+                        //
+                        // **The outgoing instance is taken out of the place and
+                        // kept alive**, which is RFC 0063's *instantiate
+                        // alongside* and is the whole of what this line owed.
+                        // It is not torn down here: its table, its address
+                        // space, its memory and the state it just wrote are all
+                        // still standing while the successor is built, so the
+                        // two generations hold state at the same moment. What
+                        // ends it is `retire_instance`, after the commit.
+                        //
+                        // The place is empty for `spawn`'s refusal — which asks
+                        // `place.occupant.is_some()` — without the instance
+                        // being gone, and that gap between *out of the slot* and
+                        // *destroyed* is exactly the window an abandonment needs.
+                        if outgoing.is_some() {
+                            return Err(Failure::WrongPlace);
+                        }
+                        outgoing = Some(extra.place.occupant.take().ok_or(Failure::WrongPlace)?);
+                        // The mount goes now rather than at the teardown, because
+                        // the successor is about to publish into this place's one
+                        // mount node and a root naming the outgoing instance's
+                        // tree while the incoming one writes would be a reader
+                        // following one place into two components.
+                        unmount(tree, &extra.place);
+                        // Kept so the abandonment below can put the place's
+                        // identity back exactly as it was. A place that
+                        // abandoned a swap and kept the successor's manifest
+                        // would be a place whose `spawn` refusal compares
+                        // against a module its occupant is not running.
+                        displaced = Some((extra.place.module, extra.place.manifest));
                         extra.place.module = module;
                         extra.place.manifest = ContentId::of(module);
                         let offered = offer(
@@ -1910,9 +1970,37 @@ pub unsafe fn demonstrate(
                             next,
                             frames,
                             supplied,
-                        )?;
+                        );
+                        // **Phase A is still reversible here, and this is the
+                        // first build in which that sentence is true of the
+                        // frame.** The outgoing instance is alive and holds
+                        // everything it had, so an offer that will not be made
+                        // puts it back rather than leaving the place empty. RFC
+                        // 0063 calls that an abandonment and counts it under its
+                        // own name, because the occupant it would otherwise
+                        // penalise is the one that behaved correctly.
+                        let offered = match offered {
+                            Ok(offered) => offered,
+                            Err(why) => {
+                                if let Some((was_module, was_manifest)) = displaced.take() {
+                                    extra.place.module = was_module;
+                                    extra.place.manifest = was_manifest;
+                                }
+                                extra.place.occupant = outgoing.take();
+                                extra.place.abandoned += 1;
+                                abandoned_line(
+                                    Name(record.label()),
+                                    f_abi::swap::Abandoned::Refused,
+                                );
+                                extra.place.routing.commit(extra.place.epoch.saturating_add(1));
+                                return Err(why);
+                            }
+                        };
                         // SAFETY: as the first spawn — the caller's guarantee,
-                        // and the place is empty because the teardown emptied it.
+                        // and the place's slot is empty because the outgoing
+                        // instance was taken out of it a few lines up. It is
+                        // still alive; `spawn` asks whether the *slot* is free,
+                        // which is the question it needs answered.
                         unsafe {
                             spawn(
                                 frames,
@@ -1940,6 +2028,12 @@ pub unsafe fn demonstrate(
                         if generation > KILLS_MAX {
                             return Err(Failure::WrongPlace);
                         }
+                        // The outgoing instance is **not** retired here. It
+                        // stays alive across this pass and into the next one,
+                        // where the successor replays and the swap is
+                        // acknowledged — because phase A is reversible for the
+                        // whole of itself, and an occupant that has been taken
+                        // apart cannot be resumed. Its end is beside the commit.
                         swapping = Some(swap);
                         replaying = records;
                         continue;
@@ -1980,10 +2074,74 @@ pub unsafe fn demonstrate(
                                 .acknowledged(replayed == taken)
                                 .and_then(|()| swap.commit(&extra.place.routing, generation));
                             if let Err(why) = done {
+                                // **The reversal, and it is a real one now.**
+                                // The outgoing occupant is still standing, so
+                                // the place takes it back and the successor is
+                                // what ends. A client that submitted across this
+                                // waited and lost nothing — no table, no
+                                // registration, no buffer — which is the whole
+                                // of what RFC 0063 buys over a restart and was
+                                // unreachable while the frame tore down first.
                                 abandoned_line(Name(record.label()), why);
                                 extra.place.abandoned += 1;
+                                if let Some(back) = outgoing.take() {
+                                    let mut failed = extra
+                                        .place
+                                        .occupant
+                                        .replace(back)
+                                        .ok_or(Failure::WrongPlace)?;
+                                    retire_instance(
+                                        frames,
+                                        &mut failed,
+                                        &mut supervisor,
+                                        &extra.account,
+                                        None,
+                                        &mut report,
+                                    )?;
+                                    if let Some((was, held)) = displaced.take() {
+                                        extra.place.module = was;
+                                        extra.place.manifest = held;
+                                    }
+                                    extra.place.routing.commit(extra.place.epoch.saturating_add(1));
+                                }
                                 return Err(Failure::WrongPlace);
                             }
+                            // --- and now the instance it replaced ----------
+                            //
+                            // **After the commit and not before**, which is what
+                            // makes phase A reversible for the whole of itself:
+                            // until this line the outgoing occupant is alive and
+                            // still holds every byte it had, so an abandonment
+                            // at the acknowledgement above puts it back rather
+                            // than costing a client a table it never asked to
+                            // lose. RFC 0063 says a swap that fails costs the
+                            // client latency and nothing else; this is the line
+                            // that makes that true of the frame.
+                            //
+                            // Its frames were charged **below** the successor's,
+                            // so the account cannot take them back yet —
+                            // `Table::refund` rewinds a watermark and the
+                            // successor is sitting on top of them. The bytes are
+                            // recorded against the place and applied when the
+                            // successor is itself retired. RFC 0095.
+                            if let Some(mut done) = outgoing.take() {
+                                retire_instance(
+                                    frames,
+                                    &mut done,
+                                    &mut supervisor,
+                                    &extra.account,
+                                    Some(&mut extra.place.deferred_refund),
+                                    &mut report,
+                                )?;
+                                extra.place.stops += 1;
+                            }
+                            // The successor's identity is the place's now, so
+                            // there is nothing left to put back. Cleared rather
+                            // than left standing: a `displaced` that outlived
+                            // its swap would restore an old module on the *next*
+                            // pass's abandonment, which is a place quietly
+                            // reverting a generation nobody abandoned.
+                            let _ = displaced.take();
                             extra.place.swaps += 1;
                             report.swaps += 1;
                             // SAFETY: as above.
@@ -2884,6 +3042,7 @@ unsafe fn fill(
         retired: false,
         window: Handle::NULL,
         window_object: 0,
+        deferred_refund: 0,
         reservation: None,
         budget: Budget::default(),
         routing: f_abi::swap::Routing::new(f_abi::swap::PAUSED),
@@ -6668,6 +6827,113 @@ impl Serving<'_> {
 /// `process::withdraw` is where the non-empty case runs, on every `cap=unmap`
 /// boot, and it is the same call this will make when a scheduler puts an
 /// instance on a core.
+/// Take one instance apart: its table, its names, its memory, its page tables.
+///
+/// **Extracted from [`tear_down`] so that an instance can be retired while its
+/// place already holds another one**, which is what RFC 0063's *instantiate
+/// alongside* asks for and what `tear_down` cannot express — that function
+/// takes the occupant *out of* the place, so by construction there is only ever
+/// one. A swap holds the outgoing instance in a local while the incoming one is
+/// spawned into the place, and this is what then ends it.
+///
+/// # The deferral, which is RFC 0095
+///
+/// `Table::refund` rewinds a watermark and can only give back the top. While a
+/// place has one occupant at a time that is sound, because the frames an
+/// instance was made of are the last ones retyped. With two live instances it
+/// is false: the incoming one is charged above the outgoing one, so refunding
+/// the outgoing one's frames rewinds over memory the successor is running in —
+/// silently, because nothing in a watermark knows what is above it.
+///
+/// So `defer` says *these frames are not the top*. The names are given up
+/// either way, because a supervisor still holding a `Frame` capability naming
+/// memory the next instance owns is the one thing a teardown may not leave
+/// behind; only the arithmetic waits.
+///
+/// # Errors
+///
+/// [`Failure::Capability`] where a name will not give up or an account will not
+/// take its memory back.
+fn retire_instance(
+    frames: &mut FrameAllocator,
+    occupant: &mut Instance,
+    supervisor: &mut Table,
+    account: &Account,
+    defer: Option<&mut u64>,
+    report: &mut Report,
+) -> Result<(u32, u32, u32), Failure> {
+    if occupant.heap != 0 {
+        // SAFETY: `occupant.heap` is the direct-map address of a region this
+        // frame mapped and described at spawn, and the occupant has ended — the
+        // teardown below is what gives it back, and it has not run yet.
+        let heap = unsafe { f_ring::heap::Heap::over(occupant.heap) };
+        if heap.valid() {
+            report.heap_peak = report.heap_peak.max(heap.peak());
+            report.heap_starved |= heap.starved();
+            report.heap_bytes = report.heap_bytes.max(heap.bytes());
+        }
+    }
+
+    // 1. Revoke the table. Every slot, in slot order, and the mappings a
+    //    revoked capability authorised go with the names.
+    let used = occupant.table.used() as u32;
+    let capacity = occupant.table.capacity() as u32;
+    occupant.table.clear_all();
+
+    // 3. Give up the names the supervisor minted to make the offer with. Not
+    //    refunded: the memory behind them is the same memory the charges below
+    //    give back, and giving it back twice is the bug the two lists exist to
+    //    not have.
+    for index in (0..occupant.supplies).rev() {
+        let Some(handle) = occupant.supplied.get(index).copied() else { continue };
+        if handle == Handle::NULL {
+            continue;
+        }
+        supervisor.relinquish(handle).map_err(Failure::Capability)?;
+    }
+
+    // 4. Return the memory to the `Untyped` it was retyped from — or record
+    //    that it is owed, when this instance's frames are not the top of the
+    //    watermark. Last charged first either way.
+    let mut refunded = 0;
+    let mut owed = 0u64;
+    for index in (0..occupant.charges).rev() {
+        let Some(handle) = occupant.charged.get(index).copied() else { continue };
+        // The name goes before the memory does, and it goes even when the
+        // memory waits: a supervisor holding a `Frame` capability naming a page
+        // the successor is running in is authority over somebody else's memory,
+        // which is worse than an account that is temporarily short.
+        supervisor.relinquish(handle).map_err(Failure::Capability)?;
+        if defer.is_some() {
+            owed = owed.saturating_add(FRAME_SIZE);
+        } else {
+            supervisor
+                .refund(account.handle, FRAME_SIZE, account.floor)
+                .map_err(Failure::Capability)?;
+        }
+        refunded += 1;
+    }
+    if let Some(sink) = defer {
+        // One at a time. A place that already owes a refund and is asked to owe
+        // a second one has either a third instance or a teardown that ran
+        // twice, and both are bugs this refuses rather than sums.
+        if *sink != 0 {
+            return Err(Failure::Account);
+        }
+        *sink = owed;
+    }
+
+    // The page tables themselves, which the account never paid for: RFC 0044
+    // puts them outside it, so they go back to the allocator directly.
+    for frame in occupant.space.tables().iter().copied() {
+        // SAFETY: a frame this module allocated for this address space, which
+        // has just been emptied and is named by nothing else.
+        unsafe { frames.free(frame) };
+    }
+
+    Ok((used, capacity, refunded))
+}
+
 fn tear_down(
     frames: &mut FrameAllocator,
     place: &mut Place,
@@ -6682,20 +6948,6 @@ fn tear_down(
     // prologue, written by the allocator, and read here by the frame — the same
     // arrangement as a state tree, and for the same reason. A component's word
     // for whether it allocated would be worth nothing.
-    if let Some(occupant) = place.occupant.as_ref()
-        && occupant.heap != 0
-    {
-        // SAFETY: `occupant.heap` is the direct-map address of a region this
-        // frame mapped and described at spawn, and the occupant has ended — the
-        // teardown below is what gives it back, and it has not run yet.
-        let heap = unsafe { f_ring::heap::Heap::over(occupant.heap) };
-        if heap.valid() {
-            report.heap_peak = report.heap_peak.max(heap.peak());
-            report.heap_starved |= heap.starved();
-            report.heap_bytes = report.heap_bytes.max(heap.bytes());
-        }
-    }
-
     let mut withdrawn = (0, 0, 0, 0);
     // 0. Take the mount out of the frame's root, and take it out *first*. The
     //    frame this place's occupant published into is about to go back to the
@@ -6709,69 +6961,39 @@ fn tear_down(
     // connect that arrives while this runs pends rather than being handed a
     // channel to an instance whose address space is being dismantled.
     place.routing.pause();
-    if let Some(mut occupant) = place.occupant.take() {
-        // 1. Revoke the table. Every slot, in slot order, and the mappings a
-        //    revoked capability authorised go with the names — which for this
-        //    instance is every page it had, because its whole address space is
-        //    about to stop existing.
-        withdrawn.0 = occupant.table.used() as u32;
-        withdrawn.1 = occupant.table.capacity() as u32;
-        occupant.table.clear_all();
+    if let Some(occupant) = place.occupant.take() {
+        // The instance's own half, which `retire_instance` owns so that a swap
+        // can end an instance whose place already holds its successor. Nothing
+        // is deferred here: this occupant is the only one, so its frames are
+        // the top of the watermark and `Table::refund`'s bound holds as it
+        // always did.
+        let mut occupant = occupant;
+        let (used, capacity, refunded) =
+            retire_instance(frames, &mut occupant, supervisor, account, None, report)?;
+        withdrawn.0 = used;
+        withdrawn.1 = capacity;
+        withdrawn.2 = refunded;
 
-        // 2. Tear down its channels. There are none standing here — the client's
-        //    channel region is freed at the moment it is read, because there is
-        //    no component to hold the far end of it yet — and the far end's next
-        //    submission earning `PEER/GONE` is what `connect` answers on a
-        //    retired place.
-
-        // 3. Give up the names the supervisor minted to make the offer with.
-        //    Not refunded: the memory behind them is the same memory the
-        //    charges below give back, and giving it back twice is the bug the
-        //    two lists exist to not have.
-        for index in (0..occupant.supplies).rev() {
-            let Some(handle) = occupant.supplied.get(index).copied() else { continue };
-            if handle == Handle::NULL {
-                continue;
-            }
-            supervisor.relinquish(handle).map_err(Failure::Capability)?;
-        }
-
-        // 4. Return the memory to the `Untyped` it was retyped from. What an
-        //    account paid for comes back to that account, not to a global free
-        //    list, which is what makes a supervisor's quota a real number after
-        //    its children have lived and died.
-        //
-        //    Last charged first, because a watermark can only give back its top
-        //    — `Table::refund` states the bound and why a general answer would
-        //    be a free list per account.
-        for index in (0..occupant.charges).rev() {
-            let Some(handle) = occupant.charged.get(index).copied() else { continue };
-            // The name goes before the memory does. A supervisor still holding
-            // a `Frame` capability naming a refunded page would be holding
-            // authority over memory the next instance is about to be given,
-            // which is the one thing a restart may not leave behind.
-            supervisor.relinquish(handle).map_err(Failure::Capability)?;
+        // And now the refund a *previous* instance could not take, if this
+        // place owes one. RFC 0095: the frames above it have just gone, so it
+        // is the top at last. Drained a frame at a time because that is the
+        // width `Table::refund` gives back and the loop is the arithmetic
+        // saying so rather than one subtraction that would hide a remainder.
+        while place.deferred_refund >= FRAME_SIZE {
             supervisor
                 .refund(account.handle, FRAME_SIZE, account.floor)
                 .map_err(Failure::Capability)?;
+            place.deferred_refund -= FRAME_SIZE;
             withdrawn.2 += 1;
         }
-        // The page tables under it are the allocator's — see the module comment
-        // on what is not yet charged to the account — and are returned exactly,
-        // by the same list `process::reap` gives back.
-        for frame in occupant.space.tables().iter().copied() {
-            // SAFETY: every one of these came from this allocator in `spawn`,
-            // and the address space they describe has never been in `CR3` on
-            // any core, so no translation reaches them.
-            unsafe { frames.free(frame) };
+        // A remainder is arithmetic nobody can spend and is a bug rather than
+        // a rounding: every charge is one frame, so a deferral that is not a
+        // whole number of them was not built by `retire_instance`.
+        if place.deferred_refund != 0 {
+            return Err(Failure::Account);
         }
     }
 
-    // 5. Post peer-gone to every holder of an endpoint to the place. The
-    //    supervisor is one such holder, and this is how it learns — there is no
-    //    separate wait-for-child. Outside the branch above on purpose: a place
-    //    being *retired* is a death of the place rather than of an occupant,
-    //    and its holders are owed the news whether or not anybody was in it.
     if supervisor.note_peer_gone(place.endpoint).is_ok() {
         withdrawn.3 += 1;
     }

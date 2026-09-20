@@ -53,8 +53,23 @@ GUARD_SIZE  = 4K;
  *
  * *Reversal:* a supervisor that is a component. Its `Supply` is then its own
  * memory, charged to its own account, and what is left here is the frame's own
- * call depth. */
-STACK_SIZE  = 128K;
+ * call depth.
+ *
+ * **128K to 256K on 2026-09-20, and the number was measured rather than
+ * chosen.** RFC 0063's *instantiate alongside* holds the outgoing instance
+ * alive while its successor is built, so `component::demonstrate` carries one
+ * more `Instance` on its frame — a `Table` with thirty-two inline slots, sixty
+ * -four charged handles and an address space, which is kilobytes and not bytes.
+ * At 128K that overflowed, and the failure was `EXCEPTION 8` raised while the
+ * *second* place was being admitted: nowhere near the swap, because a stack
+ * overflow surfaces at whatever call happens to be deepest.
+ *
+ * What the measurement says about the old number is the part worth keeping:
+ * **there was under one instance of headroom left**, and borrowing rather than
+ * moving that instance did not recover it. The comment above already said
+ * every place added since has been added to this stack and that the guard page
+ * has been catching it — that was still true, and this is what it caught. */
+STACK_SIZE  = 256K;
 FAULT_STACK_SIZE = 16K;
 
 /* The stacks an application processor arrives on: one block per core this

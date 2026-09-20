@@ -3901,26 +3901,44 @@ fn churn_counts(log: &str, marker: &str) -> Option<(u64, u64)> {
 /// declarations* this row said would replace it. Deleting the line would have
 /// made every other refill path stop checking.
 ///
-/// # What is still owed, which is one clause of four
+/// # What is still owed, and it has narrowed twice
 ///
 /// `E2-B06`'s sentence is *instantiate alongside, transfer state, swap routing
-/// at a quiescent point, retire*. Three are paid. **Alongside is not**: the frame
-/// tears the outgoing occupant down and *then* spawns the incoming one, so the
-/// two never exist at the same moment and the history crosses a window rather
-/// than two live instances. That is why the second needle below is the line that
-/// changes a place's identity while it is empty.
+/// at a quiescent point, retire*. **All four are paid.** The text here used to
+/// say alongside was not, because the frame tore the outgoing occupant down and
+/// then spawned the incoming one, so the two never existed at the same moment
+/// and an abandonment after the teardown was a restart. That is no longer the
+/// build: `component::demonstrate` takes the outgoing instance out of the
+/// place's slot and keeps it **alive** — its table, its address space, its
+/// memory and the state it just wrote all standing — spawns the successor
+/// beside it, and retires it only after `Swap::commit`. An abandonment at the
+/// acknowledgement puts the place's occupant back and ends the successor
+/// instead, which is RFC 0063's *a client observes added latency and nothing
+/// else* made true of the frame rather than of a simulation.
 ///
-/// What it costs is real rather than cosmetic: a swap that instantiated
-/// alongside could abandon phase A and keep the occupant it had, and this one
-/// cannot — once the outgoing instance is gone, an abandonment is a restart.
-/// `f_abi::swap::Abandoned` has five variants and this build can honour them
-/// only before the teardown.
+/// What that cost is recorded rather than absorbed: the outgoing instance's
+/// frames are charged **below** the successor's, so `Table::refund` cannot take
+/// them when it is asked to, and RFC 0095 defers the refund onto the place
+/// until the successor is itself retired. The boot processor's stack went from
+/// 128K to 256K because `demonstrate` now carries a second `Instance`, and at
+/// 128K it overflowed — into the guard page, surfacing as `EXCEPTION 8` raised
+/// while an unrelated place was being admitted.
+///
+/// **What is unpaid is a demonstration and not a mechanism.** No boot in this
+/// tree provokes an abandonment. The two paths exist, they restore the outgoing
+/// occupant, and nothing runs them — which is the state this repository refuses
+/// everywhere else it has a counter, because a reversal that has never been
+/// taken is a reversal nobody has checked. `sim/src/swap.rs` abandons for all
+/// five of `f_abi::swap::Abandoned`'s reasons under load; the frame abandons
+/// for none, because no `blk=` half asks it to. The needle below is the line an
+/// abandonment control has to reach, and it is where such a half would arm
+/// itself.
 const SWAP_GAP: &[Gap] = &[(
     "kernel/src/component.rs",
     "extra.place.module = module;",
-    "a place changes its identity while it is empty, so the two generations of \
-     one component never exist at the same moment and RFC 0063's *instantiate \
-     alongside* is unpaid — an abandonment after the teardown is a restart",
+    "the frame's reversal paths exist and no boot takes one: a swap that \
+     abandons puts its outgoing occupant back, and no `blk=` half provokes it, \
+     so the frame's half of RFC 0063's abandonment is code without a run",
     "TODO.md E2-B06 and E2-P08; docs/rfc/0012's *what the frame changed means*; \
      docs/rfc/0063's phase A and its `E2-P08` reversal condition; \
      sim/src/swap.rs's module comment; abi/src/swap.rs's module comment",
