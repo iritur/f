@@ -1596,6 +1596,16 @@ pub struct Placed<'a> {
     free_before: u64,
     /// Whether this client is the one that has its server killed under it.
     killing: bool,
+    /// Whether the swap it asks for is to be **abandoned** rather than
+    /// committed.
+    ///
+    /// The negative control `sim/src/swap.rs` has had all along and the frame
+    /// has not: a swap that fails in phase A, so that RFC 0063's *an
+    /// abandonment is not a restart* is a sentence about a run rather than
+    /// about a design. It rides on [`Self::swapping`] — the same script, the
+    /// same client, one more branch — because a control with a harness of its
+    /// own is a second opinion about what a client observes.
+    abandoning: bool,
     /// Whether it is the one that has its server **swapped** under it.
     ///
     /// One script with one branch, and that is the point rather than an economy:
@@ -1735,6 +1745,7 @@ impl<'a> Placed<'a> {
                 free_before: 0,
                 killing: false,
                 swapping: false,
+                abandoning: false,
                 naming: None,
                 generation: 0,
                 registered_at: 0,
@@ -1769,6 +1780,17 @@ impl<'a> Placed<'a> {
     pub const fn swaps(&mut self) {
         self.killing = true;
         self.swapping = true;
+    }
+
+    /// Have this client's swap abandoned instead of committed.
+    ///
+    /// Implies [`Self::swaps`], because an abandonment is something that
+    /// happens *to* a swap and a run that never asked for one has nothing to
+    /// abandon.
+    pub const fn abandons(&mut self) {
+        self.killing = true;
+        self.swapping = true;
+        self.abandoning = true;
     }
 
     /// Whether this client held a registration across a swap and used it
@@ -2293,6 +2315,10 @@ impl Placed<'_> {
 }
 
 impl component::Datapath for Placed<'_> {
+    fn abandons(&self) -> bool {
+        self.abandoning
+    }
+
     fn drive(
         &mut self,
         frames: &mut FrameAllocator,

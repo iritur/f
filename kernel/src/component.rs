@@ -944,6 +944,11 @@ pub struct Report {
     /// never heard of it, and a swap hands the successor the history its
     /// predecessor lived. Unit: swaps.
     pub swaps: u32,
+    /// Swaps that reached phase A and were reversed. **Never summed with
+    /// [`Report::swaps`] or with restarts**: RFC 0063 counts an abandonment
+    /// under its own name because the occupant it would otherwise penalise is
+    /// the one that behaved correctly. Unit: abandonments.
+    pub abandoned: u32,
     /// Needs satisfied with a capability of the declared type that names no
     /// object this machine has. Unit: capabilities.
     ///
@@ -1922,6 +1927,28 @@ pub unsafe fn demonstrate(
 
                         handed_line(Name(record.label()), was, in_flight, records);
 
+                        // The negative control, armed by the client and applied
+                        // by the frame because the window is the frame's page.
+                        // One byte, in the middle of what the outgoing occupant
+                        // just wrote, so the successor's reader is what refuses
+                        // it rather than this line deciding the outcome.
+                        if client.abandons() {
+                            let at = frames.virt(window);
+                            // SAFETY: `window` is a frame this place was
+                            // charged at `fill` and reachable through the
+                            // direct map; no core is inside the occupant,
+                            // which has ended, and the successor does not
+                            // exist yet, so nothing else reads this byte.
+                            let was = unsafe { at.read() };
+                            // SAFETY: the same frame and the same argument,
+                            // one write of the byte just read. Split from the
+                            // read because a block may hold one unsafe
+                            // operation, which is the rule that makes each
+                            // `SAFETY:` discharge one obligation.
+                            unsafe { at.write(was ^ 0xFF) };
+                            garbled_line(Name(record.label()));
+                        }
+
                         // --- the place takes its successor -------------------
                         //
                         // `place.module` and `place.manifest` move **together**,
@@ -2054,7 +2081,27 @@ pub unsafe fn demonstrate(
                         let Some((outcome, entries, _)) = served else {
                             return Err(Failure::WrongPlace);
                         };
-                        if outcome != f_virtio_blk::routing::stopped::TOLD || entries == 0 {
+                        // **A client that asked for an abandonment is excused
+                        // this, and the reason is a finding rather than a
+                        // convenience.** RFC 0063 has the incoming instance
+                        // acknowledge the records *before* the routing word
+                        // swaps and before it serves anybody. This frame gives
+                        // the successor a core, lets it replay *and serve*, and
+                        // checks the acknowledgement afterwards — so a
+                        // successor that replayed nothing has already refused
+                        // the client by the time the frame notices. The zero
+                        // below is that refusal, and asserting on it here would
+                        // stop the run before it reached the reversal it exists
+                        // to demonstrate.
+                        //
+                        // The ordering is the frame's and not the protocol's,
+                        // and `SWAP_GAP` carries it: acknowledging before the
+                        // successor serves is what makes *the client observes
+                        // added latency and nothing else* true of a failed
+                        // swap, and this build does not do it yet.
+                        if !client.abandons()
+                            && (outcome != f_virtio_blk::routing::stopped::TOLD || entries == 0)
+                        {
                             return Err(Failure::WrongPlace);
                         }
                         // --- the swap's far end ---------------------------
@@ -2084,6 +2131,7 @@ pub unsafe fn demonstrate(
                                 // unreachable while the frame tore down first.
                                 abandoned_line(Name(record.label()), why);
                                 extra.place.abandoned += 1;
+                                report.abandoned += 1;
                                 if let Some(back) = outgoing.take() {
                                     let mut failed = extra
                                         .place
@@ -2103,6 +2151,19 @@ pub unsafe fn demonstrate(
                                         extra.place.manifest = held;
                                     }
                                     extra.place.routing.commit(extra.place.epoch.saturating_add(1));
+                                }
+                                // **An abandonment the client asked for is an
+                                // outcome and not a fault.** The frame did what
+                                // RFC 0063 says a failed phase A does: it
+                                // reversed. Returning an error would make the
+                                // one boot that demonstrates the reversal the
+                                // one boot that cannot finish, and a control
+                                // that fails the run it belongs to proves
+                                // nothing about that run. An abandonment nobody
+                                // asked for is still a failure, which is the
+                                // line after this one.
+                                if client.abandons() {
+                                    break;
                                 }
                                 return Err(Failure::WrongPlace);
                             }
@@ -3227,6 +3288,19 @@ fn abandoned_line(what: Name<'_>, why: f_abi::swap::Abandoned) {
     );
 }
 
+/// A byte of the transfer window, flipped on purpose.
+///
+/// Printed where it happens rather than summarised afterwards, because a
+/// control whose arming is invisible is a control a reader has to take on
+/// trust. `sim/src/swap.rs`'s `garble` is the same provocation one layer up.
+fn garbled_line(what: Name<'_>) {
+    crate::kprintln!(
+        "  garbled       place {what} transfer window \u{2014} one byte flipped after the \n\
+         \u{20}               outgoing occupant wrote its history, so the successor's own \n\
+         \u{20}               record reader is what refuses it"
+    );
+}
+
 /// A swap that reached its far end: the successor replayed what it was handed.
 ///
 /// The two counts are the whole verdict and they come from opposite sides. The
@@ -4198,6 +4272,27 @@ pub trait Datapath {
     ///
     /// Unit: frames.
     fn retained(&mut self, frames: &mut FrameAllocator) -> u64;
+
+    /// Whether this client wants the swap it asked for to be **abandoned**.
+    ///
+    /// **A negative control, and it is a client's to ask for.** RFC 0063 says a
+    /// swap that fails in phase A costs the client latency and nothing else,
+    /// and a frame that can abandon but has never been asked to is a frame
+    /// whose abandonment is untested — `sim/src/swap.rs` abandons for all five
+    /// of `f_abi::swap::Abandoned`'s reasons and the frame abandoned for none.
+    ///
+    /// The frame's instrument is the same one the simulator's `garble` control
+    /// uses: a byte of the transfer window, flipped after the outgoing occupant
+    /// wrote its history and before the successor reads it. The successor's own
+    /// record reader refuses what did not cross intact, replays fewer records
+    /// than it was told to, and `Swap::acknowledged` refuses a count that does
+    /// not match. Nothing is special-cased: the abandonment is the protocol's.
+    ///
+    /// Default `false`, so every existing client is unaffected and a half that
+    /// wants this has to say so.
+    fn abandons(&self) -> bool {
+        false
+    }
 }
 
 /// Where a serving occupant's two rings and its board are, as kernel addresses.

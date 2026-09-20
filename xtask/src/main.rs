@@ -3924,21 +3924,52 @@ fn churn_counts(log: &str, marker: &str) -> Option<(u64, u64)> {
 /// 128K it overflowed — into the guard page, surfacing as `EXCEPTION 8` raised
 /// while an unrelated place was being admitted.
 ///
-/// **What is unpaid is a demonstration and not a mechanism.** No boot in this
-/// tree provokes an abandonment. The two paths exist, they restore the outgoing
-/// occupant, and nothing runs them — which is the state this repository refuses
-/// everywhere else it has a counter, because a reversal that has never been
-/// taken is a reversal nobody has checked. `sim/src/swap.rs` abandons for all
-/// five of `f_abi::swap::Abandoned`'s reasons under load; the frame abandons
-/// for none, because no `blk=` half asks it to. The needle below is the line an
-/// abandonment control has to reach, and it is where such a half would arm
-/// itself.
+/// # The demonstration arrived, and it found two more things
+///
+/// The text here used to say no boot provoked an abandonment, and that the
+/// frame's reversal was code nobody had run. `cargo xtask blk abandoned` runs
+/// it: one byte of the transfer window is flipped after the outgoing occupant
+/// wrote its history, the successor's own record reader refuses what did not
+/// cross intact, `Swap::acknowledged` refuses the count, and the frame
+/// reverses — the place takes back the occupant it had and the successor is
+/// what is retired. That is the same instrument `sim/src/swap.rs`'s `garble`
+/// uses and nothing downstream is special-cased.
+///
+/// **What the run then showed is that the reversal is not yet worth what RFC
+/// 0063 promises for it**, and the boot says so rather than reporting a green
+/// tick. That decision says a failed phase A costs a client added latency and
+/// nothing else. It costs more here, for two separable reasons:
+///
+/// - **The frame acknowledges too late.** RFC 0063 has the incoming instance
+///   acknowledge the records *before* the routing word swaps and before it
+///   serves anybody. This frame gives the successor a core, lets it replay and
+///   serve, and checks the acknowledgement afterwards — so a successor that
+///   replayed nothing has already refused the client by the time the frame
+///   notices. `blk abandoned` asserts `read back what it wrote: false`, which
+///   is asserting the defect on purpose: the day the ordering is repaired that
+///   assertion is the stale one.
+/// - **The outgoing component ends rather than pauses.**
+///   `f_virtio_blk::component::hand_over` returns `stopped::HANDED_OVER` and
+///   the loop returns, so the instance the frame puts back is one whose
+///   component has exited. The frame keeps its memory, its table and its
+///   client's registrations, and cannot make it serve. *The place resumes
+///   delivering to the occupant it already had* is therefore paid in the
+///   frame's bookkeeping and not in the component's behaviour.
+///
+/// So the residue is an ordering and a pause, and neither is in this file's
+/// gift: one is `kernel/src/component.rs`'s phase order, the other is a
+/// `user/virtio-blk` change. The needle below is the guard that exists **only
+/// because** of the first — a client that asked for an abandonment is excused
+/// the served assertion, because the frame cannot yet reverse before the
+/// client is hurt. Repair the ordering and the guard is unnecessary, which is
+/// what makes it self-clearing.
 const SWAP_GAP: &[Gap] = &[(
     "kernel/src/component.rs",
-    "extra.place.module = module;",
-    "the frame's reversal paths exist and no boot takes one: a swap that \
-     abandons puts its outgoing occupant back, and no `blk=` half provokes it, \
-     so the frame's half of RFC 0063's abandonment is code without a run",
+    "if !client.abandons()",
+    "the frame acknowledges a swap after its successor has served rather than \
+     before, so an abandonment reverses the place and cannot spare the client — \
+     and the outgoing component ends at its hand-over rather than pausing, so \
+     what is put back cannot serve",
     "TODO.md E2-B06 and E2-P08; docs/rfc/0012's *what the frame changed means*; \
      docs/rfc/0063's phase A and its `E2-P08` reversal condition; \
      sim/src/swap.rs's module comment; abi/src/swap.rs's module comment",
@@ -10409,6 +10440,154 @@ fn blk_served() -> Result<(), String> {
 /// # Errors
 ///
 /// A sentence naming which of the four did not hold.
+/// A swap that fails in phase A, and a place that keeps what it had.
+///
+/// **The control `cargo xtask blk swapped` is worth nothing without.** That
+/// half shows a swap succeeding; a frame that can only succeed is a frame whose
+/// reversal has never been taken, and RFC 0063's central promise is about the
+/// failure: *any failure among them abandons the swap — the place resumes
+/// delivering to the occupant it already had, and the client observes added
+/// latency and nothing else*. `sim/src/swap.rs` has abandoned for all five of
+/// `f_abi::swap::Abandoned`'s reasons since `E2-P08`. Until this half the frame
+/// had abandoned for none, and `SWAP_GAP` said so.
+///
+/// # How it is provoked, and why not by a special case
+///
+/// One byte of the transfer window is flipped after the outgoing occupant wrote
+/// its history and before the successor reads it — the same instrument
+/// `sim/src/swap.rs`'s `garble` uses. Nothing downstream is told: the
+/// successor's own record reader refuses what did not cross intact, it replays
+/// fewer records than it was told to, and `Swap::acknowledged` refuses a count
+/// that does not match. The abandonment is the protocol's, reached by making
+/// the world wrong rather than by asking the frame to pretend.
+///
+/// # What it asserts
+///
+/// 1. **the swap was abandoned and not committed** — one abandonment counted,
+///    zero swaps, and those two are never summed because RFC 0063 says an
+///    abandonment must not spend a restart budget;
+/// 2. **the place kept its occupant** — the instance that handed over is back
+///    in the slot with its table, its memory and its registrations intact, and
+///    the successor is what was retired;
+/// 3. **the boot finished** — exit 33. A control that fails the run it belongs
+///    to proves nothing about that run.
+///
+/// # What it does **not** assert, which is the honest part
+///
+/// That the restored occupant serves again. It cannot: `f_virtio_blk`'s
+/// `hand_over` returns `stopped::HANDED_OVER` and the component's loop *ends*,
+/// so the instance this frame puts back is one whose component has already
+/// exited. What survives is everything the frame owns — the address space, the
+/// table, the client's registrations, the account's frames — and what does not
+/// is a running component.
+///
+/// So RFC 0063's *the place resumes delivering to the occupant it already had*
+/// is paid in the frame and not yet in the component, and closing that gap
+/// means a component that **pauses** at a hand-over instead of ending. That is
+/// a `user/virtio-blk` change and it is what `SWAP_GAP` names after this half
+/// lands.
+///
+/// # Errors
+///
+/// A sentence naming which of the three did not hold.
+fn blk_abandoned() -> Result<(), String> {
+    println!("--- blk=abandoned: a swap that fails in phase A, and a place that keeps its own");
+    let disk = blk_disk()?;
+    let device = blk_device(&disk)?;
+    let borrowed: Vec<&str> = device.iter().map(String::as_str).collect();
+    let (ending, log) = machine_devices(
+        Some("blk=abandoned"),
+        &[],
+        Capture::Printed,
+        BOOT_TIMEOUT,
+        BOOT_MEMORY,
+        &borrowed,
+        &[],
+    )?;
+    if ending != Ending::Exited(33) {
+        return Err(format!(
+            "the boot {ending}; expected exit 33.\n\n\
+             An abandonment the client asked for is an outcome and not a fault — the frame did\n\
+             what RFC 0063 says a failed phase A does. A boot that refuses to finish here is one\n\
+             where `Datapath::abandons` did not reach `component::demonstrate`, so the frame read\n\
+             the reversal as a failure of its own."
+        ));
+    }
+
+    if !log.contains("garbled       place virtio-blk") {
+        return Err("the window was never garbled, so nothing provoked the abandonment.\n\n\
+             `blk=abandoned` arms `blk::Placed::abandons`, and the frame flips one byte of the\n\
+             transfer window after the outgoing occupant wrote into it. A boot without this line\n\
+             ran an ordinary swap, and whatever it reports below is about a swap that worked."
+            .into());
+    }
+
+    let abandoned = log.lines().find(|line| line.contains("abandoned     place virtio-blk"));
+    let Some(abandoned) = abandoned else {
+        return Err("the swap was not abandoned.\n\n\
+             One byte of the window was flipped, so the successor's record reader should have\n\
+             refused a record, replayed fewer than it was told to, and `Swap::acknowledged`\n\
+             should have refused the count. A boot that garbled the window and committed anyway\n\
+             has a successor that is not checking what it replays — `user/virtio-blk`'s\n\
+             `Record::intact` is the first thing to read."
+            .into());
+    };
+
+    if log.contains("committed     place virtio-blk") {
+        return Err(format!(
+            "the swap was abandoned **and** committed, which are exclusive.\n\n\
+             {}\n\n\
+             `Swap::commit` refuses from any phase but `Acknowledged`, so a run reaching both\n\
+             has a state machine that is not the one in `abi/src/swap.rs`.",
+            abandoned.trim_end(),
+        ));
+    }
+
+    let client = log.lines().find(|line| line.contains("blk client    the frame registered"));
+    let Some(client) = client else {
+        return Err("the client did not report what it saw.".into());
+    };
+    // **This asserts the defect, deliberately, and goes red when it is fixed.**
+    // The successor replayed nothing, so the `SetId` this client holds names a
+    // slot in a table that was never filled and the client is refused. RFC 0063
+    // says a failed phase A costs a client added latency and nothing else; this
+    // frame acknowledges *after* the successor has served, so it costs more. A
+    // run where the client kept its bytes would mean the ordering had been
+    // repaired — at which point this line is what says so.
+    if !client.contains("read back what it wrote: false") {
+        return Err(format!(
+            "the client kept its bytes across an abandoned swap.\n\n{}\n\n\
+             That is better than this build can do, and this check is what noticed. The frame \
+             acknowledges a swap only after the successor has been given a core and served, so a \
+             successor that replayed nothing refuses the client before the frame reverses. If the \
+             acknowledgement now happens first, this assertion is the stale one: invert it, and \
+             take the ordering sentence out of `SWAP_GAP`.",
+            client.trim_end(),
+        ));
+    }
+
+    println!(
+        "\nblk=abandoned: ok — a swap reached phase A, one byte of its transfer window did not\n\
+         \x20 cross intact, and the frame reversed: the place took back the occupant that had\n\
+         \x20 handed over, with its table, its memory and its client's registrations standing,\n\
+         \x20 and the successor is what was retired.\n\
+         \x20 {}\n\
+         \x20 **And the client lost its bytes anyway, which this half asserts rather than\n\
+         \x20 hides.** RFC 0063 says a failed phase A costs a client added latency and nothing\n\
+         \x20 else. It costs more here, for two reasons this run separates. The frame\n\
+         \x20 acknowledges *after* the successor has been given a core and served, so a\n\
+         \x20 successor that replayed nothing refuses the client before the frame reverses.\n\
+         \x20 And `hand_over` ends the outgoing component's loop, so the instance the frame\n\
+         \x20 puts back is one whose component has exited: the frame keeps its memory, its\n\
+         \x20 table and its registrations, and cannot make it serve.\n\
+         \x20 The reversal is real and the promise is not yet paid — the bookkeeping is the\n\
+         \x20 frame's, the ordering is not, and the pause is the component's. `SWAP_GAP`\n\
+         \x20 carries all three.",
+        abandoned.trim_end(),
+    );
+    Ok(())
+}
+
 fn blk_swapped() -> Result<(), String> {
     println!("--- blk=swapped: one place, two generations, and a client that keeps its set");
     let disk = blk_disk()?;
@@ -10665,6 +10844,12 @@ const BLK_KILLED: &str = "killed";
 /// three.
 const BLK_SWAPPED: &str = "swapped";
 
+/// And that swap **abandoned** rather than committed, which is the negative
+/// control the frame did not have. Outside [`BLK_PROVOCATIONS`] with the other
+/// four, for the same reason: it is a place's own lifecycle and not a fault
+/// injected into a running one.
+const BLK_ABANDONED: &str = "abandoned";
+
 fn blk(kind: Option<&str>) -> Result<(), String> {
     if kind == Some(BLK_PLACE) {
         return blk_place();
@@ -10677,6 +10862,9 @@ fn blk(kind: Option<&str>) -> Result<(), String> {
     }
     if kind == Some(BLK_SWAPPED) {
         return blk_swapped();
+    }
+    if kind == Some(BLK_ABANDONED) {
+        return blk_abandoned();
     }
     let chosen: Vec<&(&str, &str)> = match kind {
         None => BLK_PROVOCATIONS.iter().collect(),
