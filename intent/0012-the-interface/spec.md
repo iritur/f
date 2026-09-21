@@ -427,7 +427,7 @@ seam nobody tests is a seam that drifts.
 
 ```
 - [ ] **E3-B04a** `M` Timestamped at the driver, at interrupt time, and nowhere else.
-  *exit:* one time source in the whole path; a lint finds any second reading of a clock in it, with a fixture that makes the lint fail; under the simulator the stamp is `Env`'s virtual time and one seed gives one sequence of stamps on both architectures.
+  *exit:* one time source in the crates that can hold one; a lint finds any second reading of a clock in them, any crate that names the stamp and has no row, and any file compiled in from off the path, each with a fixture that makes the lint fail; under the simulator the stamp is `Env`'s virtual time and one seed gives one sequence of stamps on both architectures. **Narrowed from *one time source in the whole path* by RFC 0099**, on a measurement rather than on a judgement: `abi/`, `interface/` and `scene/` depend on neither `f-env` nor `f-input`, so a second clock reading cannot be *written* there and their rows are held open in advance rather than checked — `stage_reach` computes that and `lint-stamp` prints it on every green run. The interrupt-time call site and the stages downstream of the driver arrive with `E3-B04d`, and the reversal is mechanical: a second row reaching a clock.
   *needs:* E3-00
 - [ ] **E3-B04b** `S` The input entry format in `abi/`.
   *exit:* fixed-width on both architectures, unread fields refused when non-zero, and the timestamp's scale in its name rather than in a comment.
