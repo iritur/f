@@ -618,6 +618,49 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+  # The re-chunking claim, and it is a job of its own rather than a step in
+  # `gating-claims` because it is the one gating claim that is neither
+  # boot-heavy nor quick: two 128 MiB objects and an 8 MiB one, five content
+  # mixtures, two seeds, both object kinds, and every edit on the extent kind
+  # submitted across a real objects ring. Minutes of hashing, and a red night
+  # should name it in the job rather than in the eleventh step of another one.
+  #
+  # ## Why this arrived on 2026-09-21 and not earlier
+  #
+  # `claims/0017` was `pending` for two epochs, on a denominator: the ratio is
+  # *per application byte written* and `intent/0006-state/spec.md` defines an
+  # application byte as one the client submitted **on the objects ring**, while
+  # the bench computed `edits * WRITE_BYTES` for itself. `E2-B09` closed that —
+  # both halves of the ratio now come off `f_objects::Served` — so the claim
+  # gates, and a gating claim no workflow compares is what
+  # `cargo xtask lint-claim-runs` exists to refuse.
+  #
+  # ## What a red night here means
+  #
+  # `claims/0017`'s `[diagnosis]` table names what each row implies, and the
+  # first sentence of it is the one to read: a bound moves only by an RFC
+  # carrying the measurement that moved it. Three have looked — RFC 0061, 0062
+  # and 0064 — and every one of them left the 786 432 where it was.
+  rechunk:
+    name: bytes re-chunked per application byte, on both object kinds
+    needs: [environment, image]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: both workloads, and every threshold compared
+        run: |
+          set -o pipefail
+          cargo xtask claim bytes-rechunked-per-byte 2>&1 | tee rechunk-report.txt
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rechunk-report
+          path: rechunk-report.txt
+          retention-days: 90
+          if-no-files-found: error
+
   # `claims/0030` is `gating`, and until this job existed nothing ran it.
   #
   # ## Why it is here rather than in `verify` or in `ci`

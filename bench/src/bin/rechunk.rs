@@ -78,16 +78,25 @@
 
 use std::env;
 
+use f_abi::buf::SetId;
+use f_abi::flags;
+use f_abi::objects::{Entry as Asked, Request, Write as WriteRecord};
 use f_bench::Environment;
 use f_blob::chunk::{
     CHUNK_MAX_BYTES, CHUNK_MIN_BYTES, CHUNK_TARGET_BYTES, Chunker, RESYNC_BOUND_BYTES,
 };
 use f_blob::device::Memory;
-use f_blob::extent::{EXTENT_BYTES, Extent};
+use f_blob::extent::{Cost, EXTENT_BYTES, Extent};
 use f_blob::gear::{GEAR, MASK};
 use f_blob::store::{Store, superblock_for_this_build};
 use f_env::split::{Stream, label};
 use f_hash::sha256;
+use f_index::Index;
+use f_objects::dma::Landing;
+use f_objects::read::mount;
+use f_objects::service::Service;
+use f_zone::device::ZonedMemory;
+use f_zone::map::ZoneMap;
 
 /// The small object. Unit: bytes.
 ///
@@ -124,13 +133,39 @@ const WRITE_BYTES: usize = 4096;
 /// is measured at a placed boundary as well as counted over the draw.
 const WRITES_PER_OBJECT: usize = 64;
 
-/// Writes between snapshots on the extent path. Unit: count of writes.
+/// The modelled device's logical block. Unit: bytes.
 ///
-/// Recorded beside the snapshot row rather than folded into the per-write
-/// number, because RFC 0058 is explicit that folding it in would make the
-/// per-write number a function of how often the bench snapshots — a knob, not a
-/// property.
-const SNAPSHOT_INTERVAL_WRITES: usize = 16;
+/// Four kibibytes, which is the block `intent/0006-state/spec.md` derives claim
+/// 0016's padding term at and therefore the block every number in this epoch is
+/// about. `user/objects/tests/reads.rs` uses the same one for the same reason.
+const BLOCK_BYTES: usize = 4096;
+
+/// Blocks in one zone. Unit: count of blocks — one mebibyte a zone.
+const ZONE_BLOCKS: u64 = 256;
+
+/// The zones below the first data zone: the superblock's conventional zone and
+/// the two root zones. Unit: count of zones. `zone/tests/cycle.rs`'s geometry.
+const DATA_FROM: u32 = 3;
+
+/// Buffers in the client's registered set. Unit: count of buffers.
+///
+/// Two, each [`WRITE_BYTES`] wide. One would do — this workload has one write
+/// outstanding at a time — and two exist so that the set is a *set*: a
+/// registration of one buffer cannot tell an index that is checked from an
+/// index that is ignored, and `f_ring::registry::Table::resolve` refusing an
+/// index past the set is the check this workload's bytes pass through.
+const RING_BUFFERS: u32 = 2;
+
+/// Blocks the index's log region is given. Unit: count of blocks.
+///
+/// The write path never resolves a name, so this is the smallest region
+/// `Index::mount` accepts rather than a figure derived from the workload — and
+/// it is here at all because `f_objects::read::ReadPath` owns an index and a
+/// service is put in front of a *read* path.
+const LOG_BLOCKS: u64 = 64;
+
+/// The index's own block. Unit: bytes — the smallest this format accepts.
+const LOG_BLOCK_BYTES: usize = 512;
 
 /// The window the register sees. Unit: bytes.
 ///
@@ -582,7 +617,29 @@ struct Extents {
     placed: u64,
     /// The extent record's own rewrite, which is a snapshot cost and not a
     /// per-write one.
+    ///
+    /// **One per write since `E2-B09` closed, and that is RFC 0098's price
+    /// rather than a knob.** A completion has to carry the object's new content
+    /// address and an extent has none until it is snapshotted, so the interval
+    /// this bench used to choose is no longer the bench's to choose. It stays
+    /// its own row for the reason it always had one: a snapshot is proportional
+    /// to the piece count and therefore to the *object*, and folding it into
+    /// the per-write cost would turn `2 x EXTENT_BYTES at both sizes` into two
+    /// numbers sixteen times apart.
     snapshots: Tally,
+    /// Application bytes the **component** counted, off
+    /// `f_objects::Served::written_bytes`.
+    ///
+    /// `claims/0017`'s denominator, and the second of two sums neither derived
+    /// from the other: this workload knows how many bytes it drew and the
+    /// service knows how many a client submitted, and the run requires them to
+    /// agree. Unit: bytes.
+    submitted: u64,
+    /// Entries the service answered for this cell. Unit: count of entries.
+    ///
+    /// The count beside the byte sum, for `f_objects::dma::Landed`'s stated
+    /// reason: a zero beside a zero says nothing.
+    answered: u64,
 }
 
 fn main() {
@@ -627,7 +684,7 @@ fn main() {
 
                 let label = format!("{} seed {seed} at {size}", kind.name());
                 let chunked = measure_chunked(&object, &edits, &label);
-                let extents = measure_extent(object, &edits, geometry.snapshot_interval);
+                let extents = measure_extent(object, &edits);
 
                 println!(
                     "{:<17} {:>5} {:>9} {:>11} {:>9} {:>11} {:>9} {:>11}  {}",
@@ -669,7 +726,6 @@ struct Geometry {
     small: usize,
     large: usize,
     writes: usize,
-    snapshot_interval: usize,
     seeds: Vec<u64>,
 }
 
@@ -679,7 +735,6 @@ impl Geometry {
             small: OBJECT_BYTES_SMALL,
             large: OBJECT_BYTES_LARGE,
             writes: WRITES_PER_OBJECT,
-            snapshot_interval: SNAPSHOT_INTERVAL_WRITES,
             seeds: SEEDS.to_vec(),
         };
         let args: Vec<String> = env::args().skip(1).collect();
@@ -706,7 +761,7 @@ impl Geometry {
         println!("object_bytes_large        {}", self.large);
         println!("write_bytes               {WRITE_BYTES}");
         println!("writes_per_object         {}", self.writes);
-        println!("snapshot_interval_writes  {}", self.snapshot_interval);
+        println!("snapshot_per_write        1 (RFC 0098: a completion carries the new address)");
         println!("seeds                     {:?}", self.seeds);
         println!("mixtures                  {}", Mixture::ALL.len());
         println!("extent_bytes              {EXTENT_BYTES}");
@@ -911,28 +966,64 @@ fn record_second_clause(
     }
 }
 
-/// The extent kind: the same edits through the real write path.
+/// The extent kind: the same edits, submitted by a client across a real objects
+/// ring.
 ///
-/// A real [`Store`] over a modelled device rather than arithmetic over a `Vec`,
-/// because the number this claim publishes is what the *write path* costs and a
-/// model of it would be a second implementation nobody checks against the first.
+/// # Why this goes through a service rather than straight to the store
+///
+/// Because `claims/0017` is *bytes re-chunked and re-hashed per application
+/// byte written*, `intent/0006-state/spec.md` defines an application byte once
+/// — **a byte the client submitted on the objects ring** — and until `E2-B09`
+/// closed, this function called `Extent::write` directly and the denominator
+/// was `edits.len() * WRITE_BYTES`, an arithmetic the bench did for itself.
+/// That is a write path and not a client, and the claim said so for two epochs.
+///
+/// So the bytes go into a registered buffer, an `f_abi::Sqe` names that buffer,
+/// `f_objects::service::Service` answers it, and both halves of the ratio are
+/// read back off `f_objects::Served` afterwards. The store underneath is the
+/// same `f_blob::extent::Extent`, reached by the same call — what changed is
+/// who called it and where the count was taken.
+///
+/// # Why a boot cannot be this, which is RFC 0098 and not a shortcut
+///
+/// `Extent::write` allocates a piece buffer of `EXTENT_BYTES` — a compile-time
+/// mebibyte — whatever the object's size, and `kernel/src/objects.rs` gives
+/// `user/objects` a 128 KiB heap. So a boot's channel has no subject, a
+/// non-zero offset on it is refused, and this workload's edits belong in a host
+/// process over the same `Service`. A ring is not a boot; the spec says ring.
+///
 /// The pieces are read back and compared against the bytes the workload expects
 /// before any number is reported: a measurement of a write path that produced
 /// the wrong bytes would be a measurement of nothing.
-fn measure_extent(mut expected: Vec<u8>, edits: &[Edit], snapshot_interval: usize) -> Extents {
+fn measure_extent(mut expected: Vec<u8>, edits: &[Edit]) -> Extents {
     let mut out = Extents::default();
     let mut store = a_store(expected.len(), edits.len());
     // The object is taken by value and then mutated into the bytes the workload
     // expects, so that a 128 MiB run holds one copy of it and not two. A second
     // copy is not free at this size and buys nothing: the base object has no
     // reader left once the pieces are written.
-    let mut extent = Extent::create(&mut store, &expected).expect("a device sized for the object");
+    let extent = Extent::create(&mut store, &expected).expect("a device sized for the object");
 
     let (_, first) = extent.snapshot(&mut store).expect("a record fits");
     out.snapshots.record(first.copied);
 
-    for (index, edit) in edits.iter().enumerate() {
-        let cost = extent.write(&mut store, edit.at as u64, &edit.bytes).expect("an offset inside");
+    // The index the read path owns and this workload never asks anything of.
+    // A service is put in front of a *read* path, and a read path resolves
+    // names; nothing here has a name to resolve.
+    let log = Memory::new(LOG_BLOCK_BYTES, LOG_BLOCKS);
+    let index = Index::mount(log, 0, LOG_BLOCKS).expect("a log region this build sized itself");
+    let mut service = Service::over(mount(store, index));
+    // What the channel is about. `serve.rs` never makes this call, which is the
+    // whole of why a boot refuses an edit and this does not.
+    service.about(extent);
+
+    let mut region = vec![0u8; RING_BUFFERS as usize * WRITE_BYTES];
+    let (mut landing, set) =
+        Landing::open(&mut region, RING_BUFFERS).expect("a region that divides into its buffers");
+
+    for (which, edit) in edits.iter().enumerate() {
+        let cost =
+            submit(&mut service, &mut landing, set, which as u64, edit.at as u64, &edit.bytes);
         expected[edit.at..edit.at + edit.bytes.len()].copy_from_slice(&edit.bytes);
 
         out.copied.record(cost.copied);
@@ -940,10 +1031,6 @@ fn measure_extent(mut expected: Vec<u8>, edits: &[Edit], snapshot_interval: usiz
         out.pieces.record(u64::from(cost.pieces));
         if cost.pieces > 1 {
             out.straddling.record(cost.copied);
-        }
-        if (index + 1) % snapshot_interval == 0 {
-            let (_, snapshot) = extent.snapshot(&mut store).expect("a record fits");
-            out.snapshots.record(snapshot.copied);
         }
     }
 
@@ -959,7 +1046,7 @@ fn measure_extent(mut expected: Vec<u8>, edits: &[Edit], snapshot_interval: usiz
     if expected.len() > EXTENT_BYTES {
         let at = EXTENT_BYTES as u64 - (WRITE_BYTES / 2) as u64;
         let bytes = vec![0x5Au8; WRITE_BYTES];
-        let cost = extent.write(&mut store, at, &bytes).expect("an offset inside");
+        let cost = submit(&mut service, &mut landing, set, edits.len() as u64, at, &bytes);
         expected[at as usize..at as usize + WRITE_BYTES].copy_from_slice(&bytes);
         assert_eq!(cost.pieces, 2, "a write across a piece boundary rewrites two pieces");
         out.copied.record(cost.copied);
@@ -969,20 +1056,39 @@ fn measure_extent(mut expected: Vec<u8>, edits: &[Edit], snapshot_interval: usiz
         out.placed += 1;
     }
 
-    let (published, last) = extent.snapshot(&mut store).expect("a record fits");
-    out.snapshots.record(last.copied);
+    // The component's own totals, read once at the end rather than accumulated
+    // here: a denominator this file added up would be this file's arithmetic
+    // again, and the whole of what moved is that it is not.
+    let served = *service.served();
+    out.submitted = served.written_bytes;
+    out.answered = served.writes;
+    assert_eq!(
+        served.rechunked_bytes, out.copied.total,
+        "the service's re-chunk total and the sum of what it answered per entry disagree"
+    );
+    assert_eq!(
+        out.submitted,
+        out.answered * WRITE_BYTES as u64,
+        "the service counted application bytes this workload did not submit"
+    );
+
+    // The last write's answer is the extent's published name. Taken from the
+    // completion's own detail rather than from the handle this file holds,
+    // because a client reads back what it was *told*.
+    let published = served.written_hash;
 
     // Verify, piece by piece so that nothing here holds a second copy of a
     // 128 MiB object. `Store::get` has already checked each piece against its
     // own name; what this adds is that the pieces are the bytes the *workload*
     // wrote, which no hash inside the store can say.
-    let reader = Extent::open(&mut store, &published).expect("a published extent");
+    let store = service.path_mut().store_mut();
+    let reader = Extent::open(store, &published).expect("a published extent");
     assert_eq!(reader.extent_bytes(), expected.len() as u64);
     let mut window = vec![0u8; EXTENT_BYTES];
     let mut at = 0usize;
     while at < expected.len() {
         let take = EXTENT_BYTES.min(expected.len() - at);
-        reader.read(&mut store, at as u64, &mut window[..take]).expect("inside the extent");
+        reader.read(store, at as u64, &mut window[..take]).expect("inside the extent");
         assert_eq!(&window[..take], &expected[at..at + take], "the extent read back wrong at {at}");
         at += take;
     }
@@ -990,19 +1096,91 @@ fn measure_extent(mut expected: Vec<u8>, edits: &[Edit], snapshot_interval: usiz
     out
 }
 
+/// One client write across the ring, and what the service said it cost.
+///
+/// # The three steps, and why none of them is a shortcut
+///
+/// The client fills its own registered buffer through
+/// [`f_objects::dma::Landing::fill`] — resolved through the same
+/// `f_ring::registry::Table` the service resolves it through, so a buffer this
+/// workload could not name is one the service would not read. It submits an
+/// `f_abi::Sqe` naming that buffer by set and index, never by address. The
+/// service answers, and the numbers come out of `f_objects::Served` rather than
+/// out of anything this function computed.
+///
+/// Every refusal is a panic and not a recorded zero. A run in which the ring
+/// refused half the writes and reported a bounded cost over the other half
+/// would be a green row about a workload that did not happen.
+fn submit(
+    service: &mut Service<ZonedMemory, Memory>,
+    landing: &mut Landing<'_>,
+    set: SetId,
+    token: u64,
+    at: u64,
+    bytes: &[u8],
+) -> Cost {
+    if let Err(code) = landing.fill(set, 0, bytes) {
+        panic!("the client could not fill its own registered buffer: {code:#x}");
+    }
+    let (entry, payload) = Request {
+        user_data: token,
+        cap: 0,
+        class: 0,
+        deadline: 0,
+        payload_offset: 0,
+        buf_set: set.bits(),
+        buf_index: 0,
+        flags: flags::FIXED_BUF,
+        body: Asked::Write(WriteRecord { offset: at, bytes: bytes.len() as u32 }),
+    }
+    .encode();
+
+    let before = *service.served();
+    let answer = service.answer(&entry, &payload, landing, 0);
+    let after = *service.served();
+
+    assert_eq!(answer.user_data, token, "the completion carries somebody else's token");
+    if let Some((domain, code)) = answer.error() {
+        panic!("write {token} at {at} was refused {domain:#x}/{code:#x}");
+    }
+    assert_eq!(
+        answer.result,
+        bytes.len() as i32,
+        "the completion states a length the client did not submit"
+    );
+    assert_eq!(after.writes, before.writes + 1, "one entry answered one write");
+
+    Cost {
+        pieces: u32::try_from(after.pieces_rewritten - before.pieces_rewritten)
+            .expect("a piece count that fits the wire's own width"),
+        copied: after.rechunked_bytes - before.rechunked_bytes,
+        hashed: after.rehashed_bytes - before.rehashed_bytes,
+    }
+}
+
 /// A device with room for the extent, its rewrites and its snapshots.
 ///
 /// Sized from the workload rather than guessed, because a `refusal::FULL` in the
 /// middle of a measurement would be a shorter run reported as a complete one.
-fn a_store(object_bytes: usize, writes: usize) -> Store<Memory> {
-    let block_bytes: u64 = 4096;
+///
+/// **Zoned since `E2-B09` closed**, because `f_objects::read::ReadPath` mounts a
+/// `ZoneMap` and a service is put in front of a read path. The arithmetic below
+/// is unchanged and the zones are derived from it: what a zone changes is where
+/// a block lives, and this function's job is only to have enough of them.
+fn a_store(object_bytes: usize, writes: usize) -> Store<ZoneMap<ZonedMemory>> {
+    let block_bytes = BLOCK_BYTES as u64;
     let per_piece = EXTENT_BYTES as u64 / block_bytes + 1;
     // Every write may rewrite two pieces, and one extra placed write besides.
     let blobs = object_bytes.div_ceil(EXTENT_BYTES) as u64 + 2 * writes as u64 + 4;
+    // One snapshot per write, each rewriting the extent's record — a hash a
+    // piece, so the largest of them is 128 x 32 bytes and a block holds it.
     let blocks = blobs * per_piece + 4 * writes as u64 + 64;
-    let device = Memory::new(block_bytes as usize, blocks);
-    let layout = superblock_for_this_build(block_bytes as u32, 1, blocks * block_bytes, 0, 0);
-    Store::format(device, &layout).expect("a device this build formatted itself")
+    let zones = DATA_FROM + blocks.div_ceil(ZONE_BLOCKS) as u32 + 1;
+    let device = ZonedMemory::new(BLOCK_BYTES, ZONE_BLOCKS, zones);
+    let map = ZoneMap::new(device, DATA_FROM).expect("a device this build mapped itself");
+    let layout =
+        superblock_for_this_build(BLOCK_BYTES as u32, zones, ZONE_BLOCKS * block_bytes, 1, 2);
+    Store::format(map, &layout).expect("a device this build formatted itself")
 }
 
 fn merge_tally(into: &mut Tally, from: &Tally) {
@@ -1032,6 +1210,8 @@ fn merge_extent(into: &mut Extents, from: &Extents) {
     merge_tally(&mut into.straddling, &from.straddling);
     merge_tally(&mut into.snapshots, &from.snapshots);
     into.placed += from.placed;
+    into.submitted += from.submitted;
+    into.answered += from.answered;
 }
 
 /// The rows, printed under the names claim 0017 registers them under.
@@ -1053,6 +1233,25 @@ fn report(
     // own edit counts, and folding them in here would make one denominator mean
     // two things.
     println!("application_bytes_written (drawn)            {app_bytes}");
+    // **The same quantity, counted by the component that was submitted to**,
+    // and the row `E2-B09` was open for. `intent/0006-state/spec.md` defines an
+    // application byte as one the client submitted on the objects ring; this is
+    // the sum `f_objects::Served::written_bytes` kept while answering, and it
+    // includes the placed straddling writes because those crossed the ring too.
+    //
+    // Two sums, neither derived from the other: this file drew the edits and
+    // the service counted the entries, and the assertion below is what makes
+    // the pair evidence rather than one number printed twice.
+    let at_the_ring = extent_small.submitted + extent_large.submitted;
+    let placed = extent_small.placed + extent_large.placed;
+    println!("application_bytes_written_at_the_ring        {at_the_ring}");
+    let answered = extent_small.answered + extent_large.answered;
+    println!("entries_answered_at_the_ring                 {answered}");
+    println!("  = the drawn total plus the {placed} placed straddling write(s), which cross the");
+    println!("  same ring. The chunked kind has no ring number and is not owed one: it has");
+    println!("  no write path at all — `measure_chunked` re-chunks an object and undoes the");
+    println!("  edit, which is the numerator's own measurement. The extent kind is where a");
+    println!("  client submits, and it is the kind this claim's headline rows come from.");
     println!();
     println!("bytes_rechunked_per_edit_chunked_small       {}", chunked_small.clear.max);
     println!("bytes_rechunked_per_edit_chunked_large       {}", chunked_large.clear.max);
@@ -1141,7 +1340,11 @@ fn report(
         "extent_snapshot_bytes_max                    {} small, {} large",
         extent_small.snapshots.max, extent_large.snapshots.max
     );
-    println!("  snapshot_interval_writes                   {}", geometry.snapshot_interval);
+    println!("  one snapshot per write, because RFC 0098 makes the completion carry the");
+    println!("  object's new address and an extent has none until it is snapshotted. It is");
+    println!("  its own row and not part of the per-write cost: a snapshot scales with the");
+    println!("  piece count, so folding it in would make the two rows above differ by the");
+    println!("  object's size — which is the property they exist to deny.");
     println!();
     println!("--- per application byte written, which is what the claim's name says ---");
     println!(
@@ -1229,6 +1432,20 @@ fn report(
         extent_small.straddling.edits > 0 && extent_large.straddling.edits > 0,
         "no straddling write was measured, so the row that says why the extent threshold is \
          two megabytes rather than one is a row over no observations"
+    );
+
+    // **The two denominators, required to be equal**, and an assertion rather
+    // than a verdict row because the verdict table compares `measured <=
+    // threshold` and this needs both directions. A workload that drew one total
+    // and a service that counted another is a run in which some writes did not
+    // reach the ring, and every ratio above it would then be taken over a
+    // submission that did not happen.
+    assert_eq!(
+        at_the_ring,
+        app_bytes + placed * WRITE_BYTES as u64,
+        "the client drew {app_bytes} bytes of edits and placed {placed} more write(s), and \
+         the service counted {at_the_ring}. Two sums of the same submissions disagreeing is \
+         not something this workload may report the larger of"
     );
 
     println!();

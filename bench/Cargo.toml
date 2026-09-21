@@ -24,5 +24,27 @@ f-blob.workspace = true
 # measurement.
 f-hash.workspace = true
 
+# The component, as a library. `E2-B09`'s last clause is that claim 0017's
+# denominator be an application byte as `intent/0006-state/spec.md` defines one
+# — a byte the client submitted **on the objects ring** — and until this
+# dependency the bench computed it as `edits * WRITE_BYTES` and nothing had
+# crossed a ring. `rechunk` now fills a registered buffer, submits an
+# `f_abi::Sqe`, and reads both halves of the ratio back off
+# `f_objects::Served`.
+#
+# The workspace row's `default-features = false` is inherited and is what is
+# wanted here: the `image` feature carries a `#[panic_handler]`, a linked
+# artefact may hold exactly one, and this binary links `std`'s. The crate's own
+# `target_os = "none"` gate would cover it anyway, and the two agreeing is not a
+# reason to rely on either alone.
+f-objects.workspace = true
+
+# The two crates `f_objects::read::ReadPath` mounts, and they are here because a
+# service is put in front of a *read* path rather than because this workload
+# reads anything: the store is zoned and the path owns an index. Sized to the
+# smallest thing each will accept, with the reason written at the constant.
+f-zone.workspace = true
+f-index.workspace = true
+
 [lints]
 workspace = true

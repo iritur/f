@@ -33,24 +33,44 @@
 //! `Write` cannot, `32 + 8 + 4 = 44`, with the payload one stride for every
 //! opcode.
 //!
-//! This service **establishes** objects and does not **edit** them, and the
-//! difference is a mebibyte: `Extent::write` allocates a piece buffer of
-//! `EXTENT_BYTES` whatever the object's size, against a 128 KiB heap. A
-//! non-zero offset is refused rather than approximated, because a service that
-//! met an edit it could not afford by storing the submitted bytes would answer
-//! `Ok` to a client whose object it had silently replaced.
+//! # The subject is a field, and that is RFC 0098's decision rather than a
+//! widening of it
 //!
-//! **The numerator is deliberately not here.** Bytes re-chunked and re-hashed
-//! are `f_blob`'s to count, across the geometry `claims/0017` names — 8 MiB and
-//! 128 MiB objects, five mixtures, two seeds — and that geometry cannot run in
-//! this component: `f_blob::extent::EXTENT_BYTES` is a mebibyte and
-//! `Extent::write` allocates a piece of it, against the 128 KiB heap
-//! `kernel/src/objects.rs` gives this place. A component that published a
-//! re-chunk ratio over a few kilobytes and let it be read as `claims/0017`'s
-//! would be answering a question about one geometry with a measurement from
-//! another, which is the defect `claims/0016` and `claims/0019` each already
-//! carry a paragraph about. The ratio stays in the bench; what moves here is
-//! the denominator's boundary.
+//! *The object its channel is about* is [`WritePath::subject`]. Where there is
+//! one, a write edits it at `Write::offset` and answers the extent's new root.
+//! Where there is none, a write at offset zero establishes an object and a
+//! non-zero offset is **refused** — the same arm, unchanged, that shipped when
+//! this module had no subject at all.
+//!
+//! **Which arm a caller gets is decided by what it could afford to construct**,
+//! and that is the sentence RFC 0098 actually wrote: *an edit the service
+//! cannot afford is refused and never quietly downgraded to something cheaper*.
+//! `Extent::write` allocates a piece buffer of `EXTENT_BYTES` — a compile-time
+//! mebibyte — whatever the object's size, against the 128 KiB heap
+//! `kernel/src/objects.rs` gives this component. So the component hands this
+//! path no subject and gets the refusing arm, on every boot, and there is
+//! nothing it can pass that would change that: `serve.rs` constructs the
+//! service and never calls [`crate::service::Service::about`].
+//!
+//! A host process has a heap that fits one, and `bench/src/bin/rechunk.rs` is
+//! the caller that does. The affordability is a property of the caller, which
+//! is the only reading under which the refusal is a decision rather than a
+//! constant nobody chose.
+//!
+//! # The numerator is here now, and it is counted rather than computed
+//!
+//! Bytes re-chunked and re-hashed are `f_blob`'s: [`Written::cost`] is the
+//! `f_blob::extent::Cost` that `Extent::write` answered, carried through
+//! untouched. This module adds no arithmetic to it and keeps no running total —
+//! `f_blob::extent::Cost`'s own comment says why the sum belongs to whoever
+//! submitted, and [`crate::service::Served`] is where the sum is taken because
+//! that is where a *client* can be said to have asked for one.
+//!
+//! What it does add is that both halves of `claims/0017`'s ratio now come off
+//! the same boundary. Before this, the claim's denominator was a 4096-byte
+//! write straight into a `Store` in the bench's own process — a write path and
+//! not a client — while its numerator came from an `Extent` beside it. The two
+//! were about the same bytes and neither was about a ring.
 //!
 //! # No copy that the read path would not have made
 //!
@@ -65,6 +85,7 @@
 //! and is not made here, not weakened here, and not extended to this direction.
 
 use f_blob::device::Device;
+use f_blob::extent::{Cost, Extent};
 use f_zone::device::Zoned;
 
 use crate::read::ReadPath;
@@ -88,49 +109,94 @@ pub struct Written {
     /// Unit: bytes of a SHA-256 digest. Zero is no address, which no real
     /// digest collides with because SHA-256 over any input is not zero.
     pub hash: [u8; 32],
+    /// What re-chunking this write cost, as the extent counted it.
+    ///
+    /// `claims/0017`'s numerator, per entry. [`Cost::default`] — zeros — where
+    /// the channel had no subject and the write established an object instead
+    /// of editing one, because `Store::put_object` chunks content that had no
+    /// previous chunking to move and there is no re-chunk to report. A zero
+    /// here beside a non-zero [`Written::bytes`] is that case and not a lost
+    /// measurement.
+    /// Unit: bytes and a piece count — `f_blob::extent::Cost`'s three fields,
+    /// each carrying its own on that type. Zero is an establish rather than an
+    /// edit.
+    pub cost: Cost,
+    /// What naming the result cost, kept apart from [`Written::cost`].
+    ///
+    /// **Separate because folding it in would break the row this claim exists
+    /// for.** A snapshot rewrites the extent's record, so its cost is
+    /// proportional to the *piece count* and therefore to the object's size:
+    /// 256 bytes for an 8 MiB extent and 4096 for a 128 MiB one. Added into the
+    /// per-edit cost it would make `2 x EXTENT_BYTES at both sizes` — the
+    /// identical 2 097 152 that is this claim's strongest evidence — into two
+    /// numbers that differ by the object's size, which is precisely the
+    /// property being denied.
+    ///
+    /// It is a real cost and is recorded rather than dropped: RFC 0098 requires
+    /// the completion to carry the object's new content address, an extent has
+    /// no address until it is snapshotted, so this is what that requirement
+    /// costs per write.
+    /// Unit: bytes and a piece count, as [`Written::cost`]. Zero is a write
+    /// that published nothing, which is every write on a channel with no
+    /// subject.
+    pub published: Cost,
 }
 
 impl<Z: Zoned, I: Device> WritePath<'_, Z, I> {
     /// Put a client's bytes into the object store.
     ///
-    /// # What `at` means, and why this service refuses a non-zero one
+    /// # What `at` means, and what decides whether it may be non-zero
     ///
     /// **RFC 0098.** A `WRITE` edits the object its channel is about, at `at`,
     /// and answers with that object's *new* content address — a name is its
     /// content, so an edit produces a different object and a client that could
     /// not learn the new name would have lost the old one. Where the channel
-    /// has no object yet, a write at offset zero **establishes** one, which is
-    /// what this service does.
+    /// has no object yet, a write at offset zero **establishes** one.
     ///
-    /// It cannot do the other half, and the gap is a mebibyte rather than a
-    /// matter of degree. `Extent::create` chunks what it is given and stores
-    /// each piece, allocating no piece-sized buffer. `Extent::write` allocates
-    /// `vec![0u8; piece_bytes]`, and `piece_bytes` is `EXTENT_BYTES` — a
-    /// compile-time mebibyte — **whatever the object's size**, because
-    /// `blob/src/extent.rs` argues that a piece size a reader has to be told is
-    /// a format with a dial in it. `kernel/src/objects.rs` gives this component
-    /// a 128 KiB heap.
+    /// So there are two arms, and which one a caller gets was fixed when it
+    /// constructed the path rather than when it submitted:
     ///
-    /// So an edit is **refused**, and refusing is the decision rather than a
-    /// shortcut around it: a service that met an edit it could not afford by
-    /// storing the submitted bytes as a fresh object would answer `Ok` to a
-    /// client whose object it had silently replaced. The first cut of this arm
-    /// dropped `at` entirely and did exactly that.
+    /// - **With a subject**, `at` is an offset into that extent and the write
+    ///   edits it. `Extent::write` refuses an offset past the end and refuses
+    ///   to grow, both for reasons that file gives. The extent is snapshotted
+    ///   afterwards, because RFC 0098 requires the answer to carry the object's
+    ///   new address and an extent has none until it is.
+    /// - **With no subject**, a non-zero `at` is **refused**. Honouring it means
+    ///   holding an extent, `Extent::write` allocates a piece buffer of
+    ///   `EXTENT_BYTES` whatever the object's size, and the component this crate
+    ///   ships as has a 128 KiB heap. Refusing is the decision and not a
+    ///   shortcut around it: a service that met an edit it could not afford by
+    ///   storing the submitted bytes as a fresh object would answer `Ok` to a
+    ///   client whose object it had silently replaced. The first cut of this arm
+    ///   dropped `at` entirely and did exactly that.
     ///
     /// # Errors
     ///
-    /// [`f_abi::store::refusal::ADDRESS`] for an edit — a non-zero `at` — which
-    /// this service cannot afford and will not approximate. `Store::put_object`'s
-    /// unchanged otherwise: `NO_SPACE` where the device is full, `UNKNOWN` for a
-    /// kind the format does not name. A refusal a client sees is one the store
-    /// made, so a client chasing it reads `f_blob`'s rules rather than this
-    /// crate's paraphrase of them.
+    /// [`f_abi::store::refusal::ADDRESS`] for an edit this path has no subject
+    /// for — a non-zero `at` — which it cannot afford and will not approximate,
+    /// and the same code from `Extent::write` for an edit that runs past a
+    /// subject's end. `Store::put_object`'s unchanged otherwise: `NO_SPACE`
+    /// where the device is full, `UNKNOWN` for a kind the format does not name.
+    /// A refusal a client sees is one the store made, so a client chasing it
+    /// reads `f_blob`'s rules rather than this crate's paraphrase of them.
     pub fn apply(&mut self, at: u64, bytes: &[u8]) -> Result<Written, i32> {
-        if at != 0 {
-            return Err(f_abi::store::refusal::ADDRESS);
-        }
-        let hash = self.path.store_mut().put_object(bytes)?;
-        Ok(Written { bytes: bytes.len() as u64, hash })
+        let submitted = bytes.len() as u64;
+        let Some(extent) = self.subject.as_deref_mut() else {
+            if at != 0 {
+                return Err(f_abi::store::refusal::ADDRESS);
+            }
+            let hash = self.path.store_mut().put_object(bytes)?;
+            return Ok(Written {
+                bytes: submitted,
+                hash,
+                cost: Cost::default(),
+                published: Cost::default(),
+            });
+        };
+        let store = self.path.store_mut();
+        let cost = extent.write(store, at, bytes)?;
+        let (hash, published) = extent.snapshot(store)?;
+        Ok(Written { bytes: submitted, hash, cost, published })
     }
 
     /// Make the write durable.
@@ -156,11 +222,24 @@ impl<Z: Zoned, I: Device> WritePath<'_, Z, I> {
 /// `Sync` and nothing here makes it so.
 pub struct WritePath<'a, Z: Zoned, I: Device> {
     path: &'a mut ReadPath<Z, I>,
+    /// The object this channel is about, where it has one.
+    ///
+    /// `None` is a channel with no object yet, which is every channel this
+    /// crate's component half ever opens. See the module comment: the
+    /// distinction is what a caller could afford to construct, and the whole of
+    /// RFC 0098's refusal rests on it.
+    subject: Option<&'a mut Extent>,
 }
 
-/// Borrow a mounted path for writing.
-pub fn over<Z: Zoned, I: Device>(path: &mut ReadPath<Z, I>) -> WritePath<'_, Z, I> {
-    WritePath { path }
+/// Borrow a mounted path for writing, and tell it what its channel is about.
+///
+/// `subject` is `None` for a channel with no object — the component's case, and
+/// the case in which a non-zero offset is refused.
+pub fn over<'a, Z: Zoned, I: Device>(
+    path: &'a mut ReadPath<Z, I>,
+    subject: Option<&'a mut Extent>,
+) -> WritePath<'a, Z, I> {
+    WritePath { path, subject }
 }
 
 /// The kind a client write is stored under.

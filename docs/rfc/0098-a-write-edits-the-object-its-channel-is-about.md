@@ -98,6 +98,46 @@ objects written` establishes objects at offset zero and asserts that the bytes
 crossed and that both sides counted the same — which is a statement about a
 ring, and is all a boot of that size can honestly make.
 
+## What building it established, on 2026-09-21
+
+This entry was accepted the day before the workload that needed it was built, so
+what the build found is recorded here rather than left to be inferred from a
+diff.
+
+**The refusal moved from a constant to a property of the caller, and that is
+this decision rather than a widening of it.** The sentence above is *an edit the
+service cannot afford is refused*, and the first implementation read it as *an
+edit is refused*: `WritePath::apply` returned `refusal::ADDRESS` for every
+non-zero offset, unconditionally, and there was nothing a caller could pass that
+would change it. The subject is a field now — `Service::about` sets it,
+`WritePath::subject` holds it, an edit against it is answered with the extent's
+new root, and a channel with no subject refuses a non-zero offset exactly as
+before.
+
+**No boot's behaviour changed, and that is checkable rather than asserted.**
+`user/objects/src/serve.rs` constructs the service and never calls
+`Service::about`, so every channel in a boot has no subject, and `cargo xtask
+objects written` puts the same four whole-object writes across the same ring
+with the same refusal behind them. The 128 KiB heap in `kernel/src/objects.rs`
+is unchanged and was never raised.
+
+**What could afford it was a host process, which is what the table above already
+implied and did not say.** `bench/src/bin/rechunk.rs` holds an `Extent` at
+`claims/0017`'s own geometry — 8 MiB and 128 MiB objects, five mixtures, two
+seeds — fills a registered buffer, submits an `f_abi::Sqe`, and reads both
+halves of the ratio back off `f_objects::Served`. That claim is `gating` as of
+the same day, on `application_bytes_written_at_the_ring = 5 324 800` asserted
+equal to the total the workload drew.
+
+**One cost arrived that this entry did not forecast.** *The completion carries
+the object's new content address* is a requirement, and an extent has no address
+until it is snapshotted — so there is one snapshot per write, where the bench
+used to choose an interval. It is recorded as its own row and deliberately not
+folded into the per-edit cost: a snapshot is proportional to the piece count and
+therefore to the object, so adding it in would turn `2 x EXTENT_BYTES at both
+object sizes` into two numbers sixteen times apart, which is the property the
+extent kind exists to have.
+
 ## What would reverse this
 
 **A `PAYLOAD_BYTES` that fits a hash and an offset.** Then a write can name its

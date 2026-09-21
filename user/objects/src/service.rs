@@ -82,6 +82,7 @@ use f_abi::objects::{Entry, PAYLOAD_BYTES, Read as ReadRecord, Request, Write as
 use f_abi::store::refusal;
 use f_abi::{Cqe, Sqe, error};
 use f_blob::device::Device;
+use f_blob::extent::Extent;
 use f_ring::{completion, refusal as refused};
 use f_zone::device::Zoned;
 
@@ -170,6 +171,43 @@ pub struct Served {
     /// over any input is not zero.
     /// Unit: bytes of a SHA-256 digest.
     pub written_hash: [u8; 32],
+    /// Bytes moved into new pieces while answering client writes.
+    ///
+    /// **`claims/0017`'s numerator, at the same boundary as its denominator**,
+    /// which is the whole of what `E2-B09` was still open for. The sum of
+    /// `f_blob::extent::Cost::copied` over the writes this service answered —
+    /// it counts every byte the new piece carries, including the ones the
+    /// client already had, which is the quantity RFC 0058 says an extent's cost
+    /// is honest about.
+    ///
+    /// Zero on a channel with no subject, where a write establishes an object
+    /// rather than editing one and there is no previous chunking to move.
+    /// Unit: bytes.
+    pub rechunked_bytes: u64,
+    /// Bytes fed to `f-hash` to name those pieces.
+    ///
+    /// The sum of `f_blob::extent::Cost::hashed`. Equal to
+    /// [`Served::rechunked_bytes`] for whole-piece rewrites and kept apart
+    /// anyway, for the reason `Cost::hashed`'s own comment gives: a sub-piece
+    /// scheme would move the two apart and one row would hide it.
+    /// Unit: bytes.
+    pub rehashed_bytes: u64,
+    /// Pieces rewritten while answering client writes.
+    ///
+    /// `claims/0017`'s `pieces_touched_max` is a maximum over entries rather
+    /// than this sum, and this is its denominator. Unit: count of pieces.
+    pub pieces_rewritten: u64,
+    /// Bytes spent naming the results — the extent's own record, rewritten.
+    ///
+    /// **Deliberately not summed into [`Served::rechunked_bytes`].** A snapshot
+    /// is proportional to the piece count and therefore to the object's size,
+    /// so folding it in would turn `2 x EXTENT_BYTES at both object sizes` into
+    /// two numbers that differ by the object — which is the property
+    /// `claims/0017` exists to state. It is a real cost of RFC 0098's rule that
+    /// a completion carries the object's new address, and is recorded under its
+    /// own name rather than dropped.
+    /// Unit: bytes.
+    pub published_bytes: u64,
     /// Bytes that went through any buffer that was **not** the caller's
     /// registered one, while answering an entry.
     ///
@@ -214,6 +252,15 @@ enum Wanted {
 pub struct Service<Z: Zoned, I: Device> {
     path: ReadPath<Z, I>,
     served: Served,
+    /// The object this service's channel is about, where it has one.
+    ///
+    /// RFC 0098: *a `WRITE` edits the object its channel is about*. `None` is a
+    /// channel with no object, which is what every channel in a boot is — the
+    /// component never calls [`Service::about`], because `Extent::write`
+    /// allocates a mebibyte and its heap is 128 KiB. See
+    /// [`crate::write`]'s module comment, which is where that decision is
+    /// argued rather than restated.
+    subject: Option<Extent>,
 }
 
 impl<Z: Zoned, I: Device> Service<Z, I> {
@@ -228,10 +275,40 @@ impl<Z: Zoned, I: Device> Service<Z, I> {
                 writes: 0,
                 written_bytes: 0,
                 written_hash: [0; 32],
+                rechunked_bytes: 0,
+                rehashed_bytes: 0,
+                pieces_rewritten: 0,
+                published_bytes: 0,
                 staged_bytes: 0,
                 refused: 0,
             },
+            subject: None,
         }
+    }
+
+    /// Say what this service's channel is about.
+    ///
+    /// # Who calls this, and who deliberately does not
+    ///
+    /// A caller whose heap can hold `f_blob::extent::EXTENT_BYTES` — a
+    /// mebibyte — because that is what `Extent::write` allocates per edited
+    /// piece, whatever the object's size. `bench/src/bin/rechunk.rs` is that
+    /// caller and takes `claims/0017`'s numerator and denominator across one
+    /// boundary because of it.
+    ///
+    /// `serve.rs` does not, and the omission is the decision rather than an
+    /// oversight: the place `kernel/src/objects.rs` builds for this component
+    /// has a 128 KiB heap, so a boot's channel has no subject and a non-zero
+    /// offset on it is refused. RFC 0098.
+    pub fn about(&mut self, extent: Extent) {
+        self.subject = Some(extent);
+    }
+
+    /// The object this channel is about, for a caller reading back what its
+    /// writes produced.
+    #[must_use]
+    pub const fn subject(&self) -> Option<&Extent> {
+        self.subject.as_ref()
     }
 
     /// What this service did, at the entry.
@@ -329,7 +406,8 @@ impl<Z: Zoned, I: Device> Service<Z, I> {
             Ok(bytes) => bytes,
             Err(code) => return self.refuse(request.user_data, code, 0, now),
         };
-        let applied = crate::write::over(&mut self.path).apply(asked.offset, fetched);
+        let applied =
+            crate::write::over(&mut self.path, self.subject.as_mut()).apply(asked.offset, fetched);
         // Given back before anything else happens, and **before the refusal
         // below can return**. `Table::resolve` marks a buffer lent and
         // `Table::release` is what unmarks it, so a write path that kept the
@@ -346,6 +424,18 @@ impl<Z: Zoned, I: Device> Service<Z, I> {
         self.served.writes = self.served.writes.saturating_add(1);
         self.served.written_bytes = self.served.written_bytes.saturating_add(written.bytes);
         self.served.written_hash = written.hash;
+        // The numerator, added up where the denominator is added up. `Cost`
+        // hands itself back per call and keeps no total, for the reason
+        // `blob/src/extent.rs` gives: a counter inside the write path is a
+        // number the write path keeps about itself. This is the first place
+        // above it where a *client* can be said to have submitted.
+        self.served.rechunked_bytes =
+            self.served.rechunked_bytes.saturating_add(written.cost.copied);
+        self.served.rehashed_bytes = self.served.rehashed_bytes.saturating_add(written.cost.hashed);
+        self.served.pieces_rewritten =
+            self.served.pieces_rewritten.saturating_add(u64::from(written.cost.pieces));
+        self.served.published_bytes =
+            self.served.published_bytes.saturating_add(written.published.copied);
         let named = written.hash.first_chunk::<8>().map_or(0, |head| u64::from_le_bytes(*head));
         let Ok(stated) = i32::try_from(asked.bytes) else {
             return self.refuse(request.user_data, refusal::SHORT_BUFFER, 0, now);

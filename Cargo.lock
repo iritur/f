@@ -24,7 +24,10 @@ dependencies = [
  "f-blob",
  "f-env",
  "f-hash",
+ "f-index",
+ "f-objects",
  "f-ring",
+ "f-zone",
 ]
 
 [[package]]
