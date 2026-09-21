@@ -1020,7 +1020,8 @@ macro_rules! vocabulary {
     (
         $(
             $(#[$about:meta])*
-            $variant:ident, $spelling:literal, $family:ident, $operable:literal, $parent:pat,
+            $variant:ident, $spelling:literal, $since:literal, $family:ident, $operable:literal,
+            $parent:pat,
         )*
     ) => {
         /// What a node *is*. The closed vocabulary, version 1.
@@ -1065,7 +1066,59 @@ macro_rules! vocabulary {
             /// that used to is deleted, and deleting it is the repair — but
             /// because there is no way to write a variant this array does not
             /// get.
-            pub const ALL: [Self; Self::COUNT] = [$(Self::$variant),*];
+            ///
+            /// **`pub(crate)`, and that is the whole of RFC 0083's *a second
+            /// decoder*.** It was public, and a public array is a public
+            /// ordinal-to-role map: `Role::ALL[ordinal as usize]` compiled in
+            /// every crate, needed no admission, and panicked rather than
+            /// refused when the ordinal was out of range — which is exactly the
+            /// route a wire ordinal takes when somebody is in a hurry. What is
+            /// public now is [`all`](Self::all), which cannot be indexed, and
+            /// [`from_index`](Self::from_index), which answers `None`. The
+            /// reversal condition is this line saying `pub` again.
+            pub(crate) const ALL: [Self; Self::COUNT] = [$(Self::$variant),*];
+
+            /// Every role, in declaration order.
+            ///
+            /// The iteration [`ALL`](Self::ALL) used to be, without the
+            /// subscript. A caller that wants *all of them* gets all of them; a
+            /// caller that wants *the one at ordinal `i`* is asking a different
+            /// question and [`from_index`](Self::from_index) is where it is
+            /// asked, because that is the question that has a wrong answer.
+            pub fn all() -> impl Iterator<Item = Self> {
+                Self::ALL.into_iter()
+            }
+
+            /// The role at that position in the vocabulary, if the vocabulary
+            /// has one.
+            ///
+            /// **The one function that turns an ordinal into a [`Role`].** RFC
+            /// 0083's *not representable* rests on there being exactly one, and
+            /// this is it: `f_abi::semantic` admits an ordinal against the
+            /// agreed version and hands it across the crate boundary as a
+            /// number, because that crate cannot see this one, and this is
+            /// where the number stops being a number.
+            ///
+            /// Derived from [`ALL`](Self::ALL) rather than written as a match,
+            /// for [`from_name`](Self::from_name)'s reason and it is the same
+            /// reason: there is no index this function accepts that is not
+            /// already a role, so an integer cannot become an escape hatch by
+            /// being passed through here. `None` and never a neutral role —
+            /// the module's own *the vocabulary has no escape hatch* is the
+            /// argument, and a fallback here would be the wildcard arm moved
+            /// one function upstream of the projections that would have held
+            /// it.
+            ///
+            /// It takes no version, and that is deliberate rather than
+            /// forgotten: *which versions name this ordinal* is
+            /// [`since`](Self::since) against the agreed version, asked by the
+            /// `f_abi::semantic::Vocabulary` implementor before the ordinal
+            /// gets here. A `from_index` that also took a version would be the
+            /// admission written twice.
+            #[must_use]
+            pub fn from_index(index: usize) -> Option<Self> {
+                Self::ALL.get(index).copied()
+            }
 
             /// This role's position in [`ALL`](Self::ALL).
             ///
@@ -1105,6 +1158,32 @@ macro_rules! vocabulary {
             #[must_use]
             pub fn from_name(name: &str) -> Option<Self> {
                 Self::ALL.into_iter().find(|role| role.name() == name)
+            }
+
+            /// The vocabulary version this role was introduced in.
+            ///
+            /// The second field of the role's line. RFC 0083's admission rule
+            /// is `from_index(i)` **and** `since(role) <= agreed`, and this is
+            /// the half that was missing: without it a `Vocabulary` implementor
+            /// has nothing to filter by, so the version it was handed is a
+            /// number it can only discard, and an older receiver is protected
+            /// by its own list length — which is what it would have had with no
+            /// handshake at all.
+            ///
+            /// Written on the line rather than derived from the position,
+            /// because two roles appended in one release share a version and
+            /// nothing about a position says so. The column is asserted
+            /// non-decreasing at compile time below this macro, so a role
+            /// appended out of order fails the build rather than a review: RFC
+            /// 0083 part two's *the vocabulary's indices are append-only* is
+            /// what that assertion is, said in the one place a build can read
+            /// it.
+            /// Unit: none — a vocabulary version ordinal.
+            #[must_use]
+            pub const fn since(self) -> u16 {
+                match self {
+                    $(Self::$variant => $since,)*
+                }
             }
 
             /// Which part of the vocabulary this role belongs to.
@@ -1156,82 +1235,115 @@ macro_rules! vocabulary {
                 }
             }
         }
+
+        /// The `since` column never goes backwards, checked by the compiler.
+        ///
+        /// RFC 0083 part two says the vocabulary's indices are append-only, and
+        /// this is the half of that a build can see: a role inserted in the
+        /// middle of the list, or appended with a version below the one before
+        /// it, is an index that has been re-meant. That failure is the one
+        /// nobody notices — both peers say version 1, both are honest, and 14
+        /// is `Toggle` on one and `Command` on the other — so it is refused
+        /// here, where the answer arrives as a build error with the list in
+        /// front of whoever caused it, rather than in a test that runs later
+        /// and names a digest.
+        ///
+        /// It does not catch a *reorder within one version*, and nothing here
+        /// could: two roles both `since: 1` may be swapped and this stays true.
+        /// That is what `abi`'s frozen digest over version 1's names is for,
+        /// and the two guards are complementary rather than redundant — this
+        /// one covers the append, that one covers the shuffle.
+        const _: () = {
+            let since = [$($since),*];
+            let mut i = 1;
+            while i < since.len() {
+                assert!(
+                    since[i - 1] <= since[i],
+                    "a role's `since` is below the role before it: the list is not append-only"
+                );
+                i += 1;
+            }
+            assert!(
+                since.is_empty() || since[0] == 1,
+                "the vocabulary's first role belongs to version 1, which is what version 1 is"
+            );
+        };
     };
 }
 
 vocabulary! {
     /// A region a projection can present on its own: a window, a screen, a pane.
     /// The only role that may be a root.
-    Surface, "surface", Structure, false, None | Some(Role::Surface),
+    Surface, "surface", 1, Structure, false, None | Some(Role::Surface),
 
     /// Children that belong together and are named together. The vocabulary's
     /// workhorse, and deliberately the answer to *toolbar*, *section*,
     /// *fieldset* and *card*, none of which tells a projection anything its
     /// children do not already.
-    Group, "group", Structure, false, Some(_any),
+    Group, "group", 1, Structure, false, Some(_any),
 
     /// An ordered sequence of [`Role::Item`]s that are alike.
-    List, "list", Structure, false, Some(_any),
+    List, "list", 1, Structure, false, Some(_any),
 
     /// A hierarchy of [`Role::Item`]s that expands and collapses.
-    Tree, "tree", Structure, false, Some(_any),
+    Tree, "tree", 1, Structure, false, Some(_any),
 
     /// A member of a [`Role::List`], [`Role::Tree`] or [`Role::Choice`], or of
     /// another item where the hierarchy nests.
-    Item, "item", Structure, true, Some(Role::List | Role::Tree | Role::Choice | Role::Item),
+    Item, "item", 1, Structure, true, Some(Role::List | Role::Tree | Role::Choice | Role::Item),
 
     /// A grid whose rows carry the same cells in the same order. That equality
     /// is the whole of what makes a column a column here, and [`check`] enforces
     /// it rather than trusting it.
-    Table, "table", Structure, false, Some(_any),
+    Table, "table", 1, Structure, false, Some(_any),
 
     /// One row of a [`Role::Table`].
-    Row, "row", Structure, true, Some(Role::Table),
+    Row, "row", 1, Structure, true, Some(Role::Table),
 
     /// One cell of a [`Role::Row`].
-    Cell, "cell", Structure, true, Some(Role::Row),
+    Cell, "cell", 1, Structure, true, Some(Role::Row),
 
     /// A declared boundary between groups. Not decoration: it is the difference
     /// between two groups and one group with a gap in it, and only the author
     /// knows which was meant.
-    Separator, "separator", Structure, false, Some(_any),
+    Separator, "separator", 1, Structure, false, Some(_any),
 
     /// Text that names another node, which says so with
     /// [`Relation::LabelledBy`].
-    Label, "label", Content, false, Some(_any),
+    Label, "label", 1, Content, false, Some(_any),
 
     /// Text that is itself the content: a paragraph, a file name, a message.
-    Text, "text", Content, false, Some(_any),
+    Text, "text", 1, Content, false, Some(_any),
 
     /// A picture the projection may describe, substitute, or decline to render.
     /// It carries no intent: a picture you can click is a [`Role::Command`]
     /// whose content is media.
-    Image, "image", Content, false, Some(_any),
+    Image, "image", 1, Content, false, Some(_any),
 
     /// A reading of how something stands — a count, a message, a condition. A
     /// separate role for *alert* was refused deliberately: urgency is
     /// [`StateSet::INVALID`] or a style token, and a role meaning *pay
     /// attention* is a role every author uses for everything.
-    Status, "status", Content, false, Some(_any),
+    Status, "status", 1, Content, false, Some(_any),
 
     /// Invoking it does one thing, named by its intent.
-    Command, "command", Control, true, Some(_any),
+    Command, "command", 1, Control, true, Some(_any),
 
     /// Two states, and invoking it moves between them.
-    Toggle, "toggle", Control, true, Some(_any),
+    Toggle, "toggle", 1, Control, true, Some(_any),
 
     /// Free text a caller supplies.
-    Entry, "entry", Control, true, Some(_any),
+    Entry, "entry", 1, Control, true, Some(_any),
 
     /// Exactly one of its [`Role::Item`] children is selected. A radio group, a
     /// dropdown and a segmented control are one role here because they are one
     /// fact and three appearances.
-    Choice, "choice", Control, true, Some(_any),
+    Choice, "choice", 1, Control, true, Some(_any),
 
     /// A quantity a caller sets, within whatever its [`Reading`] says. A slider,
     /// a stepper and a spinner are presentations of this — and so is a progress
     /// bar, which is this role with no intent.
-    Number, "number", Control, true, Some(_any),
+    Number, "number", 1, Control, true, Some(_any),
 
     /// A region whose pixels the application draws, and whose content it must
     /// still declare as children.
@@ -1241,20 +1353,20 @@ vocabulary! {
     /// [`Defect::EmptyCanvas`] and the tree does not pass [`check`]. A canvas
     /// that declares nothing is strictly less expressive than the [`Role::Group`]
     /// it should have been.
-    Canvas, "canvas", Arrangement, true, Some(_any),
+    Canvas, "canvas", 1, Arrangement, true, Some(_any),
 
     /// A named lane of an arrangement, declared under a [`Role::Canvas`].
-    Track, "track", Arrangement, true, Some(Role::Canvas),
+    Track, "track", 1, Arrangement, true, Some(Role::Canvas),
 
     /// A placed occupant of a [`Role::Track`]. *Where* it is placed — the time
     /// range section 13's question turns on — is not a field here: `canvas.rs`
     /// (`E3-D02`) holds the arrangement and keys it by [`NodeId`], because a
     /// vocabulary extended by widening its node is not closed.
-    Clip, "clip", Arrangement, true, Some(Role::Track),
+    Clip, "clip", 1, Arrangement, true, Some(Role::Track),
 
     /// A named point in the arrangement's dimension: a playhead, a cue, a
     /// bookmark.
-    Marker, "marker", Arrangement, true, Some(Role::Canvas | Role::Track),
+    Marker, "marker", 1, Arrangement, true, Some(Role::Canvas | Role::Track),
 }
 
 /// What an application declares. Section 11's struct, plus one field.
@@ -1716,8 +1828,9 @@ mod tests {
         // kept out of a hand-written array. There is no hand-written array.
         //
         // *The edit that makes this go red:* add a line to `vocabulary!` —
-        // `Other, "other", Structure, false, Some(_any),` — which is the whole
-        // of what adding the escape hatch now costs, and this test names it.
+        // `Other, "other", 1, Structure, false, Some(_any),` — which is the
+        // whole of what adding the escape hatch now costs, and this test names
+        // it.
         // (`the_family_census_is_what_the_rfc_says` fails on the same line, for
         // the second reason: the census and `COUNT` both move.)
         for role in Role::ALL {
@@ -1742,6 +1855,81 @@ mod tests {
         assert_eq!(Role::from_name(""), None);
         assert_eq!(Role::from_name("Surface"), None, "names are exact, not case-folded");
         assert_eq!(Role::from_name("timeline-widget"), None);
+    }
+
+    #[test]
+    fn an_ordinal_becomes_a_role_here_or_it_does_not_become_one() {
+        // RFC 0083's *not representable* rests on there being exactly one
+        // function that turns an ordinal into a `Role`, and for three rounds
+        // there was none — the RFC named `Role::from_index` as a fact and the
+        // item did not exist, while `Role::ALL` was public and
+        // `Role::ALL[ordinal as usize]` was a shorter route to the same answer
+        // that skipped the admission and panicked instead of refusing. `ALL` is
+        // `pub(crate)` now, so that route does not compile outside this crate;
+        // this is the route that replaced it.
+        //
+        // The negative answer is the whole test. A `from_index` that clamped,
+        // wrapped or fell back to a neutral role would be the wildcard arm
+        // moved one function upstream of the projections that were closed to
+        // prevent it, and it would be invisible: every ordinal would decode and
+        // a settings panel would be announced wrongly forever.
+        //
+        // *The edits that make this go red:* making `from_index` total —
+        // `ALL[index % COUNT]`, `ALL.get(index).copied().unwrap_or(Role::Group)`
+        // — or deriving it from anything but `ALL`, which is how it comes to
+        // accept an index that is not a role.
+        for (at, role) in Role::all().enumerate() {
+            assert_eq!(role.index(), at, "{} is not at its own index", role.name());
+            assert_eq!(Role::from_index(at), Some(role), "{} does not round-trip", role.name());
+        }
+        assert_eq!(Role::all().count(), Role::COUNT);
+
+        // One past the end, and the two values a wire ordinal widened to a
+        // `usize` most easily becomes. None of them is a role.
+        assert_eq!(Role::from_index(Role::COUNT), None);
+        assert_eq!(Role::from_index(Role::COUNT + 1), None);
+        assert_eq!(Role::from_index(usize::from(u16::MAX)), None);
+        assert_eq!(Role::from_index(usize::MAX), None);
+    }
+
+    #[test]
+    fn every_role_says_which_version_introduced_it_and_the_column_only_goes_up() {
+        // The half of RFC 0083's admission rule that lives here.
+        // `f_abi::semantic` asks a `Vocabulary` implementor whether the agreed
+        // version names an ordinal, and what the implementor is supposed to
+        // answer with is `ALL.iter().filter(|r| r.since() <= agreed)`. Until
+        // this column existed there was nothing to filter by, so the agreed
+        // version was a number every implementor discarded and an older
+        // receiver was protected by its own list length — which is what it
+        // would have had with no handshake at all.
+        //
+        // The non-decreasing property is asserted by the compiler beside the
+        // macro, so the edit that breaks it is a build failure rather than this
+        // test. It is asserted again here for the reason the tree asserts
+        // `size_of::<Sqe>()` twice: a fact held in another item is a fact this
+        // one is trusting rather than stating, and a reader of this test should
+        // not have to find the `const` block to know the rule exists.
+        let mut floor = 0;
+        for role in Role::all() {
+            assert!(
+                role.since() >= floor,
+                "{} was introduced before the role in front of it",
+                role.name()
+            );
+            assert!(
+                role.since() >= 1,
+                "{} claims a version zero, which is no version",
+                role.name()
+            );
+            floor = role.since();
+        }
+
+        // And version 1 is the whole list today, which is the fact RFC 0083's
+        // frozen digest is a digest *of*. When this stops being true — the day
+        // a role is appended under version 2 — the honest edit is to say so
+        // here rather than to loosen it, because the number this asserts is
+        // what `abi`'s `VOCABULARY_VERSION` has to agree with.
+        assert_eq!(floor, 1, "the vocabulary has a version 2 and this test still says it does not");
     }
 
     #[test]

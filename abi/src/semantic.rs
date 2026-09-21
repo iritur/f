@@ -131,6 +131,27 @@
 //! frame, keeps the refusal proportionate and puts the evidence in the sender's
 //! own completions, where its author is the one who sees it.
 //!
+//! **Except for the one entry that is about the channel.** A refused
+//! [`op::DECLARE_VOCABULARY`] is refused for the epoch and not for the frame,
+//! and the asymmetry is the point rather than an exception to it: the rule is
+//! *the first is the cause and the rest are consequences*, and what a refused
+//! negotiation is the cause of is every entry of that epoch, because none of
+//! them can be read. [`Session::refused`] is where it is recorded, nothing but
+//! [`Session::follow_epoch`] clears it, and without it the receiver told a
+//! refused peer its own ceiling — the detail word, which RFC 0011's shape
+//! requires — and then let it re-offer inside the same epoch without limit.
+//! That is the negotiation entry being the one entry the wire was permissive
+//! about, which is the opposite of what a negotiation is for.
+//!
+//! And the frame's refusal is a **key** rather than a request. A receiver that
+//! applied each entry as it arrived would stand with a half-built tree when the
+//! frame was refused, so [`Session::accept`] hands back a [`Received::Staged`]
+//! for an edit and a [`Sealed`] only on the [`op::COMMIT`] that closed a frame
+//! nothing refused. An apply path that demands the key cannot be handed a
+//! half-frame. `scene`'s `Sealed` is the same type for the same reason one
+//! layer down; this module's *the contract* on [`Session`] says what the key
+//! does not do, which is accumulate the frame.
+//!
 //! # No deadline, and no field to put one in
 //!
 //! [`scene`](crate::scene)'s commit reads [`Sqe::deadline`] because a frame is
@@ -479,15 +500,18 @@ impl Refusal {
     /// is a refusal that names what was missing* is only true if the version
     /// the refusing side offered actually leaves this build.
     ///
-    /// **A conflict this function does not resolve.** [`error::PEER`]'s own
-    /// documentation says the domain's detail is *the peer's channel epoch*,
-    /// while [`error::peer::VERSION_UNSUPPORTED`]'s says *the version this side
-    /// offered*. This follows the code's, because a per-code detail is the only
-    /// one that can say anything a caller could not already read off the
-    /// channel header — an epoch is in the header, and the version the refusing
-    /// side speaks is nowhere else. Reconciling the two doc comments is an edit
-    /// to `abi/src/lib.rs`, which RFC 0083 records as owed rather than making
-    /// quietly here.
+    /// **A conflict this function used to leave standing.** [`error::PEER`]'s
+    /// own documentation said the domain's detail was *the peer's channel
+    /// epoch*, while [`error::peer::VERSION_UNSUPPORTED`]'s said *the version
+    /// this side offered*, and this function followed the second while RFC 0083
+    /// quoted it — so a reader who consulted the domain line read the detail
+    /// word as an epoch, and the sentence the RFC rests on was true of the code
+    /// and false of one of its two comments. The domain line now says *per
+    /// code, see each*, because a per-code detail is the only one that can say
+    /// anything a caller could not already read off the channel header: an
+    /// epoch is in the header, and the version the refusing side speaks is
+    /// nowhere else. `the_peer_domain_and_its_version_code_state_one_rule` is
+    /// what keeps the two files saying one thing.
     ///
     /// Zero for every refusal whose value says all there is to say: a caller
     /// reading a detail of zero is reading *the code is the whole answer*, not
@@ -624,7 +648,7 @@ impl StateBits {
 /// `interface/`. This crate cannot see `interface/`, and the answer is not to
 /// copy the list across the gap but to hold none: the implementor is the
 /// component that owns the tree, its answer is derived from the single
-/// `vocabulary!` list — `ALL.iter().filter(|r| r.since() <= agreed)` — and
+/// `vocabulary!` list — `Role::all().filter(|r| r.since() <= agreed)` — and
 /// nothing in this module could disagree with a list it does not have.
 ///
 /// # What an implementor owes
@@ -742,12 +766,14 @@ macro_rules! admitted {
                 /// The ordinal, for the one function that turns it into a value
                 /// of the closed enum.
                 ///
-                /// That function is `interface`'s, it is derived from the
-                /// single list the way `from_name` already is, and it is the
-                /// only place an ordinal becomes a value. RFC 0083's *a second
-                /// decoder* is the reversal condition on that, and it applies
-                /// to a snapshot read back and to a simulator replay as much as
-                /// to this wire.
+                /// That function is `interface`'s `Role::from_index`, it is
+                /// derived from the single list the way `from_name` already is,
+                /// and it is the only place an ordinal becomes a value —
+                /// `Role::ALL` was the other one until it stopped being public,
+                /// and an array is a decoder that panics instead of refusing.
+                /// RFC 0083's *a second decoder* is the reversal condition on
+                /// that, and it applies to a snapshot read back and to a
+                /// simulator replay as much as to this wire.
                 /// Unit: none — an ordinal in the declaring list's own order.
                 #[must_use]
                 pub const fn get(self) -> u16 {
@@ -2050,19 +2076,36 @@ pub struct Fault {
 /// — so they need something that remembers. This is the smallest thing that
 /// can.
 ///
-/// # The contract, stated because it is what makes the refusal mean anything
+/// # The contract, and the key that carries it rather than a sentence
 ///
-/// **Apply nothing until [`Session::accept`] has returned a [`Commit`].** A
+/// **Apply nothing until [`Session::accept`] has returned a [`Sealed`].** A
 /// receiver that applied each entry as it arrived would have a half-built tree
 /// standing when the frame was refused, and RFC 0083's *the tree the receiver
 /// is already presenting stands unchanged* would be false in the one place it
 /// matters.
 ///
-/// This session helps as far as a type can: once a frame is poisoned, every
-/// later entry of it is refused with the same [`Fault`], so there is no entry a
-/// caller could be handed and apply. It cannot make the rule true on its own,
-/// because it holds no tree — and that is why the rule is written here rather
-/// than assumed.
+/// That sentence used to be the whole mechanism, and a sentence is what a
+/// reviewer walked past: [`Session::accept`] handed back an applicable
+/// [`Delta`] for every entry, so *wait for the commit* was a rule the caller
+/// kept or did not. It is now a value. [`Received::Staged`] carries the delta
+/// and no key; [`Received::Frame`] carries the last delta and a [`Sealed`],
+/// which has no public constructor, is neither `Clone` nor `Copy`, and is
+/// produced in exactly one place — this function, on an [`op::COMMIT`] that was
+/// not refused. `scene`'s [`commit`](crate::scene) module holds the identical
+/// rule the identical way one layer down, and two modules of one crate that
+/// held one rule two ways would be the defect R04 exists to prevent.
+///
+/// **What this still does not do, said here so the seam is not discovered
+/// later.** The key is what an apply path may *demand*; it is not what
+/// accumulates the frame. This crate is `#![no_std]` with no allocator, so a
+/// [`Session`] cannot hold a frame's deltas the way `scene`'s `Batch` holds its
+/// edits — a caller that chooses to apply a [`Received::Staged`] delta by hand
+/// is still able to, and no type here stops it. What is now impossible is
+/// applying a frame whose [`op::COMMIT`] never arrived *through a path that
+/// asks for the key*, and writing that path is the job of the component that
+/// owns the tree. RFC 0083 records the split; the reversal condition is an
+/// apply path that takes a [`Delta`] and no [`Sealed`], which is this argument
+/// undone whatever its comment says.
 #[derive(Clone, Copy, Debug)]
 pub struct Session {
     /// The channel epoch this agreement belongs to.
@@ -2073,13 +2116,25 @@ pub struct Session {
     at: u32,
     /// The refusal that poisoned the current frame, if one did.
     poison: Option<Fault>,
+    /// The refused negotiation that ended this epoch, if one did.
+    ///
+    /// Separate from [`Session::poison`] because it is a different scope and
+    /// the difference is the whole of what RFC 0083's *may appear once per
+    /// channel epoch* binds. A poison is about a frame and a [`op::COMMIT`]
+    /// clears it; this is about the channel, no entry clears it, and only
+    /// [`Session::follow_epoch`] does — because the epoch is the unit that may
+    /// agree again. Without it the clause bound agreements and not attempts: a
+    /// peer refused for no overlap learnt this build's ceiling from the detail
+    /// word and could re-offer inside the same epoch without limit, which is
+    /// the wire being permissive in the one entry that governs every other.
+    refused: Option<Fault>,
 }
 
 impl Session {
     /// A channel on which nothing has been agreed yet.
     #[must_use]
     pub const fn opening(epoch: u32) -> Self {
-        Self { epoch, agreed: None, at: 0, poison: None }
+        Self { epoch, agreed: None, at: 0, poison: None, refused: None }
     }
 
     /// The version both sides agreed, or `None` before the handshake.
@@ -2097,6 +2152,18 @@ impl Session {
         self.poison
     }
 
+    /// Did a negotiation on this epoch fail, and with what?
+    ///
+    /// [`Session::poisoned`]'s sibling at the other scope. A caller reading
+    /// `Some` here is reading *this channel is over until the epoch moves*,
+    /// which is a different thing to say to an operator than *this frame will
+    /// not be applied*, and a receiver that reported them with one word would
+    /// be telling somebody to retry a thing that cannot succeed.
+    #[must_use]
+    pub const fn refused(&self) -> Option<Fault> {
+        self.refused
+    }
+
     /// Follow the channel's epoch, discarding the agreement if it moved.
     ///
     /// [`ChannelHeader::epoch`](crate::ChannelHeader::epoch) moves when a peer restarts, and its own
@@ -2106,6 +2173,14 @@ impl Session {
     /// one may be a different build entirely. Discarding it is what makes
     /// [`Refusal::Renegotiated`] a rule about a stream rather than a rule about
     /// a lifetime — an epoch is the unit that may agree again.
+    ///
+    /// It is also the only thing that clears [`Session::refused`], and that is
+    /// load-bearing rather than incidental: a refused negotiation is terminal
+    /// for the epoch, so if anything else cleared it the peer would hold the
+    /// reset and *once per channel epoch* would bind nothing. Written as a
+    /// whole-struct replacement rather than field by field, so that a field
+    /// added to [`Session`] is reset by an epoch move without anybody
+    /// remembering to add a line.
     ///
     /// Answers whether anything was discarded, so that a caller can drop the
     /// tree it was presenting in the same breath.
@@ -2126,18 +2201,38 @@ impl Session {
     /// [`Commit`] that would have closed it — is refused with the *first* fault
     /// rather than with one of its own, because the first is the cause and the
     /// rest are consequences of having decoded past it.
+    ///
+    /// A refused [`op::DECLARE_VOCABULARY`] is the wider case and is refused
+    /// for the whole epoch rather than for the frame. See
+    /// [`Session::refused`]; the rule is one sentence — *the first is the cause
+    /// and the rest are consequences* — applied at the scope the entry belongs
+    /// to.
     pub fn accept(
         &mut self,
         entry: &Sqe,
         payload: &[u8; PAYLOAD_BYTES],
         vocabulary: &dyn Vocabulary,
-    ) -> Result<Delta, Fault> {
+    ) -> Result<Received, Fault> {
+        // Above everything, including `closes` below. A `Commit` ends a frame,
+        // and a refused negotiation is not about a frame: if this check sat
+        // under the poison check it would be cleared by the next commit the
+        // peer sent, which is the peer clearing it, which is no bound at all.
+        // That placement is the whole of the guard; moving it is undoing it.
+        if let Some(standing) = self.refused {
+            return Err(standing);
+        }
+
         // Read off the raw opcode rather than the decoded body, because a frame
         // that has already been poisoned is not decoded again: the question
         // *does this entry end the frame* has to be answerable before that. An
         // unknown opcode is not `COMMIT`, so a poisoned frame is never closed
         // by one.
         let closes = entry.opcode == op::COMMIT;
+        // And the same question for the other scope, asked the same way and for
+        // the same reason: a malformed handshake record never reaches
+        // `negotiate`, and it is still an attempt at the entry the clause is
+        // about.
+        let negotiates = matches!(op::is_handshake(entry.opcode), Some(true));
         if let Some(standing) = self.poison {
             if closes {
                 self.poison = None;
@@ -2153,7 +2248,9 @@ impl Session {
             Ok(delta) => delta,
             Err(refusal) => {
                 let fault = Fault { refusal, at };
-                if closes {
+                if negotiates {
+                    self.refused = Some(fault);
+                } else if closes {
                     self.at = 0;
                 } else {
                     self.poison = Some(fault);
@@ -2163,24 +2260,95 @@ impl Session {
         };
 
         if let Entry::DeclareVocabulary(handshake) = delta.body {
-            // The negotiation, and the one refusal here that does not poison a
-            // frame: no frame is open, and no overlap is a statement about the
-            // channel rather than about an edit. The agreement stays `None`, so
-            // every later entry is refused as `NotNegotiated` until the epoch
-            // moves — which is the honest outcome for two peers that speak no
-            // common vocabulary.
+            // The negotiation. No overlap is a statement about the channel
+            // rather than about an edit, so it is recorded at the channel's
+            // scope and not the frame's: the agreement stays `None`, the
+            // refusal stands, and every later entry of this epoch — a second
+            // handshake included — is refused with it until `follow_epoch`
+            // moves. That is the honest outcome for two peers that speak no
+            // common vocabulary, and it is what stops the detail word naming
+            // the version to fall back to from being an invitation to keep
+            // asking.
             match handshake.negotiate() {
                 Ok(agreed) => self.agreed = Some(agreed),
-                Err(refusal) => return Err(Fault { refusal, at }),
+                Err(refusal) => {
+                    let fault = Fault { refusal, at };
+                    self.refused = Some(fault);
+                    return Err(fault);
+                }
             }
         }
 
         if closes {
             self.at = 0;
+            // The one place a `Sealed` is minted, and there is no other. A
+            // caller holding one is holding the fact that a frame closed
+            // without a refusal; a caller holding a `Staged` is holding a delta
+            // and nothing else, which is what *apply nothing until the commit*
+            // looks like when it is a type rather than a sentence.
+            return Ok(Received::Frame { delta, key: Sealed(()) });
         }
-        Ok(delta)
+        Ok(Received::Staged(delta))
     }
 }
+
+/// What offering one entry did.
+///
+/// Two answers and no third, because there are two kinds of entry in a frame:
+/// the edits, which accumulate in whatever the receiver accumulates them in,
+/// and the one [`op::COMMIT`] that ends it. Deliberately the same shape as
+/// `scene`'s `Offered` — a receiver that has learnt one of these two loops has
+/// learnt the other, and a second shape for one rule is how two modules of one
+/// crate come to disagree.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Received {
+    /// The entry decoded and belongs to the frame being assembled. No key:
+    /// nothing may reach the tree yet.
+    Staged(Delta),
+    /// The frame is closed. The key is here, and there is no other.
+    Frame {
+        /// The commit itself, so that a caller that logs entries logs this one
+        /// the way it logged the rest.
+        delta: Delta,
+        /// The right to apply the frame this commit closes.
+        key: Sealed,
+    },
+}
+
+impl Received {
+    /// The delta this entry decoded to, whichever answer it was.
+    ///
+    /// For a caller that is logging or counting rather than applying. It hands
+    /// back the delta and never the key, which is the point: there is no
+    /// accessor on this type that produces a [`Sealed`] from a
+    /// [`Received::Staged`], and adding one would be the reversal.
+    #[must_use]
+    pub const fn delta(&self) -> &Delta {
+        match self {
+            Self::Staged(delta) | Self::Frame { delta, .. } => delta,
+        }
+    }
+}
+
+/// The right to apply one frame to one tree.
+///
+/// No public constructor — the field is a private unit — no `Clone`, no `Copy`,
+/// and one producer: [`Session::accept`] on an [`op::COMMIT`] it did not
+/// refuse. `scene`'s `Sealed` is the same type for the same reason one layer
+/// down, and the reason is in [`Session`]'s own *the contract*: a rule that a
+/// receiver keeps is a rule a receiver can forget, and it was forgotten by
+/// three rounds of review before it was written as a value.
+///
+/// What it deliberately does **not** carry: a frame token, a serial, or
+/// anything else that would make it the *identity* of a frame. `scene`'s
+/// carries a `Frame` because a scene commit publishes one; a semantic commit
+/// publishes nothing, and a key that carried a token would invite a receiver to
+/// check the token instead of holding the key. There is nothing to check. The
+/// reversal condition is a field appearing on this struct: at that point it has
+/// become a message rather than a right, and the argument above is about a
+/// different type.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Sealed(());
 
 // The two facts `sqe_bytes` rests on. The first is also asserted in `lib.rs`,
 // beside the type; it is asserted again here because this is the code that
@@ -2326,7 +2494,7 @@ mod tests {
 
     /// A vocabulary that names the ordinals `interface/src/node.rs` declares.
     ///
-    /// What a real implementor does is derive the answer from `Role::ALL`
+    /// What a real implementor does is derive the answer from `Role::all()`
     /// filtered by `since`; what this does is derive it from the same list read
     /// as text, because this crate cannot see that one. Both are derivations of
     /// the one list, which is the property that matters — neither is a table
@@ -2350,6 +2518,66 @@ mod tests {
 
         fn state_bits(&self, _agreed: Agreed) -> u8 {
             FIXTURE_STATES
+        }
+    }
+
+    /// How many roles [`Appended`]'s version 1 names.
+    ///
+    /// A number of this fixture's own, and deliberately not a reading of
+    /// `interface/src/node.rs`: what is under test beside it is the *version*
+    /// parameter, and a fixture tied to the declaring list would make that test
+    /// go red the day a role is appended to a list it is not about. The role
+    /// count that must track the declaring list is [`Declared`]'s, and it is
+    /// read from the file rather than written.
+    const FIXTURE_ROLES: u16 = 3;
+
+    /// A vocabulary whose list grew: one role and one state bit exist only at
+    /// version 2.
+    ///
+    /// The smallest thing that can tell *the agreement was consulted* from *the
+    /// agreement was carried*. [`Declared`] cannot: it names the same ordinals
+    /// at every version, so the whole version half of RFC 0083's admission rule
+    /// — `from_index(i)` **and** `since(role) <= agreed` — was unobservable
+    /// from this crate, and three rounds of review shipped a parameter nothing
+    /// read. Every ordinal below [`FIXTURE_ROLES`] is a role since version 1;
+    /// the one at [`FIXTURE_ROLES`] is a role since version 2.
+    ///
+    /// This is a derivation and not a table, which is what the trait asks of an
+    /// implementor: the count is computed from the agreed version rather than
+    /// matched against a hand-written range of ordinals.
+    struct Appended {
+        /// How many roles the list had before the version-2 append.
+        at_version_1: u16,
+    }
+
+    impl Appended {
+        /// The vocabulary version the appended role and state bit arrived in.
+        const APPENDED_IN: u16 = 2;
+    }
+
+    impl Vocabulary for Appended {
+        fn names(&self, field: Closed, ordinal: u16, agreed: Agreed) -> bool {
+            let roles = if agreed.version() >= Self::APPENDED_IN {
+                self.at_version_1 + 1
+            } else {
+                self.at_version_1
+            };
+            // Exhaustive and wildcard-free for `Declared`'s reason: a fourth
+            // closed field stops this fixture rather than being admitted by a
+            // fixture that was not asked about it.
+            match field {
+                Closed::Role => ordinal < roles,
+                Closed::Relation => ordinal < FIXTURE_RELATIONS,
+                Closed::Content => ordinal < FIXTURE_CONTENT,
+            }
+        }
+
+        fn state_bits(&self, agreed: Agreed) -> u8 {
+            if agreed.version() >= Self::APPENDED_IN {
+                FIXTURE_STATES | 0b0010_0000
+            } else {
+                FIXTURE_STATES
+            }
         }
     }
 
@@ -2556,8 +2784,9 @@ mod tests {
             "RFC 0077 no longer says the vocabulary has twenty-two roles"
         );
 
+        const ALL: &str = "const ALL: [Self; Self::COUNT] = [$(Self::$variant),*];";
         assert!(
-            VOCABULARY.contains("pub const ALL: [Self; Self::COUNT] = [$(Self::$variant),*];"),
+            VOCABULARY.contains(ALL),
             "`Role::ALL` is no longer the declaration order of `vocabulary!`"
         );
         // The whole body, and not a substring of it. `contains` admits
@@ -2932,13 +3161,18 @@ mod tests {
             Err(Fault { refusal: Refusal::Renegotiated, at: 1 })
         );
 
-        // The poison a refused handshake left is cleared by the commit that
-        // ends the frame, the way any other refusal's is.
+        // And it is the channel that is refused, not the frame: a `Commit`
+        // clears a poison and clears nothing here, because a second handshake
+        // is a statement about the epoch and a commit is not entitled to end
+        // one. `a_refused_negotiation_is_terminal_for_the_epoch` is where that
+        // placement is tested on the refusal RFC 0083 names; this is the same
+        // rule reached by the other refused handshake there is.
         let (commit, commit_payload) = crossing(Entry::Commit(Commit::SPECIMEN));
         assert_eq!(
             session.accept(&commit, &commit_payload, &vocabulary),
             Err(Fault { refusal: Refusal::Renegotiated, at: 1 })
         );
+        assert_eq!(session.refused(), Some(Fault { refusal: Refusal::Renegotiated, at: 1 }));
 
         assert!(session.follow_epoch(2), "a moved epoch discards the agreement");
         assert_eq!(session.agreed(), None);
@@ -3108,8 +3342,131 @@ mod tests {
         // The next frame is clean. A peer one version ahead sends one bad
         // frame, learns from its completion, and keeps its channel.
         assert_eq!(session.poisoned(), None);
-        assert!(session.accept(&good, &good_payload, &vocabulary).is_ok());
-        assert!(session.accept(&commit, &commit_payload, &vocabulary).is_ok());
+        assert_eq!(session.refused(), None, "one bad frame is not a bad channel");
+
+        // And the key arrives on the commit and on nothing else. A refused
+        // frame produced no `Sealed` above — every `accept` in it answered
+        // `Err` — and an edit produces a `Staged`, which carries a delta and no
+        // right to apply anything.
+        let staged = session.accept(&good, &good_payload, &vocabulary).expect("a clean edit");
+        assert!(matches!(staged, Received::Staged(_)), "an edit is not a closed frame");
+        let closed = session.accept(&commit, &commit_payload, &vocabulary).expect("a clean commit");
+        assert!(matches!(closed, Received::Frame { .. }), "the commit closes the frame");
+        assert_eq!(closed.delta().body, Entry::Commit(Commit::SPECIMEN));
+    }
+
+    #[test]
+    fn a_refused_negotiation_is_terminal_for_the_epoch() {
+        // RFC 0083 part one says the handshake *may appear once per channel
+        // epoch*, and for three rounds that bound agreements rather than
+        // attempts: `Session` remembered a handshake it had accepted and
+        // nothing whatever about one it had refused. A reviewer ran a million
+        // `{highest: 10, floor: 5}` offers on one session, each refused, each
+        // leaving the session exactly as it found it, and the
+        // million-and-first `{highest: 1, floor: 1}` was agreed. The refusal
+        // names this build's ceiling in its detail word, so the retry is not
+        // even a guess — the wire tells the peer what to claim and then charges
+        // nothing for claiming it.
+        //
+        // *The edits that make this go red:* deleting `Session::refused`; not
+        // setting it in `accept`'s negotiate arm; moving its check below the
+        // poison check, where the peer's own `Commit` would clear it; clearing
+        // it anywhere but `follow_epoch`.
+        let vocabulary = vocabulary();
+        let mut session = Session::opening(1);
+
+        // The offer RFC 0083 measured, stated against the constants so that it
+        // stays above this build's ceiling when the ceiling moves.
+        let apart = Handshake { highest: VOCABULARY_VERSION + 9, floor: VOCABULARY_VERSION + 4 };
+        let (miss, miss_payload) = crossing(Entry::DeclareVocabulary(apart));
+        let standing =
+            Fault { refusal: Refusal::VersionUnsupported { offered: VOCABULARY_VERSION }, at: 0 };
+        assert_eq!(session.accept(&miss, &miss_payload, &vocabulary), Err(standing));
+        assert_eq!(session.refused(), Some(standing));
+        assert_eq!(session.agreed(), None, "nothing was agreed");
+
+        // The retry the measurement ended on. It is inside this build's range,
+        // it would have been agreed on a fresh session, and here it is refused
+        // with the fault that is standing — not with one of its own, because
+        // the first is the cause and the rest are consequences.
+        let within = Handshake { highest: VOCABULARY_VERSION, floor: VOCABULARY_VERSION_MIN };
+        let (again, again_payload) = crossing(Entry::DeclareVocabulary(within));
+        assert_eq!(session.accept(&again, &again_payload, &vocabulary), Err(standing));
+        assert_eq!(session.agreed(), None, "a refused epoch agrees nothing later");
+
+        // A `Commit` does not clear it. This is the placement, and it is the
+        // whole guard: a check that sat under the poison check would hand the
+        // reset to the peer, which is the peer deciding how long its own
+        // punishment lasts.
+        let (commit, commit_payload) = crossing(Entry::Commit(Commit::SPECIMEN));
+        assert_eq!(session.accept(&commit, &commit_payload, &vocabulary), Err(standing));
+        assert_eq!(session.refused(), Some(standing));
+
+        // Nor does an ordinary edit, which would otherwise have been refused
+        // `NotNegotiated` — a different fault, and the wrong one: the cause is
+        // the negotiation that failed, not the entry that followed it.
+        let (node, node_payload) = crossing(Entry::DeclareNode(DeclareNode::SPECIMEN));
+        assert_eq!(session.accept(&node, &node_payload, &vocabulary), Err(standing));
+
+        // The epoch is the unit that may agree again, because an epoch move is
+        // a new peer rather than the same one asking twice.
+        assert!(session.follow_epoch(2), "a moved epoch discards the refusal");
+        assert_eq!(session.refused(), None);
+        assert!(session.accept(&again, &again_payload, &vocabulary).is_ok());
+        assert_eq!(session.agreed().map(Agreed::version), Some(VOCABULARY_VERSION));
+    }
+
+    #[test]
+    fn a_role_appended_in_a_later_version_is_not_named_by_the_version_below_it() {
+        // RFC 0083 part two's admission rule is `from_index(i)` **and**
+        // `since(role) <= agreed`, and for three rounds the second half was
+        // carried and never consulted: the only `Vocabulary` in the workspace
+        // bound the parameter as `_agreed`, so replacing `self` with
+        // `Agreed(0)` inside the `admitted!` macro compiled and killed no test.
+        // An older receiver was protected by its own list length, which is what
+        // it would have had with no handshake at all.
+        //
+        // This fixture answers version-sensitively, which is what a real
+        // implementor does — `Role::all().filter(|r| r.since() <= agreed)` — and
+        // it is the smallest vocabulary that can tell the two apart: one role
+        // and one state bit that exist only at version 2.
+        //
+        // *The edits that make this go red:* passing anything but the agreed
+        // version to `Vocabulary::names` or `Vocabulary::state_bits`, from the
+        // `admitted!` macro, from `Agreed::admit_state`, or from `Delta::decode`
+        // on the way to either.
+        let vocabulary = Appended { at_version_1: FIXTURE_ROLES };
+        let appended = FIXTURE_ROLES;
+
+        // The ordinal itself, through the admission that mints the newtype.
+        assert_eq!(
+            Agreed(1).admit_role(appended, &vocabulary),
+            Err(Refusal::Unnamed { field: Closed::Role, ordinal: appended }),
+            "a role introduced in version 2 is not a role version 1 names"
+        );
+        assert_eq!(Agreed(2).admit_role(appended, &vocabulary).map(RoleOrdinal::get), Ok(appended));
+
+        // And the state bits, which travel as a mask rather than an ordinal and
+        // so reach the vocabulary by the other method.
+        const APPENDED_STATE: u8 = 0b0010_0000;
+        assert_eq!(
+            Agreed(1).admit_state(APPENDED_STATE, &vocabulary),
+            Err(Refusal::UnknownState { bits: APPENDED_STATE })
+        );
+        assert_eq!(
+            Agreed(2).admit_state(APPENDED_STATE, &vocabulary).map(StateBits::get),
+            Ok(APPENDED_STATE)
+        );
+
+        // The same two answers through the whole decode path, because an
+        // admission that is only reachable from a unit test is an admission the
+        // wire does not run. `Delta::decode` is what a receiver calls.
+        let (entry, payload) = node_of_role(appended);
+        assert_eq!(
+            Delta::decode(&entry, &payload, Some(Agreed(1)), &vocabulary),
+            Err(Refusal::Unnamed { field: Closed::Role, ordinal: appended })
+        );
+        assert!(Delta::decode(&entry, &payload, Some(Agreed(2)), &vocabulary).is_ok());
     }
 
     #[test]
@@ -3251,6 +3608,46 @@ mod tests {
     }
 
     #[test]
+    fn the_peer_domain_and_its_version_code_state_one_rule() {
+        // Two doc comments in `lib.rs` disagreed about what a `PEER` detail
+        // word carries, and RFC 0083's refusal leg — *the refusal names what
+        // was missing* — rests on one of them. The code followed the per-code
+        // comment; the domain comment said the word was an epoch; and a reader
+        // who read the domain comment read a version as an epoch and would have
+        // been right to say the RFC was quoting selectively.
+        //
+        // Asserted as text for the reason the RFC clauses above are: a doc
+        // comment is not observable to a running test any other way, and a
+        // sentence two files disagree about is exactly the thing that rots
+        // silently. `include_str!` on this crate's own root, which needs no
+        // filesystem at run time.
+        //
+        // *The edit that makes this go red:* putting a detail meaning back on
+        // the `PEER` domain line, which is where the wrong one was.
+        const LIB: &str = include_str!("lib.rs");
+        assert!(
+            LIB.contains("/// did not negotiate. Detail: per code, see each."),
+            "the `PEER` domain claims a detail word of its own again"
+        );
+        assert!(
+            !LIB.contains("did not negotiate. Detail: the peer's channel epoch."),
+            "the `PEER` domain says the detail is an epoch, which is true of one code in four"
+        );
+        assert!(
+            LIB.contains("highest version the refusing"),
+            "`VERSION_UNSUPPORTED` no longer says whose ceiling its detail word carries"
+        );
+
+        // And the code says the same thing the comment does, which is the half
+        // a text assertion cannot reach.
+        assert_eq!(
+            Refusal::VersionUnsupported { offered: VOCABULARY_VERSION }.detail(),
+            u64::from(VOCABULARY_VERSION),
+            "the refusing side's ceiling is what the detail word carries"
+        );
+    }
+
+    #[test]
     fn the_closed_fields_are_one_list_and_each_names_itself() {
         // The `admitted!` list is the only place a closed field is written, so
         // this is not a check on an array — there is nothing for a field to be
@@ -3266,6 +3663,47 @@ mod tests {
         assert_eq!(RoleOrdinal(0).field(), Closed::Role);
         assert_eq!(RelationOrdinal(0).field(), Closed::Relation);
         assert_eq!(ContentOrdinal(0).field(), Closed::Content);
+    }
+
+    #[test]
+    fn the_declaring_crate_still_has_exactly_one_route_from_an_ordinal_to_a_role() {
+        // RFC 0083's *not representable* rests on a fact about a file this
+        // crate cannot link, so it is read as text — the same `include_str!`
+        // the digest and the census already come through, and the same reason:
+        // the wire's ordinals and the list they index are one decision written
+        // in two directories, and this is the cheapest way for the toolchain to
+        // know it rather than a comment claiming it.
+        //
+        // What was here before was nothing. The RFC stated `Role::from_index`
+        // as a fact for three rounds while the item did not exist, and
+        // `Role::ALL` was public the whole time — so `Role::ALL[ordinal as
+        // usize]` was a supported, safe, total ordinal-to-role map in every
+        // crate of this workspace, needing no admission and panicking rather
+        // than refusing. That is the *second decoder* the RFC names as the
+        // reversal to watch, and it was not being watched by anything.
+        //
+        // *The edits that make this go red:* publishing `ALL` again; deleting
+        // `from_index`; deleting the `since` column the admission's other half
+        // filters by.
+        assert!(
+            VOCABULARY.contains("pub fn from_index(index: usize) -> Option<Self>"),
+            "`Role::from_index` is gone, so an admitted ordinal has nowhere to become a role"
+        );
+        assert!(
+            VOCABULARY.contains("pub const fn since(self) -> u16"),
+            "`Role::since` is gone, so the agreed version is a number nothing can filter by"
+        );
+        // Not a `contains` of the negation but a scan for the declaration,
+        // because `pub(crate) const ALL` contains no `pub const ALL` and a
+        // reader should not have to work that out. The array may be emitted; it
+        // may not be emitted to the rest of the workspace.
+        for line in VOCABULARY.lines() {
+            let text = line.trim();
+            assert!(
+                !text.starts_with("pub const ALL"),
+                "`Role::ALL` is public again, and a public array is a decoder: `{text}`"
+            );
+        }
     }
 
     #[test]

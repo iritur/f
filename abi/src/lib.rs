@@ -324,7 +324,15 @@ pub mod error {
     /// A quota, a budget or a device limit was reached. Detail: the limit.
     pub const RESOURCE: u8 = 3;
     /// The far side is gone, has restarted, or speaks a version this channel
-    /// did not negotiate. Detail: the peer's channel epoch.
+    /// did not negotiate. Detail: per code, see each.
+    ///
+    /// This line said *the peer's channel epoch* and was wrong for every code
+    /// in the domain but [`peer::EPOCH_CHANGED`]. RFC 0083 rests a sentence on
+    /// [`peer::VERSION_UNSUPPORTED`]'s detail word — *the refusal names what
+    /// was missing* — and a reader who consulted this line instead of that one
+    /// read the version as an epoch. A domain-level detail is the wrong shape
+    /// here anyway: an epoch is already in the channel header, so a word that
+    /// could only repeat it would say nothing a caller could not already read.
     pub const PEER: u8 = 4;
     /// The entry is malformed. Unknown opcode, unknown flag, non-zero reserved
     /// field: all refused, never ignored. Detail: the offending field.
@@ -427,9 +435,14 @@ pub mod error {
     /// Codes within [`PEER`].
     pub mod peer {
         /// The peer restarted: the channel epoch moved, so every outstanding
-        /// token is stale and must be discarded rather than matched.
+        /// token is stale and must be discarded rather than matched. Detail
+        /// carries the epoch the channel has moved to.
         pub const EPOCH_CHANGED: u16 = 1;
-        /// No common version. Detail carries the version this side offered.
+        /// No common version. Detail carries the **highest version the refusing
+        /// side speaks** — its ceiling rather than its floor, because the
+        /// refused peer's question is *what would I have had to say*. RFC 0083
+        /// part one, and `semantic::Refusal::detail` is where this build
+        /// answers it.
         pub const VERSION_UNSUPPORTED: u16 = 2;
         /// A feature one side marked required is not offered by the other.
         /// Detail carries the missing bits.

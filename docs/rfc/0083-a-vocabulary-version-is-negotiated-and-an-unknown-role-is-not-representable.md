@@ -62,40 +62,49 @@ comment: see *What this decision owes*, where the conflicting statements in
 outstanding edit rather than quoted selectively.
 
 *Once per epoch* is the rule, and where that rule is **held** is worth writing
-down rather than rounding to *enforced*, because today it is held over
-agreements and not over attempts. `Session` in `abi/src/semantic.rs` remembers
-an agreement and refuses a second one with `Refusal::Renegotiated`; it remembers
-nothing whatever about a handshake it *refused*. So a peer whose range does not
-overlap is told this side's ceiling — the detail word above — and may then
-re-offer inside the same epoch without limit. That is measured rather than
-feared: on one `Session::opening(1)`, a million `{highest: 10, floor: 5}`
-handshakes are each refused `VersionUnsupported { offered: 1 }` and each leave
-`agreed` and `poisoned` at `None`, and the million-and-first entry, offering
-`{highest: 1, floor: 1}`, is agreed. The same missing memory is why *first*
-means first **accepted** and not first offered: a `DeclareNode` sent ahead of
-the handshake is refused `NotNegotiated` and poisons the frame, the `Commit`
-that ends the frame clears the poison, and the handshake is then agreed as the
-third entry the channel carried. Nothing is admitted before the handshake, which
-is the half the decision needs and the half that holds; the number of entries
-refused in front of it is bounded by nothing.
+down rather than rounding to *enforced*. For three rounds of review it was held
+over agreements and not over attempts: `Session` in `abi/src/semantic.rs`
+remembered an agreement and refused a second one with `Refusal::Renegotiated`,
+and remembered nothing whatever about a handshake it had *refused*. So a peer
+whose range did not overlap was told this side's ceiling — the detail word above
+— and could then re-offer inside the same epoch without limit. That was measured
+rather than feared: on one `Session::opening(1)`, a million `{highest: 10,
+floor: 5}` handshakes were each refused `VersionUnsupported { offered: 1 }` and
+each left `agreed` and `poisoned` at `None`, and the million-and-first entry,
+offering `{highest: 1, floor: 1}`, was agreed.
 
-RFC 0011 gets that bound for free and this RFC does not, which is a price of
+It is held over attempts now, by one `Session` field and no new opcode.
+`Session::refused` records the fault a refused `DeclareVocabulary` earned; the
+check sits **above** the frame poison in `Session::accept`, so a `Commit` does
+not clear it — a check below the poison would hand the peer the reset, which is
+no bound at all — and `follow_epoch` is the only thing that does, because the
+epoch is the unit that may agree again. Every later entry of that epoch, a
+second `DeclareVocabulary` included, is refused with the standing fault. That is
+the rule the frame poison already follows one level down — *the first is the
+cause and the rest are consequences* — applied to the channel rather than to the
+frame, and it is uniform over every refused handshake rather than only the
+no-overlap one, because a malformed handshake record never reaches `negotiate`
+and is still an attempt at the entry the clause is about. The failing test is
+`a_refused_negotiation_is_terminal_for_the_epoch`: it runs the measurement's own
+sequence — a refused `{highest: 10, floor: 5}` followed by a `{highest: 1, floor:
+1}` that would be agreed on a fresh session — and asserts the standing refusal
+instead. Deleting the field, or moving its check below the poison check, turns
+that test and `the_vocabulary_is_agreed_once_per_epoch` red.
+
+RFC 0011 gets that bound for free and this RFC pays for it, which is a price of
 moving the handshake in band and is charged here rather than in a footnote.
 There the range is a header field, so a peer cannot re-state it without
 re-opening the channel, and re-opening moves the epoch; here the range is an
-entry, and an entry can simply be sent again. The bound therefore has to be a
-rule the receiver keeps, and the receiver keeps no such rule today. What would
-close it is one `Session` field and no new opcode — a refused negotiation made
-**terminal for the epoch**, recorded where a `Commit` does not clear it, so that
-every later entry of that epoch, a second `DeclareVocabulary` included, is
-refused with the standing `VersionUnsupported` until `follow_epoch` moves. That
-is the rule the frame poison already follows one level down — *the first is the
-cause and the rest are consequences* — applied to the channel rather than to the
-frame. It is owed below, with the test that has to go red without it. Until it
-lands, this clause binds a receiver only if the receiver keeps it itself, and
-the second reversal condition below — *a component that has to lie about its
-version to work* — is not merely available but free: the refusal names the
-version to claim, and nothing charges for claiming it.
+entry, and an entry can simply be sent again, so the bound has to be a rule the
+receiver keeps and the receiver now keeps it. One thing the field does **not**
+bound, said here so it is not discovered later: *first* means first **accepted**
+and not first offered. A `DeclareNode` sent ahead of the handshake is refused
+`NotNegotiated` and poisons the frame, the `Commit` that ends the frame clears
+that poison, and the handshake is then agreed as the third entry the channel
+carried. Nothing is admitted before the handshake, which is the half the
+decision needs; the number of *ordinary* entries a peer may burn in front of it
+is still bounded by nothing, and bounding it would be a rate limit rather than a
+protocol rule — which belongs to whoever measures one, not to this decision.
 
 **Two.** A version ordinal is worth negotiating only if it identifies the **same
 list** on both sides, so the vocabulary's indices are **append-only**. A new role
@@ -104,14 +113,32 @@ no index is reused; removing a role raises the floor, which is RFC 0011's own
 word for it and is a decision about which peers get dropped. Version 1's list is
 frozen by a digest over its roles' names in order, so that reordering the list
 is a failure somebody is shown rather than a review note. *Where* it is asserted
-is worth stating rather than rounding to *at compile time*: today it is a test in
-`abi/src/semantic.rs`, which reads `interface/src/node.rs` with `include_str!`
-and so rebuilds when the list changes, but fails when the tests run. The `const`
-assertion in `interface/src/node.rs` that would make a reorder a **build**
-failure is owed below and is not there yet. Without
-this, negotiation is worse than absent: it certifies that two builds agree while
-the number 13 means `Command` on one and `Toggle` on the other, and neither side
-ever finds out.
+is worth stating rather than rounding to *at compile time*, because the freeze
+has two halves and they are asserted in two places. The **append** half is a
+`const` assertion in `interface/src/node.rs`: the `vocabulary!` list carries a
+`since` column and the macro emits an assertion that it never decreases down the
+list, so a role inserted in the middle, or appended under a version below the
+one before it, fails the **build**. The **reorder within one version** half
+cannot be a `const` assertion and is not one — two roles both `since: 1` may be
+swapped and every compile-time fact stays true — so it is the digest, a test in
+`abi/src/semantic.rs` which reads `interface/src/node.rs` with `include_str!`
+and so rebuilds when the list changes, but fails when the tests run. The two are
+complementary rather than redundant, and neither is the other's substitute.
+Without both, negotiation is worse than absent: it certifies that two builds
+agree while the number 13 means `Command` on one and `Toggle` on the other, and
+neither side ever finds out.
+
+The `since` column is also the half of the **admission rule** that was missing.
+`abi` asks a `Vocabulary` implementor whether the agreed version names an
+ordinal, and for three rounds the only implementor in the workspace was a test
+fixture that bound the parameter as `_agreed` — so the negotiated number was
+carried, refused when the ranges missed, and then never consulted by anything.
+Replacing the agreement with `Agreed(0)` inside `abi`'s `admitted!` macro
+compiled and killed no test, which means an older receiver was protected by its
+own list length and by nothing else: what it would have had with no handshake at
+all. `Role::since` is what an implementor filters by, and
+`a_role_appended_in_a_later_version_is_not_named_by_the_version_below_it` in
+`abi/src/semantic.rs` is the test the `Agreed(0)` edit now turns red.
 
 The freeze is asserted for the **role list only**, and that is narrower than the
 argument above deserves. `Relation` and `Content` already cross under the same
@@ -140,6 +167,21 @@ that function no decoded type has a role field wider than `Role`. The value a
 wildcard arm would have to match cannot be constructed, so no projection can be
 handed one and there is nothing for an arm to be written about.
 
+*The one function* was stated as a fact here before it was one, and the sentence
+is kept only because the gap is now closed rather than because it read well.
+`Role::from_index` did not exist for three rounds, and `Role::ALL` was a **public
+array**: `Role::ALL[ordinal as usize]` compiled in every crate of the workspace,
+took no admission, and panicked rather than refusing when the ordinal was out of
+range — a second decoder, which is the reversal condition below, available to
+anybody and watched by nothing. `ALL` is `pub(crate)` now, so that expression does
+not compile outside `interface`; what is public is `Role::all`, which cannot be
+subscripted, and `Role::from_index`, which answers `None`. The guard that keeps
+it that way is a text assertion in `abi/src/semantic.rs` —
+`the_declaring_crate_still_has_exactly_one_route_from_an_ordinal_to_a_role`,
+reading `interface/src/node.rs` through the `include_str!` the digest already
+comes through — because the reversal is a line of somebody else's crate saying
+`pub` again, and `abi` cannot link that crate to assert it any other way.
+
 What this does **not** claim, because it is not true and an RFC that claimed it
 would be the guard a later edit walks past: it does not claim the type system
 closes this on its own. Two seams are held by argument rather than by the
@@ -149,7 +191,7 @@ compiler, and both are named here so that neither is discovered later.
   implementor whether the agreed version names an ordinal. An implementor that
   answers `true` for everything reopens the vocabulary, and nothing in `abi` can
   detect that — the module says so in its own words. What the implementor owes
-  is a *derivation*, `ALL.iter().filter(|r| r.since() <= agreed)`, and an
+  is a *derivation*, `Role::all().filter(|r| r.since() <= agreed)`, and an
   implementation that matches on a hand-written range of ordinals is the copied
   table wearing a method. This is the one place *closed* rests on a review
   rather than on a build, and `interface/`'s list — RFC 0077's — is what is
@@ -177,9 +219,32 @@ unchanged**. Not the entry alone, because a tree missing one node is a tree whos
 author believes the node is there. Not the channel, because one bad frame from a
 peer that may simply be newer is not grounds to destroy a working interface.
 
-*Stands unchanged* is a guarantee about a **working** interface, and on the first
-frame of a channel there is no interface yet: refusing that frame refuses
-everything there was, and what the receiver presents is what it was already
+*Stands unchanged* is a guarantee a **type** carries and not a sentence a
+receiver is asked to keep, and the distinction is the one three rounds of review
+walked past. `Session::accept` used to hand back an applicable delta for every
+entry, so *apply nothing until the commit* was advice in a doc comment and a
+receiver that applied entry by entry stood with a half-built tree when the frame
+was refused. It now answers `Received::Staged` for an edit — a delta and no key —
+and `Received::Frame` only on a `Commit` it did not refuse, carrying a `Sealed`
+with no public constructor, no `Clone` and no `Copy`. An apply path that demands
+the key cannot be handed a half-frame. `scene`'s `commit` module holds the
+identical rule the identical way one layer down, which is why the shape was
+chosen rather than invented.
+
+What the key does **not** do is accumulate the frame, and the seam is named here
+rather than left for a reviewer. `f_abi` is `#![no_std]` with no allocator, so a
+`Session` cannot hold a frame's deltas the way `scene`'s `Batch` holds its
+edits; a receiver that chooses to apply a `Staged` delta by hand is still able
+to, and no type in `abi` stops it. What is now impossible is applying a frame
+whose `Commit` never arrived *through a path that asks for the key*, and writing
+that path belongs to the component that owns the tree — `E3-B06c`. The reversal
+condition is an apply path there that takes a delta and no `Sealed`: at that
+point this paragraph is describing a mechanism nobody is using, whatever its
+comment says.
+
+*Stands unchanged* is also a guarantee about a **working** interface, and on
+the first frame of a channel there is no interface yet: refusing that frame
+refuses everything there was, and what the receiver presents is what it was already
 presenting, which is nothing. The sentence is not a promise that a first frame
 can fail usefully, and a receiver whose peer's opening frame is refused has a
 channel it cannot use — which is the correct outcome and is why the handshake,
@@ -279,7 +344,7 @@ precisely rather than asserting: **neither number can make the other wrong.**
 Drift is safe in both directions because the admission rule is `from_index(i)`
 **and** `since(role) <= agreed`, and both halves are derived from the one list.
 `abi` never enumerates roles: no count, no name, no table. How many roles version
-*v* has is `ALL.iter().filter(|r| r.since() <= v).count()`, which is a derivation
+*v* has is `Role::all().filter(|r| r.since() <= v).count()`, which is a derivation
 and not a copy. An `xtask` lint asserting that the highest `since` in the list
 equals `abi`'s constant would be a tidiness check and is named under *owes*;
 nothing here depends on it, because the failure it would catch is already safe.
@@ -435,20 +500,29 @@ these rows previously said the opposite of the truth: that `abi/src/semantic.rs`
 did not exist, and that this RFC had no row in the index. Both were false on the
 day this was accepted.
 
-**`interface/src/node.rs` — `E3-D01`'s file, and three emitted items.** The
-`vocabulary!` list gains a **`since` column**, the vocabulary version a role was
-introduced in, and emits `Role::since`, `Role::from_index`, and a compile-time
-assertion that `since` never decreases down the list — so a role appended out of
-order fails the build rather than a review. `from_index` must be derived from
-`ALL` the way `from_name` already is, for the reason `from_name`'s own
-documentation gives: there must be no ordinal it accepts that is not already a
-role, or the derivation becomes the escape hatch. Plus **one frozen digest per
-released version**: a `const` over the names of that version's roles in order,
-asserted against a literal written under a comment saying that it records the
-wire as shipped and must never be updated to match the list. That literal is the
-one hand-written second copy this decision asks for, and it is the correct kind —
-it copies a fact that has already happened, and the whole value of it is that it
-does *not* follow the list.
+**`interface/src/node.rs` — `E3-D01`'s file. Three emitted items, paid; one
+digest, still owed.** The `vocabulary!` list now carries a **`since` column**,
+the vocabulary version a role was introduced in, and emits `Role::since`,
+`Role::from_index`, and a compile-time assertion that `since` never decreases
+down the list — so a role appended out of order fails the build rather than a
+review. `from_index` is derived from `ALL` the way `from_name` is, for the reason
+`from_name`'s own documentation gives: there must be no ordinal it accepts that
+is not already a role, or the derivation becomes the escape hatch. Taken with it,
+because splitting them would have left a window in which `from_index` existed and
+`ALL[i]` was still the cheaper call: `ALL` is `pub(crate)`, and the public
+iteration is `Role::all`, which cannot be subscripted.
+
+Still owed here, and it is the part that copies rather than derives: **one frozen
+digest per released version** — a `const` over the names of that version's roles
+in order, asserted against a literal written under a comment saying that it
+records the wire as shipped and must never be updated to match the list. That
+literal is the one hand-written second copy this decision asks for, and it is the
+correct kind: it copies a fact that has already happened, and the whole value of
+it is that it does *not* follow the list. `abi`'s test-side digest covers the
+same ground today from the wrong side of the crate boundary — it goes red when
+the tests run rather than when the build does — and the question of what a
+`no_std` leaf crate with no dependencies may compute a digest *with* is the one
+below, still unsettled.
 
 **`abi/src/semantic.rs` — `E3-B06b`'s file. Paid but for one clause, and this
 is what it pays.** Not owed, except for the last paragraph of this row: the file
@@ -469,41 +543,58 @@ confirms the answer against the range it stated rather than adopting it. No
 overlap of version ranges reuses `PEER`/`VERSION_UNSUPPORTED`, and the detail
 word carries the highest version the refusing side speaks.
 
-What that file does **not** carry, so the absence is visible: no `since` column
-and no `Role::from_index`, because both live in `interface/src/node.rs` and are
-owed above. Until they exist, the join between an admitted ordinal and a `Role`
-is unwritten, and the component that owns the tree (`E3-B06c`) is where it lands.
+What that file does **not** carry, so the absence stays visible: the `since`
+column and `Role::from_index`, because both live in `interface/src/node.rs` and
+both are there now rather than owed. What is still unwritten is the *join* — the
+code that admits an ordinal in `abi` and turns it into a `Role` in `interface` —
+because no crate in the workspace can see both, and the component that owns the
+tree (`E3-B06c`) is where it lands. `abi` has no implementor of `Vocabulary`
+outside its own test fixtures, and until `E3-B06c` writes one, the version half
+of the admission is exercised by a fixture and by nothing that ships.
 
-And one rule of part one that file **states rather than holds**: the epoch has
-no memory of a refused negotiation. `Session` refuses a second handshake only
-once a first one has succeeded, so *may appear once per channel epoch* binds
-agreements and not attempts, and a peer refused for no overlap may re-offer
-within the epoch without limit — which the detail word makes cheap, since the
-refusal names the version to claim. What is owed is one field on `Session`: the
-refusal recorded where a `Commit` does not clear it, and every later entry of
-that epoch, a second `DeclareVocabulary` included, refused with that standing
-`Fault` until `follow_epoch` moves. Owed with it, because an owed mechanism with
-no failing test is a wish: a refused `{highest: 10, floor: 5}` followed on the
-same `Session` by `{highest: 1, floor: 1}`, which today returns `Ok` and agrees
-version 1, beside the one test that covers this ground today —
-`the_vocabulary_is_agreed_once_per_epoch`, which re-sends a handshake only after
-a successful one and so cannot see this. It is written here rather than in that
-module's comment because the comment is where it was last asserted and not
-held, and a file is not the place to record what a file does not do. It is owed
-by `E3-B06b` rather than by `E3-B06a`, on RFC 0088's rule that an exit may
-require the artefact its own task produces and not one a later task produces:
-what this task produces is the decision, and a field on `Session` is that file's.
+The one rule of part one that file **stated rather than held** is held, and the
+row is kept rather than deleted because what it records is how long it was not.
+The epoch had no memory of a refused negotiation: `Session` refused a second
+handshake only once a first had succeeded, so *may appear once per channel
+epoch* bound agreements and not attempts, and a peer refused for no overlap
+could re-offer within the epoch without limit — which the detail word made cheap,
+since the refusal names the version to claim. It is now one field,
+`Session::refused`, checked above the frame poison so a `Commit` cannot clear it
+and cleared only by `follow_epoch`, with every later entry of the epoch — a
+second `DeclareVocabulary` included — refused with the standing `Fault`. The
+failing test came with it, because an owed mechanism with no failing test is a
+wish: `a_refused_negotiation_is_terminal_for_the_epoch` runs a refused
+`{highest: 10, floor: 5}` followed on the same `Session` by `{highest: 1, floor:
+1}`, which used to return `Ok` and agree version 1.
 
-**`abi/src/lib.rs` — two doc comments that disagree, and this RFC leans on
-one.** `error::PEER`'s domain documentation says the detail word carries *the
-peer's channel epoch*; `error::peer::VERSION_UNSUPPORTED`'s says it carries *the
-version this side offered*. Part one above requires the second, and the
+Also paid, and this row is where it was conceded: `Session::accept` no longer
+hands back an applicable delta for every entry. `Received::Staged` carries a
+delta and no key; `Received::Frame` carries the key, a `Sealed` with no public
+constructor, and only a `Commit` that was not refused produces one. What that
+does not do — accumulate the frame, which a `no_std` crate with no allocator
+cannot — is stated in part three above, and the apply path that demands the key
+is `E3-B06c`'s.
+
+The row's bookkeeping, kept because it was argued once: these were owed by
+`E3-B06b` rather than by `E3-B06a`, on RFC 0088's rule that an exit may require
+the artefact its own task produces and not one a later task produces. They were
+paid in `E3-B06a`'s fourth adversarial round instead, because a decision whose
+owed mechanism outlives the review that found it missing is the shape this RFC's
+own reversal section warns about.
+
+**`abi/src/lib.rs` — two doc comments that disagreed, and this RFC leaned on
+one. Paid.** `error::PEER`'s domain documentation said the detail word carries
+*the peer's channel epoch*; `error::peer::VERSION_UNSUPPORTED`'s said it carries
+*the version this side offered*. Part one above requires the second, and the
 implementation follows the second, because an epoch is already in the channel
-header and the version the refusing side speaks is nowhere else. Reconciling the
-two — most likely by making the domain line say *per code, see each* — is an
-edit to a file this decision does not own, and it is recorded here rather than
-made quietly, because quoting the doc comment that suits an argument and not the
-one that contradicts it is how an RFC comes to rest on nothing.
+header and the version the refusing side speaks is nowhere else. The domain line
+now says *per code, see each*, `VERSION_UNSUPPORTED`'s says *the highest version
+the refusing side speaks* in the words part one uses, and
+`the_peer_domain_and_its_version_code_state_one_rule` in `abi/src/semantic.rs`
+reads `lib.rs` as text so that the wrong sentence cannot come back quietly. It
+was recorded here rather than edited quietly at the time, because quoting the doc
+comment that suits an argument and not the one that contradicts it is how an RFC
+comes to rest on nothing.
 
 **The freeze, for the three closed enums that are not `Role`.** Part two's
 digest, `since` column and monotonicity assertion cover the role list.
@@ -533,6 +624,19 @@ tidiness rather than safety: *Where the ordinal is allowed to exist* shows that
 drift in either direction is already safe, and a guard described as load-bearing
 when it is not is how a reader comes to trust the wrong thing.
 
+**A second `xtask` lint, owed and this one load-bearing.** *A second decoder*
+below is the reversal condition this decision is least able to watch, because it
+is about code nobody has written. What exists today is a text assertion in
+`abi/src/semantic.rs` over one file — it refuses `Role::ALL` becoming public
+again, and it can refuse nothing else, because `abi` reads that file and links
+no other. What is owed is a workspace-wide refusal of the shape rather than of
+the instance: an index expression into a role array, or a `StateSet::from_bits`
+on bytes that came off a wire, outside the module that declares the list. It
+needs a fixture that drives it red, on the rule this RFC applies to itself
+elsewhere: an owed mechanism with no failing test is a wish. Until it lands, the
+*not representable* claim is guarded against the route that existed and is
+argued, not guarded, against the next one.
+
 ## What would reverse this
 
 **An index moving.** The condition everything above rests on. If a role is ever
@@ -551,17 +655,19 @@ cheap — a way for an author to declare, per node, which older role a newer one
 falls back to — rather than to let the lying continue under a rule that forbids
 it.
 
-**The once-per-epoch clause staying unheld.** Part one says the handshake may
-appear once per channel epoch; today that binds agreements and not attempts, and
-the field that would bind attempts is owed above. The reversal is not the gap —
-the gap is written down — it is the gap outliving the argument for it. If the
-owed `Session` field is not written, the honest edit is to **delete the clause**
-and say in its place that a receiver bounds retries itself, because a rule
-stated and unkept is read by a peer as permission and by a reader as protection,
-and it is the second of those that costs. Watch for it arriving as a comment
-claiming the bound rather than a field holding it: that is how it read before
-this paragraph, and a reviewer had to run a million handshakes to find out
-otherwise.
+**The once-per-epoch clause going back to being unheld.** Part one says the
+handshake may appear once per channel epoch, and for three rounds that bound
+agreements and not attempts while a comment claimed otherwise — a reviewer had to
+run a million handshakes to find out. `Session::refused` holds it now, and the
+reversal is any edit that keeps the clause and drops the field: deleting the
+field, clearing it anywhere but `follow_epoch`, or moving its check below the
+frame poison, which hands the peer its own reset and is the version of this
+defect that would read as a tidy-up. If the field is ever removed, the honest
+edit is to **delete the clause** with it and say in its place that a receiver
+bounds retries itself, because a rule stated and unkept is read by a peer as
+permission and by a reader as protection, and it is the second of those that
+costs. Watch for it arriving as a comment claiming the bound rather than a field
+holding it: that is how it read before, twice.
 
 **Boundary refusals being routine rather than exceptional.** After a handshake, a
 refused frame means a peer sent an ordinal it had just agreed not to send. One is
@@ -585,6 +691,19 @@ recorded under an older vocabulary, a remote projection at a machine boundary
 (`E3-B06h`) — must pass through that same function. A second decoder written for
 one of those routes is this decision reversed, whatever it says about itself,
 because the route it covers is the route the next grey box arrives by.
+
+The cheapest second decoder is not a function somebody writes; it is a container
+somebody indexes, and one was public for three rounds. `Role::ALL[ordinal as
+usize]` needed no new code, no admission and no argument. It is `pub(crate)` now
+and `the_declaring_crate_still_has_exactly_one_route_from_an_ordinal_to_a_role`
+refuses a line that publishes it again — but that test reads one file, and the
+shape it is about is general: `StateSet::from_bits` in the same module keeps
+every bit it is given, and any future `from_bits`, `from_ordinal` or public array
+over a closed enum is the same route under a different name. A workspace lint —
+an `xtask` verb refusing an index expression into a role array, or a raw
+`from_bits` on wire bytes, outside the module that declares the list — is what
+would generalise it, and it is **owed rather than claimed**: this decision is
+guarded against the route that existed and is not guarded against the next one.
 
 **The refusal moving into a projection.** If a version check ever appears inside
 the display, remote, screen-reader or agent projection, then *not representable*

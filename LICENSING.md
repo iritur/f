@@ -39,8 +39,14 @@ second, independent one.
    it. `cargo xtask lint-boundary` reads the **build**: cargo's own resolved view
    of the workspace, every dep-info rustc wrote, and three surfaces that are
    prohibited rather than inspected — the permissive tree carries no build
-   script, no symlink, and no `.cargo/config.toml` row or ambient `RUSTFLAGS`
-   naming the import.
+   script, no symlink, and no `.cargo/config.toml` row that can redirect a
+   build. Each is a prohibition on the *mechanism* and not on a spelling: a
+   build script is refused because cargo resolved a target of kind
+   `custom-build`, whatever the manifest row was called and whatever the file is
+   named, and a configuration row is refused on its key rather than on whether
+   its value happens to contain the word `third_party`. An ambient `RUSTFLAGS`
+   naming the import is refused too, and that one is an inspection, because the
+   environment a command runs in is not this repository's to prohibit.
 
    The split is the point rather than an accident of history. A route can be
    spelled in more ways than a matcher can enumerate — whitespace and comments

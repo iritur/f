@@ -209,6 +209,115 @@ const BUILD_SCRIPT_ALLOW: &[(&str, &str)] = &[];
 /// it without comment.
 const SYMLINK_ALLOW: &[(&str, &str)] = &[];
 
+/// Configuration keys that redirect a build, by their leaf name.
+///
+/// Not a list of routes into the import — a list of the rows that can *make*
+/// one. `rustflags` adds a `-L` or a `--extern`; `linker`, `runner` and the
+/// three wrapper keys put a program of somebody's choosing between cargo and
+/// the object it produces; `paths` is cargo's own source override. Every one of
+/// them reaches the imported tree with a relative path that spells no token a
+/// matcher could match, which is why this rule is about the key and not about
+/// the value.
+///
+/// Two whole tables join them in [`config_row_redirects`] rather than here,
+/// because for those it is the table and not the leaf that decides: `[env]`
+/// sets a variable every build step reads, and `[source]` replaces where a
+/// dependency comes from without changing a character of the manifest that
+/// names it.
+const CONFIG_REDIRECTS: &[&str] = &[
+    "rustflags",
+    "rustdocflags",
+    "rustc",
+    "rustc-wrapper",
+    "rustc-workspace-wrapper",
+    "linker",
+    "runner",
+    "paths",
+];
+
+/// Configuration rows in the permissive tree permitted to redirect a build.
+///
+/// The third allow-list, and the one that is **not** empty. RFC 0092 said all
+/// three were, and that sentence was wrong about this tree in the direction
+/// that matters: for one round there was no configuration allow-list at all and
+/// the rule was an inspection — the row was refused if its *value* contained
+/// the string `third_party`, so a `[source]` replacement, an `[env]` row, a
+/// linker wrapper or a relative `-L` reaching the import passed. Prohibiting the
+/// key closes the family; inspecting the value closes one spelling, which is the
+/// whole argument RFC 0092 makes about build scripts, applied to the surface it
+/// did not apply it to.
+///
+/// Two rows, and the reason each is here is in `.cargo/config.toml` beside it
+/// rather than repeated: both carry `-Zremap-cwd-prefix=.`, without which the
+/// checkout path reaches a build product and `E0-R01`'s reproduction claim is
+/// false, and the second carries the kernel image's link arguments, without
+/// which the image links as a static-PIE at vaddr 0. `cargo xtask lint-remap` is
+/// what keeps the two lists agreeing about the remap; this is what keeps a third
+/// row from arriving without an argument.
+///
+/// *What would reverse this:* a third row. It costs an entry here with a reason,
+/// which is the price the emptiness of the other two lists charges for free.
+/// The routes `lint-boundary` cannot see, declared rather than checked.
+///
+/// `RING_PROOF_BLIND` is the shape this copies, one rule over: a declared set,
+/// printed in the success line, with a test that every entry still names
+/// something real. Without one, the clause *a fixture recording each of the
+/// three routes it cannot see* is discharged by prose in RFC 0092 and
+/// `LICENSING.md` — and prose is exactly what can be deleted, closed, or joined
+/// by a fourth with nothing going red. That is the definition of decoration,
+/// and it is what the fourth adversarial round found here.
+///
+/// Each entry is `(what the nets cannot see, the sentence in LICENSING.md that
+/// says so)`. The second half is what ties this list to the normative document
+/// rather than to an argument about it: `LICENSING.md` rule 4 is what a reader
+/// is sent to, so an entry deleted there and left here — or here and left there
+/// — is a red test rather than a reader’s discovery.
+///
+/// Three fixtures below exercise these mechanisms and assert the nets are
+/// **silent**. That direction is deliberate and it is the only direction that
+/// makes a declared gap self-removing: a residue somebody actually closes turns
+/// its fixture red, and the repair is to delete the entry rather than to
+/// discover years later that the list was stale. RFC 0092’s *What would reverse
+/// this* expects two of the three to close.
+const BOUNDARY_BLIND: &[(&str, &str)] = &[
+    (
+        "a configuration `lint` never compiles — anything behind `cfg(target_arch = \
+         \"aarch64\")` or an off-by-default feature. `lint_style` clippies the host world and \
+         `x86_64-unknown-none`; the AArch64 world is compiled by `cargo xtask test`, and its \
+         dep-info is therefore not among the ones these nets read",
+        "a route behind a configuration `lint` never compiles",
+    ),
+    (
+        "a proc macro that reads an imported file at expansion time — the bytes reach the \
+         crate without the file becoming a prerequisite of it, so rustc’s own answer to \
+         *what did you read* does not name it. Nothing here prohibits a proc macro the way \
+         build scripts are prohibited, which is what closing this would cost",
+        "a proc macro that reads an imported file at expansion time",
+    ),
+    (
+        "a copy taken from somewhere that is not `third_party/` — by registry name on a \
+         vendored crate, or by path into a `vendor/` directory of its own. Every net here \
+         asks whether a path has a `third_party` component, so a copy outside it is invisible \
+         by construction. That is `deny.toml`’s ground and outside this exit’s own words",
+        "a copy taken by registry name from somewhere that is not `third_party/`",
+    ),
+];
+
+const CONFIG_ALLOW: &[(&str, &str, &str)] = &[
+    (
+        ".cargo/config.toml",
+        "build.rustflags",
+        "`-Zremap-cwd-prefix=.`, the reproduction flag. Without it the same commit \
+         produced two frame leaves at two checkout paths",
+    ),
+    (
+        ".cargo/config.toml",
+        "target.x86_64-unknown-none.rustflags",
+        "the same remap, repeated because cargo replaces rather than merges the two \
+         lists, plus the kernel image's relocation model, code model and linker script",
+    ),
+];
+
 const TOOLING: &[(&str, &str)] = &[(
     "xtask/",
     "build tooling: it runs outside the system under test, and it contains the \
@@ -15445,6 +15554,26 @@ const THE_ONE_READING: (&str, &str) = ("input/src/stamp.rs", "at_interrupt");
 /// `NOT_THE_FRAME`'s reason: a crate renamed out from under a row leaves a rule
 /// that cannot fail, which reads exactly like a rule that is holding.
 ///
+/// That is one direction and for three rounds it was the only one, which made
+/// this list a hand-written set of prefixes with nothing checking it for
+/// completeness — the exact defect `PORTABILITY` was rewritten to remove, in
+/// the file that removed it. [`classify`] reads the workspace and refuses a
+/// member with no row as well as a row with no member;
+/// [`input_path_membership_findings`] is the same second direction here, over
+/// [`ON_THE_PATH`] rather than over `members`, and `abi/` is the row it was
+/// written after: the stamp's wire form is `abi::input::Event::stamp_nanos`
+/// and the list did not name the crate that declares it.
+///
+/// What a row does **not** assert is that the crate under it can hold a clock
+/// reading at all. Three of the four cannot today — `abi/`, `interface/` and
+/// `scene/` depend on neither `f-env` nor `f-input`, so in those crates there
+/// is no expression that both reads a clock and compiles. Those rows are held
+/// open in advance rather than checked, [`stage_reach`] is what computes which
+/// is which, and `lint-stamp` prints the answer on every green run so that a
+/// reader of the log is told the difference instead of counting stages. A rule
+/// that cannot say which of its subjects are real is the vacuity this file
+/// keeps finding one layer down from where it was looking.
+///
 /// The driver joins this list at `E3-B04d`, when there is one. Until then the
 /// interrupt-time caller is a description in `input/src/stamp.rs` rather than
 /// code, and this list says what it covers rather than what it intends to.
@@ -15454,6 +15583,13 @@ const INPUT_PATH: &[(&str, &str)] = &[
         "the stamp itself and everything derived from it. The prediction forward to \
          the next scanout is this number plus a velocity, so a second clock here is \
          a prediction about a different event",
+    ),
+    (
+        "abi/",
+        "the stamp's wire form. `abi::input::Event::stamp_nanos` is the field the \
+         number crosses a trust boundary in, and `E3-B04b` puts the encoder and \
+         the decoder either side of it, so a clock read here would be a stamp \
+         minted during the crossing rather than carried across it",
     ),
     (
         "interface/",
@@ -15469,6 +15605,43 @@ const INPUT_PATH: &[(&str, &str)] = &[
          is; the row exists so that the day something does, the diff says so",
     ),
 ];
+
+/// What a crate carries when it is on the input path, and what the text means.
+///
+/// The needles are the stamp's own vocabulary: the crate that takes it, the
+/// type it is held in, and the field it crosses a wire in. A crate whose
+/// manifest or source contains one of these is handling an input timestamp,
+/// whatever its directory is called, and [`INPUT_PATH`] is refused unless it
+/// has a row for it.
+///
+/// This is deliberately a *text* question rather than a dependency-graph one,
+/// and the reason is the graph's own gap: `abi/` declares `stamp_nanos` and
+/// depends on nothing, so no edge leads to it from `f-input` — the edge points
+/// the other way. A crate that names the stamp is on the path whether or not
+/// cargo can see a route to it.
+///
+/// *Reversal:* a crate that mentions one of these words and genuinely does not
+/// handle a stamp — prose about the rule in a crate that is not subject to it.
+/// The answer is a row in [`INPUT_PATH`] saying that crate is on the path and
+/// why the reading in it is the one reading, or a needle here that is narrower;
+/// it is not an allow-list, for the reason [`INPUT_PATH`]'s own doc gives.
+const ON_THE_PATH: &[(&str, &str)] = &[
+    ("f-input", "a manifest row taking the crate that holds the one reading"),
+    ("f_input", "a use of that crate from source"),
+    ("StampNanos", "the stamp's type, so this crate holds an input timestamp"),
+    ("stamp_nanos", "the stamp's wire field, so this crate encodes or decodes one"),
+];
+
+/// What a manifest says when the crate it describes can read a clock at all.
+///
+/// `f-env` is the only sanctioned clock in this workspace and `f-input` is the
+/// only crate that wraps one, so a crate whose manifest names neither has no
+/// expression in it that both reads a clock and compiles. That is not a reason
+/// to drop its [`INPUT_PATH`] row — the row is what makes the day it grows a
+/// dependency a red build — but it *is* the difference between a stage this
+/// rule checks and a stage it is holding a place for, and [`stage_reach`] is
+/// where the difference is computed rather than assumed.
+const A_CLOCK_IN_REACH: &[&str] = &["f-env", "f-input"];
 
 /// What a clock reading looks like in source, and why each spelling counts.
 ///
@@ -15521,6 +15694,24 @@ const CLOCK_READS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// The one constructor that turns a bare `u64` into a stamp, and the text that
+/// means a line defines it rather than calls it.
+///
+/// `input/src/stamp.rs` calls this "the one hole in the type's story" and it is
+/// right: `StampNanos` has a private field and no `From<u64>`, so
+/// `from_wire_nanos` is the only route from a number to a stamp, and a caller
+/// that hands it a clock reading of its own has minted a second time source
+/// with the type system's blessing.
+///
+/// For three rounds this file told the next reader the opposite — that "the
+/// value such a helper returns still cannot become a `StampNanos`, because that
+/// type has no constructor which takes one" — which is refuted by the
+/// constructor's own signature two crates away. The sentence was the only thing
+/// standing between the helper route and a second reading, so it is deleted and
+/// the route is checked instead, at the argument site.
+///
+const WIRE_MINT: (&str, &str) = ("from_wire_nanos(", "fn from_wire_nanos(");
+
 /// E3-B04a. The input path reads a clock exactly once.
 ///
 /// # Why this is a new lint and not one more row in `DETERMINISM_ALLOW`
@@ -15561,9 +15752,27 @@ const CLOCK_READS: &[(&str, &str, &str)] = &[
 /// the call, and if that helper lived off the path it would not report it at
 /// all. The needles are spellings, not semantics, which is the same limit
 /// [`SHARED_STATE`] states about itself and is worth stating rather than
-/// pretending closed. What keeps that honest is that the value such a helper
-/// returns still cannot become a `StampNanos`, because that type has no
-/// constructor which takes one.
+/// pretending closed.
+///
+/// What used to stand here was the sentence that kept that honest: the value
+/// such a helper returns "still cannot become a `StampNanos`, because that type
+/// has no constructor which takes one". It is false and it was the load-bearing
+/// half of the paragraph. `f_input::StampNanos::from_wire_nanos` is `pub const
+/// fn(u64) -> Self`, and the module that defines it calls it "the one hole in
+/// the type's story" on the line above — so the two halves of one argument
+/// contradicted each other in two files and the wrong half was the one a
+/// reviewer was being asked to rely on. The sentence is deleted and the hole is
+/// checked instead, at the argument site: [`WIRE_MINT`] refuses any argument to
+/// that constructor which is not a field read or a literal, so
+/// `from_wire_nanos(helper(env))` is a finding whatever `helper` is called and
+/// wherever it lives.
+///
+/// What survives that is the two-statement spelling — a number bound to a name
+/// and then read back out of a struct field: `let n = helper(env); Wire { n }`,
+/// then `from_wire_nanos(wire.n)`. Following a value across statements is a
+/// dataflow question and this is a scanner, so it is stated rather than
+/// pretended closed. It is a longer route than it was: it now costs a struct, a
+/// field and three lines that say what they are doing, in a diff.
 ///
 /// Two spellings of a clock read survive the needles and are named because a
 /// reviewer wrote them: `e . now ()` with spaces around the dot, and the same
@@ -15589,32 +15798,98 @@ const CLOCK_READS: &[(&str, &str, &str)] = &[
 /// file alone re-blinds the second and leaves the first green, so the first
 /// alone documented a guard it did not provide.
 ///
-/// Nor does it see a crate *off* the path calling `at_interrupt`. That is not a
-/// hole so much as a definition: a crate that stamps input events is on the
-/// input path, and the repair is the row it is missing from [`INPUT_PATH`]
-/// rather than a needle here. `f-input`'s reverse dependencies are the place to
-/// look, and there is exactly one crate in this workspace that may grow them —
-/// the driver at `E3-B04d`, which joins the list when it exists.
+/// A crate *off* the path calling `at_interrupt` is not a hole so much as a
+/// definition: a crate that stamps input events is on the input path, and the
+/// repair is the row it is missing from [`INPUT_PATH`] rather than a needle
+/// here. That used to be the whole answer, and it was an answer with nothing
+/// behind it — the row was missing and nothing said so.
+/// [`input_path_membership_findings`] is what says so now: it reads every
+/// workspace member's manifest and sources for [`ON_THE_PATH`]'s vocabulary and
+/// refuses one that has no row. `abi/` was such a member for three rounds.
+///
+/// Membership is otherwise decided by where a file sits on disk, and a file's
+/// directory is not the crate that compiles it. `#[path]` and `include!` both
+/// break that, both are permitted in this tree, and this repository has already
+/// had imported source compiled into a permissive crate by the first of them —
+/// which is why [`path_attr_findings`] exists one screen down.
+/// [`compiled_in_findings`] closes the same route here with a different
+/// predicate: a `#[path]` on this path may only reach further *into* its own
+/// crate, and an `include!` is refused outright, because it compiles code out
+/// of a file this rule decides membership for by extension and would not read.
 fn lint_stamp() -> Result<(), String> {
+    let manifest = std::fs::read_to_string(root().join("Cargo.toml"))
+        .map_err(|e| format!("reading the workspace manifest: {e}"))?;
+
+    // One text per workspace member — its manifest, then every source under it
+    // — because *is this crate on the input path* is a question about a crate
+    // and the answer may be written in either place. `xtask` is dropped for
+    // `is_tooling`'s reason: it contains the needles this check searches for,
+    // in the fixtures that make the check fail.
+    let mut carried: Vec<(String, String)> = Vec::new();
+    for dir in member_paths(&manifest)? {
+        let prefix = format!("{dir}/");
+        if is_tooling(&prefix) {
+            continue;
+        }
+        let text = std::fs::read_to_string(root().join(&dir).join("Cargo.toml"))
+            .map_err(|e| format!("the workspace names `{dir}` and reading its manifest: {e}"))?;
+        carried.push((prefix, text));
+    }
+    // Taken before the sources are folded in, because *can this stage reach a
+    // clock* is a question about dependency rows and a source that merely
+    // mentions `f-env` in prose is not one.
+    let manifests = carried.clone();
+
     let mut files = Vec::new();
     for path in rust_sources()? {
         let rel = relative(&path);
-        if !INPUT_PATH.iter().any(|(prefix, _)| rel.starts_with(prefix)) {
+        let on_path = INPUT_PATH.iter().any(|(prefix, _)| rel.starts_with(prefix));
+        let member = carried.iter_mut().find(|(prefix, _)| rel.starts_with(prefix.as_str()));
+        if !on_path && member.is_none() {
             continue;
         }
         let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
-        files.push((rel, text));
+        if let Some((_, into)) = member {
+            into.push('\n');
+            into.push_str(&text);
+        }
+        if on_path {
+            files.push((rel, text));
+        }
     }
     let view: Vec<(&str, &str)> =
         files.iter().map(|(rel, text)| (rel.as_str(), text.as_str())).collect();
+    let members: Vec<(&str, &str)> =
+        carried.iter().map(|(dir, text)| (dir.as_str(), text.as_str())).collect();
+    let rows: Vec<(&str, &str)> =
+        manifests.iter().map(|(dir, text)| (dir.as_str(), text.as_str())).collect();
 
-    let findings = stamp_findings(&view);
+    let reach = stage_reach(&rows);
+    let mut findings = stamp_findings(&view);
+    findings.extend(input_path_membership_findings(&members));
+    findings.extend(reach_findings(&reach));
+
     if findings.is_empty() {
         println!(
             "lint-stamp: ok  (one clock reading, in {}, across {} stage(s) of the input path)",
             THE_ONE_READING.0,
             INPUT_PATH.len()
         );
+        // Which of those stages this rule is actually checking, printed green as
+        // well as red for `portability_report`'s reason: the stages that cannot
+        // hold a clock are the deliverable, because counting stages is what let
+        // three rounds read a vacuous clause as a covered one.
+        for ((prefix, _), can) in INPUT_PATH.iter().zip(&reach) {
+            if *can {
+                println!("  {prefix}  reaches a clock, so a second reading here compiles");
+            } else {
+                println!(
+                    "  {prefix}  reaches no clock: nothing under it depends on {}, so \
+                     this row is held open rather than checked",
+                    A_CLOCK_IN_REACH.join(" or ")
+                );
+            }
+        }
         return Ok(());
     }
     Err(format!(
@@ -15721,6 +15996,34 @@ fn stamp_findings(files: &[(&str, &str)]) -> Vec<String> {
                         findings.push(format!("  {rel}:{}  `{needle}` — {why}", n + 1));
                     }
                 }
+
+                // The mint site. A clock reading reaches a `StampNanos` only
+                // through [`WIRE_MINT`], so the argument is where the helper
+                // route is closed — and the definition of the constructor is
+                // not a call to it, on the same terms and for the same reason
+                // as `at_interrupt`'s row above.
+                if !(is_source && code.contains(WIRE_MINT.1)) {
+                    for argument in wire_mint_arguments(&code) {
+                        let shown = argument
+                            .as_deref()
+                            .unwrap_or("<an argument that does not close on this line>");
+                        if argument.as_deref().is_some_and(is_a_decoded_field) {
+                            continue;
+                        }
+                        findings.push(format!(
+                            "  {rel}:{}  `{}` is handed `{shown}` — a stamp rebuilt from \
+                             the wire is a field read, and anything else here is a number \
+                             this stage computed, which is a second time source wearing \
+                             the decoder's signature",
+                            n + 1,
+                            WIRE_MINT.0
+                        ));
+                    }
+                }
+
+                // The raw line and not `code`: the value this reads is a string
+                // literal, which `strip_to_code` replaces with a placeholder.
+                findings.extend(compiled_in_findings(rel, raw, n));
             }
 
             let opened = code.matches('{').count() as i64;
@@ -15781,9 +16084,233 @@ fn stamp_findings(files: &[(&str, &str)]) -> Vec<String> {
     findings
 }
 
+/// Every argument a line hands to [`WIRE_MINT`], as written.
+///
+/// `None` in a slot means the call's parentheses did not close on this line,
+/// which is a finding rather than a skip: an argument that needs two lines is
+/// either long enough to be worth reading or spread out enough to be worth
+/// asking about, and going quiet on it is how the last blind spot was built.
+fn wire_mint_arguments(code: &str) -> Vec<Option<String>> {
+    let (needle, _) = WIRE_MINT;
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(at) = code[from..].find(needle) {
+        let open = from + at + needle.len();
+        from = open;
+        let mut depth = 1i64;
+        let mut closed = None;
+        for (i, byte) in code[open..].bytes().enumerate() {
+            match byte {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        closed = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match closed {
+            Some(end) => {
+                out.push(Some(code[open..end].to_string()));
+                from = end;
+            }
+            None => out.push(None),
+        }
+    }
+    out
+}
+
+/// Whether an argument to [`WIRE_MINT`] is a number that was *read* rather than
+/// one that was *computed*.
+///
+/// A field read — `entry.stamp_nanos`, `self.nanos` — or a literal. Nothing
+/// else, and in particular not a bare local: `from_wire_nanos(nanos)` is
+/// refused even though it is the spelling a careful decoder would reach for
+/// first, because a local is where a helper's return value lands and the whole
+/// point of this predicate is that a helper's return value cannot get in. The
+/// decoder that is refused here has one line to change — pass the field — and
+/// the second time source that is refused here has a struct to invent.
+///
+/// *Reversal:* a decode that genuinely cannot name a field, which would be a
+/// wire format arriving as a loose `u64` rather than as `abi::input::Event`. On
+/// that day the argument is a row, and the row goes in [`INPUT_PATH`] saying
+/// which crate decodes it rather than in an allow-list here, for the reason
+/// that doc gives.
+fn is_a_decoded_field(argument: &str) -> bool {
+    let argument = argument.trim();
+    if argument.is_empty() {
+        return false;
+    }
+    let shaped = argument.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.');
+    let literal = argument.bytes().all(|b| b.is_ascii_digit() || b == b'_');
+    shaped && (literal || argument.contains('.'))
+}
+
+/// A file compiled into an on-path crate from somewhere this rule would not
+/// read.
+///
+/// The lint decides crate membership by where a file sits on disk, and a file's
+/// directory is not the crate that compiles it. `#[path]` and `include!` are
+/// the two spellings of that gap in this language, both are permitted here, and
+/// this repository has already had a reviewer compile source across a boundary
+/// with the first of them — [`path_attr_findings`] is the scanner written after
+/// it, over the same grammar, with a different predicate on the value.
+///
+/// The predicate here is *downward*: a `#[path]` value may reach further into
+/// the crate's own directory and nowhere else, so it is refused when it climbs
+/// out with `..`, when it is absolute, or when it is spelled with a backslash.
+/// Lexical rather than resolved, for [`reaches_import`]'s reason exactly — the
+/// fixture is a string and the tree is a file, and a check whose fixture takes
+/// a different code path is a fixture that proves the fixture.
+/// `abi/src/objects.rs` is the shape this permits and is what it was measured
+/// against.
+///
+/// `include!` is refused outright, with no value test at all. It compiles code
+/// out of a file whose membership this rule decides by extension —
+/// [`rust_sources`] collects `.rs` and nothing else, so `include!("tick.in")`
+/// is code on the input path that no needle in this file will ever run over.
+/// `include_str!` and `include_bytes!` are not this: they embed bytes, they do
+/// not compile them, and three crates on this path already use the first to
+/// hold a claim file against its own text.
+///
+/// *Reversal:* a stage that genuinely needs generated code — a table built by a
+/// build script, say. `BUILD_SCRIPT_ALLOW` is empty and RFC 0092 is why, so
+/// that day starts somewhere else; when it comes, the clock reading this rule
+/// cares about is in the generator and the row belongs there.
+fn compiled_in_findings(rel: &str, raw: &str, line: usize) -> Vec<String> {
+    let mut findings = Vec::new();
+    let trimmed = raw.trim_start();
+    // Prose about the rule is not the rule being broken, on
+    // [`path_attr_findings`]'s terms and with its limit: an attribute inside a
+    // block comment is not seen, and a route that needs one to hide is a route
+    // a reviewer reading the diff will see.
+    if trimmed.starts_with("//") || trimmed.starts_with('*') {
+        return findings;
+    }
+    if let Some(at) = trimmed.find("#[") {
+        // Past the `#[`, so the slice opens on the key rather than on the
+        // bracket. [`path_key_values`] decides what is a whole key by the byte
+        // in front of it, a rule written for TOML rows where `manifest-path`
+        // is not `path`; the bracket is the one byte in front of a key that is
+        // neither a key byte nor whitespace, so it is the byte that rule has
+        // the least reason to have an opinion about. Handing it a slice that
+        // starts at the key takes the question away, and it costs nothing:
+        // `a_path_key_inside_a_cfg_attr_is_still_this_key` is the fixture that
+        // a key further along an attribute is found either way.
+        for value in path_key_values(&trimmed[at + 2..]) {
+            let climbs = value.split('/').any(|part| part == "..")
+                || value.starts_with('/')
+                || value.contains('\\');
+            if climbs {
+                findings.push(format!(
+                    "  {rel}:{}  `#[path]` compiles `{value}` into this crate from outside \
+                     its own directory. Membership on the input path is decided by where a \
+                     file sits, so a file compiled in from elsewhere is a stage of the path \
+                     that no needle here runs over",
+                    line + 1
+                ));
+            }
+        }
+    }
+    if trimmed.contains("include!(") {
+        findings.push(format!(
+            "  {rel}:{}  `include!` compiles code this rule never reads: the file list is \
+             `.rs` files found by walking directories, and an included file is neither \
+             walked to nor necessarily named `.rs`",
+            line + 1
+        ));
+    }
+    findings
+}
+
+/// [`INPUT_PATH`] and the workspace, checked in the direction the list cannot
+/// check itself.
+///
+/// `members` is every workspace member except the tooling, as `(directory with
+/// its trailing slash, its manifest and every source under it, joined)`.
+///
+/// The check that was already here is *a row that matches no source*, which
+/// catches a crate renamed out from under a row. This is the other direction
+/// and it is the one that was missing for three rounds: *a crate on the path
+/// with no row*. A crate with no row is never read, so every needle in this
+/// file passes over it and `lint-stamp` prints `ok` — which is the same
+/// sentence it prints when the path is clean. [`classify`] has had both
+/// directions since RFC 0045 and this is that shape, over [`ON_THE_PATH`]'s
+/// vocabulary instead of over `members`.
+fn input_path_membership_findings(members: &[(&str, &str)]) -> Vec<String> {
+    let mut findings = Vec::new();
+    for (dir, carried) in members {
+        if INPUT_PATH.iter().any(|(prefix, _)| dir.starts_with(prefix)) {
+            continue;
+        }
+        for (needle, why) in ON_THE_PATH {
+            if !carried.contains(needle) {
+                continue;
+            }
+            findings.push(format!(
+                "  {dir}  handles an input timestamp and has no INPUT_PATH row: it carries \
+                 `{needle}`, which is {why}. A row is what puts a crate's sources under the \
+                 needles, so without one this rule reads none of them and reports `ok` in \
+                 the same words it uses for a path that is clean"
+            ));
+            break;
+        }
+    }
+    findings
+}
+
+/// Which stages of [`INPUT_PATH`] can hold a clock reading at all today.
+///
+/// `manifests` is every non-tooling workspace member as `(directory with its
+/// trailing slash, its manifest)`. A stage can reach a clock when some member
+/// under it names one of [`A_CLOCK_IN_REACH`].
+///
+/// This exists because *one time source in the whole path* is also true of a
+/// path that carries nothing, and counting stages cannot tell the two apart. A
+/// stage whose crates depend on neither `f-env` nor `f-input` holds no
+/// expression that reads a clock and compiles, so no single-file diff can make
+/// this rule fire there — the row is a place held open for the day the
+/// dependency arrives, and saying so out loud is the difference between a guard
+/// and a decoration.
+fn stage_reach(manifests: &[(&str, &str)]) -> Vec<bool> {
+    INPUT_PATH
+        .iter()
+        .map(|(prefix, _)| {
+            manifests.iter().any(|(dir, text)| {
+                dir.starts_with(prefix) && A_CLOCK_IN_REACH.iter().any(|dep| text.contains(dep))
+            })
+        })
+        .collect()
+}
+
+/// The one thing [`stage_reach`] refuses rather than reports.
+///
+/// A path where no stage can reach a clock is a rule with no subject: every
+/// clause below it passes, the count of readings in the source file is zero or
+/// the file is gone, and `lint-stamp` prints the same sentence it prints when
+/// the path is clean. One stage that can hold a reading is the minimum for this
+/// check to be a check, and today exactly one does.
+fn reach_findings(reach: &[bool]) -> Vec<String> {
+    if reach.iter().any(|can| *can) {
+        return Vec::new();
+    }
+    vec![format!(
+        "  INPUT_PATH  no stage of the input path can reach a clock: no crate under any row \
+         depends on {}. Every clause of this rule then passes over a path where a second \
+         reading is not an expression that compiles, which is a green build and no evidence",
+        A_CLOCK_IN_REACH.join(" or ")
+    )]
+}
+
 #[cfg(test)]
 mod one_clock_on_the_input_path {
-    use super::{INPUT_PATH, lint_stamp, stamp_findings};
+    use super::{
+        INPUT_PATH, input_path_membership_findings, lint_stamp, reach_findings, stage_reach,
+        stamp_findings,
+    };
 
     /// `input/src/stamp.rs` in the shape the rule passes: one reading, in the
     /// one function, with the spelling in prose above it that must not count.
@@ -15810,12 +16337,19 @@ pub fn latency_nanos(latched: StampNanos, event: StampNanos) -> u64 {
 
     /// The whole path, held. One file per stage, because a stage with no file
     /// is itself a finding.
+    ///
+    /// `abi/` is last rather than second because the tests below index this
+    /// vector, and a row inserted in the middle would silently repoint every
+    /// fixture written before it at a different stage — which is the shape of
+    /// change that leaves a suite green and its assertions about something
+    /// else.
     fn held() -> Vec<(&'static str, &'static str)> {
         vec![
             ("input/src/stamp.rs", SOURCE_HELD),
             ("input/src/predict.rs", STAGE_HELD),
             ("interface/src/ladder.rs", STAGE_HELD),
             ("scene/src/commit.rs", STAGE_HELD),
+            ("abi/src/input.rs", STAGE_HELD),
         ]
     }
 
@@ -16057,6 +16591,192 @@ pub fn latency_nanos(latched: StampNanos, event: StampNanos) -> u64 {
     }
 
     #[test]
+    fn a_stamp_minted_from_a_number_this_stage_computed_is_a_finding() {
+        // The route the doc above used to call closed. `StampNanos` has a
+        // private field and no `From<u64>`, and for three rounds `lint_stamp`
+        // told its reader that this was enough — "that type has no constructor
+        // which takes one" — while `from_wire_nanos` sat two crates away being
+        // exactly that constructor. The helper is off the path, so no needle in
+        // `CLOCK_READS` sees it; `f_env::nanos_now(` does not contain `::now`,
+        // which is the point of spelling it that way here. What catches it is
+        // the argument.
+        let mut files = held();
+        files[2] = (
+            "interface/src/ladder.rs",
+            "pub fn latch(env: &dyn Env) -> StampNanos {\n\
+             \x20   StampNanos::from_wire_nanos(f_env::nanos_now(env))\n\
+             }\n",
+        );
+        let findings = stamp_findings(&files);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].starts_with("  interface/src/ladder.rs:2"), "{}", findings[0]);
+        assert!(findings[0].contains("from_wire_nanos("), "{}", findings[0]);
+    }
+
+    #[test]
+    fn a_stamp_decoded_out_of_a_wire_field_is_not() {
+        // The other direction, and the reason the rule is about the argument
+        // rather than about the call: the receive half of the round trip is
+        // what this constructor exists for, and a check that refused it would
+        // be a check somebody deletes. A field read is permitted, a literal is
+        // permitted, and a computation is not.
+        let mut files = held();
+        files[3] = (
+            "scene/src/commit.rs",
+            "pub fn decode(entry: &Event) -> StampNanos {\n\
+             \x20   StampNanos::from_wire_nanos(entry.stamp_nanos)\n\
+             }\n",
+        );
+        assert_eq!(stamp_findings(&files), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_bare_local_handed_to_the_wire_mint_is_refused_because_that_is_where_a_helper_lands() {
+        // `is_a_decoded_field`'s strictness, exercised rather than asserted: a
+        // local is one statement away from anything at all, including a clock,
+        // so the number this constructor accepts has to be one it can see being
+        // read. The decoder that this inconveniences has one line to change.
+        let mut files = held();
+        files[1] = (
+            "input/src/predict.rs",
+            "pub fn decode(nanos: u64) -> StampNanos { StampNanos::from_wire_nanos(nanos) }\n",
+        );
+        let findings = stamp_findings(&files);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("is handed `nanos`"), "{}", findings[0]);
+    }
+
+    #[test]
+    fn the_source_file_may_still_define_the_wire_mint() {
+        // `SOURCE_HELD`'s last line is that definition, whose argument list is
+        // `nanos: u64` and would be a finding if the definition were read as a
+        // call. The exclusion is scoped to the source file for `CLOCK_READS`'s
+        // reason exactly — off it, a second `fn from_wire_nanos` is a second
+        // way to conjure a stamp and is the finding rather than the excuse.
+        assert_eq!(stamp_findings(&held()), Vec::<String>::new());
+        assert!(SOURCE_HELD.contains("fn from_wire_nanos("), "the fixture lost the definition");
+
+        let mut files = held();
+        files[2] = (
+            "interface/src/ladder.rs",
+            "pub const fn from_wire_nanos(nanos: u64) -> StampNanos { StampNanos { nanos } }\n",
+        );
+        let findings = stamp_findings(&files);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("from_wire_nanos("), "{}", findings[0]);
+    }
+
+    #[test]
+    fn a_file_compiled_in_from_outside_the_crate_is_a_finding() {
+        // Membership is decided by where a file sits on disk, and `#[path]`
+        // decides what a crate compiles. The two disagree, and this repository
+        // has already had a reviewer exploit that disagreement against the
+        // licence boundary — `#[path = "../../third_party/…"]`, which is why
+        // `path_attr_findings` exists. The same attribute pointed at `env/`
+        // puts a clock reading inside `f-input` from a file `INPUT_PATH` does
+        // not cover, and every needle here runs over the wrong text.
+        let mut files = held();
+        files[1] = ("input/src/predict.rs", "#[path = \"../../env/src/tick.rs\"]\nmod tick;\n");
+        let findings = stamp_findings(&files);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].starts_with("  input/src/predict.rs:1"), "{}", findings[0]);
+        assert!(findings[0].contains("env/src/tick.rs"), "{}", findings[0]);
+    }
+
+    #[test]
+    fn a_path_attribute_that_reaches_further_into_its_own_crate_is_not() {
+        // `abi/src/objects.rs` does this and is on the path, so a rule that
+        // refused every `#[path]` would be red on the tree it ships with — and
+        // a rule that is red on the shipped tree is a rule somebody deletes
+        // rather than argues with. Downward is the predicate, not absence.
+        let mut files = held();
+        files[4] = ("abi/src/input.rs", "#[path = \"input/entry.rs\"]\nmod entry;\n");
+        assert_eq!(stamp_findings(&files), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_include_compiles_code_no_needle_here_will_ever_read() {
+        // Worse than the `#[path]` route rather than a variant of it: the file
+        // list is `.rs` files found by walking directories, so `tick.in` is not
+        // collected at all and its contents are on the input path without ever
+        // having been a file this rule could open.
+        let mut files = held();
+        files[3] = ("scene/src/commit.rs", "include!(\"tick.in\");\n");
+        let findings = stamp_findings(&files);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("include!"), "{}", findings[0]);
+    }
+
+    #[test]
+    fn a_claim_file_read_as_text_is_not_code_compiled_in() {
+        // `interface/src/ladder.rs` and `abi/src/participate.rs` both hold a
+        // claim or an RFC against its own text this way. `include_str!` embeds
+        // bytes and compiles nothing, so a rule that refused it would be red on
+        // three crates of the four it covers.
+        let mut files = held();
+        files[2] = (
+            "interface/src/ladder.rs",
+            "const CLAIM: &str = include_str!(\"../../claims/0033-raster-cost-per-rung.toml\");\n",
+        );
+        assert_eq!(stamp_findings(&files), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_crate_that_handles_the_stamp_and_has_no_row_is_a_finding() {
+        // The direction `INPUT_PATH` could not check about itself, and the
+        // crate it was missing: `abi/` declares `Event::stamp_nanos`, which is
+        // the form the stamp crosses a trust boundary in, and for three rounds
+        // no row named it — so no file under `abi/` was ever read and
+        // `lint-stamp` printed `ok` in the same words it uses for a clean path.
+        let findings = input_path_membership_findings(&[
+            ("input/", "f-env.workspace = true"),
+            ("env/", "pub trait Env {}"),
+            ("objects/", "pub struct Event { pub stamp_nanos: u64 }"),
+        ]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].starts_with("  objects/"), "{}", findings[0]);
+        assert!(findings[0].contains("stamp_nanos"), "{}", findings[0]);
+    }
+
+    #[test]
+    fn the_workspace_this_ships_with_has_a_row_for_every_crate_that_holds_a_stamp() {
+        // The wiring, not the mechanism. `lint_stamp` is what reads the real
+        // manifests and sources, and the fixture above would be green on a
+        // workspace where `ON_THE_PATH` matched nothing real.
+        lint_stamp().expect("every crate on the input path has a row");
+    }
+
+    #[test]
+    fn a_stage_reaches_a_clock_only_if_something_under_it_depends_on_one() {
+        // What `INPUT_PATH.len()` cannot say. Three of this tree's four stages
+        // depend on neither `f-env` nor `f-input`, so in those crates there is
+        // no expression that both reads a clock and compiles — the rows are
+        // held open for `E3-B04d` rather than checked, and the green run prints
+        // which is which instead of counting stages.
+        let manifests: Vec<(&str, &str)> = INPUT_PATH
+            .iter()
+            .map(|(prefix, _)| {
+                (*prefix, if *prefix == "input/" { "f-env.workspace = true" } else { "" })
+            })
+            .collect();
+        let reach = stage_reach(&manifests);
+        assert_eq!(reach.iter().filter(|can| **can).count(), 1, "{reach:?}");
+        assert!(reach[INPUT_PATH.iter().position(|(p, _)| *p == "input/").expect("a row")]);
+    }
+
+    #[test]
+    fn a_path_no_stage_of_which_can_reach_a_clock_is_a_rule_with_no_subject() {
+        // The vacuity clause, which is the one thing `stage_reach` refuses
+        // rather than reports. Every other clause of this rule passes over such
+        // a path — zero readings is a finding, but a path with no crate that
+        // can hold one arrives at that finding for a reason nobody chose.
+        assert!(reach_findings(&[true, false, false]).is_empty());
+        let findings = reach_findings(&[false, false, false]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("no stage of the input path can reach a clock"));
+    }
+
+    #[test]
     fn the_tree_this_ships_with_reads_a_clock_once_on_the_input_path() {
         // The fixtures above prove the scan can fail; this proves the scan is
         // pointed at the tree and the tree passes it. A fixture-only test would
@@ -16075,6 +16795,20 @@ pub fn latency_nanos(latched: StampNanos, event: StampNanos) -> u64 {
 /// `../third_party/shaper` from a crate one directory down — is the same
 /// finding as one that spells it from the root.
 const IMPORTED: &str = "third_party";
+
+/// The `kind` cargo gives a build-script target in `cargo metadata`’s output,
+/// and the field that follows it there.
+///
+/// Two string constants rather than a JSON parser, and the reason is the one
+/// RFC 0092 gives for not writing a Rust parser: the question asked of this
+/// document is *does a package here have a build script at all*, which is a
+/// yes/no over a token cargo emits, and a parser would be a model of a format
+/// whose producer is already trusted. The field order is cargo’s — `kind`,
+/// `crate_types`, `name`, `src_path` — so the forward search lands inside the
+/// same target object. If cargo reorders them the path goes wrong and the
+/// finding still fires, which is the safe direction for a prohibition.
+const CUSTOM_BUILD: &str = "\"custom-build\"";
+const SRC_PATH: &str = "\"src_path\":\"";
 
 /// The dependency-graph half of [`lint_licensing`], over text rather than over
 /// the filesystem.
@@ -16270,34 +17004,6 @@ fn path_key_values(code: &str) -> Vec<String> {
     out
 }
 
-/// Every `#[path = "…"]` in one Rust source whose value reaches [`IMPORTED`].
-///
-/// # Why this is a third check and not a third string in the second
-///
-/// [`lint_licensing`]'s textual half matches `use third_party` and
-/// `third_party::`; [`licensing_graph_findings`] reads manifest rows. This
-/// route writes neither. `#[path = "../../third_party/shaper/src/lib.rs"] mod
-/// shaper;` compiles imported source **into the permissive crate itself** —
-/// under that crate's `unsafe_code = "forbid"`, under its
-/// `license = "Apache-2.0 OR MIT"` field, with no crate boundary to inspect and
-/// no manifest row to read. It was built and compiled rather than imagined:
-/// `grep -c "use third_party"` and `grep -c "third_party::"` over the consuming
-/// file both return 0, and its `Cargo.toml` contains no occurrence of
-/// `third_party` at all. LICENSING.md rule 1 says no file under `third_party/`
-/// may be `use`d from the permissive tree; this is that, without the `use`.
-///
-/// It is also the idiomatic spelling *here*: `kernel/proofs` and `ring/proofs`
-/// both compile a shipped file through `#[path]`, so it is the mechanism a
-/// contributor in this tree already knows, which is what makes it the likelier
-/// of the three routes rather than the exotic one.
-///
-/// # What it cannot see
-///
-/// An attribute written across two lines, and a `path` key inside
-/// `#[cfg_attr(…)]`. Both are stated rather than closed, on the same terms as
-/// the manifest half: this is the third net, and a route that needs two lines
-/// and a conditional attribute to hide is a route a reviewer reading the diff
-/// will see.
 /// Where the fixture trees live under the build directory.
 ///
 /// Named here because two places need to agree about it and they fail in
@@ -16340,6 +17046,41 @@ fn cargo_view_findings(at: &Path) -> Vec<String> {
         }
     };
     let mut findings = Vec::new();
+
+    // A build script is a *target* in cargo’s resolved view, and the view is
+    // what the row resolved to rather than how the row was spelled. `build =
+    // "make.rs"`, `"build" = "make.rs"` and `package.build = "make.rs"` are one
+    // manifest to cargo and were three spellings to the line matcher, which saw
+    // the first and neither of the other two — the file need not even be called
+    // `build.rs`. Refusing the kind closes the whole `OUT_DIR`-laundering family
+    // at the mechanism, which is what RFC 0092 argued for and what the line
+    // matcher could not deliver. The filename check in
+    // [`build_surface_findings`] stays as the belt for a crate cargo cannot
+    // resolve at all.
+    let mut from = 0usize;
+    while let Some(hit) = view[from..].find(CUSTOM_BUILD) {
+        let hit = from + hit;
+        from = hit + CUSTOM_BUILD.len();
+        let src = view[from..]
+            .find(SRC_PATH)
+            .map(|i| {
+                let start = from + i + SRC_PATH.len();
+                let end = view[start..].find('"').map_or(view.len(), |j| start + j);
+                view[start..end].replace("\\\\", "/")
+            })
+            .unwrap_or_default();
+        let root = at.to_string_lossy().replace('\\', "/");
+        let rel = src.strip_prefix(&format!("{root}/")).unwrap_or(&src).to_string();
+        if BUILD_SCRIPT_ALLOW.iter().any(|(allowed, _)| rel == *allowed) {
+            continue;
+        }
+        findings.push(format!(
+            "  {rel}  cargo resolved a build script for this package, whatever the row that \
+             declared it was called: a build script can hand any bytes on the machine to its \
+             crate through `OUT_DIR` or point the linker into the import"
+        ));
+    }
+
     let mut from = 0usize;
     while let Some(hit) = view[from..].find(IMPORTED) {
         let hit = from + hit;
@@ -16366,6 +17107,85 @@ fn cargo_view_findings(at: &Path) -> Vec<String> {
 /// hand this function a `RUSTFLAGS` value without mutating the process it runs
 /// in — the test harness is threaded, and a lint that only works when nothing
 /// else is running is not a lint.
+/// Whether a `.cargo/config.toml` row can redirect a build.
+///
+/// `table` is the last `[…]` header seen, so `build` plus `rustflags` reads as
+/// `build.rustflags` — the spelling [`CONFIG_ALLOW`] uses, because it is the
+/// spelling cargo’s own documentation uses and the one a reader can search the
+/// file for.
+///
+/// Two whole tables are redirects whatever their leaf key is. `[env]` sets a
+/// variable every build step reads, and `[source]` replaces where a dependency
+/// comes from without changing a character of the manifest that names it.
+fn config_row_redirects(table: &str, key: &str) -> bool {
+    CONFIG_REDIRECTS.contains(&key)
+        || table == "env"
+        || table == "source"
+        || table.starts_with("source.")
+}
+
+/// One `.cargo/config.toml` under the permissive tree, judged twice.
+///
+/// **The prohibition**, which is the rule: a row whose key can redirect a build
+/// is refused unless [`CONFIG_ALLOW`] carries it with a reason. It is
+/// indifferent to the value, which is the point — `-L ../vendor/shaper` and a
+/// `[source.crates-io]` `replace-with` row each reach an imported tree while
+/// spelling no token at all, and for one round this check read the value and
+/// passed both. RFC 0092 argued for prohibiting the mechanism and the code
+/// inspected a substring; this is that argument applied to the one surface it
+/// was not applied to.
+///
+/// **The inspection**, which is the belt: a row whose value names the import is
+/// refused whatever its key is, because a key nobody thought of is what an
+/// allow-list cannot anticipate, and the token costs nothing to look for.
+///
+/// A line inside a multi-line array is not a row, and taking the split as a
+/// *key* and rejecting it on the key is what sees that: the continuation
+/// `"-C", "code-model=kernel",` carries an `=` and sets nothing.
+///
+/// *Reversal:* a configuration written as dotted keys — `build.rustflags = […]`
+/// with no `[build]` header — is read here as the bare key `build.rustflags`,
+/// which is the same string the allow-list carries, so it is caught; but
+/// `[target]` followed by `x86_64-unknown-none.rustflags` composes a third
+/// spelling this function would not match against the allow-list and would
+/// therefore refuse. Refusing is the safe direction, and the repair is an
+/// allow-list row rather than a parser.
+fn config_findings(rel: &str, text: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    let mut table = String::new();
+    for (n, line) in text.lines().enumerate() {
+        let code = strip_toml_comment(line);
+        let trimmed = code.trim();
+        if let Some(head) = trimmed.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+            table = head.trim().to_string();
+            continue;
+        }
+        if let Some((key, _)) = trimmed.split_once('=') {
+            let key = key.trim().trim_matches(['"', '\'']);
+            let dotted = if table.is_empty() { key.to_string() } else { format!("{table}.{key}") };
+            let allowed = CONFIG_ALLOW.iter().any(|(file, row, _)| *file == rel && *row == dotted);
+            if config_row_redirects(&table, key) && !allowed {
+                findings.push(format!(
+                    "  {rel}:{}  `{dotted}` redirects the build, and configuration is prohibited \
+                     rather than inspected: a `[source]` replacement, an `[env]` row, a linker \
+                     wrapper or a relative `-L` reaches the import without naming it; \
+                     `CONFIG_ALLOW` is where a row that has an argument goes",
+                    n + 1
+                ));
+            }
+        }
+        if code.contains(IMPORTED) {
+            findings.push(format!(
+                "  {rel}:{}  a cargo configuration row names the import; \
+                 `rustflags`, `[env]`, `paths`, a `[source]` directory, a linker or a \
+                 wrapper all reach it without a line of Rust saying so",
+                n + 1
+            ));
+        }
+    }
+    findings
+}
+
 fn build_surface_findings(at: &Path, flags: &[(&str, String)]) -> Vec<String> {
     let mut findings = Vec::new();
     let build = target_dir();
@@ -16404,16 +17224,7 @@ fn build_surface_findings(at: &Path, flags: &[(&str, String)]) -> Vec<String> {
                 && dir.file_name().and_then(|n| n.to_str()) == Some(".cargo")
                 && let Ok(text) = std::fs::read_to_string(&path)
             {
-                for (n, line) in text.lines().enumerate() {
-                    if strip_toml_comment(line).contains(IMPORTED) {
-                        findings.push(format!(
-                            "  {rel}:{}  a cargo configuration row names the import; \
-                             `rustflags`, `[env]`, `paths`, a `[source]` directory, a linker or a \
-                             wrapper all reach it without a line of Rust saying so",
-                            n + 1
-                        ));
-                    }
-                }
+                findings.extend(config_findings(&rel, &text));
             }
             if name == "Cargo.toml"
                 && let Ok(text) = std::fs::read_to_string(&path)
@@ -16576,6 +17387,42 @@ fn source_findings(rel: &str, text: &str) -> (Vec<String>, Vec<String>) {
     (names, path_attr_findings(rel, text))
 }
 
+/// Every `#[path = "…"]` in one Rust source whose value reaches [`IMPORTED`].
+///
+/// # Why this is a third check and not a third string in the second
+///
+/// [`lint_licensing`]'s textual half matches `use third_party` and
+/// `third_party::`; [`licensing_graph_findings`] reads manifest rows. This
+/// route writes neither. `#[path = "../../third_party/shaper/src/lib.rs"] mod
+/// shaper;` compiles imported source **into the permissive crate itself** —
+/// under that crate's `unsafe_code = "forbid"`, under its
+/// `license = "Apache-2.0 OR MIT"` field, with no crate boundary to inspect and
+/// no manifest row to read. It was built and compiled rather than imagined:
+/// `grep -c "use third_party"` and `grep -c "third_party::"` over the consuming
+/// file both return 0, and its `Cargo.toml` contains no occurrence of
+/// `third_party` at all. LICENSING.md rule 1 says no file under `third_party/`
+/// may be `use`d from the permissive tree; this is that, without the `use`.
+///
+/// It is also the idiomatic spelling *here*: `kernel/proofs` and `ring/proofs`
+/// both compile a shipped file through `#[path]`, so it is the mechanism a
+/// contributor in this tree already knows, which is what makes it the likelier
+/// of the three routes rather than the exotic one.
+///
+/// # What it cannot see
+///
+/// An attribute written across two lines. It is stated rather than closed, on
+/// the same terms as the manifest half: this is the third net, and a route that
+/// needs two lines to hide is a route a reviewer reading the diff will see.
+///
+/// `#[cfg_attr(all(), path = "…")]` was on this list and was never a gap. The
+/// byte before `path` there is a space, which is not a key byte, so
+/// [`path_key_values`] reads the key and the attribute is caught — which
+/// `a_path_key_inside_a_cfg_attr_is_still_this_key` now holds. A *What it
+/// cannot see* that names something already seen is wrong in the safe
+/// direction, and the cost of it is the next author adding a fifth pattern for
+/// a route that is closed. RFC 0092 asked for this correction and for the
+/// fixture beside it; the sentence went in without the fixture, which is the
+/// citation-is-cheaper-than-a-decision hazard RFC 0084 records, one layer down.
 fn path_attr_findings(rel: &str, text: &str) -> Vec<String> {
     let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
     let mut findings = Vec::new();
@@ -16651,26 +17498,103 @@ fn lint_boundary() -> Result<(), String> {
             .filter_map(|name| std::env::var(name).ok().map(|value| (*name, value)))
             .collect();
 
-    let mut findings = cargo_view_findings(&at);
-    findings.extend(build_surface_findings(&at, &flags));
-    let (compiled, stale) = compiled_file_findings(&at, &build)?;
-    findings.extend(compiled);
+    let roots = boundary_roots(&at, &build);
+    let trees = roots.len();
+    let (findings, stale) = boundary_findings(&at, &roots, &flags)?;
 
     if !findings.is_empty() {
         return Err(format!(
             "the permissive tree reaches `{IMPORTED}/` other than over a ring:\n{}\n\n\
              `LICENSING.md` and RFC 0003: the imported tree is reachable over a ring and by no \
-             other route. RFC 0092 is the mechanism and names the three routes these nets still \
-             cannot see.",
+             other route. RFC 0092 is the mechanism and `BOUNDARY_BLIND` names the routes these \
+             nets still cannot see.",
             findings.join("\n")
         ));
     }
     println!(
-        "lint-boundary: ok  (cargo's resolved view, every dep-info under {}, and three \
-         prohibited surfaces — no build script, no symlink, no configuration naming the \n         import; {stale} prerequisite(s) skipped as stale)",
-        build.file_name().unwrap_or_default().to_string_lossy()
+        "lint-boundary: ok  (cargo’s resolved view, every dep-info under {trees} build \
+         director{}, and three prohibited surfaces — no build script, no symlink, no \
+         configuration row that redirects a build; {stale} prerequisite(s) skipped as stale)",
+        if trees == 1 { "y" } else { "ies" }
     );
+    println!(
+        "  {} route(s) these nets cannot see (BOUNDARY_BLIND, declared rather than checked):",
+        BOUNDARY_BLIND.len()
+    );
+    for (route, _) in BOUNDARY_BLIND {
+        println!("  - {route}");
+    }
     Ok(())
+}
+
+/// The trees net two reads, each with the directory its dep-info lands in.
+///
+/// **One pair is not enough, and the second pair is the finding that put this
+/// function here.** `lint_all` runs [`lint_proofs`], which `cargo check`s
+/// `kernel/proofs`, `ring/proofs` and `abi/proofs` with the crate directory as
+/// the working directory and no `--target-dir`. Each of those is its own
+/// workspace root — they are in the root manifest’s `exclude` — so their
+/// dep-info lands in `<crate>/target/` and not in this workspace’s. A net that
+/// walked only `target_dir()` was therefore green while `cargo xtask lint`
+/// compiled imported source: sixty-three dep-info files it never opened, in the
+/// three crates in this tree that already reach outside their own directory by
+/// `#[path]` out of habit, which makes them the likeliest place for this route
+/// rather than the most exotic.
+///
+/// Net one cannot recover them either: `cargo metadata --no-deps` lists members,
+/// and these three are excluded precisely so they are not members.
+///
+/// Each pair carries its own tree as the base, because a dep-info’s relative
+/// prerequisites are relative to the workspace root of the command that wrote
+/// it. Resolving a proof crate’s prerequisites against the repository root
+/// names files that do not exist, and this net counts those as stale and skips
+/// them — which is exactly how a check reads a failure as an absence.
+///
+/// A crate that is not present is not a pair. Deleting the directory is the
+/// documented whole of undoing the proof arrangement (RFC 0053), and
+/// [`lint_proofs`] skips a missing one for that reason; a lint that refused a
+/// tree for not having built something that is not there would make that
+/// reversal expensive.
+fn boundary_roots(at: &Path, build: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let mut roots = vec![(at.to_path_buf(), build.to_path_buf())];
+    for krate in PROOF_CRATES {
+        let dir = at.join(krate.dir);
+        if dir.join("Cargo.toml").is_file() {
+            let own = dir.join("target");
+            roots.push((dir, own));
+        }
+    }
+    roots
+}
+
+/// The three nets composed, which is the thing `cargo xtask lint-boundary`
+/// actually runs.
+///
+/// Separate from [`lint_boundary`] so that a fixture can drive **the lint**
+/// rather than one of its helpers. Every fixture in `no_route_into_the_import`
+/// used to call a helper directly, so deleting any one of the three lines below
+/// left roughly thirty tests green and CI green — this tree has no route for the
+/// lint to find, so the composition was the only thing a deletion could be
+/// observed in, and nothing observed it. The module had already learnt this for
+/// one net of four, in `the_pair_carries_the_path_attribute_net_too`, and the
+/// lesson was not carried to the other three.
+///
+/// [`lint_boundary`] keeps what is left: `root()`, `target_dir()`, the
+/// environment, and the printing. Those are the parts a test cannot supply.
+fn boundary_findings(
+    at: &Path,
+    roots: &[(PathBuf, PathBuf)],
+    flags: &[(&str, String)],
+) -> Result<(Vec<String>, usize), String> {
+    let mut findings = cargo_view_findings(at);
+    findings.extend(build_surface_findings(at, flags));
+    let mut stale = 0usize;
+    for (tree, build) in roots {
+        let (compiled, skipped) = compiled_file_findings(tree, build)?;
+        findings.extend(compiled);
+        stale += skipped;
+    }
+    Ok((findings, stale))
 }
 
 fn lint_licensing() -> Result<(), String> {
@@ -16775,8 +17699,8 @@ mod no_route_into_the_import {
     };
 
     use super::{
-        FIXTURE_DIR, build_surface_findings, cargo_view_findings, compiled_file_findings,
-        target_dir,
+        BOUNDARY_BLIND, CONFIG_ALLOW, FIXTURE_DIR, boundary_findings, boundary_roots,
+        build_surface_findings, cargo_view_findings, compiled_file_findings, target_dir,
     };
     use std::path::{Path, PathBuf};
 
@@ -17512,6 +18436,489 @@ f-text = { path = \"text\" }
                 "`{member}` is a workspace member and the licensing walk read none of its sources"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // The lint, rather than its helpers. RFC 0092's exit asks that `cargo
+    // xtask lint` refuse, with a fixture driving each route red; a fixture that
+    // drives a helper red does not establish that, and for one round every
+    // fixture in this module drove a helper.
+    // ---------------------------------------------------------------------
+
+    /// Only the workspace pair, which is the one `cargo test -p xtask` has
+    /// certainly filled.
+    ///
+    /// [`boundary_roots`] adds a pair per proof crate and nothing in a test run
+    /// compiles those, so a control built on the full list would be red on a
+    /// fresh clone for a reason that is not a boundary violation. The pairs
+    /// themselves are pinned by
+    /// [`the_roots_the_lint_reads_include_every_proof_crate_that_is_present`],
+    /// which is where a deletion of them is observed.
+    fn workspace_pair() -> Vec<(PathBuf, PathBuf)> {
+        vec![(root(), target_dir())]
+    }
+
+    /// Drive the whole lint over a fixture tree, the way `lint_boundary` drives
+    /// it over this one.
+    fn lint_over(at: &Path, roots: &[(PathBuf, PathBuf)]) -> Vec<String> {
+        let (findings, _) =
+            boundary_findings(at, roots, &[]).expect("every root in a fixture has been compiled");
+        findings
+    }
+
+    /// Net one through the lint. Deleting `cargo_view_findings(at)` from
+    /// [`boundary_findings`] turns this red and turns nothing else red: a path
+    /// dependency crosses a crate boundary, so the dep-info net sees the
+    /// consuming crate reading only its own sources and the surface net sees no
+    /// build script, no symlink and no configuration.
+    #[test]
+    fn the_lint_carries_cargos_view_of_a_path_dependency() {
+        let at = fixture_tree(
+            "lint-cargo-view",
+            &[
+                (
+                    "third_party/shaper/src/lib.rs",
+                    "// SPDX-License-Identifier: GPL-2.0-only\npub fn shape() -> u32 { 7 }\n",
+                ),
+                (
+                    "third_party/shaper/Cargo.toml",
+                    "[package]\nname = \"f-shaper\"\nversion = \"0.0.1\"\nedition = \"2021\"\n",
+                ),
+                (
+                    "Cargo.toml",
+                    "[workspace]\n[package]\nname = \"f-fixture\"\nversion = \"0.0.1\"\n\
+                     edition = \"2021\"\n[lib]\npath = \"src/lib.rs\"\n\
+                     [dependencies]\nf-shaper = { path = \"third_party/shaper\" }\n",
+                ),
+                ("src/lib.rs", "pub fn used() -> u32 { f_shaper::shape() }\n"),
+            ],
+        );
+        let build = compiled(&at);
+        let findings = lint_over(&at, &[(at.clone(), build)]);
+        assert!(
+            findings.iter().any(|f| f.contains("cargo metadata")),
+            "the lint did not carry cargo's own view: {findings:?}"
+        );
+    }
+
+    /// Net three through the lint, on the one surface the other two nets cannot
+    /// answer for. A `.cargo/config.toml` row is not a package, so cargo's view
+    /// never mentions it, and it compiles no file, so no dep-info names it.
+    /// Deleting `build_surface_findings(at, flags)` from [`boundary_findings`]
+    /// turns this red.
+    #[test]
+    fn the_lint_carries_the_prohibited_surfaces() {
+        let at = fixture_tree(
+            "lint-surfaces",
+            &[
+                (
+                    "Cargo.toml",
+                    "[workspace]\n[package]\nname = \"f-fixture\"\nversion = \"0.0.1\"\n\
+                     edition = \"2021\"\n[lib]\npath = \"src/lib.rs\"\n",
+                ),
+                ("src/lib.rs", "pub fn used() -> u32 { 7 }\n"),
+                (".cargo/config.toml", "[source.crates-io]\nreplace-with = \"mirror\"\n"),
+            ],
+        );
+        let build = compiled(&at);
+        let findings = lint_over(&at, &[(at.clone(), build)]);
+        assert!(
+            findings.iter().any(|f| f.contains("redirects the build")),
+            "the lint did not carry the prohibited surfaces: {findings:?}"
+        );
+    }
+
+    /// Net two through the lint. Deleting `findings.extend(compiled)` from
+    /// [`boundary_findings`] turns this red; the route writes no manifest row
+    /// and touches no prohibited surface, so nothing else can catch it.
+    #[test]
+    fn the_lint_carries_the_dep_info_net() {
+        let at = reaching(
+            "lint-dep-info",
+            "include!(\"../../third_party/shaper/src/lib.rs\");\n\
+             pub fn used() -> u32 { shape() }\n",
+        );
+        let build = compiled(&at);
+        let findings = lint_over(&at, &[(at.clone(), build)]);
+        assert!(
+            findings.iter().any(|f| f.contains("compiled a file under the import")),
+            "the lint did not carry the dep-info net: {findings:?}"
+        );
+    }
+
+    /// The control the other three need, and the assertion this lint had for no
+    /// net at all: the tree that ships has no boundary finding.
+    ///
+    /// `lint_licensing` has had
+    /// [`the_tree_this_ships_with_has_no_route_into_the_import`] since the round
+    /// that built it. `lint_boundary` had nothing equivalent, so every fixture
+    /// above could pass against nets that were never pointed at this workspace.
+    #[test]
+    fn the_tree_this_ships_with_has_no_boundary_finding() {
+        assert_eq!(lint_over(&root(), &workspace_pair()), Vec::<String>::new());
+    }
+
+    /// The pairs the lint reads, which is where the proof crates were missing.
+    ///
+    /// `cargo xtask lint` runs `lint_proofs` before `lint_boundary`, and
+    /// `lint_proofs` compiles three crates whose dep-info lands in their own
+    /// `target/` directories because each is its own workspace root. Deleting
+    /// the `PROOF_CRATES` loop in [`boundary_roots`] turns this red, and turns
+    /// [`a_proof_crate_reaching_the_import_is_caught_where_its_own_build_answers`]
+    /// red with it.
+    #[test]
+    fn the_roots_the_lint_reads_include_every_proof_crate_that_is_present() {
+        let roots = boundary_roots(&root(), &target_dir());
+        assert_eq!(roots[0], (root(), target_dir()), "the workspace is the first pair");
+        for krate in super::PROOF_CRATES {
+            let dir = root().join(krate.dir);
+            if !dir.join("Cargo.toml").is_file() {
+                continue;
+            }
+            assert!(
+                roots.contains(&(dir.clone(), dir.join("target"))),
+                "`{}` is compiled by `cargo xtask lint` and its dep-info lands in its own \
+                 target directory, which the boundary net does not read",
+                krate.dir
+            );
+        }
+    }
+
+    /// A proof crate reaching the import, caught where its own build answers.
+    ///
+    /// Shaped like the real thing rather than like a convenient fixture: an
+    /// excluded crate with its own `[workspace]`, compiled from its own
+    /// directory with no `--target-dir`, reaching the import by `include!` —
+    /// which is the mechanism those three crates already use for the shipped
+    /// files they prove, so it is the route a contributor there would take by
+    /// habit rather than the exotic one. Before [`boundary_roots`] carried the
+    /// pair, this route compiled under `cargo xtask lint` and all four nets
+    /// were silent.
+    #[test]
+    fn a_proof_crate_reaching_the_import_is_caught_where_its_own_build_answers() {
+        let at = fixture_tree(
+            "proof-crate",
+            &[
+                (
+                    "third_party/shaper/src/lib.rs",
+                    "// SPDX-License-Identifier: GPL-2.0-only\npub fn shape() -> u32 { 7 }\n",
+                ),
+                (
+                    "Cargo.toml",
+                    "[workspace]\nexclude = [\"kernel/proofs\"]\n[package]\n\
+                     name = \"f-fixture\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\
+                     [lib]\npath = \"src/lib.rs\"\n",
+                ),
+                ("src/lib.rs", "pub fn used() -> u32 { 7 }\n"),
+                (
+                    "kernel/proofs/Cargo.toml",
+                    "[workspace]\n[package]\nname = \"f-fixture-proofs\"\nversion = \"0.0.1\"\n\
+                     edition = \"2021\"\n[lib]\npath = \"src/lib.rs\"\n",
+                ),
+                (
+                    "kernel/proofs/src/lib.rs",
+                    "include!(\"../../../third_party/shaper/src/lib.rs\");\n\
+                     pub fn used() -> u32 { shape() }\n",
+                ),
+            ],
+        );
+        let build = compiled(&at);
+        // The way `lint_proofs` compiles one: the crate directory is the
+        // working directory and there is no `--target-dir`, so cargo writes
+        // into `kernel/proofs/target`.
+        super::capture_in(&at.join("kernel").join("proofs"), "cargo", &["check", "--offline"])
+            .expect("a proof-crate fixture must compile, or it is not a route");
+
+        // The pair count is pinned by
+        // [`the_roots_the_lint_reads_include_every_proof_crate_that_is_present`] and
+        // deliberately not asserted here: this test has one job, which is that the
+        // route the proof crate compiled produces a finding, and an assertion about
+        // arithmetic firing first would hide it.
+        let roots = boundary_roots(&at, &build);
+        let findings = lint_over(&at, &roots);
+        assert!(
+            findings.iter().any(|f| f.contains("shaper")),
+            "the proof crate compiled the import and no net said so: {findings:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // The build-script surface, prohibited at the mechanism rather than at a
+    // spelling. TOML admits quoted and dotted keys and the file need not be
+    // called `build.rs`, so each of the line matcher's two conditions fell to
+    // one character.
+    // ---------------------------------------------------------------------
+
+    /// Assert cargo's view refuses a build script this manifest declares, and
+    /// that the line matcher is blind to the spelling — the second half is what
+    /// keeps this from passing for the wrong reason.
+    fn build_script_spelling(name: &str, manifest: &str) {
+        let at = fixture_tree(
+            name,
+            &[
+                ("Cargo.toml", manifest),
+                ("make.rs", "fn main() {}\n"),
+                ("src/lib.rs", "pub fn used() -> u32 { 7 }\n"),
+            ],
+        );
+        assert_eq!(
+            build_surface_findings(&at, &[]),
+            Vec::<String>::new(),
+            "{name}: the line matcher was supposed to be blind to this spelling"
+        );
+        let findings = cargo_view_findings(&at);
+        assert!(
+            findings.iter().any(|f| f.contains("build script")),
+            "{name}: cargo resolved a build script and the net said nothing: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_build_script_declared_by_a_quoted_key_is_caught_by_cargos_own_view() {
+        build_script_spelling(
+            "build-quoted-key",
+            "[workspace]\n[package]\nname = \"f-fixture\"\nversion = \"0.0.1\"\n\
+             edition = \"2021\"\n\"build\" = \"make.rs\"\n[lib]\npath = \"src/lib.rs\"\n",
+        );
+    }
+
+    #[test]
+    fn a_build_script_declared_by_a_dotted_key_is_caught_by_cargos_own_view() {
+        build_script_spelling(
+            "build-dotted-key",
+            // The dotted keys come first, because a dotted key after a table
+            // header belongs to *that* table — which is TOML working as
+            // specified and is the reason this spelling is worth a fixture at
+            // all: the manifest a reader has to squint at is the one a line
+            // matcher was never going to read.
+            "package.name = \"f-fixture\"\npackage.version = \"0.0.1\"\n\
+             package.edition = \"2021\"\npackage.build = \"make.rs\"\n\
+             [workspace]\n[lib]\npath = \"src/lib.rs\"\n",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // The configuration surface, prohibited rather than inspected.
+    // ---------------------------------------------------------------------
+
+    /// The row that defeats an inspection: it redirects every dependency
+    /// resolution in the tree and spells no token any matcher could look for.
+    #[test]
+    fn a_configuration_row_that_never_names_the_import_is_prohibited_anyway() {
+        let at = fixture_tree(
+            "config-silent-row",
+            &[(
+                ".cargo/config.toml",
+                "[source.crates-io]\nreplace-with = \"vendored\"\n\
+                 [source.vendored]\ndirectory = \"../elsewhere/vendor\"\n",
+            )],
+        );
+        let findings = build_surface_findings(&at, &[]);
+        assert!(
+            !findings.iter().any(|f| f.contains("names the import")),
+            "this fixture must not be caught by the value check, or it proves nothing: \
+             {findings:?}"
+        );
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(findings.iter().all(|f| f.contains("redirects the build")), "{findings:?}");
+    }
+
+    /// The direction it must never fire in, and the reason the third allow-list
+    /// is not empty: this repository's own root configuration carries two rows
+    /// that redirect a build, and a check that refused them would refuse the
+    /// tree it ships with.
+    #[test]
+    fn the_configuration_rows_this_tree_ships_with_are_each_allow_listed() {
+        let text = std::fs::read_to_string(root().join(".cargo").join("config.toml"))
+            .expect("the root cargo configuration");
+        assert_eq!(
+            super::config_findings(".cargo/config.toml", &text),
+            Vec::<String>::new(),
+            "a row in this tree's own configuration has no `CONFIG_ALLOW` entry"
+        );
+        // And the allow-list is not a list of rows nobody wrote. An entry that
+        // names no real row widens the rule for free.
+        for (file, row, why) in CONFIG_ALLOW {
+            assert_eq!(*file, ".cargo/config.toml", "only one configuration file is expected");
+            let leaf = row.rsplit_once('.').map_or(*row, |(_, leaf)| leaf);
+            assert!(
+                text.contains(leaf),
+                "`CONFIG_ALLOW` carries `{row}`, which is not in the file"
+            );
+            assert!(why.len() > 40, "`{row}` is allow-listed without a reason");
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // `BOUNDARY_BLIND`: the routes that are declared rather than checked, each
+    // with a fixture asserting the nets are silent. A residue somebody closes
+    // turns its fixture red, which is what makes the list self-removing rather
+    // than decorative.
+    // ---------------------------------------------------------------------
+
+    /// Residue 1. The route is behind a `cfg` for an architecture `lint` never
+    /// compiles, and its path is composed rather than spelled, so the textual
+    /// net has no needle either.
+    #[test]
+    fn residue_one_a_route_behind_a_configuration_the_lint_never_compiles_is_not_seen() {
+        let at = reaching(
+            "blind-cfg",
+            "#[cfg(target_arch = \"aarch64\")]\n\
+             include!(concat!(\"../..\", \"/third_party/shaper/src/lib.rs\"));\n\
+             pub fn used() -> u32 { 7 }\n",
+        );
+        let build = compiled(&at);
+        assert_eq!(
+            lint_over(&at, &[(at.clone(), build)]),
+            Vec::<String>::new(),
+            "residue 1 is closed; delete it from BOUNDARY_BLIND, LICENSING.md and RFC 0092"
+        );
+    }
+
+    /// Residue 2. A proc macro is a package like any other here: nothing
+    /// prohibits one the way a build script is prohibited, and the file it reads
+    /// at expansion never becomes a prerequisite of the crate that invoked it.
+    /// The macro is declared rather than invoked, because what closing this
+    /// residue would add is the prohibition, and the prohibition is what this
+    /// asserts the absence of.
+    #[test]
+    fn residue_two_a_proc_macro_in_the_permissive_tree_is_not_prohibited() {
+        let at = fixture_tree(
+            "blind-proc-macro",
+            &[
+                (
+                    "Cargo.toml",
+                    "[workspace]\n[package]\nname = \"f-fixture-macro\"\nversion = \"0.0.1\"\n\
+                     edition = \"2021\"\n[lib]\npath = \"src/lib.rs\"\nproc-macro = true\n",
+                ),
+                (
+                    "src/lib.rs",
+                    "use proc_macro::TokenStream;\n\
+                     #[proc_macro]\npub fn reach(_: TokenStream) -> TokenStream {\n    \
+                     std::fs::read_to_string(\"third_party/shaper/src/lib.rs\")\n        \
+                     .unwrap_or_default()\n        .parse()\n        \
+                     .unwrap_or_else(|_| TokenStream::new())\n}\n",
+                ),
+            ],
+        );
+        let build = compiled(&at);
+        assert_eq!(
+            lint_over(&at, &[(at.clone(), build)]),
+            Vec::<String>::new(),
+            "residue 2 is closed; delete it from BOUNDARY_BLIND, LICENSING.md and RFC 0092"
+        );
+    }
+
+    /// Residue 3. The copy is outside `third_party/`, and every net here asks
+    /// whether a path has a `third_party` component, so all of them are silent
+    /// by construction. The registry-name spelling of this is the same gap with
+    /// a network between it and the fixture.
+    #[test]
+    fn residue_three_a_copy_outside_the_import_is_not_seen() {
+        let at = fixture_tree(
+            "blind-vendored",
+            &[
+                (
+                    "vendor/shaper/src/lib.rs",
+                    "// SPDX-License-Identifier: GPL-2.0-only\npub fn shape() -> u32 { 7 }\n",
+                ),
+                (
+                    "vendor/shaper/Cargo.toml",
+                    "[package]\nname = \"f-shaper\"\nversion = \"0.0.1\"\nedition = \"2021\"\n",
+                ),
+                (
+                    "Cargo.toml",
+                    "[workspace]\n[package]\nname = \"f-fixture\"\nversion = \"0.0.1\"\n\
+                     edition = \"2021\"\n[lib]\npath = \"src/lib.rs\"\n\
+                     [dependencies]\nf-shaper = { path = \"vendor/shaper\" }\n",
+                ),
+                ("src/lib.rs", "pub fn used() -> u32 { f_shaper::shape() }\n"),
+            ],
+        );
+        let build = compiled(&at);
+        assert_eq!(
+            lint_over(&at, &[(at.clone(), build)]),
+            Vec::<String>::new(),
+            "residue 3 is closed; delete it from BOUNDARY_BLIND, LICENSING.md and RFC 0092"
+        );
+    }
+
+    /// The check that stops `BOUNDARY_BLIND` from becoming decoration in the
+    /// other direction: an entry deleted from `LICENSING.md` and left here, or
+    /// a fourth added there and not here, is a red test rather than a reader's
+    /// discovery.
+    ///
+    /// Whitespace is normalised because the cited sentences are wrapped in a
+    /// Markdown paragraph and a re-wrap is not a change of meaning.
+    #[test]
+    fn every_declared_blind_route_is_the_one_licensing_md_names() {
+        let text = std::fs::read_to_string(root().join("LICENSING.md")).expect("LICENSING.md");
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        for (route, cited) in BOUNDARY_BLIND {
+            assert!(
+                flat.contains(cited),
+                "`BOUNDARY_BLIND` names a route LICENSING.md does not: `{cited}`\n  {route}"
+            );
+        }
+        assert_eq!(
+            BOUNDARY_BLIND.len(),
+            3,
+            "RFC 0092 and the exit both say three; a fourth is a reversal and needs an RFC"
+        );
+    }
+
+    /// RFC 0092 said the `#[cfg_attr(…)]` sentence in this net's *What it cannot
+    /// see* was wrong and promised "a fixture beside it". The sentence stayed
+    /// and the fixture did not, which is the citation-is-cheaper-than-a-decision
+    /// hazard RFC 0084 records, committed inside the RFC that narrows this exit.
+    /// This is the fixture, and it is what holds the corrected sentence.
+    /// The two files RFC 0082 owes, pinned by path rather than by description.
+    ///
+    /// `E3-B03a`'s exit asks that the RFC name *the two files that make the ring
+    /// observable*, and for one round it named one of them — `user/shaper/manifest.toml`
+    /// — and identified the other as "`abi/`'s `shape` protocol", which is a
+    /// directory and a protocol rather than a file a reader can go and check
+    /// for. A clause discharged by a description is a clause nobody can run a
+    /// command against, which is the same defect as a guard nothing kills, one
+    /// document over.
+    ///
+    /// The second assertion is the more interesting one: both files must be
+    /// **absent**, because that absence is what RFC 0082's *What cannot be
+    /// observed on the day this is accepted* asserts. The day the import task
+    /// lands either of them this test goes red, and the repair is to rewrite
+    /// that section rather than to relax this — an RFC that still says a file
+    /// does not exist after it does is the citation hazard RFC 0084 records.
+    #[test]
+    fn the_two_files_rfc_0082_owes_are_named_by_path_and_are_not_there_yet() {
+        let owed =
+            ["user/shaper/manifest.toml", "abi/src/shape.rs"].map(|rel| (rel, root().join(rel)));
+        let rfc = root()
+            .join("docs")
+            .join("rfc")
+            .join("0082-the-shaper-is-imported-and-there-is-no-crate-to-link.md");
+        let text = std::fs::read_to_string(&rfc).expect("RFC 0082");
+        for (rel, path) in &owed {
+            assert!(
+                text.contains(rel),
+                "RFC 0082 owes `{rel}` and does not name it by path, so a reader cannot run \
+                 one `test -f` per file to discharge the clause"
+            );
+            assert!(
+                !path.exists(),
+                "`{rel}` exists, and RFC 0082 still says it does not. The import task has \
+                 landed part of the entry: rewrite that section rather than this assertion"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_key_inside_a_cfg_attr_is_still_this_key() {
+        let findings = path_attr_findings(
+            "text/src/lib.rs",
+            "#[cfg_attr(all(), path = \"../../third_party/shaper/src/lib.rs\")]\nmod shaper;\n",
+        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].starts_with("  text/src/lib.rs:1"), "{}", findings[0]);
     }
 }
 
