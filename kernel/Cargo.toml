@@ -97,6 +97,22 @@ f-virtio-net.workspace = true
 # this comment and the two above it in one sitting is the argument.
 f-virtio-gpu.workspace = true
 
+# The compositor, and the first of these rows that is not a driver. The frame
+# links it for `routing` — the page it fills in before the component's first
+# instruction and reads after it — and for `routing::HEAP_BYTES`, which
+# `kernel/src/compositor.rs` checks the manifest's declared heap against so that
+# the graph's size and the region the boot maps are one definition the compiler
+# sees rather than two that agree today. Its `image` feature is off for the
+# reason every row above gives: a `#[panic_handler]` is a lang item and there may
+# be one per linked artefact.
+#
+# *Reversal:* the routing layout moving into `abi/`, which RFC 0051 named at two
+# drivers and RFC 0054 named again at three. This is the fourth crate in the same
+# position and the first that drives no device, which is what turns that
+# reversal's argument from *drivers share a shape* into *components the frame
+# links share a shape*.
+f-compositor.workspace = true
+
 
 # The component a place holds, and — from E1-B08 — the runtime that holds a
 # core. The frame links it for one thing: `f_store::report` is the encoding a

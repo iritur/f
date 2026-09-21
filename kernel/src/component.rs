@@ -265,7 +265,15 @@ const OCCUPANT_MICROS: u64 = 500_000;
 /// build where the boot half of RFC 0035's pair silently covered less than the
 /// workload half, which is exactly the drift `JOIN_GAP` was built to make
 /// visible.
-const PLACES_MAX: usize = 6;
+///
+/// **Seven, and the seventh is `user/compositor`.** `E2-B08` moved it from five
+/// to six for `user/objects` and `E3-B01f` moves it again for the component that
+/// holds the scene graph — the same direction each time, and for the same reason
+/// each time: a component file with no place is a component no downstream count
+/// ever looks for. `kernel/src/state.rs` grew a seventh mount id in the same
+/// diff, because a place the frame builds and cannot publish a tree for is a
+/// spawn that fails after the account has been spent.
+const PLACES_MAX: usize = 7;
 
 /// Why the lifecycle could not do what it was asked.
 ///
@@ -6482,6 +6490,84 @@ fn admit(
         return Err(Failure::Admission(error::pack(error::ADMISSION, error::admission::MEMORY)));
     }
     Ok(())
+}
+
+/// Put a record in front of the admission a spawn performs, and answer what it
+/// said.
+///
+/// # Why this exists beside [`probe_refusals`]
+///
+/// Because a boot that is not the lifecycle demonstration has no place, no
+/// supervisor table and no account, and [`admit`] needs all three. This stakes
+/// the smallest honest version of them — one region out of the frame allocator,
+/// granted into a table of its own, and this build's real reservation table —
+/// runs the **shipped** predicate against the record it was handed, and gives
+/// every frame back before it answers.
+///
+/// It is deliberately not a second statement of any rule. Nothing here decides
+/// anything: [`admit`] is the one function that decides, and a caller that
+/// wanted to know whether a manifest would be admitted without spending a frame
+/// would otherwise have to write one.
+///
+/// The caller that wants it is `kernel/src/compositor.rs`, which runs a
+/// component's own record past this twice — once as its manifest declares it,
+/// which must be admitted, and once with the state declaration emptied and
+/// nothing else changed, which must be refused `ADMISSION/NO_STATE_TREE`. Two
+/// readings, because a refusal nobody has watched happen beside an acceptance is
+/// a refusal that might refuse everything.
+///
+/// # Errors
+///
+/// [`Failure`] for something that went wrong staking the account this probe
+/// needs, which is the frame's own arithmetic and not the record's. A record the
+/// admission refused is `Ok(Err(packed))` and not an error here: being refused is
+/// the answer this function exists to return.
+///
+/// # Safety
+///
+/// Call on the boot processor with the kernel's address space in `CR3` and
+/// `frames` rebound onto its direct map, with no component running: this grants
+/// capabilities into the table of the core it is called on and clears it again.
+pub unsafe fn probe_admission(
+    frames: &mut FrameAllocator,
+    record: &Record,
+    image: &[u8],
+) -> Result<Result<(), i32>, Failure> {
+    let pages = text_pages(image)?;
+    let region = frames
+        .alloc_zeroed(account_order(record).ok_or(Failure::Manifest(Refusal::Value))?)
+        .ok_or(Failure::NoMemory)?;
+    let mut supervisor = Table::EMPTY;
+    // `DERIVE` and `GRANT` because this is the account every later charge is
+    // taken from, including the page of table slots `grant_into` buys when the
+    // table fills — the same grant `demonstrate` makes for the same reason.
+    let account = Account {
+        handle: grant_into(
+            &mut supervisor,
+            frames,
+            CapType::Untyped,
+            rights::READ | rights::WRITE | rights::DERIVE | rights::REVOKE | rights::GRANT,
+            region.addr(),
+            region.bytes(),
+        )?,
+        floor: region.addr(),
+    };
+    let reservations = crate::admit::table().map_err(|why| Failure::Admission(why.code()))?;
+
+    let outcome = match admit(record, &supervisor, &account, pages, &reservations, None) {
+        Ok(()) => Ok(()),
+        Err(Failure::Admission(code)) => Err(code),
+        // Anything else is this function's own staking having gone wrong, and
+        // it is handed back as a failure rather than reported as a refusal the
+        // record earned.
+        Err(why) => return Err(why),
+    };
+
+    supervisor.clear_all();
+    // SAFETY: allocated here, charged only by the table cleared a line ago, and
+    // no address space names any of it — this probe builds none.
+    unsafe { frames.free(region) };
+    Ok(outcome)
 }
 
 /// How many frames one instance of this manifest charges its account.

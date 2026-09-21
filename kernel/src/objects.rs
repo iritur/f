@@ -546,6 +546,16 @@ pub unsafe fn demonstrate(
                 buffers: owned.addr(),
                 buffer_bytes,
                 heap_bytes: HEAP_BYTES,
+                // No page of its own to publish into, and the `false` is a
+                // statement rather than a default. `user/objects`' manifest
+                // declares five state nodes and this boot reads none of them:
+                // what it measures is `claims/0019`'s resident frames and a
+                // count of application bytes, and a page mapped for a tree
+                // nothing writes would move the first of those for a component
+                // that publishes nothing. `kernel/src/compositor.rs` is the
+                // caller that asks for one, and `E2-B08`'s own line is where
+                // this component's tree earns a reader.
+                own_tree: false,
             },
         )
     }

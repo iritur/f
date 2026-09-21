@@ -1,0 +1,308 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# compositor: the component that holds the machine's scene graph, and the first
+# thing in E3 that is not a library.
+#
+# `user/virtio-gpu/manifest.toml` is the fullest manifest in this tree and every
+# field below was written against it rather than copied from it. The two
+# components are neighbours on the same path and are not alike: a display driver
+# moves one frame's pixels from a client's memory to a device and is finished,
+# and this component *retains* — a scene it holds between frames, built out of
+# differences a client sent it, which is what `docs/design/ring-scene-boot.html`
+# part II asks for and what nothing in this tree had until this file.
+#
+# `docs/manifest.md` is the schema and `cargo xtask lint-manifests` is what
+# refuses this file when it stops fitting.
+#
+# What it declares, in one paragraph: a compositor in the `private` speculation
+# domain, made out of an account's memory with a heap large enough for one
+# retained graph, serving one client on one ring whose deltas travel inline;
+# restarted on a fault and not on an exit, at the price of every client's
+# retained scene; in the soft class, because nothing here yet has a deadline it
+# can miss; and publishing four numbers about itself that a reader can check
+# against what a client asked for.
+
+schema = 3
+name   = "compositor"
+image  = "user/compositor"
+
+# `private`, and the argument is this component's own rather than the display
+# driver's next door.
+#
+# What a compositor holds is not a frame in transit. It is the **structure of
+# everything on the screen, retained between frames**: a tree of nodes with
+# transforms, paths, paints — and, when `E3-D01`'s vocabulary arrives on the
+# wire, roles, labels and values in plain text. Every client's subtree lives in
+# one arena, in one address space, on one heap. What separates two clients here
+# is this component's own bookkeeping and nothing else: node identifiers are
+# chosen in the *submitter's* space, no capability crosses between two clients,
+# and a compositor whose arithmetic was wrong would hand one client's subtree to
+# another with no boundary having been crossed anywhere.
+#
+# That is a sharper case for isolating it than the display driver's. A display
+# driver holds one frame's pixels for as long as a transfer takes; this holds
+# the shape and the text of every window for as long as the machine is up, which
+# is where a password is typed and a document is read. `shared` would be a
+# declaration that co-residency with an attacker cannot matter to that. It can.
+#
+# The cost is RFC 0005's flush on every crossing into and out of this component,
+# and here there is a real prediction attached to it rather than a hope. This
+# component's crossings are *per frame* and not per operation — that is the whole
+# of `E3-B01`'s exit, boundary crossings per UI frame under ten — so the flush is
+# amortised over a frame's worth of deltas rather than paid per delta. The number
+# that would reverse this is RFC 0005's cross-domain call cost, measured at
+# E1-P10, set against the frame budget `ring-scene-boot` section 09 draws. If a
+# handful of flushes per frame is visible in that budget then `private` is not
+# affordable *for a compositor* and the argument moves to the RFC, which is where
+# it belongs, rather than to this file.
+domain = "private"
+
+# --- Device: none, and the absence is the declaration -------------------------
+#
+# There is no `[[device]]` table here and there will not be one. A compositor
+# reaches a display by asking the driver that binds it — `user/virtio-gpu` —
+# rather than by binding the part itself, and RFC 0067's whole point is that two
+# manifests may not claim one device. The day this component draws, what it
+# gains is a `sibling:virtio-gpu` need and not a device row.
+
+# --- Needs: routed at spawn, in this order, one handle each -------------------
+
+# The heap, and it is the one need this component genuinely could not do without.
+#
+# `f_scene::arena::Arena` is 131 096 bytes. A component's stack is four pages,
+# and a component may hold **no writable static at all** — its text page is
+# mapped read-only and `cargo xtask component` refuses an image carrying one — so
+# the retained graph has exactly one place it can live: a region the frame maps
+# and describes before the first instruction, which is `f_ring::heap` and RFC
+# 0094's arrangement.
+#
+# One hundred and forty-three thousand three hundred and sixty bytes is
+# thirty-five pages: the graph at 131 096 and a sixty-four-delta frame under
+# construction at 5 672, with at most 64 more for the allocator's prologue and
+# the rounding on the two blocks — 136 832 of it — plus the page a wider delta
+# record would spend before anybody has to edit this file.
+# `f_compositor::HELD_BYTES` measured against
+# `f_compositor::routing::HEAP_BYTES` is a compile-time assertion, so a graph
+# that outgrew this number stops the build rather than failing an allocation at
+# ring 3 where nothing could report it; and `kernel/src/compositor.rs` reads the
+# figure back out of this manifest and refuses a boot where the two disagree.
+#
+# Read and write and nothing else. A component that could derive from its own
+# heap could hand a piece of it on, and an allocator whose memory has left is an
+# allocator that will hand it out again.
+[[capability]]
+name   = "heap"
+type   = "untyped"
+rights = ["read", "write"]
+from   = "supervisor"
+bytes  = 143_360
+
+# The place's own endpoint, routed back to it. `write` is the right to connect
+# and `grant` is the right to hand the endpoint on, which together are what a
+# component needs to introduce a peer to itself without the supervisor having to
+# know every client — and a compositor is the component in this system with the
+# most clients it did not choose. Not `revoke`: nothing may stop its own
+# occupant, because a component that could refill its own place is a component
+# that has become its own supervisor.
+[[capability]]
+name   = "self"
+type   = "endpoint"
+rights = ["write", "grant"]
+from   = "supervisor"
+
+# --- Rings: the control ring is implicit; this is the data ring ---------------
+
+# One server ring, one client, speaking `scene` version 1 — the opcode space
+# `abi/src/scene.rs` fixes: create, transform, path, paint, remove, commit.
+#
+# `payload = "inline"`, and it is the opposite of what the neighbouring driver
+# declares for a reason that is the whole of part II. A display driver's payload
+# is a frame of pixels and belongs in a registered buffer the device reads
+# directly; a scene delta's payload is fifty-six bytes of record, and the thing
+# this component is for is that **no pixel buffer crosses this ring at all**. A
+# `registered` payload here would be a compositor that takes surfaces, which is
+# the design this one exists instead of.
+#
+# `clients = 1`, and the number is a statement rather than a ceiling somebody
+# picked. One SPSC ring per client is the rule, the frame maps exactly one data
+# ring into this component's address space, and a manifest declaring four would
+# be declaring three rings nothing routes — a promise nothing can refuse, which
+# is R08. What raises it is `E3-B01g`, where a delta ring runs between two
+# components and a second client is something that can actually connect.
+#
+# `entries = 16`: sixteen is what every channel in this boot is, and a frame of
+# up to sixty-four deltas therefore fills and drains the ring several times
+# rather than sitting in it — which is deliberate, because a client that never
+# waits is a client whose back-pressure path is untested.
+#
+# `features` is empty. `admission_control` is absent for the reason the three
+# driver manifests give: this component serves in arrival order and refuses
+# nothing for want of time, and a bit claiming otherwise would be R08 with a
+# feature name on it. `E3-B01h` is what computes a wake time from a commit's
+# deadline, and that is the task that may declare it.
+[[ring]]
+name        = "scene"
+role        = "server"
+protocol    = "scene"
+version_min = 1
+version     = 1
+entries     = 16
+payload     = "inline"
+clients     = 1
+features    = []
+
+# --- Restart: the supervisor's policy, the frame's mechanism ------------------
+
+# On a fault, and not on an exit. The numbers are the display driver's numbers,
+# and that is a decision rather than a copy: RFC 0008 fixes the budget as how
+# many restarts in what window, the argument for eight in a minute is about how a
+# component fails rather than about what it does, and inventing a fourth pair
+# here would be four numbers with evidence for none of them.
+#
+# What differs from every driver in this tree is worth a comment rather than a
+# field, and it is the sharpest consequence of retaining anything. A restart of a
+# block driver loses the requests in flight; a restart of a display driver loses
+# the resource identifiers it held. **A restart of this component loses every
+# client's scene** — the graph *is* the state, and the successor comes up holding
+# an empty arena while its clients believe their trees are still there.
+#
+# What makes that survivable rather than fatal is the one piece of this epoch
+# that was already green before this component existed: `E3-B01l`'s reconciler
+# keeps the client's own tree on the client's side and emits differences against
+# it, so a client that is told its compositor changed generation reconciles
+# against an empty scene and sends a whole tree. That is a frame of extra work
+# and not a lost window — and it is the reason this line can say `on_fault` at
+# all. The day a client cannot rebuild its tree, this becomes an argument for
+# `in_place` below rather than for a longer backoff here.
+[restart]
+policy           = "on_fault"
+backoff_first_ms = 10
+backoff_max_ms   = 1_000
+max_restarts     = 8
+budget_window_ms = 60_000
+
+# --- Reservation: what admission may refuse ----------------------------------
+
+# Soft class, and the reader who expects otherwise is owed the argument, because
+# a compositor is the component a reader would most expect to hold a deadline.
+#
+# It does not hold one yet, and declaring `hard` on the strength of what it will
+# hold would be R08's own failure: nothing in this build schedules against a
+# commit's deadline, so there is no deadline this component can miss and a
+# reserved core would be capacity held for work nothing does. `E3-B01h` is the
+# task that computes a wake time backwards from the next scanout, and that task
+# is what earns `hard` here — together with RFC 0007's schedulability test, which
+# is what would have to grant it.
+#
+# The word is load-bearing at run time and not only at admission, exactly as it
+# is for the three drivers: the frame reads it out of the compiled record and
+# writes it into the component's routing page as the ceiling RFC 0025's bound 1
+# clamps against.
+#
+# Sixty-four kibibytes is the footprint: address space, page tables, text, stack,
+# control ring, board, data ring, state tree and capability table. The graph is
+# **not** in it and that is the same distinction `user/virtio-gpu/manifest.toml`
+# draws about its queues — the heap above is a routed need that the account pays
+# for separately, and folding it in here would make one number mean two things.
+[reservation]
+class        = "soft"
+memory_bytes = 65_536
+
+# --- Transfer: what this component declares about being updated in place ------
+
+# `restart_only`, and here it is not a taste but an arithmetic fact.
+#
+# RFC 0063's transfer window is one page — `kernel::process::SWAP_WINDOW_MAX` —
+# and this component's state is a hundred and thirty kilobytes of retained graph.
+# An `in_place` declaration would be a promise to hand over something that does
+# not fit in the mechanism that would carry it, which is worse than an
+# unexercised promise: it is one whose failure would be discovered at the moment
+# a swap was already under way.
+#
+# There are two reversals and they are different sizes. The small one is a window
+# sized by the declaration rather than by one page, which is a change to the
+# frame. The interesting one is that a compositor may not need to carry its graph
+# at all: `E3-B01l`'s reconciler can rebuild the whole scene from the client's
+# side, so the honest in-place transfer for this component is *the registrations
+# and the frame token, and let the clients redraw* — which is a state record of a
+# few words rather than an arena. That is the version worth building, and it
+# belongs with the task that has a second client to try it against.
+[transfer]
+mode = "restart_only"
+
+# --- State: what this component publishes about itself ------------------------
+
+# RFC 0013 puts a state tree in every component and RFC 0065 is what makes
+# "every" mean every: this array is the declaration, the frame writes the schema
+# block out of it before this component's first instruction, and a manifest that
+# declared nothing would be refused `ADMISSION/NO_STATE_TREE` at the spawn.
+# `cargo xtask compositor mute` is that refusal driven against *this* record —
+# the same record, with its declaration emptied and nothing else changed — so the
+# sentence above is a thing this tree does rather than a thing it says.
+#
+# Every node here is a number `f_compositor::tree::Counters` already keeps, which
+# is the whole of what makes the declaration honest rather than decorative: there
+# is no collect step, no sampling interval and no second copy that can disagree
+# with the first. And each of them is checkable from outside: a client that sent
+# two frames of known shape knows what all four should say, which is what
+# `kernel/src/compositor.rs` compares them against rather than taking the
+# component's word.
+#
+# Ids are permanent and are never reused, for the reason `TODO.md` never reuses a
+# task id: the id is the only thing that makes two readings of this component
+# across time comparable at all. `f_compositor::routing::node` carries the same
+# ids for the code that writes them.
+
+[[state]]
+id   = 1
+name = "compositor"
+kind = "subtree"
+unit = "none"
+
+# Frames that closed: a commit that reached the graph whole.
+#
+# The unit is `events` and not `frames`, and the difference is not pedantry:
+# `f_abi::state::unit::FRAMES` means *physical frames* in this system — pages of
+# memory — and a reader charting UI frames against page counts would be adding
+# two unrelated things. The node's name says which frame is meant and the unit
+# says what kind of quantity it is, which is exactly the division RFC 0013 draws
+# between the two fields.
+[[state]]
+id     = 2
+parent = "compositor"
+name   = "frames"
+kind   = "counter"
+unit   = "events"
+
+# Deltas that reached the graph, summed from what each commit applied. Published
+# beside the frame count and never alone: *two frames closed* says nothing about
+# whether anything changed, and a compositor that committed two empty frames
+# would move one of these and not the other.
+[[state]]
+id     = 3
+parent = "compositor"
+name   = "edits"
+kind   = "counter"
+unit   = "entries"
+
+# How many nodes the graph holds now. A gauge, because it goes both ways, and it
+# is the one node here that is read out of the arena's own census rather than
+# accumulated as things happen — so a build whose removals never reached the
+# graph publishes the same `edits` and a different number here.
+[[state]]
+id     = 4
+parent = "compositor"
+name   = "nodes"
+kind   = "gauge"
+unit   = "nodes"
+
+# Entries refused, by the wire or by the graph. Published beside the three above
+# and never alone, for the reason `user/virtio-gpu/manifest.toml` gives about its
+# own pair: *nothing was refused* is a claim about a component, and a component
+# that was asked nothing refused nothing either.
+[[state]]
+id     = 5
+parent = "compositor"
+name   = "refused"
+kind   = "counter"
+unit   = "entries"

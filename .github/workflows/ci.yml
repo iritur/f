@@ -631,6 +631,27 @@ jobs:
       # before entry and requires the adoption to refuse rather than believe it.
       # E1-B08, RFC 0038.
       - run: cargo xtask runtime
+      # E3-B01f. The first boot in this tree in which a scene graph exists in a
+      # running component. Three boots of one component. `serve` stands
+      # `user/compositor` up at ring 3 over a heap the frame described, has it
+      # adopt its control ring and the client's data ring, commits two frames of
+      # scene deltas across that ring — four nodes created and a subtree of two
+      # removed — and requires the four words the component publishes into the
+      # state tree its own manifest declares to be the ones the client's script
+      # implies, with the tree read back by the frame rather than reported by the
+      # component. `starved` is the same component over a heap two pages long,
+      # which must refuse before it serves anybody and must still leave a
+      # readable, empty tree; without it the component's own heap check is a
+      # guard nothing kills. `mute` takes that component's record, empties its
+      # state declaration and changes nothing else, and requires the admission a
+      # spawn performs to refuse it `ADMISSION/NO_STATE_TREE` while admitting the
+      # record as declared — RFC 0065 about a component rather than about a
+      # mechanism.
+      #
+      # It needs nothing this job does not already have: no device, no display
+      # and no second machine, because the client is the frame and the graph is
+      # a data structure. RFC 0013, RFC 0065.
+      - run: cargo xtask compositor
       # `claims/0037`'s five rows, compared against the table rather than against
       # the boot's own refusals. The two are different checks: the boot asserts
       # the load half crossed nothing and the provoke half crossed exactly what

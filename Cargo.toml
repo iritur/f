@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["abi", "env", "ring", "hash", "blob", "zone", "index", "generation", "interface", "scene", "text", "input", "kernel", "user/assembler", "user/init", "user/objects", "user/store", "user/supervisor", "user/virtio-blk", "user/virtio-net", "user/virtio-gpu", "bench", "sim", "xtask"]
+members = ["abi", "env", "ring", "hash", "blob", "zone", "index", "generation", "interface", "scene", "text", "input", "kernel", "user/assembler", "user/compositor", "user/init", "user/objects", "user/store", "user/supervisor", "user/virtio-blk", "user/virtio-net", "user/virtio-gpu", "bench", "sim", "xtask"]
 
 # The checker's crate, and it is excluded rather than absent for the reason RFC
 # 0022 gave the last one: a verification tool's toolchain is the tool's
@@ -126,6 +126,20 @@ f-virtio-net = { path = "user/virtio-net", default-features = false }
 # whole of the component-linked-by-the-frame arrangement, and a fourth crate
 # holding the shared half is a change to two closed tasks' evidence.
 f-virtio-gpu = { path = "user/virtio-gpu", default-features = false }
+# The compositor, on the same terms as the three drivers above and for the first
+# reason that is not a driver's. The frame links it for `routing` — the page it
+# fills in before the component's first instruction — and for
+# `routing::HEAP_BYTES`, which `kernel/src/compositor.rs` checks the manifest's
+# declared heap against, so the number the graph needs and the number the boot
+# maps are one definition the compiler sees rather than two that agree today.
+#
+# A fourth line differing only in a name. RFC 0051 said at two that these
+# vocabularies belong in `abi/` and RFC 0054 said it again at three; this is the
+# fourth crate in the same position and the first that is not a device driver,
+# which is the evidence those two RFCs asked for and could not supply — what the
+# arrangement is about is *being a component the frame links*, and it never was
+# about drivers.
+f-compositor = { path = "user/compositor", default-features = false }
 # The same arrangement, one crate over and for a different reason:
 # `user/store/Cargo.toml` says which, and the frame links this so that
 # `f_store::report` has one definition rather than two.

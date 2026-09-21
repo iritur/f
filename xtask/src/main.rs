@@ -801,6 +801,7 @@ fn main() -> ExitCode {
         "deadline" => deadline(args.get(1).map(String::as_str)),
         "runtime" => runtime(args.get(1).map(String::as_str)),
         "objects" => objects(args.get(1).map(String::as_str)),
+        "compositor" => compositor(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
         "component" => components().map(|_| ()),
         // E2-B04. One expression to one root hash, with every leaf printed
@@ -1040,6 +1041,17 @@ cargo xtask <command>
                      argument. The only check here that observes something from
                      outside the machine, because a scanout cannot be read back
                      from inside one
+  compositor [half]  Boot the compositor: a component that holds the machine's
+                     scene graph at ring 3 and takes a client's deltas across one
+                     ring. serve commits two frames and requires the component's
+                     own state tree, read back by the frame, to say what the
+                     client asked for; starved stands the identical component up
+                     over a heap two pages long, which must refuse before it
+                     serves anybody; mute puts that component's record past the
+                     admission a spawn performs with its state declaration
+                     emptied, which must be refused ADMISSION/NO_STATE_TREE while
+                     the record as declared is admitted. All three with no
+                     argument
   screen [check]     Check the frame's fallback console on a machine with no
                      display, which is every machine this harness has. `font`
                      renders all ninety-five glyphs to the serial port as
@@ -1611,7 +1623,7 @@ fn image_dir(name: &str) -> PathBuf {
 /// why that position is the contract. Everything here follows it, each as one
 /// module holding a record and an image.
 const COMPONENTS: &[&str] =
-    &["store", "supervisor", "virtio-blk", "virtio-net", "virtio-gpu", "objects"];
+    &["store", "supervisor", "virtio-blk", "virtio-net", "virtio-gpu", "objects", "compositor"];
 
 /// Every component the *source tree* declares, by the name in its manifest.
 ///
@@ -1842,6 +1854,19 @@ const IMAGE_MAX: &[(&str, u64)] = &[
     // generation contains — it reads the module rather than embedding it — so
     // this number moves with the crate and not with the topology.
     ("supervisor", 16 * 4096),
+    // `compositor`, and the row is here for the reason the two above it are: it
+    // is a **spawn-shape** component — `kernel::process::prepare_server` reserves
+    // `process::TEXT_PAGES` for it — and the default below belongs to the init
+    // and runtime shapes, which it is not.
+    //
+    // The margin is the one worth watching in this epoch. A compositor links
+    // `f-scene`, and what a renderer adds to an image is a function of how much
+    // of the graph it reaches rather than of how large the graph is: the arena is
+    // in the heap and never in the text. So this number moves with `E3-B02`'s
+    // rungs and not with `NODES_MAX`, and a build that outgrew sixteen pages
+    // would be a compositor whose *code* had grown, which is a conversation
+    // rather than a constant to raise.
+    ("compositor", 16 * 4096),
 ];
 
 /// What a component whose shape [`IMAGE_MAX`] does not name may be.
@@ -12215,6 +12240,117 @@ objects: ok — a component served `objects::op::READ` from ring 3 across a mapp
     Ok(())
 }
 
+/// The two halves of `cargo xtask compositor`, and why there are two.
+///
+/// One stands the component up and one does not, which is unusual for a pair in
+/// this file and is the point: the serving half is a boot with a core, a ring
+/// and a client, and the refusal half is a *record* put past the admission a
+/// spawn performs. They are two halves of one exit — `E3-B01f` asks for a
+/// compositor that runs and for a build declaring no state tree to be refused at
+/// spawn — and neither is the other's control. What each one controls for is
+/// stated in its own row.
+const COMPOSITOR_HALVES: &[(&str, &str)] = &[
+    (
+        "serve",
+        "the client commits two frames of scene deltas and the component's own state tree
+         is read back and required to say what the client asked for",
+    ),
+    (
+        "starved",
+        "the identical component over a heap two pages long: it must refuse before it serves
+         anybody, and its published tree must be readable and empty",
+    ),
+    (
+        "mute",
+        "the same component's record, as declared and with its state declaration emptied:
+         the first must be admitted and the second refused ADMISSION/NO_STATE_TREE",
+    ),
+];
+
+/// Boot the compositor: a component that holds the machine's scene graph at
+/// ring 3, and the frame as its client.
+///
+/// The verdict is the kernel's rather than this harness's, exactly as `blk`'s,
+/// `gpu`'s and `objects`' are. What this side checks is that the boot *ran*: an
+/// exit code says the kernel agreed with itself, and a green boot that printed
+/// no verdict line is a stage that was skipped — which is what a build carrying
+/// no `compositor` component file produces, and is a pass nobody asked for.
+fn compositor(kind: Option<&str>) -> Result<(), String> {
+    let chosen: Vec<&(&str, &str)> = match kind {
+        None => COMPOSITOR_HALVES.iter().collect(),
+        Some(name) => {
+            let found = COMPOSITOR_HALVES.iter().find(|(known, _)| *known == name);
+            let Some(found) = found else {
+                let list: Vec<String> =
+                    COMPOSITOR_HALVES.iter().map(|(n, w)| format!("  {n:<6} {w}")).collect();
+                return Err(format!(
+                    "unknown compositor half: {name}
+
+{}",
+                    list.join(
+                        "
+"
+                    )
+                ));
+            };
+            vec![found]
+        }
+    };
+
+    let all = chosen.len() > 1;
+    for (name, what) in chosen {
+        if all {
+            println!(
+                "
+--- compositor={name}: {what}"
+            );
+        }
+        let (ending, log) = machine_with(
+            Some(&format!("compositor={name}")),
+            &[],
+            Capture::Printed,
+            BOOT_TIMEOUT,
+            BOOT_MEMORY,
+        )?;
+        match ending {
+            Ending::Exited(33) => {}
+            Ending::Exited(35) => {
+                return Err(format!(
+                    "the kernel refused to finish after `compositor={name}`. Either the                      component did not end on the frame's stop notice, or what it published                      is not what the client's script asked for, or a record declaring no state                      tree was admitted — the serial log above says which, and the verdict that                      refused is in `kernel/src/compositor.rs`."
+                ));
+            }
+            Ending::TimedOut(_) => {
+                return Err(format!(
+                    "`compositor={name}` never finished. A component that holds a core and                      does not give it back is the one failure a served datapath has that a                      spawn does not: the boot core is waiting on a mailbox word that will                      never move."
+                ));
+            }
+            other => return Err(format!("the boot {other}; expected exit 33")),
+        }
+
+        if !log.contains("compositor    verdict:") {
+            return Err(format!(
+                "`compositor={name}` exited green and printed no verdict line, so the half did                  not run. The likeliest cause is a boot with no `compositor` component file."
+            ));
+        }
+    }
+
+    if all {
+        println!(
+            "
+compositor: ok — all three halves held. A component held the machine's scene graph at
+             ring 3, took two frames of deltas across one ring, applied each whole or not
+             at all, and published what it holds into the state tree its own manifest
+             declares — which the frame read back rather than being told. The identical
+             component over a heap two pages long refused before it served anybody and
+             left that tree readable and empty, so the numbers in the first half are this
+             run's rather than a schema's. And the same record with its state declaration
+             emptied was refused ADMISSION/NO_STATE_TREE while the record as declared was
+             admitted."
+        );
+    }
+    Ok(())
+}
+
 const RUNTIME_PROVOCATIONS: &[(&str, &str)] = &[
     ("load", "a component schedules its own work; nothing may cross the boundary until it exits"),
     ("provoke", "one crossing on purpose: the count must move, and by exactly as many"),
@@ -12536,6 +12672,13 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-virtio-blk", host: None, bare: None },
     Portability { krate: "f-virtio-net", host: None, bare: None },
     Portability { krate: "f-virtio-gpu", host: None, bare: None },
+    // `E3-B01f`'s compositor. Both answers are `None` and the AArch64 compile is
+    // load-bearing here in a way it is not for the three drivers above: this
+    // crate links `f-scene`, whose whole point is a graph built out of integers
+    // with no float anywhere, and an arena that compiled on one architecture and
+    // not the other would be a scene graph that is not portable — which is the
+    // property RFC 0004 is about and the one this crate would break first.
+    Portability { krate: "f-compositor", host: None, bare: None },
     Portability {
         krate: "f-bench",
         host: None,
