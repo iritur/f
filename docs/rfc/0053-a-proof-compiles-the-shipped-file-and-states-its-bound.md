@@ -300,3 +300,29 @@ directory is gone rather than failing.
 discharged deductively, a bounded check of a subset of them is a weaker
 statement kept for its speed rather than for its content. Keep it while it is
 the faster instrument; delete it when it stops being the only one.
+
+*Read against `E2-P04` on 2026-09-21: **fired, and not met.*** Verus is on the
+frame — `cargo xtask verus`, three properties in `kernel/src/watermark.rs`,
+proved over every `u64` — and it discharges none of the invariants this entry is
+about. What it proves is arithmetic; the five capability properties are about a
+table reached through a raw pointer, and a deductive proof of one needs a
+specification for the memory that pointer reaches. So the bounded checks stay,
+and they are still the only instrument aimed at those five.
+
+**What did happen is the sentence above, as a measurement rather than an
+argument.** This entry says a bounded check is *a weaker statement kept for its
+speed rather than for its content*, and both preconditions `watermark.rs` now
+states are `u64` overflows that `kernel/proofs/src/mem.rs` puts out of reach on
+purpose — `FRAME_SIZE` is 256 there and the harnesses run an eight-slot table.
+Two findings the bounded checker cannot have, in the file it already compiles
+through `#[path]`. That is the difference this entry asserted, and it is now a
+run.
+
+**And the mechanism did not transfer, which is RFC 0096.** `#[path]` works for
+Kani because an unannotated second compile is a complete input to it; Verus
+verifies only what is written inside `verus!{ … }`, so the same compile gives it
+nothing to read. 0096 takes the other branch — the shipped file carries the
+annotations — and the file it carries them in is a module of `f-kernel` that
+names nothing above itself, so the checker reads it as a crate root with no
+stand-ins at all. `kernel/proofs` reaches that same file through a second
+`#[path]`, so one source answers to both checkers.

@@ -730,6 +730,11 @@ fn main() -> ExitCode {
         // leaving to a reader who has only seen a hash.
         "attest" => attest(),
         "prove" => prove(args.get(1).map(String::as_str)),
+        // E2-P04. The second checker, and it answers a question the first
+        // one cannot reach: `kernel/proofs/src/mem.rs` sets `FRAME_SIZE` to
+        // 256 and the harnesses run an eight-slot table, so a `u64`
+        // overflow is outside Kani's space and always will be. RFC 0096.
+        "verus" => verus(),
         // E1-B14. What an unmap costs under churn, counted both ways in one
         // boot, and the host workload beside the E1-P10 claims that asks the
         // same question of a clock which refuses to answer. RFC 0052.
@@ -1017,12 +1022,18 @@ cargo xtask <command>
                      the frame refuse to publish a root it cannot measure its way
                      to, and is the reserved zero reachable. No signature and no
                      freshness — RFC 0012 says what it does not prove
-  prove [harness]    Bounded model checking, in two crates: the five capability
-                     properties over arbitrary handles, and the ring's
-                     validation paths over arbitrary peer bytes. Every harness
+  prove [harness]    Bounded model checking, in three crates: the capability
+                     properties over arbitrary handles, the ring's validation
+                     paths over arbitrary peer bytes, and the ABI's own
+                     arithmetic. Every harness
                      must pass, at both bounds where the bound does not bind it,
                      and then each deliberate defect must fail the harness that
                      states the property it breaks. Needs Kani, `full` image
+  verus              Deductive proof over the file the kernel ships, not a copy
+                     of it: the three functions an untyped account's watermark is
+                     moved by, over every `u64`. Then the same file with its
+                     overflow guard taken away, which must be refuted. Needs
+                     Verus, `full` image, x86-64
   timer [seconds]    Run the 1 kHz timer and print a jitter histogram. Sixty
                      seconds by default. A measurement, not an assertion
   test               test-host, then cross. Both halves, on this machine
@@ -3079,6 +3090,18 @@ const DEFECTS: &[&str] = &[
     // that could not tell this build from the shipped one would be a proof of
     // nothing.
     "mutate-overlapping-grant",
+    // E2-P04's, and the only defect in this list that **no boot can reach**.
+    // It takes the overflow guard out of `kernel::watermark::refunded`, which
+    // is what `Table::refund` did before a deductive checker was pointed at it:
+    // `extent.saturating_add(bytes)` answers `Ok` and loses the difference, so
+    // `object + extent` is not preserved. `extent` is bytes left in an untyped
+    // region and no machine here has one within a refund of `u64::MAX`, so
+    // `cargo xtask mutate` has no provocation that finds it and this row is
+    // deliberately **not** in `MUTATIONS`. `cargo xtask verus` arms it and
+    // requires the conservation postcondition to be refuted and `watermark.rs`
+    // to be named — which is the difference between a bounded check and a
+    // deductive one as a run rather than as an argument. RFC 0096.
+    VERUS_DEFECT,
     // E2-B07's, and the only defect in this list that breaks nothing at all. It
     // changes sixteen bytes of read-only data nothing reads, so the only thing
     // in the system that can notice it is the frame's measurement of its own
@@ -9042,7 +9065,8 @@ fn lint_proofs() -> Result<(), String> {
     println!(
         "lint-proofs: ok  ({} crate(s) build against the code they prove under the pinned \
          toolchain, in {built} configuration(s) between them; the nightly still runs \
-         `cargo xtask prove`, and {dependents} job depends on the checker's image)",
+         `cargo xtask prove` and `cargo xtask verus`, and {dependents} job depends on the \
+         checkers' image)",
         PROOF_CRATES.len()
     );
     println!(
@@ -9056,7 +9080,7 @@ fn lint_proofs() -> Result<(), String> {
             .join(", ")
     );
     println!(
-        "  {} propert{} of E1-P07's exit the schedule establishes and this machine \
+        "  {} propert{} of E1-P07's and E2-P04's exits the schedule establishes and this machine \
          cannot (PROVE_RUN_GAP, declared rather than checked):",
         PROVE_RUN_GAP.len(),
         if PROVE_RUN_GAP.len() == 1 { "y" } else { "ies" }
@@ -9106,6 +9130,11 @@ fn proof_schedule() -> Result<usize, String> {
     for (needle, what) in [
         ("cron:", "a schedule at all"),
         ("cargo xtask prove", "the verb the `prove` job exists to run"),
+        // The second checker, and it is checked here rather than in a check of
+        // its own because it is a *step* of the same job: `image_full` is the
+        // only image either of them exists in and the count below is one on
+        // purpose. RFC 0096, E2-P04.
+        ("cargo xtask verus", "the deductive half, in the same job for the reason below"),
         ("outputs.image_full", "the image that carries the checker"),
     ] {
         if !text.contains(needle) {
@@ -9127,8 +9156,8 @@ fn proof_schedule() -> Result<usize, String> {
         return Err(format!(
             "{dependents} job(s) in {NIGHTLY} depend on `image_full`, and exactly one may.\n\n\
              That image carries Kani's own rustc, built by fetching a crate and a 483 MB\n\
-             release at image-build time. Every job waiting on it is a job the checker's\n\
-             toolchain can take down — and the sweep, the two fuzzers and the Miri job\n\
+             release at image-build time, plus a second for the deductive checker. Every\n\
+             job waiting on it is a job those toolchains can take down — and the sweep, the two fuzzers and the Miri job\n\
              assert things that have nothing to do with a proof. A check that does not run\n\
              asserts nothing, so the blast radius of that layer is one job on purpose.\n\
              RFC 0053, and the header of the `image_full` job itself."
@@ -9310,6 +9339,12 @@ const PROVE_RUN_GAP: &[&str] = &[
      crates.io and a 483 MB release from GitHub, and the only builder it has ever run on \
      needed `--network=host` to do it (docker/README.md). `image_full` is a job of its own \
      so that being wrong about this costs one check rather than seven",
+    "that the deductive half runs on anything but x86-64. Verus publishes no \
+     aarch64-linux bundle, `docker/Dockerfile` stands the layer down rather than failing \
+     the image, and the `prove` job is amd64 for Kani's reasons anyway — so an arm64 \
+     `full` image has one checker and `cargo xtask verus` on it says `no verus on PATH`. \
+     That is stated rather than discovered, and it closes on an arm64-linux release and \
+     on nothing this tree can do",
 ];
 
 /// [`sh`], somewhere other than the root.
@@ -14324,6 +14359,279 @@ fn lint_claim_runs() -> Result<(), String> {
         enforced.len(),
         if enforced.is_empty() { "  (none)".to_string() } else { enforced.join("\n") }
     ))
+}
+
+/// The file a deductive checker reads.
+///
+/// **One file, and it is a module of `f-kernel` rather than a crate beside
+/// it.** RFC 0053 fixed what a proof in this tree may be — over the file the
+/// kernel ships, not over a copy and not over a model — and mechanised it for
+/// Kani with `#[path]`, one file compiled twice. That does not transfer: Kani
+/// verifies ordinary Rust, so an unannotated second compile is a complete
+/// input, while Verus verifies only what is written inside `verus!{ … }`. RFC
+/// 0096 takes the other branch — the shipped file carries the annotations — and
+/// what makes it cheap is that this file names nothing above itself. `verus`
+/// reads it as a crate root exactly as it sits on disk, with no stand-in
+/// modules and no second crate.
+const VERUS_FILE: &str = "kernel/src/watermark.rs";
+
+/// The properties [`VERUS_FILE`] states, and what each one is for.
+///
+/// Written out here for `PROOF_HARNESSES`' reason, one checker over: a run that
+/// verified two functions because somebody deleted the third would print
+/// `2 verified, 0 errors` and read as a success. The count below is compared
+/// against what the checker reports, and the names are required to be in the
+/// file, so a deleted property is a red run rather than a shorter green one.
+const VERUS_PROPERTIES: &[(&str, &str)] = &[
+    (
+        "carvable",
+        "may a frame be carved off this account — both clauses, so a selection \
+         that says yes cannot be followed by a charge that says no",
+    ),
+    (
+        "carved",
+        "carving a frame moves the base up and the remainder down by the same \
+         number, so `object + extent` does not move",
+    ),
+    (
+        "refunded",
+        "a refund moves them back, never below the floor the region started at, \
+         and `object + extent` does not move",
+    ),
+];
+
+/// The defect [`verus`] arms, and the one property it must break.
+///
+/// In `DEFECTS` and deliberately not in `MUTATIONS`: the overflow it restores
+/// needs an untyped region within a refund of `u64::MAX` and no machine in this
+/// tree has one, so there is no boot provocation that finds it. That is the
+/// whole reason this verb exists beside `prove` rather than instead of it.
+const VERUS_DEFECT: &str = "mutate-saturating-refund";
+
+/// The property [`VERUS_DEFECT`] must be refuted at.
+const VERUS_DEFECT_BREAKS: &str = "refunded";
+
+/// Prove the frame's watermark arithmetic, then break it and require the proof
+/// to notice.
+///
+/// # Why there are three phases and not one
+///
+/// Phase 1 is the proof. Phase 2 is what makes phase 1 mean anything — a
+/// checker pointed at a file with no specification in it also prints
+/// `0 errors`, and the only way to tell that apart from a proof is to arm a
+/// defect and require the refutation to land on the named property.
+///
+/// Phase 3 is the one a reader would not guess. [`VERUS_DEFECT`] is a `cfg` in
+/// the shipped file and nothing else in this tree ever builds with it: it is
+/// not in `MUTATIONS`, so `cargo xtask mutate` does not compile it, and phase 2
+/// only asks `verus` to read it. A defect that had stopped compiling under
+/// `rustc` would keep passing phase 2 for ever while being a defect nobody
+/// could arm, which is the same class of silence `lint-proofs` exists for.
+///
+/// # Errors
+///
+/// No `verus` on `PATH`; a proof that does not hold; an armed run that verifies
+/// anyway; an armed run that fails somewhere other than in this file, or at a
+/// property other than the one the defect is about; an armed build that does
+/// not compile.
+fn verus() -> Result<(), String> {
+    verus_version()?;
+
+    let source = root().join(VERUS_FILE);
+    let text = std::fs::read_to_string(&source).map_err(|e| {
+        format!("reading {VERUS_FILE}: {e}\n\nThe proof's whole subject is that file.")
+    })?;
+    for (name, about) in VERUS_PROPERTIES {
+        if !text.contains(&format!("pub fn {name}(")) {
+            return Err(format!(
+                "{VERUS_FILE} no longer states `{name}` — {about}.\n\n\
+                 A checker run against a file with one fewer property in it prints a\n\
+                 smaller count and no error, which reads exactly like a proof. The list\n\
+                 is in `VERUS_PROPERTIES`: delete the row in the same diff, and say in an\n\
+                 RFC what stopped being worth proving."
+            ));
+        }
+    }
+
+    let wanted = VERUS_PROPERTIES.len();
+    println!("[1/3] the three properties, over every u64");
+    let (ok, log) = verus_run(&source, None)?;
+    let (verified, errors) = verus_counts(&log).ok_or_else(|| {
+        format!("verus reached no verdict over {VERUS_FILE}:\n\n{}", verus_findings(&log))
+    })?;
+    if !ok || errors != 0 || verified != wanted {
+        return Err(format!(
+            "{VERUS_FILE} does not verify: {verified} verified, {errors} errors, against\n\
+             the {wanted} properties `VERUS_PROPERTIES` names.\n\n{}",
+            verus_findings(&log)
+        ));
+    }
+    for (name, about) in VERUS_PROPERTIES {
+        println!("      {name:<10} {about}");
+    }
+
+    println!("[2/3] with `{VERUS_DEFECT}` — the proof must refuse it");
+    let (armed_ok, armed) = verus_run(&source, Some(VERUS_DEFECT))?;
+    let (armed_verified, armed_errors) = verus_counts(&armed).ok_or_else(|| {
+        format!(
+            "the armed run reached no verdict, which is not the same as a proof that\n\
+             failed — a checker that could not start prints nothing either:\n\n{}",
+            verus_findings(&armed)
+        )
+    })?;
+    if armed_ok || armed_errors == 0 {
+        return Err(format!(
+            "`{VERUS_DEFECT}` verified: {armed_verified} verified, {armed_errors} errors.\n\n\
+             The defect takes the overflow guard out of `{VERUS_DEFECT_BREAKS}`, so\n\
+             `object + extent` is no longer preserved and the conservation clause of that\n\
+             function's `ensures` cannot hold. A green armed run means the specification\n\
+             stopped saying so — which is the failure this phase exists to catch, and it\n\
+             is a larger finding than a red phase 1."
+        ));
+    }
+    if !armed.contains("watermark.rs") {
+        return Err(format!(
+            "the armed run went red somewhere other than {VERUS_FILE}:\n\n{}\n\n\
+             A red exit is not the property. The refutation has to land in the file the\n\
+             defect is in, or this phase is satisfied by a checker that failed to start.",
+            verus_findings(&armed)
+        ));
+    }
+    if armed_verified != wanted.saturating_sub(1) {
+        return Err(format!(
+            "the armed run broke {} of {wanted} properties, not one.\n\n\
+             `{VERUS_DEFECT}` is about `{VERUS_DEFECT_BREAKS}` alone. A defect that takes\n\
+             two proofs down is either a defect that is doing more than it says or a\n\
+             specification the three properties share more of than they should.\n\n{}",
+            wanted.saturating_sub(armed_verified),
+            verus_findings(&armed)
+        ));
+    }
+    println!("      refuted at {VERUS_DEFECT_BREAKS}, in {VERUS_FILE}");
+
+    println!("[3/3] the armed build still compiles, so the defect stays armable");
+    let built = Command::new("cargo")
+        .args([
+            "check",
+            "--quiet",
+            "-p",
+            "f-kernel",
+            "--target",
+            KERNEL_TARGET,
+            "-Zbuild-std=core,compiler_builtins",
+            "--features",
+            VERUS_DEFECT,
+        ])
+        .current_dir(root())
+        .output()
+        .map_err(|e| format!("could not run cargo check: {e}"))?;
+    if !built.status.success() {
+        return Err(format!(
+            "`f-kernel` does not compile with `{VERUS_DEFECT}`:\n\n{}\n\n\
+             Nothing else in this tree builds that feature — it is not in `MUTATIONS`,\n\
+             because no boot can reach what it breaks — so this is the only thing that\n\
+             would ever notice it rotting. A defect that cannot be built is a defect\n\
+             phase 2 is reading a stale file about.",
+            String::from_utf8_lossy(&built.stderr)
+        ));
+    }
+
+    println!();
+    println!(
+        "verus: ok — {wanted} propert(ies) hold over every u64, and 1 deliberate defect is \
+         refuted at the property it breaks"
+    );
+    println!();
+    println!("What this reaches that `cargo xtask prove` cannot, and it is not a matter of");
+    println!("degree: `kernel/proofs/src/mem.rs` sets `FRAME_SIZE` to 256 and the harnesses");
+    println!("run an eight-slot table, so a `u64` overflow is not in Kani's space and never");
+    println!("will be. Both refutations behind {VERUS_FILE} are overflows, and both were");
+    println!("preconditions the shipped code had never written down. RFC 0053's own reversal");
+    println!("says a bounded check is a weaker statement kept for its speed rather than for");
+    println!("its content; this is that difference as a run.");
+    println!();
+    println!("What it does not reach: everything in `kernel/src/cap.rs` that is not");
+    println!("arithmetic. A deductive proof over a function that dereferences a raw pointer");
+    println!("needs a specification for the memory it reaches, and that is a larger project");
+    println!("than three postconditions. `cargo xtask prove` is where the capability");
+    println!("properties live and this does not replace it.");
+    Ok(())
+}
+
+/// Run `verus` over one file, armed or not, and hand back its report.
+///
+/// Captured rather than streamed, for [`kani`]'s reason: every phase of this
+/// verb is an assertion about the report.
+fn verus_run(source: &Path, armed: Option<&str>) -> Result<(bool, String), String> {
+    let mut command = Command::new("verus");
+    command.args(["--crate-type=lib", "--edition=2024"]);
+    if let Some(feature) = armed {
+        command.arg("--cfg").arg(format!("feature=\"{feature}\""));
+    }
+    command.arg(source).current_dir(root());
+    let out = command.output().map_err(|e| format!("could not run verus: {e}"))?;
+    let mut log = String::from_utf8_lossy(&out.stdout).into_owned();
+    log.push_str(&String::from_utf8_lossy(&out.stderr));
+    Ok((out.status.success(), log))
+}
+
+/// What the report counted, or `None` when it did not say.
+///
+/// Read out of the text rather than from the exit status, for
+/// [`kani_verdict`]'s reason and with one addition of its own: the *count*
+/// matters here and the verdict does not. A run that verified two of three
+/// properties and reported no error has lost a property, and a run that
+/// verified all three and reported an error has one that does not hold; both
+/// exit the same way in one of the two cases.
+fn verus_counts(log: &str) -> Option<(usize, usize)> {
+    log.lines().rev().find_map(|line| {
+        let (verified, rest) = line.trim().split_once(" verified, ")?;
+        let verified = verified.rsplit_once(": ").map_or(verified, |(_, n)| n);
+        let errors = rest.strip_suffix(" errors")?;
+        Some((verified.trim().parse().ok()?, errors.trim().parse().ok()?))
+    })
+}
+
+/// The lines of a report worth putting in front of a person.
+fn verus_findings(log: &str) -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    let mut carry = 0usize;
+    for line in log.lines() {
+        if line.starts_with("error") || line.contains("verification results") {
+            lines.push(line);
+            carry = 4;
+        } else if carry > 0 {
+            lines.push(line);
+            carry -= 1;
+        }
+    }
+    if lines.is_empty() {
+        lines = log.lines().rev().take(30).collect();
+        lines.reverse();
+    }
+    lines.join("\n")
+}
+
+/// Is there a checker, and which one.
+fn verus_version() -> Result<(), String> {
+    match Command::new("verus").arg("--version").output() {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let version = text.lines().find(|l| l.contains("Version")).unwrap_or("verus").trim();
+            println!("verus         {version}");
+            Ok(())
+        }
+        _ => Err("no `verus` on PATH.\n\n\
+             The checker pins its own rustc and demands it through the rustup shim, so it\n\
+             is in the `full` image rather than in `dev` — and only there on x86-64,\n\
+             because Verus publishes no aarch64-linux bundle and `docker/Dockerfile`\n\
+             stands the layer down rather than failing the image:\n\n\
+             \x20 docker compose -f docker/compose.yaml build full\n\
+             \x20 docker compose -f docker/compose.yaml run --rm -T full cargo xtask verus\n\n\
+             Nothing else in this tree needs it, and `cargo xtask verify` does not run\n\
+             this verb."
+            .to_string()),
+    }
 }
 
 /// A small count, spelled the way `docs/` spells it.

@@ -599,22 +599,43 @@ jobs:
   # report is kept as an artifact for ninety days and the job goes red, which is
   # what a deterministic failure on a fixed input needs and no more.
   prove:
-    name: the capability properties and the ring's validation paths, proved
+    name: the capability properties, the ring's validation paths and the frame's
+      watermark, proved
     needs: [environment, image_full]
     runs-on: ubuntu-latest
     container: ${{ needs.environment.outputs.image_full }}
     steps:
       - uses: actions/checkout@v7
-      - name: both crates, and the deliberate defects that must break them
+      - name: three crates, and the deliberate defects that must break them
         run: |
           set -o pipefail
           cargo xtask prove 2>&1 | tee prove-report.txt
-      - name: keep the report
+      # The second checker, in this job and not in one of its own. `image_full`
+      # is the only image either of them exists in, it is built by fetching a
+      # crate and two releases at image-build time, and `xtask`'s
+      # `proof_schedule` refuses to let more than one job depend on it — every
+      # job waiting on that image is a job the checkers' toolchains can take
+      # down, and the sweep, the two fuzzers and the Miri job assert things that
+      # have nothing to do with a proof. Two checkers behind one image is one
+      # blast radius; two jobs would be two.
+      #
+      # What it adds that the step above cannot reach: `kernel/proofs/src/mem.rs`
+      # sets `FRAME_SIZE` to 256 and the harnesses run an eight-slot table, so a
+      # `u64` overflow is outside Kani's space and always will be. Both
+      # preconditions `kernel/src/watermark.rs` now states were found by a
+      # deductive checker and neither is reachable by a bounded one. RFC 0096.
+      - name: the frame's watermark over every u64, and the defect that must refute it
+        run: |
+          set -o pipefail
+          cargo xtask verus 2>&1 | tee verus-report.txt
+      - name: keep the reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: prove-report
-          path: prove-report.txt
+          path: |
+            prove-report.txt
+            verus-report.txt
           retention-days: 90
           if-no-files-found: error
 

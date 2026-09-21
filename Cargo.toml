@@ -89,6 +89,14 @@ f-index = { path = "index" }
 # moving the path.
 f-objects = { path = "user/objects", default-features = false }
 f-generation = { path = "generation" }
+
+# The deductive checker's two runtime crates, taken by `kernel` alone and
+# pinned by `=` because both are published by date rather than semantically.
+# The row is here rather than in `kernel/Cargo.toml` for the reason every
+# other row in this table is: a version this workspace resolves twice is a
+# version it can resolve two ways. RFC 0096.
+verus_builtin = "=0.0.0-2026-09-16-0054"
+verus_builtin_macros = "=0.0.0-2026-09-20-0158"
 # The assembler, and the row is short for `f-hash`'s reason: a library and not a
 # component, so no `image` feature and no `default-features` line. What is worth
 # saying here rather than in that crate is why it is above `user/` and not

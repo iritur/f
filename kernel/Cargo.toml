@@ -122,6 +122,28 @@ f-store.workspace = true
 # is `abi/`'s.
 f-supervisor.workspace = true
 
+# The deductive checker's two runtime crates, and RFC 0096 is where the
+# price is argued rather than here. `verus!{ … }` in `src/watermark.rs` is
+# a macro from the second and the specification types it expands against
+# live in the first, so the frame — the one tree RFC 0001 concentrates
+# `unsafe` in — takes two dependencies for a *checker* rather than for a
+# thing it does. Under rustc the macro erases every specification and what
+# is left is three function bodies; under `verus` they are the proof.
+#
+# Pinned with `=` and not with a caret, because both are published by date
+# rather than semantically: `cargo add` resolves them against *latest Rust
+# 1.99.0-nightly compatible version*, and without the `=` a newer date would
+# arrive as a toolchain bump nobody asked for — which `CLAUDE.md` forbids as
+# a side effect and `claims/README.md` prices as a full re-run.
+#
+# They pull `verus_syn`, `verus_prettyplease`, `syn`, `quote`,
+# `proc-macro2`, `convert_case`, `synstructure` and `unicode-ident` behind
+# them. Every one of those is a proc-macro dependency and none of them is in
+# the image: the frame leaf `cargo xtask generation` measures is the linked
+# artefact, and a macro that ran at compile time is not in it.
+verus_builtin.workspace = true
+verus_builtin_macros.workspace = true
+
 [lints.rust]
 # The frame. This is the crate the < 5% unsafe-of-TCB metric measures.
 # Adding another crate to this list is a visible, reviewable diff.
@@ -182,6 +204,16 @@ mutate-modified-frame = []
 # the field before anything enters ring 3, and `cargo xtask mutate` requires it
 # to. `kernel/src/arch/x86_64/gdt.rs` at `SYSRET_BASE`, and RFC 0074.
 mutate-sysret-base-without-privilege = []
+# The first defect in this list no boot can reach, and that is the point of
+# it. It takes the overflow guard out of `watermark::refunded`, which is
+# what the shipped `Table::refund` did before RFC 0096 pointed a deductive
+# checker at it: `extent.saturating_add(bytes)` answers `Ok` and loses the
+# difference, so `object + extent` is not preserved. `extent` is bytes left
+# in an untyped region and no machine here has one within a refund of
+# `u64::MAX`, so `cargo xtask mutate` cannot catch it and never will —
+# `cargo xtask verus` does, and requires the conservation postcondition to
+# be refuted and `watermark.rs` to be named.
+mutate-saturating-refund = []
 
 [[bin]]
 name = "f-kernel"
