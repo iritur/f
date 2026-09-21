@@ -949,7 +949,11 @@ impl Table {
             if slot.occupied()
                 && slot.cap_kind() == Some(CapType::Untyped)
                 && rights::holds(slot.rights, rights::DERIVE)
-                && slot.extent >= FRAME_SIZE
+                // The same predicate the charge below refuses on, so a
+                // selection that says yes cannot be followed by an arithmetic
+                // that says no. It used to be `slot.extent >= FRAME_SIZE`,
+                // which is one of its two clauses.
+                && crate::watermark::carvable(slot.object, slot.extent, FRAME_SIZE)
             {
                 account = Some(index);
                 break;
@@ -978,9 +982,12 @@ impl Table {
 
         // Charged last, and only once the page exists. A component that was
         // billed for a page it did not get would have no way to find out.
-        if let Some(slot) = self.at_mut(account) {
-            slot.object = slot.object.wrapping_add(FRAME_SIZE);
-            slot.extent = slot.extent.wrapping_sub(FRAME_SIZE);
+        if let Some(slot) = self.at_mut(account)
+            && let Some((next, left)) =
+                crate::watermark::carved(slot.object, slot.extent, FRAME_SIZE)
+        {
+            slot.object = next;
+            slot.extent = left;
         }
         Ok(())
     }
@@ -1067,11 +1074,21 @@ impl Table {
         if slot.cap_kind() != Some(CapType::Untyped) {
             return Err(error::pack(error::AUTHORITY, error::authority::WRONG_TYPE));
         }
-        if slot.object < floor.saturating_add(bytes) {
+        // The arithmetic is `crate::watermark`'s and the proof is over that
+        // file. What used to be here was `slot.extent.saturating_add(bytes)`
+        // beside a floor test, and a deductive checker refuted the conservation
+        // it implied: a refund whose `extent + bytes` would pass `u64::MAX`
+        // answered `Ok` and lost the difference. RFC 0096 records the day, and
+        // `watermark.rs` records the precondition that had never been written
+        // down. It is refused now, under the same code as the floor, because
+        // from a holder's side both are the frame having lost count.
+        let Some((object, extent)) =
+            crate::watermark::refunded(slot.object, slot.extent, bytes, floor)
+        else {
             return Err(error::pack(error::ARGUMENT, error::argument::BAD_ADDRESS));
-        }
-        slot.object -= bytes;
-        slot.extent = slot.extent.saturating_add(bytes);
+        };
+        slot.object = object;
+        slot.extent = extent;
         Ok(())
     }
 
@@ -1386,13 +1403,19 @@ impl Table {
         if kind != CapType::Untyped {
             return Ok((kind, slot.object, slot.extent));
         }
-        if slot.extent < FRAME_SIZE {
-            return Err(exhausted());
-        }
+        // What stood here was `if slot.extent < FRAME_SIZE` and two
+        // `wrapping_` calls under the comment *checked immediately above, so
+        // neither of these can wrap*. The check above bounded the subtraction
+        // and said nothing about the addition: an account whose `object` is
+        // within a frame of the end of the address space wrapped to zero and
+        // handed out a frame at address zero. `crate::watermark::carved` states
+        // both clauses and is proved over them.
         let object = slot.object;
-        // Checked immediately above, so neither of these can wrap.
-        slot.object = object.wrapping_add(FRAME_SIZE);
-        slot.extent = slot.extent.wrapping_sub(FRAME_SIZE);
+        let Some((next, left)) = crate::watermark::carved(object, slot.extent, FRAME_SIZE) else {
+            return Err(exhausted());
+        };
+        slot.object = next;
+        slot.extent = left;
         Ok((CapType::Frame, object, FRAME_SIZE))
     }
 

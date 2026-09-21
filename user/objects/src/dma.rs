@@ -95,6 +95,22 @@ pub struct Landed {
     /// [`registered_bytes`]: Landed::registered_bytes
     /// Unit: bytes.
     pub fetched_bytes: u64,
+    /// Bytes a **client** put into its own registered buffer before submitting
+    /// a write.
+    ///
+    /// The third direction, and it has its own name for the reason the second
+    /// one does. [`registered_bytes`] is *bytes the device wrote* and
+    /// [`fetched_bytes`] is *bytes the device read*; this is neither, because
+    /// no device is involved — it is the client filling memory it owns. A
+    /// workload that reached for [`Landing::lend`] to do it would move
+    /// `registered_bytes`, and `claims/0022`'s zero would then be a statement
+    /// about a counter that had quietly started summing a client's own writes
+    /// into its own buffer.
+    ///
+    /// [`registered_bytes`]: Landed::registered_bytes
+    /// [`fetched_bytes`]: Landed::fetched_bytes
+    /// Unit: bytes.
+    pub filled_bytes: u64,
     /// Bytes that moved through a buffer that is not the caller's registered
     /// one.
     ///
@@ -246,6 +262,41 @@ impl<'m> Landing<'m> {
         let window = self.region.get(at..end).ok_or(refusal::ADDRESS)?;
         self.landed.fetched_bytes = self.landed.fetched_bytes.saturating_add(len as u64);
         Ok(window)
+    }
+
+    /// The client's own bytes into its own registered buffer, before it
+    /// submits.
+    ///
+    /// # Why a client needs a function here at all
+    ///
+    /// Because a registered region is `&mut` for the life of the [`Landing`],
+    /// so a workload holding one cannot also hold a slice of the memory it
+    /// registered. The alternative shapes are worse in ways this crate already
+    /// argues about elsewhere: filling the region *before* registering it makes
+    /// every write in a run carry the same bytes, and reaching for
+    /// [`Landing::lend`] borrows the buffer as the device rather than as its
+    /// owner and lands in the wrong tally.
+    ///
+    /// The resolution is [`Landing::fetch`]'s, unchanged — the same
+    /// `f_ring::registry::Table`, the same refusals, the same region check — and
+    /// the lease is taken and given back inside this call, because a client
+    /// filling its own buffer is not a submission and must not leave the buffer
+    /// looking submitted.
+    ///
+    /// # Errors
+    ///
+    /// `Table::resolve`'s, unchanged, and [`refusal::ADDRESS`] for an address
+    /// the table answered that this model's region does not cover.
+    pub fn fill(&mut self, set: SetId, index: u32, bytes: &[u8]) -> Result<(), i32> {
+        let wanted = u32::try_from(bytes.len()).map_err(|_| refusal::SHORT_BUFFER)?;
+        let reach = self.table.resolve(set, index, wanted).map_err(|(code, _)| code)?;
+        let at = usize::try_from(reach.address.wrapping_sub(DEVICE_BASE))
+            .map_err(|_| refusal::ADDRESS)?;
+        let end = at.checked_add(bytes.len()).ok_or(refusal::ADDRESS)?;
+        let window = self.region.get_mut(at..end).ok_or(refusal::ADDRESS)?;
+        window.copy_from_slice(bytes);
+        self.landed.filled_bytes = self.landed.filled_bytes.saturating_add(bytes.len() as u64);
+        self.table.release(set, index).map_err(|(code, _)| code)
     }
 
     /// The device is finished with the buffer.

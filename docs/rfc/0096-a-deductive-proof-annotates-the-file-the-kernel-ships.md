@@ -148,6 +148,65 @@ compiler is a red layer with a version in the message.
 invalidated every layer under it — including the Kani bundle, a 483 MB download
 the image then took again for the sake of one unarchiver.
 
+## What building it established, on 2026-09-21
+
+**The file is `kernel/src/watermark.rs` and it is smaller than this entry
+expected.** The decision above is *the shipped file carries the annotations*,
+and the cost it priced was the whole of `cap.rs` becoming a file two compilers
+read. It is not: Verus runs a compiler front end over its input, so a file that
+says `use crate::` needs the crate around it — which is the stand-in machinery
+`kernel/proofs` carries for Kani — and a file that names nothing above itself
+does not. The three functions an untyped account's watermark is moved by are
+arithmetic over four `u64`s and nothing else, so they are their own module,
+`verus` reads that module as a crate root exactly as it sits on disk, and
+`cap.rs` calls into it. No second crate, no `#[path]`, no stand-ins.
+
+**Three properties, and two of them corrected the code they were written for.**
+
+- `carved` — carving a frame moves the base up and the remainder down by the
+  same number, so `object + extent` does not move. `Table::retype` did that with
+  two `wrapping_` calls under the comment *"Checked immediately above, so
+  neither of these can wrap"*. What was checked immediately above is
+  `extent >= FRAME_SIZE`, which bounds the subtraction and says nothing about
+  the addition: an account whose `object` was within a frame of the end of the
+  address space wrapped to zero and handed out a frame at address zero.
+- `refunded` — the conservation this entry's own probe refuted on 2026-09-20,
+  now stated and held. The guard that makes it hold is what
+  `mutate-saturating-refund` takes away.
+- `carvable` — the predicate `Table::grow` selects an account by, so that a
+  selection which says yes cannot be followed by a charge that says no. It used
+  to be one of its two clauses.
+
+**Neither correction is claimed to be reachable.** `extent` is bytes left in an
+untyped region and `object` is a physical address; no machine in this tree has
+either within a frame of `u64::MAX`. What the refutations establish is that the
+preconditions were never written down, which is a different and checkable
+claim — and it is the reason `mutate-saturating-refund` is in `DEFECTS` and
+deliberately **not** in `MUTATIONS`. There is no boot provocation that finds it,
+which is the whole argument for a second checker rather than a broader first
+one.
+
+**The two costs this entry forecast were both paid and both were smaller than
+priced.** `f-kernel` takes `verus_builtin` and `verus_builtin_macros`, pinned
+with `=` because both are published by date; they pull seven proc-macro crates
+behind them and none of those is in the image, because the frame leaf
+`cargo xtask generation` measures is the linked artefact and a macro that ran at
+compile time is not in it. The frame compiles for `x86_64-unknown-none` under
+`nightly-2026-08-01` with `-D warnings`, which is the sharpest risk this entry
+named, tested rather than assumed. One line of cost was not forecast:
+`use verus_builtin::*` is load-bearing under Verus and has no user under rustc,
+so it carries an `allow(unused_imports)` with the reason written beside it.
+
+**The route is `cargo xtask verus`, and it is a step of the nightly `prove` job
+rather than a job of its own.** `image_full` is the only image either checker
+exists in, and `xtask`'s `proof_schedule` refuses more than one job depending on
+it — every job waiting on that image is a job the checkers' toolchains can take
+down. Two checkers behind one image is one blast radius; two jobs would be two.
+The verb has three phases: the proof, the armed run that must be refuted at the
+named property and in the named file, and a `cargo check` of the armed build —
+because nothing else in this tree ever compiles that feature, so a defect that
+had stopped compiling would keep passing phase two for ever.
+
 ## Why Kani is not deleted
 
 RFC 0053 named its own reversal: *Verus arriving on the frame at phase 02 — if

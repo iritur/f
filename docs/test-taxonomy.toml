@@ -586,7 +586,7 @@ check   = "REVIEW.md passes 1 and 3; no lint reads the comment"
 cadence = ["every-pr"]
 status  = "partially"
 accepted_because = "A checker for this is a proof checker; there is no cheaper version, and listing it as mechanised would be worse than listing it as review."
-reversal = "E2-P04 puts Verus on the frame."
+reversal = "A proof in this tree states something about a pointer's provenance or a region's extent. This row used to name `E2-P04` putting Verus on the frame; that happened on 2026-09-21 and moved nothing here, because what arrived is a deductive checker over arithmetic — `kernel/src/watermark.rs` contains no `unsafe` — and a `SAFETY` comment is an obligation about memory a raw pointer reaches."
 
 [[row]]
 id      = "unsafe-share-trigger"

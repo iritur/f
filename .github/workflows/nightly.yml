@@ -599,22 +599,86 @@ jobs:
   # report is kept as an artifact for ninety days and the job goes red, which is
   # what a deterministic failure on a fixed input needs and no more.
   prove:
-    name: the capability properties and the ring's validation paths, proved
+    name: the capability properties, the ring's validation paths and the frame's
+      watermark, proved
     needs: [environment, image_full]
     runs-on: ubuntu-latest
     container: ${{ needs.environment.outputs.image_full }}
     steps:
       - uses: actions/checkout@v7
-      - name: both crates, and the deliberate defects that must break them
+      - name: three crates, and the deliberate defects that must break them
         run: |
           set -o pipefail
           cargo xtask prove 2>&1 | tee prove-report.txt
-      - name: keep the report
+      # The second checker, in this job and not in one of its own. `image_full`
+      # is the only image either of them exists in, it is built by fetching a
+      # crate and two releases at image-build time, and `xtask`'s
+      # `proof_schedule` refuses to let more than one job depend on it — every
+      # job waiting on that image is a job the checkers' toolchains can take
+      # down, and the sweep, the two fuzzers and the Miri job assert things that
+      # have nothing to do with a proof. Two checkers behind one image is one
+      # blast radius; two jobs would be two.
+      #
+      # What it adds that the step above cannot reach: `kernel/proofs/src/mem.rs`
+      # sets `FRAME_SIZE` to 256 and the harnesses run an eight-slot table, so a
+      # `u64` overflow is outside Kani's space and always will be. Both
+      # preconditions `kernel/src/watermark.rs` now states were found by a
+      # deductive checker and neither is reachable by a bounded one. RFC 0096.
+      - name: the frame's watermark over every u64, and the defect that must refute it
+        run: |
+          set -o pipefail
+          cargo xtask verus 2>&1 | tee verus-report.txt
+      - name: keep the reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: prove-report
-          path: prove-report.txt
+          path: |
+            prove-report.txt
+            verus-report.txt
+          retention-days: 90
+          if-no-files-found: error
+
+  # The re-chunking claim, and it is a job of its own rather than a step in
+  # `gating-claims` because it is the one gating claim that is neither
+  # boot-heavy nor quick: two 128 MiB objects and an 8 MiB one, five content
+  # mixtures, two seeds, both object kinds, and every edit on the extent kind
+  # submitted across a real objects ring. Minutes of hashing, and a red night
+  # should name it in the job rather than in the eleventh step of another one.
+  #
+  # ## Why this arrived on 2026-09-21 and not earlier
+  #
+  # `claims/0017` was `pending` for two epochs, on a denominator: the ratio is
+  # *per application byte written* and `intent/0006-state/spec.md` defines an
+  # application byte as one the client submitted **on the objects ring**, while
+  # the bench computed `edits * WRITE_BYTES` for itself. `E2-B09` closed that —
+  # both halves of the ratio now come off `f_objects::Served` — so the claim
+  # gates, and a gating claim no workflow compares is what
+  # `cargo xtask lint-claim-runs` exists to refuse.
+  #
+  # ## What a red night here means
+  #
+  # `claims/0017`'s `[diagnosis]` table names what each row implies, and the
+  # first sentence of it is the one to read: a bound moves only by an RFC
+  # carrying the measurement that moved it. Three have looked — RFC 0061, 0062
+  # and 0064 — and every one of them left the 786 432 where it was.
+  rechunk:
+    name: bytes re-chunked per application byte, on both object kinds
+    needs: [environment, image]
+    runs-on: ubuntu-latest
+    container: ${{ needs.environment.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: both workloads, and every threshold compared
+        run: |
+          set -o pipefail
+          cargo xtask claim bytes-rechunked-per-byte 2>&1 | tee rechunk-report.txt
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rechunk-report
+          path: rechunk-report.txt
           retention-days: 90
           if-no-files-found: error
 

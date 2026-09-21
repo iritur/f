@@ -11,93 +11,67 @@
 # the next reader needs: it was a reservation and not a withdrawal, which the
 # RFC directory spent two epochs teaching about the number 0012.
 #
-# **Why this is still `pending`, and the reason changed on 2026-09-20.** The
-# claim's own subject is *bytes re-chunked per application byte written*, and an
-# application byte is defined once, in the spec, as a byte the client submitted
-# **on the objects ring**.
+# **Why this was `pending` for two epochs, and what closed it on 2026-09-21.**
+# The claim's own subject is *bytes re-chunked per application byte written*,
+# and an application byte is defined once, in the spec, as a byte the client
+# submitted **on the objects ring**.
 #
-# The reason used to be that no such byte existed: `abi::objects::op::known`
-# admitted `READ` alone, so nothing a client submitted could be written, and the
-# bench's denominator was a 4096-byte write through a real `Store` over a
-# modelled device — a write path and not a client. **That is paid.** `op::known`
-# admits `WRITE`, `user/objects` answers it through `f_objects::write::WritePath`,
-# and `cargo xtask objects written` puts four client writes across a real ring at
-# a boot: 8192 bytes counted by the client and 8192 counted by the component, two
-# sums on opposite sides neither derived from the other, with the store's content
-# address for them agreeing between the completion and the component's board.
+# For most of that time no such byte existed anywhere: `abi::objects::op::known`
+# admitted `READ` alone, so nothing a client submitted could be written, and
+# this bench's denominator was `edits * WRITE_BYTES` — an arithmetic it did for
+# itself beside a `Store` call in its own process. A write path, and not a
+# client.
 #
-# What keeps it `pending` now is **geometry, not boundary**. This claim is
-# defined over 8 MiB and 128 MiB objects across five mixtures and two seeds;
-# `f_blob::extent::EXTENT_BYTES` is a mebibyte and `Extent::write` allocates a
-# piece of it, against the 128 KiB heap `kernel/src/objects.rs` gives that place.
-# So the boot can carry the denominator's *boundary* and cannot carry this
-# claim's *workload*, and a ratio taken over 8 KiB and published under this name
-# would be a measurement from one geometry answering a question about another —
-# which `claims/0016` and `claims/0019` each already carry a paragraph about.
-# `user/objects/src/write.rs` states the same limit where a reader of the code
-# will meet it. What closes this row is a place whose account can fund the
-# geometry, and that is an account and a heap rather than a boundary.
+# **Both halves now come off one boundary.** `bench/src/bin/rechunk.rs` fills a
+# registered buffer through `f_objects::dma::Landing::fill`, submits an
+# `f_abi::Sqe` naming that buffer by set and index, and
+# `f_objects::service::Service` answers it. The numerator is
+# `Served::rechunked_bytes` — `f_blob::extent::Cost::copied`, summed where the
+# client submitted rather than where the extent was called — and the denominator
+# is `Served::written_bytes`. Neither is computed by the file that draws the
+# edits, and `application_bytes_written_at_the_ring` is asserted equal to the
+# drawn total plus the placed straddling writes, so a run in which some
+# submission did not reach the ring is red rather than quieter.
 #
-# **What the two workloads each supply.** `blob/tests/chunker.rs` measures the
-# numerator's worst case directly — the distance from an edit to the first
-# boundary the two streams agree on again — over 32 (seed, mixture) pairs; the
-# bench measures the cost of a write, on both object kinds, at two object sizes.
-# One row of the first was not met on the day this file was registered, was
-# written down as not met rather than left out, and was **replaced rather than
-# widened** by the four rows RFC 0062 produced. One row of the second was not
-# met on the day the bench first ran at full geometry, was written down here the
-# same way, and was answered by RFC 0064 scoping the clause it belongs to rather
-# than by moving the number it failed: see `[diagnosis]`, and RFC 0061, 0062 and
-# 0064.
+# **What it cost, and it was one decision rather than a widening.** RFC 0098
+# says a `WRITE` edits the object its channel is about; the channel carries the
+# subject because the ABI leaves no alternative — a `Read` names its object by
+# content address and fits, `32 + 4 = 36` against a `PAYLOAD_BYTES` of 40, and a
+# `Write` cannot at `32 + 8 + 4 = 44`. That subject is now a field:
+# `Service::about` sets it, an edit against it is answered, and a channel
+# without one refuses a non-zero offset exactly as before.
 #
-# **Both workloads are run by this claim's one command, and every row below is
-# compared against what they print.** That was not true until 2026-09-07: the
-# reproduction ran the test alone, the bench was unreachable from
-# `cargo xtask claim`, and a threshold breach inside it went unobserved inside a
-# green `verify`. A threshold nothing compares against is a number in a file.
+# **A boot still refuses, and the refusal is unchanged rather than weakened.**
+# `Extent::write` allocates a piece buffer of `EXTENT_BYTES` — a compile-time
+# mebibyte — whatever the object's size, and `kernel/src/objects.rs` gives
+# `user/objects` a 128 KiB heap. `serve.rs` never calls `Service::about`, so
+# every channel in a boot has no subject and every non-zero offset on one is
+# refused. What moved is that the affordability is a property of the caller,
+# which is the only reading under which RFC 0098's *an edit the service cannot
+# afford is refused* is a decision rather than a constant nobody chose. Raising
+# the heap past a mebibyte to suit this workload would have been a component
+# sized by its own measurement; the spec says *a ring*, not *a boot*, and
+# `f-objects` is a workspace member whose library builds on the host with only
+# its image half gated on `target_os = "none"`.
 #
-# **Where the workload has to run, settled on 2026-09-20.** The reason this
-# claim was `pending` is now one sentence rather than two, and the sentence is
-# about *where* and not about *whether*.
+# **One row moved because of it, and it is recorded rather than folded away.**
+# The completion has to carry the object's new content address and an extent has
+# none until it is snapshotted, so there is now one snapshot per write where the
+# bench used to choose an interval. `extent_snapshot_bytes_max` is its own row
+# for the reason it always had one: a snapshot is proportional to the piece
+# count and therefore to the object, so adding it into the per-write cost would
+# turn `2 x EXTENT_BYTES at both sizes` — 2 097 152 at 8 MiB and the identical
+# 2 097 152 at 128 MiB, this claim's strongest evidence — into two numbers
+# sixteen times apart.
 #
-# `f_blob::extent::EXTENT_BYTES` is a compile-time constant of one mebibyte and
-# `Extent::create` chunks by it — deliberately, and that file argues for it: a
-# piece size is a property of the writer and not a dial. So an edit allocates a
-# mebibyte, and `kernel/src/objects.rs` gives `user/objects` a 128 KiB heap.
-# **The edit workload therefore cannot run in a boot**, and raising the heap
-# past a mebibyte to suit a benchmark would be a component sized by its
-# measurement.
-#
-# It does not need to. `intent/0006-state/spec.md` defines an application byte
-# as one the client submitted **on the objects ring** — a ring, not a boot — and
-# `f-objects` is a workspace member whose library builds and tests on the host,
-# with only its image half gated on `target_os = "none"`. So the boundary this
-# claim names is reachable in a host process at this claim's own geometry, which
-# is where its numbers already come from.
-#
-# What closes this row, with no unknowns left in it: `bench` takes `f-objects`
-# as a dependency, `bench/src/bin/rechunk.rs` submits `objects::op::WRITE`
-# through `Service::answer` against a `Landing` — the shape
-# `user/objects/tests/reads.rs` already sets up — the service's write path holds
-# an `f_blob::extent::Extent` and answers with its `Cost`, and the denominator
-# becomes `Served::written_bytes` rather than a sum of `WRITE_BYTES` the bench
-# computed for itself. Both halves of the ratio then come off the ring.
-#
-# **RFC 0098 took the decision that shape needed.** A `WRITE` edits the object
-# its channel is about and answers with that object's new content address; where
-# the channel has no object, a write at offset zero establishes one. The channel
-# carries the subject because the ABI leaves no alternative — a `Read` names its
-# object by content address and fits, `32 + 4 = 36` against a `PAYLOAD_BYTES` of
-# 40, and a `Write` cannot at `32 + 8 + 4 = 44`.
-#
-# `user/objects` establishes and does not edit, and refuses a non-zero offset
-# rather than approximating it: a service that met an edit it could not afford
-# by storing the submitted bytes would answer `Ok` to a client whose object it
-# had silently replaced. So the ring in a boot carries whole-object writes, and
-# this claim's edits belong in a host process over the same `Service`.
+# **The chunked kind has no ring number and is not owed one.** It has no write
+# path at all: `measure_chunked` applies an edit to an object, chunks both
+# streams and undoes it, which is the numerator's own measurement and is where
+# the resynchronisation rows come from. The rows this claim's headline rests on
+# — the extent kind's — are the ones a client submits for.
 
 name       = "bytes-rechunked-per-byte"
-status     = "pending"          # pending | tracked | gating
+status     = "gating"           # pending | tracked | gating
 milestone  = "E2"
 
 statement  = """
@@ -315,6 +289,14 @@ secondary = [
   "resync_pairs_unstarved",
   "resync_pairs_starved_periodic",
   "resync_pairs_starved_zero_filled",
+  # **The boundary, as a pair of counts rather than as a sentence.** These are
+  # what `E2-B09` was open for after everything else in it was met: the bytes
+  # and the entries a *component* counted while answering this workload's
+  # submissions, off `f_objects::Served`. The bench's own drawn total is printed
+  # beside them and required to be equal, which is what makes the pair evidence
+  # rather than one number printed twice.
+  "application_bytes_written_at_the_ring",
+  "entries_answered_at_the_ring",
   # The geometry, because every row above is a statement over it and a run that
   # quietly shrank the object would report a bound it did not test.
   "object_bytes_small",
@@ -376,6 +358,15 @@ rechunk_edits_clear_of_a_starved_run_large = { min = 64 }
 # one chunk. Measured 0 over the 1049 excused edits of 1280, which is the first
 # run in which that clause was asserted anywhere rather than assumed.
 rechunk_edits_exceeding_the_second_clause = { max = 0 }
+# **The denominator, at the boundary this claim defines it at.** Exact rather
+# than a floor, and derived rather than measured: two object sizes x two seeds x
+# five mixtures x 64 writes = 1280 drawn edits, plus one placed straddling write
+# per cell = 1300 entries, at 4096 bytes each. A run that shrank its geometry
+# fails here as it fails at `writes_per_object`, and a run whose submissions did
+# not all reach the ring fails here *first* — which is the point, because every
+# ratio above it would otherwise be taken over a submission that did not happen.
+application_bytes_written_at_the_ring   = { min = 5324800, max = 5324800 }
+entries_answered_at_the_ring            = { min = 1300, max = 1300 }
 # Property 4 as RFC 0061 states it: every pair inside the published bound.
 # Measured 32 of 32, and the row below says on how many of them that could have
 # come out otherwise.
@@ -458,7 +449,7 @@ writes_per_object                       = { min = 64 }
 
 [hardware]
 runner = "runner-class-A"       # pinned bare metal, thermally stable
-notes  = "**This claim does not need that machine, and says so rather than pretending** — the same note `claims/0014` carries. Every metric is a count of bytes the chunker scanned or hashed, taken by the workload itself, and it is the same count on a fast host and a slow one; `f_bench::Environment` refuses to record a *timing* and this records none, which is why it may gate in the development container the day it stops being `pending`, the way `claims/0005` does. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it."
+notes  = "**This claim does not need that machine, and says so rather than pretending** — the same note `claims/0014` carries. Every metric is a count of bytes the chunker scanned or hashed, taken by the workload itself, and it is the same count on a fast host and a slow one; `f_bench::Environment` refuses to record a *timing* and this records none, which is why it gates in the development container the way `claims/0005` does — as of 2026-09-21 it does, and the nightly `rechunk` job is what compares it. The runner is named because `lint-reproduce` requires every claim to name one with a specification file beside it."
 
 [reproduce]
 command = "cargo xtask claim bytes-rechunked-per-byte"

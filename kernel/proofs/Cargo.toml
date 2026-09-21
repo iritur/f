@@ -28,6 +28,20 @@ doctest = false
 [dependencies]
 f-abi = { path = "../../abi" }
 
+# `src/watermark.rs` is compiled here through `#[path]`, the same way `cap.rs`
+# is, and it carries a `verus!{ … }` block — so this crate needs the macro and
+# the types it expands against exactly as `f-kernel` does. Pinned with `=` and
+# to the same versions the workspace pins, because a file compiled twice against
+# two versions of one macro is a file two checkers can disagree about. RFC 0096.
+#
+# This crate is outside the workspace and inherits no dependency table, which is
+# why the versions are written out rather than inherited. `cargo xtask
+# lint-registries` does not police them; what does is that a drift here is a
+# build failure in `lint-proofs`, which compiles this crate in every
+# configuration `prove` builds.
+verus_builtin = "=0.0.0-2026-09-16-0054"
+verus_builtin_macros = "=0.0.0-2026-09-20-0158"
+
 [lints.rust]
 # The frame's file is compiled here, and it is `unsafe` where it always was.
 # The three stand-ins carry one `unsafe impl` between them — `pages::Pages` —
@@ -54,6 +68,17 @@ multiple_unsafe_ops_per_block = "deny"
 # `cargo xtask lint-mutations` walks every manifest in the tree, this one
 # included, and refuses any of them that turns a defect on by default.
 mutate-unchecked-index = []
+
+# The second defect this crate can be built with, and it is declared for a
+# narrower reason than the first. Nothing here arms it: `cargo xtask verus`
+# arms it against `f-kernel`, and no harness in `src/proofs.rs` could find what
+# it breaks — `mem::FRAME_SIZE` is 256 here and the overflow it restores needs
+# an untyped region within a refund of `u64::MAX`. It is declared because
+# `src/watermark.rs` is compiled here and *names* it, and a `cfg(feature = ...)`
+# for a feature the manifest does not declare is an `unexpected_cfgs` warning —
+# which in this tree is a failure. So the row exists to keep the two manifests
+# agreeing about what the one file may say.
+mutate-saturating-refund = []
 
 # Run the harnesses at the page size the kernel actually buys. See
 # `mem::FRAME_SIZE`: the reduced page is what makes the walking proofs finish,

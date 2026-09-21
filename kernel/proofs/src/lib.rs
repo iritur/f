@@ -63,6 +63,24 @@ pub mod mem;
 pub mod pages;
 pub mod percpu;
 
+/// The watermark arithmetic, compiled from the file the kernel ships — and the
+/// file a *second* checker reads.
+///
+/// **A fourth stand-in would have been the wrong answer here and it is worth
+/// saying why.** The three above are stand-ins because what they model is a
+/// machine: a page, a frame allocator, a per-CPU shard. This is four `u64`s,
+/// and RFC 0096 put a `verus!{ … }` block in it — so a copy beside this one
+/// would be a copy of the only file in the tree that two checkers read, and the
+/// first thing it would stop containing is the specification. `#[path]`, for
+/// `cap`'s reason one line down.
+///
+/// What each checker gets from it is different and neither subsumes the other.
+/// Kani reads it as ordinary Rust at `mem::FRAME_SIZE` = 256; Verus reads the
+/// specifications over every `u64`, which is where both of this file's
+/// preconditions came from.
+#[path = "../../src/watermark.rs"]
+pub mod watermark;
+
 /// The frame's capability table, compiled from the file the kernel ships.
 ///
 /// `#[path]` and not a copy. A copy would drift, and the first thing it would

@@ -387,3 +387,11 @@ The honest costs, stated where the numbers will be rather than in a rebuttal:
   identically: a proof system that can state a *specification* rather than a
   bound would replace the whole of this with something stronger, and the
   harnesses here would become the regression suite for it.
+
+  *Read against `E2-P04` on 2026-09-21: **fired, and not met**, for the reason
+  0053's own reading gives.* Verus is on the frame and proves three arithmetic
+  functions in `kernel/src/watermark.rs`. Nothing it states is about a region of
+  peer bytes, and the specification this entry imagines — one that says what
+  `adopt` may conclude from 640 bytes it did not write — is a different and much
+  larger object than a postcondition over four `u64`s. These harnesses are not a
+  regression suite for anything yet.

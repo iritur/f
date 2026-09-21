@@ -445,10 +445,18 @@ reversal condition. Nothing is left as "we should probably".
   condition. A verb that went red at phase 00 would be a gate with no path to
   green. *Reverse this* at phase 02: `lint_all` gains a line, as `E0-B21`
   records.
-- **A `SAFETY` comment that does not discharge its obligation.** Review, until
-  `E2-P04` puts Verus on the frame. A checker for this is a proof checker; there
-  is no cheaper version, and pretending otherwise would put a rule in the
-  mechanised column that is not mechanised.
+- **A `SAFETY` comment that does not discharge its obligation.** Review. **The
+  reversal this row named has half happened and the row has not moved**, which
+  is worth writing down rather than quietly leaving: `E2-P04` put Verus on the
+  frame on 2026-09-21 — `cargo xtask verus`, three properties in
+  `kernel/src/watermark.rs`, proved over every `u64` and refuted under a
+  deliberate defect — and none of it reads a `SAFETY` comment. What arrived is a
+  deductive checker over *arithmetic*. A `SAFETY` comment discharges an
+  obligation about memory a raw pointer reaches, and proving one needs a
+  specification for that memory; the three functions Verus verifies here contain
+  no `unsafe` at all. *Reverse this* when a proof in this tree states something
+  about a pointer's provenance or a region's extent, which is a larger project
+  than a checker being present.
 - **A number in prose with no claim.** The mechanised direction is the other
   one: `lint-claims` catches a *cited* value that has moved, `lint-reproduce` a
   claim that cannot be re-derived, `lint-claim-owners` one nobody owns. A lint

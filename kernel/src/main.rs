@@ -50,6 +50,14 @@ pub mod screen;
 pub mod smp;
 pub mod state;
 pub mod supervisor;
+// The one module of this crate a second compiler reads. RFC 0096: a
+// deductive proof annotates the file the kernel ships, so the
+// specifications are in the source rather than in a model beside it, and
+// `cargo xtask verus` points the checker at exactly this file. It names
+// nothing above itself on purpose — a file that said `use crate::` would
+// need the crate around it, which is the stand-in machinery
+// `kernel/proofs` carries for Kani.
+pub mod watermark;
 
 use core::panic::PanicInfo;
 
