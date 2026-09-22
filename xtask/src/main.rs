@@ -281,11 +281,15 @@ const CONFIG_REDIRECTS: &[&str] = &[
 /// this* expects two of the three to close.
 const BOUNDARY_BLIND: &[(&str, &str)] = &[
     (
-        "a configuration `lint` never compiles — anything behind `cfg(target_arch = \
-         \"aarch64\")` or an off-by-default feature. `lint_style` clippies the host world and \
-         `x86_64-unknown-none`; the AArch64 world is compiled by `cargo xtask test`, and its \
-         dep-info is therefore not among the ones these nets read",
-        "a route behind a configuration `lint` never compiles",
+        "a configuration **this runner** never compiles — an off-by-default feature, or a \
+         `cfg(target_arch = ...)` naming an architecture the job is not. `lint_style` clippies \
+         the host world and `x86_64-unknown-none`, so a route gated to another architecture is \
+         compiled by nothing these nets read. **Narrowed on 2026-09-22, by a red arm job rather \
+         than by an argument:** this entry used to name `cfg(target_arch = \"aarch64\")` as the \
+         example, and on `ubuntu-24.04-arm` that is the host — rustc reads the file, the \
+         dep-info names it, and net two catches it. So the blind spot is relative to the runner \
+         and not to the spelling, and the two fixtures below sit either side of that line",
+        "a route behind a configuration this runner never compiles",
     ),
     (
         "a proc macro that reads an imported file at expansion time — the bytes reach the \
@@ -17643,6 +17647,7 @@ fn lint_boundary() -> Result<(), String> {
 
     let roots = boundary_roots(&at, &build);
     let trees = roots.len();
+    let built = warm_the_proof_crates(&at, &roots)?;
     let (findings, stale) = boundary_findings(&at, &roots, &flags)?;
 
     if !findings.is_empty() {
@@ -17657,8 +17662,12 @@ fn lint_boundary() -> Result<(), String> {
     println!(
         "lint-boundary: ok  (cargo’s resolved view, every dep-info under {trees} build \
          director{}, and three prohibited surfaces — no build script, no symlink, no \
-         configuration row that redirects a build; {stale} prerequisite(s) skipped as stale)",
-        if trees == 1 { "y" } else { "ies" }
+         configuration row that redirects a build; {stale} prerequisite(s) skipped as stale{})",
+        if trees == 1 { "y" } else { "ies" },
+        match built {
+            0 => String::new(),
+            n => format!("; {n} proof crate(s) compiled here, because nothing else had"),
+        }
     );
     println!(
         "  {} route(s) these nets cannot see (BOUNDARY_BLIND, declared rather than checked):",
@@ -17668,6 +17677,71 @@ fn lint_boundary() -> Result<(), String> {
         println!("  - {route}");
     }
     Ok(())
+}
+
+/// Compile a proof crate whose build directory holds no dep-info, so that net
+/// two's precondition is satisfied by this check rather than by the order
+/// somebody happened to run it in.
+///
+/// **This was a red merge before it was a function.** `boundary_roots`' comment
+/// below says the proof crates are compiled by [`lint_proofs`], which is true
+/// of `lint_all` — where `lint-proofs` runs first — and false of anything that
+/// runs `cargo xtask lint-boundary` on its own. CI's `policy checks` job runs
+/// each verb as its own step and `lint-proofs` lives in a different job, so on
+/// a cold runner `kernel/proofs/target` did not exist, net two read nothing,
+/// and it refused. Refusing was right: a net that reads nothing would pass over
+/// anything, and RFC 0092's whole argument is that a silent skip is how a check
+/// reads a failure as an absence. What was wrong was requiring a precondition
+/// and not establishing it.
+///
+/// A plain `cargo check` is deliberately enough. This is not [`lint_proofs`]'s
+/// job and must not become it — the feature configurations, the `-D warnings`
+/// and the `fmt --check` are that check's business, and duplicating them here
+/// would put one policy in two places. All this needs is for rustc to have
+/// written down what it opened.
+///
+/// It costs nothing in `lint_all`, where `lint-proofs` has already run and
+/// every directory is warm, and the return value is printed so a reader can
+/// tell the two situations apart rather than guess.
+///
+/// *What would reverse this:* the proof crates joining the workspace, which
+/// RFC 0053 refuses for a reason that has not changed — a verification tool's
+/// toolchain is the tool's business. If they ever did, `target_dir()` would
+/// hold their dep-info and this function would have nothing to do.
+fn warm_the_proof_crates(at: &Path, roots: &[(PathBuf, PathBuf)]) -> Result<usize, String> {
+    let mut built = 0usize;
+    for (tree, build) in roots {
+        // The workspace root is warm by construction: running this check at all
+        // has just compiled `xtask` into it.
+        if tree == at || holds_dep_info(build) {
+            continue;
+        }
+        run_in(tree, "cargo", &["check", "--quiet"])?;
+        built += 1;
+    }
+    Ok(built)
+}
+
+/// Whether a build directory holds any dep-info at all.
+///
+/// The same walk [`compiled_file_findings`] does, asking only whether it would
+/// find anything. Written as its own function rather than by calling that one
+/// and looking at the error, because a check that decides what to do by
+/// provoking a failure reads its own refusal as data.
+fn holds_dep_info(build: &Path) -> bool {
+    let mut stack = vec![build.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "d") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// The trees net two reads, each with the directory its dep-info lands in.
@@ -18899,22 +18973,81 @@ f-text = { path = \"text\" }
     // than decorative.
     // ---------------------------------------------------------------------
 
-    /// Residue 1. The route is behind a `cfg` for an architecture `lint` never
-    /// compiles, and its path is composed rather than spelled, so the textual
-    /// net has no needle either.
+    /// The architecture residue 1's fixture is gated to, and why it is not
+    /// `aarch64`.
+    ///
+    /// This tree compiles four worlds: the host, `x86_64-unknown-none`,
+    /// `aarch64-unknown-none`, and the host again on an arm runner. A fixture
+    /// gated to `aarch64` is therefore blind on one runner and **compiled on
+    /// the other**, which is not a property of the residue at all — it is a
+    /// property of where the test happened to run. It cost a red `tests
+    /// (AArch64, weak memory)` job on 2026-09-22 to find that out, and the
+    /// finding is worth more than the fixture was: the blind spot is relative
+    /// to the runner.
+    ///
+    /// RISC-V is the choice because it is a real architecture with a real
+    /// `target_arch` value that nothing in this repository builds for, on any
+    /// runner, in any job. *What would reverse this:* a RISC-V port, at which
+    /// point this constant moves to the next architecture nobody builds and
+    /// this comment is the record of why it moves.
+    const NEVER_COMPILED_ARCH: &str = "riscv64";
+
+    /// Residue 1. The route is behind a `cfg` for an architecture nothing in
+    /// this tree compiles, and its path is composed rather than spelled, so the
+    /// textual net has no needle either.
     #[test]
     fn residue_one_a_route_behind_a_configuration_the_lint_never_compiles_is_not_seen() {
         let at = reaching(
             "blind-cfg",
-            "#[cfg(target_arch = \"aarch64\")]\n\
-             include!(concat!(\"../..\", \"/third_party/shaper/src/lib.rs\"));\n\
-             pub fn used() -> u32 { 7 }\n",
+            &format!(
+                "#[cfg(target_arch = \"{NEVER_COMPILED_ARCH}\")]\n\
+                 include!(concat!(\"../..\", \"/third_party/shaper/src/lib.rs\"));\n\
+                 pub fn used() -> u32 {{ 7 }}\n"
+            ),
         );
         let build = compiled(&at);
         assert_eq!(
             lint_over(&at, &[(at.clone(), build)]),
             Vec::<String>::new(),
             "residue 1 is closed; delete it from BOUNDARY_BLIND, LICENSING.md and RFC 0092"
+        );
+    }
+
+    /// The other side of residue 1's line, and the half that was an assumption
+    /// until an arm runner measured it.
+    ///
+    /// The same route, gated to **this runner's own architecture**, is caught.
+    /// That is what makes residue 1 a statement about the runner rather than
+    /// about the `cfg` mechanism: net two reads what the compiler says it
+    /// opened, and a `cfg` that is true is a file the compiler opened. Written
+    /// with `std::env::consts::ARCH` rather than a literal so that it asserts
+    /// the same thing on both jobs instead of passing on one by construction.
+    ///
+    /// Together with the test above this makes the residue self-removing in the
+    /// way `BOUNDARY_BLIND` intends: the day `lint` compiles every architecture
+    /// this tree ships, the fixture above goes red and the entry comes out.
+    #[test]
+    fn a_route_gated_to_this_runners_own_architecture_is_caught_rather_than_blind() {
+        let here = std::env::consts::ARCH;
+        assert_ne!(
+            here, NEVER_COMPILED_ARCH,
+            "residue 1's fixture is gated to the architecture this job runs on, so it proves \
+             nothing; move `NEVER_COMPILED_ARCH` on"
+        );
+        let at = reaching(
+            "seen-cfg",
+            &format!(
+                "#[cfg(target_arch = \"{here}\")]\n\
+                 include!(concat!(\"../..\", \"/third_party/shaper/src/lib.rs\"));\n\
+                 pub fn used() -> u32 {{ 7 }}\n"
+            ),
+        );
+        let build = compiled(&at);
+        let findings = lint_over(&at, &[(at.clone(), build)]);
+        assert!(
+            findings.iter().any(|f| f.contains("compiled a file under the import")),
+            "a `cfg` this runner satisfies is a file rustc opened, and net two reads what rustc \
+             opened: {findings:?}"
         );
     }
 

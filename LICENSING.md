@@ -59,7 +59,7 @@ second, independent one.
 
    **What they do not cover is named rather than left as a remainder**, because
    a rule that claims everything is a rule nobody can check: a route behind a
-   configuration `lint` never compiles, a proc macro that reads an imported file
+   configuration this runner never compiles, a proc macro that reads an imported file
    at expansion time, and a copy taken by registry name from somewhere that is
    not `third_party/` — which is `deny.toml`'s ground rather than this file's.
    RFC 0092 holds the argument and the reversal conditions.

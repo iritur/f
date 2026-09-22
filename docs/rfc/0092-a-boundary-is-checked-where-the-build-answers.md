@@ -60,6 +60,35 @@ whole difference between a scoped claim and a broken one:
    `cfg(target_arch = "aarch64")` or an off-by-default feature is seen only by
    the textual net, and only if its path is spelled rather than composed by a
    macro.
+
+   **Amended on 2026-09-22: the residue is relative to the runner, and the
+   example this paragraph chose was the one that proves it.** The fixture
+   asserting these nets are silent gated its route on
+   `cfg(target_arch = "aarch64")` — and the `tests (AArch64, weak memory)` job
+   runs on `ubuntu-24.04-arm`, where that `cfg` is **true**. rustc read the
+   file, the dep-info named it, net two caught it, and the fixture asserting
+   blindness went red. The residue is therefore not *anything behind a
+   `cfg(target_arch)`*; it is **anything behind a configuration the job in front
+   of it does not compile**, which is a smaller claim and a truer one.
+
+   Two things follow and both are in the tree rather than here. The fixture is
+   gated on `riscv64` — a real architecture with a real `target_arch` value that
+   nothing in this repository builds for, on any runner, in any job — behind a
+   named constant whose comment says to move it the day a RISC-V port lands.
+   And the other side of the line now has a fixture of its own: the same route
+   gated to `std::env::consts::ARCH` **is** caught, written from the constant
+   rather than from a literal so that it asserts the same thing on both jobs
+   instead of passing on one by construction. That turns *the lint never
+   compiles it* from an assumption into a boundary with a test on each side, and
+   makes the entry self-removing in the way `BOUNDARY_BLIND` intends: the day
+   `lint` compiles every architecture this tree ships, the blind fixture goes
+   red and the row comes out.
+
+   What this cost is worth saying plainly, because it is the second time in two
+   days this mechanism has paid: the finding came from a red arm job and not
+   from anybody reasoning about it, and the local loop cannot produce it —
+   `CLAUDE.md`'s scar about testing the ring only on x86-64 is the same scar,
+   one check over.
 2. **A proc macro that reads an imported file at expansion time.** The bytes
    reach the crate without the file becoming a prerequisite of it.
 3. **A dependency taken by registry name on a vendored copy outside
