@@ -159,6 +159,27 @@ const MODELS: &[(&str, Peer)] = &[
     // manifest already declares the `sibling:virtio-blk` need, so the diff that
     // turns that need into a submission is the diff that owes this table a peer.
     ("objects", Peer::Native),
+    // `scene`, which is `user/compositor`'s ring and the first protocol in this
+    // table whose component holds **retained state**. `Native` is a registration
+    // table, a service time and nothing below, and two of those three are
+    // accurate here: there is no device under this component, and its service
+    // time is what it costs to apply a frame.
+    //
+    // What `Native` does not model is the retention, and saying so is the point
+    // of this comment rather than a reason to invent a variant. A deployment
+    // scenario drives arrivals and measures what a client observes; the scene
+    // graph changes what the *component* holds and not what an arrival costs, so
+    // a peer that modelled the arena would be modelling a thing this scenario
+    // does not read. `f_scene`'s own tests are where the graph is checked, and
+    // `cargo xtask compositor` is where a real one runs.
+    //
+    // *Reversal, and it is the same one `objects` carries:* the day this
+    // component holds a client of the display driver's ring and a frame it
+    // commits reaches a device over it. That is a component with a device below
+    // it that it does not drive, reached over another component's ring, which is
+    // a shape no peer in this enum has — and `E3-B02f` is the task that creates
+    // it.
+    ("scene", Peer::Native),
 ];
 
 /// One component file, held where a [`Record`] may be read out of it.

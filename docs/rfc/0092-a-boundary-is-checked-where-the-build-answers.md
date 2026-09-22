@@ -32,11 +32,12 @@ being checked by reading what the build did.** Four nets, of which three are new
   `include_bytes!`, macro expansion and symlinks stop being nine patterns and
   become one finding.
 - The build-script, symlink and configuration surfaces are **prohibited rather
-  than inspected**. The permissive tree may carry no `build.rs`, no `build =` or
-  `links =` row, no symlink, and no `.cargo/config.toml` row or ambient
-  `RUSTFLAGS` whose value resolves into the import. Each is an allow-list that
-  is empty today. This is the half that closes `OUT_DIR` laundering and the
-  static-link family at the mechanism instead of chasing their traces.
+  than inspected**. The permissive tree may carry no build script — no target of
+  kind `custom-build` in cargo's resolved view, whatever the row that declared it
+  was called and whatever the file is named — no symlink, and no
+  `.cargo/config.toml` row that can redirect a build. Each is an allow-list.
+  This is the half that closes `OUT_DIR` laundering and the static-link family
+  at the mechanism instead of chasing their traces.
 
 The existing textual net stays, with its job rewritten to the one thing the
 other three cannot do: see code the build never compiled.
@@ -59,12 +60,50 @@ whole difference between a scoped claim and a broken one:
    `cfg(target_arch = "aarch64")` or an off-by-default feature is seen only by
    the textual net, and only if its path is spelled rather than composed by a
    macro.
+
+   **Amended on 2026-09-22: the residue is relative to the runner, and the
+   example this paragraph chose was the one that proves it.** The fixture
+   asserting these nets are silent gated its route on
+   `cfg(target_arch = "aarch64")` — and the `tests (AArch64, weak memory)` job
+   runs on `ubuntu-24.04-arm`, where that `cfg` is **true**. rustc read the
+   file, the dep-info named it, net two caught it, and the fixture asserting
+   blindness went red. The residue is therefore not *anything behind a
+   `cfg(target_arch)`*; it is **anything behind a configuration the job in front
+   of it does not compile**, which is a smaller claim and a truer one.
+
+   Two things follow and both are in the tree rather than here. The fixture is
+   gated on `riscv64` — a real architecture with a real `target_arch` value that
+   nothing in this repository builds for, on any runner, in any job — behind a
+   named constant whose comment says to move it the day a RISC-V port lands.
+   And the other side of the line now has a fixture of its own: the same route
+   gated to `std::env::consts::ARCH` **is** caught, written from the constant
+   rather than from a literal so that it asserts the same thing on both jobs
+   instead of passing on one by construction. That turns *the lint never
+   compiles it* from an assumption into a boundary with a test on each side, and
+   makes the entry self-removing in the way `BOUNDARY_BLIND` intends: the day
+   `lint` compiles every architecture this tree ships, the blind fixture goes
+   red and the row comes out.
+
+   What this cost is worth saying plainly, because it is the second time in two
+   days this mechanism has paid: the finding came from a red arm job and not
+   from anybody reasoning about it, and the local loop cannot produce it —
+   `CLAUDE.md`'s scar about testing the ring only on x86-64 is the same scar,
+   one check over.
 2. **A proc macro that reads an imported file at expansion time.** The bytes
    reach the crate without the file becoming a prerequisite of it.
 3. **A dependency taken by registry name on a vendored copy outside
    `third_party/`.** That is `deny.toml`'s ground and outside this exit's own
    words, and is recorded here so the next reader does not mistake the
    boundary's silence for the licence policy's.
+
+The three are carried in code as `BOUNDARY_BLIND` in `xtask/src/main.rs`,
+printed in `lint-boundary`'s success line the way `RING_PROOF_BLIND` is printed
+in `lint-proofs`', and each has a fixture that exercises its mechanism and
+asserts the nets are **silent**. That direction is what makes the list
+self-removing: a residue somebody closes turns its fixture red and has to be
+deleted deliberately. Without it the clause *a fixture recording each of the
+three routes it cannot see* is discharged by this paragraph, and a paragraph is
+what can be deleted, closed or joined by a fourth with nothing going red.
 
 A stale target directory is a fourth way the second net reads yesterday's
 answer, and it is a property of this environment rather than of a route; it is
@@ -97,6 +136,34 @@ making the skip visible rather than by turning it into a finding. The reasoning
 that produced the wrong sentence is worth naming, because it will recur: *fail
 closed* is a good instinct that becomes a false positive the moment the failing
 condition is more common than the thing being guarded against.
+
+### Two sentences this entry got wrong about its own mechanism
+
+**"Each is an allow-list that is empty today" was true of two of the three.**
+There was no configuration allow-list at all. The configuration rule shipped as
+an *inspection* — a row was refused when its value contained the string
+`third_party` — which is the thing this entry argues against, in the paragraph
+that argues against it. A `[source]` replacement, an `[env]` row, a linker
+wrapper and a relative `-L` into a copy taken elsewhere each pass that check
+while reaching an imported tree. The rule is now the key rather than the value:
+`rustflags`, `rustdocflags`, `rustc`, the three wrapper keys, `linker`, `runner`
+and `paths`, plus any row under `[env]` or `[source]`, are refused unless
+`CONFIG_ALLOW` carries them with a reason. **That list is not empty**, and it
+cannot be: this repository's own `.cargo/config.toml` carries `build.rustflags`
+and `target.x86_64-unknown-none.rustflags`, without which reproduction claims are
+false and the kernel image does not link. Two rows with their reasons written
+down is what this decision costs, and it is a smaller cost than a surface that
+reads *prohibited* and behaves like a grep.
+
+**"No `build.rs`, no `build =` or `links =` row" was two spellings, not a
+mechanism.** TOML admits `"build" = "make.rs"` and `package.build = "make.rs"`,
+which are the same manifest to cargo and neither of which begins with `build`
+once trimmed, and the file need not be called `build.rs` at all. The
+prohibition now reads cargo's resolved view for a target of kind `custom-build`,
+which is indifferent to all of that; the filename check stays as the belt for a
+crate cargo cannot resolve. Both errors have the same shape and it is the shape
+this entry was written to remove: the argument moved to mechanisms and two of
+the three implementations stayed at spellings.
 
 ## Context
 
@@ -163,6 +230,19 @@ and check only permissive ones, or `lint` goes red on the import task's first
 build and the repair under time pressure is to weaken the net. And the fixtures
 write `.d` files full of imported prerequisites, so the walk must skip
 `target/licence-fixtures/` — the `.claude` worktree scar, one directory over.
+
+**A second build directory per proof crate, which the first draft did not
+have.** `lint_all` runs `lint_proofs` before this check, and that command
+`cargo check`s `kernel/proofs`, `ring/proofs` and `abi/proofs` from their own
+directories with no `--target-dir`. All three are in the root manifest's
+`exclude` and are therefore their own workspace roots, so their dep-info lands
+in `<crate>/target/` — sixty-three files that a net walking only `<root>/target`
+never opened, in the three crates in this tree that already reach outside their
+own directories by `#[path]` out of habit. Net one cannot recover them either:
+`cargo metadata --no-deps` lists members, and these are excluded precisely so
+they are not members. `boundary_roots` now yields one `(tree, build directory)`
+pair per compiled tree, each carrying its own base because a dep-info's relative
+prerequisites are relative to the workspace root of the command that wrote it.
 
 **One way it goes green while broken that no fixture can close.** A stale target
 directory: the second net reads the dep-info cargo last wrote, so a route added

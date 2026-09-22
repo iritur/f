@@ -97,21 +97,28 @@
 //! steady speed, and the amount is the margin the over-prediction bound below
 //! is bought with. Claim the whole lead and the margin is zero.
 //!
-//! What four lag-ward knobs do *not* buy — and what an earlier version of this
-//! file claimed they did — is monotonicity under a worse *input*. A knob is
-//! turned; an input arrives. Halve the report rate over the same motion and the
-//! worst over-prediction **rises**, on 1484 of the 4096 recordings the tests
-//! below sweep and on the committed one, from 145 476 to 157 576 — against
-//! 71 463 of extra lag on that same recording. The mechanism is not subtle: a
-//! longer baseline lags the truth by more, and a velocity estimate that lags is
-//! not merely late but *wrong*, wrong in whichever direction the hand has since
-//! turned, and an extrapolation of a wrong velocity can run on. So the true
-//! sentence is that degradation is spent *mostly* on lag, in a ratio this file
-//! writes down rather than asserts in prose, and
-//! `halving_the_report_rate_costs_mostly_lag_and_some_overshoot` is where the
-//! two numbers live. The test that stood there before was named for the
-//! stronger claim and checked only that the over-prediction stayed under a
-//! bound that happened to have twenty per cent of slack in it.
+//! What four lag-ward knobs do *not* buy — and what two earlier versions of
+//! this file claimed they did — is monotonicity under a worse *input*. A knob
+//! is turned; an input arrives. Halve the report rate over the same motion and
+//! the worst over-prediction **rises**, on 2842 of the 4096 recordings the
+//! tests below sweep and on the committed one, from 193 838 to 295 374 —
+//! against 48 376 of extra lag on that same recording. The mechanism is not
+//! subtle: a longer baseline lags the truth by more, and a velocity estimate
+//! that lags is not merely late but *wrong*, wrong in whichever direction the
+//! hand has since turned, and an extrapolation of a wrong velocity does not
+//! fall short of the truth, it goes somewhere else.
+//!
+//! So the true sentence is the reverse of the one that stood here: halving the
+//! report rate costs **mostly overshoot**, about two to one on the committed
+//! recording, and
+//! `halving_the_report_rate_costs_both_and_mostly_overshoot` is where the two
+//! numbers live. The claim before it — *mostly lag* — was measured and was
+//! true of the instrument that measured it, which filed a cursor drawn the
+//! wrong way along a reversing motion as lag. Repairing that classifier moved
+//! the class across and inverted the ratio. It is worth knowing that this
+//! paragraph has now been wrong in two directions for two different reasons,
+//! and that the second reason was a measurement of the wrong thing rather than
+//! a sentence nobody measured.
 //!
 //! And every degradation path holds the last measured position rather than
 //! guessing: see [`Held`]. When this module does not know, it lags. That is a
@@ -125,13 +132,14 @@
 //! are empirical, and the sentence they support is exactly this one: over those
 //! recordings, at those report rates, nothing exceeded them. They are not
 //! bounds over all motions. Draw more recordings and the maximum rises — over
-//! eight of them the worst over-prediction is 4.8 px, over four thousand and
-//! ninety-six it is 7.2, over forty thousand it is 10.2, which is *past the
-//! eight-pixel bound stated below* — which is what a maximum does, and is why
-//! the count swept is written into the test beside the numbers it produced. An
-//! earlier version of this file stated *one* recording's maximum as though it
-//! were a bound, in prose that said the cursor *never* runs on by more than it;
-//! the same generator exceeded that number on one draw in six.
+//! four thousand and ninety-six the worst over-prediction is 13.44 px at the
+//! recorded rate and 15.76 px at half of it, and over ten times as many it is
+//! 15.70 and 18.41, the second of which is *past the sixteen-pixel bound stated
+//! below* — which is what a maximum does, and is why the count swept is
+//! written into the test beside the numbers it produced. An earlier version of
+//! this file stated *one* recording's maximum as though it were a bound, in
+//! prose that said the cursor *never* runs on by more than it; the same
+//! generator exceeded that number on one draw in six.
 //!
 //! The version after it did something subtler and is the reason this paragraph
 //! is longer than it was. It fitted the pair to 4096 draws and then defended the
@@ -143,10 +151,11 @@
 //! `ten_times_the_swept_set_runs_past_the_stated_over_prediction_bound` draws
 //! ten times the set and requires the escapes to be there. What that leaves is
 //! a true sentence and a smaller one — over *these* recordings, at those two
-//! rates, nothing exceeded these two integers, and one measurement in six
-//! thousand off the set does — and it is the sentence the exit for this subtask
-//! was narrowed to by RFC 0084. A reader who needs a number that holds for a
-//! motion nobody drew has the theorem below and its factor of eighty.
+//! rates, nothing exceeded these two integers, and thirteen measurements in
+//! eighty-two thousand off the set do — and it is the sentence the exit for
+//! this subtask was narrowed to by RFC 0084. A reader who needs a number that
+//! holds for a motion nobody drew has the theorem below and its factor of
+//! seventy-three.
 //!
 //! What a universal bound would have to look like is worth writing down,
 //! because it is the reason there is not one here. Over-prediction does have a
@@ -154,13 +163,15 @@
 //! the step is at most the window's speed times the lead actually used, and
 //! both of those are capped above — [`SPEED_CEILING_X65536_PER_MS`] times
 //! [`LEAD_CEILING_NANOS`] damped by [`LEAD_NUMERATOR`]/[`LEAD_DENOMINATOR`],
-//! which is 576 px on one axis. That is a theorem,
-//! `the_only_universal_over_prediction_bound_is_the_two_ceilings_multiplied`
-//! keeps it tied to the three constants it is derived from, and it is eighty
+//! which is 576 px on one axis and so 1152 px for the two-axis sum a
+//! [`Deviation`] actually reports. That is a theorem,
+//! `the_only_universal_over_prediction_bound_is_attained_at_the_two_ceilings`
+//! keeps it tied to the three constants it is derived from *and* drives a real
+//! prediction into the corner where it is reached, and it is seventy-three
 //! times the worst the sweep measured — true, and too loose to be a design
-//! statement, which is the trade the whole section is about. Under-prediction has
-//! no closed form at all: the truth is wherever the hand went, and a hand can
-//! leave. So the instrument is a corpus, and the honest sentence names the
+//! statement, which is the trade the whole section is about. Under-prediction
+//! has no closed form at all: the truth is wherever the hand went, and a hand
+//! can leave. So the instrument is a corpus, and the honest sentence names the
 //! corpus.
 //!
 //! # The arithmetic, and its rounding
@@ -391,10 +402,6 @@ pub enum Held {
     NoLead,
     /// Fewer than two samples. One position is not a velocity.
     ShortHistory,
-    /// The window's oldest and newest samples share an instant — a duplicated
-    /// report, or two reports the driver stamped from one interrupt. Dividing
-    /// by that is the one arithmetic trap in this module, and it is closed here.
-    NoBaseline,
     /// The window spans more than [`BASELINE_CEILING_NANOS`]. The velocity in
     /// it is a fact about a gesture that has already ended.
     StaleWindow,
@@ -422,7 +429,6 @@ impl Held {
         match self {
             Self::NoLead => "the scanout is not after the newest report",
             Self::ShortHistory => "one position is not a velocity",
-            Self::NoBaseline => "the window's ends share an instant, so it has no baseline",
             Self::StaleWindow => "the window spans longer than a velocity survives",
             Self::FarScanout => "the scanout is further ahead than a velocity may be believed",
             Self::ImplausibleSpeed => "the window implies a teleport rather than a movement",
@@ -629,6 +635,27 @@ impl Predictor {
     /// `bool` and not a refusal a caller must handle: the window is unchanged
     /// and the next in-order report repairs everything. A caller that wants to
     /// count reordering — a driver auditing its own queue — has the answer.
+    ///
+    /// # This refusal is also what closes the one arithmetic trap in the module
+    ///
+    /// Two divisions downstream take a span between two held samples as their
+    /// denominator: the baseline in [`Predictor::predict_at`] and the two half
+    /// spans in `Predictor::trust_x1024`. Neither can be zero, and the reason
+    /// is this line: *strictly* newer, so no two slots of the window ever share
+    /// an instant. A duplicated report, or two reports a driver stamped from
+    /// one interrupt, is refused here and never becomes a second slot.
+    ///
+    /// That is worth stating here rather than there. A [`Held`] reason saying
+    /// *the window's ends share an instant* stood in `predict_at` for four
+    /// rounds, reachable from nothing, and read as the place the trap was
+    /// closed. It is closed here, and
+    /// `a_reordered_report_does_not_become_the_anchor` is what holds it closed.
+    ///
+    /// *What would reverse this:* a device whose reports genuinely carry equal
+    /// stamps — a driver that batches an interrupt's worth of motion into
+    /// several entries with one stamp — at which point this refusal would drop
+    /// real motion, the comparison would have to weaken to `<`, and both
+    /// divisions would need a guard again.
     pub fn observe(&mut self, sample: Sample) -> bool {
         if let Some(newest) = self.newest()
             && sample.at <= newest.at
@@ -745,10 +772,15 @@ impl Predictor {
             return Some(Predicted::held(newest, Held::ShortHistory));
         };
 
+        // Strictly positive, and that is `observe`'s doing rather than this
+        // line's: two distinct slots cannot share an instant, so there is no
+        // zero here to divide by. A seventh `Held` reason stood here saying so,
+        // and it was unreachable from the day it was written — no test named
+        // it, deleting it changed no outcome, and its doc claimed to close a
+        // trap that is closed two hundred lines above. A reason for holding
+        // that cannot be reached is a sentence about the code that the code
+        // does not contain.
         let base_nanos = newest.at.since_nanos(oldest.at);
-        if base_nanos == 0 {
-            return Some(Predicted::held(newest, Held::NoBaseline));
-        }
         if base_nanos > BASELINE_CEILING_NANOS {
             return Some(Predicted::held(newest, Held::StaleWindow));
         }
@@ -949,6 +981,13 @@ impl Deviation {
     /// was, and the next frame will snap it back. Assigning it to the tighter
     /// bound is the conservative reading and the one that matches what a user
     /// sees.
+    ///
+    /// So does a cursor drawn the *wrong way* along a direction the pointer
+    /// really did travel, which is the reversal case and the one this
+    /// instrument mis-filed for four rounds: being on the near side of the
+    /// truth is not enough to be lag, because the near side of the truth
+    /// includes the far side of the anchor. `axis` is where that is decided
+    /// and where the argument for it is written.
     #[must_use]
     pub fn between(predicted: &Predicted, truth_x_x65536: i32, truth_y_x65536: i32) -> Self {
         let x = axis(predicted.x_x65536, predicted.anchor_x_x65536, truth_x_x65536);
@@ -984,15 +1023,57 @@ impl Deviation {
 }
 
 /// One axis of [`Deviation::between`].
+///
+/// # Lag is a cursor that did not go far enough, not a cursor on the near side
+///
+/// Three quantities, and the classifier needs all three. `travel` is where the
+/// pointer actually went, from the anchor; `step` is where the *cursor* was
+/// actually put, from that same anchor; `error` is the gap between the cursor
+/// and the truth. A version of this function that read only `travel` and
+/// `error` stood here for four rounds, and it mis-filed a whole class of
+/// snap-back.
+///
+/// The case it got wrong is the textbook one. The pointer reverses just after
+/// the newest report: the window still says *rightward*, so the cursor is drawn
+/// to the right, and the finger has gone left. The cursor is then on the far
+/// side of the anchor from the truth — which puts `error` and `travel` on
+/// opposite signs, which is exactly the shape of falling short — and the whole
+/// displacement was filed as lag. It is not lag. Every 65 536th of it is a
+/// motion the user did not make and the next frame has to undo, which is the
+/// definition the module's *over-prediction is a snap-back* gives.
+///
+/// So: an error counts as lag only when the cursor moved the way the pointer
+/// moved and did not get there. `step` opposite to `travel` is the wrong way
+/// round and is over-prediction however small it is.
+///
+/// A `step` of zero is deliberately *not* the wrong way. Holding the last
+/// measured position is the degradation every guard in this module falls back
+/// to, and it is pure lag — the cursor is where the device last said the
+/// pointer was, which is a place it really was. Classifying it as overshoot
+/// would make `doing_nothing_has_a_perfect_ahead_bound` state the opposite of
+/// what it argues, and would make the tighter bound the one a predictor escapes
+/// by predicting nothing. Zero is therefore *not opposite*, which is what the
+/// `step != 0` conjunct says.
+///
+/// The `travel == 0` case — the pointer did not move on this axis at all —
+/// stays over-prediction as before: there is no direction to have fallen short
+/// along, and the cursor is somewhere the finger never was.
+///
+/// *What would reverse this:* a `Deviation` that carried the wrong-way case as
+/// a third field. It is over-prediction for the purpose the two bounds serve —
+/// the eye sees a snap-back — but it is a different mechanism from overshooting
+/// along the direction of travel, and a module that wanted to tune them apart
+/// would need them counted apart.
 fn axis(predicted: i32, anchor: i32, truth: i32) -> Deviation {
     let travel = i64::from(truth) - i64::from(anchor);
+    let step = i64::from(predicted) - i64::from(anchor);
     let error = i64::from(predicted) - i64::from(truth);
     let magnitude = u32::try_from(error.unsigned_abs()).unwrap_or(u32::MAX);
-    // Opposite signs mean the prediction did not reach where the pointer went;
-    // everything else — including a pointer that did not move on this axis —
-    // counts toward the tighter bound. This is the separation the two bounds
-    // rest on: it is this function, not the two fields, that decides which
-    // bound an error is held to.
+    // Opposite signs mean the cursor is on the near side of the truth, which is
+    // *necessary* for lag and, since the round that added `step`, no longer
+    // sufficient. This is the separation the two bounds rest on: it is this
+    // function, not the two fields, that decides which bound an error is held
+    // to.
     //
     // The zero-travel clause is the half of that rule a reviewer deleted to see
     // what would notice, and nothing did: without `travel != 0` a cursor drawn
@@ -1008,7 +1089,9 @@ fn axis(predicted: i32, anchor: i32, truth: i32) -> Deviation {
     // branch takes it. It is kept because a classifier that reads `is_negative`
     // on an exact hit invites the next reader to work that out again, and it is
     // labelled here so that nobody writes a test claiming to check it.
-    if error != 0 && travel != 0 && error.is_negative() != travel.is_negative() {
+    let on_the_near_side = error != 0 && travel != 0 && error.is_negative() != travel.is_negative();
+    let the_wrong_way = step != 0 && travel != 0 && step.is_negative() != travel.is_negative();
+    if on_the_near_side && !the_wrong_way {
         Deviation { ahead_x65536: 0, behind_x65536: magnitude }
     } else {
         Deviation { ahead_x65536: magnitude, behind_x65536: 0 }
@@ -1383,12 +1466,12 @@ mod tests {
     /// rather than as a fit to 4096 draws, it was prose beside a constant with
     /// no test evaluating it, and this generator refutes it. Ten times as many
     /// — [`DECADE_CORPORA`], of which these are the first — moves the worst
-    /// over-prediction from 471 635 to 668 081 at the recorded rate, two fifths
-    /// and 10.19 px against a stated bound of 8, and from 517 792 to 646 115 at
-    /// half that rate, a quarter and also past the bound. The two
-    /// under-prediction maxima move by 4.6 and 5.1 per cent, so *a few per cent*
-    /// was true of half the numbers it was written about and the half it was
-    /// false of is the half this module exists for. So the count below is the size
+    /// over-prediction from 880 930 to 1 028 810 at the recorded rate, a sixth
+    /// and 15.70 px against a stated bound of 16, and from 1 032 943 to
+    /// 1 206 210 at half that rate, the same sixth, 18.41 px and past the
+    /// bound. The two under-prediction maxima move by 4.6 and 5.1 per cent, so
+    /// *a few per cent* was true of half the numbers it was written about and
+    /// the half it was false of is the half this module exists for. So the count below is the size
     /// of the set the bounds are *stated over* and not evidence that a larger
     /// set would agree; `ten_times_the_swept_set_runs_past_the_stated_over_prediction_bound`
     /// is that measurement, and RFC 0084 is where the exit this subtask is
@@ -1432,6 +1515,17 @@ mod tests {
         /// over-prediction rather than only the lag.
         /// Unit: recordings.
         halving_raises_overshoot: u64,
+        /// How many recordings were folded.
+        ///
+        /// [`Decade`] counts its measurements and this did not, which is an
+        /// asymmetry with a consequence: every sentence the two bounds appear
+        /// in names 4096 recordings, and nothing in this file observed that
+        /// 4096 were swept. A loop that drew a tenth of them would move every
+        /// constant below — which the equality assertions would catch — but
+        /// would leave the *count* in the prose unchallenged, and the count is
+        /// half of what the sentence claims.
+        /// Unit: recordings.
+        corpora: u64,
     }
 
     impl Sweep {
@@ -1445,6 +1539,7 @@ mod tests {
                 within_two_thirds_of_nothing: 0,
                 worst_lag_share_permille: 0,
                 halving_raises_overshoot: 0,
+                corpora: 0,
             };
             for index in 0..SWEPT_CORPORA {
                 let recording = swept(index);
@@ -1471,6 +1566,7 @@ mod tests {
                 if share * 3 <= 2_000 {
                     sweep.within_two_thirds_of_nothing += 1;
                 }
+                sweep.corpora += 1;
             }
             sweep
         }
@@ -1491,12 +1587,18 @@ mod tests {
     /// it is worth less than this file used to imply. The same generator over
     /// ten times the swept set, at both report rates —
     /// `ten_times_the_swept_set_runs_past_the_stated_over_prediction_bound`,
-    /// 81 920 measurements: the eight-pixel bound is exceeded fourteen times,
-    /// worst 668 081, which is 10.19 px and a quarter past the stated number;
-    /// the thirty-two-pixel bound is exceeded five times, worst 2 163 217, three
-    /// per cent past. So the tighter half of the pair — the half this file
-    /// argues hardest for — is the half that fails more often and by more, and
-    /// the number it fails by is not a rounding.
+    /// 81 920 measurements: the sixteen-pixel bound is exceeded eight times,
+    /// worst 1 206 210, which is 18.41 px and fifteen per cent past the stated
+    /// number; the thirty-two-pixel bound is exceeded five times, worst
+    /// 2 163 217, three per cent past. So the tighter half of the pair — the
+    /// half this file argues hardest for — is the half that fails more often
+    /// and by more, and the number it fails by is not a rounding.
+    ///
+    /// Every one of those eight over-prediction escapes is at the halved rate.
+    /// Ten times the set at the recorded rate reaches 15.70 px and stays
+    /// inside; it is the halved rate that both sets the bound and breaks it.
+    /// That is stated here because a reader who ran only the full rate would
+    /// conclude the bound holds off its set, and it does not.
     ///
     /// Neither bound is widened to swallow those: a number moved until its
     /// counterexample fits is a number that bounds nothing, and the honest
@@ -1510,18 +1612,31 @@ mod tests {
     /// empirical. It is a fact about eyes, argued at the top of this module,
     /// and it is why [`Bounds::stated`] refuses a pair that collapses it.
     ///
-    /// **Over-prediction, eight pixels.** The tighter of the two by a factor of
-    /// four, because what it bounds is a cursor arriving where the finger never
-    /// went and then leaving again: the user is shown the error twice, and the
-    /// second showing is a motion nobody made. It is the number to argue with
-    /// first — a compositor that draws a large cursor has a reason to want it
-    /// lower, and lowering it means claiming less lead ([`LEAD_NUMERATOR`] over
-    /// [`LEAD_DENOMINATOR`] is the knob) and watching the bound below rise.
+    /// **Over-prediction, sixteen pixels.** The tighter of the two by a factor
+    /// of two, because what it bounds is a cursor arriving where the finger
+    /// never went and then leaving again: the user is shown the error twice,
+    /// and the second showing is a motion nobody made. It is the number to
+    /// argue with first — a compositor that draws a large cursor has a reason
+    /// to want it lower, and lowering it means claiming less lead
+    /// ([`LEAD_NUMERATOR`] over [`LEAD_DENOMINATOR`] is the knob) and watching
+    /// the bound below rise.
+    ///
+    /// Sixteen and not eight, and the eight is worth a sentence because it was
+    /// this file's headline number for three rounds. It was eight because the
+    /// instrument that measured it filed a whole class of snap-back as lag: a
+    /// cursor drawn the wrong way along a motion that had reversed is on the
+    /// near side of the truth, which is the shape of falling short, and `axis`
+    /// read only that shape. Repairing the classifier did not change a single
+    /// prediction this module makes — the arithmetic above is untouched — and
+    /// it doubled the measured over-prediction maximum, because the errors were
+    /// always there and were being counted in the other column. The pair the
+    /// file used to state was not a tighter predictor, it was a kinder ruler.
     ///
     /// **Under-prediction, thirty-two pixels.** Looser, because lag is the
     /// failure the system has anyway and it degrades smoothly. The number to
-    /// read it against is not the eight but what *not predicting* costs on the
-    /// same recordings, which the sweep measures at up to sixty-four pixels.
+    /// read it against is not the sixteen but what *not predicting* costs on
+    /// the same recordings, which the sweep measures at up to sixty-four
+    /// pixels.
     /// `doing_nothing_has_a_perfect_ahead_bound` is where that comparison is
     /// made, and it is made per recording rather than maximum against maximum,
     /// because two maxima are two different recordings.
@@ -1529,28 +1644,28 @@ mod tests {
     /// Writing them as a `const` is what makes [`Bounds::stated`]'s refusal a
     /// compile error here; `equal_bounds_are_refused` is what makes it a
     /// failing test everywhere else.
-    const BOUNDS: Bounds = Bounds::stated(8 * PX, 32 * PX);
+    const BOUNDS: Bounds = Bounds::stated(16 * PX, 32 * PX);
 
     /// The worst over-prediction the committed recording produces.
     /// Unit: 1/65536 of a device pixel.
-    const CORPUS_WORST_AHEAD_X65536: u32 = 145_476;
+    const CORPUS_WORST_AHEAD_X65536: u32 = 193_838;
 
     /// The worst under-prediction the committed recording produces.
     /// Unit: 1/65536 of a device pixel.
-    const CORPUS_WORST_BEHIND_X65536: u32 = 544_394;
+    const CORPUS_WORST_BEHIND_X65536: u32 = 454_354;
 
     /// The worst over-prediction the committed recording produces when the
     /// reports arrive half as often.
     /// Unit: 1/65536 of a device pixel.
-    const CORPUS_HALVED_AHEAD_X65536: u32 = 157_576;
+    const CORPUS_HALVED_AHEAD_X65536: u32 = 295_374;
 
     /// And the worst under-prediction there.
     /// Unit: 1/65536 of a device pixel.
-    const CORPUS_HALVED_BEHIND_X65536: u32 = 615_857;
+    const CORPUS_HALVED_BEHIND_X65536: u32 = 502_730;
 
     /// The worst over-prediction anywhere in the sweep, at the recorded rate.
     /// Unit: 1/65536 of a device pixel.
-    const SWEPT_WORST_AHEAD_X65536: u32 = 471_635;
+    const SWEPT_WORST_AHEAD_X65536: u32 = 880_930;
 
     /// The worst under-prediction anywhere in the sweep, at that rate.
     /// Unit: 1/65536 of a device pixel.
@@ -1558,11 +1673,22 @@ mod tests {
 
     /// The worst over-prediction anywhere in the sweep at half that rate.
     /// Unit: 1/65536 of a device pixel.
-    const SWEPT_HALVED_AHEAD_X65536: u32 = 517_792;
+    const SWEPT_HALVED_AHEAD_X65536: u32 = 1_032_943;
 
     /// The worst under-prediction anywhere in the sweep at half that rate.
     /// Unit: 1/65536 of a device pixel.
     const SWEPT_HALVED_BEHIND_X65536: u32 = 2_057_997;
+
+    /// The larger of two measured maxima.
+    ///
+    /// Separate from the rounding below because the ratio the universal
+    /// theorem is compared in wants the maximum unrounded, and a second copy of
+    /// *whichever of these two is bigger* is how the ratio came to divide by
+    /// the smaller of them for a whole round.
+    /// Unit: 1/65536 of a device pixel.
+    const fn larger(first_x65536: u32, second_x65536: u32) -> u32 {
+        if first_x65536 > second_x65536 { first_x65536 } else { second_x65536 }
+    }
 
     /// The larger of two measured maxima, rounded up to a whole pixel.
     ///
@@ -1570,8 +1696,7 @@ mod tests {
     /// can be asserted rather than read.
     /// Unit: 1/65536 of a device pixel.
     const fn rounded_up_to_a_pixel(first_x65536: u32, second_x65536: u32) -> u32 {
-        let worst = if first_x65536 > second_x65536 { first_x65536 } else { second_x65536 };
-        worst.div_ceil(PX) * PX
+        larger(first_x65536, second_x65536).div_ceil(PX) * PX
     }
 
     // *Both are the sweep's own maxima rounded up to a whole pixel* was a
@@ -1604,29 +1729,45 @@ mod tests {
     const SWEPT_NOTHING_BEHIND_X65536: u32 = 4_194_304;
 
     /// Recordings in the sweep on which the predictor lags at least as much as
-    /// doing nothing would have. Six of four thousand and ninety-six, and the
+    /// doing nothing would have. One of four thousand and ninety-six, and the
     /// number is here rather than absent because *the prediction always earns
     /// its over-prediction budget* is the sentence this file would otherwise be
     /// read as making.
+    ///
+    /// It was six before `axis` was repaired, and the drop is the repair rather
+    /// than a better predictor: five of those six were recordings whose
+    /// apparent lag was a snap-back counted in the wrong column. Doing nothing
+    /// cannot produce a wrong-way error, so the comparison was never like for
+    /// like.
     /// Unit: recordings.
-    const SWEPT_NOT_BETTER_THAN_NOTHING: u64 = 6;
+    const SWEPT_NOT_BETTER_THAN_NOTHING: u64 = 1;
 
     /// Recordings on which it cuts the lag to two thirds of doing nothing's or
     /// better, which is the trade the over-prediction budget is spent for.
     /// Unit: recordings.
-    const SWEPT_WITHIN_TWO_THIRDS: u64 = 3_961;
+    const SWEPT_WITHIN_TWO_THIRDS: u64 = 4_036;
 
     /// The worst share of doing-nothing's lag the predictor reaches on any one
-    /// recording. Over a thousand, so on its worst recording the prediction is
-    /// half again as far behind as not predicting would have been.
+    /// recording. Exactly a thousand: on its worst recording the prediction is
+    /// a tie with not predicting, to the thousandth, and on no recording in the
+    /// sweep is it worse.
+    ///
+    /// A thousandth is the resolution, and this number sits on the boundary, so
+    /// read it with [`SWEPT_NOT_BETTER_THAN_NOTHING`] beside it rather than
+    /// alone: that one recording is counted by a `>=` on the raw numbers and is
+    /// therefore a tie or an excess of less than a tenth of a per cent. The
+    /// share is kept in thousandths and not widened to catch it, because a
+    /// finer denominator would be reporting a difference the eye has no name
+    /// for.
     /// Unit: thousandths.
-    const SWEPT_WORST_LAG_SHARE_PERMILLE: u64 = 1_584;
+    const SWEPT_WORST_LAG_SHARE_PERMILLE: u64 = 1_000;
 
     /// Recordings on which halving the report rate raises the worst
-    /// over-prediction. A third of them, which is the number that refutes the
-    /// name this file's degradation test used to carry.
+    /// over-prediction. Two thirds of them, which is the number that refutes
+    /// both names this file's degradation test has carried — first *costs lag
+    /// and not overshoot*, then *costs mostly lag*.
     /// Unit: recordings.
-    const SWEPT_HALVING_RAISES_OVERSHOOT: u64 = 1_484;
+    const SWEPT_HALVING_RAISES_OVERSHOOT: u64 = 2_842;
 
     /// How many recordings the convergence check draws.
     ///
@@ -1701,47 +1842,66 @@ mod tests {
     }
 
     /// The worst over-prediction over [`DECADE_CORPORA`] recordings at the
-    /// recorded rate: 10.19 pixels, against [`SWEPT_WORST_AHEAD_X65536`]'s
-    /// 7.20 over a tenth as many. Two fifths higher — 41.6 per cent — and a
-    /// quarter past the bound stated from the smaller set.
+    /// recorded rate: 15.70 pixels, against [`SWEPT_WORST_AHEAD_X65536`]'s
+    /// 13.44 over a tenth as many. A sixth higher — 16.8 per cent — and, at
+    /// this rate, still inside the sixteen-pixel bound. It is the halved rate
+    /// below that leaves it.
     /// Unit: 1/65536 of a device pixel.
-    const DECADE_FULL_AHEAD_X65536: u32 = 668_081;
+    const DECADE_FULL_AHEAD_X65536: u32 = 1_028_810;
 
     /// The worst under-prediction there: 29.11 pixels against
     /// [`SWEPT_WORST_BEHIND_X65536`]'s 27.84, which is 4.6 per cent and is one
-    /// of the two numbers the deleted sentence was true of.
+    /// of the two numbers the deleted sentence was true of. This one did not
+    /// move when `axis` was repaired: the worst lag in the set is a genuine
+    /// shortfall along the direction of travel, which is what lag was supposed
+    /// to mean all along.
     /// Unit: 1/65536 of a device pixel.
     const DECADE_FULL_BEHIND_X65536: u32 = 1_908_104;
 
-    /// The worst over-prediction over them at half that rate: 9.86 pixels
-    /// against [`SWEPT_HALVED_AHEAD_X65536`]'s 7.90, which is 24.8 per cent and
-    /// is also past the eight-pixel bound.
+    /// The worst over-prediction over them at half that rate: 18.41 pixels
+    /// against [`SWEPT_HALVED_AHEAD_X65536`]'s 15.76, which is 16.8 per cent —
+    /// the same sixth as at the recorded rate — and is past the sixteen-pixel
+    /// bound. This is the number that makes the stated bound a maximum over a
+    /// named set rather than a bound, and it is the only one of the four that
+    /// escapes.
     /// Unit: 1/65536 of a device pixel.
-    const DECADE_HALVED_AHEAD_X65536: u32 = 646_115;
+    const DECADE_HALVED_AHEAD_X65536: u32 = 1_206_210;
 
     /// The worst under-prediction there: 33.01 pixels against
     /// [`SWEPT_HALVED_BEHIND_X65536`]'s 31.40, which is 5.1 per cent and is the
-    /// other.
+    /// other. It, too, is where it was before the classifier was repaired.
     /// Unit: 1/65536 of a device pixel.
     const DECADE_HALVED_BEHIND_X65536: u32 = 2_163_217;
 
-    /// Measurements in that set outside the stated over-prediction bound:
-    /// fourteen of 81 920, about one in 5 900.
+    /// Measurements in that set outside the stated over-prediction bound: eight
+    /// of 81 920, about one in 10 200, and every one of them at the halved
+    /// rate.
     /// Unit: measurements.
-    const DECADE_OUTSIDE_AHEAD: u64 = 14;
+    const DECADE_OUTSIDE_AHEAD: u64 = 8;
 
     /// Measurements in that set outside the stated under-prediction bound: five
     /// of 81 920, one in 16 384 — rarer than the over-prediction exceedance and
     /// smaller when it happens, which is the opposite way round from how this
-    /// file used to read.
+    /// file used to read. The margin between the two counts narrowed when the
+    /// over-prediction bound moved from eight pixels to sixteen, and the
+    /// ordering did not: eight against five, and fifteen per cent against
+    /// three.
     /// Unit: measurements.
     const DECADE_OUTSIDE_BEHIND: u64 = 5;
 
     /// How much looser the one universal over-prediction bound is than the
-    /// worst the sweep measured: eighty times. That ratio is the argument for
-    /// stating maxima over a named set instead of the theorem.
+    /// worst the sweep measured: seventy-three times. That ratio is the
+    /// argument for stating maxima over a named set instead of the theorem.
+    ///
+    /// Both sides are two-axis quantities. The theorem is 576 px *on one axis*
+    /// and a [`Deviation`] adds the axes, so the numerator is 1152 px; the
+    /// denominator is the worse of [`SWEPT_WORST_AHEAD_X65536`] and
+    /// [`SWEPT_HALVED_AHEAD_X65536`], which is the halved rate. The round that
+    /// wrote *eighty* divided a one-axis theorem by a two-axis measurement and
+    /// then took the smaller of the two measurements, so the number was true of
+    /// neither pairing.
     /// Unit: none — a ratio of two distances.
-    const UNIVERSAL_BOUND_OVER_SWEPT_WORST: i64 = 80;
+    const UNIVERSAL_BOUND_OVER_SWEPT_WORST: i64 = 73;
 
     #[test]
     fn the_recording_is_what_the_seed_produces() {
@@ -1780,6 +1940,13 @@ mod tests {
     #[test]
     fn over_the_swept_recordings_the_two_errors_are_bounded_separately() {
         let sweep = Sweep::taken();
+        // The set first, because the set is half the claim. *Over 4096 seeded
+        // recordings* is a sentence in the spec's exit and in this file's prose,
+        // and until this line nothing observed the 4096.
+        assert_eq!(
+            sweep.corpora, SWEPT_CORPORA,
+            "the sweep folded a different number of recordings than the bounds are stated over"
+        );
         let full = sweep.full;
         assert_eq!(
             (full.ahead_x65536(), full.behind_x65536()),
@@ -1788,12 +1955,23 @@ mod tests {
         );
         assert!(BOUNDS.admits(full), "{full:?} is outside {BOUNDS:?}");
         // And the separation is load-bearing rather than decorative. The worst
-        // over-prediction is less than a third of the worst under-prediction,
-        // so a single symmetric bound set where this pair's lag bound sits
-        // would admit an overshoot several times anything these recordings
-        // produced — which is the whole reason there are two numbers.
+        // over-prediction is less than half the worst under-prediction, so a
+        // single symmetric bound set where this pair's lag bound sits would
+        // admit an overshoot twice anything these recordings produced — which
+        // is the whole reason there are two numbers.
+        //
+        // *Less than half* and not *less than a third*, which is what stood
+        // here until the round that repaired `axis`. The margin narrowed
+        // because the repair moved a class of error across: a cursor drawn the
+        // wrong way along a reversing motion used to be counted as lag, so the
+        // lag maximum was inflated by snap-backs and the overshoot maximum was
+        // missing them. The two bounds are further apart on paper than they
+        // deserved to be, and this line is where that shows. It is now tight —
+        // three per cent — and a run that reddened it would mean the two maxima
+        // had met, at which point two bounds genuinely are one bound written
+        // twice and `Bounds` should be argued about rather than restated.
         assert!(
-            u64::from(full.ahead_x65536()) * 3 < u64::from(full.behind_x65536()),
+            u64::from(full.ahead_x65536()) * 2 < u64::from(full.behind_x65536()),
             "two bounds are ceremony unless the two maxima differ: {full:?}"
         );
     }
@@ -1803,11 +1981,19 @@ mod tests {
         // Where the word *bounded* stops being true, measured rather than
         // disclaimed. This file spent a round saying that sweeping ten times as
         // many recordings *moves the maxima by a few per cent* — a convergence
-        // claim, and the thing that made eight pixels read as a bound rather
-        // than as a fit to 4096 draws. It is false in the one direction the
-        // module exists for: the worst over-prediction rises by two fifths and
-        // straight past the stated integer, while only the two under-prediction
-        // maxima behave as the sentence said.
+        // claim, and the thing that made a stated integer read as a bound
+        // rather than as a fit to 4096 draws. It is false in the one direction
+        // the module exists for: both over-prediction maxima rise by a sixth,
+        // the halved-rate one straight past the stated integer, while the two
+        // under-prediction maxima move by the few per cent the sentence
+        // promised.
+        //
+        // Which rate escapes is itself part of the sentence now, and it changed
+        // when `axis` was repaired. At the recorded rate ten times the set
+        // reaches 15.70 px against a sixteen-pixel bound and stays inside it;
+        // at half the rate it reaches 18.41 px and does not. So the bound is
+        // set by the halved rate and broken by the halved rate, and a reader
+        // who only ever ran the full rate would not see it fail at all.
         let decade = Decade::taken();
         assert_eq!(
             (decade.full.ahead_x65536(), decade.full.behind_x65536()),
@@ -1820,23 +2006,32 @@ mod tests {
             "what it produces at half that rate moved"
         );
         // The comparison the deleted sentence made, made in arithmetic: each
-        // maximum against the same maximum over a tenth as many recordings. The
-        // over-prediction one rises by more than a third at the recorded rate;
-        // *a few per cent* is true of the two lag numbers and of neither of the
-        // other two.
-        let ahead_scaling_permille =
-            u64::from(decade.full.ahead_x65536()) * 1_000 / u64::from(SWEPT_WORST_AHEAD_X65536);
+        // maximum against the same maximum over a tenth as many recordings, at
+        // both rates rather than at one. Both over-prediction maxima rise by a
+        // sixth and both lag maxima by a twentieth; *a few per cent* is true of
+        // the two lag numbers and of neither of the other two, and it is true
+        // of them at both rates, which is what makes it a property of the
+        // direction rather than of one report rate.
+        let scaled = |decade_x65536: u32, swept_x65536: u32| {
+            u64::from(decade_x65536) * 1_000 / u64::from(swept_x65536)
+        };
+        let ahead_scaling_permille = scaled(decade.full.ahead_x65536(), SWEPT_WORST_AHEAD_X65536);
+        let halved_ahead_scaling_permille =
+            scaled(decade.halved.ahead_x65536(), SWEPT_HALVED_AHEAD_X65536);
         let behind_scaling_permille =
-            u64::from(decade.full.behind_x65536()) * 1_000 / u64::from(SWEPT_WORST_BEHIND_X65536);
+            scaled(decade.full.behind_x65536(), SWEPT_WORST_BEHIND_X65536);
+        let halved_behind_scaling_permille =
+            scaled(decade.halved.behind_x65536(), SWEPT_HALVED_BEHIND_X65536);
         assert!(
-            ahead_scaling_permille > 1_300,
-            "the over-prediction maximum has not settled: ten times the set puts it at \
-             {ahead_scaling_permille} thousandths of the swept one"
+            ahead_scaling_permille > 1_150 && halved_ahead_scaling_permille > 1_150,
+            "the over-prediction maxima have not settled: ten times the set puts them at \
+             {ahead_scaling_permille} and {halved_ahead_scaling_permille} thousandths of the \
+             swept ones"
         );
         assert!(
-            behind_scaling_permille < 1_100,
-            "the under-prediction maximum is the one that does behave as the deleted sentence \
-             said: {behind_scaling_permille} thousandths"
+            behind_scaling_permille < 1_100 && halved_behind_scaling_permille < 1_100,
+            "the under-prediction maxima are the ones that do behave as the deleted sentence \
+             said: {behind_scaling_permille} and {halved_behind_scaling_permille} thousandths"
         );
         assert_eq!(decade.measurements, 2 * DECADE_CORPORA, "both rates, every recording");
         assert_eq!(
@@ -1861,31 +2056,69 @@ mod tests {
         );
         // And the direction the exceedance runs in, which is the finding that
         // refused this subtask twice. The over-prediction bound fails more often
-        // than the under-prediction one, and by a quarter of itself rather than
-        // by three per cent — so the number this file presents as the solid half
-        // of the pair is the less stable of the two.
+        // than the under-prediction one — eight against five — and by fifteen
+        // per cent of itself rather than by three, so the number this file
+        // presents as the solid half of the pair is the less stable of the two.
         assert!(
             decade.outside_ahead > decade.outside_behind,
             "the tighter bound is the one that escapes more often, and this file says so"
         );
+        // *Every one of the eight at the halved rate* is a clause of the exit,
+        // so it is observed here rather than left to a reader to derive. It is
+        // an entailment and not an independent guard — a maximum that is inside
+        // the bound cannot contain a measurement outside it, and the maximum is
+        // pinned exactly two assertions above — and it is labelled as one so
+        // that nobody counts it as a second piece of evidence for the same
+        // fact. What it buys is that the day the full rate starts escaping, the
+        // line saying it does not goes red beside the constant that moved.
         assert!(
-            u64::from(decade.full.ahead_x65536()) * 4 > u64::from(BOUNDS.ahead_x65536()) * 5,
-            "a quarter past the stated bound is the size of the miss: {} against {}",
+            decade.full.ahead_x65536() <= BOUNDS.ahead_x65536(),
+            "the recorded rate stays inside the bound over ten times the set, which is what              makes every escape a halved-rate escape: {} against {}",
             decade.full.ahead_x65536(),
+            BOUNDS.ahead_x65536()
+        );
+        // The size of the miss, measured at the rate that misses. The
+        // full-rate maximum is inside the bound now, so asserting the miss
+        // against `decade.full` would assert something false — which is what
+        // this line did until the repair moved the numbers, and it would have
+        // passed by reading the wrong one of the two rates.
+        assert!(
+            u64::from(decade.halved.ahead_x65536()) * 10 > u64::from(BOUNDS.ahead_x65536()) * 11,
+            "more than a tenth past the stated bound is the size of the miss: {} against {}",
+            decade.halved.ahead_x65536(),
             BOUNDS.ahead_x65536()
         );
     }
 
     #[test]
-    fn halving_the_report_rate_costs_mostly_lag_and_some_overshoot() {
+    fn halving_the_report_rate_costs_both_and_mostly_overshoot() {
         // The one degradation that does not trip a guard: the same motion
-        // reported half as often. This test used to be named *costs lag and not
-        // overshoot*, and that was false — halving raises the worst
-        // over-prediction on the committed recording and on a third of the
-        // sweep. It passed because it checked the over-prediction against a
-        // bound with twenty per cent of slack rather than against the number
-        // its own name claimed it beat. What is true is a ratio, so the ratio
-        // is what is asserted and both of its ends are pinned.
+        // reported half as often. This test has now been named for a false
+        // sentence twice, and the second time is the interesting one.
+        //
+        // It was first called *costs lag and not overshoot*, which was false
+        // because halving raises the worst over-prediction at all; it passed
+        // because it checked that over-prediction against a bound with twenty
+        // per cent of slack rather than against the number its own name claimed
+        // it beat. It was then called *costs mostly lag and some overshoot*,
+        // which was measured and true — of an instrument that filed the
+        // reversal case as lag. Repairing `axis` moved that class across and
+        // inverted the ratio: on the committed recording halving now costs
+        // 101 536 of overshoot against 48 376 of lag, about two to one the
+        // other way, and it raises the worst over-prediction on two thirds of
+        // the sweep rather than a third.
+        //
+        // That is the module's *every knob is turned toward lag* meeting its
+        // limit, and the limit is worth stating plainly: the knobs are turned
+        // toward lag, and a *worse input* still buys mostly overshoot. Halving
+        // the report rate doubles the baseline, a longer baseline lags the
+        // truth by more, and a velocity estimate that lags is wrong in whatever
+        // direction the hand has since turned — so the extra error is a step in
+        // a stale direction, which is exactly the wrong-way over-prediction the
+        // repaired classifier now files where it belongs.
+        //
+        // What is true is a ratio, so the ratio is what is asserted and both of
+        // its ends are pinned.
         let full = measured(&CORPUS, 1);
         let halved = measured(&CORPUS, 2);
         assert_eq!(
@@ -1895,18 +2128,19 @@ mod tests {
         );
         let overshoot_cost = halved.ahead_x65536() - full.ahead_x65536();
         let lag_cost = halved.behind_x65536() - full.behind_x65536();
-        assert_eq!((overshoot_cost, lag_cost), (12_100, 71_463), "the split of the cost moved");
+        assert_eq!((overshoot_cost, lag_cost), (101_536, 48_376), "the split of the cost moved");
         assert!(
-            lag_cost > overshoot_cost * 5,
-            "mostly lag is the claim, and about six to one is where it stands: \
-             {lag_cost} of lag against {overshoot_cost} of overshoot"
+            overshoot_cost > lag_cost * 2,
+            "mostly overshoot is the claim, and about two to one is where it stands: \
+             {overshoot_cost} of overshoot against {lag_cost} of lag"
         );
         // Over the sweep, the part of the old claim that survived: the stated
-        // bounds still hold at half the rate. And the part that did not,
-        // counted. A predictor that genuinely spent every degradation on lag
-        // would drive the count to zero and this assertion red, which is an
-        // outcome to hope for rather than a sentence to write before it is
-        // true.
+        // bounds still hold at half the rate — which they do, and only just,
+        // since the halved rate is where the over-prediction bound is set from
+        // and where it fails off its set. And the part that did not, counted. A
+        // predictor that genuinely spent every degradation on lag would drive
+        // the count to zero and this assertion red, which is an outcome to hope
+        // for rather than a sentence to write before it is true.
         let sweep = Sweep::taken();
         assert_eq!(
             (sweep.halved.ahead_x65536(), sweep.halved.behind_x65536()),
@@ -1980,7 +2214,7 @@ mod tests {
     }
 
     #[test]
-    fn the_only_universal_over_prediction_bound_is_the_two_ceilings_multiplied() {
+    fn the_only_universal_over_prediction_bound_is_attained_at_the_two_ceilings() {
         // The one over-prediction bound in this file that is a theorem rather
         // than a maximum, kept beside the empirical pair so the difference
         // between them stays visible. A prediction is *ahead* only by part of
@@ -1992,14 +2226,70 @@ mod tests {
         // rather than measured.
         let damped_nanos = LEAD_CEILING_NANOS * LEAD_NUMERATOR / LEAD_DENOMINATOR;
         let damped = i64::try_from(damped_nanos).expect("a lead is nanoseconds and small");
-        let ceiling_x65536 = SPEED_CEILING_X65536_PER_MS * damped / NANOS_PER_MS;
-        assert_eq!(ceiling_x65536, 576 * i64::from(PX), "the derived universal bound moved");
-        // And why it is not the stated bound: it is eighty times the worst the
-        // sweep measured, which makes it true and useless. A ratio that fell
-        // toward one would mean the ceilings had become the binding constraint
-        // and the stated pair should be replaced by this arithmetic.
+        let per_axis_x65536 = SPEED_CEILING_X65536_PER_MS * damped / NANOS_PER_MS;
+        assert_eq!(per_axis_x65536, 576 * i64::from(PX), "the derived universal bound moved");
+
+        // Now the predictor, which is the half of this test that did not exist.
+        // For four rounds this was an identity over three constants: it called
+        // no method of `Predictor`, constructed no `Sample`, and stayed green
+        // with the speed guard half deleted and the premise it rests on false
+        // on one axis. A theorem about a function that never runs the function
+        // is arithmetic wearing the function's name.
+        //
+        // So: a window at exactly the speed ceiling on both axes, asked about a
+        // scanout at exactly the lead ceiling, which is the corner the
+        // derivation is taken at. The pointer then stops dead, so the truth is
+        // the anchor and the whole step is over-prediction. The bound is not
+        // merely respected here, it is *attained* — which is what makes it the
+        // least universal bound rather than some larger number that also holds.
+        let mut predictor = Predictor::new();
+        let per_report_x65536 =
+            i32::try_from(SPEED_CEILING_X65536_PER_MS * widened(SAMPLE_NANOS) / NANOS_PER_MS)
+                .expect("the ceiling over one report is a few dozen pixels");
+        for index in 0..WINDOW_SAMPLES {
+            let step = i32::try_from(index).expect("the window is small") * per_report_x65536;
+            let at_the_limit = Sample { at: stamp_of(index), x_x65536: step, y_x65536: step };
+            assert!(predictor.observe(at_the_limit));
+        }
+        let newest = predictor.newest().expect("the window is full");
+        let scanout = StampNanos::from_wire_nanos(newest.at.nanos() + LEAD_CEILING_NANOS);
+        let predicted = predictor.predict_at(scanout).expect("a report has been observed");
         assert_eq!(
-            ceiling_x65536 / i64::from(SWEPT_WORST_AHEAD_X65536),
+            predicted.basis(),
+            Basis::Extrapolated,
+            "the corner the theorem is derived at must be inside every guard, or the theorem \
+             is about a prediction this module declines to make"
+        );
+        let at_the_corner = Deviation::between(&predicted, newest.x_x65536, newest.y_x65536);
+        assert_eq!(at_the_corner.behind_x65536(), 0, "a pointer that stopped cannot be lagged");
+
+        // And the units, which is where the ratio below used to be wrong twice
+        // over. `Deviation::between` **adds** the two axes — the module's *why
+        // per axis, and why the two are added* is the argument — so every
+        // over-prediction measured anywhere in this file is a two-axis sum,
+        // while 576 px is a per-axis number. The universal bound on the
+        // quantity actually measured is therefore twice it. Comparing the
+        // per-axis theorem against a two-axis measurement was comparing two
+        // different quantities and calling the quotient a factor of safety.
+        let universal_x65536 = 2 * per_axis_x65536;
+        assert_eq!(universal_x65536, 1152 * i64::from(PX), "the two-axis universal bound moved");
+        assert_eq!(
+            i64::from(at_the_corner.ahead_x65536()),
+            universal_x65536,
+            "the theorem is the least universal bound only if a prediction reaches it"
+        );
+
+        // And why it is not the stated bound: it is seventy-three times the
+        // worst the sweep measured, which makes it true and useless. The
+        // divisor is the worse of the sweep’s two over-prediction maxima and
+        // not the full-rate one — the halved rate is the worse of the two, and
+        // dividing by the smaller of them overstated the ratio for a round. A
+        // ratio that fell toward one would mean the ceilings had become the
+        // binding constraint and the stated pair should be replaced by this
+        // arithmetic.
+        assert_eq!(
+            universal_x65536
+                / i64::from(larger(SWEPT_WORST_AHEAD_X65536, SWEPT_HALVED_AHEAD_X65536)),
             UNIVERSAL_BOUND_OVER_SWEPT_WORST,
             "the distance between the theorem and the measurement moved"
         );
@@ -2140,6 +2430,33 @@ mod tests {
             .predict_at(scanout_after(WINDOW_SAMPLES - 1))
             .expect("a report has been observed");
         assert_eq!(predicted.basis(), Basis::Held(Held::ImplausibleSpeed));
+        // And the same warp along y, which nothing checked. The guard is two
+        // calls — one per axis — and until this half was written the second of
+        // them could be deleted with every test in the workspace still green.
+        // That matters beyond the guard itself: the module's universal
+        // over-prediction bound is derived from *the step is at most the
+        // window's speed times the lead used*, and that premise is this check
+        // on each axis separately. Half a premise is not a theorem.
+        //
+        // The warp runs the way the recording's y was already going, which is
+        // upward on this table and therefore *downward* in these coordinates.
+        // A warp the other way is caught by [`Held::Reversed`] before it ever
+        // reaches the speed check — the window's two halves then disagree about
+        // direction — so a fixture written the obvious way would go red for the
+        // wrong reason and would keep going red with this guard deleted, which
+        // is a test that observes nothing. Along the existing direction the
+        // halves agree, trust is full, and the speed ceiling is the only thing
+        // standing between a teleport and an extrapolation of it.
+        let mut sideways = Predictor::new();
+        for index in 0..WINDOW_SAMPLES - 1 {
+            assert!(sideways.observe(sample_of(&CORPUS, index)));
+        }
+        let lifted = Sample { y_x65536: anchor.y_x65536 - 4_000 * 65_536, ..anchor };
+        assert!(sideways.observe(lifted));
+        let vertical = sideways
+            .predict_at(scanout_after(WINDOW_SAMPLES - 1))
+            .expect("a report has been observed");
+        assert_eq!(vertical.basis(), Basis::Held(Held::ImplausibleSpeed));
     }
 
     #[test]
@@ -2264,6 +2581,39 @@ mod tests {
         // here and not on `Bounds`.
         let ran_back = Deviation::between(&predicted_at(-10 * 65_536, 0), 0, 0);
         assert_eq!((ran_back.ahead_x65536(), ran_back.behind_x65536()), (10 * PX, 0));
+        // A leftward motion, which nothing in this file exercised until the
+        // round that found the classifier wrong: every case above and below
+        // has the pointer at or forward of the anchor, so `travel` was never
+        // negative anywhere, and a classifier that read only the sign of the
+        // error against the sign of travel could not be told apart from one
+        // that also read where the cursor was actually put.
+        //
+        // The pointer went from the origin to -10 px and the cursor was drawn
+        // to -4 px: it went the way the finger went and did not get there.
+        // That is lag, and it must stay lag — this is the case the repair
+        // must not swallow.
+        let short_leftward = Deviation::between(&predicted_at(-4 * 65_536, 0), -10 * 65_536, 0);
+        assert_eq!((short_leftward.ahead_x65536(), short_leftward.behind_x65536()), (0, 6 * PX));
+        // The same leftward motion, and the cursor drawn to +5 px: forward,
+        // along an axis the finger was leaving. It is on the near side of the
+        // truth — which is what the old classifier read, and why it filed all
+        // fifteen pixels of this as lag — and it is on the far side of the
+        // anchor, so every one of those fifteen pixels is a place the finger
+        // never went and the next frame has to come back from. Over-prediction,
+        // the snap-back the tighter bound exists for, and the whole of it.
+        let snapped_back = Deviation::between(&predicted_at(5 * 65_536, 0), -10 * 65_536, 0);
+        assert_eq!((snapped_back.ahead_x65536(), snapped_back.behind_x65536()), (15 * PX, 0));
+        // And holding the last position through a leftward motion, which is
+        // what every guard in the module falls back to. The step is zero: the
+        // cursor did not go the wrong way, it did not go at all. Lag, and if
+        // this line ever reads (10 px, 0) then the test named for doing
+        // nothing's perfect ahead bound is asserting the opposite of what it
+        // argues.
+        let held_through_a_reversal = Deviation::between(&held, -10 * 65_536, 0);
+        assert_eq!(
+            (held_through_a_reversal.ahead_x65536(), held_through_a_reversal.behind_x65536()),
+            (0, 10 * PX)
+        );
         // Folding the two keeps both, which is the whole reason `worst` is not
         // one comparison and a winner.
         let folded = behind.worst(ahead);

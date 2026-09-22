@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "f-compositor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The compositor: a component that holds the retained scene graph and takes a client's deltas across one ring."
+
+# A library and not a binary, for the reason `user/init/Cargo.toml` states at
+# length and the four component crates before this one repeat: a binary needs an
+# entry point, naming one means `#[unsafe(no_mangle)]`, and that is an unsafe
+# attribute a crate forbidding unsafe code cannot write. `user/init/link.ld`
+# finds the entry by the section `component::start` was compiled into, which is
+# why this crate's entry has that path too — one script, one placement rule, one
+# check, now across five component crates.
+
+[dependencies]
+f-abi.workspace = true
+f-ring.workspace = true
+# The retained graph. **This row is the task**: `scene/src/lib.rs` says the
+# compositor is a component and the graph is not, and until this line the graph
+# was a library nothing linked into a boot. What the crate brings is `Arena` —
+# one fixed allocation with a named maximum — and `commit::Batch`, which is the
+# rule that a frame reaches the graph whole or not at all.
+f-scene.workspace = true
+
+# No override. This crate inherits `unsafe_code = "forbid"` from the workspace,
+# and here that inheritance costs something a reader should see stated: the
+# graph is a hundred and twenty-eight kibibytes and a component has four pages
+# of stack, so it lives in the heap the frame maps and is reached through a
+# `Box`. There is no `static mut` version of this file to fall back to —
+# `cargo xtask component` refuses an image with any writable symbol in it — and
+# that refusal is what makes the heap the answer rather than a preference.
+[lints]
+workspace = true
+
+# The image half, on by default and turned off by the one crate that links this
+# as a library rather than building it into a component file.
+#
+# It exists because a `#[panic_handler]` is a lang item and there may be exactly
+# one in a linked artefact. `component::start` needs one — a component has no
+# serial port and no unwinder, so stopping is the whole handler — and the frame
+# already has its own. The frame links this crate for `routing`'s offsets and
+# for the heap size the boot has to agree with the manifest about, so the two
+# would collide; `kernel/Cargo.toml` turns this off and says why.
+#
+# `dep:`-free, because this crate's `image` gate turns on a module rather than a
+# dependency: `f-scene` is linked by both halves, since the frame reads
+# `scene::arena::NODES_MAX` to size what it expects a published census to be.
+[features]
+default = ["image"]
+image = []

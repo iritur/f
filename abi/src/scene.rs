@@ -284,7 +284,11 @@ pub enum Refusal {
     /// [`PAYLOAD_BYTES`], or an arena offset that is not an arena offset.
     Malformed,
     /// A closed field carries a value outside its set — a node kind, a fill
-    /// rule, or a node named as its own parent.
+    /// rule, a node named as its own parent, or a node placed in front of
+    /// itself. The last two are one guard in [`CreateNode::read`] and are
+    /// written down as two because a reader looking for *which cycles does one
+    /// entry refuse* should find both halves here rather than only the half
+    /// somebody happened to test.
     Value,
     /// A field that must name a node holds [`NO_NODE`]. Separate from
     /// [`Refusal::Value`] because a zeroed payload produces exactly this, and a
@@ -1950,11 +1954,30 @@ mod tests {
         let (entry, payload) = delta(Entry::SetPath(unruled)).encode();
         assert_eq!(Delta::decode(&entry, &payload), Err(Refusal::Value));
 
-        // A node cannot be its own parent, which is the only cycle one entry
-        // can state without help.
-        let looped = CreateNode { parent: CreateNode::SPECIMEN.node, ..CreateNode::SPECIMEN };
-        let (entry, payload) = delta(Entry::CreateNode(looped)).encode();
-        assert_eq!(Delta::decode(&entry, &payload), Err(Refusal::Value));
+        // A node cannot be its own parent, nor be placed in front of itself:
+        // the two cycles one entry can state without help, and the two halves
+        // of one `if` in `CreateNode::read`. Both are asserted because either
+        // disjunct can be deleted on its own, and until this test carried the
+        // `before` case the deletion of that half was green across the
+        // workspace — no caller anywhere builds a `CreateNode` whose `before`
+        // is its own `node`, so the guard had no other witness. A refusal
+        // nothing reaches is a comment with an `if` in front of it.
+        //
+        // *What would reverse this:* `before` ceasing to name a sibling — if
+        // it ever became an index rather than a node, `before == node` stops
+        // being a cycle and this half of the guard goes with the field.
+        for looped in [
+            CreateNode { parent: CreateNode::SPECIMEN.node, ..CreateNode::SPECIMEN },
+            CreateNode { before: CreateNode::SPECIMEN.node, ..CreateNode::SPECIMEN },
+        ] {
+            let (entry, payload) = delta(Entry::CreateNode(looped)).encode();
+            assert_eq!(
+                Delta::decode(&entry, &payload),
+                Err(Refusal::Value),
+                "a node that is its own {}",
+                if looped.parent == looped.node { "parent" } else { "next sibling" }
+            );
+        }
     }
 
     #[test]
@@ -1984,19 +2007,46 @@ mod tests {
         // with a code that already means what it says. Nothing here invents a
         // code — see the module's *why the refusals are local* — and this is
         // what would fail if one were added without a domain to put it in.
-        for refusal in [
-            Refusal::UnknownOpcode,
-            Refusal::UnknownFlag,
-            Refusal::Reserved,
-            Refusal::Malformed,
-            Refusal::Value,
-            Refusal::NoNode,
-            Refusal::NotScheduled,
+        //
+        // The code is spelled out per variant rather than left to the domain,
+        // because the domain alone does not distinguish *this peer sent an
+        // opcode nobody has* from *this peer left a reserved byte set*, and a
+        // caller reading a completion has only the packed integer. Asserting
+        // the sign and the domain and nothing else would let all seven variants
+        // collapse onto one code with the suite still green, which is the
+        // difference between a peer being refused and a peer being shrugged at.
+        // `objects.rs` pins `UnknownOpcode` this way already; this is the same
+        // discipline over the whole set.
+        //
+        // The three that share [`error::argument::UNKNOWN_FLAG`] share it on
+        // purpose and the module argues for it above — so the sharing is
+        // asserted too, rather than assumed. Splitting one of them off is a
+        // new code on the wire, and this test is where that decision has to be
+        // made deliberately.
+        //
+        // *What would reverse this:* RFC 0010 gaining a code for *a closed
+        // field is outside its set* that is not `UNKNOWN_FLAG`, at which point
+        // the three rows below move and this test records the move.
+        for (refusal, code) in [
+            (Refusal::UnknownOpcode, error::argument::UNKNOWN_OPCODE),
+            (Refusal::UnknownFlag, error::argument::UNKNOWN_FLAG),
+            (Refusal::Reserved, error::argument::RESERVED_NOT_ZERO),
+            (Refusal::Malformed, error::argument::MALFORMED_HEADER),
+            (Refusal::Value, error::argument::UNKNOWN_FLAG),
+            (Refusal::NoNode, error::argument::UNKNOWN_FLAG),
+            (Refusal::NotScheduled, error::argument::UNKNOWN_FLAG),
         ] {
             let packed = refusal.packed();
             assert!(packed < 0, "{}", refusal.message());
-            let (domain, _) = error::unpack(packed).expect("a refusal is an error");
+            assert_eq!(
+                packed,
+                error::pack(error::ARGUMENT, code),
+                "{} is not the code it is written down as",
+                refusal.message()
+            );
+            let (domain, carried) = error::unpack(packed).expect("a refusal is an error");
             assert_eq!(domain, error::ARGUMENT, "{}", refusal.message());
+            assert_eq!(carried, code, "{}", refusal.message());
             assert!(!refusal.message().is_empty());
         }
     }

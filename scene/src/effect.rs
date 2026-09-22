@@ -192,6 +192,18 @@
 //! file does deliver is that there is no *other* route from two words to an
 //! [`Effect`], and no way to hold half of one afterwards.
 //!
+//! Both of those are claims about what this file **does not contain**, which no
+//! call can observe: a second constructor is invisible to a test that calls the
+//! first one, and a cost field narrowed to `u32` behind an accessor that still
+//! returns `NonZeroU32` changes no behaviour `Effect::declared` can produce.
+//! They were true by reading and defended by nothing for three rounds. What
+//! defends them now is
+//! `tests::the_only_route_from_two_words_to_an_effect_is_still_declared`, which
+//! reads this file as text and asks it those two questions, and the `const _`
+//! size assertion beside the struct, which asks the compiler the cheaper half
+//! of the second one. Both are named here because a reader who deletes one
+//! should know which sentence above goes with it.
+//!
 //! # No clock, no randomness, no binary floating point, no allocator
 //!
 //! Every function here is a pure function of its arguments. This crate takes no
@@ -322,7 +334,7 @@ macro_rules! refusals {
     (
         $(
             $(#[$about:meta])*
-            $variant:ident, $sentence:literal;
+            $variant:ident, $sentence:literal, $half:literal;
         )*
     ) => {
         /// Why a declaration was not believed.
@@ -375,6 +387,38 @@ macro_rules! refusals {
                     $(Self::$variant => $sentence,)*
                 }
             }
+
+            /// The words in this variant's sentence that say which case it is.
+            ///
+            /// Written per variant, on the same line as the sentence, because
+            /// the clause the exit carries — *the refusal names which half was
+            /// missing* — is a claim about the English a producer reads, and
+            /// nothing about an exhaustive `match` forces a sentence to be
+            /// about its own arm. That gap was real and it was open: swapping
+            /// [`Undeclared::NoEstimate`]'s sentence with
+            /// [`Undeclared::NoFallback`]'s left this crate green, because
+            /// *non-empty* and *pairwise distinct* — all the suite asked of a
+            /// sentence — are both true of a pair of lies about each other.
+            ///
+            /// This fragment is what
+            /// `a_refusal_says_which_half_was_missing` requires to appear in
+            /// this variant's own sentence **and in no other's**, which is the
+            /// correspondence the variant name has and the sentence did not.
+            /// A sixth refusal cannot be written without one, for the same
+            /// reason it cannot be written without a sentence: the macro asks
+            /// for it on the line that declares the variant.
+            ///
+            /// *The reversal condition:* a refusal whose whole sentence is the
+            /// identification, with no fragment unique to it. Then this is a
+            /// duplicate of `message` and the test should compare whole
+            /// sentences instead.
+            /// Unit: none — a fragment of the sentence beside it.
+            #[must_use]
+            pub const fn names(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $half,)*
+                }
+            }
         }
     };
 }
@@ -386,7 +430,7 @@ refusals! {
     /// something that has no cheaper form to fall back to, and a policy that
     /// accepted it would be degrading nodes whose kind never said it could be
     /// degraded.
-    NotAnEffect, "a declaration was offered for a node that is not an effect";
+    NotAnEffect, "a declaration was offered for a node that is not an effect", "not an effect";
 
     /// Neither word was written.
     ///
@@ -394,7 +438,8 @@ refusals! {
     /// nothing is a different defect from one that wrote half: the first forgot
     /// the record, the second forgot a field in it, and they are fixed in
     /// different places.
-    Neither, "an effect node declared neither a cost nor a fallback";
+    Neither, "an effect node declared neither a cost nor a fallback",
+        "neither a cost nor a fallback";
 
     /// A saving, and nothing for it to be a saving from.
     ///
@@ -402,13 +447,14 @@ refusals! {
     /// fallback whose effect has no declared cost cannot be ranked against
     /// anything, so accepting it would put a node in the policy's table that the
     /// policy can never choose.
-    NoEstimate, "an effect node declared a saving and no cost to save from";
+    NoEstimate, "an effect node declared a saving and no cost to save from", "no cost to save from";
 
     /// An estimate, and nothing cheaper to do instead.
     ///
     /// The case the exit is written about: an effect that has told the
     /// compositor what it will cost and not what to do when that is too much.
-    NoFallback, "an effect node declared a cost and nothing cheaper to do instead";
+    NoFallback, "an effect node declared a cost and nothing cheaper to do instead",
+        "nothing cheaper to do instead";
 
     /// A fallback that gives back more than the effect ever cost.
     ///
@@ -416,7 +462,7 @@ refusals! {
     /// generous declaration, it is an incoherent one — and a policy that
     /// subtracted it from a frame's remaining budget would believe it had
     /// recovered time that never existed.
-    CheaperThanFree, "a fallback saves more than the effect it replaces costs";
+    CheaperThanFree, "a fallback saves more than the effect it replaces costs", "saves more";
 }
 
 impl Undeclared {
@@ -526,6 +572,25 @@ pub struct Effect {
     /// [`Effect::saving_us_x100`]'s return type honest.
     saving_us_x100: NonZeroU32,
 }
+
+// An `Option<Effect>` costs what an `Effect` costs, and that is the two cost
+// fields being non-zero rather than a convenience worth having.
+//
+// Why here and not in the tests: a size is a fact about the shipped build, and
+// this assertion is the compiler's own arithmetic rather than a run of
+// anything. Why it is not enough on its own, which is the part a later reader
+// needs: it catches *both* cost fields being widened at once and nothing less.
+// Widen one and the other still donates the niche, `Option<Effect>` does not
+// move, and this line stays green over a type that can now hold half a
+// declaration. `the_only_route_from_two_words_to_an_effect_is_still_declared`
+// is the half that catches that one, and the two are written next to each other
+// so that neither is mistaken for the whole guard.
+//
+// The reversal condition: a field is added whose type carries a niche of its
+// own. Then this assertion is about that field rather than about the costs,
+// which is worse than not having it, and it should be deleted rather than kept
+// as a true sentence about something else.
+const _: () = assert!(core::mem::size_of::<Option<Effect>>() == core::mem::size_of::<Effect>());
 
 impl Effect {
     /// Believe a declaration, or refuse it.
@@ -809,17 +874,211 @@ mod tests {
         // `[Self; Self::COUNT]`, so its length *is* `COUNT` by its own type and
         // no edit to this workspace could make the comparison false. It sat at
         // the head of the one test that is a guard and read like a third one.
-        // The loop below is the guard, and a mutation that gave two variants
-        // one sentence reddens it.
+        //
+        // What stood here after it was a pairwise `assert_ne!` over the
+        // sentences, and it was not this test's name. **Distinctness is not
+        // identification.** Swapping `NoEstimate`'s sentence with
+        // `NoFallback`'s — telling a producer that forgot the saving that it
+        // forgot the estimate — leaves five distinct non-empty sentences and
+        // left this whole crate green; `message` has no other reader in the
+        // workspace, so nothing else would have caught it either. The clause
+        // in the exit is about what the producer is told, and the only reader
+        // of that English is a human, so the test has to be the one that reads
+        // it.
+        //
+        // The correspondence below is what a name has and a sentence did not:
+        // each refusal's `names()` fragment appears in its own sentence and in
+        // nobody else's. It subsumes both deleted assertions — a non-empty
+        // sentence, because a non-empty fragment is inside it, and pairwise
+        // distinctness, because two equal sentences would each contain the
+        // other's fragment — which is why they are named here rather than kept
+        // as a second statement of an implied fact.
+        //
+        // *The mutations that redden this:* swapping any two sentences;
+        // copying one sentence over another; writing a sixth refusal whose
+        // `names()` fragment is a substring of somebody else's sentence.
         for (at, one) in Undeclared::ALL.iter().enumerate() {
-            assert!(!one.message().is_empty(), "{one:?} has no sentence");
-            for other in &Undeclared::ALL[at + 1..] {
-                assert_ne!(one.message(), other.message(), "{one:?} and {other:?} say one thing");
+            assert!(!one.names().is_empty(), "{one:?} names no half");
+            assert!(
+                one.message().contains(one.names()),
+                "{one:?} says {:?}, which does not contain {:?}: its sentence is about \
+                 some other refusal than itself",
+                one.message(),
+                one.names()
+            );
+            for (also, other) in Undeclared::ALL.iter().enumerate() {
+                if also == at {
+                    continue;
+                }
+                assert!(
+                    !other.message().contains(one.names()),
+                    "{other:?} says {:?}, which contains {one:?}'s own {:?}: one sentence \
+                     identifies two causes and therefore neither",
+                    other.message(),
+                    one.names()
+                );
             }
         }
         // One code on the wire, five values here — the module documentation's
         // argument, asserted so that a later edit that split the code has to
         // come through this line.
         assert_eq!(Undeclared::REFUSAL, Refusal::Value);
+    }
+
+    /// This file, as text.
+    ///
+    /// Read rather than called, because the two clauses below are about what
+    /// this file **does not** contain, and a second constructor is invisible to
+    /// a test that calls the first one. Every test above could pass unchanged
+    /// beside a `pub const fn from_parts` that skipped every check in
+    /// [`Effect::declared`], and beside a cost field narrowed to `u32` with its
+    /// accessor rewritten to hand back `NonZeroU32::MIN` on the zero it can now
+    /// hold — both are safe, both compile, and neither is refused by anything
+    /// that runs.
+    ///
+    /// `include_str!` reads at compile time and needs no filesystem at run
+    /// time, which is the route `abi/src/semantic.rs` already reads
+    /// `interface/src/node.rs` by, for the same reason: a fact about a source
+    /// file is not otherwise observable to a run, and a comment claiming it is
+    /// the thing that rots.
+    ///
+    /// *What would reverse this:* an `xtask` lint making the same statement
+    /// over this file from outside it. That is the better home — it would fail
+    /// the build rather than a test, and it could hold the rule for every type
+    /// of this shape rather than for one. This sits here because the property
+    /// is `E3-B07a`'s exit and the exit is closed here; a lint that subsumes it
+    /// should delete this test rather than stand beside it.
+    const SOURCE: &str = include_str!("effect.rs");
+
+    /// The body of `impl Effect`, from its opening line to the `}` in column
+    /// zero that closes it.
+    ///
+    /// Sliced rather than parsed, and the slice is narrow on purpose: an
+    /// `impl Effect` block is where a second inherent constructor would be
+    /// written, and scanning the whole file would find the helpers in this test
+    /// module instead.
+    fn impl_effect() -> &'static str {
+        const OPEN: &str = "\nimpl Effect {\n";
+        let at = SOURCE
+            .find(OPEN)
+            .expect("`impl Effect {` is no longer a line of its own, so this scan reads nothing");
+        let rest = &SOURCE[at + OPEN.len()..];
+        let end = rest
+            .find("\n}\n")
+            .expect("`impl Effect` has no closing brace in column zero, so this scan has no end");
+        &rest[..end]
+    }
+
+    #[test]
+    fn the_only_route_from_two_words_to_an_effect_is_still_declared() {
+        // The clause of the exit that no run could observe: *`Effect::declared`
+        // is the only constructor of an `Effect`, whose two cost fields are
+        // `NonZeroU32`*. Both halves were true by reading and defended by
+        // nothing, and they are each other's only support — *no value of the
+        // type can hold half a declaration* needs the fields to be non-zero
+        // **and** needs there to be no other way in, so a guard over one of
+        // them is not a guard over the sentence. That is why they are one test
+        // and must not be split.
+
+        // One inherent function returns an `Effect`, and it is the one the exit
+        // names. Signatures are read off one line each, which is what
+        // `rustfmt.toml`'s `use_small_heuristics = "Max"` makes true of this
+        // file; a signature this scan cannot read is a failure rather than a
+        // skip, because a scan that silently ignores what it cannot parse is
+        // the decoration this test exists not to be.
+        let mut routes = 0_usize;
+        for line in impl_effect().lines() {
+            let line = line.trim();
+            if line.starts_with("//") || !line.contains("fn ") {
+                continue;
+            }
+            assert!(
+                line.contains("->") && line.ends_with('{'),
+                "this scan reads a whole signature off one line and cannot read `{line}`: a \
+                 function in `impl Effect` that wraps or returns nothing needs it taught first"
+            );
+            let returns = line.rsplit("->").next().expect("a signature with an arrow has a tail");
+            if returns.contains("Self") || returns.contains("Effect") {
+                routes += 1;
+                assert!(
+                    line.contains("fn declared("),
+                    "`{line}` is a second way to obtain an `Effect`, and the exit is that there \
+                     is one; if it is a real need, the exit is the thing to change first"
+                );
+            }
+        }
+        assert_eq!(
+            routes, 1,
+            "`impl Effect` no longer has exactly one function that returns one, so either \
+             `declared` is gone or this scan stopped seeing it"
+        );
+
+        // The family the scan above cannot see, because its methods live in an
+        // `impl Trait for` block rather than in `impl Effect`: `Default`,
+        // `From`, `TryFrom`, `FromStr`, a deserialiser. The rule is blanket
+        // rather than a list of the ones somebody thought of, because the list
+        // of traits whose method returns `Self` is not a list this file can
+        // finish. A trait genuinely wanted here comes through this line and
+        // says why it is not a constructor.
+        // Assembled with `concat!` rather than written out, and not for style:
+        // this file is its own haystack, so a needle spelled here is a needle
+        // this line finds in itself. It did, on the first run. Adjacent string
+        // literals do not concatenate in Rust, which is why this is a macro and
+        // not two strings side by side.
+        const TRAIT_IMPL: &str = concat!(" for ", "Effect ");
+        assert!(
+            !SOURCE.contains(TRAIT_IMPL),
+            "a trait is implemented for `Effect` by hand; if its method does not return one, \
+             say so here and let it past"
+        );
+
+        // The derive list, pinned whole rather than searched for `Default`.
+        // Two things ride on it. `Default` in it is a constructor that answers
+        // zero for both costs. `Ord` in it is the order this type's own
+        // documentation refuses eight lines above the struct — a table sorted
+        // by node identifier that looks like a downgrade order — and `E3-B07b`
+        // is the task that would inherit it. One line refuses both, and costs
+        // an edit here for any derive somebody genuinely wants.
+        assert!(
+            SOURCE.contains("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct Effect {\n"),
+            "`Effect`'s derive list changed; `Default` there is a constructor and `Ord` there is \
+             `E3-B07b`'s decision made by a macro"
+        );
+
+        // And the fields, spelled. This is the clause the accessors cannot
+        // carry: `saving_us_x100: u32` behind an accessor that still returns
+        // `NonZeroU32` is a const-legal, `unsafe`-free edit that no assertion
+        // in this module notices, because `declared` never writes a zero — and
+        // after it an in-module value holding half a declaration is
+        // expressible, which is exactly what the exit says cannot happen.
+        //
+        // The count is pinned too, because the sentence in the spec says *two*
+        // and the struct has three: a fourth field would make the count wrong
+        // in the other direction and nothing else here would see it.
+        const FIELDS_OPEN: &str = "pub struct Effect {\n";
+        let at = SOURCE.find(FIELDS_OPEN).expect("`pub struct Effect {` is no longer written");
+        let rest = &SOURCE[at + FIELDS_OPEN.len()..];
+        let fields = &rest[..rest.find("\n}\n").expect("`struct Effect` does not close")];
+        for spelling in
+            ["node: u32,", "estimate_us_x100: NonZeroU32,", "saving_us_x100: NonZeroU32,"]
+        {
+            assert!(
+                fields.contains(spelling),
+                "`Effect` no longer declares `{spelling}`; a cost field that is not `NonZeroU32` \
+                 can hold the zero `declared` refuses"
+            );
+        }
+        let declared = fields
+            .lines()
+            .filter(|line| {
+                let line = line.trim();
+                !line.starts_with("//") && line.contains(':') && line.ends_with(',')
+            })
+            .count();
+        assert_eq!(
+            declared, 3,
+            "`Effect` has a field the exit does not know about; the exit counts the two that \
+             are costs and this test counts all of them"
+        );
     }
 }

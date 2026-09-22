@@ -297,8 +297,21 @@ landed.
    refuses, because a manifest is policy and a re-import must not be able to
    change it — with `image = "third_party/<name>"`, a `domain` that is not
    `shared`, and a `[[ring]]` declaring the `shape` protocol with `role =
-   "server"`. The consuming component declares the matching `role = "client"`
-   ring whose `to` names an `endpoint` capability carrying `write`.
+   "server"`. The protocol it names is the second file: **`abi/src/shape.rs`**,
+   beside `abi/src/objects.rs`, `abi/src/store.rs` and `abi/src/input.rs`, which
+   is where every other protocol in this tree is declared and what makes the
+   name `shape` resolve to something rather than to a directory. Those two are
+   the files the clause means, and a reader discharges it with one `test -f`
+   each.
+
+   The consuming component declares the matching `role = "client"` ring whose
+   `to` names an `endpoint` capability carrying `write`. That is a **row added
+   to a manifest that already exists**, not a third file, and *which* component
+   adds it is the import task's to choose: `user/` holds nine of them and the
+   first caller of a shaper is not decided here. Naming a consumer now would be
+   naming it in the document that cannot check it — and the reason the clause
+   says *two files* rather than three is exactly that.
+
    `lint-manifests` checks every one of those fields today against a schema it
    already has. **This observation needs no new code; it needs the two files.**
 2. **No other route in source.** `lint_licensing` reads every Rust file in the
@@ -375,8 +388,12 @@ which is therefore named here with an owner rather than assumed.
 
 Plainly, because the alternative is a clause everybody assumes somebody checked:
 `third_party/` is empty — `find third_party -type f` returns `README.md` and
-nothing else — `user/shaper/manifest.toml` does not exist, and `abi/`'s `shape`
-protocol does not exist. Observation 3 is written now and observations 1 and 2
+nothing else — `user/shaper/manifest.toml` does not exist, and
+`abi/src/shape.rs` does not exist. Those are the two files, by path, because a
+clause that names a directory and a protocol is a clause a reader cannot run a
+command against; the first draft of this section named the second one as
+"`abi/`'s `shape` protocol" and a fourth review round was right that it
+identified nothing. Observation 3 is written now and observations 1 and 2
 are not, because 1 needs the two files and 2 has nothing to read.
 
 **So the second clause of `E3-B03a`'s exit is not met, and this RFC's own first

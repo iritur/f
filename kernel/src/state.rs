@@ -310,6 +310,23 @@ pub mod node {
     /// Zero on every boot that does not run the objects demonstration, which is
     /// most of them. Unit: frames.
     pub const OBJECTS_RESIDENT: u32 = 54;
+
+    /// The seventh place's mount.
+    ///
+    /// **55, and the id is not beside the sixth because ids here are permanent.**
+    /// `COMPONENTS_MOVED` and `OBJECTS_RESIDENT` took 53 and 54 in between, so
+    /// the next free number is 55 and this node sits after them in the schema's
+    /// array — which `f_abi::state::validate` requires, since ids ascend in array
+    /// order. A mount run that reads contiguously in the source is a tidiness
+    /// nobody is owed; a reader that can compare two boots by id is.
+    ///
+    /// **The paragraph on [`COMPONENT_TREE_4`] is a record and this is its third
+    /// entry.** It said a build that grew a further place would find the `None`
+    /// arm at the call site rather than silently publishing into the last mount.
+    /// `E1-B05` grew one, `E2-B08` grew another, and `E3-B01f` grows this one:
+    /// `user/compositor` is the seventh component file, and the frame builds a
+    /// place per file.
+    pub const COMPONENT_TREE_6: u32 = 55;
     /// What this machine is running. RFC 0012.
     ///
     /// The node the exit of `E2-B07` is about: *the machine answers "what are
@@ -424,6 +441,7 @@ pub mod node {
             3 => Some(COMPONENT_TREE_3),
             4 => Some(COMPONENT_TREE_4),
             5 => Some(COMPONENT_TREE_5),
+            6 => Some(COMPONENT_TREE_6),
             _ => None,
         }
     }
@@ -439,7 +457,7 @@ pub mod node {
 }
 
 /// How many nodes this build publishes.
-pub const NODES: usize = 55;
+pub const NODES: usize = 56;
 
 /// The schema, written once and never again for a generation.
 ///
@@ -828,7 +846,15 @@ const SCHEMA: [SchemaEntry; NODES] = [
         unit::FRAMES,
         b"resident",
     ),
-    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 54 * WORD, 0xEE, unit::NONE, b"reserved"),
+    SchemaEntry::new(
+        node::COMPONENT_TREE_6,
+        node::COMPONENTS,
+        54 * WORD,
+        kind::MOUNT,
+        unit::ADDRESS,
+        b"place6",
+    ),
+    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 55 * WORD, 0xEE, unit::NONE, b"reserved"),
 ];
 
 /// Where the schema block starts: immediately after the header, on the

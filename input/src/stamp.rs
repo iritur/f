@@ -49,6 +49,17 @@
 //! and it has a fixture that makes it fail, because a lint nobody has watched
 //! go red is a lint nobody has tested.
 //!
+//! That sentence was not enough on its own and the gap was a reviewer's rather
+//! than a hypothesis. A clock reading does not have to be spelled at the call:
+//! `from_wire_nanos(nanos_now(env))`, with the helper in a crate the lint does
+//! not read, contains no spelling of `now` that any needle matches. So the
+//! lint checks this constructor's *argument* as well as the path's needles —
+//! a field read or a literal, and nothing that was computed here — and the
+//! two-statement version of the same trick now costs a struct and a field
+//! somebody has to write down. What the type removes, what the needles catch
+//! and what the argument rule catches are three different sets, and this
+//! paragraph is the only place that says so.
+//!
 //! # Under the simulator
 //!
 //! The stamp is `f_env::Env`'s virtual time and nothing else, so one seed
@@ -136,8 +147,18 @@ impl StampNanos {
     /// signature can tell that number from one that came off a ring. What can
     /// tell them apart is *where the reading was written*, so that is what is
     /// checked — `cargo xtask lint-stamp` refuses a clock reading anywhere on
-    /// the input path except the single one in [`at_interrupt`], and the
-    /// expression that would abuse this function contains one.
+    /// the input path except the single one in [`at_interrupt`].
+    ///
+    /// The sentence that used to end here said the abusive expression "contains
+    /// one", and it does not have to. `from_wire_nanos(helper(env))` names no
+    /// clock at all when `helper` lives in a crate the lint does not read, and
+    /// `xtask`'s own doc asserted the opposite half of the same argument — that
+    /// no constructor of this type takes a `u64` — while this function sat here
+    /// being one. So the lint now reads what is *handed* to this function as
+    /// well: on the input path the argument must be a field read or a literal.
+    /// That is why a decode should pass `entry.stamp_nanos` straight in rather
+    /// than binding it first; a bare local is refused, because a local is
+    /// exactly where a helper's return value lands.
     #[must_use]
     pub const fn from_wire_nanos(nanos: u64) -> Self {
         Self { nanos }

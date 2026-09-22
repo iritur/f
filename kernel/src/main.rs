@@ -27,6 +27,11 @@ pub mod blk;
 pub mod cap;
 pub mod churn;
 pub mod component;
+// `E3-B01f`. The first component in this tree that holds a scene graph, and
+// the client half of the boot that stands it up. Beside `objects` rather than
+// under `scene/`, because what is here is the frame's side of one boot and the
+// graph itself is a library above the frame that this file never touches.
+pub mod compositor;
 pub mod doorbell;
 pub mod env;
 pub mod objects;
@@ -910,6 +915,14 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // `claims/0019`'s resident pages, carried to the tree publish below. Zero
     // on a boot with no `objects=` parameter, which is every ordinary one.
     let objects_resident = objects_report.as_ref().map_or(0, |report| report.resident_frames);
+
+    // E3-B01f. A component holding the machine's scene graph at ring 3, with
+    // this frame as its client — and, on the other half, the same component's
+    // own record put past the admission a spawn performs with its state
+    // declaration emptied. Behind its own parameter for `objects_datapath`'s
+    // reason: an ordinary boot has no scene to commit, and a default boot that
+    // ran it would stop being the fixture `cargo xtask trace` hashes.
+    compositor_boot(&boot, &mut frames, &space, features, clocks, tree.physical());
 
     // E1-B08. A component that holds a core and schedules its own work inside
     // it, with the frame counting what crossed. Behind its own parameter, like
@@ -3008,6 +3021,95 @@ fn admission_demonstration(boot: &BootInfo) {
             arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
         }
     }
+}
+
+/// `E3-B01f`'s boot: a component that holds the machine's scene graph at ring 3,
+/// and this frame committing frames of deltas to it.
+///
+/// Two halves, and `kernel/src/compositor.rs` argues why neither means anything
+/// alone: `compositor=serve` commits two frames and requires the component's
+/// published numbers to be what the client's own script implies, and
+/// `compositor=mute` puts the same component's record past the admission a spawn
+/// performs — once as declared, which must be admitted, and once with its state
+/// declaration emptied, which must be refused `ADMISSION/NO_STATE_TREE`.
+///
+/// The verdict is the kernel's rather than the harness's, exactly as `blk`'s and
+/// `objects`' are: it knows which half it asked for, what it submitted, and what
+/// came back out of the tree the component published.
+fn compositor_boot(
+    boot: &BootInfo,
+    frames: &mut mem::FrameAllocator,
+    space: &paging::AddressSpace,
+    features: paging::Features,
+    clocks: arch::x86_64::apic::Clocks,
+    tree: u64,
+) -> Option<compositor::Report> {
+    let half = if boot.has_parameter(b"compositor=serve") {
+        compositor::Half::Serve
+    } else if boot.has_parameter(b"compositor=starved") {
+        compositor::Half::Starved
+    } else if boot.has_parameter(b"compositor=mute") {
+        compositor::Half::Mute
+    } else {
+        return None;
+    };
+
+    // Another core for the serving half, always. A server and its client are two
+    // ends of a ring and this frame is the client, so a machine with one core has
+    // nowhere to put the server — `objects_datapath`'s sentence, and the same
+    // refusal rather than a fallback that would be measuring something else.
+    //
+    // The refusal half needs none: it spawns nothing and runs no component, which
+    // is why it is a *record* probe and not a boot that stands one up. A machine
+    // with one core can still say whether a manifest declaring no tree is
+    // refused.
+    let me = arch::x86_64::current_cpu();
+    let worker = (smp::started() > 1).then(smp::first_worker).filter(|core| *core != me);
+    let Some(worker) = worker.or(match half {
+        compositor::Half::Mute => Some(me),
+        compositor::Half::Serve | compositor::Half::Starved => None,
+    }) else {
+        kprintln!(
+            "FAIL: the compositor boot needs a second core — the component holds the graph at              ring 3 and the frame is its client"
+        );
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+
+    // SAFETY: the boot processor, with the kernel's address space in `CR3`,
+    // `frames` rebound onto its direct map, the direct map covering every boot
+    // module, and `worker` a core that is up and idle — or, on the half that
+    // schedules nothing, this one, which that half never gives a job to.
+    let outcome = unsafe {
+        compositor::demonstrate(
+            frames,
+            space,
+            features,
+            half,
+            boot,
+            compositor::Scheduling {
+                tree,
+                cpu: worker,
+                hz: TIMER_HZ,
+                target: RUNTIME_TICKS,
+                tsc_khz: clocks.tsc_khz,
+            },
+        )
+    };
+
+    let report = match outcome {
+        Ok(report) => report,
+        Err(why) => {
+            kprintln!("FAIL: the compositor boot: {}", why.why());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+    compositor::report_lines(&report);
+    if let Err(why) = report.verdict() {
+        kprintln!("FAIL: the compositor boot: {why}");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+    kprintln!("  compositor    verdict: the {} half held", report.half.name());
+    Some(report)
 }
 
 /// `E2-B08`'s boot: a component that serves the objects ring, and this frame

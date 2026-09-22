@@ -218,9 +218,42 @@ macro_rules! kinds {
         /// The variants, and everything this module answers about them, are
         /// emitted from the `kinds!` invocation that declares them, which is
         /// the only place a kind is written.
+        /// # Why the discriminants are the wire values
+        ///
+        /// **Because an empty slot has to be all zeroes, and a component's image
+        /// is what pays when it is not.** `crate::arena::Arena::EMPTY` is 131 096
+        /// bytes of constant and a component reaches it through a `Box`; if a
+        /// single byte of it is non-zero the compiler cannot emit it as a zero
+        /// initialiser, so the whole constant lands in the component's *image*
+        /// and is copied out of it at run time. `user/compositor`'s image was
+        /// 147 280 bytes against the 65 536 the frame maps for a component, and
+        /// every byte of the difference was this enum's niche: an `Option<Created>`
+        /// over a six-variant enum starting at zero encodes `None` as a value
+        /// outside the range, and that value is not zero.
+        ///
+        /// Numbering the variants from one puts the niche *below* the range, at
+        /// zero, which makes `Slot::EMPTY` — and therefore `Arena::EMPTY` — all
+        /// zeroes. The component's image went back to 14 KiB.
+        ///
+        /// It is not a trick played for a byte count. The number a kind is on the
+        /// wire and the number it is in this enum were two values with a `match`
+        /// between them, and they are now one value: `wire` reads the
+        /// discriminant rather than mapping to it, and a kind whose two numbers
+        /// disagreed is no longer expressible. What it costs is
+        /// [`index`](Self::index), which is now the discriminant minus one and
+        /// says so.
+        ///
+        /// **Nothing in this crate can assert the zeroes**, because reading a
+        /// value's bytes needs `unsafe` and this crate forbids it. What checks it
+        /// is `cargo xtask component`, which refuses an image larger than the
+        /// frame's reservation — so a toolchain that placed the niche elsewhere
+        /// is a red build with the byte count in the message, and not a silent
+        /// regression. `user/compositor/src/lib.rs` carries the other half of
+        /// that sentence.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+        #[repr(u8)]
         pub enum Kind {
-            $($(#[$about])* $variant,)*
+            $($(#[$about])* $variant = wire::$constant as u8,)*
         }
 
         impl Kind {
@@ -245,13 +278,17 @@ macro_rules! kinds {
 
             /// This kind's position in [`ALL`](Self::ALL).
             ///
-            /// The enum's own discriminant, which is the position of the line
-            /// that declared the kind, which is the position of its entry in
-            /// `ALL`: one list read three ways. There is no second sequence
-            /// here to keep in step with the first.
+            /// The enum's own discriminant minus one, which is the position of
+            /// the line that declared the kind, which is the position of its
+            /// entry in `ALL`: one list read three ways, with one subtraction in
+            /// it. The subtraction is the price of the discriminants being the
+            /// wire values — see the type's own comment for why they are — and it
+            /// cannot underflow, because `abi::scene::kind` numbers from one and
+            /// the `const` block at the foot of this file walks every `u16` to
+            /// say so.
             #[must_use]
             pub const fn index(self) -> usize {
-                self as usize
+                self as usize - 1
             }
 
             /// The word a log or a trace prints.
@@ -278,9 +315,11 @@ macro_rules! kinds {
             /// Unit: none — a node kind, not a quantity.
             #[must_use]
             pub const fn wire(self) -> u16 {
-                match self {
-                    $(Self::$variant => wire::$constant,)*
-                }
+                // The discriminant, read rather than mapped. It *is*
+                // `wire::$constant` — the enum declares it so — which is what
+                // makes this method unable to drift from the list above it. The
+                // `match` this replaced was the place the two could disagree.
+                self as u16
             }
 
             /// What a renderer does with a node of this kind.

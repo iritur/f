@@ -75,9 +75,21 @@
 //! entries once and zeroes none of them on completion — `ring/src/lib.rs` — so
 //! a slot whose write is not **visible** holds the entry that occupied it last,
 //! which is a previous frame's delta and decodes perfectly. The batch has no
-//! way to tell it from one of its own: there is no sequence number on an entry,
-//! and every field of [`Sqe`] a scene delta does not read is already required
-//! to be zero.
+//! way to tell it from one of its own: there is no sequence number on an entry.
+//! **Space is not what is missing**, and an earlier version of this paragraph
+//! said it was. [`Sqe`] carries sixty-four bits a scene delta neither reads nor
+//! requires to be zero — `user_data`, which `Delta::envelope` echoes rather than
+//! zeroing, so any value in it passes the reserved-field comparison
+//! `Delta::decode` makes of the two envelopes.
+//! `tests::a_delta_carries_sixty_four_bits_this_module_never_reads` is that
+//! sentence as a run rather than as prose.
+//!
+//! What is missing is the *permission*. `f_abi::Sqe` contracts `user_data` as
+//! the submitter's own value, *returned verbatim in the completion* — see
+//! `abi/src/lib.rs` — so a sequence written there is the ABI taking a field back
+//! from every client that already uses it, on a ring shared with every other
+//! opcode. That is a real cost and a different argument from *there is nowhere
+//! to put it*, which is what was written here and was not true.
 //!
 //! What stands between that and a third scene is the ring's `Release` store and
 //! the consumer's `Acquire` load, which together promise that every slot below
@@ -92,8 +104,14 @@
 //!
 //! *What would reverse this:* a per-entry submission sequence in the ABI, which
 //! the consumer checks against the slot's own index, at which point a stale slot
-//! is detectable and the sentence above loses its clause. That is a diff to
-//! `abi/src/scene.rs` with an RFC behind it and not a diff to this file.
+//! is detectable and the sentence above loses its clause. **It is two diffs and
+//! not one.** `abi/src/scene.rs` has to say where the sequence lives and what it
+//! costs the `user_data` contract; and the check *against the slot's own index*
+//! is written in [`Batch::offer`] — this file — because the consumer is the only
+//! party that knows which index it is reading, and a producer cannot check a
+//! number it is the one writing. This paragraph used to say the repair was
+//! somebody else's entirely. It is half somebody else's, and the half that
+//! refuses is ours.
 //!
 //! # Why the bytes are the door, and the only door
 //!
@@ -163,7 +181,13 @@
 //! said no — this build's two halves disagreeing, which is not something a peer
 //! can cause, and is the same concession `arena::Refusal::Mismatched` already
 //! makes for the same reason. The graph may hold part of the frame when it
-//! happens; the sweep counts it and requires zero across every seed.
+//! happens, and the sweep does not count it — it **fails the run on it**, at
+//! `tests::one_cut`'s [`Refused::Diverged`] arm, with the re-run key in the
+//! failure message. There is deliberately no counter beside that panic, and
+//! this paragraph used to promise one: a number that can only ever be read as
+//! zero is a number no edit to this workspace could redden, which is the same
+//! reasoning the test module already wrote where it deleted the counter and
+//! the two assertions over it.
 //!
 //! Closing it properly is a change to `crate::arena` and not to this file: a
 //! graph that could answer *would you accept this* from the same code that
@@ -265,9 +289,15 @@ pub enum Refusal {
     AlreadySealed,
     /// An earlier offer to this batch was refused, so it can never seal.
     ///
-    /// The message carried is the *first* refusal's, not the most recent: that
-    /// is the one describing what actually went wrong, and every refusal after
-    /// it is a consequence.
+    /// The message carried is the refusal that poisoned the batch, and a batch
+    /// has exactly one: [`Batch::offer`]'s first statement returns this variant
+    /// before any second refusal can be made, so *the first* and *the most
+    /// recent* name one refusal and no execution can tell them apart. This doc
+    /// used to promise the first over the most recent, and the distinction was
+    /// carried by an `if self.poison.is_none()` in `Batch::poisoned` that no
+    /// call could take — a guard nothing can kill, which is the species this
+    /// module has already deleted three assertions for. The guard is gone and
+    /// the promise is gone with it.
     Poisoned(&'static str),
     /// The graph would refuse this edit, so the frame is refused instead.
     ///
@@ -671,10 +701,22 @@ impl<const LIMIT: usize> Batch<LIMIT> {
     /// One function, so that *every refusal poisons* is one line rather than a
     /// habit repeated at six call sites — which is the form of that rule an
     /// edit cannot walk past by forgetting a statement.
+    ///
+    /// The assignment is unconditional. An `if self.poison.is_none()` stood here
+    /// and is deleted rather than kept: [`Batch::offer`] is the only caller and
+    /// its first statement returns [`Refusal::Poisoned`], so every call arrives
+    /// with `self.poison` already `None` and the branch could not be taken by
+    /// any execution. Mutating it to an unconditional store left the whole suite
+    /// green, which is the definition of a guard nothing can kill, and what
+    /// actually carries *the poison is permanent* is that early return —
+    /// `a_second_commit_in_one_frame_is_refused_and_poisons_it` is what goes red
+    /// when it is deleted.
+    ///
+    /// *What would reverse this:* a second call site reachable with poison
+    /// already set, at which point *which* refusal is kept is a decision again
+    /// and the branch comes back with a test that can tell the two apart.
     fn poisoned(&mut self, refusal: Refusal) -> Refusal {
-        if self.poison.is_none() {
-            self.poison = Some(refusal.message());
-        }
+        self.poison = Some(refusal.message());
         refusal
     }
 
@@ -1421,6 +1463,32 @@ mod tests {
         panic!("a corpus frame carried no commit")
     }
 
+    /// Submit a whole frame and answer what the commit made of it.
+    ///
+    /// [`deliver`] with the panic taken off the commit: a test about a frame the
+    /// graph *will not* have needs the refusal in its hands, and a test about
+    /// one it will needs the counts. The two panics that remain are the two a
+    /// refusal would make the test about nothing — an entry the wire refused,
+    /// and a frame carrying no commit.
+    fn submit(arena: &mut Arena, entries: &[Entry], frame_token: u64) -> Result<Closed, Refused> {
+        let (slots, len) = slots_of(entries, frame_token);
+        let mut batch = Batch::<LIMIT>::new();
+        for slot in &slots[..len] {
+            let (sqe, payload) = slot.encode();
+            match batch.offer(&sqe, &payload) {
+                Ok(Offered::Staged) => {}
+                Ok(Offered::Sealed(sealed)) => return batch.commit(arena, sealed),
+                Err(refusal) => panic!("an entry was refused at the wire: {}", refusal.message()),
+            }
+        }
+        panic!("the frame carried no commit")
+    }
+
+    /// One creation, written out once because four tests below want three.
+    const fn create(node: u32, parent: u32, node_kind: u16) -> Entry {
+        Entry::CreateNode(CreateNode { node, parent, before: NO_NODE, kind: node_kind })
+    }
+
     /// Where a node stands among its siblings, in paint order.
     ///
     /// Part of the fingerprint because sibling order *is* paint order: two
@@ -1986,26 +2054,57 @@ mod tests {
     ///
     /// # The sentence this run stands behind, and the one it does not
     ///
-    /// **Over a ring whose `Release`/`Acquire` pair holds, the graph read back
-    /// after a cut is the old scene or the new one, never a third.** That is
-    /// `Mode::Honest`, it is asserted as `honest.third == 0`, and the
-    /// `Applier::Eager` control over the same cuts is required to produce third
-    /// scenes so that the zero means something.
+    /// **Over a _model_ of a ring whose `Release`/`Acquire` pair holds, the
+    /// graph read back after a cut is the old scene or the new one, never a
+    /// third.** That is `Mode::Honest`, it is asserted as `honest.third == 0`,
+    /// and the `Applier::Eager` control over the same cuts is required to
+    /// produce third scenes so that the zero means something.
     ///
-    /// **Over a ring whose pair does not hold, it is not.** `Mode::Lying` is
-    /// swept and the third scenes it produces are counted and *required to be
-    /// there*, in the same way and for the same reason the eager control is:
-    /// the number is what the ordering pair buys, and a run in which it were
-    /// zero would be a run whose model had stopped being the faithful one.
+    /// **Over a model of a ring whose pair does not hold, it is not.**
+    /// `Mode::Lying` is swept and the third scenes it produces are counted and
+    /// *required to be there*, in the same way and for the same reason the
+    /// eager control is: the number is what the ordering pair buys, and a run
+    /// in which it were zero would be a run whose model had stopped being the
+    /// faithful one.
+    ///
+    /// # The word *model*, which is the second narrowing and not a hedge
+    ///
+    /// **There is no ring in this evidence.** `f-scene` depends on `f-abi` and
+    /// on nothing else — `scene/Cargo.toml` states one dependency and `f-ring`
+    /// is not it — and [`Batch`] has no caller anywhere in this workspace
+    /// outside the tests in this file, so no run in this repository drains a
+    /// real ring into [`Batch::offer`]. [`Mode::Honest`] and [`Mode::Lying`] are
+    /// therefore this file's *statement* of what the ordering pair means, not a
+    /// reading of it, and the mutation with the definite answer says so: change
+    /// the producer's tail publish in `ring/src/lib.rs` from `Release` to
+    /// `Relaxed` and every test in `f-scene` stays green, this sweep included,
+    /// because nothing joins the two crates. `ring/tests/litmus.rs` is where
+    /// that pair is measured; nothing carries its result to here.
+    ///
+    /// What is no longer claimed, said plainly: **not that anything below has
+    /// been observed over a ring.** What is claimed is that *given* a consumer
+    /// whose slots behave the way `Mode::Honest` describes, this module leaves
+    /// two scenes and no third — which is a statement about this module and is
+    /// the one it can make from inside its own crate.
+    ///
+    /// *What would reverse this half:* `E3-B01g`, the first task with a ring
+    /// between two components. A real `f_ring` consumer draining slots into
+    /// [`Batch::offer`] in index order, with this sweep's honest mode re-run
+    /// against it, is the run that would make [`Mode::Honest`] a reading rather
+    /// than a definition. It cannot be written here — a test reaching `f-ring`
+    /// would put a dependency in `scene/Cargo.toml` that this crate's own
+    /// argument for depending on `f-abi` alone refuses — so it belongs beside
+    /// the component that holds both ends of the ring, and it is named here so
+    /// that the gap is somebody's rather than nobody's.
     ///
     /// The exit this subtask is accepted on said *the graph read back is the
     /// old scene or the new one, never a third*, with no clause about the
-    /// ring's ordering. That was broader than what is delivered, and the
-    /// difference is the entire content of the paragraph below. It is no longer
-    /// a disagreement between this module and the record: RFC 0084 rules that
-    /// an exit is the sentence a task is accepted on, so narrowing one is a
-    /// reversal, and `intent/0012-the-interface/spec.md`'s `E3-B01d` line now
-    /// carries the clause with the RFC number beside it.
+    /// ring's ordering and no word about a model. That was broader than what is
+    /// delivered, twice over, and the two differences are the sections above.
+    /// It is no longer a disagreement between this module and the record: RFC
+    /// 0084 rules that an exit is the sentence a task is accepted on, so
+    /// narrowing one is a reversal, and `intent/0012-the-interface/spec.md`'s
+    /// `E3-B01d` line carries both clauses with the RFC number beside them.
     ///
     /// # Why a lying ring produces one, and why nothing here can stop it
     ///
@@ -2019,14 +2118,20 @@ mod tests {
     ///
     /// Nothing in the delta format can tell *this slot's bytes belong to this
     /// frame* from *they belong to the last one*: there is no sequence number
-    /// on an entry, and `f_abi::Sqe` has no field left that a scene delta does
-    /// not already read or require to be zero. **Closing it is an ABI change
-    /// and not a change to this file** — a per-entry submission sequence the
-    /// consumer checks against the slot's own index, which is what makes a
-    /// stale slot detectable rather than merely unlikely. Until then the
-    /// ordering pair is load-bearing for a commit's atomicity, which is what
-    /// this repository already says that pair is for, and this sweep is the
-    /// measurement of it rather than an argument against it.
+    /// on an entry. `f_abi::Sqe` **does** have a field left — `user_data`,
+    /// sixty-four bits a scene delta neither reads nor requires to be zero,
+    /// because `Delta::envelope` echoes it rather than zeroing it, which
+    /// `a_delta_carries_sixty_four_bits_this_module_never_reads` runs. What
+    /// stops a sequence going there is the ABI's contract that the field is the
+    /// submitter's own value, returned verbatim in the completion — a cost, and
+    /// a different argument from *there is nowhere to put it*, which is what
+    /// stood here and was false. **Closing it is an ABI change _and_ a change to
+    /// this file**: the sequence is declared in `abi/`, and the check of it
+    /// against the slot's own index is written in [`Batch::offer`], because the
+    /// consumer is the only party that knows which index it is reading. Until
+    /// then the ordering pair is load-bearing for a commit's atomicity, which is
+    /// what this repository already says that pair is for, and this sweep is a
+    /// model of it rather than an argument against it.
     ///
     /// # What the run requires to have seen
     ///
@@ -2132,7 +2237,31 @@ mod tests {
             }
         }
 
-        assert!(targets_swept > 0, "no corpus frame changed the scene, so nothing was swept");
+        // *Across a seed sweep* is a claim about breadth, and until this line it
+        // had no runtime floor at all: `assert!(targets_swept > 0)` stood here,
+        // and it would pass over one frame of one seed. `record` answers `None`
+        // for a target whose old and new scenes are the same number, nothing
+        // bounded how many targets might be skipped, and every other assertion
+        // below is a `> 0` floor or a per-mode equality that one sufficiently
+        // long destroying frame satisfies on its own. A corpus change that made
+        // 47 of the 48 pairs no-ops would have left this run green with the
+        // sentence *across a seed sweep* no longer true of it — the same species
+        // the honest/payload axis was caught in above, where one observation was
+        // being counted as two.
+        //
+        // Stated as the whole grid rather than as a fraction of it, because the
+        // whole grid is what is true: measured, every one of the `SEEDS *
+        // FRAMES` pairs changes the scene. A fraction would be a floor chosen to
+        // survive a corpus nobody has written yet.
+        assert_eq!(
+            targets_swept,
+            SEEDS * FRAMES,
+            "{} of the {} (seed, frame) pairs changed the scene, so the rest were skipped and \
+             the sweep is narrower than `across a seed sweep` says. A corpus whose frames \
+             stopped changing the scene is a corpus to widen, and this is not a floor to lower",
+            targets_swept,
+            SEEDS * FRAMES
+        );
 
         // Three assertions that stood here have been deleted rather than
         // rewritten, because none of them could be driven to red and an
@@ -2656,5 +2785,242 @@ mod tests {
         assert_eq!(closed.removed, 2);
         assert_eq!(closed.created, 2);
         assert_eq!(arena.live(), 3);
+    }
+
+    /// A frame larger than the batch is refused whole rather than truncated.
+    ///
+    /// [`Refusal::Full`] was a rule with no test, and its own doc makes this
+    /// module's central claim in miniature: *a truncated frame is a third scene
+    /// the client would have no way of hearing about.* Nothing measured it. The
+    /// sweep cannot — `LIMIT` is 48 and a corpus frame carries at most a couple
+    /// of dozen entries, so `if self.len >= LIMIT` could be weakened to `>`
+    /// with the whole suite green, and at `self.len == LIMIT` the weakened
+    /// build indexes one past the end of an array in a module that denies
+    /// `clippy::panic` precisely to keep panics out of a compositor.
+    ///
+    /// A batch of two is what makes the bound reachable in three offers. The
+    /// bound is the component's own number — [`Batch`] is generic over it for
+    /// exactly this reason — so a test that states a small one is testing the
+    /// rule and not a constant.
+    #[test]
+    fn a_frame_larger_than_the_batch_is_refused_whole_rather_than_truncated() {
+        // Not `mut`, and that is half the assertion: a poisoned batch never
+        // produces the `Sealed` that `Batch::commit` would need a `&mut Arena`
+        // for, so nothing in this test can reach the graph.
+        let arena = Arena::EMPTY;
+        let before = fingerprint(&arena);
+        let mut batch = Batch::<2>::new();
+
+        let (sqe, payload) = delta_of(create(ROOT, NO_NODE, kind::LAYER)).encode();
+        assert!(matches!(batch.offer(&sqe, &payload), Ok(Offered::Staged)));
+        let (sqe, payload) = delta_of(create(2, ROOT, kind::DRAW)).encode();
+        assert!(matches!(batch.offer(&sqe, &payload), Ok(Offered::Staged)));
+        assert_eq!(batch.len(), 2, "the batch is full to its bound");
+
+        // The third, against a bound of two.
+        let (sqe, payload) = delta_of(create(3, ROOT, kind::DRAW)).encode();
+        assert_eq!(batch.offer(&sqe, &payload).err(), Some(Refusal::Full));
+        assert_eq!(batch.len(), 2, "a refused entry was staged past the bound anyway");
+        assert!(batch.is_poisoned(), "a full batch refused an entry without poisoning the frame");
+
+        // And this is the sentence the doc makes, and the only one that
+        // distinguishes refusing whole from truncating: the commit that follows
+        // does not close the two entries that did fit.
+        let (sqe, payload) = delta_of(Entry::Commit(Commit { frame_token: 13 })).encode();
+        assert_eq!(
+            batch.offer(&sqe, &payload).err(),
+            Some(Refusal::Poisoned(Refusal::Full.message())),
+            "a frame that overflowed its batch sealed on the entries that fit"
+        );
+        assert_eq!(fingerprint(&arena), before, "a truncated frame reached the graph");
+        assert!(arena.is_empty());
+    }
+
+    /// A frame the arena has no room for is refused whole, one past its last
+    /// delta.
+    ///
+    /// [`admit`]'s capacity arithmetic was never decisive in any test:
+    /// [`NODES_MAX`] is 1024, the corpus builds at most eight nodes, and
+    /// `needed > arena.remaining() + freed` could be weakened to
+    /// `+ freed + 1` with the whole suite green. That is not a cosmetic
+    /// weakening. With it, [`admit`] says yes, `Arena::apply` says no partway
+    /// through the loop, and the answer is [`Refused::Diverged`] — the one
+    /// variant whose own doc says *the graph may hold part of the frame*, which
+    /// is the third scene this module exists to remove, reached from a frame
+    /// `CreateNode::read` accepts over a ring that kept every promise.
+    ///
+    /// This is also the first run behind the `at` this module documents for a
+    /// whole-frame refusal: capacity is a statement about the frame rather than
+    /// about a delta of it, so it answers `edits().len()` — one past the last —
+    /// and a caller indexing `edits()` with it deserves that to be a rule
+    /// somebody executed.
+    #[test]
+    fn a_frame_the_arena_has_no_room_for_is_refused_whole_at_one_past_its_last_delta() {
+        let mut arena = Arena::EMPTY;
+        deliver(&mut arena, &[create(ROOT, NO_NODE, kind::LAYER)], 1);
+
+        // Fill it to the named maximum, in frames a batch of `LIMIT` can hold.
+        // Every node is a child of the root and a leaf, so a removal below
+        // gives back exactly one slot and `freed` is a number this test knows
+        // rather than one it takes from the code it is checking.
+        let mut entries = [create(NO_NODE, NO_NODE, kind::DRAW); LIMIT];
+        let mut node = 2u32;
+        let mut frame_token = 2u64;
+        while arena.live() < NODES_MAX {
+            let mut len = 0usize;
+            while len < LIMIT && arena.live() + len < NODES_MAX {
+                entries[len] = create(node, ROOT, kind::DRAW);
+                node += 1;
+                len += 1;
+            }
+            deliver(&mut arena, &entries[..len], frame_token);
+            frame_token += 1;
+        }
+        assert_eq!(arena.live(), NODES_MAX);
+        assert_eq!(arena.remaining(), 0, "the arena is full to its named maximum");
+        let before = fingerprint(&arena);
+
+        // One removal frees one slot and the frame asks for two. The arithmetic
+        // is over the whole frame rather than per entry, so being one out here
+        // is the difference between a named refusal and a graph holding half a
+        // frame.
+        assert_eq!(
+            freed_by(&arena, 2),
+            1,
+            "node 2 is a leaf, so it gives back itself and nothing else"
+        );
+        let frame = [
+            Entry::RemoveNode(RemoveNode { node: 2 }),
+            create(2000, ROOT, kind::DRAW),
+            create(2001, ROOT, kind::DRAW),
+        ];
+        assert_eq!(
+            submit(&mut arena, &frame, 99).unwrap_err(),
+            Refused::Whole { at: frame.len(), refusal: Refusal::Graph(GraphRefusal::Capacity) },
+            "a frame one node too large for the arena was not refused whole"
+        );
+        assert_eq!(fingerprint(&arena), before, "a frame that did not fit left something behind");
+        assert_eq!(arena.live(), NODES_MAX, "a refused frame removed a node on its way out");
+        assert!(arena.holds(2), "the removal of a refused frame reached the graph");
+        assert!(!arena.holds(2000) && !arena.holds(2001));
+
+        // And the arithmetic is exact rather than merely conservative: the same
+        // frame asking for exactly what the removal gives back is taken. A
+        // capacity guard that refused this would refuse every frame replacing a
+        // full scene with another full one, which is what `freed_by` exists to
+        // prevent.
+        let closed = submit(&mut arena, &frame[..2], 100).expect("a frame that fits exactly");
+        assert_eq!(closed.removed, 1);
+        assert_eq!(closed.created, 1);
+        assert_eq!(arena.live(), NODES_MAX);
+    }
+
+    /// A key that comes back as a different kind of node refuses the frame.
+    ///
+    /// [`admit`]'s `KindChanged` arm was never decisive in any test either: it
+    /// could be weakened to `ledger.kind_of(arena, create.node).is_none()` with
+    /// everything green. The corpus cannot reach it, and the reason is
+    /// structural rather than unlucky — `kind_of_key` is a pure function of the
+    /// key, so every key carries one kind for the life of the corpus, including
+    /// across the stale entries [`Mode::Lying`] splices in, because those are
+    /// earlier frames of that same corpus.
+    ///
+    /// Reached by hand, then, and the frame below is the one a lying ring
+    /// splices: **a previous frame's `CreateNode` for a key that has since come
+    /// back as a different kind of node.** With the arm weakened, [`admit`] says
+    /// yes to it and `Arena::hang` says no in the middle of the apply loop,
+    /// which is a [`Refused::Diverged`] and a graph holding part of a frame.
+    ///
+    /// Both arms of the check are exercised, because they read different
+    /// things: the graph's answer for a node that was already there, and the
+    /// ledger's for one this same frame created an entry earlier.
+    #[test]
+    fn a_key_that_comes_back_as_a_different_kind_of_node_refuses_the_whole_frame() {
+        let mut arena = Arena::EMPTY;
+        deliver(&mut arena, &[create(ROOT, NO_NODE, kind::LAYER), create(2, ROOT, kind::DRAW)], 1);
+        let before = fingerprint(&arena);
+
+        // The graph's arm: node 2 is a `Draw` and this re-hang calls it a
+        // `Clip`.
+        assert_eq!(
+            submit(&mut arena, &[create(2, NO_NODE, kind::CLIP)], 2).unwrap_err(),
+            Refused::Whole { at: 0, refusal: Refusal::Graph(GraphRefusal::KindChanged(2)) },
+            "a re-hang that changed what a node is was not refused by admission"
+        );
+        assert_eq!(fingerprint(&arena), before, "a refused re-hang reached the graph");
+
+        // The ledger's arm: the node this frame disagrees with is one the same
+        // frame created an entry earlier, so nothing in the graph has an
+        // opinion about it yet.
+        assert_eq!(
+            submit(&mut arena, &[create(3, ROOT, kind::DRAW), create(3, ROOT, kind::SEMANTIC)], 3)
+                .unwrap_err(),
+            Refused::Whole { at: 1, refusal: Refusal::Graph(GraphRefusal::KindChanged(3)) },
+            "a frame that changed its own creation's kind was not refused by admission"
+        );
+        assert_eq!(fingerprint(&arena), before, "a refused frame left its first creation behind");
+        assert!(!arena.holds(3), "the creation of a refused frame reached the graph");
+    }
+
+    /// A delta carries sixty-four bits this module never reads.
+    ///
+    /// The module's *the limit of that last one* used to say that every field
+    /// of `Sqe` a scene delta does not read is already required to be zero, and
+    /// concluded from it that closing the stale-slot gap is somebody else's
+    /// diff. The premise is false in the direction that matters: `user_data` is
+    /// sixty-four bits, `Delta::envelope` **echoes** it rather than zeroing it,
+    /// so any value there passes the reserved-field comparison `Delta::decode`
+    /// makes of the two envelopes — and nothing in this crate reads it.
+    ///
+    /// This is the run behind that correction, and it is worth having for its
+    /// own sake: it says exactly where a per-entry submission sequence could be
+    /// carried with no layout change at all, which makes the real obstacle
+    /// visible. `f_abi::Sqe` contracts the field as the submitter's own value,
+    /// *returned verbatim in the completion*, so a sequence there is the ABI
+    /// taking it back from every client that already uses it. That is a cost to
+    /// argue, not an absence to report.
+    ///
+    /// *What would reverse this test:* the field ceasing to be free — either
+    /// [`Batch::offer`] growing a rule about it, which is where the consumer's
+    /// half of that sequence goes, or the envelope zeroing it. Either turns
+    /// this red, which is the whole of what it is for.
+    #[test]
+    fn a_delta_carries_sixty_four_bits_this_module_never_reads() {
+        // Two frames differing in `user_data` and in nothing else.
+        let quiet = delta_of(create(ROOT, NO_NODE, kind::LAYER));
+        let mut loud = quiet;
+        loud.user_data = 0x0102_0304_0506_0708;
+
+        // The wire keeps it, which is what makes it space rather than padding.
+        let (sqe, payload) = loud.encode();
+        assert_eq!(sqe.user_data, loud.user_data, "the envelope zeroed a field it echoes");
+        assert_eq!(
+            Delta::decode(&sqe, &payload).map(|delta| delta.user_data),
+            Ok(loud.user_data),
+            "a delta carrying a non-zero `user_data` was refused, so the field is not free"
+        );
+
+        let mut scenes = [FNV_OFFSET; 2];
+        let mut counts = [0usize; 2];
+        for (at, delta) in [quiet, loud].iter().enumerate() {
+            let mut arena = Arena::EMPTY;
+            let mut batch = Batch::<LIMIT>::new();
+            let (sqe, payload) = delta.encode();
+            assert!(
+                matches!(batch.offer(&sqe, &payload), Ok(Offered::Staged)),
+                "`Batch::offer` grew an opinion about `user_data`. If that is the consumer's \
+                 half of a per-entry submission sequence then this test is the one to \
+                 rewrite, together with the module's *the limit of that last one*"
+            );
+            let (sqe, payload) = delta_of(Entry::Commit(Commit { frame_token: 4 })).encode();
+            let Ok(Offered::Sealed(sealed)) = batch.offer(&sqe, &payload) else {
+                panic!("a commit did not seal");
+            };
+            let closed = batch.commit(&mut arena, sealed).expect("the frame was refused");
+            scenes[at] = fingerprint(&arena);
+            counts[at] = closed.created;
+        }
+        assert_eq!(scenes[0], scenes[1], "`user_data` changed the scene, so something reads it");
+        assert_eq!(counts[0], counts[1]);
     }
 }

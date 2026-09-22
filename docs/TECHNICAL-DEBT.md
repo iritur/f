@@ -92,7 +92,7 @@ than a reason to record a debt nobody owes.
 
 ## The blockers
 
-Five things stand behind every row below.
+Six things stand behind every row below.
 
 ### `runner-class-A` — a machine nobody has bought
 
@@ -160,6 +160,42 @@ bundle a second machine differs by, and says nothing about the rest of it —
 core count, host load, filesystem, kernel, uid. `lint-remap` prints exactly
 that limitation on every green run. A second date is a second run of one commit
 a week later, which on a moving branch is the exception rather than the rule.
+
+### `photodiode-rig` — an instrument nobody has bought
+
+`claims/photodiode-rig/` is the specification, in the shape
+`claims/runner-class-A.md` uses for a machine: twelve parts with a source and a
+price each and a stated total, an error bar of **±2 µs** derived from a sample
+interval and a front end's rise time *before any part exists*, an eleven-step
+measurement path with a *whose clock* column and no software timestamp in it,
+and a `verify.sh` that re-adds every number and goes red on its own when the
+prices are 180 days old.
+
+Gate G3 is a time — input to photon at p99, taken by a photodiode, under load —
+so this instrument stands behind `E3-P02` and, through it, behind `E3-R01` and
+release 0.4.
+
+**Three of `E3-P01`'s six subtasks close on the near side of it**, and that is
+the interesting thing about this blocker rather than an aside. `E3-P01a` is a
+bill of materials, `E3-P01c` asks for the instrument's own error bar *stated as
+an integer before any measurement is taken with it*, and `E3-P01d` asks for the
+path written out and the review that looked recorded. None of the three needs a
+part. `E3-P01b`, `E3-P01e` and `E3-P01f` do: a distribution is a set of
+measurements of a real actuator, a calibration is a reproduction of a known
+number, and a document containing a calibration result contains one.
+
+It is **not** one of RFC 0093's four categories. It is a purchase, like
+`E0-D10`, and `E0-D10` is already on this page — which is the precedent for
+treating a purchase as a blocker and the reason this section says *six* rather
+than *five and a half*.
+
+**One thing a reader should not have to discover.** The prices are budget
+figures compiled from catalogue list prices for the worked examples, and not one
+of them was read from a live vendor catalogue — the session that wrote the file
+had no way to reach one. `claims/photodiode-rig/README.md` says so in its own
+words under *Hardware*, says what the total is good for (deciding whether to buy
+the rig) and what it is not good for (a purchase order), and `verify.sh` carries
+a staleness check so the figures cannot quietly become a quotation.
 
 ### A stranger
 

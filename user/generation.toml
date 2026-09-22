@@ -39,17 +39,20 @@ schema = 1
 # the moment the code changes and the moment somebody remembers.
 frame = "kernel"
 
-# The six components, in canonical order. This is exactly `COMPONENTS` in
+# The seven components, in canonical order. This is exactly `COMPONENTS` in
 # `xtask/src/main.rs` as a set, and the compiler refuses a name that list does not
 # build rather than emitting a leaf for a component file nothing produces. The two
 # orders differ on purpose and neither is the other's: that list is the order the
 # loader carries the modules in, and this one is bytewise on the name, which is
-# why `objects` is first here and last there.
+# why `compositor` is first here and last there.
 #
-# `objects` holds no route yet. It declares an optional `block` need, so the
-# assembler has nothing to refuse and nothing to check — and the day that need
-# stops being optional is the day a `[[route]]` for it belongs below.
-component = ["objects", "store", "supervisor", "virtio-blk", "virtio-gpu", "virtio-net"]
+# `objects` and `compositor` hold no route yet. `objects` declares an optional
+# `block` need, so the assembler has nothing to refuse and nothing to check, and
+# the day that need stops being optional is the day a `[[route]]` for it belongs
+# below. `compositor` declares no sibling need at all: it reaches no device and
+# holds no client of another component, which is E3-B01f's own statement of what
+# it is — and `E3-B02f` is the task that gives it a route to `virtio-gpu`.
+component = ["compositor", "objects", "store", "supervisor", "virtio-blk", "virtio-gpu", "virtio-net"]
 
 # The routes. Two of them, and they are the two the datapath already boots:
 # `cargo xtask blk` moves a sector from a client through `virtio-blk`, and

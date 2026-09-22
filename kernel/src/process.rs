@@ -1792,14 +1792,20 @@ pub struct Prepared {
 
 /// The most pages any process shape is made of.
 ///
-/// Four, in both shapes. It is a maximum rather than the count so that a shape
-/// with five is a change to one constant and a `parts` that is already carried,
-/// rather than a change to every literal in this file — but it is the *real*
-/// maximum and not a round number above it. It was six, with both shapes
-/// padding the list with two null frames to fill it, so the constant, the
-/// sentence beside it and the code disagreed about what was being reserved and
-/// why. A ceiling nobody reaches teaches a reader the wrong number.
-const PARTS_MAX: usize = 5;
+/// It is a maximum rather than the count so that a shape with one more is a
+/// change to one constant and a `parts` that is already carried, rather than a
+/// change to every literal in this file — but it is the *real* maximum and not a
+/// round number above it. It was six once, with every shape padding the list
+/// with two null frames to fill it, so the constant, the sentence beside it and
+/// the code disagreed about what was being reserved and why; it came down to
+/// five, and a ceiling nobody reaches teaches a reader the wrong number.
+///
+/// **Six, and the sixth is a server that publishes a tree of its own.** Five is
+/// text, stack, control ring, board and heap; the sixth is the page
+/// [`ServerPlan::own_tree`] asks for, which a server that does not ask for one
+/// never takes — `parts` is what says so, and the reader of this constant should
+/// read that field rather than assume the list is full.
+const PARTS_MAX: usize = 6;
 
 /// Build a process on `cpu`'s behalf: an address space, four pages, a table of
 /// capabilities and a job.
@@ -1981,9 +1987,9 @@ pub unsafe fn prepare(
 
     Ok(Prepared {
         space,
-        // Four real and one unused: `PARTS_MAX` is the runtime shape's five and
+        // Four real and two unused: `PARTS_MAX` is the largest shape's six and
         // `parts` is what says how much of this is real. `reap` slices to it.
-        pages: [text, stack, granted, untyped, Frame::from_addr(0)],
+        pages: [text, stack, granted, untyped, Frame::from_addr(0), Frame::from_addr(0)],
         parts: 4,
         before,
         granted: granted_count,
@@ -2255,7 +2261,7 @@ pub unsafe fn prepare_runtime(
     Ok((
         Prepared {
             space,
-            pages: [text, stack, control, work, own_tree],
+            pages: [text, stack, control, work, own_tree, Frame::from_addr(0)],
             parts: 5,
             before,
             granted: granted_count,
@@ -2575,8 +2581,8 @@ pub unsafe fn prepare_driver(
             // the queue memory and the data ring are the caller's and are
             // deliberately absent: a list that held them would free memory this
             // function never took, which is a corruption rather than a leak.
-            // Four real, one filler, as the ordinary shape above.
-            pages: [text, stack, control, board, Frame::from_addr(0)],
+            // Four real, two fillers, as the ordinary shape above.
+            pages: [text, stack, control, board, Frame::from_addr(0), Frame::from_addr(0)],
             parts: 4,
             before,
             granted: granted_count,
@@ -2640,6 +2646,31 @@ pub struct ServerPlan {
     /// second thing that believed it knew where a heap's free list is.
     /// Unit: bytes.
     pub heap_bytes: u64,
+    /// Whether this server publishes a state tree of its own.
+    ///
+    /// # Why it is a choice and not something every server gets
+    ///
+    /// Because a page is charged to somebody. `claims/0019` is a reading of what
+    /// a component costs in resident frames, taken across this function on the
+    /// one boot that stands `user/objects` up, and a page mapped for every
+    /// server would move a published number for components that never write a
+    /// word into it. So the shape gains the page when a caller asks and is
+    /// otherwise exactly the shape it was.
+    ///
+    /// When it is asked for, the page lands at [`SPAWN_TREE`] — **the same
+    /// address the spawn path uses** — so a component reads one address whichever
+    /// shape stood it up, and `f_virtio_blk::routing::at::TREE_AT` means the same
+    /// thing in both. The alternative was [`OWN_TREE`], which the runtime shape
+    /// uses and which lives inside this shape's sixteen-page text reservation;
+    /// a server whose image grew past twelve pages would have found its text
+    /// mapped over its own tree, which is a fault with nothing in it naming the
+    /// cause.
+    ///
+    /// The frame writes the schema into it out of the component's manifest —
+    /// `component::publish_tree`, RFC 0065 — and reads the words back out after
+    /// the run. The component writes them and asks for nothing: RFC 0013's
+    /// *read, never delivered*.
+    pub own_tree: bool,
 }
 
 /// Where the frame can reach a server's own pages.
@@ -2649,6 +2680,15 @@ pub struct ServerPages {
     /// The page that says where everything else is, as the frame sees it.
     /// Unit: bytes, kernel-virtual.
     pub board: u64,
+    /// The page this server publishes its own state tree in, as the frame sees
+    /// it, or zero for a plan that asked for none.
+    ///
+    /// Answered here for the two rings' reason: the frame has to reach it
+    /// *before* the server does. The schema goes in before the first instruction
+    /// — `component::publish_tree`, the same function the spawn path uses — and
+    /// the words come back out after the run and before [`reap`] takes the page.
+    /// Unit: bytes, kernel-virtual.
+    pub own_tree: u64,
 }
 
 /// Build a server on `cpu`'s behalf: an address space, a text reservation, a
@@ -2709,7 +2749,26 @@ pub unsafe fn prepare_server(
     // else's, and a heap of zero is a component whose first allocation faults
     // at an address the frame mapped nothing at — which looks like a bug in the
     // allocator and is a bug in this call.
-    if plan.buffer_bytes == 0 || !plan.buffer_bytes.is_multiple_of(FRAME_SIZE) {
+    //
+    // **Zero buffer bytes is legal and means *this server has no client buffer
+    // region*.** It was refused, on the reading that a region of nothing is a
+    // caller that forgot one; that reading was right for a server whose payload
+    // is `registered` and wrong for one whose payload is `inline`, where the
+    // operation's bytes are in the channel's own arena and a buffer region would
+    // be a page nobody ever addresses. `user/compositor` is the second server
+    // and it is that kind, so the refusal moved to where the mistake actually
+    // is: a region whose length and address disagree about whether it exists.
+    if plan.buffer_bytes == 0 && plan.buffers != 0 {
+        return Err(Error::TooLarge);
+    }
+    if !plan.buffer_bytes.is_multiple_of(FRAME_SIZE) {
+        return Err(Error::TooLarge);
+    }
+    // The buffer region and a published tree share one address plan, so a region
+    // long enough to reach `SPAWN_TREE` is refused rather than mapped over it.
+    // Sixteen pages is what that leaves, which is `SPAWN_TREE`'s own reservation
+    // and not a number chosen here.
+    if plan.own_tree && plan.buffers != 0 && BLK_QUEUES + plan.buffer_bytes > SPAWN_TREE {
         return Err(Error::TooLarge);
     }
     if plan.heap_bytes == 0 || plan.heap_bytes > HEAP_MAX {
@@ -2745,6 +2804,16 @@ pub unsafe fn prepare_server(
     )
     .ok_or(Error::NoFrames)?;
     let heap = frames.alloc_zeroed(heap_order).ok_or(Error::NoFrames)?;
+    // The page this server publishes its own state tree in, for a plan that
+    // asked for one. Zeroed for a reason of its own beside the rings': a
+    // published word nobody has written is zero, so a server prepared and never
+    // scheduled reads as *this component has done nothing* rather than as *this
+    // component cannot be read*, which is RFC 0065's distinction.
+    let own_tree = if plan.own_tree {
+        Some(frames.alloc_zeroed(Order::FRAME).ok_or(Error::NoFrames)?)
+    } else {
+        None
+    };
 
     let into = frames.virt(text);
     // SAFETY: `text` was just allocated at an order covering `text_pages`,
@@ -2846,8 +2915,31 @@ pub unsafe fn prepare_server(
         );
     }
 
-    let pages =
-        ServerPages { control: frames.virt(control) as u64, board: frames.virt(board) as u64 };
+    // The published tree, into the address the spawn path uses. Mapped writable:
+    // the words in it are the component's and the schema over them is the
+    // frame's, which is the division RFC 0065 draws and the reason this page is
+    // not the read-only one at `TREE` that every shape already maps.
+    if let Some(own_tree) = own_tree {
+        // SAFETY: as above; `own_tree` was allocated zeroed a few lines up and
+        // nothing else holds it.
+        unsafe {
+            paging::map_user(
+                frames,
+                &mut space,
+                SPAWN_TREE,
+                own_tree.addr(),
+                paging::UserPage::Data,
+                features,
+            )
+        }
+        .map_err(Error::Space)?;
+    }
+
+    let pages = ServerPages {
+        control: frames.virt(control) as u64,
+        board: frames.virt(board) as u64,
+        own_tree: own_tree.map_or(0, |page| frames.virt(page) as u64),
+    };
 
     let table = crate::cap::of(cpu);
     // SAFETY: the table of a core that is idle, with no process running on it,
@@ -2921,12 +3013,16 @@ pub unsafe fn prepare_server(
     Ok((
         Prepared {
             space,
-            // Five, and every one of them allocated here. The data ring and the
-            // client's buffer region are the caller's and are deliberately
-            // absent: a list that held them would free memory this function
-            // never took, which is a corruption rather than a leak.
-            pages: [text, stack, control, board, heap],
-            parts: 5,
+            // Five or six, and every one of them allocated here. The data ring
+            // and the client's buffer region are the caller's and are
+            // deliberately absent: a list that held them would free memory this
+            // function never took, which is a corruption rather than a leak.
+            //
+            // The sixth is the published tree, and it is last so that the first
+            // five are the same list at the same indices whether or not a plan
+            // asked for one — `parts` is what a reader and `reap` go by.
+            pages: [text, stack, control, board, heap, own_tree.unwrap_or(Frame::from_addr(0))],
+            parts: if own_tree.is_some() { 6 } else { 5 },
             before,
             granted: granted_count,
             generation: first.generation(),
