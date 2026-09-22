@@ -224,11 +224,19 @@ pub mod at {
     /// `Capability::ALL` and sets what it finds, so the two sides agree through
     /// the vocabulary rather than through a layout neither of them states.
     ///
-    /// A set satisfying no rung is a real answer and is published as *no rung*.
-    /// Refusing to run on such a machine is `E3-B02b`'s clause and not this
-    /// one — RFC 0080 says a backend satisfying no rung is refused a compositor
-    /// rather than handed the floor, and this build reports where that task will
-    /// refuse.
+    /// A set satisfying no rung never reaches a running component, because the
+    /// frame refuses it a compositor before this page is written —
+    /// `ADMISSION/NO_RUNG`, RFC 0080 and `E3-B02b`, in
+    /// `kernel/src/compositor.rs`. What the component does with one anyway is
+    /// `crate::tree::rung_word`'s subject, and the short answer is that it
+    /// publishes *no rung* rather than the floor.
+    ///
+    /// **Written once, before the component's first instruction, and never
+    /// again by an honest frame.** The word is not `const` and nothing here can
+    /// make it so, which is why `kernel/src/compositor.rs` deliberately writes a
+    /// *better* report into it half way through the serving boot: the component
+    /// must publish the rung it started on, and a run in which the page never
+    /// changed could not tell that apart from a component that recomputes.
     /// Unit: none — a bitmask of capability indices.
     pub const BACKEND_CAPABILITIES: u32 = 112;
 }

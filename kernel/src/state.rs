@@ -342,6 +342,14 @@ pub mod node {
     /// — and until then the honest reading of this run of ids is *the frame has
     /// a fixed table and every new component costs one entry in it*.
     pub const COMPONENT_TREE_7: u32 = 56;
+    /// The ninth, and the forecast above came true again on 2026-09-23 — this
+    /// time without anybody noticing, which is the part worth recording. A
+    /// ninth component file was dropped by `component::generations` in silence
+    /// and reported by `sim --join` as *a stale or partial build*. The bound is
+    /// still a constant and this id is still its consequence; RFC 0101 is where
+    /// the shape is written down and `component::places_dropped` is what now
+    /// makes the overflow a refusal rather than an absence.
+    pub const COMPONENT_TREE_8: u32 = 57;
     /// What this machine is running. RFC 0012.
     ///
     /// The node the exit of `E2-B07` is about: *the machine answers "what are
@@ -458,6 +466,7 @@ pub mod node {
             5 => Some(COMPONENT_TREE_5),
             6 => Some(COMPONENT_TREE_6),
             7 => Some(COMPONENT_TREE_7),
+            8 => Some(COMPONENT_TREE_8),
             _ => None,
         }
     }
@@ -473,7 +482,7 @@ pub mod node {
 }
 
 /// How many nodes this build publishes.
-pub const NODES: usize = 57;
+pub const NODES: usize = 58;
 
 /// The schema, written once and never again for a generation.
 ///
@@ -878,7 +887,15 @@ const SCHEMA: [SchemaEntry; NODES] = [
         unit::ADDRESS,
         b"place7",
     ),
-    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 56 * WORD, 0xEE, unit::NONE, b"reserved"),
+    SchemaEntry::new(
+        node::COMPONENT_TREE_8,
+        node::COMPONENTS,
+        56 * WORD,
+        kind::MOUNT,
+        unit::ADDRESS,
+        b"place8",
+    ),
+    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 57 * WORD, 0xEE, unit::NONE, b"reserved"),
 ];
 
 /// Where the schema block starts: immediately after the header, on the

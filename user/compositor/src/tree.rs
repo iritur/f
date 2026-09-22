@@ -32,11 +32,41 @@
 //!
 //! It does now hold a rung and a pacing estimate, and both arrived with
 //! `E3-B01k` and `E3-B01h`. Neither is acted on. The rung is *reported* and
-//! never used to choose a renderer, because choosing once at start and never
-//! promoting is `E3-B02b`'s clause and there is no renderer to choose; the
+//! never used to choose a renderer, because there is no renderer to choose; the
 //! pacing estimate is *published* and never slept on, because sleeping is
 //! `E3-B01g`'s doorbell. What this file holds is the arithmetic and the
 //! bookkeeping, which is the half a host test can drive on both architectures.
+//!
+//! # The rung is assigned in one place, and that is the whole of `E3-B02b`
+//!
+//! [`Held::new`] is the only line in this crate that writes [`Story::rung`], and
+//! every other field of [`Story`] is written again on every frame that closes.
+//! That asymmetry is the decision: RFC 0080 forecloses a compositor that
+//! promotes itself, on the grounds that a rung change moves the cost
+//! distribution `crate::pacing` estimates from underneath the estimator, and the
+//! cheapest way to keep that promise is for there to be no second assignment to
+//! find.
+//!
+//! **Nothing in this crate enforces that, and a reader should not believe it
+//! does.** The type permits a second assignment — [`Story`] is a plain struct
+//! whose other fields are written every frame — and what catches one is the
+//! boot: a build that recomputed the rung from a report that had moved
+//! published a different word and `cargo xtask compositor serve` went red on
+//! *the compositor promoted itself*. That is the guard, and it lives one
+//! privilege boundary away from the code it guards. A type that made the second
+//! assignment impossible would be better and is not written here, because the
+//! rung is published in the same struct as four numbers that must move and
+//! splitting them would cost a reader the one place the frame's story is.
+//!
+//! What a host test can show is that a frame closing does not move it and that a
+//! frame missing its deadline does not move it. What it cannot show is the case
+//! that matters most — a backend that *gains* a capability while the component
+//! runs — because nothing here reads the routing page twice and a test that
+//! handed [`Held`] a second [`Plan`] would be testing a constructor. That case
+//! is a boot: `kernel/src/compositor.rs` writes a better report onto the page
+//! after the first frame closes and requires the published rung to be the one
+//! this component started with. The two together are the clause, and neither is
+//! it alone.
 
 use f_abi::scene::{PAYLOAD_BYTES, Refusal as WireRefusal};
 use f_abi::{Cqe, Sqe, error, flags};
@@ -174,11 +204,30 @@ pub fn reported_capabilities(bits: u64) -> Capabilities {
 /// carries.
 ///
 /// `Rung::index()` plus one, so that zero is *this machine satisfies no rung*
-/// and is not confusable with the top one. RFC 0080 says a backend satisfying no
-/// rung is **refused a compositor** rather than handed the floor; this build
-/// reports rather than refuses, because refusing is `E3-B02b`'s exit and a
-/// component that refused to serve here would be closing that task's clause
-/// without its evidence.
+/// and is not confusable with the top one.
+///
+/// # Why zero survives, now that such a machine is refused
+///
+/// RFC 0080 says a backend satisfying no rung is **refused a compositor** rather
+/// than handed the floor, and `E3-B02b` landed that refusal — in the *frame*,
+/// before a page is spent, which is where *refused a compositor* has to happen
+/// if the words are to mean anything. `kernel/src/compositor.rs`'s floorless
+/// half is the run that shows it, and `ADMISSION/NO_RUNG` is what it carries.
+///
+/// So a compositor that is running has a rung by construction and this arm is
+/// unreachable from a live frame. It stays anyway, and the reason is worth
+/// stating rather than leaving to a later reader who will otherwise delete it:
+/// a component may not assume the frame that started it was the frame in this
+/// tree. The alternative to a zero is a floor selected by default here, which is
+/// exactly the outcome the refusal exists to prevent — a `select` whose `Err`
+/// arm produced `Rung::TessellatingFloor` would put the silent floor back one
+/// layer down from where RFC 0080 forbade it, and nothing above would be able to
+/// tell.
+///
+/// The reversal condition is precise: if a later build gives this component a
+/// way to *report* that it was started on a machine with no rung — an outcome
+/// word of its own, say — then this arm has somewhere better to go and should go
+/// there. Until then, the word is zero and the tree says so.
 /// Unit: none — a rung ordinal, not a quantity.
 #[must_use]
 pub fn rung_word(bits: u64) -> u64 {
@@ -752,6 +801,82 @@ mod tests {
         // And a bit at a position no capability names is dropped rather than
         // turned into a capability: the high half of the word cannot invent one.
         assert_eq!(rung_word(1 << 63), 0);
+    }
+
+    /// The machine RFC 0080 keeps the hybrid rung for.
+    ///
+    /// Compute shaders, storage buffers, a CPU and a way to present — and **no
+    /// usable subgroup scan**, which is the one capability the top rung asks for
+    /// and this one cannot supply. Built out of the vocabulary for [`plan`]'s
+    /// reason.
+    fn hybrid_plan() -> Plan {
+        let mut bits = 0;
+        for capability in [
+            Capability::ComputeShaders,
+            Capability::StorageBuffers,
+            Capability::Cpu,
+            Capability::ImagePresent,
+        ] {
+            bits |= 1 << capability.index();
+        }
+        Plan { backend_bits: bits, scanout_period_nanos: PERIOD_NANOS, margin_nanos: MARGIN_NANOS }
+    }
+
+    #[test]
+    fn a_backend_with_compute_shaders_and_no_usable_scan_starts_at_rung_two() {
+        // `E3-B02b`'s first clause, at the place the word is computed. The
+        // number is *two* written out rather than `Rung::Hybrid.index() + 1`,
+        // because the second spelling would agree with this component through
+        // any change to the ladder — including one that put the hybrid
+        // somewhere else. RFC 0080's table is where the two comes from, and
+        // `kernel/src/compositor.rs` reads it by hand for the same reason.
+        assert_eq!(rung_word(hybrid_plan().backend_bits), 2);
+        // And it is the rung a component started on that machine holds, which
+        // is the clause the tree carries and the boot reads back.
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let held = Held::new(&mut graph, &mut batch, hybrid_plan());
+        assert_eq!(held.story().rung, 2);
+        assert_eq!(held.story().rung, Rung::ALL[1].index() as u64 + 1);
+    }
+
+    #[test]
+    fn an_overloaded_compositor_holds_the_rung_it_started_on() {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let mut held = Held::new(&mut graph, &mut batch, hybrid_plan());
+        let mut clock = Ticking::new();
+        assert_eq!(held.story().rung, 2);
+
+        // `scene()`'s first commit carries a deadline of 900 nanoseconds and the
+        // frame costs more than it has left, so this frame is **late** and the
+        // degradation policy is asked. That is what *overloaded* means here:
+        // not a slow machine but a frame that did not fit, which is the only
+        // form of overload this component can observe.
+        let entries = scene();
+        for (entry, payload) in &entries[..6] {
+            held.offer(entry, payload, clock.next());
+        }
+        assert_eq!(held.counters().late, 1, "the frame meant to be late was not");
+        assert_eq!(held.story().degraded, degraded::SHORT);
+        assert_eq!(
+            held.story().rung,
+            2,
+            "a compositor answered a late frame by changing rasterisers, which is the one \
+             response guaranteed to miss the next frame too",
+        );
+
+        // And it does not come back up when a frame fits again. A build that
+        // demoted under load and recovered afterwards would pass the clause
+        // above and fail this one, and it is the shape most likely to be
+        // written by somebody who thought a rung was a quality setting.
+        let (remove, payload) = wire(Entry::RemoveNode(RemoveNode { node: 2 }), 0);
+        held.offer(&remove, &payload, clock.next());
+        let (commit, payload) = wire(Entry::Commit(Commit { frame_token: 0x13 }), 50_000_000);
+        held.offer(&commit, &payload, clock.next());
+        assert_eq!(held.counters().frames, 2);
+        assert_eq!(held.story().degraded, degraded::FITTED);
+        assert_eq!(held.story().rung, 2, "the rung moved when a frame fitted again");
     }
 
     #[test]

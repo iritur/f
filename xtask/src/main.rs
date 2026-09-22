@@ -950,6 +950,7 @@ fn main() -> ExitCode {
         "lint-datapath" => lint_datapath(),
         "lint-registries" => lint_registries(),
         "lint-owed" => lint_owed(),
+        "lint-decomposition" => lint_decomposition(),
         "lint-arch-tests" => lint_arch_tests(),
         "lint-snapshot" => lint_snapshot(),
         "lint-reproduce" => lint_reproduce(),
@@ -1212,6 +1213,10 @@ cargo xtask <command>
   lint-owed          The reversal conditions RFC 0008, RFC 0014 and RFC 0015
                      name and this tree has not paid, declared as a set — red
                      the day one of them is paid and the documents go stale
+  lint-decomposition  No `XL` task in TODO.md is without a decomposition, in an
+                     epoch whose `E<n>-00` is ticked. Five ids extending its own
+                     id is what a decomposition is; an epoch still waiting to be
+                     decomposed is held out, because that wait is the task
   lint-snapshot      claims/snapshot.json holds what the registry holds
   lint-arch-tests    No test is compiled on one architecture and not the other
                      without a reason and a reversal recorded beside it
@@ -1633,6 +1638,7 @@ const COMPONENTS: &[&str] = &[
     "virtio-blk",
     "virtio-net",
     "virtio-gpu",
+    "virtio-input",
     "objects",
     "compositor",
     "panel",
@@ -12337,15 +12343,17 @@ objects: ok — a component served `objects::op::READ` from ring 3 across a mapp
     Ok(())
 }
 
-/// The two halves of `cargo xtask compositor`, and why there are two.
+/// The halves of `cargo xtask compositor`, and why there is more than one.
 ///
-/// One stands the component up and one does not, which is unusual for a pair in
-/// this file and is the point: the serving half is a boot with a core, a ring
-/// and a client, and the refusal half is a *record* put past the admission a
-/// spawn performs. They are two halves of one exit — `E3-B01f` asks for a
-/// compositor that runs and for a build declaring no state tree to be refused at
-/// spawn — and neither is the other's control. What each one controls for is
-/// stated in its own row.
+/// Two of them stand the component up and two do not, which is unusual in this
+/// file and is the point: the serving halves are boots with a core, a ring and a
+/// client, and the refusing halves are a *record* and a *machine* put past the
+/// two admissions that stand in front of a compositor. They serve two exits —
+/// `E3-B01f` asks for a compositor that runs and for a build declaring no state
+/// tree to be refused at spawn, and `E3-B02b` asks for a machine that satisfies
+/// no rung to be refused a compositor rather than handed the floor — and no one
+/// of them is another's control. What each one controls for is stated in its own
+/// row.
 const COMPOSITOR_HALVES: &[(&str, &str)] = &[
     (
         "serve",
@@ -12361,6 +12369,12 @@ const COMPOSITOR_HALVES: &[(&str, &str)] = &[
         "mute",
         "the same component's record, as declared and with its state declaration emptied:
          the first must be admitted and the second refused ADMISSION/NO_STATE_TREE",
+    ),
+    (
+        "floorless",
+        "a machine below the bottom of RFC 0080's ladder — a CPU and no way at all to put an
+         image on a screen: it must be refused a compositor ADMISSION/NO_RUNG before a page
+         is spent, while this boot's own machine is admitted through the same function",
     ),
 ];
 
@@ -12413,7 +12427,7 @@ fn compositor(kind: Option<&str>) -> Result<(), String> {
             Ending::Exited(33) => {}
             Ending::Exited(35) => {
                 return Err(format!(
-                    "the kernel refused to finish after `compositor={name}`. Either the                      component did not end on the frame's stop notice, or what it published                      is not what the client's script asked for, or a record declaring no state                      tree was admitted — the serial log above says which, and the verdict that                      refused is in `kernel/src/compositor.rs`."
+                    "the kernel refused to finish after `compositor={name}`. Either the                      component did not end on the frame's stop notice, or what it published                      is not what the client's script asked for, or a record declaring no state                      tree was admitted, or a machine satisfying no rung was handed the floor — the serial log above says which, and the verdict that                      refused is in `kernel/src/compositor.rs`."
                 ));
             }
             Ending::TimedOut(_) => {
@@ -12434,15 +12448,19 @@ fn compositor(kind: Option<&str>) -> Result<(), String> {
     if all {
         println!(
             "
-compositor: ok — all three halves held. A component held the machine's scene graph at
+compositor: ok — all four halves held. A component held the machine's scene graph at
              ring 3, took two frames of deltas across one ring, applied each whole or not
              at all, and published what it holds into the state tree its own manifest
-             declares — which the frame read back rather than being told. The identical
-             component over a heap two pages long refused before it served anybody and
-             left that tree readable and empty, so the numbers in the first half are this
-             run's rather than a schema's. And the same record with its state declaration
-             emptied was refused ADMISSION/NO_STATE_TREE while the record as declared was
-             admitted."
+             declares — which the frame read back rather than being told. It started on
+             the rung RFC 0080's table gives the backend the frame described, and held it
+             through a frame that missed its deadline and through the backend gaining a
+             better capability half way through the run. The identical component over a
+             heap two pages long refused before it served anybody and left that tree
+             readable and empty, so the numbers in the first half are this run's rather
+             than a schema's. And the same record with its state declaration emptied was
+             refused ADMISSION/NO_STATE_TREE while the record as declared was admitted,
+             and a machine below the bottom of the ladder was refused a compositor
+             ADMISSION/NO_RUNG before a page was spent while this machine was admitted."
         );
     }
     Ok(())
@@ -12882,6 +12900,15 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-virtio-blk", host: None, bare: None },
     Portability { krate: "f-virtio-net", host: None, bare: None },
     Portability { krate: "f-virtio-gpu", host: None, bare: None },
+    // `E3-B04d`'s input driver, on the same terms as the three above it: a
+    // virtio device driver has no host half to test and every reason to be
+    // compiled for both bare targets. It is the fourth crate to inherit the
+    // shape `RFC 0033` argued from one example and `RFC 0051` from two, and
+    // the first whose clock reading `lint-stamp` follows into a second crate:
+    // `f_input::stamp::at_interrupt` has a caller that is not a test because
+    // this crate calls it, which is what `RFC 0099` named as the thing that
+    // would reverse its narrowing of `E3-B04a`.
+    Portability { krate: "f-virtio-input", host: None, bare: None },
     // `E3-B01f`'s compositor. Both answers are `None` and the AArch64 compile is
     // load-bearing here in a way it is not for the three drivers above: this
     // crate links `f-scene`, whose whole point is a graph built out of integers
@@ -14133,6 +14160,12 @@ fn lint_all() -> Result<(), String> {
     // nobody re-checks, and the failure that matters is not that it is never
     // closed but that it is closed and the documents go on describing it.
     lint_owed()?;
+    // And the same question asked of the file that schedules the work rather
+    // than of the documents: an `XL` line with no decomposition, in an epoch
+    // whose `E<n>-00` is ticked. Four tasks carried *this epoch contains no `XL`
+    // without a decomposition* as their exit and nothing could observe any of
+    // them, so all four were plans — which is R01 applied to `TODO.md`. E3-B08.
+    lint_decomposition()?;
     // One level below `PORTABILITY`, and the level that table cannot see: a crate
     // can be on both runners while a test inside it compiles on one. `test-host`
     // would stay green through that, because a smaller test count is not a failure
@@ -15896,6 +15929,45 @@ mod determinism_types {
 /// somebody who had read the rule and was trying to obey it.
 const THE_ONE_READING: (&str, &str) = ("input/src/stamp.rs", "at_interrupt");
 
+/// The one place in this tree that *calls* the reading above.
+///
+/// `(the file, the text that is the call)`. It exists because for three rounds
+/// the rule counted definitions and had nothing to count calls, and the file
+/// above was the only one it looked at — so *one time source in the whole input
+/// path* was true of a path that carried nothing. `at_interrupt` had no caller
+/// outside its own `#[cfg(test)]` module, no crate in the workspace depended on
+/// `f-input`, and every clause of this lint passed over a stamp nobody was
+/// taking. RFC 0099 narrowed the claim to what was measurable rather than
+/// pretending otherwise, and named `E3-B04d` — a driver — as the reversal.
+///
+/// So the arithmetic is now two counts rather than one, and they fail in
+/// opposite directions for opposite reasons:
+///
+/// - **Exactly one reading in [`THE_ONE_READING`]'s file.** Zero means the time
+///   source has gone; more than one means the path has two answers to *when did
+///   this happen*.
+/// - **Exactly one call in this file.** More than one is the same defect one
+///   frame down the stack — the spelling somebody reaching for a second stamp
+///   would actually write. **Zero is the vacuity itself**: a rule guarding a
+///   route with no traffic, which is the state RFC 0099 was written about and
+///   which used to be indistinguishable from a rule that was holding.
+///
+/// Why a named file rather than *anywhere on the path*: because *anywhere*
+/// cannot express *exactly one*. A count over the whole path would be satisfied
+/// by one call in the driver and would go on being satisfied when a second
+/// crate took one and the driver's was deleted — which is two different systems
+/// with the same number. Naming the file makes the diff that moves the stamp a
+/// diff that edits this line, in front of a reviewer who can read what it says.
+///
+/// *Reversal:* a second device driver on this path. Two input devices is the
+/// ordinary case the moment a machine has both a keyboard and a mouse, and each
+/// driver instance stamps its own reports. The repair is not a second row here —
+/// two rows would be two files each permitted one call, which is the same rule —
+/// it is that *one time source* stops meaning *one call site* and starts meaning
+/// *one `Env`*, which is a different check and wants its own RFC. `E5-B06` is
+/// the further reversal and `input/src/stamp.rs` states it.
+const THE_ONE_CALLER: (&str, &str) = ("user/virtio-input/src/clock.rs", "at_interrupt(");
+
 /// The stages an input event's timestamp travels through, and why each is on
 /// the path.
 ///
@@ -15933,10 +16005,24 @@ const THE_ONE_READING: (&str, &str) = ("input/src/stamp.rs", "at_interrupt");
 /// that cannot say which of its subjects are real is the vacuity this file
 /// keeps finding one layer down from where it was looking.
 ///
-/// The driver joins this list at `E3-B04d`, when there is one. Until then the
-/// interrupt-time caller is a description in `input/src/stamp.rs` rather than
-/// code, and this list says what it covers rather than what it intends to.
+/// The driver joined this list at `E3-B04d`, and its row is the first one
+/// below. Until it did, the interrupt-time caller was a description in
+/// `input/src/stamp.rs` rather than code: `at_interrupt` had no caller outside
+/// its own `#[cfg(test)]` module and no crate in the workspace depended on
+/// `f-input`, so this rule guarded a path with no traffic on it. That is what
+/// RFC 0099 narrowed the claim about and named `E3-B04d` as the reversal for.
+/// [`THE_ONE_CALLER`] is the other half of the repair: the *call* is now counted
+/// the way the definition always was, so deleting it is red rather than a quiet
+/// return to a vacuous green.
 const INPUT_PATH: &[(&str, &str)] = &[
+    (
+        "user/virtio-input/",
+        "the driver, which is where the stamp is taken. It is the head of the path \
+         and the only crate on it that reads a clock at all: `clock::Interrupt::stamp` \
+         is the one call to the one reading, and a second clock here would be a \
+         second answer to when the user acted rather than a second answer about a \
+         number already taken",
+    ),
     (
         "input/",
         "the stamp itself and everything derived from it. The prediction forward to \
@@ -16234,6 +16320,11 @@ fn lint_stamp() -> Result<(), String> {
             THE_ONE_READING.0,
             INPUT_PATH.len()
         );
+        // And who takes it, printed green for the same reason the reach lines
+        // below are: for three rounds this rule was green about a reading with
+        // no caller, and a log that does not say who calls it cannot be read as
+        // evidence that anybody does.
+        println!("  {}  calls it, once, and nothing else on the path does", THE_ONE_CALLER.0);
         // Which of those stages this rule is actually checking, printed green as
         // well as red for `portability_report`'s reason: the stages that cannot
         // hold a clock are the deliverable, because counting stages is what let
@@ -16281,6 +16372,11 @@ fn stamp_findings(files: &[(&str, &str)]) -> Vec<String> {
     let mut findings = Vec::new();
     let mut in_source = 0usize;
     let mut saw_source = false;
+    // The call, counted the way the definition is. [`THE_ONE_CALLER`] says why
+    // the two counts are separate and why zero here is the vacuity rather than a
+    // stricter rule holding.
+    let mut in_caller = 0usize;
+    let mut saw_caller = false;
     let mut per_stage = vec![0usize; INPUT_PATH.len()];
 
     for (rel, text) in files {
@@ -16290,6 +16386,8 @@ fn stamp_findings(files: &[(&str, &str)]) -> Vec<String> {
         per_stage[stage] += 1;
         let is_source = *rel == THE_ONE_READING.0;
         saw_source |= is_source;
+        let is_caller = *rel == THE_ONE_CALLER.0;
+        saw_caller |= is_caller;
 
         let mut carry = Carry::default();
         // Brace depth at the start of the line, and the `#[cfg(test)]` item
@@ -16351,6 +16449,14 @@ fn stamp_findings(files: &[(&str, &str)]) -> Vec<String> {
                     }
                     if is_source {
                         in_source += hits;
+                    } else if is_caller && *needle == THE_ONE_CALLER.1 {
+                        // The one call, counted rather than reported. Scoped to
+                        // the needle as well as the file: every *other* spelling
+                        // of a clock read is still a finding here, because the
+                        // driver is the one crate on this path that can reach a
+                        // clock and is therefore the one place a second reading
+                        // would compile.
+                        in_caller += hits;
                     } else {
                         findings.push(format!("  {rel}:{}  `{needle}` — {why}", n + 1));
                     }
@@ -16427,6 +16533,34 @@ fn stamp_findings(files: &[(&str, &str)]) -> Vec<String> {
              not the objection — leaving this constant naming the old path is, because \
              every clause below it then passes over a path with no time source at all",
             THE_ONE_READING.0
+        ));
+    }
+
+    if saw_caller {
+        // Exactly one again, and the zero is the one that matters. A reading
+        // with no caller is a time source nothing takes: every clause above
+        // holds, the lint prints its green sentence, and the path it describes
+        // carries nothing. That is the state RFC 0099 narrowed the claim about,
+        // and this is the clause that makes returning to it a red build rather
+        // than a green one with a different meaning.
+        if in_caller != 1 {
+            findings.push(format!(
+                "  {}  `{}` appears {in_caller} time(s) where the rule says exactly one. \
+                 Zero means the one time source has no caller, so every clause above \
+                 passes over a path that carries nothing — which is the vacuity RFC 0099 \
+                 was written about, not the rule holding. More than one means the driver \
+                 stamps twice, which is the same defect as a second reading with one more \
+                 frame on the stack",
+                THE_ONE_CALLER.0, THE_ONE_CALLER.1
+            ));
+        }
+    } else {
+        findings.push(format!(
+            "  {}  the file holding the one call to the one clock reading is not there. \
+             Renaming it is not the objection — leaving this constant naming the old path \
+             is, because the clause that says the stamp is actually taken then passes \
+             over a file nothing reads",
+            THE_ONE_CALLER.0
         ));
     }
 
@@ -16686,6 +16820,23 @@ mod tests {
 pub const fn from_wire_nanos(nanos: u64) -> StampNanos { StampNanos { nanos } }
 ";
 
+    /// `user/virtio-input/src/clock.rs` in the shape the rule passes: one call
+    /// to the one reading, with the spelling in prose above it that must not
+    /// count.
+    ///
+    /// It is a separate fixture from [`SOURCE_HELD`] because it is a separate
+    /// clause — the definition and the call fail in opposite directions and for
+    /// opposite reasons, and [`THE_ONE_CALLER`](super::THE_ONE_CALLER) is where
+    /// that is argued.
+    const CALLER_HELD: &str = "\
+//! The one call to the one reading. A second `env.now()` in this file would
+//! compile, which is why it is the file the rule counts.
+pub fn stamp(&mut self) -> StampNanos {
+    self.env.advance(self.tick_nanos);
+    f_input::stamp::at_interrupt(&self.env)
+}
+";
+
     /// A stage downstream of the driver, doing the thing the rule wants: it
     /// reads the stamp it was handed and takes no clock.
     const STAGE_HELD: &str = "\
@@ -16701,7 +16852,8 @@ pub fn latency_nanos(latched: StampNanos, event: StampNanos) -> u64 {
     /// vector, and a row inserted in the middle would silently repoint every
     /// fixture written before it at a different stage — which is the shape of
     /// change that leaves a suite green and its assertions about something
-    /// else.
+    /// else. The driver's row is appended after it, at `E3-B04d`, for the same
+    /// reason and not because it belongs last: on the real path it is the head.
     fn held() -> Vec<(&'static str, &'static str)> {
         vec![
             ("input/src/stamp.rs", SOURCE_HELD),
@@ -16709,6 +16861,7 @@ pub fn latency_nanos(latched: StampNanos, event: StampNanos) -> u64 {
             ("interface/src/ladder.rs", STAGE_HELD),
             ("scene/src/commit.rs", STAGE_HELD),
             ("abi/src/input.rs", STAGE_HELD),
+            ("user/virtio-input/src/clock.rs", CALLER_HELD),
         ]
     }
 
@@ -16749,6 +16902,86 @@ pub fn latency_nanos(latched: StampNanos, event: StampNanos) -> u64 {
         let findings = stamp_findings(&files);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(findings[0].contains("at_interrupt("), "{}", findings[0]);
+    }
+
+    #[test]
+    fn the_one_reading_losing_its_caller_is_a_finding_rather_than_a_green_build() {
+        // **The clause RFC 0099 was written about.** For three rounds this lint
+        // was green about a reading nothing called: `at_interrupt` had no caller
+        // outside its own tests and no crate depended on `f-input`, so every
+        // clause above passed over a path that carried nothing. It read exactly
+        // like the rule holding, which is the shape of silence this file exists
+        // to avoid.
+        //
+        // The substitution below is the one that makes it a *live* hole rather
+        // than a hypothetical: `from_wire_nanos` handed a field read is what
+        // `WIRE_MINT` permits, so the mint rule passes on it and the driver
+        // stamps from a number it computed itself. Only this clause catches it.
+        let mut files = held();
+        files[5] = (
+            "user/virtio-input/src/clock.rs",
+            "pub fn stamp(&mut self) -> StampNanos {\n\
+             \x20   self.env.advance(self.tick_nanos);\n\
+             \x20   StampNanos::from_wire_nanos(self.at_nanos)\n\
+             }\n",
+        );
+        let findings = stamp_findings(&files);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("0 time(s)"), "{}", findings[0]);
+        assert!(findings[0].contains("carries nothing"), "{}", findings[0]);
+
+        // And the file gone entirely, which is the same failure with a rename in
+        // front of it. Two findings, because a stage with no source at all is
+        // also a finding — and both of them are about the same disappearance,
+        // which is the point of having the second one.
+        let gone: Vec<_> = held()
+            .into_iter()
+            .filter(|(rel, _)| *rel != "user/virtio-input/src/clock.rs")
+            .collect();
+        let findings = stamp_findings(&gone);
+        assert!(
+            findings.iter().any(|f| f.contains("the one call to the one clock reading is not")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_driver_that_stamps_twice_is_a_finding_even_where_stamping_is_permitted() {
+        // The caller's own version of `two_readings_in_the_source`. This file is
+        // the one place on the path a call is legal, so the rule here is
+        // *exactly one* rather than *none* — and a driver that stamped the
+        // record and then the report would report two instants for one thing the
+        // user did.
+        let mut files = held();
+        files[5] = (
+            "user/virtio-input/src/clock.rs",
+            "pub fn stamp(&mut self) -> (StampNanos, StampNanos) {\n\
+             \x20   (f_input::stamp::at_interrupt(&self.env), \
+             f_input::stamp::at_interrupt(&self.env))\n\
+             }\n",
+        );
+        let findings = stamp_findings(&files);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("2 time(s)"), "{}", findings[0]);
+    }
+
+    #[test]
+    fn the_caller_file_is_not_a_licence_to_read_a_clock_any_other_way() {
+        // The needle is scoped as well as the file. The driver is the one crate
+        // on this path that can reach a clock, so it is the one place a second
+        // reading would compile — and permitting `at_interrupt(` there must not
+        // permit `env.now()` beside it.
+        let mut files = held();
+        files[5] = (
+            "user/virtio-input/src/clock.rs",
+            "pub fn stamp(&mut self) -> StampNanos {\n\
+             \x20   let _also = self.env.now();\n\
+             \x20   f_input::stamp::at_interrupt(&self.env)\n\
+             }\n",
+        );
+        let findings = stamp_findings(&files);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains(".now()"), "{}", findings[0]);
     }
 
     #[test]
@@ -20004,7 +20237,23 @@ fn ids_in(line: &str) -> Vec<String> {
 fn parse_todo() -> Result<Vec<Task>, String> {
     let path = root().join("TODO.md");
     let text = std::fs::read_to_string(&path).map_err(|e| format!("reading TODO.md: {e}"))?;
+    Ok(parse_todo_text(&text))
+}
 
+/// The same parse, over text rather than over the file.
+///
+/// # Why this is split
+///
+/// So that a fixture can be parsed. A rule about `TODO.md` that can only ever
+/// run against the real `TODO.md` is a rule whose red path nobody has seen, and
+/// a lint that has never failed is indistinguishable from one that cannot —
+/// which is the sentence `CONTRIBUTING.md` puts under its own table.
+///
+/// Reversal: if a second reader of this file ever appears, it calls this rather
+/// than growing its own copy. Two readers of one file that disagree is the
+/// defect this tree keeps recording, and the split exists to make the second
+/// reader cheap, not to make it plural.
+fn parse_todo_text(text: &str) -> Vec<Task> {
     let mut tasks: Vec<Task> = Vec::new();
     let mut epoch = String::from("(none)");
 
@@ -20055,7 +20304,287 @@ fn parse_todo() -> Result<Vec<Task>, String> {
         });
     }
 
-    Ok(tasks)
+    tasks
+}
+
+/// How many subtasks a decomposition names before it counts as one.
+///
+/// Five is `TODO.md`'s own number, not one chosen here: `E3-00` reads *each task
+/// becomes five to fifteen tasks with exits when the epoch opens*, and this
+/// constant is a reading of that sentence. Reversal: an `E<n>-00` written with a
+/// different floor makes this a second opinion about the file rather than a
+/// reading of it, and then the number belongs on the line and not here.
+const DECOMPOSITION_MINIMUM: usize = 5;
+
+/// The epochs whose decomposition task is ticked, addressed by id prefix.
+///
+/// `[x]` and not `[~]`. Since RFC 0093 `[~]` means dropped *or* owed, and
+/// neither is a decomposition that landed — a dropped `E<n>-00` is the statement
+/// that the epoch will not be decomposed, which is the one state where the rule
+/// below would be enforcing a plan nobody holds.
+fn decomposed_epochs(tasks: &[Task]) -> BTreeSet<&str> {
+    tasks.iter().filter(|t| t.status == 'x').filter_map(|t| t.id.strip_suffix("-00")).collect()
+}
+
+/// Every `XL` line in a decomposed epoch that does not name its own children.
+///
+/// The epoch comes from the task's **id** and not from the `##` heading it sits
+/// under, because the id is what every other line addresses it by, and a line
+/// filed under the wrong heading is a filing mistake rather than a licence.
+///
+/// *Extending its own id* is the whole test for what counts as a child:
+/// `E3-B01a` extends `E3-B01`, and `E3-D04` does not. Without that, an `XL`
+/// naming five external blockers would read as decomposed — which is the
+/// opposite of the property, since naming blockers is what a coarse line
+/// already does.
+fn undecomposed_xl(tasks: &[Task]) -> Vec<String> {
+    let decomposed = decomposed_epochs(tasks);
+    let mut findings = Vec::new();
+
+    for task in tasks.iter().filter(|t| t.size == "XL") {
+        let Some((epoch, _)) = task.id.split_once('-') else { continue };
+        if !decomposed.contains(epoch) {
+            continue;
+        }
+        let children: Vec<&str> = task
+            .needs
+            .iter()
+            .filter(|need| need.len() > task.id.len() && need.starts_with(&task.id))
+            .map(String::as_str)
+            .collect();
+        if children.len() < DECOMPOSITION_MINIMUM {
+            findings.push(format!(
+                "{} is `XL` and its `*needs:*` names {} id(s) extending {} — {} — where {} \
+                 is the floor. {}-00 is `[x]`, so this epoch's decomposition has landed and \
+                 this line is not in it",
+                task.id,
+                children.len(),
+                task.id,
+                if children.is_empty() { String::from("none") } else { children.join(", ") },
+                DECOMPOSITION_MINIMUM,
+                epoch,
+            ));
+        }
+    }
+    findings
+}
+
+/// An `XL` task with no decomposition, in an epoch that has been decomposed.
+///
+/// # The defect this was written against
+///
+/// Nothing in this tree observed it. `E3-00`, `E4-00`, `E5-00` and `E6-00` all
+/// carry the exit *this epoch contains no `XL` task without a decomposition*,
+/// `grep -n 'XL' xtask/src/main.rs` returned nothing, and a reader could have
+/// deleted all seventy-two of E3's subtask lines with `cargo xtask verify` still
+/// green. That is an exit no machine could close, on four tasks, which is
+/// `CONTRIBUTING.md`'s R01 — *name the mechanism, not the intention* — applied
+/// to the file that schedules the work.
+///
+/// # Why it is conditional on `E<n>-00`
+///
+/// Because without the condition it is red the day it lands, and red for the
+/// right reason: `E4-B01`, `E5-B01`, `E5-B02` and `E6-B01` are `XL` with no
+/// decomposition today, and decomposing them is precisely what `E4-00`, `E5-00`
+/// and `E6-00` are for. A check that fires on work nobody has started is a check
+/// somebody turns off. So the box is the switch: tick `E<n>-00`, and that
+/// epoch's `XL` lines are held to it from that moment.
+///
+/// # Why this is in `lint_all` and not in `todo`
+///
+/// `verify` runs `lint_all` and never calls `todo`, so a rule inside `todo` is a
+/// rule nothing can go red on. E3-B08, and `intent/0012-the-interface/spec.md`'s
+/// second review, finding 3.
+///
+/// # Errors
+///
+/// Any such task, or a `TODO.md` this cannot read as a task list at all.
+fn lint_decomposition() -> Result<(), String> {
+    println!("{}", decomposition_report(&parse_todo()?)?);
+    Ok(())
+}
+
+/// The reading itself, over a parsed list rather than over the file.
+///
+/// # Why there is a seam here
+///
+/// Because of the refusal directly below it. No `TODO.md` this repository would
+/// ever hold has zero task lines in it, so with the reading welded to the file
+/// there is no way for a test to reach that arm — and it was written that way
+/// first: replacing its condition with `false` left all ten tests in this module
+/// green, which is a guard nobody has ever seen work. The seam is what makes the
+/// arm reachable from a fixture, and the mutation red.
+fn decomposition_report(tasks: &[Task]) -> Result<String, String> {
+    // A reader that has stopped matching the file reports no findings, which is
+    // indistinguishable from a clean tree. `TODO.md` holding no task at all is
+    // the one state that cannot be true, so it is the one this refuses on — the
+    // same reading `lint-gate` makes of its own empty result.
+    if tasks.is_empty() {
+        return Err("no task lines were found in TODO.md, which cannot be right and means \
+                    this check's reader no longer matches the file it reads"
+            .into());
+    }
+
+    let decomposed = decomposed_epochs(tasks);
+    let examined = tasks
+        .iter()
+        .filter(|t| t.size == "XL")
+        .filter(|t| t.id.split_once('-').is_some_and(|(e, _)| decomposed.contains(e)))
+        .count();
+    let findings = undecomposed_xl(tasks);
+
+    if findings.is_empty() {
+        // The two counts are reported rather than the word `ok` alone, because
+        // the way this check rots is silent: a size spelling that stops parsing
+        // leaves it green over nothing, and a zero here is the only place that
+        // shows.
+        return Ok(format!(
+            "lint-decomposition: ok  ({examined} `XL` line(s) across {} decomposed epoch(s), \
+             each naming five or more of its own subtasks)",
+            decomposed.len()
+        ));
+    }
+
+    Err(format!(
+        "{} `XL` task(s) in a decomposed epoch name no decomposition:\n  {}\n\n\
+         `TODO.md` says an `XL` that is not decomposed by the time it starts is a planning\n\
+         failure, and `E<n>-00`'s exit says the epoch contains none. Until this check\n\
+         existed both sentences were plans: every subtask line in E3 could have been\n\
+         deleted with the whole local loop green.\n\n\
+         Either give the line a `*needs:*` naming five or more ids that extend its own id,\n\
+         or untick that epoch's `E<n>-00` — which is the honest statement that the\n\
+         decomposition has not landed, and is why E4, E5 and E6 are not held to this.\n\
+         E3-B08, and the R13 row in CONTRIBUTING.md.",
+        findings.len(),
+        findings.join("\n  ")
+    ))
+}
+
+#[cfg(test)]
+mod decomposition_tests {
+    use super::*;
+
+    /// A decomposed epoch with one `XL` that names exactly the floor.
+    const GREEN: &str = "\
+## E9 — a fixture epoch
+- [x] **E9-00** `S` Decompose this epoch before starting it.
+- [ ] **E9-B01** `XL` A coarse line.
+  *needs:* E9-B01a, E9-B01b, E9-B01c, E9-B01d, E9-B01e
+";
+
+    const NEEDS: &str = "  *needs:* E9-B01a, E9-B01b, E9-B01c, E9-B01d, E9-B01e\n";
+
+    fn findings(text: &str) -> Vec<String> {
+        undecomposed_xl(&parse_todo_text(text))
+    }
+
+    #[test]
+    fn a_decomposed_xl_in_a_decomposed_epoch_passes() {
+        assert!(findings(GREEN).is_empty(), "{:?}", findings(GREEN));
+    }
+
+    #[test]
+    fn dropping_the_needs_line_is_what_this_check_is_for() {
+        // The fixture that makes it fail, which is the half of the exit a green
+        // run cannot demonstrate.
+        let red = GREEN.replace(NEEDS, "");
+        let found = findings(&red);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("E9-B01"), "the finding must name the line: {}", found[0]);
+    }
+
+    #[test]
+    fn one_short_of_the_floor_is_short() {
+        // The boundary itself, pinned from below: four is not five. Without
+        // this, DECOMPOSITION_MINIMUM could be any number at or under four and
+        // every other test here would still pass.
+        let red = GREEN.replace(", E9-B01e\n", "\n");
+        assert_eq!(findings(&red).len(), 1, "{:?}", findings(&red));
+    }
+
+    #[test]
+    fn blockers_are_not_a_decomposition() {
+        // Five ids that do not extend the line's own id. A coarse `XL` already
+        // names external blockers, so counting those would make every such line
+        // read as decomposed — the check would pass on exactly the state it
+        // exists to refuse.
+        let red = GREEN.replace(
+            "E9-B01a, E9-B01b, E9-B01c, E9-B01d, E9-B01e",
+            "E9-D01, E9-D02, E9-D03, E9-D04, E9-D05",
+        );
+        assert_eq!(findings(&red).len(), 1, "{:?}", findings(&red));
+    }
+
+    #[test]
+    fn an_open_decomposition_task_holds_its_epoch_out() {
+        // The clause that keeps E4, E5 and E6 green on the day this lands.
+        let open = GREEN.replace("- [x] **E9-00**", "- [ ] **E9-00**").replace(NEEDS, "");
+        assert!(findings(&open).is_empty(), "{:?}", findings(&open));
+    }
+
+    #[test]
+    fn a_dropped_decomposition_task_holds_its_epoch_out_too() {
+        // `[~]` is dropped or owed since RFC 0093, and neither is landed.
+        let dropped = GREEN.replace("- [x] **E9-00**", "- [~] **E9-00**").replace(NEEDS, "");
+        assert!(findings(&dropped).is_empty(), "{:?}", findings(&dropped));
+    }
+
+    #[test]
+    fn the_tree_as_it_stands_is_green() {
+        lint_decomposition().expect("an XL task in a decomposed epoch names no decomposition");
+    }
+
+    #[test]
+    fn e3_b01_is_what_holds_the_real_file_green() {
+        // `plan.md`'s own landing test, driven against the real file rather than
+        // a fixture: with `E3-00` ticked, deleting `E3-B01`'s `*needs:*` line
+        // makes this go red naming that line. It is what shows the green run
+        // above is green because of what the file says and not because nothing
+        // was read.
+        let text = std::fs::read_to_string(root().join("TODO.md")).expect("reading TODO.md");
+        let kept: Vec<&str> =
+            text.lines().filter(|l| !l.trim_start().starts_with("*needs:* E3-B01a,")).collect();
+        assert_eq!(
+            kept.len() + 1,
+            text.lines().count(),
+            "exactly one `*needs:* E3-B01a,` line is expected to delete"
+        );
+        let found = undecomposed_xl(&parse_todo_text(&kept.join("\n")));
+        assert!(
+            found.iter().any(|f| f.starts_with("E3-B01 ")),
+            "deleting E3-B01's decomposition must be named: {found:?}"
+        );
+    }
+
+    #[test]
+    fn an_undecomposed_xl_added_to_e4_leaves_the_real_file_green() {
+        // The other half of the same landing test. E4's whole open task is to
+        // decompose it, so a coarse line there is the intended state rather than
+        // a finding.
+        let text = std::fs::read_to_string(root().join("TODO.md")).expect("reading TODO.md");
+        let added = text.replace(
+            "- [ ] **E4-B01**",
+            "- [ ] **E4-B99** `XL` A coarse line nobody has decomposed.\n- [ ] **E4-B01**",
+        );
+        assert_ne!(added, text, "E4-B01 was not found to insert beside");
+        assert!(
+            undecomposed_xl(&parse_todo_text(&added)).is_empty(),
+            "E4-00 is open, so E4's coarse lines are what that task is for"
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_tasks_in_it_is_refused_rather_than_passed() {
+        // The rot this check has: a reader that has stopped matching the file
+        // reports nothing, and nothing is what green looks like. This asserts
+        // the refusal and not just the empty parse, because the first version of
+        // it asserted the parse — and a mutation replacing the guard's condition
+        // with `false` was green on all ten tests in this module.
+        let empty = parse_todo_text("# not a task list\n");
+        assert!(empty.is_empty(), "the fixture must parse to nothing for this to mean anything");
+        let refusal = decomposition_report(&empty).expect_err("an empty task list is not green");
+        assert!(refusal.contains("no task lines were found"), "{refusal}");
+    }
 }
 
 /// How many tasks each task transitively unblocks.

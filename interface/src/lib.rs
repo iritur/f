@@ -32,6 +32,11 @@
 //! - [`canvas`] — what a self-rendering surface still declares. `E3-D02`, RFC 0078.
 //! - [`token`] — the typed token layer and what a theme cannot break. `E3-D03`, RFC 0079.
 //! - [`ladder`] — the renderer fallback ladder. `E3-D04`, RFC 0080.
+//!
+//! # The projections
+//!
+//! - [`reader`] — the screen-reader projection: a whole tree said, with nothing
+//!   rendered. `E3-B06i`.
 
 #![no_std]
 
@@ -39,4 +44,5 @@ pub mod backend;
 pub mod canvas;
 pub mod ladder;
 pub mod node;
+pub mod reader;
 pub mod token;

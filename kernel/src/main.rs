@@ -1785,6 +1785,27 @@ fn component(boot: &BootInfo) -> Option<&'static [u8]> {
         arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
     }
 
+    // The same question one layer up, and it was silent until 2026-09-23. A
+    // ninth component file was dropped by `component::generations` without a
+    // word; the boot reported eight places, `cargo xtask sim --join` read nine
+    // component files off the same directory, and the message it printed was
+    // *a stale or partial build*, which was true of nothing. RFC 0101 is the
+    // entry: a bound derived from a count, overflowing in one subsystem and
+    // reported in another.
+    //
+    // SAFETY: the direct map is live and `frames` was rebound onto it long
+    // before this runs, which is the same guarantee the module read below
+    // rests on.
+    let dropped = unsafe { component::places_dropped(boot) };
+    if dropped > 0 {
+        kprintln!(
+            "FAIL: the loader placed {dropped} component file(s) this kernel gave no place to, \
+             so a component this build produced is not in this boot"
+        );
+        kprintln!("  raise         component::PLACES_MAX, and state::NODES with it");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+
     let module = *boot.modules().first()?;
     // SAFETY: the direct map is live and `frames` was rebound onto it long
     // before this runs, and every module is in the reserved list — see
@@ -3040,6 +3061,9 @@ fn admission_demonstration(boot: &BootInfo) {
 /// `compositor=mute` puts the same component's record past the admission a spawn
 /// performs — once as declared, which must be admitted, and once with its state
 /// declaration emptied, which must be refused `ADMISSION/NO_STATE_TREE`.
+/// `compositor=floorless` describes a machine below the bottom of RFC 0080's
+/// ladder and requires the frame to refuse it a compositor `ADMISSION/NO_RUNG`
+/// before a page is spent, having admitted this boot's own machine first.
 ///
 /// The verdict is the kernel's rather than the harness's, exactly as `blk`'s and
 /// `objects`' are: it knows which half it asked for, what it submitted, and what
@@ -3058,6 +3082,8 @@ fn compositor_boot(
         compositor::Half::Starved
     } else if boot.has_parameter(b"compositor=mute") {
         compositor::Half::Mute
+    } else if boot.has_parameter(b"compositor=floorless") {
+        compositor::Half::Floorless
     } else {
         return None;
     };
@@ -3074,7 +3100,10 @@ fn compositor_boot(
     let me = arch::x86_64::current_cpu();
     let worker = (smp::started() > 1).then(smp::first_worker).filter(|core| *core != me);
     let Some(worker) = worker.or(match half {
-        compositor::Half::Mute => Some(me),
+        // Neither of these two stands a component up: `mute` probes a record and
+        // `floorless` is refused before a page is spent, so both can say what
+        // they came to say on a machine with one core.
+        compositor::Half::Mute | compositor::Half::Floorless => Some(me),
         compositor::Half::Serve | compositor::Half::Starved => None,
     }) else {
         kprintln!(

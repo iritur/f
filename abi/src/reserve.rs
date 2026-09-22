@@ -67,14 +67,16 @@ use crate::manifest::{HUGE_BYTES, Record, class, domain};
 /// before anything was spent* on a component that had nothing to do with the
 /// one that was added.
 ///
-/// Sixteen is the place count with room for every refill a boot performs, and
+/// Eighteen is twice the place count — room for every refill a boot performs — and
+/// it moved from sixteen with `PLACES_MAX` on 2026-09-23, which is the relation
+/// RFC 0101 says nothing checks. It is
 /// it is a bound rather than an arithmetic because this crate cannot see
 /// `kernel::component::PLACES_MAX` — the frame is what holds the places and
 /// `abi` is what both sides read. Growth past this is a table that is bought
 /// rather than a larger array: RFC 0029's shape, and the day it is wanted,
 /// `Table` is where it goes.
 /// Unit: reservations.
-pub const RESERVATIONS_MAX: usize = 16;
+pub const RESERVATIONS_MAX: usize = 18;
 
 /// The most physical cores this table can name.
 ///

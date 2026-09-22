@@ -197,6 +197,28 @@ const MODELS: &[(&str, Peer)] = &[
     // *Reversal:* the day the peer on this channel is a component rather than
     // the frame, which is the day `Peer` has to say which of two components is
     // being modelled. RFC 0072 is the shape that would ask for it.
+    // **A mapping and not a model, and the diff that makes it a model is named.**
+    // `virtio-input` is a device driver — the fourth in this tree — so unlike
+    // `store`, `supervisor` and `semantic` above, `Native` here is *not* the
+    // accurate peer: there is hardware below it, and `Blk`, `Net` and `Gpu`
+    // exist because a driver's device is the half worth simulating.
+    //
+    // What makes the mapping honest today rather than a silent claim is that
+    // `E3-B04d` is `[>]`: the crate exists, and the frame half that would stand
+    // it up and drain its ring does not, so **no client submits on this ring in
+    // any scenario this simulator drives**. A peer modelling an input device
+    // would be modelling a conversation that has no second party. `Native`'s
+    // registration table and service time are what a deployment scenario can
+    // actually exercise of this component, which is its spawn and its ring
+    // negotiation.
+    //
+    // *Reversal:* the other half of `E3-B04d` — `kernel/src/input.rs` standing
+    // the component up and a compositor consuming its events. That is the diff
+    // that gives this ring a client, and it is the diff that should replace
+    // this row with a `Peer::Input` that produces events at an interarrival
+    // rate rather than answering requests, because an input device is the one
+    // device in this tree that speaks first.
+    ("input", Peer::Native),
     ("semantic", Peer::Native),
 ];
 

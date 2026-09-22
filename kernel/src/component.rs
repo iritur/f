@@ -281,7 +281,7 @@ const OCCUPANT_MICROS: u64 = 500_000;
 /// that file's own note says what the run of ids has become: not a forecast that
 /// keeps coming true, but a consequence of the bound being a constant. RFC 0044
 /// is where it stops.
-const PLACES_MAX: usize = 8;
+const PLACES_MAX: usize = 9;
 
 /// Why the lifecycle could not do what it was asked.
 ///
@@ -404,8 +404,32 @@ impl Failure {
 #[must_use]
 pub unsafe fn modules(boot: &BootInfo) -> ([&'static [u8]; PLACES_MAX], usize) {
     // SAFETY: the caller's guarantee, passed down.
-    let (found, count, _) = unsafe { generations(boot) };
+    let (found, count, _, _) = unsafe { generations(boot) };
     (found, count)
+}
+
+/// Component files the loader placed that this kernel gave no place to.
+///
+/// Non-zero means [`PLACES_MAX`] is too small for the set this build produces.
+/// It is a separate function rather than a fourth element on [`modules`]
+/// because every one of that function's five callers wants the places and none
+/// of them wants to decide this — the decision belongs once, at the boot, the
+/// way `multiboot::BootInfo::modules_dropped` belongs once at
+/// `main::component`.
+///
+/// *What would reverse this:* a bound the kernel could check against the set
+/// the build produces. It cannot see `xtask`'s `COMPONENTS`, which is the same
+/// gap RFC 0101 names between `abi`'s `RESERVATIONS_MAX` and this constant:
+/// two numbers written twice with nothing comparing them.
+///
+/// # Safety
+///
+/// As [`modules`].
+#[must_use]
+pub unsafe fn places_dropped(boot: &BootInfo) -> usize {
+    // SAFETY: the caller's guarantee, passed down.
+    let (_, _, _, over) = unsafe { generations(boot) };
+    over
 }
 
 /// Every component file the loader placed, split into **places and their
@@ -437,10 +461,11 @@ pub unsafe fn modules(boot: &BootInfo) -> ([&'static [u8]; PLACES_MAX], usize) {
 /// As [`modules`].
 unsafe fn generations(
     boot: &BootInfo,
-) -> ([&'static [u8]; PLACES_MAX], usize, [&'static [u8]; PLACES_MAX]) {
+) -> ([&'static [u8]; PLACES_MAX], usize, [&'static [u8]; PLACES_MAX], usize) {
     let mut found: [&'static [u8]; PLACES_MAX] = [&[]; PLACES_MAX];
     let mut next: [&'static [u8]; PLACES_MAX] = [&[]; PLACES_MAX];
     let mut count = 0;
+    let mut over = 0;
     for module in boot.modules() {
         // **Not `break` on a full list**, and the difference cost a boot. A
         // successor arrives *after* the places it succeeds — it is the last
@@ -470,6 +495,19 @@ unsafe fn generations(
             continue;
         }
         if count == PLACES_MAX {
+            // **Counted, not merely skipped.** This `continue` was silent until
+            // 2026-09-23, and a ninth component file walked straight past it:
+            // the boot reported eight, `sim --join` read nine off the same
+            // directory, and the failure it printed was *a stale or partial
+            // build* — a true sentence about a tree that was neither. That is
+            // RFC 0101's shape a second time, and worse than the case that
+            // motivated it, because `RESERVATIONS_MAX` at least refused.
+            //
+            // The count goes out to [`main::places_dropped`], which refuses the
+            // boot, on `multiboot::modules_dropped`'s precedent one layer down:
+            // a bound that is too small is a number somebody has to see, and
+            // the place to say so is where the contents are first depended on.
+            over += 1;
             continue;
         }
         if let Some(slot) = found.get_mut(count) {
@@ -477,7 +515,7 @@ unsafe fn generations(
             count += 1;
         }
     }
-    (found, count, next)
+    (found, count, next, over)
 }
 
 /// The two numbers a supervisor's restart policy counts with, stored by the
@@ -1224,7 +1262,7 @@ pub unsafe fn demonstrate(
 ) -> Result<Report, Failure> {
     // SAFETY: the caller's guarantee that the direct map is live and covers
     // every module.
-    let (modules, count, successors) = unsafe { generations(boot) };
+    let (modules, count, successors, _) = unsafe { generations(boot) };
     let module = *modules.first().filter(|_| count > 0).ok_or(Failure::NoComponent)?;
     let record = Record::read(module).map_err(Failure::Manifest)?;
 

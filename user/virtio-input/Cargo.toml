@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "f-virtio-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The input driver, outside the frame. A virtio-input device under an emulator, drained, stamped once, and submitted as entries somebody else consumes."
+
+# A library and not a binary, for the reason `user/init/Cargo.toml` states at
+# length and the six component crates before this one repeat: a binary needs an
+# entry point, naming one means `#[unsafe(no_mangle)]`, and that is an unsafe
+# attribute a crate forbidding unsafe code cannot write. `user/init/link.ld`
+# finds the entry by the section `component::start` was compiled into, which is
+# why this crate's entry has that path too.
+
+[dependencies]
+f-abi.workspace = true
+f-ring.workspace = true
+
+# The two rows that make this crate the fourth driver rather than a third copy
+# of the third one, and they are the task.
+#
+# `f-input` brings `stamp::at_interrupt`, which until this crate existed had no
+# caller outside its own `#[cfg(test)]` module — so *one time source in the
+# whole input path* was a sentence about a path that carried nothing. RFC 0099
+# narrowed the claim to what was checkable and named this row as the reversal.
+# `cargo xtask lint-stamp` now counts the call as well as the definition, and it
+# goes red if this row is deleted.
+f-input.workspace = true
+
+# The clock the stamp is taken against. It is here rather than reached through
+# `f-input` because `at_interrupt` takes an `&dyn Env` and something has to be
+# one: this component holds a `SeededEnv`, and `crate::clock` is where the
+# argument for that — and the whole of what it costs — is written down. A
+# component has no hardware clock in this build and RFC 0004 offers it none.
+f-env.workspace = true
+
+# No override. This crate inherits `unsafe_code = "forbid"` from the workspace,
+# and that inheritance is the subject of RFC 0033: a driver that touches device
+# registers and writes virtqueue descriptors, with no `unsafe` anywhere in it,
+# because `f_ring::device` discharges the obligation once on the frame's side of
+# the boundary. `cargo xtask lint-unsafe` fails the build if this stops being
+# true.
+#
+# Not one line was added to `ring/src/device.rs` for this driver either, which is
+# the fourth sample of the evidence RFC 0033 asked for and the first taken from a
+# device that only ever *writes* into this component's memory.
+[lints]
+workspace = true
+
+# The image half, on by default and turned off by the one crate that links this
+# as a library rather than building it into a component file.
+#
+# It exists because a `#[panic_handler]` is a lang item and there may be exactly
+# one in a linked artefact. `component::start` needs one — a component has no
+# unwinder and no serial port — and the frame, which links this crate for
+# `routing`'s offsets and `driver::Counters`' shape, already has its own.
+[features]
+default = ["image"]
+image = []

@@ -421,6 +421,32 @@ pub mod error {
         /// Added by E1-B15, which is the task that made RFC 0013's *every*
         /// mean every. RFC 0065.
         pub const NO_STATE_TREE: u16 = 7;
+        /// The machine satisfies no rung of RFC 0080's fallback ladder, so
+        /// there is no renderer a compositor could start on it.
+        ///
+        /// In [`super::ADMISSION`] for [`NO_STATE_TREE`]'s reason and against
+        /// [`super::DEVICE`]'s pull: nothing failed. The backend answered, the
+        /// answer was well formed, and what it says the machine will do is less
+        /// than the least rung asks for — which is a promise nobody can make
+        /// rather than hardware that broke, and R08 is what puts the first in
+        /// this domain. Refused before anything is spent, because a compositor
+        /// does not start and then discover it has nothing to draw with.
+        ///
+        /// RFC 0080 decides this against the alternative it names: *a machine
+        /// that satisfies no rung's requirement is refused a compositor rather
+        /// than given the lowest one*, because a refusal is answerable and a
+        /// compositor that misses every frame is not.
+        ///
+        /// Detail: none, and the reason is that the only refusal of this kind
+        /// in the tree is the frame's own — there is no submission for a
+        /// completion to carry a word back on. What a detail would be is
+        /// already decided if one is ever wanted: the reported set, as a
+        /// bitmask of `f_interface::backend::Capability` indices, which is what
+        /// `f_interface::backend::Refused` already holds and one subtraction
+        /// away from *what would this machine have had to have*.
+        ///
+        /// Added by E3-B02b, which is where a rung is first chosen at all.
+        pub const NO_RUNG: u16 = 8;
     }
 
     /// Codes within [`RESOURCE`].

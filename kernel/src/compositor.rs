@@ -49,14 +49,45 @@
 //! unmodified record to be admitted**, in the same boot, through the same
 //! function. RFC 0065 says every component publishes a tree; this is the half
 //! that says so about a component rather than about the mechanism.
+//!
+//! `compositor=floorless` describes a machine below the bottom of RFC 0080's
+//! ladder — a CPU and no way at all to put an image on a screen — and requires
+//! the frame to refuse it a compositor `ADMISSION/NO_RUNG` before a page is
+//! spent, having admitted this boot's own machine through the same function in
+//! the same run. `E3-B02b`'s second clause, and it is `mute`'s shape for
+//! `mute`'s reason.
+//!
+//! # Where `E3-B02b`'s three clauses are
+//!
+//! One sentence each, because they are in three different places and a reader
+//! looking for the third will not otherwise find it.
+//!
+//! *A backend with compute shaders and no usable scan starts at rung 2 and says
+//! so in the compositor's tree* is [`BACKEND_CAPABILITIES`] and the serve
+//! half's `tree[4]` clause: the frame describes the hybrid's machine, and the
+//! number it is checked against is [`HYBRID_RUNG`], read off RFC 0080's table
+//! by hand rather than recomputed.
+//!
+//! *A backend satisfying no rung is refused a compositor rather than handed the
+//! floor* is the floorless half.
+//!
+//! *An overloaded compositor holds its rung* is the serve half, and it is a
+//! conjunction of clauses rather than one: the second frame is submitted a
+//! nanosecond before its deadline, so `late` is one of two and `degraded` is
+//! `SHORT` — that is the overload — and in the same run the frame writes a
+//! **better** report onto the routing page once the first frame has closed, so
+//! the rung had somewhere to go. A component that recomputed its rung from that
+//! word would publish [`PROMOTED_RUNG`] and go red. The negative has a run
+//! behind it, which is the only form in which a negative is worth asserting.
 
 use f_abi::manifest::Record;
 use f_abi::scene::{Commit, CreateNode, Delta, Entry, NO_NODE, RemoveNode, SetPaint, kind};
 use f_abi::{ABI_VERSION, Cqe, control, error, feature, state};
 use f_compositor::pacing::degraded;
 use f_compositor::routing::{self, at, life, node, reported, stopped};
+use f_compositor::tree::reported_capabilities;
 use f_env::{Env, SeededEnv};
-use f_interface::backend::Capability;
+use f_interface::backend::{Capability, select};
 use f_ring::{Arena, Collector, Mapping, Poster, Producer, Window};
 
 use crate::mem::{FRAME_SIZE, FrameAllocator};
@@ -189,6 +220,73 @@ const BACKEND_CAPABILITIES: u64 = (1 << Capability::ComputeShaders.index())
 /// Unit: none — a rung ordinal.
 const HYBRID_RUNG: u64 = 2;
 
+/// What the floorless half tells the component the backend reports.
+///
+/// A CPU and nothing else: a machine that can run the code but has no way at
+/// all to put a finished image on a screen, no compute shaders and no triangle
+/// pipeline. Every rung of RFC 0080's ladder asks for something this set does
+/// not carry — rungs 1 and 2 want compute shaders, rung 3 wants a CPU *and* a
+/// present, rung 4 wants a fixed-function pipeline — so it satisfies none, and
+/// that is the whole of what this half is about.
+///
+/// **A CPU rather than nothing, and the distinction is the one
+/// [`STARVED_HEAP_BYTES`] makes by being two pages rather than zero.**
+/// `Capabilities::NONE` is what a device the frame could not open reports,
+/// which is a different finding wearing this one's name; what RFC 0080 refuses
+/// a compositor is a machine that answered, whose answer is sound, and which is
+/// still below the floor.
+/// Unit: none — a bitmask of capability indices.
+const FLOORLESS_CAPABILITIES: u64 = 1 << Capability::Cpu.index();
+
+/// What the serving half tells the component the backend reports **after** its
+/// first frame has closed.
+///
+/// [`BACKEND_CAPABILITIES`] and a usable subgroup scan: the machine gained the
+/// one capability that separates the hybrid from the top rung, half way through
+/// a run. The frame writes it into the same word it wrote the first report in,
+/// so a component that read the page again would find it.
+///
+/// This is what makes *never promoted* a clause with a run behind it rather
+/// than a sentence. A negative needs a moment at which the thing could have
+/// happened, and a boot that reported one set for the whole run has no such
+/// moment: it shows a compositor that held its rung and a compositor that
+/// recomputed its rung from an unchanged report as the same green log.
+/// Unit: none — a bitmask of capability indices.
+const PROMOTED_CAPABILITIES: u64 = BACKEND_CAPABILITIES | (1 << Capability::SubgroupScan.index());
+
+/// Which rung that second report would select, as the component spells a rung.
+///
+/// One: `Rung::ComputePath` is index 0 and the published word is the index plus
+/// one. Read off RFC 0080's table by hand for [`HYBRID_RUNG`]'s reason — a boot
+/// that asked `backend::select` what to expect would agree with the component
+/// through any change to the ladder, including a change that broke it.
+///
+/// Nothing in this file requires the component to publish it. It is written
+/// down because it is the number a promoted compositor *would* publish, and a
+/// reader of the serve verdict needs to know that the report the frame left on
+/// the page names a better rung rather than the same one.
+/// Unit: none — a rung ordinal.
+const PROMOTED_RUNG: u64 = 1;
+
+// The promotion is a promotion: a different report, naming a better rung.
+//
+// Both halves are worth asserting because both can rot independently. A
+// promoted set equal to the first one would leave the serve half writing the
+// same word twice and calling it an opportunity; a promoted set naming the same
+// rung would leave it writing a different word that changes nothing, which
+// passes the clause below and exercises nothing.
+const _: () = {
+    assert!(
+        PROMOTED_CAPABILITIES != BACKEND_CAPABILITIES,
+        "the report the frame promotes to is the one it started with"
+    );
+    assert!(
+        PROMOTED_RUNG < HYBRID_RUNG,
+        "the report the frame promotes to does not name a better rung, so holding the first \
+         one costs the component nothing"
+    );
+};
+
 /// The heap the starved half describes, which is two pages.
 ///
 /// Small enough that the graph cannot fit and large enough to be a heap: the
@@ -226,6 +324,19 @@ pub enum Half {
     Starved,
     /// Put its own record past the admission a spawn performs, twice.
     Mute,
+    /// Describe a machine below the bottom of RFC 0080's ladder and require the
+    /// frame to refuse it a compositor, having admitted this boot's own machine
+    /// through the same function first.
+    ///
+    /// **The half `E3-B02b`'s second clause is, and the reason it is a half
+    /// rather than a test.** *Refused a compositor rather than handed the
+    /// floor* is a sentence about something that does not happen, and the only
+    /// way to show it is a run in which the component would otherwise have been
+    /// stood up: same record, same image, same core, same rings, one word on
+    /// the routing page different. What the verdict then requires is that
+    /// nothing was spent — no address space, no tree, no board — which is what
+    /// separates a refusal from a component that started and gave up.
+    Floorless,
 }
 
 impl Half {
@@ -236,7 +347,56 @@ impl Half {
             Self::Serve => "serve",
             Self::Starved => "starved",
             Self::Mute => "mute",
+            Self::Floorless => "floorless",
         }
+    }
+
+    /// What this half tells the component the backend under it reports.
+    ///
+    /// One function rather than a literal at each use, because the frame writes
+    /// this word onto the routing page and also decides admission from it, and
+    /// two spellings of *what this machine reports* is the arrangement in which
+    /// a boot admits one machine and describes another.
+    /// Unit: none — a bitmask of capability indices.
+    const fn reported(self) -> u64 {
+        match self {
+            Self::Floorless => FLOORLESS_CAPABILITIES,
+            Self::Serve | Self::Starved | Self::Mute => BACKEND_CAPABILITIES,
+        }
+    }
+}
+
+/// May a machine reporting `bits` be given a compositor at all?
+///
+/// RFC 0080's refusal, at the only place in this tree that stands a compositor
+/// up. A machine satisfying no rung is refused here, before a page is spent,
+/// rather than handed a component that would select the floor — which is the
+/// alternative that RFC names and declines, on the grounds that a refusal is
+/// answerable and a compositor that misses every frame is not.
+///
+/// # What this function deliberately does not return
+///
+/// A [`f_interface::ladder::Rung`]. It answers *is there one*, and the rung
+/// itself never crosses back into this file: RFC 0080 says the rung is chosen
+/// **by the compositor**, and a frame that computed one and wrote it onto the
+/// routing page would have taken that decision away while leaving the sentence
+/// in the RFC. So the component reads the same word this function read and
+/// calls the same `select` on it, and the two cannot disagree because there is
+/// one ladder and one predicate — but only one of them is choosing.
+///
+/// The bits are turned into a capability set by
+/// `f_compositor::tree::reported_capabilities`, which is the component's own
+/// reader. A second reader here would be the second place a bit position is
+/// decided, and the failure it produces is a frame refusing a machine over a
+/// capability the component would have seen at a different index.
+///
+/// # Errors
+///
+/// `ADMISSION/NO_RUNG` where the report satisfies no rung of the ladder.
+fn admit_backend(bits: u64) -> Result<(), i32> {
+    match select(reported_capabilities(bits)) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(error::pack(error::ADMISSION, error::admission::NO_RUNG)),
     }
 }
 
@@ -373,6 +533,30 @@ pub struct Report {
     /// emptied. Unit: none — a packed refusal, or zero for one that was
     /// admitted.
     pub muted: i32,
+    /// Whether the report this boot's own machine makes was admitted a
+    /// compositor by [`admit_backend`].
+    ///
+    /// **The positive control for [`Report::floorless`], and a separate field
+    /// from [`Report::admitted`] because it is a separate subject.** That one
+    /// is about a record and this one is about a machine; a boot that folded
+    /// the two would report *something was admitted* and leave a reader to
+    /// guess which.
+    pub backend_admitted: bool,
+    /// What [`admit_backend`] said about a machine below the bottom of the
+    /// ladder. Unit: none — a packed refusal, or zero for one that was
+    /// admitted.
+    pub floorless: i32,
+    /// What the routing page carried at `at::BACKEND_CAPABILITIES` when the run
+    /// ended.
+    ///
+    /// Read back off the page rather than remembered, which is what makes the
+    /// serving half's *never promoted* clause a clause about a run: the frame
+    /// writes a better report there part way through, and this is the frame
+    /// checking that the write landed before it requires the component to have
+    /// ignored it. Zero for a half that stood no component up, because there
+    /// was no page.
+    /// Unit: none — a bitmask of capability indices.
+    pub reported: u64,
     /// How long the image is. Unit: bytes.
     pub image: u64,
     /// How much heap the frame described for this run.
@@ -628,7 +812,69 @@ impl Report {
             Half::Mute => self.mute_verdict(),
             Half::Starved => self.starved_verdict(),
             Half::Serve => self.serve_verdict(),
+            Half::Floorless => self.floorless_verdict(),
         }
+    }
+
+    /// The half that is refused a compositor.
+    ///
+    /// Five clauses, and the order is the argument. The control first, because
+    /// a refusal of every machine says nothing about this one; then the refusal
+    /// and the name it carries; then the three that say **nothing was spent** —
+    /// which is the difference between *refused a compositor* and *given one
+    /// that stopped*, and is the whole of what RFC 0080 asks for here.
+    fn floorless_verdict(&self) -> Result<(), &'static str> {
+        if !self.backend_admitted {
+            return Err(
+                "the machine this boot's other halves describe was itself refused a compositor, \
+                 so the refusal beside it is a refusal of everything and says nothing about \
+                 rungs",
+            );
+        }
+        if self.floorless == 0 {
+            return Err(
+                "a machine satisfying no rung of RFC 0080's ladder was admitted a compositor: \
+                 the floor was handed out as a default, which is the outcome that RFC refuses \
+                 in favour of an answerable no",
+            );
+        }
+        if self.floorless != error::pack(error::ADMISSION, error::admission::NO_RUNG) {
+            return Err("a machine satisfying no rung was refused a compositor, and not with \
+                 ADMISSION/NO_RUNG");
+        }
+        // Nothing was spent, read three ways: no component was prepared, so no
+        // tree was published out of its manifest; no routing page was written,
+        // so the word this half's machine would have been described in is zero;
+        // and the component never ran, so its board is the default rather than
+        // a tally. A build whose refusal came after the address space would
+        // pass the three clauses above and fail these.
+        if self.tree_nodes != 0 || self.tree_after != 0 || self.tree != [0; WORDS] {
+            return Err(
+                "a machine refused a compositor had a state tree published for it anyway, so \
+                 the refusal came after the component was built rather than before",
+            );
+        }
+        if self.reported != 0 || self.heap != 0 {
+            return Err(
+                "a machine refused a compositor was described a routing page and a heap, so \
+                 the refusal came after the frame had spent them",
+            );
+        }
+        if self.board.drained != 0 || self.board.outcome != 0 || self.submitted != 0 {
+            return Err(
+                "a machine refused a compositor served a client: something ran, which is a \
+                 component that stopped rather than one that was never handed the floor",
+            );
+        }
+        // And the component file was there to be built, which is what keeps
+        // this half from passing on a boot carrying no compositor at all.
+        if self.image == 0 {
+            return Err(
+                "this half refused a machine on a boot that carries no compositor image, so \
+                 what was refused is not a compositor",
+            );
+        }
+        Ok(())
     }
 
     /// The refusal half.
@@ -746,11 +992,28 @@ impl Report {
         // deadline against the number the client put on the wire, the wake time
         // against the subtraction the exit spells out, and the degradation
         // against a script that was written to have one frame of each kind.
+        // --- `E3-B02b`: chosen once, and never promoted ----------------------
+        //
+        // The frame promoted the report after the first frame closed, so this
+        // run had a moment at which a compositor that recomputed its rung would
+        // have moved it. That the moment existed is checked first: a write that
+        // did not land would leave the clause below green over a run in which
+        // nothing was ever offered.
+        if self.reported != PROMOTED_CAPABILITIES {
+            return Err(
+                "the frame's promoted report is not on the routing page at the end of the run, \
+                 so the backend never gained a capability and `never promoted` is a clause \
+                 nothing in this boot exercised",
+            );
+        }
         if self.board.rung != HYBRID_RUNG {
             return Err(
                 "the component is not holding the rung RFC 0080's table gives the capabilities \
-                 this boot reported: a hybrid backend was described and something else was \
-                 selected",
+                 it was started with: either a hybrid backend was described and something else \
+                 was selected, or the compositor promoted itself when the backend gained a \
+                 subgroup scan part way through the run — which is the one thing RFC 0080 \
+                 forecloses, because a rung change moves the cost distribution the pacing \
+                 estimator is built on",
             );
         }
         if self.board.samples != expected.frames {
@@ -907,9 +1170,29 @@ pub fn report_lines(report: &Report) {
                  serves anybody",
             Half::Mute =>
                 "the same record twice, as declared and with its state declaration emptied",
+            Half::Floorless =>
+                "a machine below the bottom of RFC 0080's ladder, which must be refused a \
+                 compositor before a page is spent",
         }
     );
     match report.half {
+        Half::Floorless => {
+            crate::kprintln!(
+                "  compositor    this machine: {}; a machine satisfying no rung: {} — \
+                 ADMISSION/NO_RUNG is {}",
+                if report.backend_admitted { "admitted" } else { "REFUSED" },
+                report.floorless,
+                error::pack(error::ADMISSION, error::admission::NO_RUNG),
+            );
+            crate::kprintln!(
+                "  compositor    nothing spent: {} tree node(s), {} B heap, {} entr(y/ies) \
+                 submitted, image_bytes {}",
+                report.tree_nodes,
+                report.heap,
+                report.submitted,
+                report.image,
+            );
+        }
         Half::Mute => {
             crate::kprintln!(
                 "  compositor    as declared: {}; declaring no tree: {} — \
@@ -966,6 +1249,14 @@ pub fn report_lines(report: &Report) {
                 report.board.samples,
                 report.board.margin,
                 report.board.late,
+            );
+            crate::kprintln!(
+                "  compositor    backend reported 0x{:x} at the start, 0x{:x} at the end; rung \
+                 {} throughout, and a promoted compositor would say {}",
+                BACKEND_CAPABILITIES,
+                report.reported,
+                report.board.rung,
+                PROMOTED_RUNG,
             );
             crate::kprintln!(
                 "  compositor    outcome {}, image_bytes {}, heap_bytes {}",
@@ -1102,6 +1393,12 @@ unsafe fn mute(
         last_tick: 0,
         admitted: declared.is_ok(),
         muted: refused.err().unwrap_or(0),
+        // Not this half's question either way round: no machine was described
+        // here and no compositor was stood up, so both words are the ones a
+        // half that asked nothing is entitled to.
+        backend_admitted: false,
+        floorless: 0,
+        reported: 0,
         image: image.len() as u64,
         heap: 0,
     })
@@ -1122,11 +1419,57 @@ unsafe fn serve(
     on: Scheduling,
 ) -> Result<Report, Trouble> {
     let Scheduling { tree, cpu, hz, target, tsc_khz } = on;
+
+    // --- RFC 0080's refusal, before a page is spent -------------------------
+    //
+    // What this half says the machine reports, and whether a machine reporting
+    // it may be given a compositor at all. The control goes first and is the
+    // same function over this boot's own machine, for `mute`'s reason: a
+    // refusal that refused everything would look exactly like this one.
+    //
+    // **Here rather than after the rings, and the position is the clause.**
+    // *Refused a compositor* means nothing was stood up, so the refusal has to
+    // come before the frame the channel lives in, before the address space,
+    // before the tree — and the verdict below says so by requiring every one of
+    // those to be absent. A check further down would refuse a compositor that
+    // already existed, which is a compositor that exited.
+    let reported = half.reported();
+    let backend_admitted = admit_backend(BACKEND_CAPABILITIES).is_ok();
+    if let Err(code) = admit_backend(reported) {
+        return Ok(Report {
+            half,
+            submitted: 0,
+            completed: 0,
+            refused: 0,
+            board: Board::default(),
+            tree_nodes: 0,
+            tree_blank: 0,
+            tree_before: [0; WORDS],
+            tree_after: 0,
+            tree: [0; WORDS],
+            submitted_deadline: 0,
+            last_tick: 0,
+            // Not this half's question: no record was put past the admission a
+            // spawn performs, and saying otherwise would put a true-looking
+            // word in a report that had not earned it.
+            admitted: false,
+            muted: 0,
+            backend_admitted,
+            floorless: code,
+            // No page was ever written, so there is nothing to report having
+            // carried. The verdict requires this to be zero, which is the same
+            // clause as *nothing was spent* read from the page's side.
+            reported: 0,
+            image: image.len() as u64,
+            heap: 0,
+        });
+    }
+
     // What the manifest declares, or — on the starved half — two pages, which is
     // the one number in this plan the component is asked to disbelieve.
     let described = match half {
         Half::Starved => STARVED_HEAP_BYTES,
-        Half::Serve | Half::Mute => routing::HEAP_BYTES,
+        Half::Serve | Half::Mute | Half::Floorless => routing::HEAP_BYTES,
     };
     let bytes = u32::try_from(FRAME_SIZE).map_err(|_| Trouble::Channel(0))?;
 
@@ -1233,7 +1576,10 @@ unsafe fn serve(
         (at::TICK_NANOS, 0),
         (at::SCANOUT_PERIOD_NANOS, SCANOUT_PERIOD_NANOS),
         (at::PACING_MARGIN_NANOS, PACING_MARGIN_NANOS),
-        (at::BACKEND_CAPABILITIES, BACKEND_CAPABILITIES),
+        // What this half says the machine reports, and the same word
+        // `admit_backend` was given above — one function, so a boot cannot
+        // admit one machine and describe another.
+        (at::BACKEND_CAPABILITIES, reported),
     ] {
         board.write64(offset, value).map_err(Trouble::Channel)?;
     }
@@ -1262,7 +1608,7 @@ unsafe fn serve(
     let mut env = SeededEnv::new(PACING_SEED, 0);
     let driven = match half {
         Half::Serve | Half::Mute => drive(&producer, &reaper, &arena, &board, &mut env, tsc_khz),
-        Half::Starved => {
+        Half::Starved | Half::Floorless => {
             Ok(Seen { submitted: 0, completed: 0, refused: 0, deadline: 0, last_tick: 0 })
         }
     };
@@ -1275,7 +1621,11 @@ unsafe fn serve(
     // nothing it can ask the frame for while it runs.
     let joined = unsafe { crate::smp::join_serviced(cpu, tsc_khz, EXIT_MICROS, &mut || {}) };
 
-    let reported = Board::of(&board);
+    // What the page carries now, which is not what this function wrote into it:
+    // `drive` promotes the report after the first frame closes. Read before the
+    // address space goes back to the allocator, for the tree's reason.
+    let page_reported = board.read64(at::BACKEND_CAPABILITIES).unwrap_or(0);
+    let reported_board = Board::of(&board);
     // The tree, read before `reap` gives the page back. RFC 0013's *read, never
     // delivered*, with the frame on the reading end.
     let reader =
@@ -1307,7 +1657,7 @@ unsafe fn serve(
     unsafe { frames.free(wire) };
 
     let seen = driven?;
-    let board = reported.ok_or(Trouble::BadReport)?;
+    let board = reported_board.ok_or(Trouble::BadReport)?;
 
     Ok(Report {
         half,
@@ -1327,6 +1677,12 @@ unsafe fn serve(
         // true-looking word in a report that had not earned it.
         admitted: false,
         muted: 0,
+        // The machine this half described was admitted a compositor, which is
+        // what makes this the positive half of the pair the floorless half
+        // completes: the same function, in the same build, over one word.
+        backend_admitted,
+        floorless: 0,
+        reported: page_reported,
         image: image.len() as u64,
         heap: described,
     })
@@ -1446,6 +1802,35 @@ fn drive(
                 }
                 Err(_) => return Err(Trouble::Refused),
             }
+        }
+
+        // --- the backend gains a capability, mid-run ------------------------
+        //
+        // `E3-B02b`: *the rung is chosen once, at start, and never promoted*.
+        // The first frame has closed and been answered, so the component has
+        // long since read its report and chosen; now the frame writes a
+        // **better** one into the same word — the hybrid's set plus a usable
+        // subgroup scan, which RFC 0080's table gives the top rung — and the
+        // verdict requires the rung the component publishes at the end to be
+        // the one it started with.
+        //
+        // **Why after the completion rather than before the frame.** A report
+        // promoted before the component had read the first one would be a boot
+        // that described one machine and asked about another; what this task
+        // needs is a component that has already chosen, offered a better answer
+        // afterwards. The completion is what says the component has been
+        // through `Held` at least once.
+        //
+        // What this is *not* is a mechanism. Nothing in `user/compositor` reads
+        // this word twice, and that is the property under test rather than an
+        // omission: a build that added the second read would publish
+        // `PROMOTED_RUNG` here and go red on the serve verdict, which is the
+        // only way a negative clause gets a run behind it.
+        if let Entry::Commit(commit) = delta.body
+            && commit.frame_token == FRAME_ONE
+            && board.write64(at::BACKEND_CAPABILITIES, PROMOTED_CAPABILITIES).is_err()
+        {
+            return Err(Trouble::Refused);
         }
     }
     Ok(seen)

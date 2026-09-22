@@ -219,6 +219,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "f-virtio-input"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-env",
+ "f-input",
+ "f-ring",
+]
+
+[[package]]
 name = "f-virtio-net"
 version = "0.0.1"
 dependencies = [

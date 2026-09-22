@@ -310,14 +310,15 @@ tree is green on it. The only thing wrong is that two runs no longer agree.
 | A deliberate defect left on by default | X | `cargo xtask lint-mutations` | every verify, every PR | **catches** |
 | A component manifest that does not fit `docs/manifest.md` | X | `cargo xtask lint-manifests` | every verify | **catches** |
 | A reversal with no RFC | X | `REVIEW.md` pass 4 | every PR | **partially** |
+| An `XL` task with no decomposition, in an epoch whose `E<n>-00` is ticked (R13) | X | `cargo xtask lint-decomposition` | every verify, every PR | **catches** |
 | Buffer ownership violated — both sides hold it | X | three `compile_fail` doctests in `ring/src/buffers.rs` (E0599, E0451, E0382) | every verify, every PR | **catches** |
 
-Twelve of these sixteen fail a build, which is a better ratio than the twelve
-rules manage — `CONTRIBUTING.md` records that three of R01 to R12 are executable
-and nine are review. A thirteenth has a verb that reports and does not gate, for
-a reason RFC 0001 states and `E0-B21` records. The three that are left are
-review for the same reason the nine are: each would need a checker that can read
-intent. A lint cannot tell a number that needs a claim from a number in an
+Thirteen of these seventeen fail a build, which is a better ratio than the
+thirteen rules manage — `CONTRIBUTING.md` records that four of R01 to R13 are
+executable and nine are review. A fourteenth has a verb that reports and does
+not gate, for a reason RFC 0001 states and `E0-B21` records. The three that are
+left are review for the same reason the nine are: each would need a checker that
+can read intent. A lint cannot tell a number that needs a claim from a number in an
 example, or a `SAFETY` comment that discharges an obligation from one that
 restates it.
 
