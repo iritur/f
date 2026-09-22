@@ -24,6 +24,16 @@ f-ring.workspace = true
 # one fixed allocation with a named maximum — and `commit::Batch`, which is the
 # rule that a frame reaches the graph whole or not at all.
 f-scene.workspace = true
+# The ladder and what a backend says about itself. **This row is `E3-B01k`'s
+# rung**: `f_interface::backend::select` turns the capability set the frame
+# reports into one of RFC 0080's four rungs, and the component publishes which
+# one it is holding. `interface/` is a leaf crate with no dependencies of its
+# own, which is the property that made its own comment willing to be taken by a
+# compositor — so this row adds one crate to this component's graph and not a
+# subtree. Nothing here *runs* a rung: choosing once at start and never
+# promoting is `E3-B02b`, and this component reports the choice rather than
+# acting on it.
+f-interface.workspace = true
 
 # No override. This crate inherits `unsafe_code = "forbid"` from the workspace,
 # and here that inheritance costs something a reader should see stated: the
@@ -34,6 +44,18 @@ f-scene.workspace = true
 # that refusal is what makes the heap the answer rather than a preference.
 [lints]
 workspace = true
+
+# The seeded environment, and it is a dev-dependency rather than a dependency
+# because a component cannot hold one. RFC 0004 puts every observation of time
+# behind `f_env::Env`; a component at ring 3 has no clock and no port to read
+# one through, so the frame reads the clock and writes it into this component's
+# routing page — `routing::at::TICK_NANOS` — and `pacing` is arithmetic over
+# what it was told. What the `Env` is for is the *test*: `E3-B01h`'s exit says
+# two runs from one seed compute the same wake time on both architectures, and
+# a `SeededEnv` driving the corpus is what makes the seed in that sentence real
+# rather than a fixed array. It is never linked into the image.
+[dev-dependencies]
+f-env.workspace = true
 
 # The image half, on by default and turned off by the one crate that links this
 # as a library rather than building it into a component file.

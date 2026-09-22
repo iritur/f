@@ -177,6 +177,60 @@ pub mod at {
     /// and not a duration, because RFC 0004 offers a component no clock.
     /// Unit: turns.
     pub const IDLE_SPINS: u32 = 80;
+
+    /// The frame's clock, refreshed by the frame and read by the component.
+    ///
+    /// **This is the only time this component ever sees, and the arrangement is
+    /// RFC 0004 rather than a convenience.** Nothing at ring 3 may observe a
+    /// clock: there is no instruction a component is allowed to use for it and
+    /// no `f_env::Env` on this side of the boundary, which is why
+    /// `crate::tree::Held::offer` leaves `Cqe::timestamp` at zero and says so.
+    /// So the frame reads its own environment and writes the reading here, and
+    /// `crate::pacing` is arithmetic over what it was told.
+    ///
+    /// What that buys is the exit's second clause. The frame's environment is
+    /// seeded, so the sequence of readings a boot produces is a function of a
+    /// seed rather than of how fast the host was — and the wake time this
+    /// component computes is therefore the same on a slow machine and a fast
+    /// one, which is what makes it printable in a boot log `cargo xtask trace`
+    /// hashes.
+    ///
+    /// Monotonic within one run and never compared against a reading from
+    /// anywhere else, which is the caveat `f_env::Instant` already carries.
+    /// Unit: nanoseconds, in the frame's epoch.
+    pub const TICK_NANOS: u32 = 88;
+    /// How far apart the display's scanouts are.
+    ///
+    /// Told rather than assumed, because a compositor that held a refresh rate
+    /// as a constant would be a compositor that is wrong on every machine but
+    /// one. Zero is *this build knows of no display*, which
+    /// `crate::pacing::scanout_after` answers by aiming at now — a schedule
+    /// nobody can mistake for a real one.
+    /// Unit: nanoseconds.
+    pub const SCANOUT_PERIOD_NANOS: u32 = 96;
+    /// What the wake time holds back against the estimate being wrong.
+    ///
+    /// A policy and not a measurement, which is why it arrives from outside: the
+    /// number that is right depends on how bad a missed frame is on this
+    /// machine, and that is a question a component cannot answer about itself.
+    /// Unit: nanoseconds.
+    pub const PACING_MARGIN_NANOS: u32 = 104;
+    /// What the backend under this machine reports it can do.
+    ///
+    /// The bits are positions, one per `f_interface::backend::Capability`, at
+    /// that capability's own `index()`. **A bitmask and not the vocabulary's own
+    /// representation**, because `Capabilities` is a type in a crate above the
+    /// frame and a page is bytes: `crate::tree::reported_capabilities` walks
+    /// `Capability::ALL` and sets what it finds, so the two sides agree through
+    /// the vocabulary rather than through a layout neither of them states.
+    ///
+    /// A set satisfying no rung is a real answer and is published as *no rung*.
+    /// Refusing to run on such a machine is `E3-B02b`'s clause and not this
+    /// one — RFC 0080 says a backend satisfying no rung is refused a compositor
+    /// rather than handed the floor, and this build reports where that task will
+    /// refuse.
+    /// Unit: none — a bitmask of capability indices.
+    pub const BACKEND_CAPABILITIES: u32 = 112;
 }
 
 /// The state nodes this component's manifest declares, by the id it declares
@@ -203,14 +257,69 @@ pub mod node {
     /// Entries refused. Unit: entries.
     pub const REFUSED: u32 = 5;
 
+    // --- the frame's story, `E3-B01k` ---------------------------------------
+    //
+    // Five ids, and what makes them one group rather than five additions is
+    // that a reader wants all five at once: *which renderer, which frame, what
+    // it was due by, what a frame costs here, and what was given up to fit*.
+    // Any one of them alone is a number nobody can act on — a pacing estimate
+    // with no deadline beside it does not say whether the machine is keeping
+    // up, and a degradation with no frame token beside it does not say which
+    // frame gave something up.
+
+    /// Which rung of RFC 0080's ladder this compositor is holding.
+    ///
+    /// `f_interface::ladder::Rung::index()` plus one, so that zero is *this
+    /// machine satisfies no rung* rather than the top rung — which is the one
+    /// confusion this node must not be able to cause, because the top rung is
+    /// the best answer and no rung at all is the worst one.
+    /// Unit: none — a rung ordinal, not a quantity.
+    pub const RUNG: u32 = 6;
+    /// The token of the last frame that closed.
+    ///
+    /// The client's own word handed back. It is published beside `frames`
+    /// rather than instead of it: *two frames closed* and *the last one was
+    /// called 0x12* are different claims, and a compositor that had closed the
+    /// same frame twice would move one and not the other.
+    /// Unit: none — a frame identifier, not a quantity.
+    pub const FRAME: u32 = 7;
+    /// The deadline that frame carried.
+    ///
+    /// Out of `f_abi::scene::Frame::deadline`, which the wire refuses a commit
+    /// without — so this is the client's own statement of when the frame was
+    /// due, republished where a reader who never saw the submission can find
+    /// it. Unit: nanoseconds, in the channel's epoch.
+    pub const DEADLINE: u32 = 8;
+    /// The rolling p99 of what a frame has cost this compositor.
+    ///
+    /// `crate::pacing::Pacing::estimate_nanos`, over the last
+    /// `crate::pacing::WINDOW` frames. Published rather than the wake time
+    /// itself because the estimate is the part that is about *this machine*: a
+    /// wake time is an estimate, a scanout and a margin, and the other two are
+    /// things the frame told this component.
+    /// Unit: nanoseconds.
+    pub const PACING: u32 = 9;
+    /// What was given up to make the last frame fit.
+    ///
+    /// A choice from `f_scene::degrade::Criterion::ORDER`, offset by
+    /// `crate::pacing::degraded::FIRST_CRITERION`, with two values below it for
+    /// the two answers that are not a criterion. **Not a boolean**, and
+    /// `crate::pacing::degraded` argues why at length: `E3-B07b`'s whole
+    /// decision is *which* effect goes first, and a node that said only
+    /// *something was degraded* would be publishing the existence of a policy
+    /// rather than its choice.
+    /// Unit: none — a `crate::pacing::degraded` ordinal.
+    pub const DEGRADED: u32 = 10;
+
     /// Every node this component writes a word into, in ascending id order.
     ///
     /// The component publishes exactly these and the frame requires exactly
     /// this many to carry a word, so a node added to the manifest and forgotten
-    /// here is a boot that says four where the schema says five rather than a
+    /// here is a boot that says eight where the schema says nine rather than a
     /// silence.
     /// Unit: none — node ids.
-    pub const WRITTEN: [u32; 4] = [FRAMES, EDITS, NODES, REFUSED];
+    pub const WRITTEN: [u32; 9] =
+        [FRAMES, EDITS, NODES, REFUSED, RUNG, FRAME, DEADLINE, PACING, DEGRADED];
 }
 
 /// Where the component's own half of the page starts.
@@ -269,10 +378,64 @@ pub mod reported {
     ///
     /// Published on the board *as well as* written into the tree, and the
     /// duplication is the point: the frame reads the tree itself and compares.
-    /// A component that published nothing and claimed four here is caught by a
+    /// A component that published nothing and claimed nine here is caught by a
     /// reader that does not take its word for it.
     /// Unit: nodes.
     pub const PUBLISHED: u32 = super::REPORT + 88;
+    /// The scanout the last closed frame was paced against.
+    ///
+    /// Published on the board and **not** in the tree, and the division is
+    /// deliberate: the tree carries what is about this component — the estimate
+    /// it took over its own frames — and the board carries the whole of the
+    /// arithmetic, so a reader checking `E3-B01h`'s sentence can do the
+    /// subtraction rather than believe it. `crate::pacing::Decision` is the four
+    /// of them together.
+    /// Unit: nanoseconds.
+    pub const SCANOUT: u32 = super::REPORT + 96;
+    /// The rolling p99 estimate at the last frame. Unit: nanoseconds.
+    pub const ESTIMATE: u32 = super::REPORT + 104;
+    /// What was held back against it being wrong. Unit: nanoseconds.
+    pub const MARGIN: u32 = super::REPORT + 112;
+    /// The wake time: the scanout, less the estimate, less the margin.
+    ///
+    /// `E3-B01h`'s first clause, as a number a boot can read back. The three
+    /// terms above are published beside it for the reason a claim carries its
+    /// workload: an answer whose inputs are not published is an answer nobody
+    /// can check.
+    /// Unit: nanoseconds.
+    pub const WAKE: u32 = super::REPORT + 120;
+    /// How many frames the estimate was taken over.
+    ///
+    /// Beside the estimate because a p99 over four frames and a p99 over a
+    /// hundred and twenty-eight are different claims wearing one name, and a
+    /// build whose window never filled would publish a plausible number with no
+    /// evidence behind it.
+    /// Unit: samples.
+    pub const SAMPLES: u32 = super::REPORT + 128;
+    /// What was given up to fit the last frame, as a
+    /// `crate::pacing::degraded` ordinal. Unit: none.
+    pub const DEGRADED: u32 = super::REPORT + 136;
+    /// Which rung this compositor is holding, as `Rung::index()` plus one, or
+    /// zero for a machine that satisfies none. Unit: none.
+    pub const RUNG: u32 = super::REPORT + 144;
+    /// The deadline the last closed frame carried.
+    ///
+    /// On the board as well as in the tree, for [`PUBLISHED`]'s reason applied
+    /// to a word rather than to a count: the frame compares the two, and a
+    /// component whose tree and board disagreed about one number would be a
+    /// component with two sets of counters.
+    /// Unit: nanoseconds, in the channel's epoch.
+    pub const DEADLINE: u32 = super::REPORT + 152;
+    /// How many frames did not fit before their own deadline.
+    ///
+    /// **The second observation of the degradation policy, and the reason
+    /// [`DEGRADED`] is checkable at all.** The tree carries what happened to the
+    /// last frame, which is one reading; a component that answered the same way
+    /// every frame and one that decided per frame publish the same word. This is
+    /// the count, and `kernel/src/compositor.rs` requires it to be one out of
+    /// two rather than two out of two.
+    /// Unit: frames — UI frames.
+    pub const LATE: u32 = super::REPORT + 160;
 }
 
 /// Why the component's loop ended.

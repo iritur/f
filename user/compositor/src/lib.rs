@@ -69,10 +69,12 @@
 //!
 //! # What this is not, listed rather than discovered
 //!
-//! No renderer, no rung, no backend: nothing here draws, and `E3-B02` is what
-//! will. No frame pacing and no wake time — `E3-B01h` computes one, and until it
-//! does a frame closes when its commit arrives. No doorbell: this component
-//! spins its loop and `E3-B01g` is the task that puts it to sleep on one. No
+//! No renderer and no backend: nothing here draws, and `E3-B02` is what will.
+//! It holds a rung and a wake time and acts on neither — `E3-B01k` publishes
+//! them and `E3-B02b` is the task that lets the rung decide a renderer, which
+//! is a distinction [`tree`]'s own comment keeps. No doorbell: this component
+//! spins its loop and `E3-B01g` is the task that puts it to sleep on one, which
+//! is also the task that gives the wake time somewhere to be spent. No
 //! delta ring between two *components* — the client here is the frame itself,
 //! which is the arrangement every datapath boot in this tree has and what
 //! `CHAOS_GAP` in `xtask` carries as a debt. No client library: `E3-B01l` built
@@ -80,11 +82,14 @@
 //! produces deltas is the side that would.
 //!
 //! One thing it does not do is worth stating on its own, because a reader will
-//! look for it. It does not decide a class or schedule against a deadline. A
-//! commit carries one, the wire refuses a commit that carries none, and this
-//! build reads it no further: an ordering rule written before there is anything
-//! to order would be a rule nobody could falsify, and `E3-B01h` is where the
-//! arithmetic lands.
+//! look for it. **It does not decide a class or schedule against a deadline.** A
+//! commit carries one and the wire refuses a commit that carries none; what
+//! `E3-B01h` added is that this component now *reads* it — the deadline is what
+//! the degradation word is measured against, and it is published where a reader
+//! can find it. What still does not exist is an ordering rule: nothing here runs
+//! one frame before another, because an ordering rule written before there is
+//! anything to order would be a rule nobody could falsify, and the queue it
+//! would order is `E3-B01g`'s.
 
 #![no_std]
 
@@ -114,6 +119,16 @@ pub mod routing;
 // The graph and what one entry does to it, compiled everywhere so that a host
 // test can drive it on both architectures. Its own comment argues the split.
 pub mod tree;
+
+// The pacing arithmetic, compiled everywhere for the same reason and with a
+// sharper version of it. `E3-B01h`'s exit says *two runs from one seed compute
+// the same wake time to the tick on both architectures*, and the only thing in
+// this project that observes the AArch64 half is the host suite on the arm
+// runner — a boot runs on x86-64 and nothing else. So this module is not merely
+// testable off the machine, it is a module whose exit **cannot** be closed by a
+// boot, which is why every function in it is a pure function of its arguments
+// and why the clock arrives as a number rather than being read.
+pub mod pacing;
 
 // The component half is x86-64's, and only because the door is. Nothing in
 // `component.rs` is architecture-specific; the one instruction underneath it is,

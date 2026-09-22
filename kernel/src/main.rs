@@ -52,6 +52,7 @@ pub mod process;
 pub mod ring;
 pub mod runtime;
 pub mod screen;
+pub mod semantic;
 pub mod smp;
 pub mod state;
 pub mod supervisor;
@@ -923,6 +924,13 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
     // reason: an ordinary boot has no scene to commit, and a default boot that
     // ran it would stop being the fixture `cargo xtask trace` hashes.
     compositor_boot(&boot, &mut frames, &space, features, clocks, tree.physical());
+
+    // E3-B06c. An application that declares an interface across a ring and dies,
+    // leaving what it declared in a page the frame holds and a handle that no
+    // longer reaches it. Behind its own parameter for `compositor_boot`'s
+    // reason: it spawns a component and reads a page back, and a default boot
+    // that ran it would stop being the fixture `cargo xtask trace` hashes.
+    semantic_boot(&boot, &mut frames, &space, features, clocks, tree.physical());
 
     // E1-B08. A component that holds a core and schedules its own work inside
     // it, with the frame counting what crossed. Behind its own parameter, like
@@ -3112,6 +3120,85 @@ fn compositor_boot(
     Some(report)
 }
 
+/// `E3-B06c`'s boot: an application declares an interface, dies, and the frame
+/// still holds it.
+///
+/// Two halves, and `kernel/src/semantic.rs` argues why neither means anything
+/// alone: `semantic=declare` is the exit — the tree is read back by its address
+/// after the component is reaped and the component's own handle is refused
+/// against it in the same breath — and `semantic=deaf` is the control, the same
+/// component with a zero where its handle goes, which must refuse before it
+/// declares anything.
+///
+/// The verdict is the kernel's rather than the harness's, exactly as `blk`'s and
+/// `compositor`'s are: it knows which half it asked for, what the script
+/// declares, and what came back out of a tree nothing but this frame can read.
+fn semantic_boot(
+    boot: &BootInfo,
+    frames: &mut mem::FrameAllocator,
+    space: &paging::AddressSpace,
+    features: paging::Features,
+    clocks: arch::x86_64::apic::Clocks,
+    tree: u64,
+) -> Option<semantic::Report> {
+    let half = if boot.has_parameter(b"semantic=declare") {
+        semantic::Half::Declare
+    } else if boot.has_parameter(b"semantic=deaf") {
+        semantic::Half::Deaf
+    } else {
+        return None;
+    };
+
+    // Another core, always, and both halves need one: the component runs at ring
+    // 3 and the frame answers its ring from inside the join, so a machine with
+    // one core has nowhere to put the application. `objects_datapath`'s sentence
+    // and the same refusal rather than a fallback that would measure something
+    // else.
+    let me = arch::x86_64::current_cpu();
+    let Some(worker) = (smp::started() > 1).then(smp::first_worker).filter(|core| *core != me)
+    else {
+        kprintln!(
+            "FAIL: the semantic boot needs a second core — the application declares from ring 3              and the frame answers it"
+        );
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+
+    // SAFETY: the boot processor, with the kernel's address space in `CR3`,
+    // `frames` rebound onto its direct map, the direct map covering every boot
+    // module, and `worker` a core that is up and idle.
+    let outcome = unsafe {
+        semantic::demonstrate(
+            frames,
+            space,
+            features,
+            half,
+            boot,
+            semantic::Scheduling {
+                tree,
+                cpu: worker,
+                hz: TIMER_HZ,
+                target: RUNTIME_TICKS,
+                tsc_khz: clocks.tsc_khz,
+            },
+        )
+    };
+
+    let report = match outcome {
+        Ok(report) => report,
+        Err(why) => {
+            kprintln!("FAIL: the semantic boot: {}", why.why());
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+    semantic::report_lines(&report);
+    if let Err(why) = report.verdict() {
+        kprintln!("FAIL: the semantic boot: {why}");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+    kprintln!("  semantic      verdict: the {} half held", report.half.name());
+    Some(report)
+}
+
 /// `E2-B08`'s boot: a component that serves the objects ring, and this frame
 /// submitting on it.
 ///
@@ -4526,11 +4613,32 @@ fn collect(boot: &BootInfo) -> ([Region; MAX_REGIONS], usize, bool) {
 /// How many reserved ranges the boot path can carry.
 ///
 /// Three fixed, one for the second pass's exclusion of everything the first
-/// already took, and one per module the handoff kept. Sized so that the list
-/// can never be the thing that drops a reservation: a range that does not fit
-/// is memory handed to somebody while its owner is still using it, and there is
-/// no diagnostic for that worth the name.
-const MAX_RESERVED: usize = 13;
+/// already took, one for a framebuffer the loader may have given, and one per
+/// module the handoff can keep. Sized so that the list can never be the thing
+/// that drops a reservation: a range that does not fit is memory handed to
+/// somebody while its owner is still using it, and there is no diagnostic for
+/// that worth the name.
+///
+/// **It was `13`, and thirteen was two short.** The number was written against
+/// the modules a boot had when it was chosen rather than against the bound that
+/// decides how many there can be, so `E3-B06c` adding one component to
+/// `COMPONENTS` pushed the eleventh module past the end of this list —
+/// [`reserved_ranges`] stops at the bound and says nothing — and the frame
+/// allocator then handed out the *generation* module's memory to the first
+/// caller. What that looked like from the boot log was
+/// `no module this machine was offered folds to the root it was asked for`,
+/// with the address space's own root sitting at the address the module had been
+/// loaded at: a failure in the identity check, three subsystems away from the
+/// cause, on a change that touched neither.
+///
+/// So the number is now derived from
+/// [`MAX_MODULES`](arch::x86_64::multiboot::MAX_MODULES), which is the constant
+/// that decides how many modules a boot may keep at all. A component added to
+/// `COMPONENTS` cannot drop a reservation again, because the list is as long as
+/// the module table it copies from — and the day `MAX_MODULES` moves, this moves
+/// with it rather than needing to be remembered.
+/// Unit: count of ranges.
+const MAX_RESERVED: usize = 5 + arch::x86_64::multiboot::MAX_MODULES;
 
 /// Everything inside usable memory that is already spoken for.
 ///

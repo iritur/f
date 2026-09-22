@@ -652,6 +652,28 @@ jobs:
       # and no second machine, because the client is the frame and the graph is
       # a data structure. RFC 0013, RFC 0065.
       - run: cargo xtask compositor
+      # E3-B06c. Section 11's inversion, as two boots. `declare` stands
+      # `user/panel` up at ring 3 holding the *client's* end of a ring — the only
+      # component in this tree that submits rather than answers — has it declare
+      # four semantic nodes, a child order that is not the order its entries
+      # arrived in, a state and an intent, and then lets it end. The frame reaps
+      # its address space and then asks two questions in one breath: it reads the
+      # tree back **by its address** and requires every node to answer to the
+      # identifier its author chose under the role it was declared with, and it
+      # offers one more frame **by the handle that component held** and requires
+      # `AUTHORITY/REVOKED`. Neither alone would be worth a boot — a tree that
+      # survives its writer is a log and a handle that dies with its process is
+      # every handle — so the verdict fails unless both are true of one
+      # structure, and it then adopts the tree to a successor and offers the dead
+      # handle against the reopened slot, so that what refused it is the
+      # generation rather than the slot being shut. `deaf` is the same image and
+      # the same script with a zero where the handle goes, which must stop the
+      # component before it declares anything.
+      #
+      # It needs nothing this job does not already have: the peer on that channel
+      # is the frame, and the tree is a page the frame never maps to anybody.
+      # RFC 0077, RFC 0083.
+      - run: cargo xtask semantic
       # `claims/0037`'s five rows, compared against the table rather than against
       # the boot's own refusals. The two are different checks: the boot asserts
       # the load half crossed nothing and the provoke half crossed exactly what

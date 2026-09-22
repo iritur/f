@@ -1,0 +1,30 @@
+[package]
+name = "f-semantic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The semantic tree the system owns, and the handle an application holds to it."
+
+[dependencies]
+# The wire, and the key. `f_abi::semantic` is the entry format `E3-B06b` froze
+# and `f_abi::semantic::Sealed` is the right this crate's apply path demands —
+# RFC 0083 names that path as this task's and states its reversal condition as
+# an apply path that takes a `Delta` and no `Sealed`. A crate that took the
+# deltas and not the key would be that reversal with a different file name.
+f-abi.workspace = true
+
+# The meaning. `f_interface::node` is the closed vocabulary RFC 0077 froze, and
+# `vocabulary.rs` is the first implementor of `f_abi::semantic::Vocabulary`
+# outside `abi`'s own test fixtures — which RFC 0083 records as owed here.
+#
+# This is the crate that joins the two, and it exists because neither may take
+# the other: `abi` holds the wire and cannot know what a role means,
+# `interface/Cargo.toml` declines `f-abi` so that the vocabulary stays a leaf
+# that can be deleted. The join has to live somewhere that is neither, and this
+# is it. *Reversal:* `interface` taking `f-abi`, at which point the vocabulary
+# is no longer abandonable and that crate's own comment is what has changed.
+f-interface.workspace = true
+
+[lints]
+workspace = true

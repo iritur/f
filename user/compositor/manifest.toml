@@ -19,8 +19,11 @@
 # retained graph, serving one client on one ring whose deltas travel inline;
 # restarted on a fault and not on an exit, at the price of every client's
 # retained scene; in the soft class, because nothing here yet has a deadline it
-# can miss; and publishing four numbers about itself that a reader can check
-# against what a client asked for.
+# can miss; and publishing nine numbers about itself that a reader can check
+# against what a client asked for — four about what it applied, and five that are
+# one frame's story: the rung it would draw with, the frame it last closed, the
+# deadline that frame carried, what a frame costs here, and what was given up to
+# fit.
 
 schema = 3
 name   = "compositor"
@@ -194,6 +197,16 @@ budget_window_ms = 60_000
 # is what earns `hard` here — together with RFC 0007's schedulability test, which
 # is what would have to grant it.
 #
+# **`E3-B01h` has now landed and this line did not move, which is worth stating
+# rather than leaving as a forecast that quietly came due.** What that task built
+# is the arithmetic: a rolling p99 over this component's own frames, a wake time
+# computed backwards from the next scanout, and a word saying whether the last
+# frame fitted. What it did not build is anything that *misses* — nothing here
+# renders, so no work is scheduled against a deadline and there is still no
+# deadline this component can fail to meet. `hard` would be capacity reserved for
+# work nothing does. The line that earns it is the first one that draws, together
+# with RFC 0007's schedulability test, which is what would have to grant it.
+#
 # The word is load-bearing at run time and not only at admission, exactly as it
 # is for the three drivers: the frame reads it out of the compiled record and
 # writes it into the component's routing page as the ceiling RFC 0025's bound 1
@@ -240,13 +253,14 @@ mode = "restart_only"
 # the same record, with its declaration emptied and nothing else changed — so the
 # sentence above is a thing this tree does rather than a thing it says.
 #
-# Every node here is a number `f_compositor::tree::Counters` already keeps, which
-# is the whole of what makes the declaration honest rather than decorative: there
-# is no collect step, no sampling interval and no second copy that can disagree
-# with the first. And each of them is checkable from outside: a client that sent
-# two frames of known shape knows what all four should say, which is what
-# `kernel/src/compositor.rs` compares them against rather than taking the
-# component's word.
+# Every node here is a number `f_compositor::tree::Counters` or
+# `f_compositor::tree::Story` already keeps, which is the whole of what makes the
+# declaration honest rather than decorative: there is no collect step, no
+# sampling interval and no second copy that can disagree with the first. And each
+# of them is checkable from outside: a client that sent two frames of known shape
+# at known deadlines, over a clock it wrote itself, knows what all nine should
+# say — which is what `kernel/src/compositor.rs` compares them against rather
+# than taking the component's word.
 #
 # Ids are permanent and are never reused, for the reason `TODO.md` never reuses a
 # task id: the id is the only thing that makes two readings of this component
@@ -306,3 +320,125 @@ parent = "compositor"
 name   = "refused"
 kind   = "counter"
 unit   = "entries"
+
+# --- The frame's story, E3-B01k ----------------------------------------------
+#
+# Five nodes that are one declaration. A reader of this component wants all five
+# at once, because no one of them can be acted on alone: a pacing estimate with
+# no deadline beside it does not say whether the machine is keeping up, a
+# degradation with no frame token beside it does not say which frame gave
+# something up, and a rung with neither says only what the machine could have
+# drawn with.
+#
+# Every one of them is a value `f_compositor::tree::Held` already holds, which is
+# the rule `user/virtio-gpu/manifest.toml` states at length and this file obeys
+# rather than restates: a node with no counter behind it would be a serialisation
+# with extra steps wearing RFC 0013's name. There is no collect step here, no
+# sampling interval and no second copy that can disagree with the first — the
+# component writes these nine words out of one `Counters` and one `Story`, and
+# `f_compositor::routing::reported` carries the same numbers onto the board so
+# that the frame can require the two to agree.
+#
+# Ids 6 to 10, ascending, and 1 to 5 keep what they had. A node's id is never
+# reused and never renumbered: two readings of this component across time are
+# comparable only because `frames` was 2 before this task and is 2 after it.
+
+# Which rung of RFC 0080's ladder this compositor is holding, as
+# `Rung::index()` plus one — so zero is *this machine satisfies no rung* and is
+# not confusable with the top one, which is the good answer.
+#
+# A gauge and not a counter, because it is a level rather than a tally, and the
+# unit is `none` because a rung ordinal is not a quantity: a reader that summed
+# two of these would be adding two positions on a ladder.
+#
+# **It is reported and not acted on.** Nothing in this build chooses a renderer,
+# because there is no renderer — `E3-B02b` is the task where a rung decides one
+# and where a backend satisfying no rung is refused a compositor rather than
+# handed the floor. That task's exit says *a backend with compute shaders and no
+# usable scan starts at rung 2 and says so in the compositor's tree*, and this is
+# the node it says it in.
+[[state]]
+id     = 6
+parent = "compositor"
+name   = "rung"
+kind   = "gauge"
+unit   = "none"
+
+# The token of the last frame that closed, as the client named it.
+#
+# Published beside `frames` and never instead of it: *two frames closed* and
+# *the last one was called two* are different claims, and a compositor that had
+# closed one frame twice would move one of these and not the other.
+#
+# `none`, because a frame identifier is chosen by the submitter and is opaque
+# here — `abi/src/scene.rs` refuses a zero, so a zero in this node is *no frame
+# has closed* rather than *frame zero closed*, which is the distinction the unit
+# is carrying.
+[[state]]
+id     = 7
+parent = "compositor"
+name   = "frame"
+kind   = "gauge"
+unit   = "none"
+
+# The deadline that frame carried.
+#
+# Out of `f_abi::scene::Frame::deadline`, which the wire refuses a commit
+# without. It is the client's own statement of when the frame was due,
+# republished where a reader who never saw the submission can find it — and it
+# is the number `degraded` below is measured against, so a tree carrying one
+# without the other would be publishing a verdict with its evidence removed.
+#
+# Nanoseconds in the channel's epoch, which is `f_env::Instant`'s and is the only
+# clock in this system with ordering authority. RFC 0009.
+[[state]]
+id     = 8
+parent = "compositor"
+name   = "deadline"
+kind   = "gauge"
+unit   = "nanoseconds"
+
+# What a frame costs on this machine: the rolling p99 over the last hundred and
+# twenty-eight frames this component closed.
+#
+# `f_compositor::pacing` is the arithmetic and argues it in full — exact by
+# nearest rank over integers, no binary fraction anywhere, and a window that
+# forgets on a schedule. What is worth saying in a manifest is which of the four
+# numbers in `E3-B01h`'s sentence this one is: the wake time is a scanout, an
+# estimate and a margin, and **the estimate is the only one of the three that is
+# about this component**. The other two were told to it by the frame, and a tree
+# republishing what it was told would be RFC 0013's *read, never delivered* run
+# backwards. All four are on the board, where the frame can check the
+# subtraction.
+[[state]]
+id     = 9
+parent = "compositor"
+name   = "pacing"
+kind   = "gauge"
+unit   = "nanoseconds"
+
+# What was given up to make the last frame fit.
+#
+# **A choice from `E3-B07b`'s order and not a boolean**, which is the whole of
+# why this node is worth having. `scene/src/degrade.rs` opens by refusing an
+# order that is deterministic but unwritten, on the grounds that it is not a
+# decision anybody made; a node that said only *something was degraded* would
+# repeat that mistake one layer up, publishing the existence of a policy rather
+# than its choice. The word is a `Criterion::priority()` offset by
+# `pacing::degraded::FIRST_CRITERION`, with two values below it for the two
+# answers that are not a criterion: the frame fitted, and the policy was asked
+# and had nothing left to give.
+#
+# Today every over-budget frame answers the second of those, and the reason is a
+# wire format rather than a defect: `abi/src/scene.rs` has six opcodes and none
+# of them declares an effect, so the policy runs over an empty slice. That is
+# written down in `pacing::degraded::SHORT` with what would reverse it, and it is
+# why this node is declared now rather than when the criteria start being
+# reached — the id is permanent, and a reader comparing this component across
+# that change wants the same id on both sides of it.
+[[state]]
+id     = 10
+parent = "compositor"
+name   = "degraded"
+kind   = "gauge"
+unit   = "none"

@@ -252,6 +252,19 @@ pub struct Manifest {
     /// How many `[[state]]` nodes, this component's tree root included. Never
     /// zero on a manifest that passed: RFC 0065.
     pub state_nodes: usize,
+    /// Does any `[[ring]]` here declare `role = "server"`?
+    ///
+    /// **Read here so that `cargo xtask chaos`'s coverage check has a second
+    /// source for its denominator.** That check compares the number of
+    /// components the sweep killed against the number of manifests this tree
+    /// carries, and its own comment says why the two sides must not come from
+    /// one read. `user/panel` is the first manifest declaring only a client
+    /// ring, and the sweeps skip it — so the denominator is *the manifests that
+    /// declare a server*, and this is where that is decided, out of the schema
+    /// rather than out of the sweep.
+    ///
+    /// Unit: none — a property, not a quantity.
+    pub serves: bool,
 }
 
 impl Manifest {
@@ -1387,6 +1400,9 @@ impl Checker<'_> {
         }
         let ring_count = ring_items.len();
         let mut ring_names = BTreeSet::new();
+        // Any server ring at all: `Manifest::serves` says why the answer is
+        // read here rather than counted downstream.
+        let mut serves = false;
         for (index, (line, table)) in ring_items.into_iter().enumerate() {
             let place = format!("[[ring]] #{}", index + 1);
             let mut f = self.fields(place, line, table);
@@ -1400,6 +1416,7 @@ impl Checker<'_> {
                 }
             }
             let role = f.one_of("role", ROLES).map(|(_, r)| r);
+            serves |= role.as_deref() == Some("server");
             if let Some((line, protocol)) = f.string("protocol", true) {
                 let sound = !protocol.is_empty()
                     && protocol.len() <= NAME_MAX
@@ -1816,6 +1833,7 @@ impl Checker<'_> {
             restart: restart?,
             devices,
             state_nodes: node_count,
+            serves,
         })
     }
 }

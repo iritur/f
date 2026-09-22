@@ -1,0 +1,185 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+#
+# The first application: it declares an interface across a ring, and owns none
+# of it.
+#
+# `docs/manifest.md` is the schema and RFC 0008 is the policy. What is worth
+# reading here rather than there is the one row every other manifest in this
+# tree has the other way round.
+#
+# **`role = "client"` on a data ring, and it is the first in the workspace.**
+# Every other component declares `role = "server"`: it holds something and
+# answers for it, which is what an application under the arrangement section 11
+# is written against looks like from the outside. This one submits and is
+# answered. The ring it submits on is reached *through an endpoint* — `to =
+# "tree"` below — because `write` on an endpoint is the right to connect, RFC
+# 0008's table, and that is the manifest saying in its own vocabulary what
+# `E3-B06c` says in prose: the application holds a handle to a thing the system
+# owns.
+#
+# There is no `[[capability]]` naming a tree, a page or a region the tree is in,
+# and there could not be: the tree is in the frame's own memory, mapped into no
+# address space but the frame's. A capability here would be a grant of something
+# to address, and what this component holds is something to *do*.
+
+schema = 3
+name   = "panel"
+image  = "user/panel"
+
+# `private`, like every component that is not a driver: nothing here reaches a
+# device and nothing shares a domain with one.
+domain = "private"
+
+# The endpoint the data ring connects through, and the only authority this
+# component has.
+#
+# `write` and nothing else. `grant` would let it hand the channel on, which is a
+# question this task does not answer — an application that could pass its right
+# to declare to a second component is a delegation policy, and RFC 0083's
+# vocabulary negotiation is per channel epoch, so what the second component
+# would have agreed is a fourth thing to decide. *Reversal:* `E3-B06j`'s agent
+# projection, where something other than the declaring application reaches a
+# tree, at which point this row is where the question is asked.
+[[capability]]
+name   = "tree"
+type   = "endpoint"
+rights = ["write"]
+from   = "supervisor"
+
+# One page, and it is never allocated from.
+#
+# `user/panel/src/routing.rs`'s `HEAP_BYTES` is the same number and
+# `kernel/src/semantic.rs` refuses a boot where the two disagree. The component
+# has no allocator at all — the crate does not take `alloc` — so this region
+# exists because `kernel::process::prepare_server` describes a heap before the
+# first instruction and a zero-length one is a region with no prologue to write
+# into. *Reversal:* a spawn shape that accepts no heap, which would make this row
+# go rather than shrink.
+[[capability]]
+name   = "heap"
+type   = "untyped"
+rights = ["read", "write"]
+from   = "supervisor"
+bytes  = 4_096
+
+# The ring this component declares across.
+#
+# `payload = "inline"`: a semantic entry's fifty-six bytes travel in the
+# channel's own arena, so there is no region to register and no feature bit that
+# would mean anything. `entries = 16` because this component submits one entry at
+# a time and waits — `component.rs` says why that is a rule rather than a
+# simplification — so a ring sized to hold the whole script would be a bound
+# nothing reaches.
+#
+# `protocol = "semantic"` is `f_abi::semantic`'s opcode space, and
+# `version = 1` here is the *ring's* version and not the vocabulary's. The
+# vocabulary is negotiated in band, once per channel epoch, by the first entry —
+# RFC 0083 argues at length why it is not a header field, and the short version
+# is that a field meaningless on a block-device channel is the shape R04 exists
+# to refuse.
+[[ring]]
+name        = "data"
+role        = "client"
+to          = "tree"
+protocol    = "semantic"
+version_min = 1
+version     = 1
+entries     = 16
+payload     = "inline"
+features    = []
+
+# `never`, and this is the one manifest in the tree where that is the honest
+# answer rather than the lazy one.
+#
+# A restart is a new spawn and not a resurrection — RFC 0008 — so a restarted
+# panel is a *second occupant*, and under section 11 it does not inherit its
+# predecessor's right: `f_semantic::Registry::adopt` is what would hand it one,
+# at the generation the predecessor's death moved to. Until something calls it on
+# a restart path, a policy that restarted this component would produce a process
+# holding a handle that names nothing, which would fail in a way that looked like
+# a broken ring.
+#
+# *Reversal:* `E3-B06c`'s successor path reaching the supervisor, which is the
+# day `adopt` is called by something other than a boot demonstrating it.
+[restart]
+policy = "never"
+
+# Soft, and the figure is a *footprint* rather than a measurement of what this
+# component holds.
+#
+# It holds almost nothing — four pages and a ring — and this number is sixty-four
+# kibibytes anyway, because what the account has to cover is the spawn: a place's
+# occupant is given an address space, a text reservation, a stack, two rings, a
+# board, a heap and the page tables over all of it, and `kernel/src/component.rs`
+# charges every frame of that to the account the footprint sizes. The first
+# figure here was sixteen kibibytes, which is roughly what the component *is*,
+# and the boot refused with *the account could not pay for what the manifest
+# declared* at the spawn.
+#
+# Sixty-four is what `objects` and `compositor` declare, and it is the smallest
+# number in this tree that a spawn of this shape fits inside.
+[reservation]
+class        = "soft"
+memory_bytes = 65_536
+
+# `restart_only`, which is the conservative one of the two the schema admits and
+# is declared here knowing it can never be reached: `policy = "never"` above
+# means there is no restart for state to be carried across.
+#
+# That is not a contradiction, it is the declaration being about the *component*
+# rather than about this build's policy. The honest content of the row is that
+# nothing here may be updated underneath a running instance, which is true and
+# stays true if the restart policy ever changes — and a component that says
+# `in_place` is promising something this one has no mechanism for.
+[transfer]
+mode = "restart_only"
+
+# The state tree this component publishes, which is **not** the tree it declares.
+#
+# RFC 0013's monitoring tree, in a page the frame maps into this address space
+# and takes back when the component ends. Four words, every one of them a number
+# the frame also knows — the frame is the peer that answered the entries — so the
+# comparison `kernel/src/semantic.rs` makes is between two accounts of one run
+# rather than between a claim and itself.
+#
+# The contrast with the semantic tree is the task and is worth stating where both
+# are declared: this tree says what the component *did* and dies with it; the
+# semantic tree says what the component *is* and does not.
+[[state]]
+id   = 1
+name = "panel"
+kind = "subtree"
+unit = "none"
+
+[[state]]
+id     = 2
+parent = "panel"
+name   = "submitted"
+kind   = "counter"
+unit   = "entries"
+
+[[state]]
+id     = 3
+parent = "panel"
+name   = "answered"
+kind   = "counter"
+unit   = "entries"
+
+[[state]]
+id     = 4
+parent = "panel"
+name   = "refused"
+kind   = "counter"
+unit   = "entries"
+
+# A gauge and not a counter, and `unit = "none"` because it is not a quantity: a
+# reader that summed two of these would be adding two rights together. It is
+# published so that the handle this component held is readable from outside the
+# run — which is what lets the boot's second half offer the same number after the
+# component has ended and say honestly that it is the same number.
+[[state]]
+id     = 5
+parent = "panel"
+name   = "handle"
+kind   = "gauge"
+unit   = "none"

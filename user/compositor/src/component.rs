@@ -59,8 +59,9 @@ use f_ring::heap::Heap;
 use f_scene::arena::Arena;
 use f_scene::commit::Batch;
 
+use crate::pacing::Tick;
 use crate::routing::{self, at, life, node, reported, stopped};
-use crate::tree::{FRAME_DELTAS_MAX, Held};
+use crate::tree::{FRAME_DELTAS_MAX, Held, Plan};
 
 /// A run that did what it meant to.
 pub const DONE: u64 = 0;
@@ -146,10 +147,19 @@ fn serve() -> ! {
     // in this component's image and the file outgrew what the frame maps for it.
     let mut graph = alloc::boxed::Box::new(Arena::EMPTY);
     let mut batch = alloc::boxed::Box::new(Batch::<FRAME_DELTAS_MAX>::new());
-    let mut held = Held::new(&mut graph, &mut batch);
+    // The pacing window rides in `Held` rather than in a third box, and
+    // `crate::tree::Held`'s own comment says why: a kibibyte of zeroes is a
+    // `memset` and costs the image nothing, which is RFC 0100's rule read the
+    // way round that permits something rather than the way round that refuses.
+    let mut held = Held::new(&mut graph, &mut batch, parts.plan);
 
     let mut route = Route { control: parts.control, told: false };
     let mut idle: u64 = 0;
+    // The last reading this component believed. Zero until the frame writes one,
+    // which is *the epoch* and not *unknown*: a compositor whose first entry
+    // arrives before the frame has ticked charges that frame from the origin,
+    // which is a cost that is too large rather than one that is invented.
+    let mut last = Tick(0);
     let outcome = loop {
         // The control ring first, because a stop is the one thing that ends this
         // loop and work taken after it would be work done for a client the frame
@@ -203,7 +213,25 @@ fn serve() -> ! {
         let mut payload = [0u8; PAYLOAD_BYTES];
         let _ = parts.data.copy_out(entry.offset as usize, &mut payload);
 
-        if let Some(answer) = held.offer(&entry, &payload)
+        // **The one time this component ever sees, read after the entry was
+        // taken and never before it.** The order is what makes the reading
+        // belong to this entry: the client writes the tick and then submits, so
+        // a reading taken after the pop is the one the client wrote for the
+        // entry the pop returned — the ring's `Release` publish and this side's
+        // `Acquire` take are what order the two, which is the same pair
+        // `ring/src/lib.rs` rests the payload on. A tick read at the top of the
+        // turn would be whatever was there when the loop last spun, and a
+        // frame's cost would become a measure of how often this loop went round.
+        //
+        // A page that stops answering leaves the previous reading in place
+        // rather than ending the run: a clock that did not refresh is a pacing
+        // estimate that is stale, and a compositor that stopped serving its
+        // client over a stale estimate would be refusing to draw because it
+        // could not say what time it was.
+        let now = Tick(board.read64(at::TICK_NANOS).unwrap_or(last.nanos()));
+        last = now;
+
+        if let Some(answer) = held.offer(&entry, &payload, now)
             && parts.data.post(answer).is_err()
         {
             break stopped::NO_RING;
@@ -220,6 +248,9 @@ struct Parts {
     data: Server,
     /// Turns with nothing to do before the loop ends. Unit: turns.
     spins: u64,
+    /// What this machine can draw with, how often it scans out, and how much of
+    /// a frame to keep in hand.
+    plan: Plan,
 }
 
 /// Read the routing page and state everything it names.
@@ -274,7 +305,20 @@ fn laid_out(board: &Window) -> Option<Parts> {
         return None;
     }
 
-    Some(Parts { control, data, spins })
+    // The pacing inputs, read and **not** refused. Every one of them has an
+    // honest answer at zero — no display declared, no margin wanted, no
+    // capability reported — and `crate::pacing` says what each zero produces: a
+    // scanout at now, a wake time with no margin in it, and a published rung of
+    // *none*. A refusal here would be this component declining to serve a client
+    // because nobody had told it about a screen, which is the opposite of what
+    // it is for.
+    let plan = Plan {
+        backend_bits: board.read64(at::BACKEND_CAPABILITIES).ok()?,
+        scanout_period_nanos: board.read64(at::SCANOUT_PERIOD_NANOS).ok()?,
+        margin_nanos: board.read64(at::PACING_MARGIN_NANOS).ok()?,
+    };
+
+    Some(Parts { control, data, spins, plan })
 }
 
 /// Write what this component did into the half of the routing page that is its
@@ -297,6 +341,20 @@ fn report(board: &Window, held: Option<&Held>, outcome: u64) {
         let _ = board.write64(reported::LIVE, held.live());
         let _ = board.write64(reported::REFUSED, counters.refused);
         let _ = board.write64(reported::TOKEN, counters.token);
+        let _ = board.write64(reported::LATE, counters.late);
+        // The pacing decision, whole. Four numbers where one would do, because
+        // the exit's sentence is a subtraction and a reader handed only the
+        // answer cannot check it — `crate::routing::reported::WAKE` argues the
+        // same point one file over.
+        let story = held.story();
+        let _ = board.write64(reported::SCANOUT, story.decision.scanout_nanos);
+        let _ = board.write64(reported::ESTIMATE, story.decision.estimate_nanos);
+        let _ = board.write64(reported::MARGIN, story.decision.margin_nanos);
+        let _ = board.write64(reported::WAKE, story.decision.wake_nanos);
+        let _ = board.write64(reported::SAMPLES, held.samples());
+        let _ = board.write64(reported::DEGRADED, story.degraded);
+        let _ = board.write64(reported::RUNG, story.rung);
+        let _ = board.write64(reported::DEADLINE, story.deadline_nanos);
         // The same numbers, into the region the frame mounted under its own
         // root. The board is this component's answer to *what did you do*; the
         // tree is the machine's answer to *what is it running*, and RFC 0013
@@ -331,12 +389,25 @@ fn publish(tree_at: u64, held: &Held) -> u64 {
     }
     let Ok(tree) = state::Writer::at(tree_at, routing::TREE_BYTES) else { return 0 };
     let counters = held.counters();
+    let story = held.story();
     let mut written = 0;
+    // In `node::WRITTEN`'s order, and the frame reads it back in that order.
+    // Nine words and not four: the five `E3-B01k` adds are the frame's story —
+    // the rung it is drawing with, the frame it last closed, the deadline that
+    // frame carried, what a frame costs on this machine, and what was given up
+    // to fit. Every one of them is a value this component already holds, which
+    // is RFC 0013's rule: a node with no counter behind it would be a
+    // serialisation with extra steps wearing RFC 0013's name.
     for (id, value) in [
         (node::FRAMES, counters.frames),
         (node::EDITS, counters.edits),
         (node::NODES, held.live()),
         (node::REFUSED, counters.refused),
+        (node::RUNG, story.rung),
+        (node::FRAME, counters.token),
+        (node::DEADLINE, story.deadline_nanos),
+        (node::PACING, story.decision.estimate_nanos),
+        (node::DEGRADED, story.degraded),
     ] {
         if tree.set(id, value) {
             written += 1;

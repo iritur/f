@@ -484,22 +484,31 @@ enum Section {
     Removing,
     /// `CreateNode`. Nodes beginning, and nodes re-hung.
     Creating,
-    /// `SetTransform`, `SetPath`, `SetPaint`.
+    /// `SetTransform`, `SetPath`, `SetPaint`, `SetEffect`.
     Setting,
 }
 
 /// Which section an entry belongs to, or `None` for the one that ends a frame.
 ///
-/// Six arms and no wildcard, each of which decides something: a seventh opcode
-/// in `f_abi::scene` stops this build and asks where in a frame it goes. A
-/// wildcard — or an arm that fell through to [`Section::Setting`] — is exactly
-/// how a seventh opcode comes to be admitted into a frame nobody decided it
-/// belonged in.
+/// Seven arms and no wildcard, each of which decides something: an eighth
+/// opcode in `f_abi::scene` stops this build and asks where in a frame it goes.
+/// A wildcard — or an arm that fell through to [`Section::Setting`] — is
+/// exactly how an eighth opcode comes to be admitted into a frame nobody
+/// decided it belonged in.
+///
+/// `SetEffect` is [`Section::Setting`] and the answer was not free: a
+/// declaration is about a node, so it must arrive after the creation that
+/// introduced that node, and it says nothing about the tree's shape, so it has
+/// no business before one. That is the same pair of facts every other property
+/// set satisfies, and it is why the seventh opcode joined an existing arm
+/// rather than needing a fourth section.
 const fn section_of(entry: &Entry) -> Option<Section> {
     match entry {
         Entry::RemoveNode(_) => Some(Section::Removing),
         Entry::CreateNode(_) => Some(Section::Creating),
-        Entry::SetTransform(_) | Entry::SetPath(_) | Entry::SetPaint(_) => Some(Section::Setting),
+        Entry::SetTransform(_) | Entry::SetPath(_) | Entry::SetPaint(_) | Entry::SetEffect(_) => {
+            Some(Section::Setting)
+        }
         Entry::Commit(_) => None,
     }
 }
@@ -1106,6 +1115,26 @@ fn admit<const LIMIT: usize>(arena: &Arena, edits: &[Delta]) -> Result<(), (usiz
                     return Err((at, Refusal::Graph(GraphRefusal::NoSuchNode(record.node))));
                 }
             }
+            // The same rule, and the same one rule: the node has to be there
+            // when the declaration runs. The two costs are not re-checked —
+            // `SetEffect::read` refused every incoherent pair before the delta
+            // reached this batch, and a second statement of that rule here is
+            // how two halves of a system come to disagree about one boundary.
+            //
+            // *What this arm does not check*, said here rather than left to be
+            // found: that the node is of kind `Effect`. `f_scene::effect`'s
+            // `MAY_DECLARE` is where that question belongs and
+            // `Effect::declared` is what asks it, and nothing on this path
+            // calls that function yet — the census of `Kind::Effect` nodes
+            // against declarations is the other half of what that module's
+            // *what is not delivered* describes, and it needs a refusal this
+            // enum does not have. A declaration attached to a draw node is
+            // therefore admitted and stored today, and is a cost nobody reads.
+            Entry::SetEffect(record) => {
+                if !ledger.holds(arena, record.node) {
+                    return Err((at, Refusal::Graph(GraphRefusal::NoSuchNode(record.node))));
+                }
+            }
             // `Batch::offer` turns a commit into a `Sealed` and never stores
             // one, so a commit among the edits is this module disagreeing with
             // itself. The arm decides rather than falling through, which is the
@@ -1130,7 +1159,7 @@ fn admit<const LIMIT: usize>(arena: &Arena, edits: &[Delta]) -> Result<(), (usiz
 mod tests {
     use super::*;
     use crate::reconcile::{Deltas, Node, Reconciler};
-    use f_abi::scene::{Commit, CreateNode, SetPaint, kind};
+    use f_abi::scene::{Commit, CreateNode, SetEffect, SetPaint, kind};
 
     /// The reconciler's bound for the corpus trees. Unit: nodes.
     const NODES: usize = 16;
@@ -1421,6 +1450,7 @@ mod tests {
             | Entry::SetTransform(_)
             | Entry::SetPath(_)
             | Entry::SetPaint(_)
+            | Entry::SetEffect(_)
             | Entry::RemoveNode(_) => NO_DEADLINE,
         };
         Delta { user_data: 0, class: 0, deadline, payload_offset: 0, flags: 0, body }
@@ -2607,6 +2637,105 @@ mod tests {
         );
         assert_eq!(fingerprint(&arena), before, "a refused frame left something behind");
         assert!(!arena.holds(2) && !arena.holds(3));
+    }
+
+    /// The seventh opcode's two answers, which are two arms in this file.
+    ///
+    /// `E3-B07h` puts an arm in [`section_of`] and an arm in [`admit`], and
+    /// neither has any other witness: no corpus frame declares an effect cost,
+    /// so both could be deleted — or written to say something else — with the
+    /// rest of this suite green. An arm nothing reaches is a decision nobody
+    /// made.
+    #[test]
+    fn a_declaration_is_a_property_set_and_names_a_node_the_scene_holds() {
+        let declare =
+            |node| Entry::SetEffect(SetEffect { node, estimate_us_x100: 900, saving_us_x100: 300 });
+
+        // [`admit`]'s arm. The node is one nobody created, so the frame is
+        // refused whole at the entry that names it — and the two good
+        // creations in front of it do not land either, which is what *whole or
+        // not at all* means and what a `holds` check deleted from that arm
+        // would quietly stop being true.
+        let mut arena = Arena::EMPTY;
+        deliver(
+            &mut arena,
+            &[Entry::CreateNode(CreateNode {
+                node: ROOT,
+                parent: NO_NODE,
+                before: NO_NODE,
+                kind: kind::LAYER,
+            })],
+            1,
+        );
+        let before = fingerprint(&arena);
+
+        let frame = [
+            Entry::CreateNode(CreateNode {
+                node: 2,
+                parent: ROOT,
+                before: NO_NODE,
+                kind: kind::EFFECT,
+            }),
+            declare(2),
+            declare(9),
+        ];
+        let (slots, len) = slots_of(&frame, 21);
+        let mut batch = Batch::<LIMIT>::new();
+        let mut refused = None;
+        for slot in &slots[..len] {
+            let (sqe, payload) = slot.encode();
+            match batch.offer(&sqe, &payload) {
+                Ok(Offered::Staged) => {}
+                Ok(Offered::Sealed(sealed)) => refused = batch.commit(&mut arena, sealed).err(),
+                Err(refusal) => panic!("the frame was refused at the wire: {}", refusal.message()),
+            }
+        }
+        assert_eq!(
+            refused,
+            Some(Refused::Whole { at: 2, refusal: Refusal::Graph(GraphRefusal::NoSuchNode(9)) }),
+            "a declaration naming a node the scene does not hold was admitted"
+        );
+        assert_eq!(fingerprint(&arena), before, "a refused frame left something behind");
+        assert!(!arena.holds(2));
+
+        // [`section_of`]'s arm, in the direction that decides something. A
+        // declaration is `Section::Setting`, so a creation *after* one is an
+        // entry out of section and poisons the frame — which is the assertion
+        // that goes red if the arm is moved to `Removing` or `Creating`, and
+        // the one that would not exist if the arm had been a wildcard falling
+        // through.
+        let mut batch = Batch::<LIMIT>::new();
+        let (sqe, payload) = delta_of(declare(ROOT)).encode();
+        assert!(matches!(batch.offer(&sqe, &payload), Ok(Offered::Staged)));
+        let (sqe, payload) = delta_of(Entry::CreateNode(CreateNode {
+            node: 3,
+            parent: ROOT,
+            before: NO_NODE,
+            kind: kind::EFFECT,
+        }))
+        .encode();
+        assert_eq!(batch.offer(&sqe, &payload).err(), Some(Refusal::OutOfPhase));
+
+        // And the section is not a later one than the property sets': a paint
+        // after a declaration is two entries of one section and is accepted.
+        // Without this half, moving the arm past `Setting` would be a change
+        // the assertion above cannot see.
+        let mut batch = Batch::<LIMIT>::new();
+        let (sqe, payload) = delta_of(declare(ROOT)).encode();
+        assert!(matches!(batch.offer(&sqe, &payload), Ok(Offered::Staged)));
+        let (sqe, payload) = delta_of(Entry::SetPaint(SetPaint {
+            node: ROOT,
+            red_x65535: 1,
+            green_x65535: 2,
+            blue_x65535: 3,
+            alpha_x65535: 4,
+            stroke_width_x65536: 0,
+        }))
+        .encode();
+        assert!(
+            matches!(batch.offer(&sqe, &payload), Ok(Offered::Staged)),
+            "a declaration opened a section later than the property sets'"
+        );
     }
 
     /// The sections are a rule and not a habit.

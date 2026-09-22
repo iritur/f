@@ -50,6 +50,8 @@ name = "f-compositor"
 version = "0.0.1"
 dependencies = [
  "f-abi",
+ "f-env",
+ "f-interface",
  "f-ring",
  "f-scene",
 ]
@@ -109,7 +111,10 @@ dependencies = [
  "f-env",
  "f-generation",
  "f-hash",
+ "f-interface",
+ "f-panel",
  "f-ring",
+ "f-semantic",
  "f-store",
  "f-supervisor",
  "f-virtio-blk",
@@ -133,6 +138,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "f-panel"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-interface",
+ "f-ring",
+ "f-semantic",
+]
+
+[[package]]
 name = "f-ring"
 version = "0.0.1"
 dependencies = [
@@ -145,6 +160,14 @@ name = "f-scene"
 version = "0.0.1"
 dependencies = [
  "f-abi",
+]
+
+[[package]]
+name = "f-semantic"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-interface",
 ]
 
 [[package]]

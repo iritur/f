@@ -274,6 +274,33 @@ impl Client {
         producer.occupancy()
     }
 
+    /// Copy this submission's inline payload into the channel's arena.
+    ///
+    /// [`Server::copy_out`]'s other half, and it arrives four tasks later
+    /// because until `E3-B06c` no *component* was ever the submitting end of a
+    /// channel carrying a payload: the three drivers put everything they need in
+    /// the entry's own fields, and `user/objects` reads a request rather than
+    /// writing one. A component that declares a semantic tree writes fifty-six
+    /// bytes per entry and has nowhere else to put them.
+    ///
+    /// `false` when `offset` and `from` do not name bytes inside the arena,
+    /// which is a caller framing a payload the channel has no room for. Refused
+    /// rather than truncated: a short write would put a well-formed entry on the
+    /// ring pointing at bytes that are partly somebody else's.
+    ///
+    /// # What the caller still owes
+    ///
+    /// **Do not write where an entry the peer has not taken is pointing.** The
+    /// arena has no allocator and the layout does not police it — the same
+    /// contract the frame's own `Arena` keeps, and `kernel/src/compositor.rs`'s
+    /// `drive` is where it is spelled out: a client that writes every payload at
+    /// one offset must wait for each completion before it submits the next, or
+    /// the frame it is building loses an entry.
+    pub fn copy_in(&self, offset: usize, from: &[u8]) -> bool {
+        let mapping = self.0.bind();
+        mapping.arena().copy_in(offset, from)
+    }
+
     /// Take one completion, or `None` when there is none.
     ///
     /// **This is the polling point.** Every event a component receives is a

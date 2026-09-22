@@ -648,9 +648,17 @@ impl Change {
                 };
                 Ok(Self::Removed(Removal { root }))
             }
-            Entry::SetTransform(_) | Entry::SetPath(_) | Entry::SetPaint(_) | Entry::Commit(_) => {
-                Ok(Self::Untouched)
-            }
+            // `SetEffect` is here and not beside the two above it for a
+            // reason worth one line: a declaration is a property of a node
+            // that already exists, so it introduces no identifier and removes
+            // none, which is exactly what `Untouched` says. What it *does*
+            // touch — whether the node it names is an effect node at all — is
+            // a question about the graph, and this function holds no graph.
+            Entry::SetTransform(_)
+            | Entry::SetPath(_)
+            | Entry::SetPaint(_)
+            | Entry::SetEffect(_)
+            | Entry::Commit(_) => Ok(Self::Untouched),
         }
     }
 }

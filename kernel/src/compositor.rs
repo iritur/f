@@ -53,7 +53,10 @@
 use f_abi::manifest::Record;
 use f_abi::scene::{Commit, CreateNode, Delta, Entry, NO_NODE, RemoveNode, SetPaint, kind};
 use f_abi::{ABI_VERSION, Cqe, control, error, feature, state};
+use f_compositor::pacing::degraded;
 use f_compositor::routing::{self, at, life, node, reported, stopped};
+use f_env::{Env, SeededEnv};
+use f_interface::backend::Capability;
 use f_ring::{Arena, Collector, Mapping, Poster, Producer, Window};
 
 use crate::mem::{FRAME_SIZE, FrameAllocator};
@@ -76,19 +79,115 @@ const ENTRIES: u32 = 16;
 /// for any one completion. Unit: microseconds.
 const EXIT_MICROS: u64 = 500_000;
 
-/// The deadline every commit in this boot carries.
-/// Unit: nanoseconds, in this channel's epoch.
+/// How far apart this boot tells the component its display scans out.
+/// Unit: nanoseconds.
 ///
-/// A literal, and it has to be one. `f_abi::scene::Commit` is refused without a
-/// deadline — a frame nobody scheduled is a frame the pacing loop cannot account
-/// for — and nothing in this build computes one: `E3-B01h` is the task that
-/// derives a wake time backwards from the next scanout, and until it lands a
-/// number taken from this machine's clock would make this boot's log differ
-/// between a fast host and a slow one for a value nothing reads.
+/// Sixteen milliseconds and two thirds is a sixty-hertz frame. There is no
+/// display in this boot and the number is therefore a *statement* rather than a
+/// measurement — which is exactly what it would be on a real machine too, until
+/// `E3-B02f` reaches a scanout and a driver reports one. What it has to be here
+/// is a period the wake time is computed against and a period neither frame's
+/// cost comes close to, so that a build which confused the two produces a
+/// visibly wrong number.
+const SCANOUT_PERIOD_NANOS: u64 = 16_666_667;
+
+/// What this boot tells the component to hold back against its estimate being
+/// wrong. Unit: nanoseconds.
 ///
-/// Sixteen milliseconds and two thirds is a sixty-hertz frame, which is the
-/// interval the number will *mean* when something computes it.
-const DEADLINE_NANOS: u64 = 16_666_667;
+/// A millisecond, and a policy rather than a measurement — `E3-B01h`'s exit
+/// names the margin as a term and does not say who decides it. What it must be
+/// for this boot is non-zero and not a multiple of anything else here, so that a
+/// component which dropped the term from its subtraction publishes a different
+/// wake time rather than the same one.
+const PACING_MARGIN_NANOS: u64 = 1_000_000;
+
+/// How much time the first frame's commit leaves between itself and its
+/// deadline. Unit: nanoseconds.
+///
+/// A whole scanout period, which is far more than the frame cost this script
+/// produces — so the first frame **fits**, the degradation policy is never
+/// asked, and `f_compositor::pacing::degraded::FITTED` is what the component
+/// holds after it.
+const FRAME_ONE_SLACK_NANOS: u64 = SCANOUT_PERIOD_NANOS;
+
+/// And how much the second one leaves. Unit: nanoseconds.
+///
+/// One nanosecond, which no frame fits inside — so the second frame is **late**,
+/// the policy is asked, and it answers `SHORT` because nothing on this wire can
+/// declare an effect for it to degrade. One and not zero because
+/// `f_abi::scene::Commit` refuses a deadline of `NO_DEADLINE`, and the refusal is
+/// right: a frame nobody scheduled is a frame the pacing loop cannot account for.
+///
+/// **The two slacks together are what make the degradation word evidence of
+/// anything.** A component that answered the same way for every frame publishes
+/// the same word as one that decided per frame; what separates them is
+/// `Board::late`, which this script requires to be one out of two.
+const FRAME_TWO_SLACK_NANOS: u64 = 1;
+
+/// The seed this boot's clock and its frame costs are drawn from.
+///
+/// **A seeded environment of this boot's own, rather than the one `kmain`
+/// holds.** Two reasons, and the second is the one that matters. A component at
+/// ring 3 has no clock — RFC 0004 — so the frame reads one and writes it into
+/// the routing page, and if that reading came from this machine's timestamp
+/// counter then every number this boot prints would differ between a fast host
+/// and a slow one, which is the objection the deadline constant used to carry
+/// and the reason nothing here was paced before. A seeded environment answers
+/// it: the readings are a function of this constant alone.
+///
+/// Its own rather than `kmain`'s because `kmain`'s has been drawn from by every
+/// stage before this one, so its state depends on what else the boot did — and a
+/// number printed here would then move when an unrelated stage started drawing.
+/// One constant in one file is what makes these numbers reproducible from
+/// reading the file.
+const PACING_SEED: u64 = 0x_C0_11_05_17_0B_01_A0_00;
+
+/// How far this boot's clock moves between two entries, at most.
+/// Unit: nanoseconds.
+///
+/// Drawn per entry rather than fixed, so that the two frames in this script cost
+/// different amounts and a percentile is a percentile of something. One is added
+/// to every draw, so a step is never zero — which is what makes *the second
+/// frame does not fit in one nanosecond* an arithmetic fact rather than a
+/// property of this seed.
+const STEP_SPREAD_NANOS: u64 = 4096;
+
+/// What this boot tells the component the backend under it reports.
+///
+/// Compute shaders and storage buffers, a CPU and a way to present an image —
+/// and **no usable subgroup scan**, which is the one capability RFC 0080 keeps
+/// the hybrid rung for. Built out of `Capability::index()` rather than written
+/// as a bitmask, for the reason `f_compositor::tree::reported_capabilities`
+/// gives from the other side: the bit positions are the vocabulary's and neither
+/// end of this page may invent them.
+///
+/// There is no backend. This is the frame *saying* what one would report, which
+/// is the same thing `E3-B02a`'s four synthetic backends are and is all this
+/// task needs: what is under test is that the component selects a rung from a
+/// report and publishes which, not that a GPU driver exists.
+/// Unit: none — a bitmask of capability indices.
+const BACKEND_CAPABILITIES: u64 = (1 << Capability::ComputeShaders.index())
+    | (1 << Capability::StorageBuffers.index())
+    | (1 << Capability::Cpu.index())
+    | (1 << Capability::ImagePresent.index());
+
+/// Which rung that report selects, as the component publishes it.
+///
+/// Two: `Rung::Hybrid` is index 1 and the published word is the index plus one,
+/// so that zero can mean *no rung at all*. **Read off RFC 0080's table by hand
+/// rather than recomputed**, which is the whole of why it is worth asserting: a
+/// boot that called `backend::select` itself would be comparing the component's
+/// answer against the same function that produced it, and would stay green
+/// through any change to the ladder. This is the independent reading, and it
+/// goes red the day the ladder's order or the hybrid's predicate moves.
+///
+/// The derivation, so a later reader can check it: rung 1 requires a prefix scan
+/// across cooperating lanes and the report above does not carry one; rung 2
+/// requires compute shaders, which it does, and explicitly tolerates the missing
+/// scan. `E3-B02b`'s exit is the same sentence — *a backend with compute shaders
+/// and no usable scan starts at rung 2 and says so in the compositor's tree*.
+/// Unit: none — a rung ordinal.
+const HYBRID_RUNG: u64 = 2;
 
 /// The heap the starved half describes, which is two pages.
 ///
@@ -242,18 +341,32 @@ pub struct Report {
     /// is that every word is zero, which is [`Report::tree_before`], and what
     /// this number is for is saying that the fold moved.
     pub tree_blank: u64,
-    /// The four words this component publishes, read before it ran a line.
+    /// The nine words this component publishes, read before it ran a line.
     ///
-    /// Required to be zero, which is what makes the four read afterwards
+    /// Required to be zero, which is what makes the nine read afterwards
     /// evidence of anything: a component that published nothing into a tree
     /// somebody else had already filled in would be indistinguishable from one
     /// that published. Unit: as [`Report::tree`].
-    pub tree_before: [u64; 4],
+    pub tree_before: [u64; WORDS],
     /// The snapshot taken after it ended. Unit: none — a fold.
     pub tree_after: u64,
-    /// The four words this component's manifest says it publishes, read back out
-    /// of the tree by id: frames, edits, nodes, refused.
-    pub tree: [u64; 4],
+    /// The nine words this component's manifest says it publishes, read back out
+    /// of the tree by id, in `node::WRITTEN`'s order: frames, edits, nodes,
+    /// refused, rung, frame, deadline, pacing, degraded.
+    pub tree: [u64; WORDS],
+    /// The deadline the client put on the last commit it submitted.
+    ///
+    /// Held by the *client*, because the client computed it — a deadline in this
+    /// boot is a clock reading plus a slack, and the component is required to
+    /// publish the number it was sent rather than one of its own. A tree that
+    /// agreed with the component's board and with nothing outside it would be
+    /// two copies of one opinion.
+    /// Unit: nanoseconds, in this boot's seeded epoch.
+    pub submitted_deadline: u64,
+    /// The last reading the client wrote into the routing page.
+    ///
+    /// Unit: nanoseconds, in this boot's seeded epoch.
+    pub last_tick: u64,
     /// Whether the record as its manifest declares it was admitted.
     pub admitted: bool,
     /// What the admission said about the same record with its state declaration
@@ -269,6 +382,15 @@ pub struct Report {
     /// Unit: bytes.
     pub heap: u64,
 }
+
+/// How many words this component publishes into its own tree.
+///
+/// `f_compositor::routing::node::WRITTEN`'s length, read from the component's
+/// own crate rather than written here: the two sides index the same array, and a
+/// boot that carried its own count would be the second place the number is
+/// written and the one that goes stale.
+/// Unit: nodes.
+const WORDS: usize = node::WRITTEN.len();
 
 /// What the component wrote into the half of its routing page that is its own.
 #[derive(Clone, Copy, Default)]
@@ -295,6 +417,25 @@ pub struct Board {
     pub outcome: u64,
     /// How many of its declared nodes it wrote a word into. Unit: nodes.
     pub published: u64,
+    /// The scanout the last closed frame was paced against. Unit: nanoseconds.
+    pub scanout: u64,
+    /// Its rolling p99 estimate at that frame. Unit: nanoseconds.
+    pub estimate: u64,
+    /// What it held back against the estimate being wrong. Unit: nanoseconds.
+    pub margin: u64,
+    /// The wake time the three of them make. Unit: nanoseconds.
+    pub wake: u64,
+    /// How many frames the estimate was taken over. Unit: samples.
+    pub samples: u64,
+    /// What it gave up to fit the last frame, as a
+    /// `f_compositor::pacing::degraded` ordinal. Unit: none.
+    pub degraded: u64,
+    /// Which rung it is holding. Unit: none — a rung ordinal.
+    pub rung: u64,
+    /// The deadline the last closed frame carried. Unit: nanoseconds.
+    pub deadline: u64,
+    /// How many frames did not fit before their own deadline. Unit: frames.
+    pub late: u64,
 }
 
 impl Board {
@@ -316,6 +457,15 @@ impl Board {
             named: board.read64(reported::TOKEN).ok()?,
             outcome: board.read64(reported::OUTCOME).ok()?,
             published: board.read64(reported::PUBLISHED).ok()?,
+            scanout: board.read64(reported::SCANOUT).ok()?,
+            estimate: board.read64(reported::ESTIMATE).ok()?,
+            margin: board.read64(reported::MARGIN).ok()?,
+            wake: board.read64(reported::WAKE).ok()?,
+            samples: board.read64(reported::SAMPLES).ok()?,
+            degraded: board.read64(reported::DEGRADED).ok()?,
+            rung: board.read64(reported::RUNG).ok()?,
+            deadline: board.read64(reported::DEADLINE).ok()?,
+            late: board.read64(reported::LATE).ok()?,
         })
     }
 }
@@ -364,10 +514,23 @@ fn script() -> [Delta; 8] {
         flags: 0,
         body: Entry::CreateNode(CreateNode { node, parent, before: NO_NODE, kind }),
     };
-    let commit = |user_data: u64, named: u64| Delta {
+    // **The deadline a commit carries here is a *slack* and not an instant**,
+    // and [`drive`] turns it into one by adding the clock reading it wrote for
+    // that entry. It has to be that way round: a deadline is a point on the
+    // frame's own clock, this boot's clock is seeded and its origin is wherever
+    // the draws have reached by the time the commit goes on the ring, and a
+    // literal instant written here would be a deadline that had already passed
+    // or one a whole run away depending on nothing anybody chose.
+    //
+    // What it buys is that *how much room the frame had* is exact rather than
+    // approximate: the component reads the same reading the client added, so the
+    // remaining time at the commit is the slack to the nanosecond, and the two
+    // halves of this script — one frame that fits and one that does not — are
+    // arithmetic rather than a race.
+    let commit = |user_data: u64, named: u64, slack_nanos: u64| Delta {
         user_data,
         class: 0,
-        deadline: DEADLINE_NANOS,
+        deadline: slack_nanos,
         payload_offset: 0,
         flags: 0,
         body: Entry::Commit(Commit { frame_token: named }),
@@ -392,7 +555,7 @@ fn script() -> [Delta; 8] {
                 stroke_width_x65536: 0x0002_0000,
             }),
         },
-        commit(6, FRAME_ONE),
+        commit(6, FRAME_ONE, FRAME_ONE_SLACK_NANOS),
         Delta {
             user_data: 7,
             class: 0,
@@ -401,7 +564,7 @@ fn script() -> [Delta; 8] {
             flags: 0,
             body: Entry::RemoveNode(RemoveNode { node: REMOVED_ROOT }),
         },
-        commit(8, FRAME_TWO),
+        commit(8, FRAME_TWO, FRAME_TWO_SLACK_NANOS),
     ]
 }
 
@@ -441,6 +604,7 @@ impl Expected {
                 Entry::SetTransform(_)
                 | Entry::SetPath(_)
                 | Entry::SetPaint(_)
+                | Entry::SetEffect(_)
                 | Entry::RemoveNode(_) => expected.edits += 1,
             }
         }
@@ -508,13 +672,18 @@ impl Report {
                  compositor answering frames it has nowhere to put",
             );
         }
-        if self.tree_nodes as usize != node::WRITTEN.len() + 1 || self.tree_before != [0; 4] {
+        if self.tree_nodes as usize != WORDS + 1 || self.tree_before != [0; WORDS] {
             return Err("the tree the frame published for a starved component is not the one its \
                  manifest declares");
         }
-        if self.tree != [0; 4] {
+        if self.tree != [0; WORDS] {
             return Err("a component that never held a graph published words about one");
         }
+        // Including the rung, which is the one word a starved component could
+        // plausibly have published: it is chosen in the constructor, and the
+        // constructor is reached only after the heap check. A build that decided
+        // the rung before asking whether it had a graph would publish a two here
+        // and fail the clause above, which is the point of naming it.
         Ok(())
     }
 
@@ -570,25 +739,119 @@ impl Report {
             return Err("the last frame the component closed is not the last one submitted");
         }
 
+        // --- the frame's story, `E3-B01k` and `E3-B01h` ----------------------
+        //
+        // Every clause below is checked against something this file knows
+        // independently: the rung against RFC 0080's table read by hand, the
+        // deadline against the number the client put on the wire, the wake time
+        // against the subtraction the exit spells out, and the degradation
+        // against a script that was written to have one frame of each kind.
+        if self.board.rung != HYBRID_RUNG {
+            return Err(
+                "the component is not holding the rung RFC 0080's table gives the capabilities \
+                 this boot reported: a hybrid backend was described and something else was \
+                 selected",
+            );
+        }
+        if self.board.samples != expected.frames {
+            return Err(
+                "the pacing window holds a different number of samples than the client closed \
+                 frames, so the estimate is over something other than this run's frames",
+            );
+        }
+        if self.board.estimate == 0 {
+            return Err(
+                "the rolling estimate is zero after two frames, so the component measured \
+                 nothing — every step of this boot's clock is at least one nanosecond",
+            );
+        }
+        if self.board.margin != PACING_MARGIN_NANOS {
+            return Err("the component did not hold back the margin the frame gave it");
+        }
+        // The scanout is a boundary of the period the frame declared, and it is
+        // the first one *after* the last reading the client wrote. A component
+        // that aimed at the boundary it had already reached would produce a wake
+        // time in the past for every frame that lands on time.
+        if !self.board.scanout.is_multiple_of(SCANOUT_PERIOD_NANOS)
+            || self.board.scanout <= self.last_tick
+        {
+            return Err(
+                "the scanout the last frame was paced against is not the first boundary of the \
+                 declared period after the clock reading the component was given",
+            );
+        }
+        // `E3-B01h`'s first clause, spelled as the exit spells it. A component
+        // whose subtraction dropped a term agrees with itself and fails this.
+        if self.board.wake
+            != self
+                .board
+                .scanout
+                .saturating_sub(self.board.estimate)
+                .saturating_sub(self.board.margin)
+        {
+            return Err(
+                "the wake time is not the scanout less the p99 estimate less the margin, which \
+                 is the whole of what E3-B01h computes",
+            );
+        }
+        // The script submits one frame with a whole scanout of room and one with
+        // a nanosecond. **One of two, and not two of two**: a component that
+        // answered the same way whatever the deadline said would pass every
+        // clause above and fail this one, which is the reason the count is
+        // published beside the word.
+        if self.board.late != 1 {
+            return Err(
+                "the component did not find exactly one of the two frames late: one was given a \
+                 whole scanout period of room and the other a single nanosecond, so a build \
+                 that answers the same way for both is not reading the deadline",
+            );
+        }
+        if self.board.degraded != degraded::SHORT {
+            return Err("the last frame was submitted a nanosecond before its deadline and the \
+                 component did not answer that it was short: nothing on this wire can declare \
+                 an effect, so there is nothing for the policy to give back");
+        }
+        if self.board.deadline != self.submitted_deadline {
+            return Err(
+                "the deadline the component published is not the one the client put on the \
+                 last commit it submitted",
+            );
+        }
+
         // --- the published tree ---------------------------------------------
-        if self.tree_nodes as usize != node::WRITTEN.len() + 1 {
+        if self.tree_nodes as usize != WORDS + 1 {
             return Err(
                 "the schema the frame published out of the manifest does not carry the nodes \
                  this component writes, plus the subtree they hang under",
             );
         }
-        if self.tree_before != [0; 4] {
+        if self.tree_before != [0; WORDS] {
             return Err(
                 "the tree already carried a word before the component ran, so a word in it                  afterwards would be evidence of nothing",
             );
         }
-        if self.board.published as usize != node::WRITTEN.len() {
+        if self.board.published as usize != WORDS {
             return Err(
                 "the component wrote fewer words into its tree than it declares nodes: an id it \
                  published is not one its manifest carries",
             );
         }
-        let published = [self.board.frames, self.board.edits, self.board.live, self.board.refused];
+        // In `node::WRITTEN`'s order, which is the order the tree was read back
+        // in. Nine words and not four: a board that agreed with a tree about the
+        // four old ones and diverged on the five new ones would be a component
+        // with two sets of numbers, which is the failure this comparison exists
+        // to catch and the reason every word on the board has a node beside it.
+        let published = [
+            self.board.frames,
+            self.board.edits,
+            self.board.live,
+            self.board.refused,
+            self.board.rung,
+            self.board.named,
+            self.board.deadline,
+            self.board.estimate,
+            self.board.degraded,
+        ];
         if self.tree != published {
             return Err(
                 "the numbers in the component's published tree are not the numbers on its \
@@ -601,6 +864,24 @@ impl Report {
         {
             return Err("the tree a reader would find does not say what this client asked the \
                  compositor to do");
+        }
+        // And the five the story added, read out of the subtree rather than out
+        // of the board — which is `E3-B01k`'s exit sentence, *a boot reads all
+        // five back out of the component's subtree rather than out of the serial
+        // log*. The equality above already requires the two to agree; these are
+        // the clauses that say what the five have to **be**, so a component whose
+        // board and tree agreed on five wrong numbers is caught here.
+        if self.tree[4] != HYBRID_RUNG
+            || self.tree[5] != FRAME_TWO
+            || self.tree[6] != self.submitted_deadline
+            || self.tree[7] != self.board.estimate
+            || self.tree[8] != degraded::SHORT
+        {
+            return Err(
+                "the five words E3-B01k publishes are not in the component's subtree: a reader \
+                 of the tree alone cannot see the rung, the frame, its deadline, what a frame \
+                 costs here, or what was given up to fit",
+            );
         }
         if self.tree_after == self.tree_blank {
             return Err(
@@ -666,6 +947,25 @@ pub fn report_lines(report: &Report) {
                 report.tree[1],
                 report.tree[2],
                 report.tree[3],
+            );
+            crate::kprintln!(
+                "  compositor    state tree rung {}, frame {}, deadline {} ns, pacing {} ns, \
+                 degraded {}",
+                report.tree[4],
+                report.tree[5],
+                report.tree[6],
+                report.tree[7],
+                report.tree[8],
+            );
+            crate::kprintln!(
+                "  compositor    wake {} ns = scanout {} - p99 {} over {} frame(s) - margin {}; \
+                 {} frame(s) late",
+                report.board.wake,
+                report.board.scanout,
+                report.board.estimate,
+                report.board.samples,
+                report.board.margin,
+                report.board.late,
             );
             crate::kprintln!(
                 "  compositor    outcome {}, image_bytes {}, heap_bytes {}",
@@ -795,9 +1095,11 @@ unsafe fn mute(
         board: Board::default(),
         tree_nodes: 0,
         tree_blank: 0,
-        tree_before: [0; 4],
+        tree_before: [0; WORDS],
         tree_after: 0,
-        tree: [0; 4],
+        tree: [0; WORDS],
+        submitted_deadline: 0,
+        last_tick: 0,
         admitted: declared.is_ok(),
         muted: refused.err().unwrap_or(0),
         image: image.len() as u64,
@@ -888,7 +1190,7 @@ unsafe fn serve(
         .map_err(|_| Trouble::StateTree(0))?;
     let blank = state::Reader::at(pages.own_tree, FRAME_SIZE as u32).map_err(Trouble::StateTree)?;
     let tree_blank = blank.snapshot();
-    let mut tree_before = [0u64; 4];
+    let mut tree_before = [0u64; WORDS];
     for (slot, id) in tree_before.iter_mut().zip(node::WRITTEN) {
         // `u64::MAX` for an id the schema does not carry, so a manifest and
         // `routing::node` that disagree fail this half's *blank* clause rather
@@ -921,6 +1223,17 @@ unsafe fn serve(
         (at::NEGOTIATED_VERSION, u64::from(ABI_VERSION)),
         (at::NEGOTIATED_FEATURES, 0),
         (at::IDLE_SPINS, IDLE_SPINS),
+        // What the component needs to pace a frame, and none of it is something
+        // a component could have found out for itself: RFC 0004 gives it no
+        // clock, nothing tells it about a display, and the margin is a policy.
+        // The clock reading below is a placeholder the client overwrites before
+        // every entry — it is written here so that a component whose first entry
+        // somehow arrived before the first tick reads a number rather than
+        // whatever the page held.
+        (at::TICK_NANOS, 0),
+        (at::SCANOUT_PERIOD_NANOS, SCANOUT_PERIOD_NANOS),
+        (at::PACING_MARGIN_NANOS, PACING_MARGIN_NANOS),
+        (at::BACKEND_CAPABILITIES, BACKEND_CAPABILITIES),
     ] {
         board.write64(offset, value).map_err(Trouble::Channel)?;
     }
@@ -943,9 +1256,15 @@ unsafe fn serve(
     // adopts anything, so a client that submitted would be waiting for a
     // completion from a component that has already exited — which is this
     // harness measuring its own bound rather than the refusal it came for.
+    // This boot's own clock, and the only one the component will ever see.
+    // `PACING_SEED` is the whole of what decides the readings below, which is
+    // what lets a pacing estimate be printed in a boot log at all.
+    let mut env = SeededEnv::new(PACING_SEED, 0);
     let driven = match half {
-        Half::Serve | Half::Mute => drive(&producer, &reaper, &arena, tsc_khz),
-        Half::Starved => Ok(Seen { submitted: 0, completed: 0, refused: 0 }),
+        Half::Serve | Half::Mute => drive(&producer, &reaper, &arena, &board, &mut env, tsc_khz),
+        Half::Starved => {
+            Ok(Seen { submitted: 0, completed: 0, refused: 0, deadline: 0, last_tick: 0 })
+        }
     };
 
     // Told to stop whatever happened above, because a component left serving a
@@ -962,7 +1281,7 @@ unsafe fn serve(
     let reader =
         state::Reader::at(pages.own_tree, FRAME_SIZE as u32).map_err(Trouble::StateTree)?;
     let tree_after = reader.snapshot();
-    let mut tree = [0u64; 4];
+    let mut tree = [0u64; WORDS];
     for (slot, id) in tree.iter_mut().zip(node::WRITTEN) {
         *slot = reader.value(id).unwrap_or(0);
     }
@@ -1001,6 +1320,8 @@ unsafe fn serve(
         tree_before,
         tree_after,
         tree,
+        submitted_deadline: seen.deadline,
+        last_tick: seen.last_tick,
         // Not this half's question. Nothing here admitted anything —
         // `prepare_server` is not a spawn — and claiming otherwise would put a
         // true-looking word in a report that had not earned it.
@@ -1020,6 +1341,15 @@ struct Seen {
     /// Completions carrying a refusal, or answering an entry this client was not
     /// waiting for. Unit: entries.
     refused: u64,
+    /// The deadline this client put on the last commit it submitted.
+    ///
+    /// Kept because the component is required to publish it back, and a boot
+    /// that took the component's word for what it was sent would be comparing a
+    /// number against itself. Unit: nanoseconds, in this boot's seeded epoch.
+    deadline: u64,
+    /// The last clock reading it wrote into the routing page.
+    /// Unit: nanoseconds, in this boot's seeded epoch.
+    last_tick: u64,
 }
 
 /// Submit the script, one delta at a time, and reap every completion.
@@ -1045,10 +1375,47 @@ fn drive(
     producer: &Producer<'_>,
     reaper: &Collector<'_>,
     arena: &Arena<'_>,
+    board: &Window,
+    env: &mut SeededEnv,
     tsc_khz: u64,
 ) -> Result<Seen, Trouble> {
-    let mut seen = Seen { submitted: 0, completed: 0, refused: 0 };
-    for delta in script() {
+    let mut seen = Seen { submitted: 0, completed: 0, refused: 0, deadline: 0, last_tick: 0 };
+    for mut delta in script() {
+        // --- the clock, written before the entry it belongs to --------------
+        //
+        // **The order is the whole of why the component's measurements mean
+        // anything, and it is an ordering argument rather than a convenience.**
+        // The reading goes into the page, then the entry goes on the ring with a
+        // `Release` publish, and the component takes it with an `Acquire` — so a
+        // reading written here is visible to the component before the entry that
+        // was written after it, and the component reads the page only once it
+        // has an entry in hand. Neither side spins on the other and neither
+        // needs to: the ring's own pair is what orders them, which is the same
+        // pair `ring/src/lib.rs` rests every payload byte on.
+        //
+        // The step is drawn rather than fixed, so the two frames of this script
+        // cost different amounts and a percentile is a percentile of something.
+        // One is added to every draw, so a step is never zero — which is what
+        // makes *the second frame does not fit in one nanosecond* an arithmetic
+        // fact about this script rather than a property of this seed.
+        let step_nanos = 1 + env.next_u64() % STEP_SPREAD_NANOS;
+        env.advance(step_nanos);
+        let now = env.now().as_nanos();
+        if board.write64(at::TICK_NANOS, now).is_err() {
+            return Err(Trouble::Refused);
+        }
+        seen.last_tick = now;
+
+        // A commit's deadline is a slack in `script` and an instant on the wire,
+        // and this is where it becomes one. Adding *this* reading rather than a
+        // later one is what makes the room the frame had exact: the component
+        // reads the same number, so what it has left at the commit is the slack
+        // to the nanosecond.
+        if matches!(delta.body, Entry::Commit(_)) {
+            delta.deadline = now.saturating_add(delta.deadline);
+            seen.deadline = delta.deadline;
+        }
+
         let (entry, payload) = delta.encode();
         if !arena.copy_in(0, &payload) {
             return Err(Trouble::Refused);

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! The scene-delta entry format: six opcodes, one fixed-width payload, and the
-//! commit that closes a frame.
+//! The scene-delta entry format: seven opcodes, one fixed-width payload, and
+//! the commit that closes a frame.
 //!
 //! # What crosses, and what carries it
 //!
@@ -18,7 +18,7 @@
 //! again inside a self-framing delta stream. A second deadline field is the
 //! specific disaster: see *the commit* below.
 //!
-//! # Why one width for all six
+//! # Why one width for all seven
 //!
 //! Every payload is [`PAYLOAD_BYTES`] long whatever the opcode, so a batch of
 //! deltas in the arena is an array with a stride rather than a list that must
@@ -55,7 +55,7 @@
 //!   decoder consumed, and `Reader::finish` requires every byte past it to be
 //!   zero. A field a
 //!   record does not read is a field in the tail, and the tail is refused. The
-//!   rule is written once, so a seventh record inherits it by existing.
+//!   rule is written once, so an eighth record inherits it by existing.
 //! - **The envelope.** [`Delta::decode`] rebuilds the [`Sqe`] this build would
 //!   have written from the fields it actually read, and compares all
 //!   sixty-four bytes. Any field of `Sqe` the encoder does not set — today
@@ -113,14 +113,21 @@
 //! already means what it says, and the day one of them genuinely cannot,
 //! `store::code`'s note is the precedent for how a new one is numbered.
 //!
-//! # A seventh opcode
+//! # An eighth opcode
 //!
 //! It is an RFC, by the rule that makes every change to this crate an ABI
 //! change, and it is also a diff to one list: the `entries!` invocation below
 //! emits the opcode constants, the [`Entry`] variants, the dispatch, the
 //! specimens the round-trip test runs over, and the answer to *does this one
-//! carry a deadline*. There is no second place a seventh opcode could be
+//! carry a deadline*. There is no second place an eighth opcode could be
 //! written, and no way to add one that the round-trip test does not pick up.
+//!
+//! [`op::SET_EFFECT`] is what that cost, once, and it is worth reading as the
+//! worked example rather than as a paragraph. The diff that added it is this
+//! list, one record, one byte image in the per-opcode table, and one arm in
+//! each of the five consumers in `f_scene` that decide per opcode. Every one
+//! of those was a build error rather than a reviewer's catch, which is the
+//! property the macro and the emitted corpora were bought for.
 //!
 //! The opcode space is the compositor's own. Section 05 makes an opcode space
 //! per-service, so these numbers are not [`crate::op`]'s, not
@@ -269,7 +276,7 @@ pub mod fill {
 /// domains is written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// An opcode outside this service's six. Refused, never skipped: R04.
+    /// An opcode outside this service's seven. Refused, never skipped: R04.
     UnknownOpcode,
     /// A submission flag outside [`FLAGS_ACCEPTED`]. Refused rather than masked
     /// off — a bit silently dropped is two peers with different beliefs about
@@ -284,11 +291,19 @@ pub enum Refusal {
     /// [`PAYLOAD_BYTES`], or an arena offset that is not an arena offset.
     Malformed,
     /// A closed field carries a value outside its set — a node kind, a fill
-    /// rule, a node named as its own parent, or a node placed in front of
-    /// itself. The last two are one guard in [`CreateNode::read`] and are
-    /// written down as two because a reader looking for *which cycles does one
-    /// entry refuse* should find both halves here rather than only the half
-    /// somebody happened to test.
+    /// rule, a node named as its own parent, a node placed in front of itself,
+    /// or half an effect declaration. The self-parent and self-sibling cases
+    /// are one guard in [`CreateNode::read`] and are written down as two
+    /// because a reader looking for *which cycles does one entry refuse*
+    /// should find both halves here rather than only the half somebody
+    /// happened to test.
+    ///
+    /// A half declaration is the same shape of refusal and shares this code
+    /// deliberately: `f_scene::effect::Undeclared::REFUSAL` is already
+    /// [`Refusal::Value`], so a declaration refused at this decoder and one
+    /// refused by `Effect::declared` reach a peer as one answer rather than
+    /// as two that a caller would have to learn apart.
+    /// [`SetEffect::read`] is where the set is stated.
     Value,
     /// A field that must name a node holds [`NO_NODE`]. Separate from
     /// [`Refusal::Value`] because a zeroed payload produces exactly this, and a
@@ -307,7 +322,7 @@ impl Refusal {
     #[must_use]
     pub const fn message(self) -> &'static str {
         match self {
-            Self::UnknownOpcode => "the opcode is not one of this service's six",
+            Self::UnknownOpcode => "the opcode is not one of this service's seven",
             Self::UnknownFlag => "the entry carries a submission flag a scene delta may not",
             Self::Reserved => "a field this opcode does not read is not zero",
             Self::Malformed => "the entry does not frame a payload of the one width there is",
@@ -356,6 +371,16 @@ struct Writer<'a> {
     out: &'a mut [u8; PAYLOAD_BYTES],
     /// How much of it has been written.
     at: usize,
+    /// Where each field this record wrote landed.
+    ///
+    /// Test builds only, and it costs the shipped encoder nothing — a frame's
+    /// deltas are written on the path this module exists to keep cheap, and a
+    /// span list every producer pays for so that a test can read it back would
+    /// be the wrong trade. What it buys is in [`Spans`]: the field list a
+    /// specimen is checked against is the one the writer actually wrote,
+    /// rather than a second list beside the record.
+    #[cfg(test)]
+    spans: Spans,
 }
 
 impl Writer<'_> {
@@ -384,13 +409,77 @@ impl Writer<'_> {
     /// Indexing rather than a checked write, and the bound is a compile-time
     /// fact rather than a runtime hope: `entries!` emits
     /// `assert!(WIDTH <= PAYLOAD_BYTES)` for every record it declares — so the
-    /// bound is not a list of six that a seventh joins by somebody remembering
+    /// bound is not a list of seven that an eighth joins by somebody
+    /// remembering
     /// — and `the_width_each_record_declares_is_the_width_it_writes` requires
     /// the writer to stop at `WIDTH` for every record there is. A record wide
     /// enough to overflow this cannot reach a build.
     fn put(&mut self, bytes: &[u8]) {
+        #[cfg(test)]
+        self.spans.wrote(self.at, bytes.len());
         self.out[self.at..self.at + bytes.len()].copy_from_slice(bytes);
         self.at += bytes.len();
+    }
+}
+
+/// Where a record's fields landed, in the order the writer wrote them.
+///
+/// The field list, derived rather than declared. A record's fields are
+/// otherwise visible only to its own `write`, so every rule *about a field* —
+/// the specimen corpus's *non-zero and distinct*, which existed as a comment on
+/// three records and as nothing at all on the rest — had to be re-stated per
+/// record by hand and was therefore inherited by no new one. This is the
+/// mechanism that lets such a rule be written once and hold over
+/// [`Entry::SPECIMENS`], which is the emitted corpus: an eighth record joins it
+/// by having a `write`.
+///
+/// Test-only, which is the whole reason it may be this shape. In a shipped
+/// build [`Writer`] has no such field and `put` no such statement.
+///
+/// *What would reverse this:* a record that writes one field with two `put`
+/// calls — a fixed-width array, say — at which point the spans are no longer
+/// fields and the rule below is about the wrong boundaries. Nothing here writes
+/// one today, and the assertion in `wrote` is what makes a record that starts
+/// to a failure rather than a silent re-interpretation.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+struct Spans {
+    /// Each field's offset into the payload and its width, in writing order.
+    /// Unit: bytes, and bytes.
+    at: [(usize, usize); SPANS_MAX],
+    /// How many of `at` are meaningful.
+    /// Unit: fields.
+    len: usize,
+}
+
+/// The most fields any record here writes, plus room.
+///
+/// [`SetTransform`] writes seven, which is the largest. A record with more
+/// panics in [`Spans::wrote`] rather than silently losing its tail, because a
+/// field list that quietly stopped being complete is exactly the defect this
+/// type was added to remove.
+/// Unit: fields.
+#[cfg(test)]
+const SPANS_MAX: usize = 8;
+
+#[cfg(test)]
+impl Spans {
+    /// No fields written yet.
+    const EMPTY: Self = Self { at: [(0, 0); SPANS_MAX], len: 0 };
+
+    /// Record one field.
+    fn wrote(&mut self, at: usize, bytes: usize) {
+        let slot = self.at.get_mut(self.len).expect("a record with more fields than SPANS_MAX");
+        *slot = (at, bytes);
+        self.len += 1;
+    }
+
+    /// Each field's bytes, in writing order.
+    fn each(self, payload: &[u8; PAYLOAD_BYTES]) -> impl Iterator<Item = &[u8]> {
+        (0..self.len).map(move |ix| {
+            let (at, bytes) = self.at[ix];
+            &payload[at..at + bytes]
+        })
     }
 }
 
@@ -468,7 +557,7 @@ impl Reader<'_> {
 /// Private, because nothing outside this module should encode a payload without
 /// the envelope that frames it — [`Delta`] is the door. Its value is what it
 /// makes obligatory: a record cannot exist without a width, a specimen, a
-/// writer and a reader, so a seventh opcode cannot be added without all four,
+/// writer and a reader, so an eighth opcode cannot be added without all four,
 /// and [`Entry::SPECIMENS`] picks the specimen up without anybody remembering
 /// to add it to a test.
 trait Record: Copy + Sized {
@@ -500,7 +589,12 @@ trait Record: Copy + Sized {
     /// Encode into a whole payload slot. Everything past the fields is zero.
     fn to_payload(&self) -> [u8; PAYLOAD_BYTES] {
         let mut out = [0u8; PAYLOAD_BYTES];
-        let mut writer = Writer { out: &mut out, at: 0 };
+        let mut writer = Writer {
+            out: &mut out,
+            at: 0,
+            #[cfg(test)]
+            spans: Spans::EMPTY,
+        };
         self.write(&mut writer);
         out
     }
@@ -520,7 +614,7 @@ trait Record: Copy + Sized {
         // that dropped its record's *last* field would be invisible: the bytes
         // it left behind are inside the declared width, so `finish` never sees
         // them and `WIDTH` is only ever checked against the writer. The rule is
-        // written once, here, so a seventh record inherits it by existing —
+        // written once, here, so an eighth record inherits it by existing —
         // which is `Reader::finish`'s own shape, one level up. A decoder that
         // read *past* its width is caught by the same comparison and is the
         // more serious half: it would be reading a later field's bytes.
@@ -544,7 +638,7 @@ macro_rules! opcode_pattern {
     };
 }
 
-/// The six opcodes, written once.
+/// The seven opcodes, written once.
 ///
 /// # Why a macro, in a tree that mostly refuses them
 ///
@@ -559,7 +653,7 @@ macro_rules! opcode_pattern {
 ///
 /// The exit this file is accepted on says *every opcode round-trips*. A
 /// hand-written specimen table is precisely how that sentence stops being true
-/// while every test stays green: a seventh opcode is added, it is not in the
+/// while every test stays green: an eighth opcode is added, it is not in the
 /// table, and the loop over the table keeps passing. One list closes it.
 /// Everything the rest of this module asks of an opcode — its number, its
 /// record, its variant, whether it carries a deadline, and a legal value of it
@@ -637,7 +731,7 @@ macro_rules! entries {
             /// an unscheduled one and go on to read its payload.
             ///
             /// The answer is on the line that declares the opcode, so a
-            /// seventh cannot be added without deciding it. Today exactly one
+            /// eighth cannot be added without deciding it. Today exactly one
             /// opcode answers `Some(true)`, and the module's *the commit* is
             /// why that is the whole of the deadline's story.
             #[must_use]
@@ -665,7 +759,7 @@ macro_rules! entries {
             /// One legal value of every opcode's record.
             ///
             /// The round-trip test's corpus, and it is derived rather than
-            /// written: a seventh opcode is round-tripped by the tests that
+            /// written: an eighth opcode is round-tripped by the tests that
             /// already exist, on the day it is declared, without anybody
             /// remembering.
             /// Unit: none — one entry per opcode, in declaration order.
@@ -686,6 +780,28 @@ macro_rules! entries {
                 match self {
                     $(Self::$variant(record) => record.to_payload(),)*
                 }
+            }
+
+            /// The payload, and where in it each of this record's fields went.
+            ///
+            /// Emitted per variant for the reason everything else here is: a
+            /// rule stated over the fields of every record has to reach every
+            /// record, and a helper written for the ones somebody thought of
+            /// is the hand-written corpus this macro exists to delete.
+            #[cfg(test)]
+            fn fields(&self) -> (Spans, [u8; PAYLOAD_BYTES]) {
+                let mut out = [0u8; PAYLOAD_BYTES];
+                let spans = match self {
+                    $(
+                        Self::$variant(record) => {
+                            let mut writer =
+                                Writer { out: &mut out, at: 0, spans: Spans::EMPTY };
+                            record.write(&mut writer);
+                            writer.spans
+                        }
+                    )*
+                };
+                (spans, out)
             }
 
             /// The bytes a record's fields occupy, for the caller that needs to
@@ -713,9 +829,9 @@ macro_rules! entries {
         $(
             // Every record fits the one payload width, emitted from the list
             // that declares the records rather than written out beside them. A
-            // seventh opcode joins this check by existing, which is what
-            // `Writer::put`'s doc claims and what a hand-written list of six
-            // could not deliver: a seventh record wider than the stride built
+            // eighth opcode joins this check by existing, which is what
+            // `Writer::put`'s doc claims and what a hand-written list of seven
+            // could not deliver: an eighth record wider than the stride built
             // clean and panicked at run time instead.
             const _: () = assert!(
                 <$record as Record>::WIDTH <= PAYLOAD_BYTES,
@@ -762,6 +878,18 @@ entries! {
     /// The only opcode that reads [`Sqe::deadline`](crate::Sqe::deadline), and
     /// the module's *the commit* is why it is the only one.
     Commit / Commit / COMMIT = 0x06, carries_deadline: true;
+
+    /// Declare what an effect node costs and what is done instead.
+    ///
+    /// Declared after the commit rather than beside the other property sets,
+    /// which is the one thing about this list that needs saying: the numbers
+    /// are the wire's and are already published, so a seventh opcode takes the
+    /// next free one and the declaration order follows the numbering rather
+    /// than the other way round. `op::ALL` is emitted from this list and is
+    /// read in order by `f_scene::dirty::REACH`'s assertion and by the
+    /// per-opcode byte images, and both are comparisons rather than
+    /// assumptions about where a reader would have put it.
+    SetEffect / SetEffect / SET_EFFECT = 0x07, carries_deadline: false;
 }
 
 /// Create a node and hang it in the tree.
@@ -1001,7 +1129,7 @@ impl Record for SetPath {
 /// carried one would be a record whose width is a function of its content,
 /// which is the fixed stride gone. *What would reverse this:* a scene corpus in
 /// which solid fills are the minority, at which point the honest change is a
-/// seventh opcode carrying a paint *source* by name, with an RFC for it, rather
+/// eighth opcode carrying a paint *source* by name, with an RFC for it, rather
 /// than a sixth field here that is meaningful only under some values of a
 /// fifth.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1154,6 +1282,138 @@ impl Record for Commit {
     }
 }
 
+/// Declare what an effect node costs and what is done instead.
+///
+/// # What the two words are, and why the second is a saving
+///
+/// `f_scene::effect` is where the argument lives in full and this record does
+/// not restate it. The half of it that is a property of *these bytes* is the
+/// one a reader of this file needs: an unwritten field is zero, so a field
+/// whose zero is meaningful cannot tell *nobody wrote this* from *somebody
+/// wrote nothing*. A second **cost** is such a field — the commonest fallback
+/// there is costs nothing — and a **saving** is not, because a fallback that
+/// saves nothing is not a fallback. So zero is the unwritten value in both
+/// fields here, and both refuse it.
+///
+/// # Why the refusal is the decoder's
+///
+/// Because this is the boundary the exit names, and it is not the same
+/// boundary `Effect::declared` is. That function refuses two integers a caller
+/// inside `f_scene` wrote; this one refuses a record a **peer** wrote, which is
+/// the only side of the seam on which *a producer forgot a field* is a thing
+/// that can actually happen. Until this opcode existed there was no such
+/// record, so the sentence *a delta carrying one and not the other is refused*
+/// was a statement about nothing — RFC 0084 narrowed `E3-B07a`'s exit on
+/// exactly that measurement, and this record is the reversal it named.
+///
+/// The three refusals are all [`Refusal::Value`], which is the code
+/// `f_scene::effect::Undeclared::REFUSAL` already is. That is not a saving of
+/// an enum variant: it is the two boundaries answering a peer with one word for
+/// one mistake, so that a producer chasing a rejected frame does not have to
+/// know which side of the seam refused it.
+///
+/// # What this deliberately cannot say
+///
+/// What the effect *is*, and what the fallback *is*. No blur, no shadow, no
+/// material, no taps, no radius. A vocabulary of effect shapes here would be a
+/// second copy of the renderer's knowledge on the wire, and every entry in it
+/// would be an ABI change made on a renderer's schedule. *What would reverse
+/// this:* `E3-B07b`'s downgrade order turning out to need a rank per effect
+/// shape rather than per declared saving, at which point the shape is a fourth
+/// field here and this record grows one — with its own RFC, because that is
+/// what a wire vocabulary widening is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SetEffect {
+    /// The node this declaration is about.
+    ///
+    /// A node of kind [`kind::EFFECT`], and that this record cannot check:
+    /// nothing here holds a scene, so *which kind is this node* is a question
+    /// only the graph can answer. `f_scene` is where it is asked.
+    /// Unit: none — a node identifier. [`NO_NODE`] is refused.
+    pub node: u32,
+    /// What the declarer expects this effect to add to the frame.
+    ///
+    /// Marginal over rendering the same subtree without the effect, and an
+    /// upper bound rather than a typical case — `f_scene::effect`'s *what makes
+    /// an estimate honest* is the whole of what this number promises, and this
+    /// record carries no part of enforcing it.
+    /// Unit: microseconds, scaled by 100, so one unit is ten nanoseconds. Zero
+    /// is not an estimate: it is what an unwritten word holds, and it is
+    /// refused.
+    pub estimate_us_x100: u32,
+    /// What choosing the fallback instead is expected to give back.
+    ///
+    /// Unit: microseconds, scaled by 100 — [`SetEffect::estimate_us_x100`]'s
+    /// scale, because the two are subtracted to recover what the fallback
+    /// costs. Zero is a fallback that saves nothing, which is not a fallback
+    /// and is refused. Equal to the estimate is the fallback that is free,
+    /// which is the effect not being applied at all, and is the top of the
+    /// range rather than past it.
+    pub saving_us_x100: u32,
+}
+
+impl Record for SetEffect {
+    const WIDTH: usize = 4 + 4 + 4;
+    // Three distinct non-zero values, on `CreateNode::SPECIMEN`'s rule — and
+    // this record is the one that made the rule structural rather than a
+    // comment: `every_specimen_writes_fields_that_are_non_zero_and_distinct`
+    // reads the fields back out of the writer that wrote them, so an eighth
+    // record inherits the rule the way it inherits its width bound.
+    // The two costs are `f_scene::effect`'s own test constants — 90
+    // microseconds against a saving of 35 — so a reader comparing the two
+    // files is comparing one declaration and not two.
+    const SPECIMEN: Self = Self { node: 7, estimate_us_x100: 9_000, saving_us_x100: 3_500 };
+
+    fn write(&self, out: &mut Writer) {
+        out.u32(self.node);
+        out.u32(self.estimate_us_x100);
+        out.u32(self.saving_us_x100);
+    }
+
+    fn read(raw: &mut Reader) -> Result<Self, Refusal> {
+        let node = raw.u32();
+        let estimate_us_x100 = raw.u32();
+        let saving_us_x100 = raw.u32();
+        if node == NO_NODE {
+            return Err(Refusal::NoNode);
+        }
+        // The exit's sentence. An estimate with no saving is an effect that
+        // has told the compositor what it will cost and not what to do when
+        // that is too much — half a declaration, refused here where the bytes
+        // are rather than by a consumer that would have had to invent what the
+        // missing half meant, at frame time, with no time to be told anything.
+        if saving_us_x100 == 0 {
+            return Err(Refusal::Value);
+        }
+        // Nothing is cheaper than free. A saving above the estimate is not a
+        // generous declaration but an incoherent one, and a policy that
+        // subtracted it from a frame's remaining budget would believe it had
+        // recovered time that never existed. Refused here as well as in
+        // `Effect::declared`, and the duplication is deliberate for once: the
+        // subtraction that recovers the fallback's own cost is done in
+        // `f_scene` on values this decoder handed over, so this is the line
+        // that makes it total there.
+        //
+        // **It is also the mirror**, and that is why there is no third
+        // condition here. *A saving with no estimate* is a fallback the policy
+        // can never rank, and it is refused by this line rather than by one of
+        // its own: a saving past the first guard is non-zero, and a non-zero
+        // saving against an estimate of zero is above it. The obvious third
+        // guard — `if estimate_us_x100 == 0` — was written first and is not
+        // here because it cannot be killed. Measured: with it in place,
+        // changing its condition to `== u32::MAX` left
+        // `cargo test -p f-abi --lib scene` at `20 passed; 0 failed`, which is
+        // a guard no test can fail and this file has no room for one.
+        // `half_an_effect_declaration_is_refused_by_the_decoder` asks about
+        // that input anyway, because *which line refuses it* is this comment's
+        // business and not a peer's.
+        if saving_us_x100 > estimate_us_x100 {
+            return Err(Refusal::Value);
+        }
+        Ok(Self { node, estimate_us_x100, saving_us_x100 })
+    }
+}
+
 /// What a commit schedules: the frame, and what it was scheduled against.
 ///
 /// `E3-B01a`'s exit sentence as a type. It exists so that the two numbers
@@ -1254,7 +1514,7 @@ impl Delta {
     /// What a commit schedules, or `None` for a delta that schedules nothing.
     ///
     /// The arms are written out rather than closed with a wildcard, so that a
-    /// seventh opcode stops this build and asks whether it names a frame. A
+    /// eighth opcode stops this build and asks whether it names a frame. A
     /// wildcard would answer `None` on its behalf, which is the safe answer and
     /// exactly the kind of safe answer nobody ever revisits.
     #[must_use]
@@ -1269,6 +1529,7 @@ impl Delta {
             | Entry::SetTransform(_)
             | Entry::SetPath(_)
             | Entry::SetPaint(_)
+            | Entry::SetEffect(_)
             | Entry::RemoveNode(_) => None,
         }
     }
@@ -1483,7 +1744,7 @@ mod tests {
     /// A delta around a body, with an envelope that is legal for it.
     ///
     /// Derived from [`op::carries_deadline`] rather than written per opcode, so
-    /// that a seventh opcode gets a legal envelope from the list that declared
+    /// that an eighth opcode gets a legal envelope from the list that declared
     /// it, and every test below covers it without being edited.
     fn delta(body: Entry) -> Delta {
         let scheduled = op::carries_deadline(body.opcode()) == Some(true);
@@ -1506,7 +1767,7 @@ mod tests {
         // can inherit the host's word size, its alignment or its byte order.
         //
         // The corpus is `Entry::SPECIMENS`, emitted from the same list as the
-        // opcodes, so a seventh opcode is in it the day it is declared.
+        // opcodes, so an eighth opcode is in it the day it is declared.
         assert_eq!(Entry::SPECIMENS.len(), op::COUNT);
         for body in Entry::SPECIMENS {
             let original = delta(body);
@@ -1598,7 +1859,7 @@ mod tests {
         // This list is written by hand, because a derived one would be derived
         // from the encoder it is supposed to check. What is *not* left to
         // memory is whether it is complete: the assertions below require one
-        // image per opcode, in `op::ALL`'s order, so a seventh opcode fails
+        // image per opcode, in `op::ALL`'s order, so an eighth opcode fails
         // this test on the day it is declared rather than being quietly
         // uncovered by it. That is the difference between this list and the
         // hand-written arrays `docs/postmortem/0001` is about.
@@ -1639,6 +1900,11 @@ mod tests {
             (Entry::Commit(Commit::SPECIMEN), &[
                 0xF0, 0xDE, 0xBC, 0x9A, 0x78, 0x56, 0x34, 0x12,  // frame token
             ]),
+            (Entry::SetEffect(SetEffect::SPECIMEN), &[
+                0x07, 0x00, 0x00, 0x00,  // node = 7
+                0x28, 0x23, 0x00, 0x00,  // estimate = 9 000, which is 90 us
+                0xAC, 0x0D, 0x00, 0x00,  // saving = 3 500, which is 35 us
+            ]),
         ];
 
         let covered: [u8; op::COUNT] = images.map(|(body, _)| body.opcode());
@@ -1658,7 +1924,7 @@ mod tests {
     /// Test-only, and it is the only way this file can observe the rule
     /// `Record::from_payload` states: every record that actually ships reads
     /// exactly what it declares, so deleting that rule changes nothing any real
-    /// corpus can see. What it would change is the day a seventh record's
+    /// corpus can see. What it would change is the day an eighth record's
     /// decoder drops its last field — and a guard whose absence nothing
     /// notices is a guard a later edit walks past. This is that day, written
     /// down.
@@ -1729,7 +1995,7 @@ mod tests {
         // that can be flipped and still decode to the value it started as.
         //
         // The corpus is `Entry::SPECIMENS` and the positions are every position
-        // there is, so neither is a list a seventh opcode or a seventh field
+        // there is, so neither is a list an eighth opcode or an eighth field
         // could be left out of.
         for body in Entry::SPECIMENS {
             let original = delta(body);
@@ -1989,6 +2255,7 @@ mod tests {
             Entry::SetTransform(SetTransform { node: NO_NODE, ..SetTransform::SPECIMEN }),
             Entry::SetPath(SetPath { node: NO_NODE, ..SetPath::SPECIMEN }),
             Entry::SetPaint(SetPaint { node: NO_NODE, ..SetPaint::SPECIMEN }),
+            Entry::SetEffect(SetEffect { node: NO_NODE, ..SetEffect::SPECIMEN }),
             Entry::RemoveNode(RemoveNode { node: NO_NODE }),
         ] {
             let (entry, payload) = delta(body).encode();
@@ -2077,12 +2344,132 @@ mod tests {
     }
 
     #[test]
+    fn half_an_effect_declaration_is_refused_by_the_decoder() {
+        // `E3-B07h`'s exit, and `E3-B07a`'s pre-narrowing sentence restored to
+        // the boundary it names. The antecedent finally exists: until
+        // `SET_EFFECT` there was no delta in this workspace that could carry an
+        // estimate without a saving, which is the measurement RFC 0084
+        // narrowed that exit on.
+        //
+        // All four incoherent declarations, not the one the sentence names.
+        // The mirror — a saving with no estimate — is the same defect seen from
+        // the other side and is refused by its own condition, so deleting
+        // either condition reddens its own row here; a test that only carried
+        // the named case would let the mirror's deletion through.
+        for (estimate, saving, why) in [
+            (ESTIMATE, 0, "a cost and nothing cheaper to do"),
+            (0, SAVING, "a saving and no cost to save from"),
+            (0, 0, "neither word"),
+            (SAVING, ESTIMATE, "a saving above the estimate"),
+        ] {
+            let half = SetEffect {
+                estimate_us_x100: estimate,
+                saving_us_x100: saving,
+                ..SetEffect::SPECIMEN
+            };
+            let (entry, payload) = delta(Entry::SetEffect(half)).encode();
+            assert_eq!(
+                Delta::decode(&entry, &payload),
+                Err(Refusal::Value),
+                "a declaration naming {why} was believed"
+            );
+        }
+
+        // And the two coherent shapes are not refused, because a decoder that
+        // refused everything would pass every assertion above. The free
+        // fallback — the effect not applied at all — is `saving == estimate`,
+        // which is the top of the range and inside it: an off-by-one in the
+        // comparison above turns this half of the test red rather than
+        // reducing it to prose.
+        for saving in [SAVING, ESTIMATE] {
+            let whole = SetEffect {
+                estimate_us_x100: ESTIMATE,
+                saving_us_x100: saving,
+                ..SetEffect::SPECIMEN
+            };
+            let original = delta(Entry::SetEffect(whole));
+            let (entry, payload) = original.encode();
+            assert_eq!(Delta::decode(&entry, &payload), Ok(original), "saving {saving}");
+        }
+    }
+
+    /// A cost a declarer might plausibly write: 90 microseconds.
+    /// Unit: microseconds, scaled by 100.
+    const ESTIMATE: u32 = 9_000;
+
+    /// A saving strictly inside the estimate, so the fallback is a reduction
+    /// rather than a skip.
+    /// Unit: microseconds, scaled by 100.
+    const SAVING: u32 = 3_500;
+
+    #[test]
+    fn every_specimen_writes_fields_that_are_non_zero_and_distinct() {
+        // The rule three records carried as a comment and the other four
+        // carried not at all, made structural. `CreateNode::SPECIMEN` states
+        // it: a round trip is evidence that a writer and a reader agree, and a
+        // pair that had swapped two fields or read one at the wrong width
+        // round-trips perfectly unless the values tell them apart. Zero is the
+        // value every broken decoder invents, and two equal fields are two a
+        // swap cannot be seen through.
+        //
+        // The field list is the writer's own — `Spans` records it as the
+        // record writes — so this holds over `Entry::SPECIMENS`, which is the
+        // emitted corpus. An eighth record joins it by having a `write`, which
+        // is the difference between this and the comment it replaces.
+        //
+        // *What would reverse this:* a record whose fields genuinely cannot
+        // all be distinct — two node identifiers that must name the same node,
+        // say. Then the specimen says so and this loop needs an exception with
+        // a reason, which is a harder thing to add by accident than a comment
+        // somebody did not copy.
+        for body in Entry::SPECIMENS {
+            let label = op::label(body.opcode());
+            let (spans, payload) = body.fields();
+            let mut seen: [u64; SPANS_MAX] = [0; SPANS_MAX];
+            let mut count = 0usize;
+            for field in spans.each(&payload) {
+                assert!(
+                    field.iter().any(|byte| *byte != 0),
+                    "{label}: field {count} of the specimen is zero, which is the value a                      decoder that stopped reading would have produced"
+                );
+                // Widened to one type so that fields of different widths are
+                // compared as the numbers they are: a `u16` and a `u32` both
+                // holding 7 are two fields a swapped decoder could confuse,
+                // and comparing their bytes would call them different.
+                let mut value = 0u64;
+                for (place, byte) in field.iter().enumerate() {
+                    value |= u64::from(*byte) << (place * 8);
+                }
+                for (earlier, other) in seen.iter().take(count).enumerate() {
+                    assert_ne!(
+                        *other, value,
+                        "{label}: fields {earlier} and {count} of the specimen are equal, so a                          decoder that swapped them round-trips"
+                    );
+                }
+                seen[count] = value;
+                count += 1;
+            }
+            assert!(count > 0, "{label}: the writer wrote no fields");
+            // The spans cover the declared width exactly, which is what makes
+            // *every field* above mean every field rather than every field the
+            // writer happened to announce.
+            let written: usize = spans.each(&payload).map(<[u8]>::len).sum();
+            assert_eq!(written, body.width(), "{label}: the spans are not the record's width");
+        }
+    }
+
+    #[test]
     fn the_vocabulary_is_the_one_the_design_names() {
-        // Section 07's six node kinds and this service's six opcodes. Not a
-        // count for its own sake: it is what makes adding a seventh of either a
+        // Section 07's six node kinds and this service's seven opcodes. Not a
+        // count for its own sake: it is what makes adding one more of either a
         // diff that fails a test somebody has to read, on top of being a diff
         // to the wire crate, which is reviewed as an ABI change.
-        assert_eq!(op::COUNT, 6);
+        //
+        // The two numbers were both six until `SET_EFFECT` landed, and they
+        // are asserted separately rather than against each other precisely
+        // because they were never one fact: the kinds are what a scene can
+        // contain, and the opcodes are what one delta can say about it.
+        assert_eq!(op::COUNT, 7);
         let kinds =
             [kind::TRANSFORM, kind::CLIP, kind::LAYER, kind::DRAW, kind::EFFECT, kind::SEMANTIC];
         for value in kinds {

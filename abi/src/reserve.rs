@@ -51,13 +51,30 @@ use crate::manifest::{HUGE_BYTES, Record, class, domain};
 
 /// The most reservations one table holds.
 ///
-/// Eight, matching the frame's own place count: a reservation belongs to a
-/// component and a component occupies a place, so a table larger than the
-/// places would hold entries nothing could have been granted through. Growth is
-/// a table that is bought rather than a larger array — RFC 0029's shape, and
-/// the day it is wanted, `Table` is where it goes.
+/// **Sixteen, and it was eight.** Eight was *the frame's own place count*, on
+/// the argument that a reservation belongs to a component and a component
+/// occupies a place, so a table larger than the places would hold entries
+/// nothing could have been granted through. The argument was sound and the
+/// number was still one short, because a place that is **refilled** grants
+/// again: `kernel::component::fill` puts the grant on the place after the
+/// spawn, and the one boot that tears a place down and fills it from the same
+/// supply therefore holds two entries for one place until the first is
+/// released.
+///
+/// So at seven components the table was exactly full, and `E3-B06c`'s eighth
+/// component file overflowed it — reported correctly, as `NoCore` from a full
+/// table, and read three subsystems away as *the spawn was refused admission
+/// before anything was spent* on a component that had nothing to do with the
+/// one that was added.
+///
+/// Sixteen is the place count with room for every refill a boot performs, and
+/// it is a bound rather than an arithmetic because this crate cannot see
+/// `kernel::component::PLACES_MAX` — the frame is what holds the places and
+/// `abi` is what both sides read. Growth past this is a table that is bought
+/// rather than a larger array: RFC 0029's shape, and the day it is wanted,
+/// `Table` is where it goes.
 /// Unit: reservations.
-pub const RESERVATIONS_MAX: usize = 8;
+pub const RESERVATIONS_MAX: usize = 16;
 
 /// The most physical cores this table can name.
 ///

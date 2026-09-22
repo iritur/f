@@ -1025,6 +1025,9 @@ mod tests {
                     set.node = NO_NODE;
                     self.nodes[at].paint = set;
                 }
+                Entry::SetEffect(_) => {
+                    panic!("the reconciler declares no effect costs; `E3-B07c` is where it will")
+                }
                 Entry::Commit(_) => panic!("the reconciler does not close the frame"),
             }
         }

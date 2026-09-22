@@ -273,7 +273,15 @@ const OCCUPANT_MICROS: u64 = 500_000;
 /// ever looks for. `kernel/src/state.rs` grew a seventh mount id in the same
 /// diff, because a place the frame builds and cannot publish a tree for is a
 /// spawn that fails after the account has been spent.
-const PLACES_MAX: usize = 7;
+///
+/// **Eight, and the eighth is `user/panel`.** `E3-B06c` adds the first component
+/// in this tree that is an *application* rather than a server, and it costs a
+/// place like any other component file. `kernel/src/state.rs` grew an eighth
+/// mount id in the same diff, for the reason the seventh's paragraph gives, and
+/// that file's own note says what the run of ids has become: not a forecast that
+/// keeps coming true, but a consequence of the bound being a constant. RFC 0044
+/// is where it stops.
+const PLACES_MAX: usize = 8;
 
 /// Why the lifecycle could not do what it was asked.
 ///

@@ -1604,7 +1604,33 @@ impl Chaos {
             // produced. A device refusing on its own terms would make the count
             // the assertions rest on ambiguous.
             extent: 4_096,
-            kills,
+            // **Derived from the declaration, not taken from the caller, for
+            // the same reason `refills` below is.** A component whose policy
+            // does not refill its place has exactly one kill in it: the first
+            // one ends the occupant and there is nothing left to kill, so a
+            // plan of three reports two that never landed and `verdict` fails
+            // the run for being a smaller experiment than its name — which is
+            // true, and is a statement about the plan rather than about the
+            // component.
+            //
+            // [`KILLS`] is three because `user/store/manifest.toml` declares a
+            // budget of three restarts, and that is the same arithmetic run on
+            // a budget of none. `user/panel` is the first component in this
+            // tree to declare `never` and is what found it; the comment on
+            // `operations` above records `E1-B03` finding the identical shape
+            // on the other axis, where a non-durable component finished early
+            // and abandoned the kills it had left. Two axes, one rule: the plan
+            // is a fact about the component and the harness reads it rather
+            // than choosing it.
+            //
+            // *What would reverse this:* a policy between `never` and a budget
+            // — a component that refills once and then retires — at which point
+            // one bit is not enough and this wants the budget itself.
+            kills: if policy.as_record().restarts_after(true, false) {
+                kills
+            } else {
+                kills.min(1)
+            },
             durable,
             lazy: false,
             volatile: false,
@@ -2184,7 +2210,33 @@ pub fn sweep(deployment: &Deployment, seed: u64, kills: u32) -> Result<Vec<Pair>
         );
     }
     let mut pairs = Vec::new();
-    for component in deployment.components() {
+    // **A component that serves nobody is not in this sweep, and that is a
+    // statement about the experiment rather than about the component.** Both of
+    // these sweeps ask one question: what does a *client* observe while the
+    // thing it talks to is replaced underneath it. A component holding the
+    // client end of its own data ring has nobody on the other side to observe
+    // anything, so a run over it produces a digest and no evidence — which is
+    // the failure `is_empty` above refuses in the large and this refuses in the
+    // small.
+    //
+    // `user/panel` is the first `role = "client"` in this deployment and it
+    // failed both sweeps on the same day, for two different-looking reasons: a
+    // kill plan that could land one of three, because nothing about it
+    // restarts; and a worst operation 81 ns past a bound of *control plus a
+    // declared ladder of 0 ns*, because the ladder is a fault-restart ladder and
+    // this component declares no restart. Two symptoms, one cause, and the
+    // patch for either one separately would have been a number.
+    //
+    // It is skipped rather than refused, and the count is printed by the caller,
+    // because a deployment of nothing but clients is a real mistake and a silent
+    // zero is how it would be read as a pass.
+    //
+    // *What would reverse this:* a client worth replacing under load — an
+    // application whose own restart is what a **second** client observes, which
+    // is `E3-B06c`'s `Registry::adopt` path having a caller. Then the question
+    // is asked of it too, and the skip becomes a reason to widen the harness
+    // rather than a reason to leave it out.
+    for component in deployment.components().iter().filter(|it| it.serves()) {
         let policy = policy_of(component);
         let chaos = Chaos::of(component, policy, kills);
         let mut control = chaos;
@@ -2482,9 +2534,21 @@ mod tests {
         declared.restart = restart::NEVER;
         let policy = policy_of(&declared);
         // One kill, because the first one is the last one: there is no second
-        // occupant to kill.
-        let chaos = Chaos::of(&declared, policy, 1);
+        // occupant to kill. **The plan is asked for as [`KILLS`] and comes back
+        // as one**, which is the point: this test used to pass `1` by hand and
+        // therefore agreed with a harness that did not. `user/panel` is what
+        // found the difference — the first component in the deployment to
+        // declare `never`, killed three times by a plan that could only land
+        // one, failing `cargo xtask sim --chaos-hash` on *a smaller experiment
+        // than the one it is named after*, which was a true sentence about the
+        // plan and read as an accusation against the component.
+        let chaos = Chaos::of(&declared, policy, KILLS);
         assert!(!chaos.refills, "a `never` policy was read as a policy that refills");
+        assert_eq!(
+            chaos.kills, 1,
+            "a place that is never refilled has one kill in it, and the plan is supposed to be \
+             read off the declaration rather than taken from the caller"
+        );
         let mut control = chaos;
         control.kills = 0;
 

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["abi", "env", "ring", "hash", "blob", "zone", "index", "generation", "interface", "scene", "text", "input", "kernel", "user/assembler", "user/compositor", "user/init", "user/objects", "user/store", "user/supervisor", "user/virtio-blk", "user/virtio-net", "user/virtio-gpu", "bench", "sim", "xtask"]
+members = ["abi", "env", "ring", "hash", "blob", "zone", "index", "generation", "interface", "scene", "semantic", "text", "input", "kernel", "user/assembler", "user/compositor", "user/init", "user/panel", "user/objects", "user/store", "user/supervisor", "user/virtio-blk", "user/virtio-net", "user/virtio-gpu", "bench", "sim", "xtask"]
 
 # The checker's crate, and it is excluded rather than absent for the reason RFC
 # 0022 gave the last one: a verification tool's toolchain is the tool's
@@ -48,6 +48,23 @@ f-ring = { path = "ring" }
 f-scene = { path = "scene" }
 f-text = { path = "text" }
 f-input = { path = "input" }
+# The tree the system owns, and the one crate in the workspace that takes both
+# `f-abi` and `f-interface`. It exists because neither may take the other: the
+# wire is `abi`'s and cannot know what a role means, and `interface/Cargo.toml`
+# declines `f-abi` so that the vocabulary stays a leaf that can be deleted. The
+# join has to live somewhere that is neither, and this is it. `E3-B06c`, RFC
+# 0083, and `semantic/Cargo.toml` is the long version.
+f-semantic = { path = "semantic" }
+# The vocabulary, and the row exists because the compositor now takes it.
+# `interface/src/lib.rs` said this crate depends on nothing and nothing depends
+# on it, and that the day a compositor existed it would take these types; that
+# day is `E3-B01k`, which publishes the rung `backend::select` chose into the
+# component's own state tree. The crate is still a leaf — it has no
+# dependencies of its own — so the sentence about being able to abandon it
+# survives this row. `f-semantic` above takes it too, which means the claim in
+# `interface/src/lib.rs` that *nothing yet depends on it* is now false twice
+# over and that sentence is owed an edit.
+f-interface = { path = "interface" }
 # The one SHA-256 in the tree, and a plain path dependency with no
 # `default-features` line: this is a library and not a component, so it carries
 # no `image` feature and no `#[panic_handler]`, and RFC 0054's shape — the three
@@ -140,6 +157,16 @@ f-virtio-gpu = { path = "user/virtio-gpu", default-features = false }
 # arrangement is about is *being a component the frame links*, and it never was
 # about drivers.
 f-compositor = { path = "user/compositor", default-features = false }
+# The panel, on the same terms as the row above and for the first reason that is
+# not a server's: the frame links it for `routing` — the page it fills in before
+# the component's first instruction — and for `f_panel::script`, which is what
+# `kernel/src/semantic.rs` checks the tree it kept against. One definition the
+# compiler sees rather than two that agree today.
+#
+# A fifth line differing only in a name. RFC 0051 said at two that these
+# vocabularies belong in `abi/`, RFC 0054 said it again at three, and the
+# compositor's row said it at four; nothing has changed except the count.
+f-panel = { path = "user/panel", default-features = false }
 # The same arrangement, one crate over and for a different reason:
 # `user/store/Cargo.toml` says which, and the frame links this so that
 # `f_store::report` has one definition rather than two.

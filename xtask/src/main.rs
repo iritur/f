@@ -806,6 +806,7 @@ fn main() -> ExitCode {
         "runtime" => runtime(args.get(1).map(String::as_str)),
         "objects" => objects(args.get(1).map(String::as_str)),
         "compositor" => compositor(args.get(1).map(String::as_str)),
+        "semantic" => semantic(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
         "component" => components().map(|_| ()),
         // E2-B04. One expression to one root hash, with every leaf printed
@@ -1626,8 +1627,16 @@ fn image_dir(name: &str) -> PathBuf {
 /// manifest, every existing boot depends on it being first, and RFC 0030 says
 /// why that position is the contract. Everything here follows it, each as one
 /// module holding a record and an image.
-const COMPONENTS: &[&str] =
-    &["store", "supervisor", "virtio-blk", "virtio-net", "virtio-gpu", "objects", "compositor"];
+const COMPONENTS: &[&str] = &[
+    "store",
+    "supervisor",
+    "virtio-blk",
+    "virtio-net",
+    "virtio-gpu",
+    "objects",
+    "compositor",
+    "panel",
+];
 
 /// Every component the *source tree* declares, by the name in its manifest.
 ///
@@ -1667,6 +1676,36 @@ fn declared_components() -> Result<Vec<String>, String> {
             )
         })?;
         names.push(checked.name);
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// The components this tree declares that hold the server end of a ring.
+///
+/// **The denominator `cargo xtask chaos`'s coverage check compares against.**
+/// That check exists because two reads of one directory cannot disagree, and it
+/// reads the manifests for exactly that reason. `sim::chaos::sweep` and
+/// `sim::swap::sweep` skip a component that serves nobody — their loops carry
+/// the argument — so the number they produce is this one and not
+/// [`declared_components`]'s. Both are still read here, out of the schema,
+/// which is what keeps the comparison between two sources rather than inside
+/// one.
+fn declared_servers() -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for path in manifest::files(&root(), &target_dir())? {
+        let rel = relative(&path);
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+        let checked = manifest::check(&rel, &text).map_err(|findings| {
+            format!(
+                "{rel} does not fit the schema, so the set of components this tree declares \
+                 cannot be read:\n{}",
+                findings.join("\n")
+            )
+        })?;
+        if checked.serves {
+            names.push(checked.name);
+        }
     }
     names.sort();
     Ok(names)
@@ -1871,6 +1910,14 @@ const IMAGE_MAX: &[(&str, u64)] = &[
     // would be a compositor whose *code* had grown, which is a conversation
     // rather than a constant to raise.
     ("compositor", 16 * 4096),
+    // `panel`, and the row is here for the same reason: it is a spawn-shape
+    // component. The margin is enormous and is expected to stay that way — this
+    // component holds nothing, and RFC 0100's whole finding was that what fills
+    // a component's image is the constants it materialises. An application that
+    // held a copy of the tree it declared would be the first thing to move this
+    // number, which is exactly the property `user/panel/src/lib.rs` says the
+    // crate must not have.
+    ("panel", 16 * 4096),
 ];
 
 /// What a component whose shape [`IMAGE_MAX`] does not name may be.
@@ -4214,18 +4261,39 @@ fn swap_gate() -> Result<(), String> {
         .and_then(|rest| rest.trim().parse::<usize>().ok())
         .ok_or("the swap report did not say how many components it ran")?;
     let declared = declared_components()?;
-    if ran != declared.len() {
+    // As in `chaos`, and for the same reason: a replacement is observed by the
+    // client on the other side of the ring, so a component holding no server
+    // ring is skipped by `sim::swap::sweep` and is counted out here — out of
+    // the manifests, not out of the sweep's own report.
+    let serving = declared_servers()?;
+    let idle: Vec<&str> = declared
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !serving.iter().any(|had| had == name))
+        .collect();
+    if ran != serving.len() {
         return Err(format!(
             "the sweep replaced {ran} component(s) and this tree declares {} in its\n\
-             manifests. A component the sweep did not reach is a component nobody has\n\
-             replaced, and a green result over a smaller set is the failure this check\n\
-             exists to refuse. `cargo xtask lint-components` says which list is short.",
-            declared.len()
+             manifests, {} of which serve somebody. A component the sweep did not reach\n\
+             is a component nobody has replaced, and a green result over a smaller set is\n\
+             the failure this check exists to refuse. A component declaring no server ring\n\
+             is skipped on purpose; `cargo xtask lint-components` says which list is short.",
+            declared.len(),
+            serving.len()
         ));
     }
     println!(
-        "\ncoverage      {ran} component(s) replaced, of {} this tree's manifests declare",
-        declared.len()
+        "\ncoverage      {ran} component(s) replaced, of {} this tree's manifests declare{}",
+        declared.len(),
+        if idle.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " — {} serve(s) nobody and is not in this sweep: {}",
+                idle.len(),
+                idle.join(", ")
+            )
+        }
     );
 
     println!("\ndeclared gap  what this replaces that a boot cannot, and why it is still true:");
@@ -4348,7 +4416,20 @@ fn chaos() -> Result<(), String> {
     .lines()
     .filter_map(|line| line.split_whitespace().next().map(str::to_string))
     .collect();
-    if ran != declared.len() || built.len() != declared.len() {
+    // The sweep asks what a *client* observes while its peer is replaced, so a
+    // component holding no server ring is skipped there and must be skipped
+    // here too — otherwise this check reads a correct sweep as a short one,
+    // which is what it did on the day `user/panel` landed. The subtraction is
+    // taken from the manifests rather than from the sweep's own report, because
+    // a denominator supplied by the thing being measured is the defect the
+    // paragraph above this one exists to prevent.
+    let serving = declared_servers()?;
+    let idle: Vec<&str> = declared
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !serving.iter().any(|had| had == name))
+        .collect();
+    if ran != serving.len() || built.len() != declared.len() {
         let missing: Vec<&str> = declared
             .iter()
             .map(String::as_str)
@@ -4356,13 +4437,16 @@ fn chaos() -> Result<(), String> {
             .collect();
         return Err(format!(
             "the sweep killed {ran} component(s), the build produced {}, and this tree\n\
-             declares {} in its manifests{}.\n\n\
+             declares {} in its manifests, {} of which serve somebody{}.\n\n\
              *Each driver component in turn* is the exit criterion's own words, so a\n\
              component the sweep did not reach is a component nobody has killed — and a\n\
              green result over a smaller set is the failure this check exists to refuse.\n\
-             `cargo xtask lint-components` says which list is short.",
+             A component declaring no server ring is skipped on purpose and is counted\n\
+             out of the manifests above; `cargo xtask lint-components` says which list\n\
+             is short.",
             built.len(),
             declared.len(),
+            serving.len(),
             if missing.is_empty() {
                 String::new()
             } else {
@@ -4371,8 +4455,17 @@ fn chaos() -> Result<(), String> {
         ));
     }
     println!(
-        "\ncoverage      {ran} component(s) killed, of {} this tree's manifests declare",
-        declared.len()
+        "\ncoverage      {ran} component(s) killed, of {} this tree's manifests declare{}",
+        declared.len(),
+        if idle.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " — {} serve(s) nobody and is not in this sweep: {}",
+                idle.len(),
+                idle.join(", ")
+            )
+        }
     );
 
     println!("\ndeclared gap  what this kills that a boot cannot, and why it is still true:");
@@ -12355,6 +12448,111 @@ compositor: ok — all three halves held. A component held the machine's scene g
     Ok(())
 }
 
+/// `E3-B06c`'s two halves, and neither is the other's control in the ordinary
+/// way — the *exit* needs both of its own halves inside one run, which is why
+/// they are not two rows here.
+///
+/// `declare` is the task: a component declares an interface across a ring and
+/// ends, and the frame then reads the tree back **by its address** and offers
+/// one more frame **by the handle the component held**. A tree that survives its
+/// writer is what a log does and a handle that dies with its process is what
+/// every handle does, so the boot fails unless both are true of one structure.
+///
+/// `deaf` is what stops the refusal from being a refusal of everything: the same
+/// image and the same script, with a zero where the handle goes, which must stop
+/// the component before it declares anything and leave the tree empty.
+const SEMANTIC_HALVES: &[(&str, &str)] = &[
+    (
+        "declare",
+        "an application declares four nodes and dies: the tree is still addressable by the
+         identifiers its author chose, and the handle it held no longer reaches it",
+    ),
+    (
+        "deaf",
+        "the identical component holding no handle: it must refuse before it declares
+         anything, and the tree must be empty",
+    ),
+];
+
+/// Run the halves of `cargo xtask semantic`.
+///
+/// # Errors
+///
+/// A half that did not hold, or a boot that did not finish.
+fn semantic(kind: Option<&str>) -> Result<(), String> {
+    let chosen: Vec<&(&str, &str)> = match kind {
+        None => SEMANTIC_HALVES.iter().collect(),
+        Some(name) => {
+            let Some(found) = SEMANTIC_HALVES.iter().find(|(known, _)| *known == name) else {
+                let list: Vec<String> =
+                    SEMANTIC_HALVES.iter().map(|(n, w)| format!("  {n:<8} {w}")).collect();
+                return Err(format!(
+                    "unknown semantic half: {name}
+
+{}",
+                    list.join(
+                        "
+"
+                    )
+                ));
+            };
+            vec![found]
+        }
+    };
+
+    let all = chosen.len() > 1;
+    for (name, what) in chosen {
+        if all {
+            println!(
+                "
+--- semantic={name}: {what}"
+            );
+        }
+        let (ending, log) = machine_with(
+            Some(&format!("semantic={name}")),
+            &[],
+            Capture::Printed,
+            BOOT_TIMEOUT,
+            BOOT_MEMORY,
+        )?;
+        match ending {
+            Ending::Exited(33) => {}
+            Ending::Exited(35) => {
+                return Err(format!(
+                    "the kernel refused to finish after `semantic={name}`. Either the                      application did not say what its script says, or the tree the frame kept                      is not the tree that was declared, or the handle the dead component held                      still reaches it — the serial log above says which, and the verdict that                      refused is in `kernel/src/semantic.rs`."
+                ));
+            }
+            Ending::TimedOut(_) => {
+                return Err(format!(
+                    "`semantic={name}` never finished. An application that submits and is never                      answered holds its core until its own idle bound, and the frame answers it                      from inside the join — so a boot that hangs here is a frame that stopped                      serving rather than a component that stopped asking."
+                ));
+            }
+            other => return Err(format!("the boot {other}; expected exit 33")),
+        }
+
+        if !log.contains("semantic      verdict:") {
+            return Err(format!(
+                "`semantic={name}` exited green and printed no verdict line, so the half did                  not run. The likeliest cause is a boot with no `panel` component file."
+            ));
+        }
+    }
+
+    if all {
+        println!(
+            "
+semantic: ok — both halves held. An application declared four nodes, a child
+          order that is not the order its entries arrived in, a state and an intent, across
+          one ring into a tree it was never shown the address of; it ended; the frame reaped
+          its address space and went on holding what it declared, addressable by the
+          identifiers its author chose. The handle that component held was then offered one
+          more frame and refused — twice, the second time against a slot a successor had
+          reopened, so what refused it was the generation and not the slot being shut. And
+          the identical component holding no handle refused before it declared anything."
+        );
+    }
+    Ok(())
+}
+
 const RUNTIME_PROVOCATIONS: &[(&str, &str)] = &[
     ("load", "a component schedules its own work; nothing may cross the boundary until it exits"),
     ("provoke", "one crossing on purpose: the count must move, and by exactly as many"),
@@ -12630,6 +12828,14 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-scene", host: None, bare: None },
     Portability { krate: "f-text", host: None, bare: None },
     Portability { krate: "f-input", host: None, bare: None },
+    // `E3-B06c`'s semantic tree. Both answers are `None`, and the AArch64
+    // compile earns its place for `f-scene`'s reason plus one of its own: this
+    // crate is what the *frame* links in order to hold a tree a component
+    // declared, so a type in it that compiled on one architecture and not the
+    // other would be a tree the day an AArch64 frame exists cannot hold. It is
+    // also the only crate in the workspace that takes both `f-abi` and
+    // `f-interface`, and the compile is what says that join stays portable.
+    Portability { krate: "f-semantic", host: None, bare: None },
     Portability {
         krate: "f-kernel",
         host: Some(
@@ -12683,6 +12889,12 @@ const PORTABILITY: &[Portability] = &[
     // not the other would be a scene graph that is not portable — which is the
     // property RFC 0004 is about and the one this crate would break first.
     Portability { krate: "f-compositor", host: None, bare: None },
+    // `E3-B06c`'s application. Both answers are `None`, and the AArch64 compile
+    // carries one thing nothing above it does: this is the crate that turns a
+    // `Role` into a wire ordinal, so a build where `Role::index` and the wire
+    // agreed on one architecture and not the other would be a vocabulary that is
+    // not portable — which is the one property RFC 0077 froze it for.
+    Portability { krate: "f-panel", host: None, bare: None },
     Portability {
         krate: "f-bench",
         host: None,
