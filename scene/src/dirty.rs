@@ -42,6 +42,19 @@
 //!   what [`Dirty::at_commit`] does with the whole set, and a commit that also
 //!   marked something would be a commit that dirtied the scene it is publishing.
 //!
+//! `SET_EFFECT` is a property delta by the first rule and it is worth saying
+//! why, because the declaration it carries is two costs and not a mark on the
+//! screen. What the declaration decides is whether `E3-B07b`'s policy degrades
+//! this node when the frame is late, and degrading it changes the picture over
+//! its whole subtree — so a declaration that changed and was not re-encoded is
+//! a subtree drawn against last frame's answer to *what may be dropped*. The
+//! cheaper reading, that a cost is metadata and dirties nothing, is only true
+//! in the frames where nothing is late, which are the frames this module is
+//! not for. *What would reverse this:* the declaration ceasing to be read at
+//! encode time — a policy that consulted it after the encoder had run would
+//! make this row `Reach::Nothing`, and the commit would stop being the one
+//! opcode that marks nothing.
+//!
 //! The cost of the structural rule is real and stated: inserting one node under
 //! a parent with a thousand children marks a thousand and one. *What would
 //! reverse this:* bounds per node, at which point the mark can be a rectangle
@@ -242,6 +255,7 @@ pub const REACH: [(u8, Reach); op::COUNT] = [
     (op::SET_PAINT, Reach::Subtree),
     (op::REMOVE_NODE, Reach::Enclosing),
     (op::COMMIT, Reach::Nothing),
+    (op::SET_EFFECT, Reach::Subtree),
 ];
 
 // The table and the wire's opcode list are one list, checked where a
@@ -550,6 +564,7 @@ impl Dirty {
             Entry::SetPaint(set) => (set.node, None),
             Entry::RemoveNode(gone) => (gone.node, None),
             Entry::Commit(_) => (NO_NODE, None),
+            Entry::SetEffect(set) => (set.node, None),
         };
 
         match reach {

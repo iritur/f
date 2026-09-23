@@ -44,13 +44,13 @@ only one core is running — see `kernel/src/percpu.rs` and section 14 of
 the cost of breaking it is not paid until the day a second core boots, which is
 the worst day to start paying it.
 
-## The twelve rules
+## The thirteen rules
 
-These come from `docs/what-must-be-stated.html` section 15, which derived them
-by looking at nine gaps in the design corpus and asking what discipline was
-missing in each. That is why they are worth more than the nine fixes: the gaps
-were not independent accidents, they were places where a discipline this
-project already applies elsewhere was not applied here.
+The first twelve come from `docs/what-must-be-stated.html` section 15, which
+derived them by looking at nine gaps in the design corpus and asking what
+discipline was missing in each. That is why they are worth more than the nine
+fixes: the gaps were not independent accidents, they were places where a
+discipline this project already applies elsewhere was not applied here.
 
 The last column is the part this repository cares about. **A rule listed as
 mechanised that is not mechanised is worse than one honestly listed as review**,
@@ -70,14 +70,24 @@ because it is a check somebody believes is happening.
 | **R10** Peers negotiate; they never demand equality | Lockstep versioning contradicts the component model, and the component model is what three separate arguments rest on. | the ABI: `ChannelHeader::negotiate`, RFC 0011 |
 | **R11** The apparatus ships with the thing it measures | Determinism and coverage instrumentation were built early for exactly this reason, and the reasoning was written down. The state tree is the same argument and was deferred anyway. | process: a milestone that produces a number also produces its instrument |
 | **R12** A concession is written as a cost, never hidden in a metric | "Full system rollback: one reboot" is a concession dressed as a target. Reservations leaving capacity idle belongs beside the latency claim, not in a rebuttal after somebody runs a throughput benchmark. | review; the claims registry carries the cost beside the number |
+| **R13** An `XL` that is not decomposed by the time it starts is a planning failure | `TODO.md` has said this since E0, and `E3-00`, `E4-00`, `E5-00` and `E6-00` each carry *this epoch contains no `XL` task without a decomposition* as their exit. Nothing observed any of the four: every subtask line in a decomposed epoch could have been deleted with the whole local loop green. It is R01 applied to the file that schedules the work, which is why it is the row that moved. | **`cargo xtask lint-decomposition`**, from the day the epoch's `E<n>-00` is ticked; an epoch still waiting to be decomposed is held out, because that wait is the task |
 
-Three are executable in full, and each has a fixture in `xtask` that breaks it —
+Four are executable in full, and each has a fixture in `xtask` that breaks it —
 a lint that has never failed is indistinguishable from a lint that cannot. R02
 is executable in the half a manifest can carry and review in the half that is a
 judgement about what a component holds, which is why its cell says both. The
 other eight are review, and saying so is the point: **R01 applies to this
 table**. A rule with "review" beside it is a rule somebody has to apply, which
 is a plan, and this table is honest about which rows are plans.
+
+R13 is the thirteenth because it is not one of the nine gaps: it is a rule this
+repository already wrote down for itself, in `TODO.md`, and then left in the
+review column for three epochs. It is in the table rather than only in `TODO.md`
+because that is where this project keeps the count of which of its own rules a
+machine holds — and the row is worth reading as the shape of the move, since a
+rule leaving that column is the only kind of change this table is for. Reversing
+it means putting a rule back, and the RFC that does so has to say what stopped
+being observable.
 
 ## Where a change starts
 

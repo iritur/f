@@ -201,6 +201,8 @@ jobs:
       - run: cargo xtask lint-datapath
       - run: cargo xtask lint-registries
       - run: cargo xtask lint-owed
+      - run: cargo xtask lint-decomposition
+      - run: cargo xtask lint-token-pair
       - run: cargo xtask lint-reproduce
       - run: cargo xtask lint-remap
       - run: cargo xtask lint-testing-status
@@ -652,6 +654,51 @@ jobs:
       # and no second machine, because the client is the frame and the graph is
       # a data structure. RFC 0013, RFC 0065.
       - run: cargo xtask compositor
+      # E3-B06c. Section 11's inversion, as two boots. `declare` stands
+      # `user/panel` up at ring 3 holding the *client's* end of a ring — the only
+      # component in this tree that submits rather than answers — has it declare
+      # four semantic nodes, a child order that is not the order its entries
+      # arrived in, a state and an intent, and then lets it end. The frame reaps
+      # its address space and then asks two questions in one breath: it reads the
+      # tree back **by its address** and requires every node to answer to the
+      # identifier its author chose under the role it was declared with, and it
+      # offers one more frame **by the handle that component held** and requires
+      # `AUTHORITY/REVOKED`. Neither alone would be worth a boot — a tree that
+      # survives its writer is a log and a handle that dies with its process is
+      # every handle — so the verdict fails unless both are true of one
+      # structure, and it then adopts the tree to a successor and offers the dead
+      # handle against the reopened slot, so that what refused it is the
+      # generation rather than the slot being shut. `deaf` is the same image and
+      # the same script with a zero where the handle goes, which must stop the
+      # component before it declares anything.
+      #
+      # It needs nothing this job does not already have: the peer on that channel
+      # is the frame, and the tree is a page the frame never maps to anybody.
+      # RFC 0077, RFC 0083.
+      - run: cargo xtask semantic
+      # E3-B04d and E3-B04a. The first boot in this tree in which something a
+      # person did reaches a scene graph. Two boots of two components. `deliver`
+      # stands `user/virtio-input` up at ring 3 over a real virtio-mouse the job
+      # adds, holds the machine still **in the middle of the run** while this
+      # harness moves the pointer over the emulator's monitor socket, drains the
+      # entries the driver submits unasked, decodes every one of them - which is
+      # what says each carries a reading, because the decoder refuses a payload
+      # with none - reaps the driver, stands `user/compositor` up on the core it
+      # gave back and hands it one `SetTransform` per event. The verdict is the
+      # kernel's, except for one clause this harness is the only thing entitled
+      # to make: how far it asked the pointer to move, against where the driver's
+      # accumulator ended up, two numbers on opposite sides of the emulator with
+      # neither holding the other's copy. `withheld` is the identical boot with
+      # the hand-on removed: the same events are produced, drained and decoded,
+      # and the graph must hold nothing but its own two setup nodes - without it
+      # the edit count above would say that a compositor applies deltas rather
+      # than that these came off a device.
+      #
+      # It needs one thing this job does not otherwise have, and it is the same
+      # thing `gpu` needs: a monitor socket, because an input event exists only
+      # while a device is running and cannot be injected from a command line.
+      # RFC 0047, RFC 0099, RFC 0103.
+      - run: cargo xtask input
       # `claims/0037`'s five rows, compared against the table rather than against
       # the boot's own refusals. The two are different checks: the boot asserts
       # the load half crossed nothing and the provoke half crossed exactly what

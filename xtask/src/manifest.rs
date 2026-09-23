@@ -65,7 +65,18 @@ use std::path::{Path, PathBuf};
 /// no part, and a driver bound by the order a bus scan reported is a topology
 /// that is not a function of its root. Both are refused and edited, not
 /// defaulted.
-pub const SCHEMA: u64 = 3;
+///
+/// Four since `E3-B03b`, which lets a component declare the typefaces it will
+/// load by content address. A schema-3 manifest declares none and a component
+/// file built from one has a reserved zero where the count is, and reading that
+/// zero as *declares no face* would be the same silence the bump above refuses.
+/// What is worth carrying from that task into this comment is **where** the
+/// declaration went: `[[face]]` entries are a section of the component file
+/// after the image, not an array in the record, because an earlier attempt put
+/// them in the record and grew it by a quarter — and the assembler owns a record
+/// by value, so every boot in the tree died on a guard page three subsystems
+/// away. `abi::manifest::Face` holds the whole argument.
+pub const SCHEMA: u64 = 4;
 
 /// The longest component, capability or ring name, in bytes. Names are
 /// `[a-z0-9-]`, so bytes are characters. Thirty-two is what a fixed-layout
@@ -89,6 +100,10 @@ pub const RINGS_MAX: usize = 8;
 /// The most `[[device]]` entries a manifest may declare.
 /// `abi::manifest::DEVICES_MAX`, mirrored here for [`CAP_TYPES`]'s reason.
 pub const DEVICES_MAX: usize = 4;
+
+/// The most `[[face]]` entries a manifest may declare.
+/// `abi::manifest::FACES_MAX`, mirrored here for the same reason.
+pub const FACES_MAX: usize = 4;
 
 /// The vendor identifier a bus returns when nothing answered at an address.
 /// `abi::manifest::Binding::NO_VENDOR`, mirrored here for the same reason.
@@ -252,6 +267,28 @@ pub struct Manifest {
     /// How many `[[state]]` nodes, this component's tree root included. Never
     /// zero on a manifest that passed: RFC 0065.
     pub state_nodes: usize,
+    /// The `[[face]]` entries, as `(name, sha256 hex)` in canonical order.
+    ///
+    /// Carried out of the check rather than counted, for the reason
+    /// [`Manifest::devices`] is: the interesting question about a face is asked
+    /// *between* a manifest and something else — whether the component that
+    /// loads one declared it — and a count cannot answer it. Empty is the
+    /// common and correct answer.
+    /// Unit: entries; neither half of a pair is a quantity.
+    pub faces: Vec<(String, String)>,
+    /// Does any `[[ring]]` here declare `role = "server"`?
+    ///
+    /// **Read here so that `cargo xtask chaos`'s coverage check has a second
+    /// source for its denominator.** That check compares the number of
+    /// components the sweep killed against the number of manifests this tree
+    /// carries, and its own comment says why the two sides must not come from
+    /// one read. `user/panel` is the first manifest declaring only a client
+    /// ring, and the sweeps skip it — so the denominator is *the manifests that
+    /// declare a server*, and this is where that is decided, out of the schema
+    /// rather than out of the sweep.
+    ///
+    /// Unit: none — a property, not a quantity.
+    pub serves: bool,
 }
 
 impl Manifest {
@@ -425,6 +462,19 @@ mod record {
     /// The first byte of the state array. Last in the record, because putting
     /// it anywhere else would move every slot the three offsets above name.
     pub const STATE_AT: usize = RINGS_AT + super::RINGS_MAX * RING;
+    /// The byte the face count is stamped at — `abi::manifest::Record::faces`,
+    /// which is where the last reserved byte was.
+    ///
+    /// A literal and not a derivation, for the reason every offset here is one:
+    /// `xtask` does not depend on `f-abi`, so this mirrors the field and
+    /// `the_record_layout_matches_the_abi` reads the assertion that pins it.
+    pub const FACES_AT: usize = 103;
+    /// Bytes in one `[[face]]` entry — `abi::manifest::Face`. A name and a
+    /// SHA-256 digest, in that order, because the order is what the canonical
+    /// sort is on.
+    pub const FACE: usize = 64;
+    /// Bytes of the name half of one, which is where the digest starts.
+    pub const FACE_NAME: usize = 32;
     /// `abi::manifest::MAGIC`.
     pub const MAGIC: u64 = 0x465f_4d41_4e00_0001;
     /// `abi::manifest::NO_CAPABILITY`, which is not zero because zero is a
@@ -466,7 +516,13 @@ pub const TICKS_PER_MS: u64 = 1;
 pub fn compile(rel: &str, text: &str, image: &[u8]) -> Result<Vec<u8>, Vec<String>> {
     check(rel, text)?;
     let doc = parse(rel, text)?;
-    let mut out = vec![0u8; record::BYTES + image.len()];
+    // The file is the record, the image and the face table, in that order. The
+    // table is last because it is the only part whose length the record states
+    // as a count rather than as bytes, and putting it in front of the image
+    // would make the image's offset depend on it — `Record::image` is
+    // `record_bytes` and stays that whatever a component declares.
+    let faces: &[(usize, Table)] = doc.arrays.get("face").map_or(&[], Vec::as_slice);
+    let mut out = vec![0u8; record::BYTES + image.len() + faces.len() * record::FACE];
     let mut findings = Vec::new();
 
     put64(&mut out, 0, record::MAGIC);
@@ -631,8 +687,27 @@ pub fn compile(rel: &str, text: &str, image: &[u8]) -> Result<Vec<u8>, Vec<Strin
         }
     }
 
-    if let Some(tail) = out.get_mut(record::BYTES..) {
+    if let Some(tail) = out.get_mut(record::BYTES..record::BYTES + image.len()) {
         tail.copy_from_slice(image);
+    }
+
+    // `[[face]]`, in file order — which the checker has already required to be
+    // canonical order, so this writes what it read rather than sorting. E3-B03b.
+    //
+    // **After the image and not inside the record**, and that is the whole
+    // decision this schema is: `abi::manifest::Face` argues it, and the cost of
+    // getting it wrong is written into `abi::manifest::SCHEMA`. What it means
+    // here is that `record::BYTES` does not move, so none of the five offsets
+    // above moved either, and a component declaring no face produces exactly the
+    // file it produced under schema 3 with one byte different.
+    put8(&mut out, record::FACES_AT, narrow8(faces.len()));
+    for (index, (_, table)) in faces.iter().enumerate() {
+        let at = record::BYTES + image.len() + index * record::FACE;
+        put_name(&mut out, at, &string(table, "name"));
+        let hash = face_hash_bytes(&string(table, "hash"));
+        if let Some(slot) = out.get_mut(at + record::FACE_NAME..at + record::FACE) {
+            slot.copy_from_slice(&hash);
+        }
     }
     if findings.is_empty() { Ok(out) } else { Err(findings) }
 }
@@ -1387,6 +1462,9 @@ impl Checker<'_> {
         }
         let ring_count = ring_items.len();
         let mut ring_names = BTreeSet::new();
+        // Any server ring at all: `Manifest::serves` says why the answer is
+        // read here rather than counted downstream.
+        let mut serves = false;
         for (index, (line, table)) in ring_items.into_iter().enumerate() {
             let place = format!("[[ring]] #{}", index + 1);
             let mut f = self.fields(place, line, table);
@@ -1400,6 +1478,7 @@ impl Checker<'_> {
                 }
             }
             let role = f.one_of("role", ROLES).map(|(_, r)| r);
+            serves |= role.as_deref() == Some("server");
             if let Some((line, protocol)) = f.string("protocol", true) {
                 let sound = !protocol.is_empty()
                     && protocol.len() <= NAME_MAX
@@ -1789,6 +1868,58 @@ impl Checker<'_> {
             }
         }
 
+        // `[[face]]`. E3-B03b: the typefaces this component will load, each
+        // named by the content address the blob store answers at, declared here
+        // so that a component asking for one it did not declare is refused
+        // before an entry crosses rather than after the bytes have landed.
+        //
+        // Zero entries is the common and correct answer and is not a finding,
+        // exactly as `[[device]]` above: a component that loads no typeface
+        // declares none, and the record carries the zero. The order is checked
+        // and never sorted, for `[[device]]`'s reason — two entries swapped are
+        // two component files with different content hashes naming one
+        // component, and then a content address names two things.
+        let mut faces: Vec<(String, String)> = Vec::new();
+        let face_items = arrays.remove("face").unwrap_or_default();
+        if face_items.len() > FACES_MAX {
+            self.note(
+                face_items[FACES_MAX].0,
+                &format!(
+                    "more than {FACES_MAX} `[[face]]` entries; a component declares the typefaces it loads, and a manifest that needs more than {FACES_MAX} is declaring a font library rather than a component's own faces — `abi::manifest::FACES_MAX` states what reverses that"
+                ),
+            );
+        }
+        for (index, (line, table)) in face_items.into_iter().enumerate() {
+            let place = format!("[[face]] #{}", index + 1);
+            let mut f = self.fields(place, line, table);
+            let name = f.string("name", true).and_then(|(line, n)| {
+                if n.is_empty() || n.len() > NAME_MAX || !is_name(&n) {
+                    f.refuse(line, &format!("`name = \"{n}\"` is not `[a-z0-9-]`, at most {NAME_MAX} bytes, with no edge hyphen; this is the word the component's own code asks by and nothing outside the component reads it"));
+                    return None;
+                }
+                Some(n)
+            });
+            let hash = f.string("hash", true).and_then(|(line, h)| {
+                match face_hash_problem(&h) {
+                    Some(why) => {
+                        f.refuse(line, &format!("`hash = \"{h}\"` is not a content address: {why}. This is what the store is asked, and it is a SHA-256 digest rather than `abi::manifest::ContentId` because the thing on the other side of the name is whatever content hashed to it — RFC 0030 wrote that reversal down and this is the field it arrives at"));
+                        None
+                    }
+                    None => Some(h),
+                }
+            });
+            f.finish();
+            if let (Some(name), Some(hash)) = (name, hash) {
+                if faces.iter().any(|(known, _)| *known == name) {
+                    self.note(line, &format!("a second `[[face]]` named `{name}`; that is an author with two beliefs about which face `{name}` is, not a list to be de-duplicated"));
+                } else if faces.last().is_some_and(|(last, _)| *last > name) {
+                    self.note(line, &format!("`[[face]]` entries are out of order: `{name}` sorts before the entry above it. They are checked and never sorted, for `[[device]]`'s reason — a reader that reordered would let two different component files carry one meaning"));
+                } else {
+                    faces.push((name, hash));
+                }
+            }
+        }
+
         // Anything else at the top of the file is unknown.
         for (table, (line, _)) in tables {
             self.note(
@@ -1816,8 +1947,61 @@ impl Checker<'_> {
             restart: restart?,
             devices,
             state_nodes: node_count,
+            faces,
+            serves,
         })
     }
+}
+
+/// Why a `[[face]] hash` is not a content address, or `None` if it is.
+///
+/// The same spelling `image` takes when it is a content address rather than a
+/// path — `sha256:` and sixty-four lower-case hex digits — and deliberately the
+/// same one: a tree with two ways to write a content address is a tree where a
+/// reader has to know which field they are looking at before they can read it.
+/// Lower case only, because a hex digest is a canonical string here and `A` and
+/// `a` naming one address would let two manifests differ in bytes that mean the
+/// same thing.
+fn face_hash_problem(hash: &str) -> Option<&'static str> {
+    let Some(hex) = hash.strip_prefix("sha256:") else {
+        return Some(
+            "it does not begin `sha256:`, which is the only digest this tree addresses by",
+        );
+    };
+    if hex.len() != 64 {
+        return Some("a SHA-256 digest is exactly sixty-four hex digits");
+    }
+    if !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Some("the digits are lower-case hex, `0-9a-f`");
+    }
+    if hex.bytes().all(|b| b == b'0') {
+        return Some(
+            "all zero is not an address; an entry whose digest was never filled in is a build mistake and not an empty slot",
+        );
+    }
+    None
+}
+
+/// The thirty-two bytes a judged `sha256:` string names.
+///
+/// Only ever called on a string [`face_hash_problem`] has already admitted, so
+/// a digit that does not parse cannot arise; it produces zero there rather than
+/// panicking, because a panic in a build tool is a worse failure than a record
+/// `Record::read` refuses at the next boot.
+fn face_hash_bytes(hash: &str) -> [u8; 32] {
+    let hex = hash.strip_prefix("sha256:").unwrap_or("").as_bytes();
+    let mut out = [0u8; 32];
+    for (index, byte) in out.iter_mut().enumerate() {
+        let nibble = |at: usize| -> u8 {
+            match hex.get(at) {
+                Some(c @ b'0'..=b'9') => c - b'0',
+                Some(c @ b'a'..=b'f') => c - b'a' + 10,
+                _ => 0,
+            }
+        };
+        *byte = nibble(index * 2) * 16 + nibble(index * 2 + 1);
+    }
+    out
 }
 
 /// Why an `image` value is not one, or `None` if it is.
@@ -1862,7 +2046,7 @@ mod tests {
     /// test can break a single line of it.
     const SOUND: &str = "\
 # SPDX-License-Identifier: Apache-2.0 OR MIT
-schema = 3
+schema = 4
 name   = \"example\"
 image  = \"user/example\"
 domain = \"shared\"
@@ -1936,6 +2120,113 @@ unit   = \"entries\"
         );
     }
 
+    /// [`SOUND`] with a `[[face]]` array appended, one entry per `(name, hex)`.
+    fn with_faces(entries: &[(&str, &str)]) -> String {
+        let mut out = String::from(SOUND);
+        for (name, hex) in entries {
+            out.push_str(&format!("\n[[face]]\nname = \"{name}\"\nhash = \"sha256:{hex}\"\n"));
+        }
+        out
+    }
+
+    /// Sixty-four hex digits that are not all zero, from one byte repeated.
+    fn digest(byte: &str) -> String {
+        byte.repeat(32)
+    }
+
+    #[test]
+    fn a_declared_face_lands_after_the_image_and_not_in_the_record() {
+        // The decision this schema **is**, asserted as bytes: the record does
+        // not grow, the image does not move, and the table is found by
+        // arithmetic over `image_bytes`. An earlier attempt put these entries in
+        // the record, grew it from 2 696 to 2 952, and killed every boot in the
+        // tree through a stack temporary in `f_assembler::topology::Instance` —
+        // so `record::BYTES` staying put is the load-bearing assertion here and
+        // not a tidy extra.
+        let image = [7u8; 16];
+        let text = with_faces(&[("regular", &digest("ab"))]);
+        let m = check("user/example/manifest.toml", &text)
+            .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+        assert_eq!(m.faces.len(), 1);
+        assert_eq!(m.faces[0].0, "regular");
+
+        let bytes = compile("user/example/manifest.toml", &text, &image)
+            .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+        assert_eq!(record::BYTES, 2696, "the record grew, which is what this schema refuses to do");
+        assert_eq!(bytes.len(), record::BYTES + image.len() + record::FACE);
+        assert_eq!(bytes[record::FACES_AT], 1, "the face count is not where the record carries it");
+        // 103 and not 102: `[[state]]` took the byte before it, and a writer
+        // that stamped both at one offset would publish a face count over a node
+        // count with no reader ever the wiser.
+        assert_eq!(bytes[102], 2, "the node count moved, which means an offset did");
+        assert_eq!(&bytes[record::BYTES..record::BYTES + image.len()], &image);
+
+        let at = record::BYTES + image.len();
+        assert_eq!(&bytes[at..at + 7], b"regular");
+        assert!(
+            bytes[at + 7..at + record::FACE_NAME].iter().all(|b| *b == 0),
+            "the name is padded"
+        );
+        assert_eq!(&bytes[at + record::FACE_NAME..at + record::FACE], &[0xabu8; 32]);
+    }
+
+    #[test]
+    fn a_manifest_declaring_no_face_produces_the_file_it_did_before() {
+        // The zero this design is for. Every component in this tree but one
+        // declares no typeface, and the cost of the ability to declare one has
+        // to be a single byte in a record that already had it spare.
+        let image = [7u8; 16];
+        let bytes = compile("user/example/manifest.toml", SOUND, &image)
+            .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+        assert_eq!(bytes.len(), record::BYTES + image.len());
+        assert_eq!(bytes[record::FACES_AT], 0);
+    }
+
+    #[test]
+    fn a_face_declaration_is_judged_field_by_field() {
+        refused_for(&with_faces(&[("regular", &digest("00"))]), "all zero is not an address");
+        refused_for(&with_faces(&[("Regular", &digest("ab"))]), "is not `[a-z0-9-]`");
+        refused_for(&with_faces(&[("regular", "abcd")]), "sixty-four hex digits");
+        refused_for(&with_faces(&[("regular", &digest("AB"))]), "lower-case hex");
+        refused_for(
+            &format!("{SOUND}\n[[face]]\nname = \"regular\"\nhash = \"{}\"\n", digest("ab")),
+            "does not begin `sha256:`",
+        );
+        refused_for(&format!("{SOUND}\n[[face]]\nname = \"regular\"\n"), "hash");
+        refused_for(&format!("{SOUND}\n[[face]]\nhash = \"sha256:{}\"\n", digest("ab")), "name");
+    }
+
+    #[test]
+    fn a_face_list_is_canonical_and_is_checked_rather_than_sorted() {
+        // Two entries the wrong way round are two component files with two
+        // content hashes naming one component, which is `[[device]]`'s argument
+        // one array over and the reason neither is sorted here.
+        refused_for(
+            &with_faces(&[("regular", &digest("ab")), ("bold", &digest("cd"))]),
+            "out of order",
+        );
+        refused_for(
+            &with_faces(&[("bold", &digest("ab")), ("bold", &digest("cd"))]),
+            "a second `[[face]]` named `bold`",
+        );
+        let sound = with_faces(&[("bold", &digest("ab")), ("regular", &digest("cd"))]);
+        let m = check("user/example/manifest.toml", &sound)
+            .unwrap_or_else(|f| panic!("{}", f.join("\n")));
+        assert_eq!(m.faces.len(), 2);
+    }
+
+    #[test]
+    fn more_faces_than_the_bound_is_refused() {
+        let five: Vec<(&str, String)> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (*name, digest(["ab", "cd", "ef", "12", "34"][index])))
+            .collect();
+        let borrowed: Vec<(&str, &str)> =
+            five.iter().map(|(name, hex)| (*name, hex.as_str())).collect();
+        refused_for(&with_faces(&borrowed), "more than 4 `[[face]]` entries");
+    }
+
     #[test]
     fn the_sound_fixture_passes() {
         let m = check("user/example/manifest.toml", SOUND)
@@ -1980,7 +2271,7 @@ unit   = \"entries\"
 
     #[test]
     fn a_later_schema_is_refused() {
-        refused_for(&edit("schema = 3", "schema = 4"), "knows schema 3");
+        refused_for(&edit("schema = 4", "schema = 5"), "knows schema 4");
     }
 
     #[test]
@@ -2502,8 +2793,8 @@ unit   = \"entries\"
     fn the_syntax_is_the_subset_and_nothing_else() {
         refused_for(&edit("name   = \"example\"", "name   = \"\"\"example\"\"\""), "no quote");
         refused_for(&edit("name   = \"example\"", "name   = \"ex\\nample\""), "backslash");
-        refused_for(&edit("schema = 3", "schema = -1"), "signed");
-        refused_for(&edit("schema = 3", "schema = 3\nschema = 3"), "appears twice");
+        refused_for(&edit("schema = 4", "schema = -1"), "signed");
+        refused_for(&edit("schema = 4", "schema = 4\nschema = 4"), "appears twice");
         refused_for(&edit("[restart]", "[restart]\n[restart]"), "appears twice");
         refused_for(
             &edit("memory_bytes = 65536", "memory_bytes = { min = 65536 }"),
@@ -2515,7 +2806,7 @@ unit   = \"entries\"
             "same line",
         );
         refused_for(&edit("memory_bytes = 65536", "memory_bytes = 65_536_"), "between digits");
-        refused_for(&edit("schema = 3", "just some words"), "`key = value`");
+        refused_for(&edit("schema = 4", "just some words"), "`key = value`");
         // Underscores between digits are TOML and are read.
         let m = check(
             "user/example/manifest.toml",
@@ -2534,7 +2825,7 @@ unit   = \"entries\"
     fn a_syntax_error_stops_before_the_fields_are_judged() {
         // Otherwise a file with one broken line reports every field after it
         // as missing, which is noise wearing a finding's clothes.
-        let f = findings(&edit("schema = 3", "schema = 3\n[[capability"));
+        let f = findings(&edit("schema = 4", "schema = 4\n[[capability"));
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].contains("array header"));
     }
@@ -2549,7 +2840,7 @@ unit   = \"entries\"
         // with no tree is one nobody can read.
         let text = "\
 # SPDX-License-Identifier: Apache-2.0 OR MIT
-schema = 3
+schema = 4
 name   = \"init\"
 image  = \"user/init\"
 domain = \"shared\"
@@ -2663,6 +2954,12 @@ unit = \"none\"
         assert_eq!(size_of("Ring"), record::RING, "a ring slot has changed size");
         assert_eq!(size_of("Node"), record::NODE, "a state node slot has changed size");
         assert_eq!(size_of("Binding"), record::BINDING, "a device slot has changed size");
+        // `Face` is not in the record, so it moves no offset — and that is
+        // exactly why its width is mirrored here rather than left to be
+        // discovered. A section whose entries this writer and the frame's reader
+        // size differently is a table one of them reads one entry short, and no
+        // assertion over `record::BYTES` can see it.
+        assert_eq!(size_of("Face"), record::FACE, "a face entry has changed size");
 
         let konst = |name: &str, ty: &str| -> String {
             let needle = format!("pub const {name}: {ty} = ");
@@ -2706,6 +3003,16 @@ unit = \"none\"
             DEVICES_MAX,
             "abi::manifest::DEVICES_MAX has drifted from this checker's"
         );
+        assert_eq!(
+            konst("FACES_MAX", "usize").parse::<usize>().unwrap(),
+            FACES_MAX,
+            "abi::manifest::FACES_MAX has drifted from this checker's"
+        );
+        assert_eq!(
+            konst("FACE_HASH_BYTES", "usize").parse::<usize>().unwrap(),
+            record::FACE - record::FACE_NAME,
+            "abi::manifest::FACE_HASH_BYTES has drifted from where this writer stamps a digest"
+        );
 
         // The transfer declaration is a second file's assertion, because the
         // type is `abi/src/transfer.rs`'s and only the field sits in the
@@ -2740,6 +3047,7 @@ unit = \"none\"
         assert_eq!(offset("capability"), record::CAPS_AT, "the capability array has moved");
         assert_eq!(offset("ring"), record::RINGS_AT, "the ring array has moved");
         assert_eq!(offset("state"), record::STATE_AT, "the state array has moved");
+        assert_eq!(offset("faces"), record::FACES_AT, "the face count byte has moved");
 
         // The two closed vocabularies a `[[state]]` node is judged against,
         // read out of `abi/src/state.rs` and compared word for word and in wire
@@ -2828,7 +3136,19 @@ unit = \"none\"
             // the length arithmetic around it rather than any particular code.
             let file = compile(&rel, &text, &[0u8])
                 .unwrap_or_else(|findings| panic!("{rel}:\n{}", findings.join("\n")));
-            assert_eq!(file.len(), record::BYTES + 1, "{rel} produced the wrong length");
+            // The record, the one-byte image, and whatever face table the
+            // manifest declares. The last term is why this is an equation over
+            // the declaration rather than a constant: a `[[face]]` entry adds
+            // sixty-four bytes to the *file* and nothing at all to the record,
+            // and a test that asserted `record::BYTES + 1` outright would be
+            // asserting that no manifest may declare one.
+            let declared = check(&rel, &text).map(|m| m.faces.len()).unwrap_or(0);
+            assert_eq!(
+                file.len(),
+                record::BYTES + 1 + declared * record::FACE,
+                "{rel} produced the wrong length"
+            );
+            assert_eq!(file[record::FACES_AT] as usize, declared, "{rel} miscounted its faces");
             assert_eq!(
                 u64::from_le_bytes(file[..8].try_into().unwrap()),
                 record::MAGIC,

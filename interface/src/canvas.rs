@@ -859,17 +859,30 @@ pub enum Operable {
 impl Operable {
     /// What a node's own declaration says about operating it.
     ///
-    /// **Private, and the privacy is the scoping.** This is a two-field read of
-    /// a node that knows nothing about any canvas, so a public version of it
+    /// **Not public, and the privacy is the scoping.** This is a two-field read
+    /// of a node that knows nothing about any canvas, so a public version of it
     /// would be this module answering *what may be invoked on this* for a node
     /// no canvas admitted — which is the answer [`Participating::operable`]
     /// exists to refuse, offered under another name thirty lines above the
     /// refusal. It was public once, and the refusal was documented over it.
     ///
-    /// Its two callers are that method, which checks scope before it reads
-    /// anything, and `Participating::say`, which runs over nodes the canvas has
-    /// already been admitted against.
-    const fn of(node: &Node) -> Self {
+    /// It is `pub(crate)` rather than private because
+    /// [`crate::reader`](crate::reader) and [`crate::agent`](crate::agent) ask
+    /// it of nodes of a **whole tree** they have themselves been admitted
+    /// against, which is a wider scope than a canvas has and a narrower one
+    /// than none. That widening is deliberate and it is bounded by the same
+    /// rule: every caller below holds a value that proves something was
+    /// checked, and there is no route from outside this crate to a bare
+    /// [`Node`]'s answer.
+    ///
+    /// Its four callers are [`Participating::operable`], which checks scope
+    /// before it reads anything; `Participating::say`, which runs over nodes the
+    /// canvas has already been admitted against; `reader::Reader::say`, which
+    /// runs over the tree its [`Reader`](crate::reader::Reader) was admitted
+    /// against; and `agent::Acting::select`, which runs over the tree its
+    /// `Acting` was admitted against — the same admission, since that type
+    /// holds the reader's rather than repeating it.
+    pub(crate) const fn of(node: &Node) -> Self {
         match node.intent {
             None => Self::Inert,
             Some(intent) => {

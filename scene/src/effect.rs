@@ -41,13 +41,22 @@
 //! from the policy's table — which is the frame-time surprise this file opened
 //! by describing, arriving by the one route this file does not close.
 //!
-//! Closing it is two changes and neither is here. It needs a record on the wire
-//! for a declaration to arrive in — see *where the boundary is* below — and it
-//! needs a census on the side that holds the nodes: a count of `Kind::Effect`
-//! creations against declarations, refused at the commit, which is
-//! `crate::arena`'s and `crate::commit`'s to keep and not this type's.
-//! [`kind::ByKind`](crate::kind::ByKind) is already the table for the first
-//! half of it.
+//! Closing it is two changes and **the first of them has landed**. It needed a
+//! record on the wire for a declaration to arrive in, and
+//! `f_abi::scene::SetEffect` is that record — see *where the boundary is*
+//! below. What is still owed is the census on the side that holds the nodes: a
+//! count of `Kind::Effect` creations against declarations, refused at the
+//! commit, which is `crate::arena`'s and `crate::commit`'s to keep and not
+//! this type's. [`kind::ByKind`](crate::kind::ByKind) is already the table for
+//! the first half of it.
+//!
+//! The half that landed narrows this paragraph and does not delete it, which is
+//! worth being exact about. A producer can now be *refused* for writing one
+//! word and not the other, at the decoder, before any of it reaches a graph. A
+//! producer that writes no `SET_EFFECT` at all for an effect node it created is
+//! refused by nothing, because there is nothing for the absence of an entry to
+//! be refused *by*: only a count kept across a frame can see it, and a count is
+//! what neither the decoder nor this function is.
 //!
 //! # Two numbers, and why the second is a saving
 //!
@@ -147,7 +156,7 @@
 //! `abi/src/scene.rs` reviewed as an ABI change — not a convention a renderer
 //! and a policy are asked to share.
 //!
-//! # Where the boundary is, and what the wire does not carry yet
+//! # Where the boundary is, and where the other one is
 //!
 //! *An `Effect` delta* means a `CreateNode` whose kind is `kind::EFFECT`,
 //! together with the words that declare it. The first half is already a type:
@@ -157,40 +166,52 @@
 //! arrived, and [`Effect::declared`] asks for one rather than for a node number
 //! a caller found somewhere.
 //!
-//! The second half has no record to arrive in today: `abi/src/scene.rs` has six
-//! opcodes and none of them carries an effect's parameters. **So there is no
-//! delta in this workspace that can carry an estimate without a saving, and
-//! nothing is refused at the wire boundary — because nothing can knock on it.**
-//! [`Declared`] is a plain in-process struct that a caller inside this crate
-//! hands over, and [`Effect::declared`] is the boundary that exists: the one
-//! between two integers somebody wrote and the value this crate will act on.
-//! Every sentence in this file is about that boundary and none of them is about
-//! a decoder.
+//! The second half now has a record to arrive in. `f_abi::scene::SetEffect`
+//! carries a node, an estimate and a saving, and its decoder refuses a
+//! declaration with one word and not the other before the bytes become a value
+//! anywhere — with [`Undeclared::REFUSAL`]'s own code, which is why the two
+//! boundaries answer a peer with one word. That is `E3-B07h`, and it is the
+//! reversal RFC 0084 named when it narrowed `E3-B07a`'s exit: the pre-narrowing
+//! sentence, *an `Effect` delta carrying one and not the other is refused at
+//! the boundary*, was a statement about nothing for as long as there were six
+//! opcodes and none of them carried an effect's parameters, and it is a
+//! statement about a decoder now.
 //!
-//! That is a narrower claim than *a delta carrying one and not the other is
-//! refused*, and the difference is not a formality: a peer could not produce a
-//! half declaration if it tried, and the day it can, the refusal will be a
-//! decoder's rather than this function's. It is also no longer a narrowing that
-//! lives only here. RFC 0084 rules that an exit is the sentence a task is
-//! accepted on, so narrowing one is a reversal and belongs in the record:
-//! `intent/0012-the-interface/spec.md`'s `E3-B07a` line now carries the
-//! narrower sentence, both of the measurements it rests on, and the RFC number
-//! beside it. A module paragraph that disagreed with the spec would be a false
-//! line waiting for a paste into `TODO.md`, which is exactly what that RFC was
-//! written about. What landing the record would take is
-//! a seventh opcode in `abi/src/scene.rs` — `SET_EFFECT`, carrying a node, an
-//! estimate and a saving — which is an ABI change with an RFC behind it, and it
-//! stops the build of every consumer that decides per opcode: `section_of` and
-//! `admit` in `crate::commit`, `REACH` in `crate::dirty`, `Change::of` in
-//! `crate::kind`, and `Arena::apply`. That list is the cost of the change and
-//! the reason it is one diff and not this one.
+//! **The two boundaries are not one boundary, and this file is still about the
+//! second.** The wire's is between a *peer's* bytes and a record; this one is
+//! between two integers somebody in this process wrote and a value this crate
+//! will act on. [`Declared`] is the plain in-process struct for the second, and
+//! it is not what crosses — `f_abi` is below this crate and knows nothing of
+//! it. A decoder that minted an [`Effect`] out of wire bytes would have to come
+//! through [`Effect::declared`] anyway, because there is no other route to the
+//! type, and `the_only_route_from_two_words_to_an_effect_is_still_declared` is
+//! what keeps that true.
+//!
+//! Neither boundary is redundant, and it is worth saying which case each one
+//! is the only guard for. A half declaration built inside this crate — by
+//! `crate::degrade`'s tests, by whatever assembles a policy's table — never
+//! passes a decoder, and [`Effect::declared`] is what refuses it. A half
+//! declaration from a peer is refused at the decoder, and the frame it was in
+//! never reaches a graph: a consumer that had to cope with one would be a
+//! consumer deciding, at frame time, what the missing half meant.
+//!
+//! What the record cost, for a reader deciding whether to add an eighth: one
+//! line in `f_abi::scene`'s `entries!`, one record, one byte image in the
+//! per-opcode table, and an arm in each of the five consumers in this crate
+//! that decide per opcode — `section_of` and `admit` in `crate::commit`,
+//! `REACH` in `crate::dirty`, `Change::of` in `crate::kind`, and
+//! `Arena::apply`. Every one of those was a build error on the day the opcode
+//! was declared rather than something a reviewer found.
 //!
 //! Two limits remain either way, stated in the same place `kind.rs` states its
-//! own. Nothing in this workspace can force a future decoder to call this
-//! function. And nothing requires an effect node to be declared at all — the
-//! module's *what is not delivered* above is the whole of that one. What this
-//! file does deliver is that there is no *other* route from two words to an
-//! [`Effect`], and no way to hold half of one afterwards.
+//! own. Nothing in this workspace can force a caller holding a decoded
+//! `SetEffect` to bring it through this function — `crate::arena` holds no
+//! declaration at all, and [`Arena::set_effect`](crate::arena::Arena::set_effect)
+//! says why. And nothing requires an effect node to be declared at all: the
+//! module's *what is not delivered* above is the whole of that one, and the
+//! seventh opcode did not close it. What this file does deliver is that there
+//! is no *other* route from two words to an [`Effect`], and no way to hold half
+//! of one afterwards.
 //!
 //! Both of those are claims about what this file **does not contain**, which no
 //! call can observe: a second constructor is invisible to a test that calls the

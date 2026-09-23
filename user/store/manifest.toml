@@ -16,7 +16,7 @@
 # compiles it into the record the frame actually reads. RFC 0030 is why those
 # are three different things.
 
-schema = 3
+schema = 4
 name   = "store"
 image  = "user/store"
 

@@ -50,6 +50,8 @@ name = "f-compositor"
 version = "0.0.1"
 dependencies = [
  "f-abi",
+ "f-env",
+ "f-interface",
  "f-ring",
  "f-scene",
 ]
@@ -109,11 +111,16 @@ dependencies = [
  "f-env",
  "f-generation",
  "f-hash",
+ "f-interface",
+ "f-panel",
  "f-ring",
+ "f-semantic",
  "f-store",
  "f-supervisor",
+ "f-text",
  "f-virtio-blk",
  "f-virtio-gpu",
+ "f-virtio-input",
  "f-virtio-net",
  "verus_builtin",
  "verus_builtin_macros",
@@ -129,7 +136,18 @@ dependencies = [
  "f-hash",
  "f-index",
  "f-ring",
+ "f-text",
  "f-zone",
+]
+
+[[package]]
+name = "f-panel"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-interface",
+ "f-ring",
+ "f-semantic",
 ]
 
 [[package]]
@@ -145,6 +163,14 @@ name = "f-scene"
 version = "0.0.1"
 dependencies = [
  "f-abi",
+]
+
+[[package]]
+name = "f-semantic"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-interface",
 ]
 
 [[package]]
@@ -192,6 +218,16 @@ name = "f-virtio-gpu"
 version = "0.0.1"
 dependencies = [
  "f-abi",
+ "f-ring",
+]
+
+[[package]]
+name = "f-virtio-input"
+version = "0.0.1"
+dependencies = [
+ "f-abi",
+ "f-env",
+ "f-input",
  "f-ring",
 ]
 
@@ -310,4 +346,6 @@ dependencies = [
  "f-bench",
  "f-generation",
  "f-hash",
+ "f-interface",
+ "f-text",
 ]

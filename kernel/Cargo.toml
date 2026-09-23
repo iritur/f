@@ -48,6 +48,65 @@ f-hash.workspace = true
 # where that day is described.
 f-generation.workspace = true
 
+# `E3-B06c`. The tree the system owns, and the frame is the system: this is the
+# one dependency in this list the frame takes in order to **hold** something on a
+# component's behalf rather than to share a vocabulary with it.
+#
+# It is acceptable on `f-hash`'s terms and for `f-hash`'s reason: `no_std`, no
+# allocator, no architecture, no dependencies beyond `f-abi` and `f-interface`,
+# and it forbids `unsafe` — so linking it adds nothing to the surface
+# `lint-unsafe` measures. The alternative was a second semantic tree inside
+# `kernel/`, which is the one shape of duplication this layer cannot afford: two
+# implementations of one tree are two answers to *what is this machine
+# presenting*.
+#
+# *Reversal:* the tree moving above the frame, which is the day something other
+# than the frame is the system a component's interface belongs to. RFC 0072's
+# *a runtime is a component so it publishes a tree* is the shape that would ask
+# for it.
+f-semantic.workspace = true
+
+# The vocabulary, for `Role::from_index` and `Role::name`. Taken directly rather
+# than through the row above, because what the frame does with it is *print* —
+# `kernel/src/semantic.rs` names the roles it found in the boot log — and a log
+# line that said `role 0` would be a log nobody can check against
+# `interface/src/node.rs` by eye.
+#
+# `kernel/src/compositor.rs` is the second reader and wants something else from
+# the same crate: it describes a backend to the compositor and names the
+# capabilities by their own `Capability::index()` rather than by a bitmask it
+# made up. Both uses are the frame refusing to write down a number that already
+# has a name — a role's spelling in one case and a bit position in the other —
+# and neither makes the frame a consumer of the interface layer.
+#
+# `no_std`, no allocator, no dependencies at all, forbids `unsafe`.
+# *Reversal:* the boot log ceasing to name roles **and** a backend that reports
+# for itself. Either alone leaves the other reader, so this row goes when both
+# have gone: the day a GPU driver says what it can do, the capability constant
+# moves to the driver and `kernel/src/compositor.rs` stops composing one.
+f-interface.workspace = true
+
+# `E3-B03b`'s fixture face, and this row takes one thing from the crate:
+# `face::fixture`, which is *bytes* — the declared face and its undeclared twin
+# — plus `face::Face` to parse what came back. The frame lays out no text, holds
+# no metric and shapes nothing; what it does is decide whether a content address
+# is one the component's manifest declared, and then read the answer back and
+# check that it is a face rather than a run of the right length.
+#
+# It is here rather than a second copy of those bytes for `f-hash`'s reason one
+# row up, sharpened by what this particular duplication would cost: the frame
+# computes the address of the face the component stored, so a second
+# transcription would be a second face with a different address, and the symptom
+# would be a read that resolves to nothing rather than a diff anybody can see.
+#
+# `no_std`, no allocator, no architecture, no dependencies at all, forbids
+# `unsafe` — so linking it adds nothing to the surface `lint-unsafe` measures.
+#
+# *Reversal:* a face that arrives from outside the build — RFC 0082's imported
+# shaper — at which point the bytes are not a fixture, the parser is not this
+# one, and this row goes with the stocking it exists for.
+f-text.workspace = true
+
 # The block driver, which is a component and not part of the frame — it inherits
 # `unsafe_code = "forbid"` like every other `user/` crate and `cargo xtask
 # lint-unsafe` holds it to that.
@@ -97,6 +156,25 @@ f-virtio-net.workspace = true
 # this comment and the two above it in one sitting is the argument.
 f-virtio-gpu.workspace = true
 
+# The input driver, on exactly the same terms as the three rows above it and for
+# the same three shared vocabularies: `routing`'s offsets, `driver::Counters`'
+# shape, and the constants `kernel/src/input.rs` checks a manifest against. The
+# frame calls none of its code and `cargo xtask lint-datapath` holds that rather
+# than leaving it to a reader.
+#
+# The fourth copy of one paragraph, and RFC 0051 and RFC 0054 have already said
+# everything there is to say about that: the reversal is those vocabularies
+# moving into `abi/`, where a wire layout two crates agree on belongs. What is
+# worth adding at the fourth is the one thing that is *not* a copy. This driver
+# routes a word the other three have no counterpart for — the clock it is told
+# to take its stamps against — and that word is a page offset like every other,
+# so it arrives through `routing` and costs this row nothing. The frame writes
+# it, the component reads it, and neither of them is the code that takes the
+# reading: `cargo xtask lint-stamp` names the driver and not this crate, and
+# `kernel/src/input.rs` says at length why the frame on this path is a courier
+# rather than a stage.
+f-virtio-input.workspace = true
+
 # The compositor, and the first of these rows that is not a driver. The frame
 # links it for `routing` — the page it fills in before the component's first
 # instruction and reads after it — and for `routing::HEAP_BYTES`, which
@@ -112,6 +190,13 @@ f-virtio-gpu.workspace = true
 # reversal's argument from *drivers share a shape* into *components the frame
 # links share a shape*.
 f-compositor.workspace = true
+
+# `E3-B06c`'s application. The frame links it for `f_panel::routing` — the page
+# it fills in before the component's first instruction — and for
+# `f_panel::script`, which is what `kernel/src/semantic.rs` checks the tree it
+# kept against. One definition the compiler sees rather than two that agree
+# today, which is the argument the four component rows above this one make.
+f-panel.workspace = true
 
 
 # The component a place holds, and — from E1-B08 — the runtime that holds a

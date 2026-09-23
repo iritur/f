@@ -79,7 +79,7 @@ imported driver's manifest lives in `user/` and its `image` points into
 
 | field | type | required | what it is |
 | --- | --- | --- | --- |
-| `schema` | integer | yes | The schema this file is written to. Must be `3`. A later value is refused: a reader that guesses at fields it was not written for is two readers. |
+| `schema` | integer | yes | The schema this file is written to. Must be `4`. A later value is refused: a reader that guesses at fields it was not written for is two readers. |
 | `name` | string | yes | The component's name in the topology: `[a-z0-9-]`, at most 32 bytes, no edge hyphen. Unique across the tree — `lint-manifests` refuses two manifests with one name, because `sibling:` references and the topology name a component by it. |
 | `image` | string | yes | Where the image comes from. Either a tree-relative path to the crate that builds it — forward slashes, no `.`/`..`/empty segment, not under `target/` — or `sha256:` and sixty-four lower-case hex digits for bytes the tree does not build. |
 | `domain` | string | yes | RFC 0005's kind: `shared`, `private` or `hostile`. No default, and none of the working names other documents used (`trusted`, `confined`) is accepted — the RFC's spelling is the only spelling. |
@@ -334,6 +334,61 @@ sentinel added to these two fields, because a sentinel would make two property
 sets overlap without being equal and the refusal above would quietly become a
 subsumption test nobody wrote.
 
+## `[[face]]` — what typefaces the component loads
+
+Optional, and zero entries is the answer for every component in this tree but
+one. This array is where a component says, by content address, which typefaces
+it will ask the blob store for; a component that asks for one it did not declare
+is refused before the bytes move, which is the whole of `E3-B03b` and the first
+consumer of E2's content addressing that is not E2.
+
+| field | type | required | what it is |
+| --- | --- | --- | --- |
+| `name` | string | yes | The word the component's own code asks by — `[a-z0-9-]`, at most 32 bytes, no edge hyphen. Nothing outside the component reads it. Unit: none — a name. |
+| `hash` | string | yes | `sha256:` and exactly sixty-four lower-case hex digits: the content address the store answers at. All zero is refused. Unit: none — a content address, not a quantity. |
+
+**Where this declaration lives is the decision, and it is not in the record.**
+Every other array in this document is a fixed-width slot array inside
+`abi::manifest::Record`. `[[face]]` is not: the compiled entries are a **section
+of the component file after the image**, and the record carries only a count.
+The reason is a measured one rather than a taste. An earlier build put four
+sixty-four-byte entries inside the record and grew it from 2 696 bytes to 2 952;
+`f_assembler::topology::Instance` owns a `Record` **by value**, so the record's
+size is the size of a stack temporary in a crate that never mentions typefaces,
+and at 2 952 that temporary went through the supervisor's guard page. Every boot
+in the tree died of `exception 14`, and what was printed was *a spawn named a
+place it may not occupy* — three subsystems from the cause. So the rule this
+schema now follows: **a declaration most components leave empty is a section,
+not a field.** A component that declares no face pays nothing for the ability.
+
+The count is still in the record, in the byte that was the last reserved one,
+and that is not an inconsistency. A reader needs it *before* it can tell a file
+with two faces from a file with three and a truncation; the module is exactly
+`record_bytes + image_bytes + faces * 64` bytes long and is checked to be. There
+are no reserved bytes left in the record, which is worth saying here because the
+next field that wants one takes a section the way this one did.
+
+**A digest and not a `ContentId`.** The `image` field may be named by
+`sha256:<hex>` too, and that is the same spelling on purpose. What is *not* the
+same is `abi::manifest::ContentId`, which is FNV-1a over a component file the
+boot loader placed and is honest about identifying against accident only. A face
+arrives from a store, where the thing on the other side of the name is whatever
+content hashed to it, so this field is a cryptographic digest from its first
+line — which is the reversal RFC 0030 wrote down, arriving.
+
+**The entries are canonical and are checked, never sorted.** Sorted ascending on
+`name`, and a file out of order is refused with the offending entry named, for
+`[[device]]`'s reason exactly: two entries swapped would be two component files
+with two content hashes naming one component. One name declared twice is refused
+for the neighbouring reason — that is an author with two beliefs about which
+face `regular` is, not a list to be de-duplicated.
+
+At most four. A component declares a regular, an italic, a bold and a bold
+italic and has said everything anybody here has written down; a manifest that
+needs more is declaring a font library rather than a component's own faces.
+`abi::manifest::FACES_MAX` states what reverses that, and the reversal is a
+capability naming a *set* of faces rather than a wider array.
+
 ## `[[state]]` — what the component publishes about itself
 
 Required, and required non-empty. RFC 0013 puts a hierarchical, typed state tree
@@ -394,7 +449,7 @@ For a reviewer, in one place:
 - Any syntax outside the subset: escapes, multi-line strings, inline tables,
   dotted or quoted keys, signed numbers, a list that does not close on its line.
 - A key or table appearing twice.
-- A `schema` other than 3.
+- A `schema` other than 4.
 - A missing `name`, `image`, `domain`, `[restart]`, `[reservation]`,
   `[transfer]` or `[[state]]`.
 - A field this document does not list, anywhere.
@@ -422,6 +477,9 @@ For a reviewer, in one place:
 - Transfer quantities under `restart_only`; a zero state-record schema; a
   `record_bytes` that is not a positive multiple of 8; zero `records_max`; a
   window larger than the account that buys it.
+- More than 4 `[[face]]` entries; a `name` outside `[a-z0-9-]` or longer than
+  32 bytes; a `hash` that is not `sha256:` and sixty-four lower-case hex digits,
+  or is all zero; two entries with one `name`, or entries out of order.
 - Two manifests with one `name`; an image path that names a file.
 
 Two things are stated as *not* refused, because a reader will otherwise assume

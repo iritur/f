@@ -55,7 +55,16 @@ use crate::arch::x86_64::current_cpu;
 /// `AP_CORES * AP_STACK_STRIDE`, which is why the fit is not a fit:
 ///
 /// ```text
-/// resident(N) = 1 352 094 + 64 296 * N bytes      62.8 KiB per core
+/// resident(N) = 1 909 150 + 64 328 * N bytes      62.8 KiB per core
+///
+/// **Re-measured on 2026-09-23**, when `E3-B01g` gave every core four
+/// doorbell counters and a wakeup latch: the slope moved by 32 bytes and
+/// `cargo xtask cores` refused the build until this line, the table in
+/// `docs/booting-on-hardware.md` and `xtask`'s `CORE_COST_BYTES` agreed
+/// again. Only the slope is gated; the intercept above is not, and it had
+/// drifted by more than half a mebibyte before this measurement caught it,
+/// which is the check's own point about which of the two is stale more
+/// often.
 /// ```
 ///
 /// Built at 2, 8, 16, 32 and 64, on 2026-09-17 at `a8e5f31`: the model is taken

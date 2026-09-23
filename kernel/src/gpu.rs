@@ -1122,7 +1122,7 @@ unsafe fn run(
     let mut supervising = Supervising {
         asks: &asks,
         answers: &answers,
-        reaper: &reaper,
+        reaper: Some(&reaper),
         unit: &mut *unit,
         domain: &mut *domain,
         frames: &mut *frames,

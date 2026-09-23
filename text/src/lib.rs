@@ -23,4 +23,5 @@
 #![no_std]
 
 pub mod corpus;
+pub mod face;
 pub mod metric;

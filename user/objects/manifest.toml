@@ -15,7 +15,7 @@
 # compiles it into the record the frame reads. RFC 0030 is why those are three
 # different things.
 
-schema = 3
+schema = 4
 name   = "objects"
 image  = "user/objects"
 
@@ -204,6 +204,40 @@ budget_window_ms = 3_000
 [reservation]
 class        = "soft"
 memory_bytes = 65_536
+
+# --- Face: what typefaces this component may load ----------------------------
+
+# One, and it is the first `[[face]]` entry in this tree. E3-B03b: a face is
+# addressed by content hash and declared before it is used, and this line is the
+# declaration — the only place the set is written down, so a component asking the
+# store for anything else is refused before an entry crosses.
+#
+# **The digest is not copied from anywhere; it is computed twice and compared.**
+# `user/objects/src/face.rs` composes the face out of two constants — a
+# thousand design units to the em and four advances — `f_blob::store::Store::put`
+# hashes exactly those bytes, and
+# `the_manifest_declares_the_address_of_what_this_component_stocks` asserts the
+# number below is the number that comes out. Change either constant and that test
+# goes red rather than this component quietly stocking a face nobody declared.
+# That is what makes this line evidence and not a comment.
+#
+# **Why the entry is not in the record.** `docs/manifest.md`'s `[[face]]` section
+# and `abi::manifest::Face` carry the argument in full; the short version is that
+# an earlier build put these entries inside `abi::manifest::Record`, grew it from
+# 2 696 bytes to 2 952, and every boot in the tree died — because
+# `f_assembler::topology::Instance` owns a `Record` by value and the stack
+# temporary went through the supervisor's guard page. The compiled entry is a
+# section of the component file after the image; this file is unchanged in shape
+# by that, and the record is unchanged in size.
+#
+# *What moves this line:* a real face behind the licence boundary. RFC 0003 says
+# an imported font is reached over a ring, and on the day one arrives this digest
+# names an imported file rather than a composition, `f_text::face::compose` loses
+# its only non-test caller, and the name below stays exactly where it is — which
+# is the point of naming a face by a word and addressing it by a hash.
+[[face]]
+name = "regular"
+hash = "sha256:1ecfbbb8cf48189488be6273d0407449ac6e0518c792f74e47eb67a09f1731c8"
 
 # --- Transfer: what this component declares about being updated in place ------
 

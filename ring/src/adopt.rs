@@ -274,6 +274,33 @@ impl Client {
         producer.occupancy()
     }
 
+    /// Copy this submission's inline payload into the channel's arena.
+    ///
+    /// [`Server::copy_out`]'s other half, and it arrives four tasks later
+    /// because until `E3-B06c` no *component* was ever the submitting end of a
+    /// channel carrying a payload: the three drivers put everything they need in
+    /// the entry's own fields, and `user/objects` reads a request rather than
+    /// writing one. A component that declares a semantic tree writes fifty-six
+    /// bytes per entry and has nowhere else to put them.
+    ///
+    /// `false` when `offset` and `from` do not name bytes inside the arena,
+    /// which is a caller framing a payload the channel has no room for. Refused
+    /// rather than truncated: a short write would put a well-formed entry on the
+    /// ring pointing at bytes that are partly somebody else's.
+    ///
+    /// # What the caller still owes
+    ///
+    /// **Do not write where an entry the peer has not taken is pointing.** The
+    /// arena has no allocator and the layout does not police it — the same
+    /// contract the frame's own `Arena` keeps, and `kernel/src/compositor.rs`'s
+    /// `drive` is where it is spelled out: a client that writes every payload at
+    /// one offset must wait for each completion before it submits the next, or
+    /// the frame it is building loses an entry.
+    pub fn copy_in(&self, offset: usize, from: &[u8]) -> bool {
+        let mapping = self.0.bind();
+        mapping.arena().copy_in(offset, from)
+    }
+
     /// Take one completion, or `None` when there is none.
     ///
     /// **This is the polling point.** Every event a component receives is a
@@ -354,6 +381,49 @@ impl Server {
     pub fn copy_out(&self, offset: usize, out: &mut [u8]) -> bool {
         let mapping = self.0.bind();
         mapping.arena().copy_out(offset, out)
+    }
+
+    /// Say that this end is about to stop looking, so its peer must ring.
+    ///
+    /// **The half of the suppression protocol that lives on the sleeping side**,
+    /// and the reason it is here rather than only on
+    /// [`Consumer`](crate::Consumer): a component holds an [`Adopted`], which
+    /// borrows nothing and binds the mapping for the length of a call, so it has
+    /// no `Consumer` to reach. Until `E3-B01g` nothing at ring 3 ever slept, so
+    /// nothing needed one.
+    ///
+    /// The order a caller owes is the protocol's and is not checked here: arm,
+    /// then **look again**, and sleep only if the second look found nothing. A
+    /// caller that armed and slept without looking is the lost wakeup RFC 0020
+    /// describes from the producer's side -- the entry it would have found
+    /// arrived between its last look and its decision, and the producer had
+    /// already read an unarmed flag and rung nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`RingError::Corrupt`] for a peer cursor that is impossible, which is the
+    /// same refusal every other method here makes for the same reason.
+    pub fn arm_wakeup(&self) -> Result<(), RingError> {
+        let mapping = self.0.bind();
+        let consumer = Consumer::new(mapping.channel()).ok_or(RingError::Corrupt)?;
+        consumer.arm_wakeup();
+        Ok(())
+    }
+
+    /// Say that this end is looking again, so its peer need not ring.
+    ///
+    /// Called on the way out of a sleep and on every turn that found work, which
+    /// is what makes doorbells-per-operation fall to zero under load: a consumer
+    /// that never disarmed would be rung for every entry it was already draining.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::arm_wakeup`].
+    pub fn disarm_wakeup(&self) -> Result<(), RingError> {
+        let mapping = self.0.bind();
+        let consumer = Consumer::new(mapping.channel()).ok_or(RingError::Corrupt)?;
+        consumer.disarm_wakeup();
+        Ok(())
     }
 
     /// Answer one submission.

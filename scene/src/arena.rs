@@ -173,7 +173,8 @@
 )]
 
 use f_abi::scene::{
-    CreateNode, Delta, Entry, NO_NODE, Refusal as WireRefusal, SetPaint, SetPath, SetTransform,
+    CreateNode, Delta, Entry, NO_NODE, Refusal as WireRefusal, SetEffect, SetPaint, SetPath,
+    SetTransform,
 };
 
 use crate::kind::{ByKind, Change, Created, Kind, Removal};
@@ -405,7 +406,9 @@ pub enum Applied {
     /// named and everything that was under it.
     /// Unit: nodes.
     Removed(usize),
-    /// A property of the node this names was replaced.
+    /// A property of the node this names was replaced, or — for a declaration,
+    /// which this graph deliberately does not hold — checked against a node
+    /// that is there. [`Arena::set_effect`] is where the difference is argued.
     /// Unit: none — a node identifier, not a quantity.
     Set(u32),
     /// The delta closes a frame and says nothing about the graph.
@@ -697,6 +700,7 @@ impl Arena {
             }
             Entry::SetPath(record) => self.set_path(record).map(|()| Applied::Set(record.node)),
             Entry::SetPaint(record) => self.set_paint(record).map(|()| Applied::Set(record.node)),
+            Entry::SetEffect(record) => self.set_effect(record).map(|()| Applied::Set(record.node)),
             Entry::Commit(commit) => Ok(Applied::Closes(commit.frame_token)),
         }
     }
@@ -814,6 +818,49 @@ impl Arena {
     pub fn set_paint(&mut self, record: SetPaint) -> Result<(), Refusal> {
         let ix = self.find(record.node).ok_or(Refusal::NoSuchNode(record.node))?;
         self.slot_mut(ix).paint = Some(record);
+        Ok(())
+    }
+
+    /// Check a declaration against the graph, and hold none of it.
+    ///
+    /// The one setter here that stores nothing, and the absence is the
+    /// decision rather than a gap somebody will fill in later.
+    ///
+    /// # Why the graph is not where a declaration lives
+    ///
+    /// Because the thing that reads one does not read the graph.
+    /// [`crate::degrade::downgrade`] takes a `&mut [Effect]` — a table of
+    /// declarations, ranked and spent against one frame's overrun — so
+    /// whichever component runs that policy holds that table, and a
+    /// declaration hung on a node would have to be gathered out of the tree
+    /// into exactly such a table before it was any use. Two homes for one
+    /// fact, and the graph's copy read by nobody.
+    ///
+    /// It is also not free, and the number is measured rather than supposed. A
+    /// declaration per [`Slot`] is sixteen bytes times [`NODES_MAX`], which is
+    /// 16 KiB, and `f_compositor`'s heap is declared in a manifest: the field
+    /// existed for one build and that build failed at
+    /// `user/compositor/src/lib.rs`'s *the heap this manifest declares is
+    /// smaller than the graph this component holds*. RFC 0100's bound is the
+    /// same argument one level up — a structure a component holds is paid for
+    /// where it is held, and this one would have been paid for in a component
+    /// that does not read it.
+    ///
+    /// What the call still does is the part that is this file's: the node has
+    /// to exist. A declaration naming a node the scene does not hold is a
+    /// producer that has lost track of its own frame, and it is refused here
+    /// on the same terms as a paint delta naming one.
+    ///
+    /// *What would reverse this:* `E3-B07c` finding that the policy wants the
+    /// declaration *at* the node — a rank that depends on where in the tree
+    /// the effect sits, say — at which point the field comes back, with the
+    /// manifest number it costs moving in the same diff.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NoSuchNode`] for a node the scene does not hold.
+    pub fn set_effect(&mut self, record: SetEffect) -> Result<(), Refusal> {
+        self.find(record.node).ok_or(Refusal::NoSuchNode(record.node))?;
         Ok(())
     }
 
@@ -1128,7 +1175,7 @@ const _: () = assert!(
 mod tests {
     use super::*;
     use f_abi::NO_DEADLINE;
-    use f_abi::scene::{Commit, RemoveNode, fill, op};
+    use f_abi::scene::{Commit, RemoveNode, SetEffect, fill, op};
 
     /// A deadline far enough from zero to be unmistakably a deadline.
     const SCHEDULED_AT: u64 = 0x0000_0002_1871_1A00;
@@ -1165,6 +1212,48 @@ mod tests {
     /// The delta that removes a subtree.
     fn remove_of(node: u32) -> Delta {
         delta(Entry::RemoveNode(RemoveNode { node }))
+    }
+
+    /// The delta that declares what a node's effect costs.
+    fn declare_of(node: u32) -> Delta {
+        delta(Entry::SetEffect(SetEffect { node, estimate_us_x100: 9_000, saving_us_x100: 3_500 }))
+    }
+
+    #[test]
+    fn a_declaration_is_checked_against_the_graph_and_held_nowhere() {
+        // `E3-B07h`'s arm in `Arena::apply`, and the one thing that arm
+        // decides: a declaration is about a node, so the node has to be there.
+        // Without this test the arm could be `Ok(Applied::Set(record.node))`
+        // with no lookup at all and the whole suite would stay green, because
+        // no corpus frame anywhere in this crate declares an effect cost.
+        let mut arena = Arena::EMPTY;
+        let root = hang_of(1, NO_NODE, NO_NODE, Kind::Effect);
+        assert_eq!(arena.apply(&root), Ok(Applied::Hung(Hung::Created)));
+
+        assert_eq!(arena.apply(&declare_of(1)), Ok(Applied::Set(1)));
+        assert_eq!(
+            arena.apply(&declare_of(2)),
+            Err(Refusal::NoSuchNode(2)),
+            "a declaration naming a node the scene does not hold was applied"
+        );
+
+        // *Held nowhere* is the other half of the sentence and it is not a
+        // behaviour this test can observe — there is no accessor to ask,
+        // because there is nothing stored to ask about. What guards it is the
+        // pair of `const _` assertions above this module, which are what the
+        // field cost when it briefly existed: a declaration per slot is 16 KiB
+        // and `user/compositor`'s manifest is where that lands.
+        // `Arena::set_effect` carries the argument.
+        //
+        // What this half does assert is the visible consequence: applying a
+        // declaration leaves the graph exactly as it was, so the node it named
+        // is neither created by it nor changed in any way this file reports.
+        assert!(arena.holds(1) && !arena.holds(2));
+        assert_eq!(arena.live(), 1, "a declaration created a node");
+        assert_eq!(arena.kind_of(1), Some(Kind::Effect));
+        assert_eq!(arena.paint_of(1), Ok(None));
+        assert_eq!(arena.transform_of(1), Ok(None));
+        assert_eq!(arena.path_of(1), Ok(None));
     }
 
     /// Node `nth`'s kind, cycling through every kind there is.

@@ -39,7 +39,7 @@ schema = 1
 # the moment the code changes and the moment somebody remembers.
 frame = "kernel"
 
-# The seven components, in canonical order. This is exactly `COMPONENTS` in
+# The eight components, in canonical order. This is exactly `COMPONENTS` in
 # `xtask/src/main.rs` as a set, and the compiler refuses a name that list does not
 # build rather than emitting a leaf for a component file nothing produces. The two
 # orders differ on purpose and neither is the other's: that list is the order the
@@ -52,7 +52,18 @@ frame = "kernel"
 # below. `compositor` declares no sibling need at all: it reaches no device and
 # holds no client of another component, which is E3-B01f's own statement of what
 # it is — and `E3-B02f` is the task that gives it a route to `virtio-gpu`.
-component = ["compositor", "objects", "store", "supervisor", "virtio-blk", "virtio-gpu", "virtio-net"]
+#
+# `panel` holds no route either, and its reason is the one `E3-B06c` is about.
+# Its manifest declares a `tree` endpoint and a data ring that connects through
+# it, which is a client need and would ordinarily want a `[[route]]` — and there
+# is nothing here to route it to, because the peer on that channel is the
+# **frame**. Every datapath boot in this tree has the same shape and carries it
+# as `CHAOS_GAP` in `xtask`; what is different here is that it may never stop
+# being true, since the system a component's interface belongs to is the system.
+# The day something above the frame owns semantic trees is the day this line
+# gains a route, and RFC 0072's *a runtime is a component so it publishes a tree*
+# is the shape that would ask for it.
+component = ["compositor", "objects", "panel", "store", "supervisor", "virtio-blk", "virtio-gpu", "virtio-net"]
 
 # The routes. Two of them, and they are the two the datapath already boots:
 # `cargo xtask blk` moves a sector from a client through `virtio-blk`, and

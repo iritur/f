@@ -1758,7 +1758,33 @@ pub fn sweep(deployment: &Deployment, seed: u64, swaps: u32) -> Result<Vec<Pair>
             .into());
     }
     let mut pairs = Vec::new();
-    for component in deployment.components() {
+    // **A component that serves nobody is not in this sweep, and that is a
+    // statement about the experiment rather than about the component.** Both of
+    // these sweeps ask one question: what does a *client* observe while the
+    // thing it talks to is replaced underneath it. A component holding the
+    // client end of its own data ring has nobody on the other side to observe
+    // anything, so a run over it produces a digest and no evidence — which is
+    // the failure `is_empty` above refuses in the large and this refuses in the
+    // small.
+    //
+    // `user/panel` is the first `role = "client"` in this deployment and it
+    // failed both sweeps on the same day, for two different-looking reasons: a
+    // kill plan that could land one of three, because nothing about it
+    // restarts; and a worst operation 81 ns past a bound of *control plus a
+    // declared ladder of 0 ns*, because the ladder is a fault-restart ladder and
+    // this component declares no restart. Two symptoms, one cause, and the
+    // patch for either one separately would have been a number.
+    //
+    // It is skipped rather than refused, and the count is printed by the caller,
+    // because a deployment of nothing but clients is a real mistake and a silent
+    // zero is how it would be read as a pass.
+    //
+    // *What would reverse this:* a client worth replacing under load — an
+    // application whose own restart is what a **second** client observes, which
+    // is `E3-B06c`'s `Registry::adopt` path having a caller. Then the question
+    // is asked of it too, and the skip becomes a reason to widen the harness
+    // rather than a reason to leave it out.
+    for component in deployment.components().iter().filter(|it| it.serves()) {
         let swap = Swap::of(component, swaps);
         let mut control = swap;
         control.swaps = 0;

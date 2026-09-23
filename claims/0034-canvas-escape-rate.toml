@@ -7,12 +7,23 @@
 # but a **verdict on a design decision** — RFC 0077 chose twenty-two roles and
 # named this rate as the observation that would say the choice was wrong.
 #
-# `E3-D01` is what put it here and `E3-B06l` is what moves it to `tracked`. What
-# stands between this file and a number is one thing and it is large: a corpus of
-# real applications expressed as `Node` trees. Not three fixtures written by the
-# author of the vocabulary — those are in `interface/src/node.rs`'s tests, they
-# are the argument for the number rather than evidence about it, and a rate taken
-# over them would be a vocabulary grading its own homework.
+# `E3-D01` is what put it here. `E3-B06l` was to be what moved it to `tracked`,
+# and it did not: it built the apparatus and left the row `pending`, which is
+# worth reading as the result rather than as an unfinished task. What stands
+# between this file and a number is one thing and it is large: a corpus of real
+# applications expressed as `Node` trees, ported by somebody who did not write
+# the vocabulary. Not three fixtures written by the author of it — those are in
+# `interface/src/node.rs`'s tests, they are the argument for the number rather
+# than evidence about it, and a rate taken over them would be a vocabulary
+# grading its own homework. Nobody in this repository is that somebody, and a
+# corpus assembled here would have scored well and established nothing.
+#
+# So what `E3-B06l` built is everything except the corpus: `claims/canvas-corpus/`
+# with a README addressed to the porter, an entry format that will not let a port
+# omit who wrote it, and a reproduction that **refuses**. Running it today prints
+# what it looked at — nothing — and says so. That is a measurement apparatus
+# standing ready in front of an empty room, which is a different state from *this
+# claim has no workload* and is the state this row is in.
 #
 # **Why the threshold is written before the corpus.** Because the alternative is
 # writing it after, and after means writing it once the rate is known, which is
@@ -64,6 +75,26 @@ because an application that had to reach for one still had to reach for one. A
 rate that excused the well-behaved canvases would measure politeness rather than
 coverage.
 
+**Who counts as the corpus.** An entry declares `independent`, and an entry
+that says `false` — a port by somebody who wrote or works on the vocabulary — is
+read, recorded in the run's output, and left out of the numerator and the
+denominator both. This is arithmetic rather than manners. The seam this claim
+cannot see is stated three times in this file: a rate under the target is
+equally consistent with a corpus too simple to push on anything, so the one
+defence the number has is who did the porting, and a defence enforced by a
+reader's diligence is not one. A corpus of nothing but self-ports therefore
+refuses exactly as an empty directory does, because it is the same state.
+
+**The rate is rounded up.** Canvases times a thousand, divided by declared
+nodes, rounded away from zero. A rounding rule is part of a published integer
+rather than an implementation detail, and the direction is chosen for the reason
+every other line here is: truncation moves a borderline corpus toward the answer
+that flatters the vocabulary. 51 canvases in 1001 nodes is 50.9 per thousand;
+truncated it is 50, which is the maximum below and reports green, and RFC 0077's
+reversal condition fails to fire on a corpus that met it. Rounded up it is 51,
+the condition fires, and somebody argues about it — which is what a reversal
+condition is for.
+
 **What this claim does not say.** It says nothing about `canvas_escapes`, which
 counts a different and narrower thing — canvases that declared *nothing* — and
 which is zero for every tree that passed `check`, by construction. That count is
@@ -77,7 +108,7 @@ expressed without a canvas, only that it was not.
 
 [baseline]
 system  = "none"
-notes   = "There is nothing to compare against and a comparison would be the wrong instrument. This is an absolute bound on one vocabulary's coverage, in the manner of `claims/0002` and `claims/0033`, so a baseline configuration would be a baseline of nothing. What takes its place is the **corpus**, and it does the work a baseline usually does: the number means nothing without knowing which applications were ported, by whom, and whether the porter was free to give up and reach for a canvas. A corpus ported by the vocabulary's own authors would score well and prove nothing, which is the failure mode this row exists to name in advance. `E3-B06l` records what the corpus was with every run, and a run that cannot say what it counted is not this claim whatever number it produces."
+notes   = "There is nothing to compare against and a comparison would be the wrong instrument. This is an absolute bound on one vocabulary's coverage, in the manner of `claims/0002` and `claims/0033`, so a baseline configuration would be a baseline of nothing. What takes its place is the **corpus**, and it does the work a baseline usually does: the number means nothing without knowing which applications were ported, by whom, and whether the porter was free to give up and reach for a canvas. A corpus ported by the vocabulary's own authors would score well and prove nothing, which is the failure mode this row exists to name in advance. `E3-B06l` records what the corpus was with every run, and a run that cannot say what it counted is not this claim whatever number it produces — that half is built and is exercised by `cargo test -p xtask canvas`, which is where the record and the rate are watched, because the command itself refuses and so runs neither. What it does print today is the record of an empty corpus, which is the shortest true answer to *what was counted*."
 
 [owner]
 # R09: every headline claim names the subsystem that owns it.
@@ -86,11 +117,14 @@ section  = "13"
 notes    = "Section 13 owns this number because it is where the metric is defined and where the two failure directions — too small and applications escape into canvas, too large and the meanings go ambiguous — are stated. What owns the *vocabulary* is `interface/src/node.rs`, whose `canvas_census` computes the two integers this rate is a ratio of, and RFC 0077 is the decision behind both. The seam worth watching: this claim can only go red in one direction. A rate far *below* the target is not evidence that twenty-two roles is right — it is equally consistent with a corpus of applications too simple to push on anything, and no number in this file can tell those apart."
 
 [workload]
-# There is no workload. This row names the file holding the metric the workload
-# will report, because a `[workload] path` pointing at nothing is worse than one
-# pointing at the closest true thing and saying so.
-path    = "interface/src/node.rs"
-notes   = "What stands in: nothing, and the three interfaces in that file's tests are emphatically not a stand-in. They are a settings panel, a file browser and a timeline written by the author of the vocabulary to argue that twenty-two is defensible; running this rate over them would return 1 canvas in 50 nodes and would be a measurement of the argument rather than of the world. `E3-B06l` builds the corpus and its exit already carries the discipline this needs: the reproduction must **refuse when the corpus is empty rather than reporting a clean zero**, because a clean zero here retires RFC 0077's reversal condition on the day nobody has ported anything — the one direction in which this metric can do damage silently and in the reassuring direction. `canvas_census` in `interface/src/node.rs` is written to the same rule and returns `None` for a tree with no nodes, so the two halves of the refusal cannot come to disagree."
+# The workload is the corpus, and the corpus is empty. This row named
+# `interface/src/node.rs` while there was nowhere for a corpus to go, on the
+# argument that a `[workload] path` pointing at nothing is worse than one
+# pointing at the closest true thing; there is somewhere now, and the directory
+# being empty is a fact a reader can check in one `ls` rather than a claim this
+# file has to make.
+path    = "claims/canvas-corpus"
+notes   = "An empty directory with a README in it, and the README is addressed to a porter who is not us. What stands in: nothing, and the three interfaces in `interface/src/node.rs`'s tests are emphatically not a stand-in. They are a settings panel, a file browser and a timeline written by the author of the vocabulary to argue that twenty-two is defensible; running this rate over them would return 1 canvas in 50 nodes and would be a measurement of the argument rather than of the world. `E3-B06l` builds the corpus and its exit already carries the discipline this needs: the reproduction must **refuse when the corpus is empty rather than reporting a clean zero**, because a clean zero here retires RFC 0077's reversal condition on the day nobody has ported anything — the one direction in which this metric can do damage silently and in the reassuring direction. `canvas_census` in `interface/src/node.rs` is written to the same rule and returns `None` for a tree with no nodes, so the two halves of the refusal cannot come to disagree. That is now literal rather than parallel: the corpus-level refusal is not a second check, it is the admitted trees laid end to end and handed to that same function, and there is no other test of emptiness anywhere in the route. The corpus format is `claims/canvas-corpus/README.md`; the route is `claim_canvas` in `xtask/src/main.rs`; the four things that would make it lie — a clean zero on an empty corpus, a self-port admitted, a truncating rate, a tree nobody checked — each have a test named after the edit that would cause them."
 
 [metrics]
 primary   = "canvas_escape_rate_x1000"
@@ -112,4 +146,4 @@ command = "cargo xtask claim canvas-escape-rate"
 # rather than on the afternoon a number goes red.
 canvas_escape_rate_x1000_over = "RFC 0077's primary reversal condition has fired and the vocabulary is too small for the work real applications do. Before treating it as one, read `canvas_nodes` against `applications`: a rate carried by a single application is a gap and the RFC says so — *one is a gap; two is a shape* — while a rate spread across the corpus is the shape. Then ask what the canvases are *for*, because the answer is the list of roles to argue for, one at a time, and an RFC per role is the mechanism rather than the obstacle. Do not answer this by widening `Role::Canvas`'s licence or by demoting `Defect::EmptyCanvas`: the RFC names that second move as its own separate reversal, and it is the one that arrives first because it looks like a convenience"
 canvas_escape_rate_x1000_far_under = "not evidence that twenty-two is right, and the row most likely to be misread. A rate near zero is equally consistent with a corpus of applications too simple to push on the vocabulary at all, and this claim cannot tell the two apart. What can: whether the corpus contains anything of the kind section 13 calls hard — a timeline, a canvas-shaped editor, a drawing surface. A corpus with none of those has measured the easy half of the problem"
-a_threshold_no_workload_printed = "the run reached no number at all, which in this epoch is the expected ending rather than a fault: there is no corpus, `Route::Unbuilt` refuses rather than exiting zero, and the refusal names `E3-B06l` as the task that owes one. It becomes a real finding on the day that task lands, and what to read then is whether the corpus refused itself for being empty — which is the same refusal one layer down and is the run working rather than failing"
+an_empty_corpus = "the expected ending in this epoch rather than a fault, and the only ending the command has ever had. `claims/canvas-corpus/` holds no entries, `canvas_census` answers `None` for a corpus with no nodes in it, and the route refuses rather than exiting zero. This row used to read `a_threshold_no_workload_printed` and described `Route::Unbuilt` — the state where nothing could have run — and it predicted that `E3-B06l` landing would turn that into the corpus refusing itself for being empty. That is what happened, and it is the run working rather than failing. What would make it a real finding: entries in that directory and this refusal anyway, which means every entry declares `independent = false` and the corpus is a self-port collection wearing a corpus's name"

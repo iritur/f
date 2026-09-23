@@ -290,14 +290,22 @@ so that nobody has to re-derive them and so that their absence is visible rather
 than assumed.
 
 **`ROUTES` in `xtask/src/main.rs` — the orchestrator's, and no longer owed.**
-`("canvas-escape-rate", Route::Unbuilt("E3-B06l"))` is in that table. This
-paragraph said *until it is there* while the row was already in the same
-uncommitted change set as this file, which is the same tense-defect the
-reversal section below confesses to and repairs — caught in one place and left
-standing, inverted, in the other. What the row buys is stated once, here:
+The row was `("canvas-escape-rate", Route::Unbuilt("E3-B06l"))`. This paragraph
+said *until it is there* while the row was already in the same uncommitted
+change set as this file, which is the same tense-defect the reversal section
+below confesses to and repairs — caught in one place and left standing,
+inverted, in the other. What the row bought is stated once, here:
 `lint-reproduce` reads `claims/0034` as a claim whose published command refuses
 rather than as a claim whose command runs nothing, which is what
 `Route::Unbuilt` was added for and what `claims/0033` established.
+
+`E3-B06l` has since replaced it with `Route::Canvas`, and the difference is
+worth keeping rather than glossing. `Route::Unbuilt` meant *nothing here could
+have run*. `Route::Canvas` means the route ran: it read `claims/canvas-corpus/`,
+found no application ported by anybody outside this tree, and refused through
+`canvas_census` answering `None` for a corpus with no nodes in it. The command
+is red either way. What changed is that the apparatus now exists and the corpus
+does not, which is a smaller thing to owe and a more visible one.
 
 **`docs/rfc/README.md` — the orchestrator's, and deferred here deliberately.**
 This RFC and 0078 through 0080 have numbers and no entry in the shared index.
@@ -330,12 +338,22 @@ the corpus is a denominator anybody can compute and nobody can argue with, and a
 reversal condition that cannot be computed is a sentiment with a number in it.
 
 The registry row is `claims/0034-canvas-escape-rate.toml`, at
-`canvas_escape_rate_x1000 = 50`. It is `pending`, it has no workload, and its
-reproduction command refuses rather than reporting a clean zero — `E3-B06l` is
-the task that owes it a corpus, and `Route::Unbuilt("E3-B06l")` in `xtask`'s
-`ROUTES` is what says so at the command line. This RFC previously asserted that
+`canvas_escape_rate_x1000 = 50`. It is `pending`, and its reproduction command
+refuses rather than reporting a clean zero. This RFC previously asserted that
 row in the present tense while it did not exist, which the same review caught;
 the row exists now and the tense is true.
+
+What it says today is *the corpus is empty*, which is `E3-B06l`'s result. That
+task built the route, the entry format in `claims/canvas-corpus/README.md` and
+the refusal, and did not build a corpus, because this condition asks for
+applications ported by somebody who did not write the vocabulary and nobody in
+this repository is that somebody. A corpus assembled here would have scored
+well. The refusal is one call: the admitted trees laid end to end and handed to
+`canvas_census`, so the corpus-level *empty* and the per-tree *empty* are the
+same function and cannot come to disagree. An entry declaring
+`independent = false` is recorded and excluded, which means a corpus of nothing
+but self-ports refuses identically to no corpus at all — the one enforcement
+this condition's blind direction admits of.
 
 Two functions in `node.rs` relate to the rate and they are not the same
 function, which this RFC also ran together. `canvas_census` is the per-tree half

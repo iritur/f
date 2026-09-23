@@ -46,6 +46,14 @@ f-index.workspace = true
 # worth as much as a copied one.
 f-hash.workspace = true
 
+# The face format, for E3-B03b. The split is the point rather than a layering
+# nicety: `f-text` decides whether a run of bytes *is* a face and decides nothing
+# about where it came from, and `src/face.rs` decides whether this component may
+# have it and decides nothing about what it means. A crate that did both would
+# make the provenance check depend on a parser's opinion, and a parser is the
+# thing that will one day be handed a hostile file.
+f-text.workspace = true
+
 [dev-dependencies]
 # The workload draws its content from a seeded `Env` through a `Stream` split at
 # a named identity, RFC 0026, so that adding a draw site later cannot move a

@@ -26,15 +26,55 @@
 //! reaches; this type is the two of them side by side with a tally, and it adds
 //! no rule of its own to either.
 //!
-//! It is **not** a renderer, and it holds no surface, no rung and no pacing
-//! estimate. A frame closes here and nothing is drawn: `E3-B02` is what draws
-//! and `E3-B01h` is what decides when. A reader looking for the pixels will not
-//! find them, and `crate`'s own comment says who owes them.
+//! It is **not** a renderer and it holds no surface. A frame closes here and
+//! nothing is drawn: `E3-B02` is what draws, and a reader looking for the
+//! pixels will not find them — `crate`'s own comment says who owes them.
+//!
+//! It does now hold a rung and a pacing estimate, and both arrived with
+//! `E3-B01k` and `E3-B01h`. Neither is acted on. The rung is *reported* and
+//! never used to choose a renderer, because there is no renderer to choose; the
+//! pacing estimate is *published* and never slept on, because sleeping is
+//! `E3-B01g`'s doorbell. What this file holds is the arithmetic and the
+//! bookkeeping, which is the half a host test can drive on both architectures.
+//!
+//! # The rung is assigned in one place, and that is the whole of `E3-B02b`
+//!
+//! [`Held::new`] is the only line in this crate that writes [`Story::rung`], and
+//! every other field of [`Story`] is written again on every frame that closes.
+//! That asymmetry is the decision: RFC 0080 forecloses a compositor that
+//! promotes itself, on the grounds that a rung change moves the cost
+//! distribution `crate::pacing` estimates from underneath the estimator, and the
+//! cheapest way to keep that promise is for there to be no second assignment to
+//! find.
+//!
+//! **Nothing in this crate enforces that, and a reader should not believe it
+//! does.** The type permits a second assignment — [`Story`] is a plain struct
+//! whose other fields are written every frame — and what catches one is the
+//! boot: a build that recomputed the rung from a report that had moved
+//! published a different word and `cargo xtask compositor serve` went red on
+//! *the compositor promoted itself*. That is the guard, and it lives one
+//! privilege boundary away from the code it guards. A type that made the second
+//! assignment impossible would be better and is not written here, because the
+//! rung is published in the same struct as four numbers that must move and
+//! splitting them would cost a reader the one place the frame's story is.
+//!
+//! What a host test can show is that a frame closing does not move it and that a
+//! frame missing its deadline does not move it. What it cannot show is the case
+//! that matters most — a backend that *gains* a capability while the component
+//! runs — because nothing here reads the routing page twice and a test that
+//! handed [`Held`] a second [`Plan`] would be testing a constructor. That case
+//! is a boot: `kernel/src/compositor.rs` writes a better report onto the page
+//! after the first frame closes and requires the published rung to be the one
+//! this component started with. The two together are the clause, and neither is
+//! it alone.
 
 use f_abi::scene::{PAYLOAD_BYTES, Refusal as WireRefusal};
 use f_abi::{Cqe, Sqe, error, flags};
+use f_interface::backend::{Capabilities, Capability, select};
 use f_scene::arena::{Arena, Refusal as GraphRefusal};
 use f_scene::commit::{Batch, DELTAS_MAX, Offered, Refusal, Refused};
+
+use crate::pacing::{Decision, Pacing, Tick, degraded, degraded_word};
 
 /// How many deltas one frame may carry before this component refuses it.
 ///
@@ -79,6 +119,17 @@ pub struct Counters {
     /// The token of the last frame that closed.
     /// Unit: none — a frame identifier, not a quantity.
     pub token: u64,
+    /// Frames whose pacing estimate did not fit before their own deadline.
+    ///
+    /// **A count and not a flag, and it is the number that makes
+    /// [`Story::degraded`] checkable.** The tree carries what happened to the
+    /// *last* frame, which is one observation; a reader cannot tell a compositor
+    /// that decided per frame from one that answers the same way every time out
+    /// of a single reading. This is the second observation, and
+    /// `kernel/src/compositor.rs` requires it to be one out of two rather than
+    /// two out of two.
+    /// Unit: frames — UI frames.
+    pub late: u64,
 }
 
 impl Counters {
@@ -86,7 +137,7 @@ impl Counters {
     ///
     /// A `const` rather than `Default::default()` so that [`Held::new`] adds
     /// nothing to the two it is handed: what a compositor starts as is an empty
-    /// graph, an empty frame and eight zeroes, and the zeroes are the only part
+    /// graph, an empty frame and nine zeroes, and the zeroes are the only part
     /// this file gets to decide.
     pub const ZERO: Self = Self {
         drained: 0,
@@ -97,7 +148,118 @@ impl Counters {
         removed: 0,
         refused: 0,
         token: 0,
+        late: 0,
     };
+}
+
+/// What the frame told this component before its first instruction.
+///
+/// Three numbers off the routing page, carried together because they are one
+/// decision — *what this machine can draw with, how often it scans out, and how
+/// much of a frame to keep in hand* — and because a constructor taking three
+/// bare integers of two different units is a constructor whose arguments get
+/// swapped. `crate::routing::at` is where each one is written and argued.
+///
+/// Told rather than computed, for the reason `crate::routing`'s own comment
+/// gives about every other field on that page: a component that derived its own
+/// refresh rate would be a component that is wrong on every machine but the one
+/// its author had.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Plan {
+    /// What the backend reports, as a bitmask of
+    /// `f_interface::backend::Capability` indices.
+    /// Unit: none — a bitmask.
+    pub backend_bits: u64,
+    /// How far apart this display's scanouts are. Unit: nanoseconds.
+    pub scanout_period_nanos: u64,
+    /// What the wake time holds back against the estimate being wrong.
+    /// Unit: nanoseconds.
+    pub margin_nanos: u64,
+}
+
+/// The bitmask the frame wrote, read back through the vocabulary.
+///
+/// **Through `Capability::ALL` and each capability's own `index()`, rather than
+/// by casting the word.** `f_interface::backend::Capabilities` is a type in a
+/// crate that deliberately depends on nothing and is not on any wire — its own
+/// comment says so — so there is no layout for the frame and the component to
+/// agree about, and a `transmute` would be this component inventing one. What
+/// the two sides share instead is the vocabulary: a capability's index is a
+/// position in a list both of them read, and a bit at a position nothing names
+/// is a bit this function drops rather than a capability it invents.
+///
+/// Unit of `bits`: none — a bitmask of capability indices.
+#[must_use]
+pub fn reported_capabilities(bits: u64) -> Capabilities {
+    let mut reported = Capabilities::NONE;
+    for capability in Capability::ALL {
+        if bits & (1 << capability.index()) != 0 {
+            reported = reported.with(capability);
+        }
+    }
+    reported
+}
+
+/// Which rung this machine gets, as the word `crate::routing::node::RUNG`
+/// carries.
+///
+/// `Rung::index()` plus one, so that zero is *this machine satisfies no rung*
+/// and is not confusable with the top one.
+///
+/// # Why zero survives, now that such a machine is refused
+///
+/// RFC 0080 says a backend satisfying no rung is **refused a compositor** rather
+/// than handed the floor, and `E3-B02b` landed that refusal — in the *frame*,
+/// before a page is spent, which is where *refused a compositor* has to happen
+/// if the words are to mean anything. `kernel/src/compositor.rs`'s floorless
+/// half is the run that shows it, and `ADMISSION/NO_RUNG` is what it carries.
+///
+/// So a compositor that is running has a rung by construction and this arm is
+/// unreachable from a live frame. It stays anyway, and the reason is worth
+/// stating rather than leaving to a later reader who will otherwise delete it:
+/// a component may not assume the frame that started it was the frame in this
+/// tree. The alternative to a zero is a floor selected by default here, which is
+/// exactly the outcome the refusal exists to prevent — a `select` whose `Err`
+/// arm produced `Rung::TessellatingFloor` would put the silent floor back one
+/// layer down from where RFC 0080 forbade it, and nothing above would be able to
+/// tell.
+///
+/// The reversal condition is precise: if a later build gives this component a
+/// way to *report* that it was started on a machine with no rung — an outcome
+/// word of its own, say — then this arm has somewhere better to go and should go
+/// there. Until then, the word is zero and the tree says so.
+/// Unit: none — a rung ordinal, not a quantity.
+#[must_use]
+pub fn rung_word(bits: u64) -> u64 {
+    match select(reported_capabilities(bits)) {
+        Ok(rung) => rung.index() as u64 + 1,
+        Err(_) => 0,
+    }
+}
+
+/// What this component publishes about the last frame it closed.
+///
+/// `E3-B01k`'s five words, minus the one [`Counters`] already keeps: the frame
+/// token is a tally's business because it moves with `frames`, and the other
+/// four are here. Every field is a value this component computed or was told,
+/// and none of them is an opinion it holds about itself — which is the same
+/// property [`Counters`] has and the reason `kernel/src/compositor.rs` can check
+/// all of them against what its own script asked for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Story {
+    /// Which rung of RFC 0080's ladder, as [`rung_word`] spells it.
+    /// Unit: none — a rung ordinal.
+    pub rung: u64,
+    /// The deadline the last closed frame carried, out of
+    /// `f_abi::scene::Frame::deadline`.
+    /// Unit: nanoseconds, in the channel's epoch.
+    pub deadline_nanos: u64,
+    /// What was given up to fit it, as a `crate::pacing::degraded` ordinal.
+    /// Unit: none.
+    pub degraded: u64,
+    /// The scanout it was paced against, the estimate, the margin and the wake
+    /// time the three of them make.
+    pub decision: Decision,
 }
 
 /// The graph, the frame under construction, and the tally.
@@ -130,6 +292,25 @@ pub struct Held<'a> {
     batch: &'a mut Batch<FRAME_DELTAS_MAX>,
     /// What has happened so far.
     counters: Counters,
+    /// What the last [`crate::pacing::WINDOW`] frames cost.
+    ///
+    /// Owned rather than borrowed, unlike the two above, and the asymmetry is
+    /// RFC 0100's: a kibibyte of zeroes is a `memset` and costs nothing in the
+    /// image, while the arena and the batch are a hundred and thirty kilobytes
+    /// that have to be on the heap whatever they are initialised to. A window
+    /// that had to be boxed would be a third allocation for no reason.
+    pacing: Pacing,
+    /// What the frame told this component.
+    plan: Plan,
+    /// What it publishes about the last frame it closed.
+    story: Story,
+    /// When the first delta of the frame under construction was staged.
+    ///
+    /// `None` between frames, which is what makes a frame's cost the span of
+    /// *that frame* rather than the span since the last commit: a compositor
+    /// with nothing to do sits idle, and charging that idleness to the next
+    /// frame would make the estimate a measure of how often a client submits.
+    opened: Option<Tick>,
 }
 
 impl<'a> Held<'a> {
@@ -140,8 +321,32 @@ impl<'a> Held<'a> {
     /// them on its own stack, which is what makes this file testable without a
     /// frame under it.
     #[must_use]
-    pub fn new(graph: &'a mut Arena, batch: &'a mut Batch<FRAME_DELTAS_MAX>) -> Self {
-        Self { graph, batch, counters: Counters::ZERO }
+    pub fn new(graph: &'a mut Arena, batch: &'a mut Batch<FRAME_DELTAS_MAX>, plan: Plan) -> Self {
+        Self {
+            graph,
+            batch,
+            counters: Counters::ZERO,
+            pacing: Pacing::ZERO,
+            plan,
+            // The rung is decided **once**, here, and nothing below moves it.
+            // RFC 0080's whole argument is that a compositor picks a rasteriser
+            // when it starts and never promotes, and the cheapest way to keep
+            // that promise is for the only assignment to be in the constructor.
+            story: Story { rung: rung_word(plan.backend_bits), ..Story::default() },
+            opened: None,
+        }
+    }
+
+    /// What it publishes about the last frame it closed.
+    #[must_use]
+    pub const fn story(&self) -> &Story {
+        &self.story
+    }
+
+    /// How many frames the pacing estimate is taken over. Unit: samples.
+    #[must_use]
+    pub const fn samples(&self) -> u64 {
+        self.pacing.held() as u64
     }
 
     /// What this component has counted.
@@ -186,10 +391,18 @@ impl<'a> Held<'a> {
     /// commit carries is read by the wire, refused when absent, and scheduled
     /// against by nothing in this build — `E3-B01h` is the task that computes a
     /// wake time from it, and until then a frame closes when it arrives.
-    pub fn offer(&mut self, entry: &Sqe, payload: &[u8; PAYLOAD_BYTES]) -> Option<Cqe> {
+    pub fn offer(&mut self, entry: &Sqe, payload: &[u8; PAYLOAD_BYTES], now: Tick) -> Option<Cqe> {
         self.counters.drained += 1;
         let answered = match self.batch.offer(entry, payload) {
             Ok(Offered::Staged) => {
+                // The instant the frame opened, taken at the first delta that
+                // reached it rather than at the commit that closed it. A frame's
+                // cost is the span of the frame; `Held::opened`'s own comment
+                // says what charging the gap between frames would measure
+                // instead.
+                if self.opened.is_none() {
+                    self.opened = Some(now);
+                }
                 self.counters.staged += 1;
                 Ok(())
             }
@@ -207,9 +420,20 @@ impl<'a> Held<'a> {
                         self.counters.created += closed.created as u64;
                         self.counters.removed += closed.removed as u64;
                         self.counters.token = closed.frame.token;
+                        self.close(now, closed.frame.deadline);
                         Ok(())
                     }
-                    Err(why) => Err(refused(&why)),
+                    Err(why) => {
+                        // A frame that did not reach the graph is not a frame
+                        // for pacing purposes either: it cost this component
+                        // something, but what it cost is the cost of a refusal
+                        // rather than of a frame, and a window that held both
+                        // would be estimating the wrong quantity. The open
+                        // instant is dropped for the same reason `Batch::commit`
+                        // resets on both paths.
+                        self.opened = None;
+                        Err(refused(&why))
+                    }
                 }
             }
             Err(refusal) => Err(packed(&refusal)),
@@ -237,6 +461,42 @@ impl<'a> Held<'a> {
                     ..Cqe::ZERO
                 })
             }
+        }
+    }
+
+    /// Record what the frame that just closed cost, and decide about the next
+    /// one.
+    ///
+    /// # Why the whole of `E3-B01h` is three lines
+    ///
+    /// Because `crate::pacing` is where the arithmetic lives and this is the one
+    /// place it is fed. The cost is the span between the first delta of the
+    /// frame and the commit that closed it, taken from the frame's own clock —
+    /// the only clock this component ever sees, and `crate::routing::at::
+    /// TICK_NANOS` says why it arrives rather than being read.
+    ///
+    /// The overrun the degradation policy is asked about is measured against
+    /// **this frame's own deadline** rather than against the scanout the wake
+    /// time is computed from, and the two are different questions on purpose: a
+    /// deadline is what the client asked for and a scanout is what the display
+    /// will do, so a frame can be inside one and outside the other. The word
+    /// published names what happened to the client's request.
+    /// Unit of `deadline_nanos`: nanoseconds, in the channel's epoch.
+    fn close(&mut self, now: Tick, deadline_nanos: u64) {
+        let cost_nanos = now.since(self.opened.unwrap_or(now));
+        self.opened = None;
+        self.pacing.observe(cost_nanos);
+        self.story.deadline_nanos = deadline_nanos;
+        self.story.decision =
+            self.pacing.decide(now, self.plan.scanout_period_nanos, self.plan.margin_nanos);
+        // How long the client left between the commit landing and its own
+        // deadline. Saturating: a deadline already passed is *no time at all*
+        // rather than a negative span, and a compositor handed one is a
+        // compositor that is already late.
+        let remaining_nanos = deadline_nanos.saturating_sub(now.nanos());
+        self.story.degraded = degraded_word(self.story.decision.estimate_nanos, remaining_nanos);
+        if self.story.degraded != degraded::FITTED {
+            self.counters.late += 1;
         }
     }
 }
@@ -308,8 +568,39 @@ fn packed(refusal: &Refusal) -> (i32, u32) {
 #[cfg(test)]
 mod tests {
     use f_abi::scene::{Commit, CreateNode, Delta, Entry, NO_NODE, RemoveNode, SetPaint, kind};
+    use f_interface::ladder::Rung;
 
     use super::*;
+
+    /// What the frame tells the component in these tests.
+    ///
+    /// The capability set is the one RFC 0080's table gives the top rung, and it
+    /// is built from the vocabulary rather than written as a literal bitmask:
+    /// what `reported_capabilities` has to invert is a set of *indices*, so a
+    /// test that hard-coded the bits would be asserting against the same
+    /// arithmetic it is checking.
+    fn plan() -> Plan {
+        let mut bits = 0;
+        for capability in Capability::ALL {
+            bits |= 1 << capability.index();
+        }
+        Plan { backend_bits: bits, scanout_period_nanos: PERIOD_NANOS, margin_nanos: MARGIN_NANOS }
+    }
+
+    /// A sixty-hertz frame. Unit: nanoseconds.
+    const PERIOD_NANOS: u64 = 16_666_667;
+
+    /// What the wake time holds back. Unit: nanoseconds.
+    const MARGIN_NANOS: u64 = 1_000_000;
+
+    /// How far apart the ticks these tests hand the component are.
+    ///
+    /// A hundred nanoseconds per entry, so a frame of five deltas and a commit
+    /// costs five hundred — a number small enough to fit inside a sixty-hertz
+    /// deadline and large enough that a build which measured the span from the
+    /// *previous* commit instead would produce a different one.
+    /// Unit: nanoseconds.
+    const STEP_NANOS: u64 = 100;
 
     /// One delta, encoded the way a client encodes one.
     fn wire(body: Entry, deadline: u64) -> (Sqe, [u8; PAYLOAD_BYTES]) {
@@ -377,10 +668,11 @@ mod tests {
     fn a_frame_reaches_the_graph_only_when_its_commit_arrives() {
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
-        let mut held = Held::new(&mut graph, &mut batch);
+        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut clock = Ticking::new();
         let entries = scene();
         for (entry, payload) in &entries[..5] {
-            assert!(held.offer(entry, payload).is_some_and(|cqe| cqe.result == 0));
+            assert!(held.offer(entry, payload, clock.next()).is_some_and(|cqe| cqe.result == 0));
             // The graph is still empty, entry after entry. This is the clause a
             // compositor that applied deltas as they arrived would fail, and it
             // is asserted inside the loop rather than after it so that the
@@ -389,7 +681,7 @@ mod tests {
         }
         assert_eq!(held.counters().staged, 5);
         let (commit, payload) = &entries[5];
-        assert!(held.offer(commit, payload).is_some_and(|cqe| cqe.result == 0));
+        assert!(held.offer(commit, payload, clock.next()).is_some_and(|cqe| cqe.result == 0));
         assert_eq!(held.live(), 4);
         assert_eq!(held.counters().frames, 1);
         assert_eq!(held.counters().edits, 5);
@@ -402,10 +694,11 @@ mod tests {
     fn a_removal_takes_the_subtree_under_it_and_the_census_says_so() {
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
-        let mut held = Held::new(&mut graph, &mut batch);
+        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut clock = Ticking::new();
         let entries = scene();
         for (entry, payload) in &entries[..6] {
-            held.offer(entry, payload);
+            held.offer(entry, payload, clock.next());
         }
         assert_eq!(held.live(), 4);
 
@@ -413,9 +706,9 @@ mod tests {
         // difference between `removed` and *entries that said remove*, and the
         // reason the census is published beside both.
         let (remove, payload) = wire(Entry::RemoveNode(RemoveNode { node: 2 }), 0);
-        assert!(held.offer(&remove, &payload).is_some_and(|cqe| cqe.result == 0));
+        assert!(held.offer(&remove, &payload, clock.next()).is_some_and(|cqe| cqe.result == 0));
         let (commit, payload) = &entries[6];
-        assert!(held.offer(commit, payload).is_some_and(|cqe| cqe.result == 0));
+        assert!(held.offer(commit, payload, clock.next()).is_some_and(|cqe| cqe.result == 0));
         assert_eq!(held.live(), 2);
         assert_eq!(held.counters().removed, 2);
         assert_eq!(held.counters().frames, 2);
@@ -427,7 +720,8 @@ mod tests {
     fn a_refused_entry_is_completed_and_poisons_the_frame_it_was_offered_to() {
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
-        let mut held = Held::new(&mut graph, &mut batch);
+        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut clock = Ticking::new();
         // A create naming no node: the refusal a zeroed payload earns, which is
         // what a slot whose payload had not landed looks like.
         let (entry, payload) = wire(
@@ -439,7 +733,8 @@ mod tests {
             }),
             0,
         );
-        let answer = held.offer(&entry, &payload).expect("a refusal always completes");
+        let answer =
+            held.offer(&entry, &payload, clock.next()).expect("a refusal always completes");
         assert!(answer.result < 0, "a refused entry is completed with a refusal");
         assert_eq!(held.counters().refused, 1);
 
@@ -448,17 +743,264 @@ mod tests {
         // in it.
         let entries = scene();
         let (commit, payload) = &entries[5];
-        let answer = held.offer(commit, payload).expect("a refusal always completes");
+        let answer = held.offer(commit, payload, clock.next()).expect("a refusal always completes");
         assert!(answer.result < 0);
         assert_eq!(held.counters().frames, 0);
         assert_eq!(held.live(), 0);
+    }
+
+    /// A clock that ticks once per entry offered.
+    ///
+    /// This is what the *frame* is, from this component's side: something that
+    /// writes a reading into the routing page before each entry it submits. The
+    /// tests hold one rather than calling a clock, for the reason
+    /// `crate::pacing`'s comment gives — a component has no clock, so a test
+    /// that reached for one would be testing something this component cannot do.
+    struct Ticking(u64);
+
+    impl Ticking {
+        const fn new() -> Self {
+            Self(0)
+        }
+
+        /// The next reading. Unit: nanoseconds.
+        fn next(&mut self) -> Tick {
+            self.0 += STEP_NANOS;
+            Tick(self.0)
+        }
+    }
+
+    #[test]
+    fn the_rung_is_the_one_the_reported_capabilities_select_and_is_decided_once() {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut clock = Ticking::new();
+        // Everything reported is the top rung, and the word is its index plus
+        // one — so a build that published the index itself says 0, which is the
+        // value reserved for a machine that satisfies no rung at all.
+        assert_eq!(held.story().rung, Rung::ALL[0].index() as u64 + 1);
+        assert_eq!(held.story().rung, 1);
+
+        // And it does not move while frames close. RFC 0080: chosen at start,
+        // never promoted, and never demoted by a frame either.
+        let entries = scene();
+        for (entry, payload) in &entries[..6] {
+            held.offer(entry, payload, clock.next());
+        }
+        assert_eq!(held.counters().frames, 1);
+        assert_eq!(held.story().rung, 1, "a closed frame moved the rung");
+    }
+
+    #[test]
+    fn a_machine_that_satisfies_no_rung_is_reported_as_no_rung_rather_than_as_the_floor() {
+        // Nothing reported. The floor of RFC 0080's ladder still asks for
+        // something, so an empty set selects no rung — and the word for that is
+        // zero, which is below every rung rather than equal to the last one.
+        assert_eq!(rung_word(0), 0);
+        // And a bit at a position no capability names is dropped rather than
+        // turned into a capability: the high half of the word cannot invent one.
+        assert_eq!(rung_word(1 << 63), 0);
+    }
+
+    /// The machine RFC 0080 keeps the hybrid rung for.
+    ///
+    /// Compute shaders, storage buffers, a CPU and a way to present — and **no
+    /// usable subgroup scan**, which is the one capability the top rung asks for
+    /// and this one cannot supply. Built out of the vocabulary for [`plan`]'s
+    /// reason.
+    fn hybrid_plan() -> Plan {
+        let mut bits = 0;
+        for capability in [
+            Capability::ComputeShaders,
+            Capability::StorageBuffers,
+            Capability::Cpu,
+            Capability::ImagePresent,
+        ] {
+            bits |= 1 << capability.index();
+        }
+        Plan { backend_bits: bits, scanout_period_nanos: PERIOD_NANOS, margin_nanos: MARGIN_NANOS }
+    }
+
+    #[test]
+    fn a_backend_with_compute_shaders_and_no_usable_scan_starts_at_rung_two() {
+        // `E3-B02b`'s first clause, at the place the word is computed. The
+        // number is *two* written out rather than `Rung::Hybrid.index() + 1`,
+        // because the second spelling would agree with this component through
+        // any change to the ladder — including one that put the hybrid
+        // somewhere else. RFC 0080's table is where the two comes from, and
+        // `kernel/src/compositor.rs` reads it by hand for the same reason.
+        assert_eq!(rung_word(hybrid_plan().backend_bits), 2);
+        // And it is the rung a component started on that machine holds, which
+        // is the clause the tree carries and the boot reads back.
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let held = Held::new(&mut graph, &mut batch, hybrid_plan());
+        assert_eq!(held.story().rung, 2);
+        assert_eq!(held.story().rung, Rung::ALL[1].index() as u64 + 1);
+    }
+
+    #[test]
+    fn an_overloaded_compositor_holds_the_rung_it_started_on() {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let mut held = Held::new(&mut graph, &mut batch, hybrid_plan());
+        let mut clock = Ticking::new();
+        assert_eq!(held.story().rung, 2);
+
+        // `scene()`'s first commit carries a deadline of 900 nanoseconds and the
+        // frame costs more than it has left, so this frame is **late** and the
+        // degradation policy is asked. That is what *overloaded* means here:
+        // not a slow machine but a frame that did not fit, which is the only
+        // form of overload this component can observe.
+        let entries = scene();
+        for (entry, payload) in &entries[..6] {
+            held.offer(entry, payload, clock.next());
+        }
+        assert_eq!(held.counters().late, 1, "the frame meant to be late was not");
+        assert_eq!(held.story().degraded, degraded::SHORT);
+        assert_eq!(
+            held.story().rung,
+            2,
+            "a compositor answered a late frame by changing rasterisers, which is the one \
+             response guaranteed to miss the next frame too",
+        );
+
+        // And it does not come back up when a frame fits again. A build that
+        // demoted under load and recovered afterwards would pass the clause
+        // above and fail this one, and it is the shape most likely to be
+        // written by somebody who thought a rung was a quality setting.
+        let (remove, payload) = wire(Entry::RemoveNode(RemoveNode { node: 2 }), 0);
+        held.offer(&remove, &payload, clock.next());
+        let (commit, payload) = wire(Entry::Commit(Commit { frame_token: 0x13 }), 50_000_000);
+        held.offer(&commit, &payload, clock.next());
+        assert_eq!(held.counters().frames, 2);
+        assert_eq!(held.story().degraded, degraded::FITTED);
+        assert_eq!(held.story().rung, 2, "the rung moved when a frame fitted again");
+    }
+
+    #[test]
+    fn a_frame_costs_the_span_of_its_own_deltas_and_not_the_gap_before_it() {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut clock = Ticking::new();
+        // Six entries open and close the first frame, so the first tick is at
+        // 100 and the commit is at 600: five steps, five hundred nanoseconds.
+        let entries = scene();
+        for (entry, payload) in &entries[..6] {
+            held.offer(entry, payload, clock.next());
+        }
+        assert_eq!(held.samples(), 1);
+        assert_eq!(
+            held.story().decision.estimate_nanos,
+            5 * STEP_NANOS,
+            "the first frame's cost is not the span from its first delta to its commit",
+        );
+
+        // Then a long idle gap, and a second frame of two entries. Its cost is
+        // two hundred nanoseconds — the gap belongs to nobody. A build that
+        // measured from the previous commit would charge the gap to this frame
+        // and the estimate would move.
+        clock.0 += 9_000_000;
+        let (remove, payload) = wire(Entry::RemoveNode(RemoveNode { node: 2 }), 0);
+        held.offer(&remove, &payload, clock.next());
+        let (commit, payload) = &entries[6];
+        held.offer(commit, payload, clock.next());
+        assert_eq!(held.counters().frames, 2);
+        assert_eq!(held.samples(), 2);
+        // Two samples: five hundred and one hundred. The p99 of two by nearest
+        // rank is the larger, so the estimate is still the first frame's.
+        assert_eq!(held.story().decision.estimate_nanos, 5 * STEP_NANOS);
+    }
+
+    #[test]
+    fn the_wake_time_is_the_scanout_less_the_estimate_less_the_margin() {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut clock = Ticking::new();
+        let entries = scene();
+        for (entry, payload) in &entries[..6] {
+            held.offer(entry, payload, clock.next());
+        }
+        let decision = held.story().decision;
+        assert_eq!(decision.scanout_nanos, PERIOD_NANOS, "the first scanout after six hundred ns");
+        assert_eq!(decision.margin_nanos, MARGIN_NANOS);
+        assert_eq!(
+            decision.wake_nanos,
+            PERIOD_NANOS - 5 * STEP_NANOS - MARGIN_NANOS,
+            "the wake time is not the scanout less the estimate less the margin",
+        );
+    }
+
+    #[test]
+    fn a_frame_inside_its_deadline_degrades_nothing_and_one_outside_it_is_counted_late() {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut clock = Ticking::new();
+        // `scene()`'s commits carry deadlines of 900 and 901 nanoseconds. The
+        // first frame closes at 600 with an estimate of 500, so 300 nanoseconds
+        // remain and it does not fit — this is the late one.
+        let entries = scene();
+        for (entry, payload) in &entries[..6] {
+            held.offer(entry, payload, clock.next());
+        }
+        assert_eq!(held.story().deadline_nanos, 900);
+        assert_eq!(held.story().degraded, degraded::SHORT);
+        assert_eq!(held.counters().late, 1);
+
+        // The second frame is given a deadline a whole scanout away, and the
+        // estimate has not moved — so it fits, the word goes back to `FITTED`,
+        // and the late count stays at one. A component that answered the same
+        // way every frame fails the second half of this and a component that
+        // never answered at all fails the first.
+        let (remove, payload) = wire(Entry::RemoveNode(RemoveNode { node: 2 }), 0);
+        held.offer(&remove, &payload, clock.next());
+        let (commit, payload) = wire(Entry::Commit(Commit { frame_token: 0x13 }), 50_000_000);
+        held.offer(&commit, &payload, clock.next());
+        assert_eq!(held.counters().frames, 2);
+        assert_eq!(held.story().deadline_nanos, 50_000_000);
+        assert_eq!(held.story().degraded, degraded::FITTED);
+        assert_eq!(held.counters().late, 1, "a frame inside its deadline was counted late");
+    }
+
+    #[test]
+    fn a_frame_that_never_closed_leaves_no_sample_behind() {
+        let mut graph = Arena::EMPTY;
+        let mut batch = Batch::new();
+        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut clock = Ticking::new();
+        // A create naming no node poisons the frame it was offered to, so the
+        // commit after it is refused and the graph never changes. A refused
+        // frame is not a frame, so the window must still be empty: an estimate
+        // that counted refusals would be estimating the cost of being wrong.
+        let (bad, payload) = wire(
+            Entry::CreateNode(CreateNode {
+                node: NO_NODE,
+                parent: NO_NODE,
+                before: NO_NODE,
+                kind: kind::LAYER,
+            }),
+            0,
+        );
+        held.offer(&bad, &payload, clock.next());
+        let entries = scene();
+        let (commit, payload) = &entries[5];
+        held.offer(commit, payload, clock.next());
+        assert_eq!(held.counters().frames, 0);
+        assert_eq!(held.samples(), 0, "a refused frame left a sample in the pacing window");
+        assert_eq!(held.story().deadline_nanos, 0);
+        assert_eq!(held.counters().late, 0);
     }
 
     #[test]
     fn an_entry_that_asked_not_to_be_told_it_worked_is_not_told() {
         let mut graph = Arena::EMPTY;
         let mut batch = Batch::new();
-        let mut held = Held::new(&mut graph, &mut batch);
+        let mut held = Held::new(&mut graph, &mut batch, plan());
+        let mut clock = Ticking::new();
         let (mut entry, payload) = wire(
             Entry::CreateNode(CreateNode {
                 node: 1,
@@ -469,13 +1011,13 @@ mod tests {
             0,
         );
         entry.flags = flags::NO_CQE;
-        assert!(held.offer(&entry, &payload).is_none());
+        assert!(held.offer(&entry, &payload, clock.next()).is_none());
 
         // The same flag on an entry that is refused still completes, which is
         // the asymmetry `f_abi::flags::NO_CQE` states and the reason this test
         // has two halves.
         let (mut bad, payload) = wire(Entry::RemoveNode(RemoveNode { node: NO_NODE }), 0);
         bad.flags = flags::NO_CQE;
-        assert!(held.offer(&bad, &payload).is_some());
+        assert!(held.offer(&bad, &payload, clock.next()).is_some());
     }
 }

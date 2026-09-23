@@ -165,6 +165,13 @@ pub mod component;
 pub mod serve;
 
 pub mod dma;
+// The face half, `E3-B03b`: a typeface out of the store by the content address
+// this component's manifest declares, and the refusal of one it does not. It is
+// not behind the three image gates above because nothing in it calls the door
+// and nothing in it is a lang item — it is a library the component body will
+// use and a host test can drive, which is the shape `read` and `service` already
+// have.
+pub mod face;
 pub mod read;
 pub mod resident;
 pub mod service;

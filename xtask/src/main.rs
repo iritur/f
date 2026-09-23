@@ -523,6 +523,16 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
     // with the direct map underneath every address in it — and `copies_per_read
     // = 0` would be a number about a component that is not one.
     ("kernel/", "ReadPath::", "user/objects/"),
+    // The fifth, and the fourth whose needle is `Driver::`. The frame links
+    // `f-virtio-input` from `E3-B04d` for the same three shared vocabularies the
+    // three rows above name, and `kernel/src/input.rs` calls none of its code: what
+    // it reads is `routing`'s offsets and what it writes is a page that crate
+    // describes. The third field is what keeps this from being satisfied by a name
+    // nothing defines, and it matters more on this driver than on the others -
+    // `user/virtio-input/src/driver.rs` holds the accumulator every coordinate on
+    // this path comes out of, so a frame that ran it would be a frame deciding where
+    // the pointer is.
+    ("kernel/", "Driver::", "user/virtio-input/"),
 ];
 
 /// The reversal conditions that have fallen due and are **not paid**, declared
@@ -801,11 +811,14 @@ fn main() -> ExitCode {
         "blk" => blk(args.get(1).map(String::as_str)),
         "net" => net(args.get(1).map(String::as_str)),
         "gpu" => gpu(args.get(1).map(String::as_str)),
+        "input" => input(args.get(1).map(String::as_str)),
         "screen" => screen(args.get(1).map(String::as_str)),
         "deadline" => deadline(args.get(1).map(String::as_str)),
         "runtime" => runtime(args.get(1).map(String::as_str)),
         "objects" => objects(args.get(1).map(String::as_str)),
+        "face" => face(args.get(1).map(String::as_str)),
         "compositor" => compositor(args.get(1).map(String::as_str)),
+        "semantic" => semantic(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
         "component" => components().map(|_| ()),
         // E2-B04. One expression to one root hash, with every leaf printed
@@ -949,6 +962,8 @@ fn main() -> ExitCode {
         "lint-datapath" => lint_datapath(),
         "lint-registries" => lint_registries(),
         "lint-owed" => lint_owed(),
+        "lint-decomposition" => lint_decomposition(),
+        "lint-token-pair" => lint_token_pair(),
         "lint-arch-tests" => lint_arch_tests(),
         "lint-snapshot" => lint_snapshot(),
         "lint-reproduce" => lint_reproduce(),
@@ -1045,6 +1060,16 @@ cargo xtask <command>
                      argument. The only check here that observes something from
                      outside the machine, because a scanout cannot be read back
                      from inside one
+  input [half]       Boot the input path: a fourth driver component brings a real
+                     pointing device up, this harness moves the pointer from
+                     outside the machine while the driver is serving, and the
+                     frame hands every event it drains to a compositor as a
+                     scene transform - deliver; the identical boot with the
+                     hand-on removed, where the same events are produced and
+                     decoded and the graph must not move - withheld. Both with
+                     no argument. The only check here that acts *into* the
+                     machine while it runs, because an input event exists only
+                     while a device is running
   compositor [half]  Boot the compositor: a component that holds the machine's
                      scene graph at ring 3 and takes a client's deltas across one
                      ring. serve commits two frames and requires the component's
@@ -1211,6 +1236,15 @@ cargo xtask <command>
   lint-owed          The reversal conditions RFC 0008, RFC 0014 and RFC 0015
                      name and this tree has not paid, declared as a set — red
                      the day one of them is paid and the documents go stale
+  lint-decomposition  No `XL` task in TODO.md is without a decomposition, in an
+                     epoch whose `E<n>-00` is ticked. Five ids extending its own
+                     id is what a decomposition is; an epoch still waiting to be
+                     decomposed is held out, because that wait is the task
+  lint-token-pair    No type outside interface/src/token.rs holds an `Rgb`
+                     without the `Token` pair it was checked against, and
+                     nothing outside it computes readability. RFC 0079's last
+                     reversal condition, and the one it says to watch first: it
+                     does not look like a reversal, it looks like a cache
   lint-snapshot      claims/snapshot.json holds what the registry holds
   lint-arch-tests    No test is compiled on one architecture and not the other
                      without a reason and a reversal recorded beside it
@@ -1626,8 +1660,17 @@ fn image_dir(name: &str) -> PathBuf {
 /// manifest, every existing boot depends on it being first, and RFC 0030 says
 /// why that position is the contract. Everything here follows it, each as one
 /// module holding a record and an image.
-const COMPONENTS: &[&str] =
-    &["store", "supervisor", "virtio-blk", "virtio-net", "virtio-gpu", "objects", "compositor"];
+const COMPONENTS: &[&str] = &[
+    "store",
+    "supervisor",
+    "virtio-blk",
+    "virtio-net",
+    "virtio-gpu",
+    "virtio-input",
+    "objects",
+    "compositor",
+    "panel",
+];
 
 /// Every component the *source tree* declares, by the name in its manifest.
 ///
@@ -1667,6 +1710,36 @@ fn declared_components() -> Result<Vec<String>, String> {
             )
         })?;
         names.push(checked.name);
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// The components this tree declares that hold the server end of a ring.
+///
+/// **The denominator `cargo xtask chaos`'s coverage check compares against.**
+/// That check exists because two reads of one directory cannot disagree, and it
+/// reads the manifests for exactly that reason. `sim::chaos::sweep` and
+/// `sim::swap::sweep` skip a component that serves nobody — their loops carry
+/// the argument — so the number they produce is this one and not
+/// [`declared_components`]'s. Both are still read here, out of the schema,
+/// which is what keeps the comparison between two sources rather than inside
+/// one.
+fn declared_servers() -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for path in manifest::files(&root(), &target_dir())? {
+        let rel = relative(&path);
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+        let checked = manifest::check(&rel, &text).map_err(|findings| {
+            format!(
+                "{rel} does not fit the schema, so the set of components this tree declares \
+                 cannot be read:\n{}",
+                findings.join("\n")
+            )
+        })?;
+        if checked.serves {
+            names.push(checked.name);
+        }
     }
     names.sort();
     Ok(names)
@@ -1871,6 +1944,14 @@ const IMAGE_MAX: &[(&str, u64)] = &[
     // would be a compositor whose *code* had grown, which is a conversation
     // rather than a constant to raise.
     ("compositor", 16 * 4096),
+    // `panel`, and the row is here for the same reason: it is a spawn-shape
+    // component. The margin is enormous and is expected to stay that way — this
+    // component holds nothing, and RFC 0100's whole finding was that what fills
+    // a component's image is the constants it materialises. An application that
+    // held a copy of the tree it declared would be the first thing to move this
+    // number, which is exactly the property `user/panel/src/lib.rs` says the
+    // crate must not have.
+    ("panel", 16 * 4096),
 ];
 
 /// What a component whose shape [`IMAGE_MAX`] does not name may be.
@@ -4214,18 +4295,39 @@ fn swap_gate() -> Result<(), String> {
         .and_then(|rest| rest.trim().parse::<usize>().ok())
         .ok_or("the swap report did not say how many components it ran")?;
     let declared = declared_components()?;
-    if ran != declared.len() {
+    // As in `chaos`, and for the same reason: a replacement is observed by the
+    // client on the other side of the ring, so a component holding no server
+    // ring is skipped by `sim::swap::sweep` and is counted out here — out of
+    // the manifests, not out of the sweep's own report.
+    let serving = declared_servers()?;
+    let idle: Vec<&str> = declared
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !serving.iter().any(|had| had == name))
+        .collect();
+    if ran != serving.len() {
         return Err(format!(
             "the sweep replaced {ran} component(s) and this tree declares {} in its\n\
-             manifests. A component the sweep did not reach is a component nobody has\n\
-             replaced, and a green result over a smaller set is the failure this check\n\
-             exists to refuse. `cargo xtask lint-components` says which list is short.",
-            declared.len()
+             manifests, {} of which serve somebody. A component the sweep did not reach\n\
+             is a component nobody has replaced, and a green result over a smaller set is\n\
+             the failure this check exists to refuse. A component declaring no server ring\n\
+             is skipped on purpose; `cargo xtask lint-components` says which list is short.",
+            declared.len(),
+            serving.len()
         ));
     }
     println!(
-        "\ncoverage      {ran} component(s) replaced, of {} this tree's manifests declare",
-        declared.len()
+        "\ncoverage      {ran} component(s) replaced, of {} this tree's manifests declare{}",
+        declared.len(),
+        if idle.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " — {} serve(s) nobody and is not in this sweep: {}",
+                idle.len(),
+                idle.join(", ")
+            )
+        }
     );
 
     println!("\ndeclared gap  what this replaces that a boot cannot, and why it is still true:");
@@ -4348,7 +4450,20 @@ fn chaos() -> Result<(), String> {
     .lines()
     .filter_map(|line| line.split_whitespace().next().map(str::to_string))
     .collect();
-    if ran != declared.len() || built.len() != declared.len() {
+    // The sweep asks what a *client* observes while its peer is replaced, so a
+    // component holding no server ring is skipped there and must be skipped
+    // here too — otherwise this check reads a correct sweep as a short one,
+    // which is what it did on the day `user/panel` landed. The subtraction is
+    // taken from the manifests rather than from the sweep's own report, because
+    // a denominator supplied by the thing being measured is the defect the
+    // paragraph above this one exists to prevent.
+    let serving = declared_servers()?;
+    let idle: Vec<&str> = declared
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !serving.iter().any(|had| had == name))
+        .collect();
+    if ran != serving.len() || built.len() != declared.len() {
         let missing: Vec<&str> = declared
             .iter()
             .map(String::as_str)
@@ -4356,13 +4471,16 @@ fn chaos() -> Result<(), String> {
             .collect();
         return Err(format!(
             "the sweep killed {ran} component(s), the build produced {}, and this tree\n\
-             declares {} in its manifests{}.\n\n\
+             declares {} in its manifests, {} of which serve somebody{}.\n\n\
              *Each driver component in turn* is the exit criterion's own words, so a\n\
              component the sweep did not reach is a component nobody has killed — and a\n\
              green result over a smaller set is the failure this check exists to refuse.\n\
-             `cargo xtask lint-components` says which list is short.",
+             A component declaring no server ring is skipped on purpose and is counted\n\
+             out of the manifests above; `cargo xtask lint-components` says which list\n\
+             is short.",
             built.len(),
             declared.len(),
+            serving.len(),
             if missing.is_empty() {
                 String::new()
             } else {
@@ -4371,8 +4489,17 @@ fn chaos() -> Result<(), String> {
         ));
     }
     println!(
-        "\ncoverage      {ran} component(s) killed, of {} this tree's manifests declare",
-        declared.len()
+        "\ncoverage      {ran} component(s) killed, of {} this tree's manifests declare{}",
+        declared.len(),
+        if idle.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " — {} serve(s) nobody and is not in this sweep: {}",
+                idle.len(),
+                idle.join(", ")
+            )
+        }
     );
 
     println!("\ndeclared gap  what this kills that a boot cannot, and why it is still true:");
@@ -6769,7 +6896,7 @@ const MUTATIONS: &[(&str, &str, &str, &str)] = &[
 /// This number and the two documents that publish it move together or not at
 /// all, and the failure below names those documents, because the person who
 /// sees it will not have read this.
-const CORE_COST_BYTES: u64 = 64_296;
+const CORE_COST_BYTES: u64 = 64_328;
 
 /// The output sections `kernel/linker.ld` pads to a page boundary **inside** the
 /// section, so `sh_size` is a whole number of pages rather than the size of what
@@ -7368,13 +7495,28 @@ mod core_cost_tests {
     /// section came to. Read off `readelf -S` on images built at each, and kept
     /// here because the numbers are the argument: without them the rule below
     /// is somebody's opinion about linker scripts.
+    ///
+    /// **Re-measured on 2026-09-23**, by building `f-kernel` at each of the five
+    /// ceilings with the command [`core_cost_builds`] uses and reading
+    /// `readelf -S -W` off each image. `E3-B01g` gave every core four doorbell
+    /// counters and a wakeup latch, which moved `.bss` by 32 bytes a core and
+    /// therefore moved the slope; the whole table moves with it, because a row
+    /// left at the old figure would make the fit succeed on numbers no kernel
+    /// ever had.
+    ///
+    /// The three that carry a slope are `.data` at 2 448, `.bss` at 4 536 and
+    /// `.stacks` at 57 344 bytes a core, and they sum to [`CORE_COST_BYTES`].
+    /// Every span in the table agrees — 2 to 8, 2 to 32, 8 to 64 and 2 to 64 —
+    /// which is what makes this a measurement of a line rather than two points
+    /// somebody drew one through. `.rodata` is flat at all five and is the
+    /// padded section the fit has to see and refuse to take a slope from.
     const MEASURED: &[(usize, u64, u64, u64, u64)] = &[
         // ceiling, .data, .bss, .stacks, .rodata
-        (2, 54_128, 9_016, 212_992, 155_648),
-        (8, 68_816, 36_040, 557_056, 155_648),
-        (16, 88_400, 72_072, 1_015_808, 155_648),
-        (32, 127_568, 144_136, 1_933_312, 155_648),
-        (64, 205_904, 288_264, 3_768_320, 159_744),
+        (2, 54_128, 9_080, 344_064, 204_800),
+        (8, 68_816, 36_296, 688_128, 204_800),
+        (16, 88_400, 72_584, 1_146_880, 204_800),
+        (32, 127_568, 145_160, 2_064_384, 204_800),
+        (64, 205_904, 290_312, 3_899_392, 204_800),
     ];
 
     fn sections(at: usize) -> Vec<(String, u64)> {
@@ -7395,18 +7537,38 @@ mod core_cost_tests {
         slope_from_sections((high - low) as u64, &growth).expect("a model that holds").slope
     }
 
-    /// The failure this whole reading replaced: 2 to 64 is the pair `verify`
-    /// takes, and the total grew by 3 990 448 bytes over 62 cores, which does
-    /// not divide. Per section it does — the four bytes were the remainder of
-    /// one page of `.rodata` padding, and never a cost.
+    /// 2 to 64 is the pair `verify` takes, and the total grew by 3 988 336
+    /// bytes over 62 cores.
+    ///
+    /// **This test used to demonstrate why the reading must be per section, and
+    /// on 2026-09-23 it stopped being able to.** The old measurement's total was
+    /// 3 990 448, which does *not* divide by 62: the four extra bytes were the
+    /// remainder of one page of `.rodata` padding, and never a cost. Today's
+    /// `.rodata` is flat at 204 800 across all five ceilings — it no longer
+    /// crosses a page boundary anywhere in the table — so the naive total
+    /// divides cleanly, **by coincidence and not by argument**.
+    ///
+    /// The per-section reading is still the method and the reason has not
+    /// changed; what changed is that this pair can no longer show it. The
+    /// showing moved to
+    /// [`the_padded_section_is_reported_and_carries_no_slope`], which supplies
+    /// the step from a fixture rather than hoping the kernel keeps providing
+    /// one — and that is the better home for it, because a demonstration that
+    /// depends on where a linker happens to pad is a demonstration with a
+    /// shelf life.
     #[test]
     fn the_pair_verify_takes_reads_the_published_cost() {
         assert_eq!(slope_between(2, 64), CORE_COST_BYTES);
 
         let total: u64 = sections(64).iter().map(|(_, size)| size).sum::<u64>()
             - sections(2).iter().map(|(_, size)| size).sum::<u64>();
-        assert_eq!(total, 3_990_448, "the growth the old reading divided");
-        assert_ne!(total % 62, 0, "and it is still not a whole number of bytes per core");
+        assert_eq!(total, 3_988_336, "the growth this kernel's sections come to");
+        assert_eq!(
+            total % 62,
+            0,
+            "today the naive total happens to divide; when it stops, this line is the \
+             warning that the coincidence has ended and not a regression"
+        );
     }
 
     /// Two points define a slope and do not establish a line. Every adjacent
@@ -7425,9 +7587,29 @@ mod core_cost_tests {
     /// `.rodata` is the section the padding is about, so the test that matters
     /// is that it is excused for the right reason rather than by being ignored:
     /// it is reported as quantised, and it contributes nothing to the slope.
+    ///
+    /// **The step is supplied here rather than read out of [`MEASURED`], and
+    /// that changed on 2026-09-23.** It used to come from the kernel: the old
+    /// table's `.rodata` gained one page between 32 and 64 and this test read
+    /// it. Today's `.rodata` is flat at all five ceilings, so the live kernel
+    /// exhibits no step at all and the mechanism would have gone untested while
+    /// looking fine. One page is added to the high reading here, which is
+    /// exactly what the linker did then and may do again at any ceiling.
+    ///
+    /// *What would reverse this:* a kernel whose `.rodata` steps again inside
+    /// the measured range. Then the fixture is redundant and the honest test is
+    /// the one that reads it, because a real step is better evidence than a
+    /// constructed one.
     #[test]
     fn the_padded_section_is_reported_and_carries_no_slope() {
-        let growth = section_growth(&sections(32), &sections(64)).expect("one kernel twice");
+        let low = sections(32);
+        let mut high = sections(64);
+        for entry in &mut high {
+            if entry.0 == ".rodata" {
+                entry.1 += 4_096;
+            }
+        }
+        let growth = section_growth(&low, &high).expect("one kernel twice");
         let read = slope_from_sections(32, &growth).expect("a model that holds");
         assert_eq!(read.quantised.len(), 1, "one section stepped: {:?}", read.quantised);
         assert!(read.quantised[0].contains(".rodata"), "{:?}", read.quantised);
@@ -11840,6 +12022,469 @@ fn gpu(kind: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// The device `cargo xtask input` adds, and the two options on it.
+///
+/// `virtio-mouse-pci` and not a keyboard or a tablet, and the choice is the one
+/// thing about this machine that is load-bearing. A *relative* pointing device
+/// reports `EV_REL` records, which `user/virtio-input/src/driver.rs` accumulates
+/// into a position — so what the driver submits carries a coordinate, and a
+/// coordinate is a number this harness can check against what it asked for. A
+/// tablet reports `EV_ABS`, which that driver counts as ignored and does not
+/// translate; a keyboard reports `EV_KEY`, which it does translate but which
+/// carries nothing anybody outside the machine can predict the accumulation of.
+///
+/// `disable-legacy=on` forces the modern register layout, without which the
+/// device cannot negotiate the feature bit that routes its transfers through the
+/// remapping unit, and `iommu_platform=on` is the device half of the same bit.
+/// The consequence of getting that wrong is the one the network driver's comment
+/// states, at its sharpest: a bus master that addresses physical memory writes
+/// into it whenever *the user acts*, at a moment nothing in the machine chose,
+/// for as long as a buffer stays posted.
+///
+/// `id=` names the function in the emulator's own log and in nothing else, and
+/// the thing it is deliberately **not** used for is worth a sentence.
+/// `input-send-event` takes an optional `device`, which a reader would expect to
+/// be this name — it is not. That field names a *console*, and passing a qdev id
+/// there aborts the emulator with `Property 'qemu-fixed-text-console.device' not
+/// found`, which is how this comment came to exist. Omitted, the event goes to
+/// every input handler of its kind, and this machine has exactly one: `MACHINE`
+/// adds no other input device and the boot list above adds this one.
+///
+/// *What would reverse this:* a second input device on this machine, at which
+/// point *every handler of its kind* stops being one device and the routing has
+/// to be made rather than inherited — which needs a console to send through, and
+/// is the same reversal `virtio::VIRTIO_INPUT_MODERN` states from inside.
+const INPUT_DEVICE: &[&str] =
+    &["-device", "virtio-mouse-pci,id=f-pointer,disable-legacy=on,iommu_platform=on"];
+
+/// The line the kernel prints when its driver is serving and the pointer may be
+/// moved.
+///
+/// The harness waits for this and **not** for the verdict, which is the opposite
+/// of the display check's arrangement and is the same fact seen from the other
+/// side: a picture survives the boot that drew it and an input event exists only
+/// while a device is running, so the display's marker comes after its verdict
+/// and this one comes in the middle of the run. `kernel/src/input.rs` says the
+/// same thing from inside.
+const INPUT_MARKER: &str = "input inject";
+
+/// The line carrying where the driver's accumulator ended up.
+const INPUT_POINTER: &str = "input pointer";
+
+/// The byte the harness writes back when it has finished injecting.
+///
+/// One byte on the serial port, which the kernel polls for. Any byte would do
+/// and the value is not read; what matters is that *something* arrived. It says
+/// only *I have sent them* — the kernel keeps draining for its own settle period
+/// afterwards, because the emulator delivering an event and this process having
+/// asked for it are two different moments.
+const INPUT_ACK: &[u8] = b"k\n";
+
+/// How long the harness waits after the marker before the first event.
+///
+/// A second and a half. The marker is printed when the component has been given
+/// a core, which is before it has reset the device, negotiated features and set
+/// a queue up — and the emulator drops an input event for a device whose guest
+/// has not yet said `DRIVER_OK`. So this is a settling period for the *device*
+/// rather than for the harness, and the cost of it being too long is a second
+/// and a half while the cost of it being too short is an event that never
+/// happened.
+///
+/// *What would reverse this:* the kernel printing its marker when the driver has
+/// told it the device is up. It cannot today — the component publishes its
+/// counters at the end of its run and says nothing in the middle — and a notice
+/// on the control ring saying *I am serving* is the repair. That is a change to
+/// a component's protocol and belongs to whoever needs the moment to be exact.
+/// Unit: milliseconds.
+const INPUT_SETTLE_MS: u64 = 1_500;
+
+/// How long it waits between two events. Unit: milliseconds.
+///
+/// A tenth of a second, and not a measurement of anything: it exists so that the
+/// emulator's own event queue is never the thing being tested. Each command is
+/// one report and the driver drains reports as they arrive, so events sent back
+/// to back would still be counted correctly — this keeps a failed count from
+/// having two candidate explanations.
+const INPUT_GAP_MS: u64 = 100;
+
+/// The scale every coordinate on the input wire carries.
+///
+/// The field's own name is the number: `f_abi::input::PointerMotion` spells it
+/// `x_x65536`, and `user/virtio-input/src/driver.rs` multiplies whole device
+/// pixels by it. Written here rather than imported because `xtask` is a host
+/// crate and importing a bare-metal one for a constant would put a licence
+/// boundary in the way of a number — the decision `SECTOR_BYTES` above records,
+/// with the same consequence: if the two ever disagree, this check goes red on
+/// the position it reads back rather than a reader noticing.
+/// Unit: fixed-point units per device pixel.
+const INPUT_SCALE: i64 = 65_536;
+
+/// The motions this harness injects, in whole device pixels.
+///
+/// Five, none of them zero on either axis, and both properties are the fixture.
+/// Every value is non-zero because the emulator sends a record per axis it is
+/// given a value for and this harness must not depend on whether it elides a
+/// zero. No two are equal and the two running sums are never equal to each
+/// other, so a driver that accumulated x into y, or that reported the last delta
+/// rather than the position, produces a different pair of numbers rather than
+/// the same one.
+///
+/// The sum is the whole of what this harness knows and the kernel does not: it
+/// prints where its driver's accumulator ended up and holds no copy of this
+/// list, and this process holds no copy of the accumulator. Unit: device pixels.
+const MOTIONS: &[(i32, i32)] = &[(3, 5), (-1, 2), (10, -4), (2, 7), (-6, -6)];
+
+/// The two halves, and the second is what makes the first mean anything.
+const INPUT_PROVOCATIONS: &[(&str, &str)] = &[
+    ("deliver", "every event the device produced reaches a compositor's graph"),
+    ("withheld", "the same events, decoded and not handed on, so the graph must not move"),
+];
+
+/// Send the emulator the pointer motions this check is made of.
+///
+/// Three kinds of message: the greeting the monitor sends unprompted, the
+/// handshake it requires before it will take a command, and one
+/// `input-send-event` per motion. Each of those carries both axes in one
+/// command, which is one report on the wire — the emulator synchronises at the
+/// end of the batch — so the driver sees one report per call and this harness
+/// knows how many reports it asked for.
+///
+/// # Errors
+///
+/// Anything [`monitor_ask`] refuses, or a monitor that never greeted.
+fn monitor_inject(stream: &std::net::TcpStream) -> Result<(), String> {
+    use std::io::BufRead;
+
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|e| format!("setting a bound on the monitor: {e}"))?;
+    let mut reader = std::io::BufReader::new(
+        stream.try_clone().map_err(|e| format!("cloning the monitor connection: {e}"))?,
+    );
+    let mut writer =
+        stream.try_clone().map_err(|e| format!("cloning the monitor connection: {e}"))?;
+
+    let mut greeting = String::new();
+    reader.read_line(&mut greeting).map_err(|e| format!("reading the monitor's greeting: {e}"))?;
+    if !greeting.contains("QMP") {
+        return Err(format!("the monitor did not greet this connection: {}", greeting.trim()));
+    }
+    monitor_ask(&mut reader, &mut writer, "{\"execute\":\"qmp_capabilities\"}")?;
+
+    for (dx, dy) in MOTIONS {
+        std::thread::sleep(Duration::from_millis(INPUT_GAP_MS));
+        let axes = format!(
+            "[{{\"type\":\"rel\",\"data\":{{\"axis\":\"x\",\"value\":{dx}}}}},{{\"type\":\"rel\",\"data\":{{\"axis\":\"y\",\"value\":{dy}}}}}]"
+        );
+        let request =
+            format!("{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":{axes}}}}}");
+        monitor_ask(&mut reader, &mut writer, &request)?;
+    }
+    Ok(())
+}
+
+/// Boot the input path and move the pointer while it runs.
+///
+/// # Why this is neither [`machine_devices`] nor [`watched_boot`]
+///
+/// Because it has to act *into* the machine rather than out of it. The display
+/// check reads the emulator's framebuffer when the kernel says the picture is
+/// there; this one sends the emulator events when the kernel says its driver is
+/// serving, and the kernel then reports what arrived. The plumbing is the same —
+/// a monitor socket bound before the emulator starts, a line-at-a-time reader
+/// thread, and a byte written back on the serial port — and the direction of the
+/// interesting message is reversed.
+///
+/// # Errors
+///
+/// A boot that could not be started, a monitor that never connected, or one that
+/// refused an event.
+fn injected_boot(append: &str) -> Result<Watched, String> {
+    use std::io::{BufRead, Write};
+
+    // Bound before the emulator is spawned and held for the whole run, so there
+    // is no window in which the port is free for something else to take.
+    // `watched_boot`'s comment is the argument and it is unchanged here.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("could not open a monitor socket: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("could not read the monitor socket's port: {e}"))?
+        .port();
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("could not poll the monitor socket: {e}"))?;
+    let monitor = format!("tcp:127.0.0.1:{port}");
+
+    let mut devices: Vec<&str> = INPUT_DEVICE.to_vec();
+    devices.push("-qmp");
+    devices.push(&monitor);
+
+    let mut qemu = emulator(Some(append), &[], BOOT_MEMORY, &devices, &[])?;
+    qemu.stdout(Stdio::piped());
+    qemu.stdin(Stdio::piped());
+    let mut child = qemu.spawn().map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
+    let mut stdin = child.stdin.take();
+
+    let (lines, arriving) = std::sync::mpsc::channel::<String>();
+    let reader = child.stdout.take().map(|out| {
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(out).lines() {
+                let Ok(line) = line else { break };
+                if lines.send(line).is_err() {
+                    break;
+                }
+            }
+        })
+    });
+
+    let mut log = String::new();
+    let mut injected = false;
+    let mut connection: Option<std::net::TcpStream> = None;
+    let mut trouble: Option<String> = None;
+
+    const TICK_MS: u64 = 20;
+    let mut ticks = BOOT_TIMEOUT.saturating_mul(1000 / TICK_MS);
+
+    let ending = loop {
+        if connection.is_none()
+            && let Ok((stream, _)) = listener.accept()
+        {
+            connection = Some(stream);
+        }
+
+        let mut marker = false;
+        while let Ok(line) = arriving.try_recv() {
+            let line = line.trim_end_matches('\r').to_string();
+            println!("{line}");
+            log.push_str(&line);
+            log.push('\n');
+            if line.contains(INPUT_MARKER) {
+                marker = true;
+            }
+        }
+
+        if marker && !injected && trouble.is_none() {
+            injected = true;
+            // The device's own settling period, not this harness's. See
+            // `INPUT_SETTLE_MS`.
+            std::thread::sleep(Duration::from_millis(INPUT_SETTLE_MS));
+            match connection.as_ref() {
+                Some(stream) => {
+                    if let Err(why) = monitor_inject(stream) {
+                        trouble = Some(why);
+                    }
+                }
+                None => {
+                    trouble = Some("the emulator's monitor never connected".to_string());
+                }
+            }
+            // The byte back, and it goes whether or not the injection worked: a
+            // machine left waiting for a harness that has given up ends on its
+            // own bound a minute later, which turns one failure into a slow one.
+            if let Some(pipe) = stdin.as_mut() {
+                let _ = pipe.write_all(INPUT_ACK);
+                let _ = pipe.flush();
+            }
+        }
+
+        match child.try_wait().map_err(|e| format!("waiting for qemu: {e}"))? {
+            Some(status) => break status.code().map_or(Ending::Signalled, Ending::Exited),
+            None if ticks == 0 => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Ending::TimedOut(BOOT_TIMEOUT);
+            }
+            None => {
+                ticks -= 1;
+                std::thread::sleep(Duration::from_millis(TICK_MS));
+            }
+        }
+    };
+
+    while let Ok(line) = arriving.recv() {
+        let line = line.trim_end_matches('\r').to_string();
+        println!("{line}");
+        log.push_str(&line);
+        log.push('\n');
+    }
+    if let Some(handle) = reader {
+        let _ = handle.join();
+    }
+    if let Some(why) = trouble {
+        return Err(why);
+    }
+    Ok(Watched { ending, log, shot: None })
+}
+
+/// Where the kernel said its driver's accumulator ended up, and after how many
+/// motion events.
+///
+/// Read by position in a whitespace split for [`gpu_claim`]'s reason: this is a
+/// boot log and not a data format, and a parser that searched for words would
+/// start agreeing with a sentence somebody rewrote.
+///
+/// # Errors
+///
+/// A log with no such line, or one whose numbers are not numbers.
+/// Unit: the first two are fixed-point units of 1/65536 device pixel; the third
+/// is events.
+fn input_pointer(log: &str) -> Result<(i64, i64, u64), String> {
+    let line = log
+        .lines()
+        .find(|line| line.contains(INPUT_POINTER))
+        .ok_or("the boot printed no pointer position")?;
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let at = |index: usize| -> Result<&str, String> {
+        fields.get(index).copied().ok_or_else(|| format!("short pointer line: {line}"))
+    };
+    let signed = |text: &str| -> Result<i64, String> {
+        text.parse::<i64>().map_err(|_| format!("`{text}` is not a coordinate in: {line}"))
+    };
+    // `input pointer x <x> y <y> in units of ... after <n> motion event(s)`.
+    // The leading spaces are not fields, so the first token is `input`.
+    let x = signed(at(3)?)?;
+    let y = signed(at(5)?)?;
+    let count = at(fields.len() - 3)?;
+    let motions =
+        count.parse::<u64>().map_err(|_| format!("`{count}` is not a count in: {line}"))?;
+    Ok((x, y, motions))
+}
+
+/// The exit criterion of `E3-B04d` and the run half of `E3-B04a`, as a command.
+///
+/// # What it asserts, and why one of the assertions is not the kernel's
+///
+/// Every clause about the driver, the readings it took, the entries that crossed
+/// and the deltas the compositor applied is the **kernel's** verdict, for the
+/// reason every datapath check in this file leaves it there: the kernel knows
+/// which half it asked for, what it drained and what came back out of a page a
+/// component published, and a harness that second-guessed it would be a second
+/// implementation of the check.
+///
+/// One clause is not, and it is the one this process is uniquely entitled to:
+/// **how far the pointer was asked to move**. `MOTIONS` is here and nowhere
+/// else; the driver's accumulator is in the machine and nowhere else; the kernel
+/// prints where the accumulator ended up and holds no copy of the list. So the
+/// comparison is between two numbers neither side derived from the other, which
+/// is the property `cargo xtask gpu` gets from a screen capture and this one
+/// gets from having been the thing that moved the mouse.
+///
+/// The control is `withheld`: the identical boot with the frame's hand-on
+/// removed. The events are produced, drained and decoded in that run too — the
+/// kernel's verdict requires it — and the compositor must still apply exactly
+/// the two deltas the boot's own setup sends. Without it, the delivering half's
+/// edit count would establish that a compositor applies deltas rather than that
+/// these came off a device.
+///
+/// # Errors
+///
+/// A boot that did not reach 33, one that never printed a verdict, or a pointer
+/// position that is not the one this harness asked for.
+fn input(kind: Option<&str>) -> Result<(), String> {
+    let chosen: Vec<&(&str, &str)> = match kind {
+        None => INPUT_PROVOCATIONS.iter().collect(),
+        Some(name) => {
+            let found = INPUT_PROVOCATIONS.iter().find(|(known, _)| *known == name);
+            let Some(found) = found else {
+                let list: Vec<String> = INPUT_PROVOCATIONS
+                    .iter()
+                    .map(|(name, what)| format!("  {name:<9} {what}"))
+                    .collect();
+                return Err(format!("unknown input half: {name}\n\n{}", list.join("\n")));
+            };
+            vec![found]
+        }
+    };
+
+    let asked_x: i64 = MOTIONS.iter().map(|(dx, _)| i64::from(*dx)).sum();
+    let asked_y: i64 = MOTIONS.iter().map(|(_, dy)| i64::from(*dy)).sum();
+
+    let all = chosen.len() > 1;
+    for (name, what) in chosen {
+        if all {
+            println!("\n--- input={name}: {what}");
+        }
+        let watched = injected_boot(&format!("input={name}"))?;
+
+        match watched.ending {
+            Ending::Exited(33) => {}
+            Ending::Exited(35) => {
+                return Err(format!(
+                    "the kernel refused to finish after `input={name}`. Either the device \
+                     produced nothing, or the driver did not time every report exactly once, \
+                     or an entry reached this frame with no reading on it, or the compositor \
+                     applied a different number of deltas than the frame handed it. The \
+                     serial log above says which."
+                ));
+            }
+            Ending::Exited(0) => {
+                return Err(format!(
+                    "the machine reset with no output during `input={name}`. A fault taken \
+                     while the remapping unit is enabled and this kernel's own tables are \
+                     under it is the frame having programmed a device wrong."
+                ));
+            }
+            other => return Err(format!("the boot {other}; expected exit 33")),
+        }
+
+        if !watched.log.contains(INPUT_MARKER) {
+            return Err(format!(
+                "`input={name}` never reached the point where its driver is serving, so \
+                 nothing was ever injected and what ran was a driver stood up and no events."
+            ));
+        }
+        if !watched.log.contains("input verdict") {
+            return Err(format!(
+                "`input={name}` finished without reaching a verdict.\n\n\
+                 The kernel prints one for every run it makes, so this means the stage did \
+                 not run: no remapping unit was found, or the input device this boot adds \
+                 was not there to drive."
+            ));
+        }
+
+        let (x, y, motions) = input_pointer(&watched.log)?;
+        println!(
+            "\ninput={name}: this harness moved the pointer by ({asked_x}, {asked_y}) device \
+             pixels in {} event(s); the driver's accumulator ended at ({x}, {y}) in units of \
+             1/{INPUT_SCALE} of one",
+            MOTIONS.len(),
+        );
+
+        if motions as usize != MOTIONS.len() {
+            return Err(format!(
+                "`input={name}` reported {motions} motion event(s) and this harness sent {}. \
+                 A count that is short is an event the emulator dropped or the driver never \
+                 drained; one that is long is a device reporting motion nobody caused.",
+                MOTIONS.len(),
+            ));
+        }
+        if x != asked_x * INPUT_SCALE || y != asked_y * INPUT_SCALE {
+            return Err(format!(
+                "`input={name}` ended with the pointer at ({x}, {y}) and this harness asked \
+                 for ({}, {}). The two numbers are computed on opposite sides of the \
+                 emulator and neither holds the other's copy, so a disagreement is the \
+                 driver's accumulation, the axis mapping, or the fixed-point scale — and \
+                 which of the three it is shows in how they differ.",
+                asked_x * INPUT_SCALE,
+                asked_y * INPUT_SCALE,
+            ));
+        }
+    }
+
+    if all {
+        println!(
+            "\nboth halves held: a pointer moved outside the machine, one driver at ring 3 \
+             timed each report exactly once and submitted what it saw unasked, this frame \
+             drained and decoded every entry, and a compositor at ring 3 applied one \
+             transform per event and said so in the state tree it publishes; the identical \
+             boot with the hand-on removed produced and decoded the same events and left \
+             the graph holding nothing but its own two setup nodes"
+        );
+    }
+    Ok(())
+}
+
 /// What `E1-B06` still cannot show, declared as a set rather than left in a
 /// paragraph.
 ///
@@ -12170,6 +12815,103 @@ const OBJECTS_HALVES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The halves of `cargo xtask face`, and what each is the authority for.
+///
+/// Two, and neither means anything alone — the shape `cargo xtask objects` and
+/// `cargo xtask semantic` both take, for the reason those files argue at
+/// length. `load` on its own is a boot that read the one face there was, and a
+/// `declares_face` that answered `true` unconditionally would pass it.
+/// `undeclared` on its own is a boot that read nothing, which is what a boot
+/// with a broken store also does.
+///
+/// The second column is what the kernel is told, and it is deliberately the
+/// `objects=` parameter rather than a `face=` one: this is the objects
+/// datapath's component, its store and its ring, with one word on the board
+/// different. A parameter of its own would suggest a second boot.
+const FACE_HALVES: &[(&str, &str, &str)] = &[
+    (
+        "load",
+        "objects=face",
+        "the component stocks the face `user/objects/manifest.toml` declares, the frame
+         computes its address itself, checks it against the record the loader placed,
+         reads it back and parses it",
+    ),
+    (
+        "undeclared",
+        "objects=undeclared",
+        "the same face with one advance one design unit larger — real, stored and
+         readable, and declared by nothing: no entry may cross",
+    ),
+];
+
+/// Boot `E3-B03b`: a face loaded out of the blob store by content address, and
+/// one the manifest did not declare refused before an entry crosses.
+///
+/// The verdict is the kernel's rather than this harness's, exactly as
+/// `objects`' is. What this side checks is that the boot *ran*: an exit code
+/// says the frame agreed with itself, and a green boot that printed no verdict
+/// line is a half that was skipped rather than one that held.
+fn face(kind: Option<&str>) -> Result<(), String> {
+    let chosen: Vec<&(&str, &str, &str)> = match kind {
+        None => FACE_HALVES.iter().collect(),
+        Some(name) => {
+            let Some(found) = FACE_HALVES.iter().find(|(known, _, _)| *known == name) else {
+                let list: Vec<String> =
+                    FACE_HALVES.iter().map(|(n, _, w)| format!("  {n:<10} {w}")).collect();
+                return Err(format!(
+                    "unknown face half: {name}
+
+{}",
+                    list.join(
+                        "
+"
+                    )
+                ));
+            };
+            vec![found]
+        }
+    };
+
+    let all = chosen.len() > 1;
+    for (name, parameter, what) in chosen {
+        if all {
+            println!(
+                "
+--- face={name}: {what}"
+            );
+        }
+        let (ending, log) =
+            machine_with(Some(parameter), &[], Capture::Printed, BOOT_TIMEOUT, BOOT_MEMORY)?;
+        match ending {
+            Ending::Exited(33) => {}
+            Ending::Exited(35) => {
+                return Err(format!(
+                    "the kernel refused to finish after `{parameter}`. On `load` that is a face                      that did not come back, did not parse, or is not the address the manifest                      declares; on `undeclared` it is an entry that crossed for a face nobody                      declared, which is the refusal this task exists for. The serial log above                      says which, and the verdict that refused is in `kernel/src/objects.rs`."
+                ));
+            }
+            Ending::TimedOut(_) => {
+                return Err(format!(
+                    "`{parameter}` never finished. A component that holds a core and does not                      give it back is the one failure a served datapath has that a spawn does not."
+                ));
+            }
+            other => return Err(format!("the boot {other}; expected exit 33")),
+        }
+        if !log.contains("face_declared_by_the_manifest") {
+            return Err(format!(
+                "`{parameter}` exited green and printed no face rows, so the half did not run.                  The likeliest cause is a boot with no `objects` component file."
+            ));
+        }
+    }
+
+    println!(
+        "
+face: ok — a face was loaded out of the blob store by the content address
+      `user/objects/manifest.toml` declares, and the same face with one advance
+      changed was refused by the frame before an entry crossed."
+    );
+    Ok(())
+}
+
 /// Boot the objects datapath: a component serving a ring from ring 3, and the
 /// frame as its client.
 fn objects(kind: Option<&str>) -> Result<(), String> {
@@ -12244,15 +12986,17 @@ objects: ok — a component served `objects::op::READ` from ring 3 across a mapp
     Ok(())
 }
 
-/// The two halves of `cargo xtask compositor`, and why there are two.
+/// The halves of `cargo xtask compositor`, and why there is more than one.
 ///
-/// One stands the component up and one does not, which is unusual for a pair in
-/// this file and is the point: the serving half is a boot with a core, a ring
-/// and a client, and the refusal half is a *record* put past the admission a
-/// spawn performs. They are two halves of one exit — `E3-B01f` asks for a
-/// compositor that runs and for a build declaring no state tree to be refused at
-/// spawn — and neither is the other's control. What each one controls for is
-/// stated in its own row.
+/// Two of them stand the component up and two do not, which is unusual in this
+/// file and is the point: the serving halves are boots with a core, a ring and a
+/// client, and the refusing halves are a *record* and a *machine* put past the
+/// two admissions that stand in front of a compositor. They serve two exits —
+/// `E3-B01f` asks for a compositor that runs and for a build declaring no state
+/// tree to be refused at spawn, and `E3-B02b` asks for a machine that satisfies
+/// no rung to be refused a compositor rather than handed the floor — and no one
+/// of them is another's control. What each one controls for is stated in its own
+/// row.
 const COMPOSITOR_HALVES: &[(&str, &str)] = &[
     (
         "serve",
@@ -12268,6 +13012,18 @@ const COMPOSITOR_HALVES: &[(&str, &str)] = &[
         "mute",
         "the same component's record, as declared and with its state declaration emptied:
          the first must be admitted and the second refused ADMISSION/NO_STATE_TREE",
+    ),
+    (
+        "floorless",
+        "a machine below the bottom of RFC 0080's ladder — a CPU and no way at all to put an
+         image on a screen: it must be refused a compositor ADMISSION/NO_RUNG before a page
+         is spent, while this boot's own machine is admitted through the same function",
+    ),
+    (
+        "wake",
+        "the component stops its own core between frames and a client on another core rings
+         it awake: cross-core delivery, observed for the first time, and one batch of four
+         entries charged one operation and at most one doorbell",
     ),
 ];
 
@@ -12320,7 +13076,7 @@ fn compositor(kind: Option<&str>) -> Result<(), String> {
             Ending::Exited(33) => {}
             Ending::Exited(35) => {
                 return Err(format!(
-                    "the kernel refused to finish after `compositor={name}`. Either the                      component did not end on the frame's stop notice, or what it published                      is not what the client's script asked for, or a record declaring no state                      tree was admitted — the serial log above says which, and the verdict that                      refused is in `kernel/src/compositor.rs`."
+                    "the kernel refused to finish after `compositor={name}`. Either the                      component did not end on the frame's stop notice, or what it published                      is not what the client's script asked for, or a record declaring no state                      tree was admitted, or a machine satisfying no rung was handed the floor — the serial log above says which, and the verdict that                      refused is in `kernel/src/compositor.rs`."
                 ));
             }
             Ending::TimedOut(_) => {
@@ -12341,15 +13097,132 @@ fn compositor(kind: Option<&str>) -> Result<(), String> {
     if all {
         println!(
             "
-compositor: ok — all three halves held. A component held the machine's scene graph at
+compositor: ok — all five halves held. A component held the machine's scene graph at
              ring 3, took two frames of deltas across one ring, applied each whole or not
              at all, and published what it holds into the state tree its own manifest
-             declares — which the frame read back rather than being told. The identical
-             component over a heap two pages long refused before it served anybody and
-             left that tree readable and empty, so the numbers in the first half are this
-             run's rather than a schema's. And the same record with its state declaration
-             emptied was refused ADMISSION/NO_STATE_TREE while the record as declared was
-             admitted."
+             declares — which the frame read back rather than being told. It started on
+             the rung RFC 0080's table gives the backend the frame described, and held it
+             through a frame that missed its deadline and through the backend gaining a
+             better capability half way through the run. The identical component over a
+             heap two pages long refused before it served anybody and left that tree
+             readable and empty, so the numbers in the first half are this run's rather
+             than a schema's. And the same record with its state declaration emptied was
+             refused ADMISSION/NO_STATE_TREE while the record as declared was admitted,
+             and a machine below the bottom of the ladder was refused a compositor
+             ADMISSION/NO_RUNG before a page was spent while this machine was admitted.
+             And the fifth is `E3-B01g`: the same component, told that this frame rings,
+             armed the ring's wakeup flag and stopped its own core between frames, while
+             the client on the boot processor waited for it to stop and then rang — which
+             is the first time in this tree that a doorbell has been delivered from one
+             core to another and the delivery observed. The last frame went as one batch
+             of four entries, charged one operation and one doorbell; a client accounting
+             per entry would have said four of each and the kernel's verdict would have
+             refused it."
+        );
+    }
+    Ok(())
+}
+
+/// `E3-B06c`'s two halves, and neither is the other's control in the ordinary
+/// way — the *exit* needs both of its own halves inside one run, which is why
+/// they are not two rows here.
+///
+/// `declare` is the task: a component declares an interface across a ring and
+/// ends, and the frame then reads the tree back **by its address** and offers
+/// one more frame **by the handle the component held**. A tree that survives its
+/// writer is what a log does and a handle that dies with its process is what
+/// every handle does, so the boot fails unless both are true of one structure.
+///
+/// `deaf` is what stops the refusal from being a refusal of everything: the same
+/// image and the same script, with a zero where the handle goes, which must stop
+/// the component before it declares anything and leave the tree empty.
+const SEMANTIC_HALVES: &[(&str, &str)] = &[
+    (
+        "declare",
+        "an application declares four nodes and dies: the tree is still addressable by the
+         identifiers its author chose, and the handle it held no longer reaches it",
+    ),
+    (
+        "deaf",
+        "the identical component holding no handle: it must refuse before it declares
+         anything, and the tree must be empty",
+    ),
+];
+
+/// Run the halves of `cargo xtask semantic`.
+///
+/// # Errors
+///
+/// A half that did not hold, or a boot that did not finish.
+fn semantic(kind: Option<&str>) -> Result<(), String> {
+    let chosen: Vec<&(&str, &str)> = match kind {
+        None => SEMANTIC_HALVES.iter().collect(),
+        Some(name) => {
+            let Some(found) = SEMANTIC_HALVES.iter().find(|(known, _)| *known == name) else {
+                let list: Vec<String> =
+                    SEMANTIC_HALVES.iter().map(|(n, w)| format!("  {n:<8} {w}")).collect();
+                return Err(format!(
+                    "unknown semantic half: {name}
+
+{}",
+                    list.join(
+                        "
+"
+                    )
+                ));
+            };
+            vec![found]
+        }
+    };
+
+    let all = chosen.len() > 1;
+    for (name, what) in chosen {
+        if all {
+            println!(
+                "
+--- semantic={name}: {what}"
+            );
+        }
+        let (ending, log) = machine_with(
+            Some(&format!("semantic={name}")),
+            &[],
+            Capture::Printed,
+            BOOT_TIMEOUT,
+            BOOT_MEMORY,
+        )?;
+        match ending {
+            Ending::Exited(33) => {}
+            Ending::Exited(35) => {
+                return Err(format!(
+                    "the kernel refused to finish after `semantic={name}`. Either the                      application did not say what its script says, or the tree the frame kept                      is not the tree that was declared, or the handle the dead component held                      still reaches it — the serial log above says which, and the verdict that                      refused is in `kernel/src/semantic.rs`."
+                ));
+            }
+            Ending::TimedOut(_) => {
+                return Err(format!(
+                    "`semantic={name}` never finished. An application that submits and is never                      answered holds its core until its own idle bound, and the frame answers it                      from inside the join — so a boot that hangs here is a frame that stopped                      serving rather than a component that stopped asking."
+                ));
+            }
+            other => return Err(format!("the boot {other}; expected exit 33")),
+        }
+
+        if !log.contains("semantic      verdict:") {
+            return Err(format!(
+                "`semantic={name}` exited green and printed no verdict line, so the half did                  not run. The likeliest cause is a boot with no `panel` component file."
+            ));
+        }
+    }
+
+    if all {
+        println!(
+            "
+semantic: ok — both halves held. An application declared four nodes, a child
+          order that is not the order its entries arrived in, a state and an intent, across
+          one ring into a tree it was never shown the address of; it ended; the frame reaped
+          its address space and went on holding what it declared, addressable by the
+          identifiers its author chose. The handle that component held was then offered one
+          more frame and refused — twice, the second time against a slot a successor had
+          reopened, so what refused it was the generation and not the slot being shut. And
+          the identical component holding no handle refused before it declared anything."
         );
     }
     Ok(())
@@ -12630,6 +13503,14 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-scene", host: None, bare: None },
     Portability { krate: "f-text", host: None, bare: None },
     Portability { krate: "f-input", host: None, bare: None },
+    // `E3-B06c`'s semantic tree. Both answers are `None`, and the AArch64
+    // compile earns its place for `f-scene`'s reason plus one of its own: this
+    // crate is what the *frame* links in order to hold a tree a component
+    // declared, so a type in it that compiled on one architecture and not the
+    // other would be a tree the day an AArch64 frame exists cannot hold. It is
+    // also the only crate in the workspace that takes both `f-abi` and
+    // `f-interface`, and the compile is what says that join stays portable.
+    Portability { krate: "f-semantic", host: None, bare: None },
     Portability {
         krate: "f-kernel",
         host: Some(
@@ -12676,6 +13557,15 @@ const PORTABILITY: &[Portability] = &[
     Portability { krate: "f-virtio-blk", host: None, bare: None },
     Portability { krate: "f-virtio-net", host: None, bare: None },
     Portability { krate: "f-virtio-gpu", host: None, bare: None },
+    // `E3-B04d`'s input driver, on the same terms as the three above it: a
+    // virtio device driver has no host half to test and every reason to be
+    // compiled for both bare targets. It is the fourth crate to inherit the
+    // shape `RFC 0033` argued from one example and `RFC 0051` from two, and
+    // the first whose clock reading `lint-stamp` follows into a second crate:
+    // `f_input::stamp::at_interrupt` has a caller that is not a test because
+    // this crate calls it, which is what `RFC 0099` named as the thing that
+    // would reverse its narrowing of `E3-B04a`.
+    Portability { krate: "f-virtio-input", host: None, bare: None },
     // `E3-B01f`'s compositor. Both answers are `None` and the AArch64 compile is
     // load-bearing here in a way it is not for the three drivers above: this
     // crate links `f-scene`, whose whole point is a graph built out of integers
@@ -12683,6 +13573,12 @@ const PORTABILITY: &[Portability] = &[
     // not the other would be a scene graph that is not portable — which is the
     // property RFC 0004 is about and the one this crate would break first.
     Portability { krate: "f-compositor", host: None, bare: None },
+    // `E3-B06c`'s application. Both answers are `None`, and the AArch64 compile
+    // carries one thing nothing above it does: this is the crate that turns a
+    // `Role` into a wire ordinal, so a build where `Role::index` and the wire
+    // agreed on one architecture and not the other would be a vocabulary that is
+    // not portable — which is the one property RFC 0077 froze it for.
+    Portability { krate: "f-panel", host: None, bare: None },
     Portability {
         krate: "f-bench",
         host: None,
@@ -13870,6 +14766,13 @@ fn lint_all() -> Result<(), String> {
     // than one honestly listed as review.
     lint_units()?;
     lint_callbacks()?;
+    // The third rule of that shape, and the newest: a colour outside the one
+    // module that resolves one, carried with no record of the ground it was
+    // checked against. RFC 0079 ends by naming it the reversal to watch first
+    // and by saying why it is the hard one to see — it will not look like a
+    // reversal, it will look like a cache — and every test in that module goes
+    // on passing through it. E3-B06d.
+    lint_token_pair()?;
     lint_claim_owners()?;
     // Beside `lint_claim_owners` because it reads the same registry and asks the
     // next question about it: not whether each entry is well formed, but whether
@@ -13921,6 +14824,12 @@ fn lint_all() -> Result<(), String> {
     // nobody re-checks, and the failure that matters is not that it is never
     // closed but that it is closed and the documents go on describing it.
     lint_owed()?;
+    // And the same question asked of the file that schedules the work rather
+    // than of the documents: an `XL` line with no decomposition, in an epoch
+    // whose `E<n>-00` is ticked. Four tasks carried *this epoch contains no `XL`
+    // without a decomposition* as their exit and nothing could observe any of
+    // them, so all four were plans — which is R01 applied to `TODO.md`. E3-B08.
+    lint_decomposition()?;
     // One level below `PORTABILITY`, and the level that table cannot see: a crate
     // can be on both runners while a test inside it compiles on one. `test-host`
     // would stay green through that, because a smaller test count is not a failure
@@ -15684,6 +16593,45 @@ mod determinism_types {
 /// somebody who had read the rule and was trying to obey it.
 const THE_ONE_READING: (&str, &str) = ("input/src/stamp.rs", "at_interrupt");
 
+/// The one place in this tree that *calls* the reading above.
+///
+/// `(the file, the text that is the call)`. It exists because for three rounds
+/// the rule counted definitions and had nothing to count calls, and the file
+/// above was the only one it looked at — so *one time source in the whole input
+/// path* was true of a path that carried nothing. `at_interrupt` had no caller
+/// outside its own `#[cfg(test)]` module, no crate in the workspace depended on
+/// `f-input`, and every clause of this lint passed over a stamp nobody was
+/// taking. RFC 0099 narrowed the claim to what was measurable rather than
+/// pretending otherwise, and named `E3-B04d` — a driver — as the reversal.
+///
+/// So the arithmetic is now two counts rather than one, and they fail in
+/// opposite directions for opposite reasons:
+///
+/// - **Exactly one reading in [`THE_ONE_READING`]'s file.** Zero means the time
+///   source has gone; more than one means the path has two answers to *when did
+///   this happen*.
+/// - **Exactly one call in this file.** More than one is the same defect one
+///   frame down the stack — the spelling somebody reaching for a second stamp
+///   would actually write. **Zero is the vacuity itself**: a rule guarding a
+///   route with no traffic, which is the state RFC 0099 was written about and
+///   which used to be indistinguishable from a rule that was holding.
+///
+/// Why a named file rather than *anywhere on the path*: because *anywhere*
+/// cannot express *exactly one*. A count over the whole path would be satisfied
+/// by one call in the driver and would go on being satisfied when a second
+/// crate took one and the driver's was deleted — which is two different systems
+/// with the same number. Naming the file makes the diff that moves the stamp a
+/// diff that edits this line, in front of a reviewer who can read what it says.
+///
+/// *Reversal:* a second device driver on this path. Two input devices is the
+/// ordinary case the moment a machine has both a keyboard and a mouse, and each
+/// driver instance stamps its own reports. The repair is not a second row here —
+/// two rows would be two files each permitted one call, which is the same rule —
+/// it is that *one time source* stops meaning *one call site* and starts meaning
+/// *one `Env`*, which is a different check and wants its own RFC. `E5-B06` is
+/// the further reversal and `input/src/stamp.rs` states it.
+const THE_ONE_CALLER: (&str, &str) = ("user/virtio-input/src/clock.rs", "at_interrupt(");
+
 /// The stages an input event's timestamp travels through, and why each is on
 /// the path.
 ///
@@ -15721,10 +16669,24 @@ const THE_ONE_READING: (&str, &str) = ("input/src/stamp.rs", "at_interrupt");
 /// that cannot say which of its subjects are real is the vacuity this file
 /// keeps finding one layer down from where it was looking.
 ///
-/// The driver joins this list at `E3-B04d`, when there is one. Until then the
-/// interrupt-time caller is a description in `input/src/stamp.rs` rather than
-/// code, and this list says what it covers rather than what it intends to.
+/// The driver joined this list at `E3-B04d`, and its row is the first one
+/// below. Until it did, the interrupt-time caller was a description in
+/// `input/src/stamp.rs` rather than code: `at_interrupt` had no caller outside
+/// its own `#[cfg(test)]` module and no crate in the workspace depended on
+/// `f-input`, so this rule guarded a path with no traffic on it. That is what
+/// RFC 0099 narrowed the claim about and named `E3-B04d` as the reversal for.
+/// [`THE_ONE_CALLER`] is the other half of the repair: the *call* is now counted
+/// the way the definition always was, so deleting it is red rather than a quiet
+/// return to a vacuous green.
 const INPUT_PATH: &[(&str, &str)] = &[
+    (
+        "user/virtio-input/",
+        "the driver, which is where the stamp is taken. It is the head of the path \
+         and the only crate on it that reads a clock at all: `clock::Interrupt::stamp` \
+         is the one call to the one reading, and a second clock here would be a \
+         second answer to when the user acted rather than a second answer about a \
+         number already taken",
+    ),
     (
         "input/",
         "the stamp itself and everything derived from it. The prediction forward to \
@@ -16022,6 +16984,11 @@ fn lint_stamp() -> Result<(), String> {
             THE_ONE_READING.0,
             INPUT_PATH.len()
         );
+        // And who takes it, printed green for the same reason the reach lines
+        // below are: for three rounds this rule was green about a reading with
+        // no caller, and a log that does not say who calls it cannot be read as
+        // evidence that anybody does.
+        println!("  {}  calls it, once, and nothing else on the path does", THE_ONE_CALLER.0);
         // Which of those stages this rule is actually checking, printed green as
         // well as red for `portability_report`'s reason: the stages that cannot
         // hold a clock are the deliverable, because counting stages is what let
@@ -16069,6 +17036,11 @@ fn stamp_findings(files: &[(&str, &str)]) -> Vec<String> {
     let mut findings = Vec::new();
     let mut in_source = 0usize;
     let mut saw_source = false;
+    // The call, counted the way the definition is. [`THE_ONE_CALLER`] says why
+    // the two counts are separate and why zero here is the vacuity rather than a
+    // stricter rule holding.
+    let mut in_caller = 0usize;
+    let mut saw_caller = false;
     let mut per_stage = vec![0usize; INPUT_PATH.len()];
 
     for (rel, text) in files {
@@ -16078,6 +17050,8 @@ fn stamp_findings(files: &[(&str, &str)]) -> Vec<String> {
         per_stage[stage] += 1;
         let is_source = *rel == THE_ONE_READING.0;
         saw_source |= is_source;
+        let is_caller = *rel == THE_ONE_CALLER.0;
+        saw_caller |= is_caller;
 
         let mut carry = Carry::default();
         // Brace depth at the start of the line, and the `#[cfg(test)]` item
@@ -16139,6 +17113,14 @@ fn stamp_findings(files: &[(&str, &str)]) -> Vec<String> {
                     }
                     if is_source {
                         in_source += hits;
+                    } else if is_caller && *needle == THE_ONE_CALLER.1 {
+                        // The one call, counted rather than reported. Scoped to
+                        // the needle as well as the file: every *other* spelling
+                        // of a clock read is still a finding here, because the
+                        // driver is the one crate on this path that can reach a
+                        // clock and is therefore the one place a second reading
+                        // would compile.
+                        in_caller += hits;
                     } else {
                         findings.push(format!("  {rel}:{}  `{needle}` — {why}", n + 1));
                     }
@@ -16215,6 +17197,34 @@ fn stamp_findings(files: &[(&str, &str)]) -> Vec<String> {
              not the objection — leaving this constant naming the old path is, because \
              every clause below it then passes over a path with no time source at all",
             THE_ONE_READING.0
+        ));
+    }
+
+    if saw_caller {
+        // Exactly one again, and the zero is the one that matters. A reading
+        // with no caller is a time source nothing takes: every clause above
+        // holds, the lint prints its green sentence, and the path it describes
+        // carries nothing. That is the state RFC 0099 narrowed the claim about,
+        // and this is the clause that makes returning to it a red build rather
+        // than a green one with a different meaning.
+        if in_caller != 1 {
+            findings.push(format!(
+                "  {}  `{}` appears {in_caller} time(s) where the rule says exactly one. \
+                 Zero means the one time source has no caller, so every clause above \
+                 passes over a path that carries nothing — which is the vacuity RFC 0099 \
+                 was written about, not the rule holding. More than one means the driver \
+                 stamps twice, which is the same defect as a second reading with one more \
+                 frame on the stack",
+                THE_ONE_CALLER.0, THE_ONE_CALLER.1
+            ));
+        }
+    } else {
+        findings.push(format!(
+            "  {}  the file holding the one call to the one clock reading is not there. \
+             Renaming it is not the objection — leaving this constant naming the old path \
+             is, because the clause that says the stamp is actually taken then passes \
+             over a file nothing reads",
+            THE_ONE_CALLER.0
         ));
     }
 
@@ -16474,6 +17484,23 @@ mod tests {
 pub const fn from_wire_nanos(nanos: u64) -> StampNanos { StampNanos { nanos } }
 ";
 
+    /// `user/virtio-input/src/clock.rs` in the shape the rule passes: one call
+    /// to the one reading, with the spelling in prose above it that must not
+    /// count.
+    ///
+    /// It is a separate fixture from [`SOURCE_HELD`] because it is a separate
+    /// clause — the definition and the call fail in opposite directions and for
+    /// opposite reasons, and [`THE_ONE_CALLER`](super::THE_ONE_CALLER) is where
+    /// that is argued.
+    const CALLER_HELD: &str = "\
+//! The one call to the one reading. A second `env.now()` in this file would
+//! compile, which is why it is the file the rule counts.
+pub fn stamp(&mut self) -> StampNanos {
+    self.env.advance(self.tick_nanos);
+    f_input::stamp::at_interrupt(&self.env)
+}
+";
+
     /// A stage downstream of the driver, doing the thing the rule wants: it
     /// reads the stamp it was handed and takes no clock.
     const STAGE_HELD: &str = "\
@@ -16489,7 +17516,8 @@ pub fn latency_nanos(latched: StampNanos, event: StampNanos) -> u64 {
     /// vector, and a row inserted in the middle would silently repoint every
     /// fixture written before it at a different stage — which is the shape of
     /// change that leaves a suite green and its assertions about something
-    /// else.
+    /// else. The driver's row is appended after it, at `E3-B04d`, for the same
+    /// reason and not because it belongs last: on the real path it is the head.
     fn held() -> Vec<(&'static str, &'static str)> {
         vec![
             ("input/src/stamp.rs", SOURCE_HELD),
@@ -16497,6 +17525,7 @@ pub fn latency_nanos(latched: StampNanos, event: StampNanos) -> u64 {
             ("interface/src/ladder.rs", STAGE_HELD),
             ("scene/src/commit.rs", STAGE_HELD),
             ("abi/src/input.rs", STAGE_HELD),
+            ("user/virtio-input/src/clock.rs", CALLER_HELD),
         ]
     }
 
@@ -16537,6 +17566,86 @@ pub fn latency_nanos(latched: StampNanos, event: StampNanos) -> u64 {
         let findings = stamp_findings(&files);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(findings[0].contains("at_interrupt("), "{}", findings[0]);
+    }
+
+    #[test]
+    fn the_one_reading_losing_its_caller_is_a_finding_rather_than_a_green_build() {
+        // **The clause RFC 0099 was written about.** For three rounds this lint
+        // was green about a reading nothing called: `at_interrupt` had no caller
+        // outside its own tests and no crate depended on `f-input`, so every
+        // clause above passed over a path that carried nothing. It read exactly
+        // like the rule holding, which is the shape of silence this file exists
+        // to avoid.
+        //
+        // The substitution below is the one that makes it a *live* hole rather
+        // than a hypothetical: `from_wire_nanos` handed a field read is what
+        // `WIRE_MINT` permits, so the mint rule passes on it and the driver
+        // stamps from a number it computed itself. Only this clause catches it.
+        let mut files = held();
+        files[5] = (
+            "user/virtio-input/src/clock.rs",
+            "pub fn stamp(&mut self) -> StampNanos {\n\
+             \x20   self.env.advance(self.tick_nanos);\n\
+             \x20   StampNanos::from_wire_nanos(self.at_nanos)\n\
+             }\n",
+        );
+        let findings = stamp_findings(&files);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("0 time(s)"), "{}", findings[0]);
+        assert!(findings[0].contains("carries nothing"), "{}", findings[0]);
+
+        // And the file gone entirely, which is the same failure with a rename in
+        // front of it. Two findings, because a stage with no source at all is
+        // also a finding — and both of them are about the same disappearance,
+        // which is the point of having the second one.
+        let gone: Vec<_> = held()
+            .into_iter()
+            .filter(|(rel, _)| *rel != "user/virtio-input/src/clock.rs")
+            .collect();
+        let findings = stamp_findings(&gone);
+        assert!(
+            findings.iter().any(|f| f.contains("the one call to the one clock reading is not")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_driver_that_stamps_twice_is_a_finding_even_where_stamping_is_permitted() {
+        // The caller's own version of `two_readings_in_the_source`. This file is
+        // the one place on the path a call is legal, so the rule here is
+        // *exactly one* rather than *none* — and a driver that stamped the
+        // record and then the report would report two instants for one thing the
+        // user did.
+        let mut files = held();
+        files[5] = (
+            "user/virtio-input/src/clock.rs",
+            "pub fn stamp(&mut self) -> (StampNanos, StampNanos) {\n\
+             \x20   (f_input::stamp::at_interrupt(&self.env), \
+             f_input::stamp::at_interrupt(&self.env))\n\
+             }\n",
+        );
+        let findings = stamp_findings(&files);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("2 time(s)"), "{}", findings[0]);
+    }
+
+    #[test]
+    fn the_caller_file_is_not_a_licence_to_read_a_clock_any_other_way() {
+        // The needle is scoped as well as the file. The driver is the one crate
+        // on this path that can reach a clock, so it is the one place a second
+        // reading would compile — and permitting `at_interrupt(` there must not
+        // permit `env.now()` beside it.
+        let mut files = held();
+        files[5] = (
+            "user/virtio-input/src/clock.rs",
+            "pub fn stamp(&mut self) -> StampNanos {\n\
+             \x20   let _also = self.env.now();\n\
+             \x20   f_input::stamp::at_interrupt(&self.env)\n\
+             }\n",
+        );
+        let findings = stamp_findings(&files);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains(".now()"), "{}", findings[0]);
     }
 
     #[test]
@@ -19792,7 +20901,23 @@ fn ids_in(line: &str) -> Vec<String> {
 fn parse_todo() -> Result<Vec<Task>, String> {
     let path = root().join("TODO.md");
     let text = std::fs::read_to_string(&path).map_err(|e| format!("reading TODO.md: {e}"))?;
+    Ok(parse_todo_text(&text))
+}
 
+/// The same parse, over text rather than over the file.
+///
+/// # Why this is split
+///
+/// So that a fixture can be parsed. A rule about `TODO.md` that can only ever
+/// run against the real `TODO.md` is a rule whose red path nobody has seen, and
+/// a lint that has never failed is indistinguishable from one that cannot —
+/// which is the sentence `CONTRIBUTING.md` puts under its own table.
+///
+/// Reversal: if a second reader of this file ever appears, it calls this rather
+/// than growing its own copy. Two readers of one file that disagree is the
+/// defect this tree keeps recording, and the split exists to make the second
+/// reader cheap, not to make it plural.
+fn parse_todo_text(text: &str) -> Vec<Task> {
     let mut tasks: Vec<Task> = Vec::new();
     let mut epoch = String::from("(none)");
 
@@ -19843,7 +20968,829 @@ fn parse_todo() -> Result<Vec<Task>, String> {
         });
     }
 
-    Ok(tasks)
+    tasks
+}
+
+/// How many subtasks a decomposition names before it counts as one.
+///
+/// Five is `TODO.md`'s own number, not one chosen here: `E3-00` reads *each task
+/// becomes five to fifteen tasks with exits when the epoch opens*, and this
+/// constant is a reading of that sentence. Reversal: an `E<n>-00` written with a
+/// different floor makes this a second opinion about the file rather than a
+/// reading of it, and then the number belongs on the line and not here.
+const DECOMPOSITION_MINIMUM: usize = 5;
+
+/// The epochs whose decomposition task is ticked, addressed by id prefix.
+///
+/// `[x]` and not `[~]`. Since RFC 0093 `[~]` means dropped *or* owed, and
+/// neither is a decomposition that landed — a dropped `E<n>-00` is the statement
+/// that the epoch will not be decomposed, which is the one state where the rule
+/// below would be enforcing a plan nobody holds.
+fn decomposed_epochs(tasks: &[Task]) -> BTreeSet<&str> {
+    tasks.iter().filter(|t| t.status == 'x').filter_map(|t| t.id.strip_suffix("-00")).collect()
+}
+
+/// Every `XL` line in a decomposed epoch that does not name its own children.
+///
+/// The epoch comes from the task's **id** and not from the `##` heading it sits
+/// under, because the id is what every other line addresses it by, and a line
+/// filed under the wrong heading is a filing mistake rather than a licence.
+///
+/// *Extending its own id* is the whole test for what counts as a child:
+/// `E3-B01a` extends `E3-B01`, and `E3-D04` does not. Without that, an `XL`
+/// naming five external blockers would read as decomposed — which is the
+/// opposite of the property, since naming blockers is what a coarse line
+/// already does.
+fn undecomposed_xl(tasks: &[Task]) -> Vec<String> {
+    let decomposed = decomposed_epochs(tasks);
+    let mut findings = Vec::new();
+
+    for task in tasks.iter().filter(|t| t.size == "XL") {
+        let Some((epoch, _)) = task.id.split_once('-') else { continue };
+        if !decomposed.contains(epoch) {
+            continue;
+        }
+        let children: Vec<&str> = task
+            .needs
+            .iter()
+            .filter(|need| need.len() > task.id.len() && need.starts_with(&task.id))
+            .map(String::as_str)
+            .collect();
+        if children.len() < DECOMPOSITION_MINIMUM {
+            findings.push(format!(
+                "{} is `XL` and its `*needs:*` names {} id(s) extending {} — {} — where {} \
+                 is the floor. {}-00 is `[x]`, so this epoch's decomposition has landed and \
+                 this line is not in it",
+                task.id,
+                children.len(),
+                task.id,
+                if children.is_empty() { String::from("none") } else { children.join(", ") },
+                DECOMPOSITION_MINIMUM,
+                epoch,
+            ));
+        }
+    }
+    findings
+}
+
+/// An `XL` task with no decomposition, in an epoch that has been decomposed.
+///
+/// # The defect this was written against
+///
+/// Nothing in this tree observed it. `E3-00`, `E4-00`, `E5-00` and `E6-00` all
+/// carry the exit *this epoch contains no `XL` task without a decomposition*,
+/// `grep -n 'XL' xtask/src/main.rs` returned nothing, and a reader could have
+/// deleted all seventy-two of E3's subtask lines with `cargo xtask verify` still
+/// green. That is an exit no machine could close, on four tasks, which is
+/// `CONTRIBUTING.md`'s R01 — *name the mechanism, not the intention* — applied
+/// to the file that schedules the work.
+///
+/// # Why it is conditional on `E<n>-00`
+///
+/// Because without the condition it is red the day it lands, and red for the
+/// right reason: `E4-B01`, `E5-B01`, `E5-B02` and `E6-B01` are `XL` with no
+/// decomposition today, and decomposing them is precisely what `E4-00`, `E5-00`
+/// and `E6-00` are for. A check that fires on work nobody has started is a check
+/// somebody turns off. So the box is the switch: tick `E<n>-00`, and that
+/// epoch's `XL` lines are held to it from that moment.
+///
+/// # Why this is in `lint_all` and not in `todo`
+///
+/// `verify` runs `lint_all` and never calls `todo`, so a rule inside `todo` is a
+/// rule nothing can go red on. E3-B08, and `intent/0012-the-interface/spec.md`'s
+/// second review, finding 3.
+///
+/// # Errors
+///
+/// Any such task, or a `TODO.md` this cannot read as a task list at all.
+fn lint_decomposition() -> Result<(), String> {
+    println!("{}", decomposition_report(&parse_todo()?)?);
+    Ok(())
+}
+
+/// The reading itself, over a parsed list rather than over the file.
+///
+/// # Why there is a seam here
+///
+/// Because of the refusal directly below it. No `TODO.md` this repository would
+/// ever hold has zero task lines in it, so with the reading welded to the file
+/// there is no way for a test to reach that arm — and it was written that way
+/// first: replacing its condition with `false` left all ten tests in this module
+/// green, which is a guard nobody has ever seen work. The seam is what makes the
+/// arm reachable from a fixture, and the mutation red.
+fn decomposition_report(tasks: &[Task]) -> Result<String, String> {
+    // A reader that has stopped matching the file reports no findings, which is
+    // indistinguishable from a clean tree. `TODO.md` holding no task at all is
+    // the one state that cannot be true, so it is the one this refuses on — the
+    // same reading `lint-gate` makes of its own empty result.
+    if tasks.is_empty() {
+        return Err("no task lines were found in TODO.md, which cannot be right and means \
+                    this check's reader no longer matches the file it reads"
+            .into());
+    }
+
+    let decomposed = decomposed_epochs(tasks);
+    let examined = tasks
+        .iter()
+        .filter(|t| t.size == "XL")
+        .filter(|t| t.id.split_once('-').is_some_and(|(e, _)| decomposed.contains(e)))
+        .count();
+    let findings = undecomposed_xl(tasks);
+
+    if findings.is_empty() {
+        // The two counts are reported rather than the word `ok` alone, because
+        // the way this check rots is silent: a size spelling that stops parsing
+        // leaves it green over nothing, and a zero here is the only place that
+        // shows.
+        return Ok(format!(
+            "lint-decomposition: ok  ({examined} `XL` line(s) across {} decomposed epoch(s), \
+             each naming five or more of its own subtasks)",
+            decomposed.len()
+        ));
+    }
+
+    Err(format!(
+        "{} `XL` task(s) in a decomposed epoch name no decomposition:\n  {}\n\n\
+         `TODO.md` says an `XL` that is not decomposed by the time it starts is a planning\n\
+         failure, and `E<n>-00`'s exit says the epoch contains none. Until this check\n\
+         existed both sentences were plans: every subtask line in E3 could have been\n\
+         deleted with the whole local loop green.\n\n\
+         Either give the line a `*needs:*` naming five or more ids that extend its own id,\n\
+         or untick that epoch's `E<n>-00` — which is the honest statement that the\n\
+         decomposition has not landed, and is why E4, E5 and E6 are not held to this.\n\
+         E3-B08, and the R13 row in CONTRIBUTING.md.",
+        findings.len(),
+        findings.join("\n  ")
+    ))
+}
+
+#[cfg(test)]
+mod decomposition_tests {
+    use super::*;
+
+    /// A decomposed epoch with one `XL` that names exactly the floor.
+    const GREEN: &str = "\
+## E9 — a fixture epoch
+- [x] **E9-00** `S` Decompose this epoch before starting it.
+- [ ] **E9-B01** `XL` A coarse line.
+  *needs:* E9-B01a, E9-B01b, E9-B01c, E9-B01d, E9-B01e
+";
+
+    const NEEDS: &str = "  *needs:* E9-B01a, E9-B01b, E9-B01c, E9-B01d, E9-B01e\n";
+
+    fn findings(text: &str) -> Vec<String> {
+        undecomposed_xl(&parse_todo_text(text))
+    }
+
+    #[test]
+    fn a_decomposed_xl_in_a_decomposed_epoch_passes() {
+        assert!(findings(GREEN).is_empty(), "{:?}", findings(GREEN));
+    }
+
+    #[test]
+    fn dropping_the_needs_line_is_what_this_check_is_for() {
+        // The fixture that makes it fail, which is the half of the exit a green
+        // run cannot demonstrate.
+        let red = GREEN.replace(NEEDS, "");
+        let found = findings(&red);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("E9-B01"), "the finding must name the line: {}", found[0]);
+    }
+
+    #[test]
+    fn one_short_of_the_floor_is_short() {
+        // The boundary itself, pinned from below: four is not five. Without
+        // this, DECOMPOSITION_MINIMUM could be any number at or under four and
+        // every other test here would still pass.
+        let red = GREEN.replace(", E9-B01e\n", "\n");
+        assert_eq!(findings(&red).len(), 1, "{:?}", findings(&red));
+    }
+
+    #[test]
+    fn blockers_are_not_a_decomposition() {
+        // Five ids that do not extend the line's own id. A coarse `XL` already
+        // names external blockers, so counting those would make every such line
+        // read as decomposed — the check would pass on exactly the state it
+        // exists to refuse.
+        let red = GREEN.replace(
+            "E9-B01a, E9-B01b, E9-B01c, E9-B01d, E9-B01e",
+            "E9-D01, E9-D02, E9-D03, E9-D04, E9-D05",
+        );
+        assert_eq!(findings(&red).len(), 1, "{:?}", findings(&red));
+    }
+
+    #[test]
+    fn an_open_decomposition_task_holds_its_epoch_out() {
+        // The clause that keeps E4, E5 and E6 green on the day this lands.
+        let open = GREEN.replace("- [x] **E9-00**", "- [ ] **E9-00**").replace(NEEDS, "");
+        assert!(findings(&open).is_empty(), "{:?}", findings(&open));
+    }
+
+    #[test]
+    fn a_dropped_decomposition_task_holds_its_epoch_out_too() {
+        // `[~]` is dropped or owed since RFC 0093, and neither is landed.
+        let dropped = GREEN.replace("- [x] **E9-00**", "- [~] **E9-00**").replace(NEEDS, "");
+        assert!(findings(&dropped).is_empty(), "{:?}", findings(&dropped));
+    }
+
+    #[test]
+    fn the_tree_as_it_stands_is_green() {
+        lint_decomposition().expect("an XL task in a decomposed epoch names no decomposition");
+    }
+
+    #[test]
+    fn e3_b01_is_what_holds_the_real_file_green() {
+        // `plan.md`'s own landing test, driven against the real file rather than
+        // a fixture: with `E3-00` ticked, deleting `E3-B01`'s `*needs:*` line
+        // makes this go red naming that line. It is what shows the green run
+        // above is green because of what the file says and not because nothing
+        // was read.
+        let text = std::fs::read_to_string(root().join("TODO.md")).expect("reading TODO.md");
+        let kept: Vec<&str> =
+            text.lines().filter(|l| !l.trim_start().starts_with("*needs:* E3-B01a,")).collect();
+        assert_eq!(
+            kept.len() + 1,
+            text.lines().count(),
+            "exactly one `*needs:* E3-B01a,` line is expected to delete"
+        );
+        let found = undecomposed_xl(&parse_todo_text(&kept.join("\n")));
+        assert!(
+            found.iter().any(|f| f.starts_with("E3-B01 ")),
+            "deleting E3-B01's decomposition must be named: {found:?}"
+        );
+    }
+
+    #[test]
+    fn an_undecomposed_xl_added_to_e4_leaves_the_real_file_green() {
+        // The other half of the same landing test. E4's whole open task is to
+        // decompose it, so a coarse line there is the intended state rather than
+        // a finding.
+        let text = std::fs::read_to_string(root().join("TODO.md")).expect("reading TODO.md");
+        let added = text.replace(
+            "- [ ] **E4-B01**",
+            "- [ ] **E4-B99** `XL` A coarse line nobody has decomposed.\n- [ ] **E4-B01**",
+        );
+        assert_ne!(added, text, "E4-B01 was not found to insert beside");
+        assert!(
+            undecomposed_xl(&parse_todo_text(&added)).is_empty(),
+            "E4-00 is open, so E4's coarse lines are what that task is for"
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_tasks_in_it_is_refused_rather_than_passed() {
+        // The rot this check has: a reader that has stopped matching the file
+        // reports nothing, and nothing is what green looks like. This asserts
+        // the refusal and not just the empty parse, because the first version of
+        // it asserted the parse — and a mutation replacing the guard's condition
+        // with `false` was green on all ten tests in this module.
+        let empty = parse_todo_text("# not a task list\n");
+        assert!(empty.is_empty(), "the fixture must parse to nothing for this to mean anything");
+        let refusal = decomposition_report(&empty).expect_err("an empty task list is not green");
+        assert!(refusal.contains("no task lines were found"), "{refusal}");
+    }
+}
+
+/// The one module in which a colour may exist without the pair it was checked
+/// against.
+///
+/// A file and not a crate. `f-interface` holds a ladder, a screen-reader
+/// projection, an agent surface and the node vocabulary beside this file, and
+/// none of those is allowed to cache a colour either — RFC 0079's last reversal
+/// condition is about *any type outside this module*, and the module is one
+/// file.
+const THE_RESOLVER: &str = "interface/src/token.rs";
+
+/// The type a colour is spelled as.
+const CARRIED: &str = "Rgb";
+
+/// The half that has to be beside it.
+///
+/// `Token` and not `TokenName`, and the word boundary in [`cites`] is what keeps
+/// the two apart. A `TokenName` is a name a theme wrote down that this
+/// vocabulary may not have — `Paint::unknown` carries one — so it is the record
+/// of a refusal rather than the half of a pair that was checked. A type holding
+/// an `Rgb` beside a `TokenName` has remembered which name it could not resolve,
+/// which is not the same as remembering what the colour is defensible against.
+const PAIR: &str = "Token";
+
+/// The type inside [`THE_RESOLVER`] that holds a [`CARRIED`] with no [`PAIR`],
+/// and which the exemption is the whole reason is green.
+///
+/// It is *read* rather than assumed, because of how a text scan rots: it stops
+/// finding anything, every file in the tree comes out clean, and the rule is a
+/// check that cannot fail — which this repository has twice recorded the fate
+/// of. `Raised` is `{ colour: Rgb, contrast_x1000, steps, reached }`: no `Token`
+/// in it, in the one file where that is allowed. If [`type_bodies`] stops seeing
+/// it, it has stopped seeing types, and [`pairing_report`] refuses instead of
+/// printing `ok`.
+const RESOLVER_WITNESS: &str = "Raised";
+
+/// The projection E3-B06d's first clause is about.
+///
+/// Named because *contains no readability arithmetic at all* is a negative about
+/// a source, and a negative about a source is worth nothing unless something
+/// confirms the source was read. A prefix matching no file is this check going
+/// green about a component that has moved, which is the shape of every vacuous
+/// clause this file has had to be repaired for.
+const THE_PROJECTION: &str = "user/compositor/";
+
+/// The spellings in [`THE_RESOLVER`] that *compute* readability rather than
+/// report it, and what finding one somewhere else means.
+///
+/// Every entry exists only as a free item in that module, so a use of it
+/// anywhere else is arithmetic and not a lookup. `contrast_x1000(` is the one
+/// that needs care and carries its paren for it: `Resolved::contrast_x1000` is a
+/// method over the nine-entry table `resolve` filled, so `.contrast_x1000(` is
+/// exactly what a projection is supposed to call, and [`cites`] keeps the two
+/// apart by refusing a match preceded by a dot. However the free function is
+/// pathed, nothing in front of it is a dot.
+///
+/// What would reverse the `Floors` row, which is the debatable one: a second
+/// caller of `resolve_with` that is not a test. Today the floors are chosen in
+/// one place and RFC 0079 lists them under *not themeable at all*, so a
+/// component naming them is a component deciding readability policy. A future in
+/// which a display's own measured characteristics pick the floors makes that
+/// legitimate, and the row moves to wherever that decision is made.
+const READABILITY: &[(&str, &str)] = &[
+    ("luminance_x100000(", "relative luminance, computed"),
+    (
+        "contrast_x1000(",
+        "a contrast ratio computed from two colours — `Resolved::contrast_x1000`, reached \
+         through a dot, is the lookup a projection wants",
+    ),
+    ("contrast_of_luminance_x1000(", "a contrast ratio computed from two luminances"),
+    ("best_reachable_x1000(", "the ceiling on what a clamp can promise"),
+    ("raise_to_floor(", "an ink being clamped, which is `resolve`'s work and not a caller's"),
+    ("LINEAR_X100000", "the sRGB transfer table"),
+    ("LUMINANCE_X100000_MAX", "white's luminance, which nothing but arithmetic wants"),
+    ("CONTRAST_TEXT_X1000", "a contrast floor, which RFC 0079 puts outside what a theme sets"),
+    ("CONTRAST_NONTEXT_X1000", "a contrast floor, which RFC 0079 puts outside what a theme sets"),
+    ("REACHABLE_X1000", "the ceiling the whole clamp policy rests on"),
+    ("CLAMP_STEPS", "the clamp's own scan"),
+    ("Floors", "which floors a theme is held to, which is the resolver's decision"),
+];
+
+/// The code half of a line: everything before the first `//`.
+///
+/// Comments are dropped before anything below looks at a line, and that is a
+/// rule with a consequence worth stating rather than a convenience. A type whose
+/// doc comment says *the token this was checked against* and whose fields do not
+/// is exactly the type this check exists to find, so a scan that read comments
+/// would be talked out of its own finding by the comment apologising for it.
+/// `a_pair_named_only_in_a_comment_is_not_a_pair` pins it.
+fn code_only(line: &str) -> &str {
+    line.split("//").next().unwrap_or("")
+}
+
+/// Does `code` name `needle` as a thing rather than as part of another word?
+///
+/// The dot is the load-bearing half. `.contrast_x1000(` is a lookup into a table
+/// `resolve` already filled and is what RFC 0079 tells a projection to call; the
+/// same spelling with anything else in front of it is the free function, which
+/// computes. Refusing a match preceded by a dot is the whole of the difference,
+/// and `computing_a_contrast_is_refused_and_looking_one_up_is_not` is the
+/// fixture that holds it.
+///
+/// The trailing boundary is applied only when the needle ends in an identifier
+/// character, so that `Token` does not match `TokenName` while `contrast_x1000(`
+/// still matches `contrast_x1000(a, b)`.
+fn cites(code: &str, needle: &str) -> bool {
+    let bounded_after = needle.chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let mut from = 0;
+    while let Some(offset) = code[from..].find(needle) {
+        let at = from + offset;
+        let before = code[..at].chars().next_back();
+        let after = code[at + needle.len()..].chars().next();
+        let open = !matches!(before, Some(c) if c.is_alphanumeric() || c == '_' || c == '.');
+        let close = !bounded_after || !matches!(after, Some(c) if c.is_alphanumeric() || c == '_');
+        if open && close {
+            return true;
+        }
+        from = at + needle.len();
+    }
+    false
+}
+
+/// The name a `struct`, `enum` or `union` line declares, if it declares one.
+fn declared_type(code: &str) -> Option<&str> {
+    for keyword in ["struct ", "enum ", "union "] {
+        let mut from = 0;
+        while let Some(offset) = code[from..].find(keyword) {
+            let at = from + offset;
+            let before = code[..at].chars().next_back();
+            if !matches!(before, Some(c) if c.is_alphanumeric() || c == '_') {
+                let rest = code[at + keyword.len()..].trim_start();
+                let name = rest.split(|c: char| !(c.is_alphanumeric() || c == '_')).next()?;
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+            from = at + keyword.len();
+        }
+    }
+    None
+}
+
+/// Every type definition in `text`, as `(line number, name, the code of its
+/// body)`.
+///
+/// A brace count over comment-stripped lines rather than a parse. What it has to
+/// get right is *where a type ends*, because a body that runs on swallows the
+/// next type's fields and a body that stops early drops the field this check is
+/// looking for — and both of those are silent. [`RESOLVER_WITNESS`] is the
+/// guard: a scan that has stopped delimiting bodies stops finding `Raised`, and
+/// [`pairing_report`] refuses on that rather than reporting a clean tree.
+fn type_bodies(text: &str) -> Vec<(usize, String, String)> {
+    let lines: Vec<&str> = text.lines().map(code_only).collect();
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let Some(name) = declared_type(lines[index]).map(str::to_string) else {
+            index += 1;
+            continue;
+        };
+        let mut body = String::new();
+        let mut depth: i32 = 0;
+        let mut opened = false;
+        let mut end = index;
+        while end < lines.len() {
+            let line = lines[end];
+            body.push_str(line);
+            body.push('\n');
+            depth += i32::try_from(line.matches('{').count()).unwrap_or(i32::MAX);
+            depth -= i32::try_from(line.matches('}').count()).unwrap_or(i32::MAX);
+            opened |= line.contains('{');
+            end += 1;
+            if opened && depth <= 0 {
+                break;
+            }
+            // A unit or tuple struct: no brace to close, and the semicolon is
+            // where it ends. Without this arm the body runs on to the next `}`
+            // in the file and reads somebody else's fields.
+            if !opened && line.trim_end().ends_with(';') {
+                break;
+            }
+        }
+        out.push((index + 1, name, body));
+        index = end.max(index + 1);
+    }
+    out
+}
+
+/// Every type outside [`THE_RESOLVER`] holding a colour with no token beside it,
+/// and every use of that module's arithmetic outside it.
+///
+/// `files` is the tree as `(relative path, text)`. The two exemptions are
+/// decided here rather than by the caller so that a fixture can drive them:
+/// [`THE_RESOLVER`] itself, which is where the checking happens, and `xtask/`,
+/// which holds the fixtures this check searches for — the same reason
+/// [`is_tooling`] exists for [`lint_stamp`].
+fn pairing_findings(files: &[(&str, &str)]) -> Vec<String> {
+    let mut findings = Vec::new();
+    for (rel, text) in files {
+        if *rel == THE_RESOLVER || is_tooling(rel) {
+            continue;
+        }
+        for (line, name, body) in type_bodies(text) {
+            if cites(&body, CARRIED) && !cites(&body, PAIR) {
+                findings.push(format!(
+                    "  {rel}:{line}  `{name}` holds an `{CARRIED}` and no `{PAIR}` beside it"
+                ));
+            }
+        }
+        for (offset, line) in text.lines().enumerate() {
+            let code = code_only(line);
+            for (needle, why) in READABILITY {
+                if cites(code, needle) {
+                    findings.push(format!("  {rel}:{}  `{needle}` — {why}", offset + 1));
+                }
+            }
+        }
+    }
+    findings
+}
+
+/// The reading itself, over texts rather than over the filesystem.
+///
+/// Split out for the reason `decomposition_report` was: the three refusals below
+/// are unreachable from the real tree — it has a resolver, it has a compositor,
+/// and it has types in it — so welded to the filesystem they would be guards
+/// nobody could ever watch work. The seam is what makes them reachable from a
+/// fixture, and `a_scan_that_reads_no_types_is_refused_rather_than_passed` is
+/// what makes a mutation of one of them red.
+fn pairing_report(files: &[(&str, &str)]) -> Result<String, String> {
+    let Some((_, resolver)) = files.iter().find(|(rel, _)| *rel == THE_RESOLVER) else {
+        return Err(format!(
+            "{THE_RESOLVER} was not read, so the file this rule exempts is not where it was.\n\
+             Every other file in the tree is about to be told it may not hold an `{CARRIED}`,\n\
+             which is not a finding — it is this check having lost the module it is written\n\
+             around. Move the path, or say here where a token now becomes a value."
+        ));
+    };
+
+    let witness = type_bodies(resolver).into_iter().any(|(_, name, body)| {
+        name == RESOLVER_WITNESS && cites(&body, CARRIED) && !cites(&body, PAIR)
+    });
+    if !witness {
+        return Err(format!(
+            "`{RESOLVER_WITNESS}` in {THE_RESOLVER} is not being read as a type holding an\n\
+             `{CARRIED}` with no `{PAIR}`, which is what it is. So this check's scan has\n\
+             stopped delimiting type bodies, and a scan that finds nothing reports a clean\n\
+             tree — which is indistinguishable from the property holding. Repair the scan,\n\
+             or name a different witness and say why that one stopped being one."
+        ));
+    }
+
+    let seen = files.iter().filter(|(rel, _)| rel.starts_with(THE_PROJECTION)).count();
+    if seen == 0 {
+        return Err(format!(
+            "no file under {THE_PROJECTION} was read. E3-B06d's first clause is that the\n\
+             compositor contains no readability arithmetic at all, and that clause is a\n\
+             negative about a source: it is worth exactly as much as the evidence that the\n\
+             source was opened. Point this constant at wherever the projection went."
+        ));
+    }
+
+    let examined: usize = files
+        .iter()
+        .filter(|(rel, _)| *rel != THE_RESOLVER && !is_tooling(rel))
+        .map(|(_, text)| type_bodies(text).len())
+        .sum();
+
+    let findings = pairing_findings(files);
+    if findings.is_empty() {
+        // The counts rather than the word `ok` alone, for `lint_decomposition`'s
+        // reason: this rule rots by reading less, and a count is the only place
+        // that shows.
+        return Ok(format!(
+            "lint-token-pair: ok  ({examined} type(s) across {} file(s): none outside \
+             {THE_RESOLVER} holds an `{CARRIED}` without its `{PAIR}`)\n  \
+             {THE_RESOLVER}  is the exemption, and `{RESOLVER_WITNESS}` in it is what shows \
+             the scan still reads a type\n  \
+             {THE_PROJECTION}  {seen} file(s), and no readability arithmetic in any of them \
+             — E3-B06d's first clause, read from the source rather than promised",
+            files.len()
+        ));
+    }
+
+    Err(format!(
+        "{} place(s) outside {THE_RESOLVER} carry a colour without its pair, or do the\n\
+         arithmetic that module exists to have already done:\n{}\n\n\
+         RFC 0079 resolves an ink *once per ground*, because contrast is a property of a\n\
+         pair and a single resolved colour is defensible only against whichever ground it\n\
+         happened to be checked on. Its last reversal condition — the one it says to watch\n\
+         first — is a projection that stops asking `Resolved::on` and starts remembering a\n\
+         colour: *it will not look like a reversal, it will look like a cache*, and every\n\
+         test in the resolver goes on passing while the interface is unreadable on the\n\
+         grounds nobody checked.\n\n\
+         Hold a `Resolved` and ask it for the pair at the point of use. If a colour must be\n\
+         carried, carry the two `{PAIR}`s with it — `Paint` and `Boundary` are the two\n\
+         shapes in the resolver that already do, and both are `Copy`. There is deliberately\n\
+         no exemption list here: an exemption is the cache with a comment on it.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// No type outside the resolver holds a colour without the token pair it was
+/// checked against, and nothing outside it computes readability.
+///
+/// # The defect this was written against
+///
+/// It has not happened here yet, which is the point of writing it now. RFC 0079
+/// closes with the reversal it says to watch first, and it is the only one of
+/// its seven that describes a *silent* failure: a projection that caches an
+/// `Rgb`. Every test in `interface/src/token.rs` passes through it — the module
+/// is still correct, it is simply no longer being asked — and what goes wrong is
+/// an interface that is unreadable on the grounds nobody looked at. The signal
+/// that RFC names is textual, *any type outside this module that holds an `Rgb`
+/// without the `Token` pair it came from*, so the check is textual too.
+///
+/// # Why it also refuses the arithmetic
+///
+/// Because E3-B06d's first clause is *the compositor contains no readability
+/// arithmetic at all*, and that is a negative about a source file. A test can
+/// show that a compositor gets the right answer; nothing but a reading of the
+/// source can show that it did not work the answer out for itself. So the second
+/// half of this rule is [`READABILITY`]: the spellings that exist only as free
+/// items in the resolver, which is what computing looks like from outside.
+/// Between the two halves, a projection that neither holds a loose colour nor
+/// names the arithmetic has no route to a readability decision of its own.
+///
+/// # What it does not check
+///
+/// That anything *uses* a `Resolved`. This is a negative rule and a negative
+/// rule is green over an empty file. The positive half of E3-B06d's first clause
+/// — the compositor holding a `Resolved` and asking it for pairs — is a diff in
+/// `user/compositor/`, and this check is what keeps that honest afterwards
+/// rather than what puts it there.
+///
+/// It also says nothing about a colour that never came from a token: a device's
+/// own framebuffer clear value is not an `Rgb` under this vocabulary and this
+/// rule would not see it. That is the boundary rather than a hole — RFC 0079
+/// owns what a token resolves to, and nothing else.
+///
+/// # Errors
+///
+/// A type outside the resolver holding a colour with no token, a use of that
+/// module's arithmetic outside it, or a tree in which this check can no longer
+/// find the module, the witness or the projection it is written around.
+fn lint_token_pair() -> Result<(), String> {
+    let mut files: Vec<(String, String)> = Vec::new();
+    for path in rust_sources()? {
+        let rel = relative(&path);
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+        files.push((rel, text));
+    }
+    let view: Vec<(&str, &str)> =
+        files.iter().map(|(rel, text)| (rel.as_str(), text.as_str())).collect();
+    println!("{}", pairing_report(&view)?);
+    Ok(())
+}
+
+#[cfg(test)]
+mod token_pair_tests {
+    use super::*;
+
+    /// What the resolver looks like to this check: one type holding a colour
+    /// with no token, which is legal in exactly that file.
+    const RESOLVER: &str = "\
+pub struct Raised {
+    pub colour: Rgb,
+    pub contrast_x1000: u32,
+    pub steps: u8,
+}
+";
+
+    /// A projection carrying a colour the way RFC 0079 requires: with both
+    /// halves of the pair it was checked as.
+    const GREEN: &str = "\
+pub struct Painted {
+    pub ground: Token,
+    pub ink: Token,
+    pub ink_rgb: Rgb,
+}
+";
+
+    /// The two lines a cache deletes.
+    const THE_PAIR: &str = "    pub ground: Token,\n    pub ink: Token,\n";
+
+    fn findings(rel: &str, text: &str) -> Vec<String> {
+        pairing_findings(&[(THE_RESOLVER, RESOLVER), (rel, text)])
+    }
+
+    #[test]
+    fn a_colour_carried_with_its_pair_passes() {
+        let found = findings("user/compositor/src/paint.rs", GREEN);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn a_colour_carried_without_its_pair_is_the_whole_rule() {
+        // The fixture that makes it fail, which is the half a green run cannot
+        // demonstrate and which RFC 0079 names as the thing to watch first.
+        let red = GREEN.replace(THE_PAIR, "");
+        assert_ne!(red, GREEN, "the pair must be found to remove");
+        let found = findings("user/compositor/src/paint.rs", &red);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("`Painted`"), "the finding must name the type: {}", found[0]);
+    }
+
+    #[test]
+    fn a_token_name_is_not_the_pair() {
+        // `TokenName` is a name the vocabulary may not have — the record of a
+        // refusal. Without the word boundary in `cites` it would satisfy this
+        // rule, and a cache labelled with an unresolvable name would pass.
+        let red = GREEN.replace("Token,", "TokenName,");
+        let found = findings("user/panel/src/lib.rs", &red);
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+
+    #[test]
+    fn a_pair_named_only_in_a_comment_is_not_a_pair() {
+        // The comment apologising for the cache is the commonest form this
+        // arrives in, and a scan that read comments would be argued out of its
+        // own finding by it.
+        let red = GREEN
+            .replace(THE_PAIR, "")
+            .replace("pub struct Painted", "/// The Token pair.\npub struct Painted");
+        let found = findings("user/compositor/src/paint.rs", &red);
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+
+    #[test]
+    fn the_resolver_itself_is_exempt() {
+        // `Raised` is the case: a colour with no token, in the file that did the
+        // checking. Anywhere else it is the defect.
+        let found = pairing_findings(&[(THE_RESOLVER, RESOLVER)]);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn the_checker_is_exempt_because_it_holds_these_fixtures() {
+        let red = GREEN.replace(THE_PAIR, "");
+        let found = findings("xtask/src/main.rs", &red);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn computing_a_contrast_is_refused_and_looking_one_up_is_not() {
+        // The two spellings differ by one character and the whole of E3-B06d's
+        // first clause is on the difference: the free function computes, the
+        // method reads the nine-entry table `resolve` filled.
+        let computed = "fn check(a: Rgb, b: Rgb) -> u32 { contrast_x1000(a, b) }\n";
+        let looked_up = "fn check(r: &Resolved) -> u32 { r.contrast_x1000(ink, ground) }\n";
+        let found = findings("user/compositor/src/paint.rs", computed);
+        assert!(
+            found.iter().any(|f| f.contains("contrast_x1000(")),
+            "the free function is arithmetic: {found:?}"
+        );
+        let found = findings("user/compositor/src/paint.rs", looked_up);
+        assert!(found.is_empty(), "a lookup through a dot is what a projection wants: {found:?}");
+    }
+
+    #[test]
+    fn a_floor_read_outside_the_resolver_is_arithmetic_too() {
+        // The constants as well as the functions: a projection that knows the
+        // number 4 500 is a projection about to compare something to it.
+        let red = "const F: u32 = CONTRAST_TEXT_X1000;\n";
+        let found = findings("user/compositor/src/paint.rs", red);
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+
+    #[test]
+    fn a_scan_that_reads_no_types_is_refused_rather_than_passed() {
+        // The rot this check has, and the one `lint_decomposition` was repaired
+        // for: a reader that has stopped matching the files reports nothing, and
+        // nothing is what green looks like. Asserted through the refusal rather
+        // than through the empty scan, because the first version of that one
+        // asserted the scan and a mutation of the guard stayed green.
+        let blind = "pub struct Raised { pub colour: u32 }\n";
+        let refusal = pairing_report(&[(THE_RESOLVER, blind), ("user/compositor/src/lib.rs", "")])
+            .expect_err("a scan that cannot see the witness is not green");
+        assert!(refusal.contains(RESOLVER_WITNESS), "{refusal}");
+    }
+
+    #[test]
+    fn a_resolver_that_moved_is_refused() {
+        let refusal = pairing_report(&[("user/compositor/src/lib.rs", "")])
+            .expect_err("the exempt module missing is not green");
+        assert!(refusal.contains(THE_RESOLVER), "{refusal}");
+    }
+
+    #[test]
+    fn a_projection_that_moved_is_refused() {
+        let refusal = pairing_report(&[(THE_RESOLVER, RESOLVER)])
+            .expect_err("reading no compositor at all is not green");
+        assert!(refusal.contains(THE_PROJECTION), "{refusal}");
+    }
+
+    #[test]
+    fn the_tree_as_it_stands_is_green() {
+        lint_token_pair().expect("a colour outside the resolver without the pair it came from");
+    }
+
+    #[test]
+    fn the_compositor_is_what_the_first_clause_is_about() {
+        // E3-B06d's first clause, driven against the real files rather than a
+        // fixture: the compositor contains no readability arithmetic at all, and
+        // adding either half of what this rule refuses makes it red naming the
+        // real path. That is what shows the green run above is green because of
+        // what those files say and not because nothing was opened.
+        let mut real: Vec<(String, String)> = Vec::new();
+        for path in rust_sources().expect("walking the workspace") {
+            let rel = relative(&path);
+            if rel.starts_with(THE_PROJECTION) {
+                real.push((rel, std::fs::read_to_string(&path).expect("reading a source")));
+            }
+        }
+        assert!(!real.is_empty(), "no file under {THE_PROJECTION} was found to read");
+
+        let view: Vec<(&str, &str)> =
+            real.iter().map(|(rel, text)| (rel.as_str(), text.as_str())).collect();
+        let found = pairing_findings(&view);
+        assert!(found.is_empty(), "{found:?}");
+
+        let cached = format!("{}\npub struct Cached {{ pub ink: Rgb }}\n", real[0].1);
+        let mut with_cache = view.clone();
+        with_cache[0] = (real[0].0.as_str(), cached.as_str());
+        let found = pairing_findings(&with_cache);
+        assert!(
+            found.iter().any(|f| f.contains(&real[0].0) && f.contains("`Cached`")),
+            "a cached colour in the real compositor must be named: {found:?}"
+        );
+
+        let computed =
+            format!("{}\nfn worse(a: Rgb, b: Rgb) -> u32 {{ contrast_x1000(a, b) }}\n", real[0].1);
+        let mut with_arithmetic = view.clone();
+        with_arithmetic[0] = (real[0].0.as_str(), computed.as_str());
+        let found = pairing_findings(&with_arithmetic);
+        assert!(
+            found.iter().any(|f| f.contains("contrast_x1000(")),
+            "readability arithmetic in the real compositor must be named: {found:?}"
+        );
+    }
 }
 
 /// How many tasks each task transitively unblocks.
@@ -22124,6 +24071,31 @@ enum Route {
     /// rather than leaving a green run to imply otherwise.
     /// E2-B07, RFC 0012.
     Attest,
+    /// `claims/0034`'s rate over the corpus in `claims/canvas-corpus/`:
+    /// canvases against declared nodes, summed over every application a porter
+    /// from outside this tree ported into the vocabulary of RFC 0077.
+    ///
+    /// The only route here that runs no subprocess, and the reason is the
+    /// claim's own: the corpus-level refusal must be the *same* refusal
+    /// `f_interface::node::canvas_census` gives one empty tree, so that the two
+    /// halves cannot come to disagree. One function, called once, on the trees
+    /// laid end to end. A command spawned to make that call would be a second
+    /// reader of the corpus, and a second reader is the thing being avoided.
+    ///
+    /// It is a `count` under RFC 0069's taxonomy — a ratio of two integers
+    /// taken from declarations, with no clock in it — so it is the same number
+    /// in a container, on bare metal and under an emulator, which is what
+    /// `claims/0034`'s `[hardware]` note says and why this route needs no
+    /// measurement environment.
+    ///
+    /// **What it usually does is refuse**, and that is the route working. There
+    /// is no corpus: `E3-B06l` built this, the entry format and the refusal, and
+    /// could not build a corpus, because the claim asks for one ported by
+    /// somebody who did not write the vocabulary and everything here was written
+    /// by the tree that wrote it. `claims/canvas-corpus/README.md` is addressed
+    /// to whoever is that somebody.
+    /// E3-B06l, E3-D01, RFC 0077.
+    Canvas,
     /// A claim whose workload does not exist yet, naming the task that owes it.
     ///
     /// Every other route in this table runs something, and the registry has not
@@ -22268,17 +24240,22 @@ const ROUTES: &[(&str, Route)] = &[
     // says so and refuses, which is the distinction the registry needed the day
     // a claim was registered in front of the code rather than behind it.
     ("raster-cost-per-rung", Route::Unbuilt("E3-B02")),
-    // The second and third rows whose workload is absent rather than late, and
-    // they are absent for two different reasons that the one variant is still
-    // the right answer to. `canvas-escape-rate` needs a *corpus* — applications
-    // ported by somebody who was free to give up and reach for a canvas — and
-    // `E3-B06l` is what builds one; the three interfaces in `interface/src/`
-    // are the vocabulary author's own argument and counting them would measure
-    // the argument. `theme-refusals` needs a compositor and a corpus of themes
-    // nobody working on the module wrote, and `E3-B01` is what lands both. Each
-    // refusal names its task, so the next question after the failure is
-    // answered by the failure. E3-D01 and RFC 0077; E3-D03 and RFC 0079.
-    ("canvas-escape-rate", Route::Unbuilt("E3-B06l")),
+    // `canvas-escape-rate` was the second such row and is no longer one: it has
+    // a workload, and the workload refuses. That is the distinction worth
+    // keeping. `Route::Unbuilt` means *nothing here could run*;
+    // [`Route::Canvas`] means the route ran, read `claims/canvas-corpus/`,
+    // found no applications a porter outside this tree had ported, and said so
+    // through `f_interface::node::canvas_census`. The first is a promise
+    // somebody owes; the second is a measurement apparatus standing ready with
+    // nothing in front of it, which is a different and more useful state to be
+    // in — and it is the state `E3-B06l` could reach, because the corpus is the
+    // half of this claim no commit in this repository can honestly supply.
+    // E3-D01, RFC 0077.
+    ("canvas-escape-rate", Route::Canvas),
+    // Still absent rather than late: `theme-refusals` needs a compositor and a
+    // corpus of themes nobody working on the module wrote, and `E3-B01` is what
+    // lands both. The refusal names its task, so the next question after the
+    // failure is answered by the failure. E3-D03, RFC 0079.
     ("theme-refusals", Route::Unbuilt("E3-B01")),
 ];
 
@@ -22405,6 +24382,7 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         Route::Rollback => claim_rollback(&text, &relative(&file))?,
         Route::Compare => claim_compare_run(&text, &relative(&file))?,
         Route::Attest => claim_attest(&text, &relative(&file))?,
+        Route::Canvas => claim_canvas(&text, &relative(&file))?,
         Route::Unbuilt(owed) => {
             return Err(format!(
                 "claim {name} has no workload: {owed} is the task that builds one.\n\
@@ -22698,17 +24676,77 @@ fn claim_compare(
     workloads: &[Workload],
     closing: &str,
 ) -> Result<(), String> {
+    let thresholds = thresholds_or_refuse(claim, file)?;
+
+    let mut output = String::new();
+    let mut findings = Vec::new();
+
+    for (what, program, args) in workloads {
+        println!("--- {what} ---\n");
+        let (text, ok) = capture_echoing(program, args)?;
+        output.push_str(&text);
+        if !ok {
+            findings.push(format!("  {what}: the workload failed; see its output above"));
+        }
+        println!();
+    }
+
+    claim_verdict(claim, file, &thresholds, &output, findings, closing)
+}
+
+/// One claim's `[threshold]` table, or the refusal that it states none.
+///
+/// Split out and asked *before* a workload runs rather than after, which is the
+/// whole of why it is a function: a claim whose table this route compares
+/// nothing against is a fault in the registry, and finding that out at the end
+/// of a five-minute run of four kernel builds is finding it out in the most
+/// expensive place there is.
+///
+/// # Errors
+///
+/// The claim states no `[threshold]` table.
+fn thresholds_or_refuse(
+    claim: &str,
+    file: &str,
+) -> Result<std::collections::BTreeMap<String, Bound>, String> {
     let thresholds = thresholds_in(claim);
     if thresholds.is_empty() {
         return Err(format!("{file} has no `[threshold]` table, so this route compares nothing"));
     }
+    Ok(thresholds)
+}
 
+/// A claim's `[threshold]` table against rows somebody has already measured.
+///
+/// The second half of [`claim_compare`], taken out of it so that a route whose
+/// workload is *not* a subprocess can reach the same comparison. There is
+/// exactly one such route — [`claim_canvas`], which counts a corpus in this
+/// process because the counting is `f_interface::node::canvas_census` and
+/// spawning a command to call one function would be a second copy of the
+/// corpus reader wearing a command's clothes.
+///
+/// `output` is whatever text carries the rows, whether a child printed it or
+/// this process built it: [`measured_rows`]' contract is one line of `name
+/// value`, and it does not care which.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s: every red row, every row nothing printed, and whatever
+/// the caller already had against the run.
+fn claim_verdict(
+    claim: &str,
+    file: &str,
+    thresholds: &std::collections::BTreeMap<String, Bound>,
+    output: &str,
+    workload_findings: Vec<String>,
+    closing: &str,
+) -> Result<(), String> {
     let mut measured = std::collections::BTreeMap::new();
     let mut findings = Vec::new();
 
-    // Before anything is measured, because a bound this cannot read is a bound
-    // that would otherwise print `green ... (no bound)` further down and be
-    // counted as a row that passed.
+    // Before anything the caller found, because a bound this cannot read is a
+    // bound that would otherwise print `green ... (no bound)` further down and
+    // be counted as a row that passed.
     for (name, spellings) in unreadable_bounds_in(claim) {
         findings.push(format!(
             "  {name}: this claim states {} and nothing here can read {}. A bound parsed \
@@ -22722,19 +24760,11 @@ fn claim_compare(
             if spellings.len() == 1 { "it" } else { "them" },
         ));
     }
-
-    for (what, program, args) in workloads {
-        println!("--- {what} ---\n");
-        let (output, ok) = capture_echoing(program, args)?;
-        measured_rows(&output, &thresholds, &mut measured, &mut findings);
-        if !ok {
-            findings.push(format!("  {what}: the workload failed; see its output above"));
-        }
-        println!();
-    }
+    findings.extend(workload_findings);
+    measured_rows(output, thresholds, &mut measured, &mut findings);
 
     println!("=== {file}'s [threshold] table against what the workload(s) printed ===\n");
-    for (name, bound) in &thresholds {
+    for (name, bound) in thresholds {
         let Some(&value) = measured.get(name) else {
             println!("    ?  {name}: no workload printed this row");
             findings.push(format!(
@@ -22769,6 +24799,611 @@ fn claim_compare(
         findings.len(),
         findings.join("\n")
     ))
+}
+
+// ---------------------------------------------------------------------------
+// `claims/0034`: the canvas escape rate, and the corpus it is a rate over.
+// ---------------------------------------------------------------------------
+
+/// Where the corpus lives. `claims/canvas-corpus/README.md` is addressed to the
+/// porter and says what an entry is.
+const CANVAS_CORPUS: &str = "claims/canvas-corpus";
+
+/// One application somebody ported into the vocabulary of RFC 0077.
+///
+/// Everything here except [`nodes`](Self::nodes) is the *record* rather than the
+/// measurement, and it is the half `claims/0034` spends its `[baseline]` note
+/// on: the rate means nothing without knowing which applications were ported,
+/// by whom, and whether the porter was free to give up and reach for a canvas.
+/// A run that printed a number and not this would be the claim's own stated
+/// failure mode, delivered by the command that exists to prevent it.
+struct Ported {
+    /// The file it came out of.
+    file: String,
+    /// What was ported — an application and a version, not a category.
+    application: String,
+    /// Where the original is, so somebody can disagree with the port.
+    source: String,
+    /// Who did the porting.
+    ported_by: String,
+    /// Did the porter write the vocabulary being measured?
+    ///
+    /// `false` is read, recorded and **excluded from the rate**. See
+    /// [`canvas_report`] for why that is arithmetic rather than manners.
+    independent: bool,
+    /// What the porter wrote about it: what was hard, what a canvas was for.
+    notes: String,
+    /// The tree, in declaration order, already through
+    /// `f_interface::node::check`.
+    nodes: Vec<f_interface::node::Node>,
+}
+
+/// Every `.toml` file in the corpus directory, sorted, with its text.
+///
+/// Sorted because `read_dir` is not ordered and RFC 0004 applies to the tooling
+/// that implements RFC 0004. Non-`.toml` files are skipped rather than refused:
+/// the README lives here, and so will a porter's screenshots and notes.
+///
+/// It is not a directory *walk* — one `read_dir`, no recursion, no skip list —
+/// which is deliberate given this file's *Common mistakes* entry about the five
+/// walkers. A corpus that wanted subdirectories would want one per porter, and
+/// that is a flat name with a hyphen in it.
+///
+/// # Errors
+///
+/// The directory cannot be read, or one of its files cannot be.
+fn canvas_corpus_files() -> Result<Vec<(String, String)>, String> {
+    let dir = root().join(CANVAS_CORPUS);
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("reading {CANVAS_CORPUS}/: {e}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "toml"))
+        .collect();
+    files.sort();
+
+    let mut out = Vec::new();
+    for path in files {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+        out.push((relative(&path), text));
+    }
+    Ok(out)
+}
+
+/// One corpus entry, or every sentence saying why it is not one.
+///
+/// The manifest reader parses it, because a second TOML subset in this file
+/// would be another reader of one grammar and the grammar is already written
+/// down in `xtask/src/manifest.rs`. What is *checked* here is this schema, and
+/// the keys are consumed rather than looked up: a leftover key is a misspelt
+/// field, and a corpus entry whose `independent = true` was silently read as
+/// absent is precisely the mistake this whole route exists to make impossible.
+///
+/// # Errors
+///
+/// A syntax error, a missing or mistyped field, an unknown key, an unknown
+/// role, or a tree `f_interface::node::check` refuses.
+fn corpus_entry(file: &str, text: &str) -> Result<Ported, Vec<String>> {
+    use f_interface::node::{Node, NodeId, Role};
+
+    let doc = manifest::parse(file, text)?;
+    let mut top = doc.top;
+    let mut findings = Vec::new();
+
+    let string =
+        |top: &mut manifest::Table, key: &str, findings: &mut Vec<String>| match top.remove(key) {
+            Some(manifest::Entry { value: manifest::Value::Str(text), .. })
+                if !text.trim().is_empty() =>
+            {
+                text
+            }
+            Some(manifest::Entry { line, value: manifest::Value::Str(_) }) => {
+                findings.push(format!(
+                    "  {file}:{line}  `{key}` is empty. Every field here is the record the rate \
+                 is read beside, and an empty one is a row that says nothing while looking \
+                 answered"
+                ));
+                String::new()
+            }
+            Some(manifest::Entry { line, .. }) => {
+                findings.push(format!("  {file}:{line}  `{key}` is a string"));
+                String::new()
+            }
+            None => {
+                findings.push(format!("  {file}  `{key}` is required and missing"));
+                String::new()
+            }
+        };
+
+    let application = string(&mut top, "application", &mut findings);
+    let source = string(&mut top, "source", &mut findings);
+    let ported_by = string(&mut top, "ported_by", &mut findings);
+    let notes = string(&mut top, "notes", &mut findings);
+
+    let independent = match top.remove("independent") {
+        Some(manifest::Entry { value: manifest::Value::Bool(flag), .. }) => flag,
+        Some(manifest::Entry { line, .. }) => {
+            findings.push(format!("  {file}:{line}  `independent` is `true` or `false`"));
+            false
+        }
+        None => {
+            findings.push(format!(
+                "  {file}  `independent` is required and missing. It has no default, and the \
+                 default it would have had is the one that admits a port by the vocabulary's \
+                 own authors into a corpus whose whole purpose is to exclude one"
+            ));
+            false
+        }
+    };
+
+    for key in top.keys() {
+        findings.push(format!("  {file}  `{key}` is not a field of a corpus entry"));
+    }
+    for name in doc.tables.keys() {
+        findings.push(format!("  {file}  `[{name}]`: a corpus entry has no tables"));
+    }
+    for name in doc.arrays.keys().filter(|name| *name != "node") {
+        findings.push(format!(
+            "  {file}  `[[{name}]]`: a corpus entry declares nodes and nothing else"
+        ));
+    }
+
+    let mut nodes = Vec::new();
+    for (index, (line, table)) in doc.arrays.get("node").into_iter().flatten().enumerate() {
+        let place = format!("{file}:{line}  [[node]] #{}", index + 1);
+        let mut table = table.clone();
+        let mut int = |key: &str, findings: &mut Vec<String>| match table.remove(key) {
+            Some(manifest::Entry { value: manifest::Value::Int(value), .. }) => value,
+            Some(_) => {
+                findings.push(format!("  {place}: `{key}` is an unsigned integer"));
+                0
+            }
+            None => {
+                findings.push(format!("  {place}: `{key}` is required and missing"));
+                0
+            }
+        };
+        let id = int("id", &mut findings);
+        let parent = int("parent", &mut findings);
+
+        let role = match table.remove("role") {
+            Some(manifest::Entry { value: manifest::Value::Str(name), .. }) => {
+                let Some(role) = Role::from_name(&name) else {
+                    findings.push(format!(
+                        "  {place}: `{name}` is not a role of the vocabulary. The spellings are \
+                         the second column of the `vocabulary!` invocation in \
+                         interface/src/node.rs, and a port that needed a role the vocabulary \
+                         does not have is the finding RFC 0077 asks for — recorded in an RFC \
+                         and in this entry's `notes`, never by inventing a spelling here"
+                    ));
+                    continue;
+                };
+                role
+            }
+            Some(manifest::Entry { line, .. }) => {
+                findings.push(format!("  {file}:{line}  `role` is a string"));
+                continue;
+            }
+            None => {
+                findings.push(format!("  {place}: `role` is required and missing"));
+                continue;
+            }
+        };
+        for key in table.keys() {
+            findings.push(format!("  {place}: `{key}` is not a field of a node"));
+        }
+        nodes.push(Node::new(NodeId::new(id), NodeId::new(parent), role));
+    }
+
+    // The tree, before it is counted. This is what makes an entry a port rather
+    // than a tally: `check` refuses a canvas that declared nothing, a cell
+    // outside a row and a table whose rows are not the same width, so a corpus
+    // cannot reach a flattering rate by declaring canvases it never populated.
+    // `claims/0034`'s statement rests on it — *`canvas_escapes` is zero for
+    // every tree that passed `check`, by construction* — and that sentence is
+    // only true of this corpus because of this call.
+    if findings.is_empty()
+        && let Err(defect) = f_interface::node::check(&nodes)
+    {
+        findings
+            .push(format!("  {file}  the tree is not one a projection could be given: {defect:?}"));
+    }
+
+    if findings.is_empty() {
+        Ok(Ported {
+            file: file.to_string(),
+            application,
+            source,
+            ported_by,
+            independent,
+            notes,
+            nodes,
+        })
+    } else {
+        Err(findings)
+    }
+}
+
+/// The corpus, what it was, and the rate over it — or the refusal.
+///
+/// # The one thing this function must not grow
+///
+/// A second emptiness check. `claims/0034`'s `[workload]` asks for the
+/// corpus-level refusal and the per-tree one to be incapable of disagreeing, so
+/// the corpus-level refusal is `f_interface::node::canvas_census` answering
+/// `None` and nothing else: the admitted trees are laid end to end and handed to
+/// the same function a single tree is handed. There is no `if
+/// admitted.is_empty()` anywhere below and there must never be, because two
+/// conditions meaning *empty* are two conditions that will one day disagree, and
+/// the direction they disagree in here is a clean zero that retires RFC 0077's
+/// reversal condition on a day nobody has ported anything.
+///
+/// # Why the trees are concatenated
+///
+/// Because the rate is defined over the corpus and not averaged over
+/// applications: canvases summed, nodes summed, one division at the end. A
+/// concatenation is that sum, and `canvas_census` computes it directly.
+/// Identities collide across applications in the concatenation and it does not
+/// matter — the census reads roles and a length, never an edge — which is also
+/// why `check` runs per entry in [`corpus_entry`] and never here, where two
+/// applications both naming node 1 would be a `Defect::DuplicateId` about
+/// nothing.
+///
+/// # Why `independent = false` is excluded rather than footnoted
+///
+/// `claims/0034` can go red in one direction only, so the one defence it has is
+/// who did the porting. A self-port scores well and establishes nothing; the
+/// claim says so twice in its own words. Excluding it here makes the exclusion
+/// arithmetic rather than a reader's diligence, and it means a corpus of nothing
+/// but self-ports refuses through the same `None` an empty directory gets —
+/// because it is the same state.
+///
+/// # Errors
+///
+/// A corpus entry that does not parse, or a corpus with no admitted nodes in it.
+fn canvas_report(files: &[(String, String)]) -> Result<String, String> {
+    let mut ported = Vec::new();
+    let mut findings = Vec::new();
+    for (file, text) in files {
+        match corpus_entry(file, text) {
+            Ok(entry) => ported.push(entry),
+            Err(why) => findings.extend(why),
+        }
+    }
+    if !findings.is_empty() {
+        return Err(format!(
+            "{} finding(s) against {CANVAS_CORPUS}/:\n{}\n\n\
+             A corpus entry that does not parse is neither counted as zero nor skipped. \
+             Either would move the rate — one by shrinking the denominator, the other by \
+             leaving a porter's afternoon out of the number silently — and the rate is the \
+             one thing in this claim nobody can check by reading it.\n\n\
+             {CANVAS_CORPUS}/README.md is what an entry is.",
+            findings.len(),
+            findings.join("\n")
+        ));
+    }
+
+    let mut record = format!("=== {CANVAS_CORPUS}/: what was counted ===\n\n");
+    if ported.is_empty() {
+        record.push_str("  nothing: the corpus directory holds no entries\n\n");
+    }
+    for entry in &ported {
+        // The same census, per entry, so the record says where the corpus total
+        // came from rather than asking a reader to take it. `None` here is a
+        // file that declared an application and no nodes, which is visible in
+        // the record instead of being a rule of its own.
+        let counted = match f_interface::node::canvas_census(&entry.nodes) {
+            Some((canvases, declared)) => format!("{canvases} canvas(es) in {declared} node(s)"),
+            None => "no nodes at all".to_string(),
+        };
+        record.push_str(&format!(
+            "  {}\n    application  {}\n    source       {}\n    ported by    {}\n    \
+             independent  {}\n    counted      {counted}\n    notes        {}\n\n",
+            entry.file,
+            entry.application,
+            entry.source,
+            entry.ported_by,
+            entry.independent,
+            entry.notes,
+        ));
+    }
+
+    let excluded = ported.iter().filter(|entry| !entry.independent).count();
+    if excluded > 0 {
+        record.push_str(&format!(
+            "  {excluded} of the entries above declare `independent = false` and are not in\n  \
+             the corpus: a port by somebody who wrote the vocabulary is the vocabulary\n  \
+             grading its own homework, and neither its canvases nor its nodes reach the\n  \
+             rate below.\n\n"
+        ));
+    }
+
+    // One vector, one census, one division. See this function's first heading
+    // for why there is no second test of emptiness anywhere near this.
+    let mut nodes = Vec::new();
+    for entry in ported.iter().filter(|entry| entry.independent) {
+        nodes.extend_from_slice(&entry.nodes);
+    }
+    let Some((canvases, declared)) = f_interface::node::canvas_census(&nodes) else {
+        return Err(format!(
+            "{record}the corpus is empty, so there is no rate.\n\n\
+             This is `f_interface::node::canvas_census` answering `None` for a corpus with no \
+             nodes in it — the same refusal it gives one empty tree, from the same function, \
+             which is what `claims/0034`'s `[workload]` asks for so that the two halves cannot \
+             come to disagree. A clean zero here would say *fewer than one node in twenty is a \
+             canvas* about a corpus nobody has ported, and would retire RFC 0077's reversal \
+             condition in the one direction this metric can do damage silently and in the \
+             reassuring direction.\n\n\
+             What is owed is not code. It is a corpus of applications ported by somebody who \
+             did not write the vocabulary. `E3-B06l` built this route, the entry format and \
+             this refusal, and could not build that: everything in this repository was written \
+             by the tree that wrote the vocabulary. {CANVAS_CORPUS}/README.md is addressed to \
+             the porter."
+        ));
+    };
+
+    // Rounded **up**, and the rounding rule is part of the number rather than an
+    // implementation detail. `canvases * 1000 / declared` truncates, and
+    // truncation on a metric bounded by `max = 50` moves every borderline corpus
+    // in the direction that flatters the vocabulary: a rate of 50.9 reported as
+    // 50 is RFC 0077's reversal condition failing to fire, and reported as 51 it
+    // fires and somebody argues about it, which is what the condition is for.
+    //
+    // *What would reverse this:* a corpus large enough that one node either way
+    // cannot move the rate, at which point the rule stops mattering and the
+    // cheaper truncation is fine. Nothing in this epoch is near that.
+    let rate = (canvases as u64 * 1000).div_ceil(declared as u64);
+
+    record.push_str(&format!(
+        "=== the rate ===\n\n\
+         applications {}\n\
+         canvas_nodes {canvases}\n\
+         declared_nodes {declared}\n\
+         canvas_escape_rate_x1000 {rate}\n\n",
+        ported.iter().filter(|entry| entry.independent).count(),
+    ));
+    Ok(record)
+}
+
+/// `claims/0034`'s rate over the corpus, against the claim's own table.
+///
+/// The one route in [`ROUTES`] whose workload is not a subprocess. It counts in
+/// this process because the counting is one call to
+/// `f_interface::node::canvas_census`, and a command spawned to make that call
+/// would be a second corpus reader that could come to disagree with this one
+/// about what the corpus was — which is the failure `claims/0034` is written to
+/// avoid, moved one layer out.
+///
+/// # Errors
+///
+/// [`canvas_report`]'s refusals, or [`claim_verdict`]'s.
+fn claim_canvas(claim: &str, file: &str) -> Result<(), String> {
+    let thresholds = thresholds_or_refuse(claim, file)?;
+    let report = canvas_report(&canvas_corpus_files()?)?;
+    print!("{report}");
+    claim_verdict(
+        claim,
+        file,
+        &thresholds,
+        &report,
+        Vec::new(),
+        "A rate over the target is RFC 0077's primary reversal condition firing: the\n\
+         vocabulary is too small for the work real applications do. Read `canvas_nodes`\n\
+         against `applications` before treating it as one — the RFC's own *one is a gap;\n\
+         two is a shape* — and then read the `notes` of every entry above, because what\n\
+         the canvases were *for* is the list of roles to argue for, one at a time, and it\n\
+         is only ever written there.\n\n\
+         A rate far under the target is not the opposite finding, and the claim says so.\n\
+         It is equally consistent with a corpus of applications too simple to push on the\n\
+         vocabulary at all, and no number this command prints tells the two apart. What\n\
+         does: whether the corpus above holds anything section 13 calls hard.",
+    )
+}
+
+/// `claims/0034`'s two halves: what the corpus was, and the refusal when there
+/// is none.
+///
+/// These are unit tests and not a boot because the metric is a `count` under RFC
+/// 0069 — a ratio of two integers taken from declarations, identical on every
+/// machine — so there is nothing a boot would add except minutes. What they are
+/// for is the half a green `cargo xtask claim canvas-escape-rate` cannot show:
+/// the command refuses today, so every line that computes and records a rate
+/// would otherwise be code nothing has ever run.
+#[cfg(test)]
+mod canvas_corpus {
+    /// One corpus entry, as a `(file, text)` pair the way the directory reader
+    /// hands them over.
+    ///
+    /// Built here rather than committed under `claims/canvas-corpus/` on
+    /// purpose: a fixture in that directory would be a self-port sitting in the
+    /// corpus directory, and the first reader to skim it would read the corpus
+    /// as non-empty. The directory holds what a porter put there and nothing
+    /// else.
+    fn entry(
+        name: &str,
+        application: &str,
+        independent: bool,
+        nodes: &[(u64, u64, &str)],
+    ) -> (String, String) {
+        let mut text = format!(
+            "application = \"{application}\"\n\
+             source      = \"https://example.invalid/{name}\"\n\
+             ported_by   = \"a fixture\"\n\
+             independent = {independent}\n\
+             notes       = \"what was hard\"\n"
+        );
+        for (id, parent, role) in nodes {
+            text.push_str(&format!(
+                "\n[[node]]\nid     = {id}\nparent = {parent}\nrole   = \"{role}\"\n"
+            ));
+        }
+        (format!("claims/canvas-corpus/{name}.toml"), text)
+    }
+
+    /// A surface with `fillers` pieces of text under it and `canvases` canvases,
+    /// each canvas declaring one child so the tree passes `check`.
+    fn shaped(canvases: u64, fillers: u64) -> Vec<(u64, u64, &'static str)> {
+        let mut nodes = vec![(1, 0, "surface")];
+        for i in 0..canvases {
+            nodes.push((2 + 2 * i, 1, "canvas"));
+            nodes.push((3 + 2 * i, 2 + 2 * i, "text"));
+        }
+        for i in 0..fillers {
+            nodes.push((1_000_000 + i, 1, "text"));
+        }
+        nodes
+    }
+
+    #[test]
+    fn an_empty_corpus_refuses_rather_than_reporting_a_clean_zero() {
+        let why = super::canvas_report(&[]).expect_err("an empty corpus has no rate");
+        assert!(why.contains("the corpus is empty"), "{why}");
+        assert!(why.contains("canvas_census"), "{why}");
+        // The refusal and nothing that looks like a measurement. A clean zero
+        // here is the one failure this claim cannot see, because it fails in
+        // the reassuring direction.
+        //
+        // *The edit that makes this go red:* replace the `let ... else` in
+        // `canvas_report` with `unwrap_or((0, 0))`, or add an
+        // `if admitted.is_empty()` that reports a zero rate.
+        assert!(!why.contains("canvas_escape_rate_x1000 0"), "{why}");
+    }
+
+    #[test]
+    fn a_corpus_of_self_ports_is_the_same_refusal_and_still_records_them() {
+        let files = [entry("ours", "a panel we wrote", false, &shaped(1, 30))];
+        let why = super::canvas_report(&files).expect_err("a self-port is not a corpus");
+        // Excluded from the rate...
+        assert!(why.contains("the corpus is empty"), "{why}");
+        // ...and recorded anyway, which is the half that makes the refusal
+        // readable: somebody has to be able to see what was looked at.
+        //
+        // *The edit that makes this go red:* drop the `independent` filter in
+        // `canvas_report`, and the first assertion fails; drop the record, and
+        // the rest do.
+        assert!(why.contains("a panel we wrote"), "{why}");
+        assert!(why.contains("independent  false"), "{why}");
+        assert!(why.contains("1 canvas(es) in 33 node(s)"), "{why}");
+        assert!(why.contains("are not in"), "{why}");
+    }
+
+    #[test]
+    fn an_admitted_corpus_reports_the_rate_beside_what_it_counted() {
+        let files = [entry("theirs", "some-editor 4.2", true, &shaped(1, 30))];
+        let report = super::canvas_report(&files).expect("a corpus with nodes in it has a rate");
+        // 1 canvas in 33 nodes: 1000/33 = 30.3, rounded away from flattering.
+        assert!(report.contains("canvas_escape_rate_x1000 31"), "{report}");
+        assert!(report.contains("canvas_nodes 1"), "{report}");
+        assert!(report.contains("declared_nodes 33"), "{report}");
+        assert!(report.contains("applications 1"), "{report}");
+        // The record, which `claims/0034`'s `[baseline]` note says is what
+        // stands in for a baseline here. A run that cannot say what it counted
+        // is not this claim whatever number it produced.
+        //
+        // *The edit that makes this go red:* stop pushing the per-entry block
+        // onto `record`.
+        assert!(report.contains("some-editor 4.2"), "{report}");
+        assert!(report.contains("ported by    a fixture"), "{report}");
+        assert!(report.contains("https://example.invalid/theirs"), "{report}");
+        assert!(report.contains("what was hard"), "{report}");
+    }
+
+    #[test]
+    fn the_rate_is_over_the_corpus_and_not_averaged_over_applications() {
+        // One small application that is a tenth canvas, one large one that is
+        // no canvas at all. The corpus rate is 1 in 100; the average of the two
+        // per-application rates is 1 in 20, which is the target exactly — so an
+        // averaging implementation would report a corpus sitting on its own
+        // threshold as sitting on it, and this one reports 10.
+        //
+        // *The edit that makes this go red:* compute a rate per entry and
+        // average them.
+        let files = [
+            entry("small", "a small one", true, &shaped(1, 7)),
+            entry("large", "a large one", true, &shaped(0, 89)),
+        ];
+        let report = super::canvas_report(&files).expect("two applications are a corpus");
+        assert!(report.contains("canvas_nodes 1"), "{report}");
+        assert!(report.contains("declared_nodes 100"), "{report}");
+        assert!(report.contains("canvas_escape_rate_x1000 10"), "{report}");
+        assert!(report.contains("applications 2"), "{report}");
+    }
+
+    #[test]
+    fn a_borderline_rate_rounds_the_way_that_does_not_flatter_the_vocabulary() {
+        // 51 canvases in 1001 nodes is 50.949 per thousand. Truncated it is 50,
+        // which is `claims/0034`'s `max` exactly and reports green; rounded up
+        // it is 51 and RFC 0077's reversal condition fires. The condition
+        // exists to be argued with, and a rounding rule that quietly keeps it
+        // from firing is the condition being retired by arithmetic.
+        //
+        // *The edit that makes this go red:* change `div_ceil` to `/`.
+        let files = [entry("borderline", "a borderline one", true, &shaped(51, 898))];
+        let report = super::canvas_report(&files).expect("a corpus with nodes in it has a rate");
+        assert!(report.contains("declared_nodes 1001"), "{report}");
+        assert!(report.contains("canvas_escape_rate_x1000 51"), "{report}");
+    }
+
+    #[test]
+    fn an_entry_is_a_tree_a_projection_could_be_given_and_not_a_tally() {
+        // A canvas that declared nothing: the loophole RFC 0078 closes, and the
+        // cheapest way to flatter this rate would be a corpus full of them —
+        // every one of them a node in the denominator and a canvas in the
+        // numerator, but declaring nothing is how an application avoids the
+        // work the vocabulary is being measured on.
+        //
+        // *The edit that makes this go red:* drop the `check` call in
+        // `corpus_entry`.
+        let files = [entry("hollow", "a hollow one", true, &[(1, 0, "surface"), (2, 1, "canvas")])];
+        let why = super::canvas_report(&files).expect_err("an empty canvas is not a port");
+        assert!(why.contains("EmptyCanvas"), "{why}");
+    }
+
+    #[test]
+    fn independence_has_no_default() {
+        // The default a missing field would take is the one that admits a port
+        // by the vocabulary's own authors into the corpus that exists to
+        // exclude one, and a corpus entry is written by somebody who has never
+        // read this file.
+        //
+        // *The edit that makes this go red:* give `independent` a default of
+        // `true` — or of `false`, which is equally a default.
+        let (file, text) = entry("silent", "a silent one", true, &shaped(1, 8));
+        let text = text.replace("independent = true\n", "");
+        let why = super::canvas_report(&[(file, text)]).expect_err("independence is declared");
+        assert!(why.contains("`independent` is required and missing"), "{why}");
+    }
+
+    #[test]
+    fn a_role_the_vocabulary_does_not_have_is_refused_rather_than_ignored() {
+        // Ignoring it would shrink the denominator and leave the numerator
+        // alone, which moves the rate up — but a corpus reader that silently
+        // drops what it does not understand is one that cannot be read back,
+        // and RFC 0077 wants the missing role named in an RFC.
+        let files =
+            [entry("unknown", "one of those", true, &[(1, 0, "surface"), (2, 1, "carousel")])];
+        let why = super::canvas_report(&files).expect_err("`carousel` is not a role");
+        assert!(why.contains("is not a role of the vocabulary"), "{why}");
+    }
+
+    #[test]
+    fn the_corpus_directory_this_tree_ships_is_empty_and_the_command_says_so() {
+        // The state of the repository, asserted rather than described, so that
+        // the day somebody adds an entry this test is what tells them the claim
+        // has changed state and `claims/0034`'s `status` is now a decision
+        // somebody has to take in a reviewable diff.
+        let files = super::canvas_corpus_files().expect("the corpus directory is readable");
+        assert!(
+            files.is_empty(),
+            "claims/canvas-corpus/ now holds {} entr(y/ies). If a porter from outside this \
+             tree put them there, this assertion is the good news and should be replaced by \
+             a run: `cargo xtask claim canvas-escape-rate`, and claims/0034's `status` moves \
+             off `pending` in the same diff. If this tree put them there, they are not a \
+             corpus. {files:?}",
+            files.len()
+        );
+    }
 }
 
 /// `claims/0017`'s two workloads, and its `[threshold]` table applied to what

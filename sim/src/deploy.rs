@@ -51,7 +51,7 @@
 use std::fs;
 use std::path::Path;
 
-use f_abi::manifest::{ContentId, Record, Refusal as Malformed, restart};
+use f_abi::manifest::{ContentId, Record, Refusal as Malformed, restart, role};
 use f_abi::transfer::Declaration;
 
 use crate::scenario::Peer;
@@ -180,6 +180,46 @@ const MODELS: &[(&str, Peer)] = &[
     // a shape no peer in this enum has — and `E3-B02f` is the task that creates
     // it.
     ("scene", Peer::Native),
+    // `semantic`, which is `user/panel`'s ring and the first row in this table
+    // whose component is on the **submitting** end. Every other protocol here
+    // names a component that answers; this one names one that asks, and the peer
+    // that answers is the frame.
+    //
+    // `Native` anyway, and the reason is the same one the row above gives at
+    // greater length: this enum is about what a service time is made of, and a
+    // semantic entry is decoded and applied to a data structure with no device
+    // under it. What `Native` does not model here is the *direction*, and saying
+    // so is the point of this comment rather than a reason to invent a variant —
+    // a deployment scenario drives arrivals at a service, and a component that
+    // generates them rather than serving them is a client, which is a thing the
+    // scenario already has in `crate::client`.
+    //
+    // *Reversal:* the day the peer on this channel is a component rather than
+    // the frame, which is the day `Peer` has to say which of two components is
+    // being modelled. RFC 0072 is the shape that would ask for it.
+    // **A mapping and not a model, and the diff that makes it a model is named.**
+    // `virtio-input` is a device driver — the fourth in this tree — so unlike
+    // `store`, `supervisor` and `semantic` above, `Native` here is *not* the
+    // accurate peer: there is hardware below it, and `Blk`, `Net` and `Gpu`
+    // exist because a driver's device is the half worth simulating.
+    //
+    // What makes the mapping honest today rather than a silent claim is that
+    // `E3-B04d` is `[>]`: the crate exists, and the frame half that would stand
+    // it up and drain its ring does not, so **no client submits on this ring in
+    // any scenario this simulator drives**. A peer modelling an input device
+    // would be modelling a conversation that has no second party. `Native`'s
+    // registration table and service time are what a deployment scenario can
+    // actually exercise of this component, which is its spawn and its ring
+    // negotiation.
+    //
+    // *Reversal:* the other half of `E3-B04d` — `kernel/src/input.rs` standing
+    // the component up and a compositor consuming its events. That is the diff
+    // that gives this ring a client, and it is the diff that should replace
+    // this row with a `Peer::Input` that produces events at an interarrival
+    // rate rather than answering requests, because an input device is the one
+    // device in this tree that speaks first.
+    ("input", Peer::Native),
+    ("semantic", Peer::Native),
 ];
 
 /// One component file, held where a [`Record`] may be read out of it.
@@ -371,6 +411,20 @@ pub struct Component {
     pub entries: u32,
     /// How many clients the ring admits. Unit: clients.
     pub clients: u32,
+
+    /// Which end of its data ring this component holds — `role::SERVER` or
+    /// `role::CLIENT`, as `f_abi::manifest::role` spells them.
+    ///
+    /// **Carried because the sweeps are about being replaced underneath
+    /// somebody, and a component with no clients is not that.** `user/panel` is
+    /// the first `client` in this deployment and it failed both sweeps on the
+    /// same day for two different-looking reasons — a kill plan that could only
+    /// land one of three, and a latency past a ladder that was zero because
+    /// nothing about it restarts. Both are one fact: there is nobody on the
+    /// other side of it to observe anything.
+    ///
+    /// Unit: none — an identifier, not a quantity.
+    pub role: u8,
     /// RFC 0005's speculation-domain kind. Unit: none — an
     /// `f_abi::manifest::domain` constant.
     pub domain: u8,
@@ -447,6 +501,7 @@ impl Component {
             protocol,
             entries: ring.entries,
             clients: ring.clients,
+            role: ring.role,
             domain: record.domain,
             restart: record.restart,
             backoff_first_ticks: record.backoff_first_ticks,
@@ -457,6 +512,20 @@ impl Component {
             transfer: record.transfer,
             peer,
         })
+    }
+
+    /// Does anybody hold the other end of this component's data ring?
+    ///
+    /// Read off the declaration rather than inferred from the protocol, because
+    /// the two can disagree: `user/panel` speaks `semantic`, which
+    /// `user/compositor` also speaks, and the difference between them is
+    /// exactly this word.
+    ///
+    /// `sim::chaos::sweep` and `sim::swap::sweep` are the two callers and both
+    /// carry the argument for why at their own loop.
+    #[must_use]
+    pub fn serves(&self) -> bool {
+        self.role == role::SERVER
     }
 
     /// The line this component contributes to the artefact's header.

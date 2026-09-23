@@ -578,6 +578,30 @@ pub(crate) const SYS_CAP_REVOKE: u64 = door::CAP_REVOKE;
 /// whose `ext` carries the rest with room to spare.
 pub(crate) const SYS_CAP_MAP: u64 = door::CAP_MAP;
 
+/// "Stop this core until somebody rings." Answers [`HALTED`] or [`AWAKE`].
+///
+/// **The eighth, and the intended cost of adding one is paid in
+/// `f_abi::door::WAIT`'s own comment** — which is where a component reads, and
+/// therefore where an argument against RFC 0014 and RFC 0015 has to be legible.
+/// The short version of it from this side: the door is narrowed to what a
+/// component cannot do for itself, and `hlt` is a ring-0 instruction with no
+/// unprivileged equivalent. Everything else the door has ever carried had a
+/// successor named on a ring; this one *is* the thing a ring's consumer does
+/// when the ring is empty, so it has no successor and is not looking for one.
+///
+/// It takes nothing and names nothing. A wait that named a channel would make
+/// the frame hold a subscription per component per ring, which is state this
+/// frame does not keep and R05 does not want it to: what wakes a component is a
+/// doorbell, and *which ring had work* is answered by looking.
+pub(crate) const SYS_WAIT: u64 = door::WAIT;
+
+/// [`SYS_WAIT`]'s answer when the core was really stopped.
+const HALTED: u64 = door::HALTED as u64;
+
+/// [`SYS_WAIT`]'s answer when a doorbell was already waiting, so nothing
+/// stopped.
+const AWAKE: u64 = door::AWAKE as u64;
+
 /// The answer to [`SYS_PROGRESS`] while the process should carry on.
 const KEEP_GOING: u64 = door::KEEP_GOING as u64;
 
@@ -915,6 +939,22 @@ pub enum Answer {
     Reply(u64),
     /// The process is over, with this outcome for [`ring3::enter`] to return.
     Ended(u64),
+    /// Stop this core, then reply with what the stop answered.
+    ///
+    /// **A third variant rather than work done inside [`syscall`], and the
+    /// reason is the invariant [`syscall`]'s own comment states.** That function
+    /// reads this core's process state into a local, decides, and writes it
+    /// back, and it is entitled to do so only because a system call runs with
+    /// interrupts masked by `IA32_FMASK` — so the timer handler, which writes
+    /// the same shard, cannot interleave. Halting means enabling interrupts, so
+    /// it may not happen while that local is live. This variant is what carries
+    /// the decision out past the write-back, to
+    /// `arch::x86_64::ring3::syscall_dispatch`, which enables nothing until the
+    /// shard is its own again.
+    ///
+    /// A `Reply` computed by halting inside the match would have passed every
+    /// test in this tree and lost a tick count per park.
+    Park,
 }
 
 /// Which violation the process is to commit.
@@ -3208,12 +3248,18 @@ pub unsafe fn reap(frames: &mut FrameAllocator, prepared: Prepared) -> Result<Re
 
 /// Where a system call from a process is answered.
 ///
-/// Seven calls and a refusal. Three are M3's and RFC 0014 is the argument for
+/// Eight calls and a refusal. Three are M3's and RFC 0014 is the argument for
 /// them; four are M4's and RFC 0015 is the argument for those — the short
 /// version being that a ring is named by a `Channel` capability, so the
 /// capability table has to work before there is any ring to work it through.
-/// Every one of the seven names the opcode that retires it. Adding an eighth
-/// means arguing against both documents in writing, which is the intended cost.
+/// Every one of the seven names the opcode that retires it.
+///
+/// **The eighth is [`SYS_WAIT`], and the cost this paragraph named was paid
+/// rather than waived.** Adding one means arguing against both documents in
+/// writing; the argument is in `f_abi::door::WAIT` and in [`SYS_WAIT`] here, and
+/// it is that the door is narrow because a component can do everything else for
+/// itself — which is not true of stopping a core. A ninth still costs what an
+/// eighth did, and the eighth does not make the next one cheaper.
 pub fn syscall(number: u64, first: u64, second: u64) -> Answer {
     let slot = STATE.mine();
     // SAFETY: this core's slot. A system call runs with interrupts masked by
@@ -3247,6 +3293,10 @@ pub fn syscall(number: u64, first: u64, second: u64) -> Answer {
             state.caps.record(reply);
             Answer::Reply(reply)
         }
+        // The one call that cannot be answered from here, and [`Answer::Park`]
+        // says why in full: halting means interrupts, and interrupts mean the
+        // timer handler reaching the shard this function is holding a copy of.
+        SYS_WAIT => Answer::Park,
         _ => {
             // Refused in the project's own error space rather than with a
             // number invented here. RFC 0010: an error names a domain, and a
@@ -3261,6 +3311,26 @@ pub fn syscall(number: u64, first: u64, second: u64) -> Answer {
     // SAFETY: as the read above, and no reference to the slot is live across it.
     unsafe { slot.write(state) };
     answer
+}
+
+/// Stop this core until a doorbell arrives, and answer what the stop found.
+///
+/// The body of [`Answer::Park`], reached from
+/// `arch::x86_64::ring3::syscall_dispatch` after [`syscall`] has put this core's
+/// process state back. Here rather than there because the two answer words are
+/// this file's — `ring3` knows how a call returns and not what it means.
+///
+/// # Safety
+///
+/// Call on the core the process is running on, from the system-call path, after
+/// [`syscall`] has returned and while interrupts are still masked by
+/// `IA32_FMASK`. Interrupts are enabled inside, which is the whole point, and is
+/// why nothing of this core's process state may be held across it.
+pub(crate) unsafe fn park() -> u64 {
+    // SAFETY: the caller's guarantee, which is `doorbell::wait`'s own contract
+    // word for word.
+    let answer = unsafe { crate::doorbell::wait() };
+    if answer == door::HALTED { HALTED } else { AWAKE }
 }
 
 /// Answer one of the four capability calls, as a word for `rax`.

@@ -92,7 +92,33 @@ pub const MAGIC: u64 = 0x465f_4d41_4e00_0001;
 /// bump pays for both: schema 3 carries both declarations, a schema-2 component
 /// file is refused rather than read approximately, and every component file in
 /// the tree is rebuilt once at the cost RFC 0030 priced.
-pub const SCHEMA: u32 = 3;
+///
+/// **Four, and the interesting part of it is where the new declaration is not.**
+/// Schema 4 lets a component declare the typefaces it will load, by content
+/// address, and a component file carrying none is a component that may load
+/// none. The declaration is a **section of the component file after the image**
+/// — see [`Face`] — and not an array in this record, and that placement is the
+/// decision rather than a detail. An earlier attempt put four sixty-four-byte
+/// entries inside [`Record`], which grew it from 2 696 bytes to 2 952;
+/// `f_assembler::topology::Instance` owns a `Record` **by value** and
+/// [`Record::read_unaligned`] returns one, so the assembler builds a stack
+/// temporary the size of this type per member, and at 2 952 that temporary went
+/// through the supervisor's guard page. Every boot in the tree died of
+/// `exception 14` three subsystems from the cause. So the rule schema 4
+/// establishes and every later schema should follow: **a declaration most
+/// components leave empty is a section, not a field.** The record's size is a
+/// bound on somebody else's stack, which is a thing it does not look like.
+///
+/// The cost is the last reserved byte — [`Record::faces`] is where
+/// `Record::_reserved` was — and it is worth saying plainly that there are now
+/// none left. The next field that wants one takes a section the way this one
+/// did, or it pays for the growth after the assembler has stopped owning a
+/// record by value. RFC 0030's rebuild cost is paid once more here: a schema-3
+/// component file is refused rather than read approximately, because its
+/// hundred-and-fourth byte was a reserved zero and reading that as *declares no
+/// face* would be a component acquiring a property nobody chose — the same
+/// argument [`Record::transfer`] and [`Record::binding`] were bumped for.
+pub const SCHEMA: u32 = 4;
 
 /// The longest name, in bytes.
 ///
@@ -135,6 +161,26 @@ pub const DEVICES_MAX: usize = 4;
 /// count, which is a change to this constant and to `component::spawn`'s fixed
 /// parts and to nothing else.
 pub const STATE_NODES_MAX: usize = 16;
+
+/// The most `[[face]]` entries a manifest may declare.
+///
+/// Four, and the number is the same shape of argument [`DEVICES_MAX`] makes: a
+/// component declares one entry per typeface it will ask the store for, and the
+/// widest case anybody here has written down is a regular, an italic, a bold and
+/// a bold italic — four. It is not room for a component that declares a font
+/// library, which is the failure mode a list with no bound has, and it is not
+/// one either, which would make *which* face a component may not choose an
+/// argument about this constant rather than about the manifest.
+///
+/// *Reversal:* a component whose honest typeface set does not fit — a text
+/// editor offering a user's own choice is the obvious one. At that point the
+/// declaration stops being a list in the component file and becomes a
+/// capability naming a *set* of faces, which is a different design and not a
+/// wider array. Widening this constant costs nothing in [`Record`], because the
+/// entries are not in it; that is exactly why the bound has to be argued here
+/// rather than discovered when something overflows.
+/// Unit: entries.
+pub const FACES_MAX: usize = 4;
 
 /// One page, as the record counts memory. Unit: bytes.
 pub const FRAME_BYTES: u64 = 4096;
@@ -534,6 +580,112 @@ impl Binding {
     }
 }
 
+/// Bytes in a content address, as the blob store spells one.
+///
+/// Thirty-two, because `f_blob::store::Store` is keyed by `[u8; 32]` and this
+/// field is that key rather than a second naming of it. It is deliberately not
+/// a [`ContentId`]: that type is FNV-1a over a component file the boot loader
+/// placed and is honest about identifying against accident only, and a face
+/// arrives from a *store*, where the thing on the other side of the name is
+/// whatever content hashed to it. RFC 0030 wrote that reversal condition down —
+/// *the day a file arrives from anywhere the boot loader did not put it, this
+/// becomes a cryptographic digest* — and this is the field it arrives at, so it
+/// is a digest from the first line rather than a widening later.
+/// Unit: bytes.
+pub const FACE_HASH_BYTES: usize = 32;
+
+/// One declared typeface: a name a component asks by, and the content address
+/// the store answers at.
+///
+/// # Why this is a section of the component file and not a field of the record
+///
+/// Because most components declare none, and [`Record`] is a fixed-width type
+/// somebody else holds by value. `f_assembler::topology::Instance` owns a
+/// `Record`, so the record's size is the size of a stack temporary in a crate
+/// this one has never heard of; four entries of this width inside the record
+/// grew it by a quarter and put that temporary through the supervisor's guard
+/// page, and every boot in the tree died three subsystems from the cause. The
+/// [`SCHEMA`] comment tells that story once. What it means *here* is the rule:
+/// a face table lives after the image, is reached by arithmetic the way
+/// [`Record::image`] is reached, and costs a component that declares no face
+/// exactly zero bytes.
+///
+/// The count is still in the record — [`Record::faces`] — and that is not an
+/// inconsistency. A count is one byte and a reader needs it *before* it can
+/// tell a file with two faces from a file with three and a truncation; deriving
+/// it from the module's length instead would make a component file that lost
+/// its last sixty-four bytes read as a component that declared one face fewer,
+/// which is the one thing this format refuses to do with silence.
+///
+/// # Why a name beside the hash
+///
+/// Because a component asks for *the regular face*, not for a digest it would
+/// have to carry a second copy of. The name is the component's own vocabulary
+/// and nothing outside the component reads it; the hash is what the store is
+/// asked. Two fields rather than one so that the thing a component's code says
+/// and the thing that is checked against the manifest are not the same string —
+/// a component that named faces by digest would have the digest written twice,
+/// in its source and in its manifest, and the whole point of this task is that
+/// exactly one of those is the declaration.
+///
+/// *Reversal:* a face that is not one blob — a collection, or a face the store
+/// holds as an object of chunks rather than as a single record. `f_blob` already
+/// distinguishes `put` from `put_object`, so that day the entry grows a kind
+/// byte, which is a schema bump and nothing else: the section is not in the
+/// record, so widening it moves no offset anybody has asserted.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Face {
+    /// The name the component asks by, NUL-padded.
+    ///
+    /// First, and the order is what the canonical sort is on: two entries
+    /// swapped are two component files with different content hashes naming one
+    /// component, which is [`Record::binding`]'s argument applied to a section
+    /// instead of an array.
+    /// Unit: bytes of ASCII from `[a-z0-9-]`, at most [`NAME_MAX`], no edge
+    /// hyphen, never empty.
+    pub name: [u8; NAME_MAX],
+    /// What the store is asked.
+    /// Unit: bytes — a SHA-256 digest over the face's own bytes, as
+    /// `f_blob::store::Store::put` returns one. All zero is not an address and
+    /// is refused: a digest of nothing is still a digest, and an entry whose
+    /// hash field was never filled in would otherwise be a declaration.
+    pub hash: [u8; FACE_HASH_BYTES],
+}
+
+// Sixty-four bytes and alignment one. Both are load-bearing and neither is
+// incidental: the width is what `xtask::manifest` stamps entries at, and the
+// alignment is why `Record::faces` may hand back a slice of `Face` over bytes a
+// loader packed at whatever offset the image happened to end on. A field with
+// an alignment in it would make that cast unsound at exactly the offsets this
+// format cannot control.
+const _: () = assert!(core::mem::size_of::<Face>() == 64);
+const _: () = assert!(core::mem::align_of::<Face>() == 1);
+const _: () = assert!(core::mem::size_of::<Face>() == NAME_MAX + FACE_HASH_BYTES);
+
+impl Face {
+    /// An entry that is not one.
+    pub const EMPTY: Self = Self { name: [0; NAME_MAX], hash: [0; FACE_HASH_BYTES] };
+
+    /// The name, without the padding.
+    #[must_use]
+    pub fn label(&self) -> &[u8] {
+        let end = self.name.iter().position(|b| *b == 0).unwrap_or(NAME_MAX);
+        self.name.get(..end).unwrap_or(&[])
+    }
+
+    /// Is this the address of something?
+    ///
+    /// All zero is refused rather than treated as *no face here*, because there
+    /// is no *no face here*: every entry the count admits is a declaration, and
+    /// an entry whose hash was never filled in is a build mistake and not an
+    /// empty slot.
+    #[must_use]
+    pub fn addressed(&self) -> bool {
+        self.hash != [0; FACE_HASH_BYTES]
+    }
+}
+
 /// One node of the state tree a component declares it will publish.
 ///
 /// # Why the declaration is in the manifest and not in the component
@@ -756,11 +908,30 @@ pub struct Record {
     /// which is what a reserved byte is for and is why taking one is a schema
     /// bump. Two of the three are spent and one is left.
     pub state_nodes: u8,
-    /// Reserved. Must be zero — a non-zero value is refused rather than
-    /// ignored, per R04.
-    /// Unit: none; this is not a quantity and is not expected to become one
-    /// without a schema bump.
-    pub _reserved: [u8; 1],
+    /// How many [`Face`] entries follow the image in this component file.
+    ///
+    /// **The third and last reserved byte, and the reason it is a count rather
+    /// than an offset.** The face table is not in this record — [`Face`] says
+    /// why at length, and the short version is that a record most components
+    /// leave a quarter empty is a stack temporary in the assembler — so what a
+    /// reader needs from the record is the one number that makes the module's
+    /// length an equation rather than a remainder. Position is arithmetic:
+    /// `record_bytes + image_bytes`, exactly as [`Record::image`] is
+    /// `record_bytes`.
+    ///
+    /// **Zero is a declaration and not a silence**, on [`Record::devices`]'
+    /// argument one field over: a component declaring no `[[face]]` may load no
+    /// face, and that is the answer rather than the absence of one.
+    ///
+    /// Unit: entries, at most [`FACES_MAX`]. The module is exactly
+    /// `record_bytes + image_bytes + faces * size_of::<Face>()` long, checked
+    /// rather than assumed, which is what makes a truncated table a truncation
+    /// and not a shorter declaration.
+    ///
+    /// There is no reserved byte after this one. RFC 0030's cost is paid per
+    /// schema bump either way; what a later field does *not* get for free is a
+    /// place to live inside this record.
+    pub faces: u8,
     /// What this component declares about being updated in place, and what it
     /// declares when it cannot.
     ///
@@ -838,6 +1009,12 @@ const _: () = assert!(
 // let a field inserted *before* the arrays keep the total and move every slot,
 // which is a component file the writer and the reader disagree about in a way
 // no test that only sums sizes can see.
+// And the count byte, which is the only part of schema 4 that is in this record
+// at all. Pinned for the same reason the five below are: `xtask::manifest`
+// stamps it at a literal 103, and a field inserted in front of it would move it
+// without moving the record's size — which is precisely the class of mistake a
+// size assertion alone cannot see.
+const _: () = assert!(core::mem::offset_of!(Record, faces) == 103);
 const _: () = assert!(core::mem::offset_of!(Record, transfer) == 104);
 const _: () = assert!(core::mem::offset_of!(Record, binding) == 120);
 const _: () = assert!(core::mem::offset_of!(Record, capability) == 136);
@@ -964,7 +1141,7 @@ impl Record {
         rings: 0,
         devices: 0,
         state_nodes: 0,
-        _reserved: [0; 1],
+        faces: 0,
         transfer: Declaration::EMPTY,
         binding: [Binding::EMPTY; DEVICES_MAX],
         capability: [Need::EMPTY; CAPABILITIES_MAX],
@@ -999,7 +1176,7 @@ impl Record {
         // is no niche here for arbitrary bytes to violate. The reference
         // borrows `module`, so it cannot outlive the bytes it names.
         let record = unsafe { &*module.as_ptr().cast::<Self>() };
-        record.judge(module.len())?;
+        record.judge(module)?;
         Ok(record)
     }
 
@@ -1046,18 +1223,27 @@ impl Record {
         // pattern is a valid value and there is no niche for arbitrary bytes to
         // violate; the result is an owned copy that borrows nothing.
         let record = unsafe { module.as_ptr().cast::<Self>().read_unaligned() };
-        record.judge(module.len())?;
+        record.judge(module)?;
         Ok(record)
     }
 
     /// Every judgement a component file has to pass, over a record that is
     /// already in memory.
     ///
-    /// `module_bytes` is the whole file's length, because two of the checks are
-    /// about the file and not about the record: the image is not empty, and the
-    /// file is exactly the record and the image with nothing after it.
-    fn judge(&self, module_bytes: usize) -> Result<(), Refusal> {
+    /// `module` is the whole component file, because three of the checks are
+    /// about the file and not about the record: the image is not empty, the file
+    /// is exactly the record and the image and the face table with nothing after
+    /// it, and every entry in that table is one a component may ask for.
+    ///
+    /// It takes the bytes rather than their length because the face table is a
+    /// *section* and not a field — [`Face`] argues why — so the only reader that
+    /// can judge it is one holding the module. A second validator over that
+    /// section, reachable only from one of the two entry points, is exactly the
+    /// defect [`Record::read_unaligned`]'s comment says this crate exists to not
+    /// have.
+    fn judge(&self, module: &[u8]) -> Result<(), Refusal> {
         let size = core::mem::size_of::<Self>();
+        let module_bytes = module.len();
         let record = self;
 
         if record.magic != MAGIC {
@@ -1069,17 +1255,21 @@ impl Record {
         if record.record_bytes as usize != size {
             return Err(Refusal::RecordSize);
         }
-        if record._reserved != [0; 1] {
-            return Err(Refusal::Reserved);
-        }
         if record.image_bytes == 0 {
             return Err(Refusal::Quantity);
         }
-        // The module is exactly the record and the image, and nothing after it.
-        // Trailing bytes are refused rather than ignored because the content
-        // hash covers the whole module: bytes nobody reads are bytes two files
-        // can differ in while naming one component.
-        if module_bytes != size + record.image_bytes as usize {
+        if record.faces as usize > FACES_MAX {
+            return Err(Refusal::Count);
+        }
+        // The module is exactly the record, the image and the declared face
+        // table, and nothing after it. Trailing bytes are refused rather than
+        // ignored because the content hash covers the whole module: bytes nobody
+        // reads are bytes two files can differ in while naming one component.
+        //
+        // The count is checked against its bound first, so this sum is over a
+        // number at most `FACES_MAX` and cannot be arranged to overflow by a
+        // record claiming two hundred and fifty-five faces.
+        if module_bytes != size + record.image_bytes as usize + record.face_bytes() {
             return Err(Refusal::Truncated);
         }
 
@@ -1106,6 +1296,55 @@ impl Record {
         record.check_capabilities()?;
         record.check_rings()?;
         record.check_state()?;
+        record.check_faces(module)?;
+        Ok(())
+    }
+
+    /// How many bytes of face table this record declares.
+    ///
+    /// Zero for the components that declare none, which is most of them, and
+    /// that zero is the whole reason this declaration is a section: a component
+    /// with no typeface pays nothing for one, in the file and in the assembler's
+    /// stack.
+    const fn face_bytes(&self) -> usize {
+        self.faces as usize * core::mem::size_of::<Face>()
+    }
+
+    /// Every judgement the declared face table has to pass.
+    ///
+    /// Held to exactly the rules [`Record::check_bindings`] holds `[[device]]`
+    /// to, because it is the same kind of list and would rot in the same way:
+    /// names are names, an entry addresses something, and the order is canonical
+    /// rather than sorted by whoever reads it. Two entries swapped would be two
+    /// component files with different content hashes naming one component, and
+    /// then the address would stop naming what was written — which is the one
+    /// property this whole task is about.
+    ///
+    /// There is no *past the count is all zero* rule here, and its absence is
+    /// not an oversight: the table is a section whose length **is** the count,
+    /// so there is no slot past it for anything to hide in. That rule exists in
+    /// the arrays because they are fixed-width; converting it here would be
+    /// asserting something about bytes that are not in the file.
+    fn check_faces(&self, module: &[u8]) -> Result<(), Refusal> {
+        let mut previous: Option<[u8; NAME_MAX]> = None;
+        for face in self.faces(module)? {
+            if !is_name(&face.name) {
+                return Err(Refusal::Name);
+            }
+            if !face.addressed() {
+                return Err(Refusal::Value);
+            }
+            if let Some(before) = previous
+                && before >= face.name
+            {
+                // Equal is a component that declared one name twice, which is
+                // an author with two beliefs about which face `regular` is
+                // rather than a list to be de-duplicated. Greater is a file
+                // that would hash differently from the same declaration.
+                return Err(Refusal::Order);
+            }
+            previous = Some(face.name);
+        }
         Ok(())
     }
 
@@ -1120,6 +1359,39 @@ impl Record {
     pub fn image<'a>(&self, module: &'a [u8]) -> Result<&'a [u8], Refusal> {
         let at = core::mem::size_of::<Self>();
         module.get(at..at + self.image_bytes as usize).ok_or(Refusal::Truncated)
+    }
+
+    /// The typefaces this component declares it will load, in canonical order.
+    ///
+    /// The slice points into `module`, so a face table costs a reader nothing
+    /// to look at, exactly as [`Record::image`] costs nothing — which is the
+    /// property that makes it affordable to check a component's declaration on
+    /// every spawn rather than once at build time.
+    ///
+    /// Empty is the common answer and is a statement: this component loads no
+    /// typeface, and a store asked for one on its behalf is a store answering a
+    /// question nobody was authorised to ask.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::Truncated`] if the module is not the length the record says.
+    /// A caller that has been through [`Record::read`] cannot see it; the check
+    /// is here anyway, for [`Record::image`]'s reason — this is also reachable
+    /// from a caller that built the record itself.
+    pub fn faces<'a>(&self, module: &'a [u8]) -> Result<&'a [Face], Refusal> {
+        let at = core::mem::size_of::<Self>() + self.image_bytes as usize;
+        let count = self.faces as usize;
+        let bytes = module.get(at..at + self.face_bytes()).ok_or(Refusal::Truncated)?;
+        // SAFETY: `bytes` is exactly `count * size_of::<Face>()` bytes long,
+        // sliced out of `module` above, so the region covers `count` whole
+        // entries and nothing past them. `Face` has alignment one — asserted at
+        // its definition, and that assertion is the reason this cast is sound
+        // for a table a loader packed at whatever offset the image ended on —
+        // so no alignment obligation arises. `Face` is `#[repr(C)]` and both of
+        // its fields are byte arrays, so every bit pattern is a valid value and
+        // there is no niche for arbitrary bytes to violate. The slice borrows
+        // `module`, so it cannot outlive the bytes it names.
+        Ok(unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<Face>(), count) })
     }
 
     /// The component's name, without the padding.
@@ -1881,6 +2153,11 @@ mod tests {
     /// these earns the same refusal, which is why it needs no third element.
     type Meaningless = (&'static str, fn(&mut Record));
 
+    /// One thing wrong inside a declared face table, and what reading the module
+    /// should earn. A named type for [`Lie`]'s reason: a signature a reader has
+    /// to parse before they can read the cases is a signature in the way.
+    type FaceLie = (&'static str, fn(&mut [Face; 2]), Refusal);
+
     #[test]
     fn a_well_formed_record_survives_the_round_trip() {
         let record = well_formed();
@@ -1892,6 +2169,139 @@ mod tests {
         assert_eq!(back.image(&bytes.0).unwrap().len(), IMAGE);
     }
 
+    /// Bytes in a module carrying `n` face entries after the image.
+    const fn faced_bytes(n: usize) -> usize {
+        core::mem::size_of::<Record>() + IMAGE + n * core::mem::size_of::<Face>()
+    }
+
+    /// A module with a face table after the image, laid out the way
+    /// `xtask::manifest::compile` lays one out.
+    ///
+    /// Two entries and not one, because the canonical-order rule is a statement
+    /// about a pair and a fixture of one entry cannot exercise it.
+    #[repr(C, align(8))]
+    struct Faced([u8; faced_bytes(2)]);
+
+    /// One declared face, written the way a manifest compiler writes one.
+    fn face(name: &[u8], fill: u8) -> Face {
+        let mut out = Face::EMPTY;
+        out.name.get_mut(..name.len()).unwrap().copy_from_slice(name);
+        out.hash = [fill; FACE_HASH_BYTES];
+        out
+    }
+
+    /// A record and a face table, in one module.
+    fn faced(record: &Record, faces: &[Face]) -> Faced {
+        let mut bytes = Faced([0u8; faced_bytes(2)]);
+        encode(record, &mut bytes.0).unwrap();
+        let at = core::mem::size_of::<Record>() + IMAGE;
+        for (index, entry) in faces.iter().enumerate() {
+            let slot = at + index * core::mem::size_of::<Face>();
+            let mut one = [0u8; 64];
+            one[..NAME_MAX].copy_from_slice(&entry.name);
+            one[NAME_MAX..].copy_from_slice(&entry.hash);
+            bytes.0[slot..slot + 64].copy_from_slice(&one);
+        }
+        bytes
+    }
+
+    /// A record declaring two faces, and the module that carries them.
+    fn two_faces() -> (Record, [Face; 2]) {
+        let mut record = well_formed();
+        record.faces = 2;
+        (record, [face(b"bold", 0x11), face(b"regular", 0x22)])
+    }
+
+    #[test]
+    fn a_declared_face_table_is_read_back_out_of_the_module() {
+        // The section, and the property that makes it a section: the record did
+        // not grow, so the table is found by arithmetic over `image_bytes` the
+        // same way the image is found by arithmetic over `record_bytes`.
+        let (record, faces) = two_faces();
+        let bytes = faced(&record, &faces);
+        let back = read(&bytes.0).expect("a record declaring two faces was refused");
+        let table = back.faces(&bytes.0).expect("the table is where the record says");
+        assert_eq!(table.len(), 2);
+        assert_eq!(table[0].label(), b"bold");
+        assert_eq!(table[1].label(), b"regular");
+        assert_eq!(table[1].hash, [0x22; FACE_HASH_BYTES]);
+        // And the image is exactly where it was before this schema existed.
+        assert_eq!(back.image(&bytes.0).unwrap().len(), IMAGE);
+    }
+
+    #[test]
+    fn a_component_declaring_no_face_pays_nothing_for_the_ability() {
+        // The reason the declaration is a section at all: every other component
+        // in the tree produces the file it produced before, and the record is
+        // the size it was. A growth here is a stack temporary in the assembler,
+        // three subsystems away — which is how the first attempt at this task
+        // killed every boot in the tree.
+        assert_eq!(core::mem::size_of::<Record>(), 2696);
+        let record = well_formed();
+        assert_eq!(record.faces, 0);
+        let bytes = module(&record);
+        let back = read(&bytes.0).expect("a record declaring no face");
+        assert!(back.faces(&bytes.0).unwrap().is_empty());
+        assert_eq!(bytes.0.len(), core::mem::size_of::<Record>() + IMAGE);
+    }
+
+    #[test]
+    fn a_module_whose_table_is_not_the_length_the_count_says_is_truncated() {
+        // The whole reason the count is in the record rather than derived from
+        // the module's length. A file that lost its last entry reads as a
+        // truncation and not as a component that declared one face fewer.
+        let (record, faces) = two_faces();
+        let bytes = faced(&record, &faces);
+        let short = faced_bytes(1);
+        assert_eq!(read(&bytes.0[..short]).err(), Some(Refusal::Truncated));
+        // And a byte past the table is refused for the reason a byte past the
+        // image is: the content hash covers the whole module.
+        //
+        // Through `read_unaligned`, because a plain local array carries no
+        // alignment and `Refusal::Unaligned` would answer first — which is a
+        // real refusal about a different thing. Both entry points run the same
+        // judgement, so this exercises the same check.
+        let mut longer = [0u8; faced_bytes(2) + 1];
+        longer[..faced_bytes(2)].copy_from_slice(&bytes.0);
+        assert_eq!(Record::read_unaligned(&longer).err(), Some(Refusal::Truncated));
+    }
+
+    #[test]
+    fn every_lie_inside_a_face_table_is_refused() {
+        let cases: &[FaceLie] = &[
+            ("a name outside its alphabet", |f| f[0].name[0] = b'-', Refusal::Name),
+            ("an empty name", |f| f[0].name = [0; NAME_MAX], Refusal::Name),
+            ("padding after a name", |f| f[0].name[NAME_MAX - 1] = b'x', Refusal::Name),
+            (
+                "an entry that addresses nothing",
+                |f| f[1].hash = [0; FACE_HASH_BYTES],
+                Refusal::Value,
+            ),
+            // Two entries the wrong way round is two component files with two
+            // content hashes naming one component.
+            ("entries out of order", |f| f.swap(0, 1), Refusal::Order),
+            ("one name declared twice", |f| f[1].name = f[0].name, Refusal::Order),
+        ];
+        for (what, break_it, expect) in cases {
+            let (record, mut faces) = two_faces();
+            break_it(&mut faces);
+            let bytes = faced(&record, &faces);
+            assert_eq!(read(&bytes.0).err(), Some(*expect), "{what} was not refused as expected");
+        }
+    }
+
+    #[test]
+    fn a_face_table_is_judged_by_both_ways_in() {
+        // `Record::read` and `Record::read_unaligned` are two entry points and
+        // one validator, and this is the clause that keeps them one: the second
+        // copies the record out and the table stays in the module, so a check
+        // written against the borrow alone would silently not run here.
+        let (record, mut faces) = two_faces();
+        faces[1].hash = [0; FACE_HASH_BYTES];
+        let bytes = faced(&record, &faces);
+        assert_eq!(Record::read_unaligned(&bytes.0).err(), Some(Refusal::Value));
+    }
+
     #[test]
     fn every_structural_lie_is_refused() {
         // One field wrong at a time, because a fixture that breaks two things
@@ -1901,7 +2311,7 @@ mod tests {
             ("magic", |r| r.magic = 0, Refusal::NotAManifest),
             ("schema", |r| r.schema = SCHEMA + 1, Refusal::Schema),
             ("record length", |r| r.record_bytes += 8, Refusal::RecordSize),
-            ("reserved", |r| r._reserved[0] = 1, Refusal::Reserved),
+            ("a face count past its bound", |r| r.faces = 5, Refusal::Count),
             ("no image", |r| r.image_bytes = 0, Refusal::Quantity),
             ("domain", |r| r.domain = 9, Refusal::Value),
             ("policy", |r| r.restart = 0, Refusal::Value),

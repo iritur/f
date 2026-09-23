@@ -111,6 +111,32 @@ pub const VIRTIO_NET_TRANSITIONAL: u16 = 0x1000;
 ///   what moved is a parameter. RFC 0054.
 pub const VIRTIO_GPU_MODERN: u16 = 0x1050;
 
+/// The input device, which — like the display controller above it — identifies
+/// itself one way and only one way.
+///
+/// Device type 18 in the specification's numbering, so `0x1040 + 18`. There is
+/// no transitional constant beside it for the display controller's reason
+/// exactly: the sixteen transitional ids are the ones the original
+/// specification assigned, and every device defined after the modern transport
+/// arrived has a modern id and nothing else. There is no legacy virtio-input to
+/// refuse, so [`route`]'s second argument is `None` at this driver's call site
+/// and the `None` is a fact about the specification rather than a check turned
+/// off.
+///
+/// **One number for three devices**, and that is a property of the device and
+/// not of this constant: QEMU publishes `0x1052` for `virtio-keyboard-pci`,
+/// `virtio-mouse-pci` and `virtio-tablet-pci` alike, because they differ in what
+/// they *report* and not in what they are. `user/virtio-input/src/transport.rs`
+/// is where that is argued from the driver's side, and the consequence for the
+/// frame is the one worth stating here: a machine carrying two of them offers
+/// two functions this constant cannot tell apart, and [`route`] takes the first.
+///
+/// *Reversal:* a boot with more than one input device on it, at which point the
+/// choice stops being *the virtio-input function* and becomes *which one*, and
+/// the answer has to come out of the device's configuration space — the select
+/// window carrying its name — rather than out of its PCI header.
+pub const VIRTIO_INPUT_MODERN: u16 = 0x1052;
+
 /// Where a function's capability list starts, in configuration space.
 const CAP_POINTER: u64 = 0x34;
 

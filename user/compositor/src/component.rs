@@ -37,10 +37,20 @@
 //! is why it is its own outcome — [`stopped::IDLE`] — and not folded into
 //! [`stopped::TOLD`].
 //!
-//! It is also, today, this component's only answer to *nothing has arrived*.
-//! `E3-B01g` is the task that replaces the spin with a doorbell, at which point
-//! this bound stops being reached in the ordinary case and starts being what it
-//! says it is.
+//! It is no longer this component's only answer to *nothing has arrived*.
+//! `E3-B01g` gave it a second one: on a frame that says it will ring —
+//! [`at::DOORBELL`](crate::routing::at::DOORBELL) — an idle turn arms the ring's
+//! wakeup flag, looks once more, and then asks the frame to stop this core.
+//! The bound above still counts those turns, because a park that is never rung
+//! is a hang and RFC 0046 says a hang is a count; what changed is that reaching
+//! it now costs the machine nothing per turn.
+//!
+//! **The order is the protocol and not a style.** Arm, *then look again*, and
+//! only then sleep. A component that armed and slept without looking is the
+//! lost wakeup RFC 0020 describes from the other side: the entry it would have
+//! found arrived between its last look and its decision, and the producer had
+//! already read an unarmed flag and rung nothing. The `continue` after the arm
+//! below is that second look, and deleting it is a hang rather than a slow loop.
 //!
 //! # What it does *not* do, said rather than implied
 //!
@@ -59,8 +69,9 @@ use f_ring::heap::Heap;
 use f_scene::arena::Arena;
 use f_scene::commit::Batch;
 
-use crate::routing::{self, at, life, node, reported, stopped};
-use crate::tree::{FRAME_DELTAS_MAX, Held};
+use crate::pacing::Tick;
+use crate::routing::{self, at, bell, life, node, reported, stopped};
+use crate::tree::{FRAME_DELTAS_MAX, Held, Plan};
 
 /// A run that did what it meant to.
 pub const DONE: u64 = 0;
@@ -146,10 +157,28 @@ fn serve() -> ! {
     // in this component's image and the file outgrew what the frame maps for it.
     let mut graph = alloc::boxed::Box::new(Arena::EMPTY);
     let mut batch = alloc::boxed::Box::new(Batch::<FRAME_DELTAS_MAX>::new());
-    let mut held = Held::new(&mut graph, &mut batch);
+    // The pacing window rides in `Held` rather than in a third box, and
+    // `crate::tree::Held`'s own comment says why: a kibibyte of zeroes is a
+    // `memset` and costs the image nothing, which is RFC 0100's rule read the
+    // way round that permits something rather than the way round that refuses.
+    let mut held = Held::new(&mut graph, &mut batch, parts.plan);
 
     let mut route = Route { control: parts.control, told: false };
     let mut idle: u64 = 0;
+    // The doorbell's three pieces of state, and they are separate on purpose.
+    // `armed` is what the *ring* believes, and it must be put back the moment
+    // work arrives or the client rings for every entry it is already draining
+    // — which is the number `f_ring::doorbell` exists to drive to zero. The two
+    // counts are what this component publishes, and they differ by the times the
+    // frame had already been rung when it was asked to stop.
+    let mut armed = false;
+    let mut parked: u64 = 0;
+    let mut halted: u64 = 0;
+    // The last reading this component believed. Zero until the frame writes one,
+    // which is *the epoch* and not *unknown*: a compositor whose first entry
+    // arrives before the frame has ticked charges that frame from the origin,
+    // which is a cost that is too large rather than one that is invented.
+    let mut last = Tick(0);
     let outcome = loop {
         // The control ring first, because a stop is the one thing that ends this
         // loop and work taken after it would be work done for a client the frame
@@ -187,10 +216,50 @@ fn serve() -> ! {
             if idle > parts.spins {
                 break stopped::IDLE;
             }
-            core::hint::spin_loop();
+            // **A turn with no room to answer in is not a turn to sleep on**, and
+            // that is the one place the two things this branch counts as one have
+            // to come apart. A doorbell means *a submission arrived*; nothing
+            // rings when a client reaps, because a completion ring has no wakeup
+            // flag and needs none. So a component that parked because its
+            // completion ring was full would be waiting for a signal its peer has
+            // no reason to send, and would be rescued only by a timer tick —
+            // which is an accident and not a protocol.
+            if !parts.doorbell || room == 0 {
+                core::hint::spin_loop();
+                continue;
+            }
+            if !armed {
+                // Tell the client to ring, and then go round again. The second
+                // look is the `continue`, and the module comment says why it may
+                // not be optimised into a re-read here: a component that armed
+                // and slept in one turn is the lost wakeup.
+                if parts.data.arm_wakeup().is_err() {
+                    break stopped::NO_RING;
+                }
+                armed = true;
+                continue;
+            }
+            // Armed, and the turn after the arm found nothing. Stop the core.
+            parked += 1;
+            let _ = board.write64(reported::PARKED, parked);
+            if door::call0(door::WAIT) == door::HALTED {
+                halted += 1;
+                let _ = board.write64(reported::HALTED, halted);
+            }
             continue;
         };
         idle = 0;
+        if armed {
+            // Work arrived, so the client must stop ringing for it. Before the
+            // entry is answered rather than after, because the answer is what
+            // lets the client submit the next one — and a client that submitted
+            // against a flag this component had not put back would be rung for
+            // an entry it was already holding.
+            if parts.data.disarm_wakeup().is_err() {
+                break stopped::NO_RING;
+            }
+            armed = false;
+        }
 
         // The payload, out of the ring's own arena. **Zeroed first and offered
         // whatever the copy answered**, which is deliberate: an entry framing a
@@ -203,7 +272,25 @@ fn serve() -> ! {
         let mut payload = [0u8; PAYLOAD_BYTES];
         let _ = parts.data.copy_out(entry.offset as usize, &mut payload);
 
-        if let Some(answer) = held.offer(&entry, &payload)
+        // **The one time this component ever sees, read after the entry was
+        // taken and never before it.** The order is what makes the reading
+        // belong to this entry: the client writes the tick and then submits, so
+        // a reading taken after the pop is the one the client wrote for the
+        // entry the pop returned — the ring's `Release` publish and this side's
+        // `Acquire` take are what order the two, which is the same pair
+        // `ring/src/lib.rs` rests the payload on. A tick read at the top of the
+        // turn would be whatever was there when the loop last spun, and a
+        // frame's cost would become a measure of how often this loop went round.
+        //
+        // A page that stops answering leaves the previous reading in place
+        // rather than ending the run: a clock that did not refresh is a pacing
+        // estimate that is stale, and a compositor that stopped serving its
+        // client over a stale estimate would be refusing to draw because it
+        // could not say what time it was.
+        let now = Tick(board.read64(at::TICK_NANOS).unwrap_or(last.nanos()));
+        last = now;
+
+        if let Some(answer) = held.offer(&entry, &payload, now)
             && parts.data.post(answer).is_err()
         {
             break stopped::NO_RING;
@@ -220,6 +307,17 @@ struct Parts {
     data: Server,
     /// Turns with nothing to do before the loop ends. Unit: turns.
     spins: u64,
+    /// Whether the frame says it will ring a doorbell for this component.
+    ///
+    /// Read once, at layout, and never again: it is a property of the frame
+    /// this component was started by, and a frame that changed its mind half
+    /// way through a run would be a frame that had stopped ringing for a
+    /// component already asleep. `crate::routing::at::DOORBELL` says why it is
+    /// told rather than discovered.
+    doorbell: bool,
+    /// What this machine can draw with, how often it scans out, and how much of
+    /// a frame to keep in hand.
+    plan: Plan,
 }
 
 /// Read the routing page and state everything it names.
@@ -274,7 +372,27 @@ fn laid_out(board: &Window) -> Option<Parts> {
         return None;
     }
 
-    Some(Parts { control, data, spins })
+    // The pacing inputs, read and **not** refused. Every one of them has an
+    // honest answer at zero — no display declared, no margin wanted, no
+    // capability reported — and `crate::pacing` says what each zero produces: a
+    // scanout at now, a wake time with no margin in it, and a published rung of
+    // *none*. A refusal here would be this component declining to serve a client
+    // because nobody had told it about a screen, which is the opposite of what
+    // it is for.
+    let plan = Plan {
+        backend_bits: board.read64(at::BACKEND_CAPABILITIES).ok()?,
+        scanout_period_nanos: board.read64(at::SCANOUT_PERIOD_NANOS).ok()?,
+        margin_nanos: board.read64(at::PACING_MARGIN_NANOS).ok()?,
+    };
+
+    // Not refused at any value, and the reason is the same shape as the pacing
+    // inputs above: every reading has an honest answer, and the honest answer to
+    // a word this frame did not write is *nobody rings, so look for yourself*.
+    // A refusal here would be this component declining to serve a client because
+    // it had not been promised a wakeup.
+    let doorbell = board.read64(at::DOORBELL).ok()? == bell::RING;
+
+    Some(Parts { control, data, spins, plan, doorbell })
 }
 
 /// Write what this component did into the half of the routing page that is its
@@ -297,6 +415,20 @@ fn report(board: &Window, held: Option<&Held>, outcome: u64) {
         let _ = board.write64(reported::LIVE, held.live());
         let _ = board.write64(reported::REFUSED, counters.refused);
         let _ = board.write64(reported::TOKEN, counters.token);
+        let _ = board.write64(reported::LATE, counters.late);
+        // The pacing decision, whole. Four numbers where one would do, because
+        // the exit's sentence is a subtraction and a reader handed only the
+        // answer cannot check it — `crate::routing::reported::WAKE` argues the
+        // same point one file over.
+        let story = held.story();
+        let _ = board.write64(reported::SCANOUT, story.decision.scanout_nanos);
+        let _ = board.write64(reported::ESTIMATE, story.decision.estimate_nanos);
+        let _ = board.write64(reported::MARGIN, story.decision.margin_nanos);
+        let _ = board.write64(reported::WAKE, story.decision.wake_nanos);
+        let _ = board.write64(reported::SAMPLES, held.samples());
+        let _ = board.write64(reported::DEGRADED, story.degraded);
+        let _ = board.write64(reported::RUNG, story.rung);
+        let _ = board.write64(reported::DEADLINE, story.deadline_nanos);
         // The same numbers, into the region the frame mounted under its own
         // root. The board is this component's answer to *what did you do*; the
         // tree is the machine's answer to *what is it running*, and RFC 0013
@@ -331,12 +463,25 @@ fn publish(tree_at: u64, held: &Held) -> u64 {
     }
     let Ok(tree) = state::Writer::at(tree_at, routing::TREE_BYTES) else { return 0 };
     let counters = held.counters();
+    let story = held.story();
     let mut written = 0;
+    // In `node::WRITTEN`'s order, and the frame reads it back in that order.
+    // Nine words and not four: the five `E3-B01k` adds are the frame's story —
+    // the rung it is drawing with, the frame it last closed, the deadline that
+    // frame carried, what a frame costs on this machine, and what was given up
+    // to fit. Every one of them is a value this component already holds, which
+    // is RFC 0013's rule: a node with no counter behind it would be a
+    // serialisation with extra steps wearing RFC 0013's name.
     for (id, value) in [
         (node::FRAMES, counters.frames),
         (node::EDITS, counters.edits),
         (node::NODES, held.live()),
         (node::REFUSED, counters.refused),
+        (node::RUNG, story.rung),
+        (node::FRAME, counters.token),
+        (node::DEADLINE, story.deadline_nanos),
+        (node::PACING, story.decision.estimate_nanos),
+        (node::DEGRADED, story.degraded),
     ] {
         if tree.set(id, value) {
             written += 1;

@@ -32,11 +32,22 @@
 //! - [`canvas`] — what a self-rendering surface still declares. `E3-D02`, RFC 0078.
 //! - [`token`] — the typed token layer and what a theme cannot break. `E3-D03`, RFC 0079.
 //! - [`ladder`] — the renderer fallback ladder. `E3-D04`, RFC 0080.
+//!
+//! # The projections
+//!
+//! - [`reader`] — the screen-reader projection: a whole tree said, with nothing
+//!   rendered. `E3-B06i`.
+//! - [`agent`] — the agent projection: the same tree read to be acted on, one
+//!   selection per act. The capability call an invocation *is* lives in
+//!   `f_semantic::agent`, because a handle is `f-abi`'s and this crate declines
+//!   that dependency for the reason stated above. `E3-B06j`.
 
 #![no_std]
 
+pub mod agent;
 pub mod backend;
 pub mod canvas;
 pub mod ladder;
 pub mod node;
+pub mod reader;
 pub mod token;

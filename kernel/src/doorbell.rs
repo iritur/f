@@ -15,9 +15,12 @@
 //! below is a per-core counter that only its own core writes.
 //!
 //! That is worth stating rather than assuming, because the obvious design —
-//! a shared "doorbells pending" word per core — would have been a fifth address
-//! two cores reach, and `CLAUDE.md` says a fifth needs an argument. It does not
-//! need one because it does not exist.
+//! a **shared** "doorbells pending" word per core — would have been a fifth
+//! address two cores reach, and `CLAUDE.md` says a fifth needs an argument. It
+//! does not need one because it does not exist. [`PENDING`] below is a pending
+//! word and is not that word: it is written and read only by the core it names,
+//! which is what the whole of `percpu.rs` is, and the distinction is the one
+//! RFC 0016 draws — the rule is about slots two cores reach, not about slots.
 //!
 //! # What is proven at boot, and what is not
 //!
@@ -27,14 +30,38 @@
 //! handler, the acknowledgement — with one thing left out, which is the second
 //! core.
 //!
-//! Cross-core delivery is not proven here and the reason is not shyness: the
-//! only way to observe another core's count is to read another core's slot,
-//! which is the fifth cross-core address the paragraph above is glad not to
-//! need. Proving it costs either that word or a rendezvous through the mailbox
-//! `smp` already has, and both belong with the component that will actually
-//! sleep on a doorbell rather than with the vector.
+//! Cross-core delivery used to be unproven here, and the entry that deferred it
+//! said why: the only way to observe another core's count is to read another
+//! core's slot, which would be the fifth cross-core address the paragraph above
+//! is glad not to need. `E3-B01g` is the task that owns it, and the answer it
+//! found is that **no fifth word was needed**. The reasoning is
+//! [`delivered_at`]'s and is the one `smp`'s own shootdown counters already
+//! make: a counter read across a core boundary *after that core has reported
+//! finished through the mailbox* is not a slot two cores reach, because the
+//! mailbox's `Release` store and the reader's `Acquire` load are what order it.
+//! The rendezvous was already there.
+//!
+//! # What this file gained with the sleeper, and why the latch is not optional
+//!
+//! Until `E3-B01g` nothing in this tree slept, so a doorbell had nowhere to ring
+//! and this file only counted. [`wait`] is the other half: the frame's answer to
+//! `f_abi::door::WAIT`, which stops the core a component is on until a doorbell
+//! arrives.
+//!
+//! [`PENDING`] is what makes that safe, and it is the same defect RFC 0020
+//! closed one layer up wearing different clothes. The ring's protocol has the
+//! consumer arm a flag, look again, and only then decide to sleep — but *decide
+//! to sleep* and *be stopped* are two instructions apart, and the producer's
+//! doorbell can land between them. At ring 3 it lands as an interrupt that is
+//! taken, counted and returned from, and then the core halts holding work
+//! nobody will ring for again. A latch turns that into an answer: every doorbell
+//! sets it, and a wait that finds it set clears it and does not halt. It costs
+//! one word per core, written and read only by that core.
+//!
+//! *Reversal:* a wait that takes a deadline, at which point the latch stays and
+//! the unbounded halt goes. `f_abi::door::WAIT` says what bounds it today.
 
-use core::sync::atomic::{Ordering, compiler_fence};
+use core::sync::atomic::{AtomicU64, Ordering, compiler_fence};
 
 use f_ring::Ringer;
 
@@ -43,11 +70,53 @@ use crate::percpu::PerCpu;
 
 /// Doorbells delivered to each core.
 ///
-/// Written by the handler on the core it was delivered to and read by that same
-/// core, always volatilely and never through a reference — the handler and the
-/// code it interrupted are both looking at it, which is the case `percpu.rs`
-/// says no per-CPU abstraction can see. Unit: doorbells.
+/// Written by the handler on the core it was delivered to, read by that same
+/// core, and — once, after that core has reported finished — by the boot
+/// processor. Every access goes through an atomic, which is what makes the last
+/// of those three legal rather than merely rare: see [`delivered_at`].
+///
+/// It used to be volatile on both sides, which was right while the only reader
+/// was the core that wrote it. A volatile read says *do not elide this access*
+/// and says nothing about what another core may be doing to the same word at the
+/// same time, and a stray doorbell delivered to a core the boot processor is
+/// reading is exactly that. Unit: doorbells.
 static DELIVERED: PerCpu<u64> = PerCpu::new(0);
+
+/// A doorbell arrived on this core and no [`wait`] has consumed it yet.
+///
+/// One word per core, set by the handler and cleared by the wait, both on the
+/// core it belongs to. **Not a cross-core word**: no other core ever reads it,
+/// and the file comment says what it is for.
+///
+/// A count would say more and is deliberately not what this is: two doorbells
+/// between two waits are one reason not to halt, and a counter would make the
+/// second wait skip a halt it should have taken — which is a component spinning
+/// in its idle loop for a signal that has already been answered.
+/// Unit: none — a latch.
+static PENDING: PerCpu<u64> = PerCpu::new(0);
+
+/// Times [`wait`] really stopped this core. Unit: halts.
+static PARKS: PerCpu<u64> = PerCpu::new(0);
+
+/// Halts of this core that a doorbell ended, as distinct from any other
+/// interrupt.
+///
+/// **The number the exit is about, and the reason it is a separate count from
+/// [`PARKS`].** A halted core is restarted by *any* unmasked interrupt, and the
+/// timer is armed on every core running a process — so a halt that ended is not
+/// evidence that a doorbell arrived. This counts only the halts across which
+/// [`DELIVERED`] moved, which is this core's own reading of its own counter
+/// either side of one `hlt`. Unit: halts.
+static WOKEN: PerCpu<u64> = PerCpu::new(0);
+
+/// Waits that did not halt because [`PENDING`] was already set. Unit: waits.
+///
+/// Published rather than folded into [`PARKS`] because it is the count of times
+/// the race the latch exists for actually happened, and a build whose latch had
+/// stopped working would report zero here and hang rather than reporting zero
+/// here and being fine. It is read beside the others, which is what makes the
+/// zero readable.
+static SPARED: PerCpu<u64> = PerCpu::new(0);
 
 /// Answer a doorbell: count it, and say it is over.
 ///
@@ -60,14 +129,16 @@ static DELIVERED: PerCpu<u64> = PerCpu::new(0);
 /// Call from the doorbell vector's own gate, on the core it was delivered to,
 /// with interrupts disabled by that gate.
 pub(crate) unsafe fn answer() {
-    let slot = DELIVERED.mine();
-    // SAFETY: this core's counter. The interrupted code may be reading it, and
-    // is doing so volatilely for the same reason, which is why neither side
-    // takes a reference.
-    let seen = unsafe { slot.read_volatile() };
-    // SAFETY: as above. This core is inside the handler, so nothing else on it
-    // is writing.
-    unsafe { slot.write_volatile(seen.wrapping_add(1)) };
+    let me = current_cpu();
+    let seen = load(&DELIVERED, me);
+    store(&DELIVERED, me, seen.wrapping_add(1));
+
+    // The latch, after the count and before the acknowledgement. After the
+    // count, so that a wait which observes the latch is entitled to the reading
+    // that goes with it; before the acknowledgement, so that the local APIC
+    // cannot deliver a second doorbell into a core whose first one is not
+    // recorded yet.
+    store(&PENDING, me, 1);
 
     // SAFETY: this core, inside the handler for the interrupt being
     // acknowledged. Last, so that the count is written before the local APIC
@@ -78,9 +149,159 @@ pub(crate) unsafe fn answer() {
 /// Doorbells this core has been delivered. Unit: doorbells.
 #[must_use]
 pub fn delivered() -> u64 {
-    // SAFETY: a volatile read of this core's counter, which the handler writes
-    // volatilely. No reference is taken on either side.
-    unsafe { DELIVERED.mine().read_volatile() }
+    load(&DELIVERED, current_cpu())
+}
+
+/// Doorbells `cpu` has been delivered. Unit: doorbells.
+///
+/// # Why this is not the fifth cross-core word
+///
+/// Because it is the shape `smp`'s shootdown counters already argued for and not
+/// a new one. RFC 0016's rule is about *slots two cores reach* — addresses whose
+/// correctness depends on an ordering between two running cores — and this is
+/// not one: the slot is written only by the core it names, and the only reader
+/// from anywhere else is a boot processor that has already seen that core report
+/// finished through the mailbox. The mailbox's `Release` store and this core's
+/// `Acquire` load are the happens-before, and they exist for the job they were
+/// built for; nothing here adds an edge or needs one.
+///
+/// So the ordering on the access itself is `Relaxed`, and that is a statement
+/// rather than a shortcut: an ordering here would be naming an edge nothing
+/// depends on, which `smp`'s own counter bump says is worse than none in a file
+/// whose argument is that every ordering in it is load-bearing.
+///
+/// **What is left is a race rather than a rule**, and it is why the accesses are
+/// atomic at all: a doorbell delivered to `cpu` *after* it reported finished
+/// would have the handler writing this word while the boot processor reads it.
+/// Nothing in this tree rings a core that has ended — a boot stops ringing
+/// before it joins — but *nothing does it today* is not a memory model, and an
+/// atomic makes the answer a stale count instead of undefined behaviour.
+///
+/// What this is not is *meaningful* at any time: a reading taken while `cpu` is
+/// running is a reading of a number that is moving, and every caller in this tree
+/// takes it after `smp::join_serviced` or `smp::run_on` has returned `Ok`.
+#[must_use]
+pub fn delivered_at(cpu: usize) -> u64 {
+    load(&DELIVERED, cpu)
+}
+
+/// Times `cpu` was really stopped by a wait. See [`delivered_at`].
+/// Unit: halts.
+#[must_use]
+pub fn parks_at(cpu: usize) -> u64 {
+    load(&PARKS, cpu)
+}
+
+/// Halts of `cpu` that a doorbell ended, as distinct from any other interrupt.
+/// See [`delivered_at`]. Unit: halts.
+#[must_use]
+pub fn woken_at(cpu: usize) -> u64 {
+    load(&WOKEN, cpu)
+}
+
+/// Waits on `cpu` that found a doorbell already latched and did not halt.
+/// See [`delivered_at`]. Unit: waits.
+#[must_use]
+pub fn spared_at(cpu: usize) -> u64 {
+    load(&SPARED, cpu)
+}
+
+/// Stop this core until a doorbell arrives, and say whether it really stopped.
+///
+/// Answers `f_abi::door::HALTED` or `f_abi::door::AWAKE`, which is the whole of
+/// what a component learns. The four counters this moves are the frame's, and
+/// they are read from the boot processor after the core comes back.
+///
+/// # The two instructions that have to be one, and why
+///
+/// `sti` followed by `hlt` is the architecture's own idiom and not a pair that
+/// happens to work: `sti` opens the interrupt window only *after* the
+/// instruction that follows it, so an interrupt that arrives in between is taken
+/// after the `hlt` has been entered rather than before it. Written apart — or
+/// with anything between them — this is a core that halts with a doorbell
+/// already asserted and does not come back.
+///
+/// The window before that is closed by the caller rather than here: a system
+/// call runs with interrupts masked by `IA32_FMASK`, so a doorbell arriving
+/// between the latch being read and the `sti` is held in the local APIC's
+/// request register and delivered the instant the window opens. That is the one
+/// obligation this function has of its caller and it is in the safety section.
+///
+/// # Safety
+///
+/// Call on the core the component is running on, from the system-call path,
+/// with interrupts masked by `IA32_FMASK` and with nothing of the calling core's
+/// process state held across the call — interrupts are enabled inside, and the
+/// timer handler writes the same shards `process::syscall` reads.
+pub(crate) unsafe fn wait() -> i64 {
+    let me = current_cpu();
+
+    // The latch first, and cleared whether or not it was set. A wait that found
+    // it set has been told *there was already something for you*, and leaving it
+    // set would make the next wait skip a halt it should take.
+    let latched = load(&PENDING, me);
+    store(&PENDING, me, 0);
+    if latched != 0 {
+        store(&SPARED, me, load(&SPARED, me).wrapping_add(1));
+        return f_abi::door::AWAKE;
+    }
+
+    let before = load(&DELIVERED, me);
+    store(&PARKS, me, load(&PARKS, me).wrapping_add(1));
+
+    // SAFETY: the caller's guarantee that this is the system-call path with
+    // interrupts masked. Every vector the local APIC can deliver to this core
+    // has a gate — `idt::init` ran on it at bring-up — and none of them reads
+    // `GS`, which is what makes taking one at ring 0 on this path survivable:
+    // the system-call entry has already swapped it and the interrupt stubs do
+    // not. `cli` on the way out so that the rest of the call returns under the
+    // condition it was entered with.
+    //
+    // `nostack` is deliberately **not** claimed. This block does not push
+    // anything itself, but it is the one block in this kernel that is entered
+    // with interrupts about to be enabled, and an interrupt taken inside it
+    // lands on this core's kernel stack. The option's real cost is the red zone,
+    // which `x86_64-unknown-none` disables anyway — so claiming it would buy
+    // nothing and would put a promise here that depends on a target setting
+    // rather than on this code. `preserves_flags` *is* claimed and is true:
+    // `sti` and `cli` move the interrupt flag, which is not among the status
+    // flags that option is about, and the block leaves it as it found it.
+    unsafe {
+        core::arch::asm!("sti", "hlt", "cli", options(preserves_flags));
+    }
+
+    // Read after the halt and compared against the reading before it. This is
+    // the whole of how a doorbell is told apart from the timer, which is armed
+    // on every core running a process and would otherwise make every halt look
+    // like a delivery.
+    if load(&DELIVERED, me) != before {
+        store(&WOKEN, me, load(&WOKEN, me).wrapping_add(1));
+    }
+    f_abi::door::HALTED
+}
+
+/// Read one core's word out of a shard, atomically.
+///
+/// `smp`'s equivalent makes the same argument, for the same reason and with one
+/// difference worth naming: there the atomic is what makes the *other* core's
+/// access legal, and here it is what makes the *handler's* access legal beside
+/// the code it interrupted. Both are cases where a reference may not be taken,
+/// and volatile is the wrong tool for the second one now that a word in this
+/// file is read from somewhere else at all.
+fn load(shard: &'static PerCpu<u64>, cpu: usize) -> u64 {
+    let slot = shard.at(cpu);
+    // SAFETY: `at` returns a pointer to one aligned `u64` inside a `'static`
+    // shard, which is a valid `AtomicU64` for as long as every access to it goes
+    // through one — and in this file every access does. The reference does not
+    // outlive the call.
+    unsafe { AtomicU64::from_ptr(slot) }.load(Ordering::Relaxed)
+}
+
+/// Write one core's word into a shard, atomically. As [`load`].
+fn store(shard: &'static PerCpu<u64>, cpu: usize, value: u64) {
+    let slot = shard.at(cpu);
+    // SAFETY: as [`load`].
+    unsafe { AtomicU64::from_ptr(slot) }.store(value, Ordering::Relaxed);
 }
 
 /// Ring `cpu`'s doorbell.

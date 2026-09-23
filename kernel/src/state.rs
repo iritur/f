@@ -327,6 +327,29 @@ pub mod node {
     /// `user/compositor` is the seventh component file, and the frame builds a
     /// place per file.
     pub const COMPONENT_TREE_6: u32 = 55;
+
+    /// The eighth place's mount.
+    ///
+    /// **The paragraph on [`COMPONENT_TREE_4`] is a record and this is its
+    /// fourth entry.** `E1-B05` grew a place, `E2-B08` grew another, `E3-B01f`
+    /// grew the seventh, and `E3-B06c` grows this one: `user/panel` is the
+    /// eighth component file, and the frame builds a place per file.
+    ///
+    /// Worth saying at the fourth: the forecast has now come true every time
+    /// anybody added a component, which means it is not a forecast but a
+    /// consequence of the bound being a constant. RFC 0044 is where that stops —
+    /// a supervisor's places are its `Untyped` rather than an array in the frame
+    /// — and until then the honest reading of this run of ids is *the frame has
+    /// a fixed table and every new component costs one entry in it*.
+    pub const COMPONENT_TREE_7: u32 = 56;
+    /// The ninth, and the forecast above came true again on 2026-09-23 — this
+    /// time without anybody noticing, which is the part worth recording. A
+    /// ninth component file was dropped by `component::generations` in silence
+    /// and reported by `sim --join` as *a stale or partial build*. The bound is
+    /// still a constant and this id is still its consequence; RFC 0101 is where
+    /// the shape is written down and `component::places_dropped` is what now
+    /// makes the overflow a refusal rather than an absence.
+    pub const COMPONENT_TREE_8: u32 = 57;
     /// What this machine is running. RFC 0012.
     ///
     /// The node the exit of `E2-B07` is about: *the machine answers "what are
@@ -442,6 +465,8 @@ pub mod node {
             4 => Some(COMPONENT_TREE_4),
             5 => Some(COMPONENT_TREE_5),
             6 => Some(COMPONENT_TREE_6),
+            7 => Some(COMPONENT_TREE_7),
+            8 => Some(COMPONENT_TREE_8),
             _ => None,
         }
     }
@@ -457,7 +482,7 @@ pub mod node {
 }
 
 /// How many nodes this build publishes.
-pub const NODES: usize = 56;
+pub const NODES: usize = 58;
 
 /// The schema, written once and never again for a generation.
 ///
@@ -854,7 +879,23 @@ const SCHEMA: [SchemaEntry; NODES] = [
         unit::ADDRESS,
         b"place6",
     ),
-    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 55 * WORD, 0xEE, unit::NONE, b"reserved"),
+    SchemaEntry::new(
+        node::COMPONENT_TREE_7,
+        node::COMPONENTS,
+        55 * WORD,
+        kind::MOUNT,
+        unit::ADDRESS,
+        b"place7",
+    ),
+    SchemaEntry::new(
+        node::COMPONENT_TREE_8,
+        node::COMPONENTS,
+        56 * WORD,
+        kind::MOUNT,
+        unit::ADDRESS,
+        b"place8",
+    ),
+    SchemaEntry::new(node::RESERVED_KIND, node::ROOT, 57 * WORD, 0xEE, unit::NONE, b"reserved"),
 ];
 
 /// Where the schema block starts: immediately after the header, on the

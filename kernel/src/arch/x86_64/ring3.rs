@@ -302,6 +302,13 @@ pub unsafe fn forget() {
 pub unsafe extern "C" fn syscall_dispatch(number: u64, first: u64, second: u64) -> u64 {
     match crate::process::syscall(number, first, second) {
         crate::process::Answer::Reply(value) => value,
+        // SAFETY: this is the system-call path, on the core the process is
+        // running on, `syscall` has returned — so nothing of this core's
+        // process state is held across the halt — and interrupts are still
+        // masked by `FMASK`, which is what makes a doorbell that arrives
+        // between the latch and the `sti` a pending interrupt rather than a
+        // lost one.
+        crate::process::Answer::Park => unsafe { crate::process::park() },
         // SAFETY: reached only from the stub, which is only reached from a
         // process, so there is one to end.
         crate::process::Answer::Ended(outcome) => unsafe { leave(outcome) },

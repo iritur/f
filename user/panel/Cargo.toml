@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "f-panel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The first application: it declares an interface across a ring, and owns none of it."
+
+# A library and not a binary, for the reason `user/init/Cargo.toml` states at
+# length and the five component crates before this one repeat: a binary needs an
+# entry point, naming one means `#[unsafe(no_mangle)]`, and that is an unsafe
+# attribute a crate forbidding unsafe code cannot write. `user/init/link.ld`
+# finds the entry by the section `component::start` was compiled into, which is
+# why this crate's entry has that path too.
+
+[dependencies]
+f-abi.workspace = true
+f-ring.workspace = true
+# The wire's meaning, and the row that makes this an *application* rather than a
+# test fixture. What it brings is one value — `Interface`, the implementor of
+# `f_abi::semantic::Vocabulary` — and what that buys is that the role ordinals
+# this component puts on the wire are admitted against the same list the frame
+# admits them against. The alternative was a table of integers here, which is
+# precisely the second decoder RFC 0083 names as the reversal to watch.
+#
+# It does **not** bring `f_semantic::Tree`, and that absence is the task: an
+# application under section 11's inversion holds no tree. `cargo xtask
+# lint-components` would not notice one; what would is a reader, so it is said
+# here.
+f-semantic.workspace = true
+# The vocabulary itself, for `Role` and `StateSet`. Taken directly rather than
+# re-exported through the row above, because what this component names are roles
+# — `Surface`, `Group`, `Command` — and a crate that reached them through the
+# tree crate would be reading the meaning through the thing that stores it.
+f-interface.workspace = true
+
+# No override: this crate inherits `unsafe_code = "forbid"` from the workspace.
+[lints]
+workspace = true
+
+# The image half, on by default and turned off by the one crate that links this
+# as a library rather than building it into a component file. `f_abi::door::call`
+# and a `#[panic_handler]` are both behind it, for `user/compositor/Cargo.toml`'s
+# reason: a lang item may appear once per linked artefact and the frame has its
+# own. The frame links this crate for `routing`'s offsets and for the script the
+# boot checks the component's report against.
+[features]
+default = ["image"]
+image = []
