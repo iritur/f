@@ -136,6 +136,7 @@ dependencies = [
  "f-hash",
  "f-index",
  "f-ring",
+ "f-text",
  "f-zone",
 ]
 
@@ -345,5 +346,6 @@ dependencies = [
  "f-bench",
  "f-generation",
  "f-hash",
+ "f-interface",
  "f-text",
 ]

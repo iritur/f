@@ -81,14 +81,16 @@
 //! behind it, which is the only form in which a negative is worth asserting.
 
 use f_abi::manifest::Record;
-use f_abi::scene::{Commit, CreateNode, Delta, Entry, NO_NODE, RemoveNode, SetPaint, kind};
+use f_abi::scene::{
+    Commit, CreateNode, Delta, Entry, NO_NODE, PAYLOAD_BYTES, RemoveNode, SetPaint, kind,
+};
 use f_abi::{ABI_VERSION, Cqe, control, error, feature, state};
 use f_compositor::pacing::degraded;
-use f_compositor::routing::{self, at, life, node, reported, stopped};
+use f_compositor::routing::{self, at, bell, life, node, reported, stopped};
 use f_compositor::tree::reported_capabilities;
 use f_env::{Env, SeededEnv};
 use f_interface::backend::{Capability, select};
-use f_ring::{Arena, Collector, Mapping, Poster, Producer, Window};
+use f_ring::{Arena, Bell, Collector, Hardware, Mapping, Path, Poster, Producer, Window};
 
 use crate::mem::{FRAME_SIZE, FrameAllocator};
 use crate::paging;
@@ -337,6 +339,22 @@ pub enum Half {
     /// nothing was spent — no address space, no tree, no board — which is what
     /// separates a refusal from a component that started and gave up.
     Floorless,
+    /// Stand the component up on a core of its own, let it **stop that core**,
+    /// and wake it from this one.
+    ///
+    /// **`E3-B01g`, and the half that observes cross-core delivery for the first
+    /// time.** Everything [`Half::Serve`] does, plus the one difference the task
+    /// is about: the routing page says the frame will ring, so the component's
+    /// idle turn arms the ring's wakeup flag, looks once more, and asks the
+    /// frame to halt its core. The client waits for that to happen — it reads
+    /// the component's own park count off the board — and only then submits, so
+    /// the doorbell it sends lands on a core that is stopped.
+    ///
+    /// The last frame arrives as **one batch**, which is the second clause: four
+    /// entries, one publish, one operation charged to the doorbell and at most
+    /// one ring. A client that charged per entry would report four here and
+    /// would be measuring batching while calling it suppression.
+    Wake,
 }
 
 impl Half {
@@ -348,6 +366,7 @@ impl Half {
             Self::Starved => "starved",
             Self::Mute => "mute",
             Self::Floorless => "floorless",
+            Self::Wake => "wake",
         }
     }
 
@@ -361,7 +380,7 @@ impl Half {
     const fn reported(self) -> u64 {
         match self {
             Self::Floorless => FLOORLESS_CAPABILITIES,
-            Self::Serve | Self::Starved | Self::Mute => BACKEND_CAPABILITIES,
+            Self::Serve | Self::Starved | Self::Mute | Self::Wake => BACKEND_CAPABILITIES,
         }
     }
 }
@@ -431,6 +450,16 @@ pub enum Trouble {
     Refused,
     /// The admission probe could not stake the account it needs.
     Admission,
+    /// The component never parked inside the bound, so there was nothing asleep
+    /// to ring.
+    ///
+    /// Its own variant rather than [`Trouble::Refused`], because it is the one
+    /// failure of this boot that is about the *harness* and not about the
+    /// component: a client that gave up waiting for a park has not observed a
+    /// compositor that refused to sleep, it has observed itself being impatient.
+    /// A verdict that folded the two would report a missing wakeup as a broken
+    /// compositor.
+    NotParked,
 }
 
 impl Trouble {
@@ -451,6 +480,7 @@ impl Trouble {
             Self::BadReport => "the component published a board this build cannot read",
             Self::Refused => "the ring refused a submission the client had room for",
             Self::Admission => "the admission probe could not stake an account",
+            Self::NotParked => "the component never stopped its core, so nothing was asleep",
         }
     }
 }
@@ -565,6 +595,58 @@ pub struct Report {
     /// exactly one half and that half is about the difference.
     /// Unit: bytes.
     pub heap: u64,
+    /// What the doorbell did, on the half that has one.
+    pub bells: Bells,
+}
+
+/// What the doorbell did, from both ends of it.
+///
+/// **Two ends and neither derived from the other, which is the whole design of
+/// this half.** The client's three counts are what *this* core decided: how many
+/// operations it accounted, how many of those it rang for, and what the one
+/// batch cost. The core's four are what the *other* core observed: interrupts
+/// delivered to it, halts it took, halts a doorbell ended, and waits a latched
+/// doorbell spared it. A build in which the ringing and the delivery were the
+/// same counter could not fail this half.
+#[derive(Clone, Copy, Default)]
+pub struct Bells {
+    /// Which path `f_ring::doorbell::Path::select` chose for this channel.
+    ///
+    /// Carried rather than inferred from the counts, and the difference matters:
+    /// a `KernelIpi` channel whose consumer never slept rings nothing, so
+    /// *rings is zero* and *the path is polling* are different statements and a
+    /// log that computed one from the other would say the wrong one on a
+    /// perfectly suppressed run.
+    /// Unit: none — the name of a path.
+    pub path: &'static str,
+    /// Which core the component ran on. Unit: none — a core index.
+    pub worker: usize,
+    /// Which core the client ran on. Unit: none — a core index.
+    ///
+    /// Published because *cross-core* is the exit's word and a boot that printed
+    /// only the target would leave a reader to assume the two differed.
+    pub client: usize,
+    /// Operations the client's doorbell accounted, where a published batch is
+    /// one. Unit: operations.
+    pub operations: u64,
+    /// Doorbells the client sent. Unit: doorbells.
+    pub rings: u64,
+    /// Entries in the one batch this half publishes. Unit: entries.
+    pub batch_entries: u64,
+    /// Operations that batch was charged. Unit: operations.
+    pub batch_operations: u64,
+    /// Doorbells it cost. Unit: doorbells.
+    pub batch_rings: u64,
+    /// Doorbells the worker core was delivered, read off that core after it
+    /// reported finished. Unit: doorbells.
+    pub delivered: u64,
+    /// Times the worker core was really stopped. Unit: halts.
+    pub parks: u64,
+    /// Halts of the worker core that a doorbell ended, as distinct from the
+    /// timer. Unit: halts.
+    pub woken: u64,
+    /// Waits on the worker core that a latched doorbell spared. Unit: waits.
+    pub spared: u64,
 }
 
 /// How many words this component publishes into its own tree.
@@ -620,6 +702,16 @@ pub struct Board {
     pub deadline: u64,
     /// How many frames did not fit before their own deadline. Unit: frames.
     pub late: u64,
+    /// How many times it asked the frame to stop its core. Unit: waits.
+    pub parked: u64,
+    /// How many of those really stopped it, as the frame answered. Unit: waits.
+    ///
+    /// The component's own count, and deliberately not the frame's: the frame
+    /// keeps its own in `crate::doorbell`, read off the worker core after the
+    /// join, and the verdict requires the two to agree. Two counters neither of
+    /// which is derived from the other is the only arrangement in which their
+    /// agreement says anything.
+    pub halted: u64,
 }
 
 impl Board {
@@ -656,6 +748,8 @@ impl Board {
             rung: board.read64(reported::RUNG).ok()?,
             deadline: board.read64(reported::DEADLINE).ok()?,
             late: board.read64(reported::LATE).ok()?,
+            parked: board.read64(reported::PARKED).ok()?,
+            halted: board.read64(reported::HALTED).ok()?,
         })
     }
 }
@@ -671,6 +765,26 @@ const FRAME_ONE: u64 = 1;
 
 /// What the second frame is called. See [`FRAME_ONE`].
 const FRAME_TWO: u64 = 2;
+
+/// What the third frame is called, and the one only the wake half sends.
+/// See [`FRAME_ONE`]. Unit: none — a frame identifier, not a quantity.
+const FRAME_THREE: u64 = 3;
+
+/// How much room the third frame's commit leaves. Unit: nanoseconds.
+///
+/// A whole scanout period, as the first frame's: this frame is not about pacing
+/// and a late one here would move the degradation counters the serving half's
+/// clauses are written against.
+const FRAME_THREE_SLACK_NANOS: u64 = SCANOUT_PERIOD_NANOS;
+
+/// How many deltas the wake half sends as one batch. Unit: deltas.
+///
+/// Four, and it has to be more than one for the clause to say anything and
+/// small enough that four payloads fit in the channel's arena beside each
+/// other — which they do with room to spare: `PAYLOAD_BYTES` is 56 and the
+/// arena of a one-page channel with sixteen entries is over two kibibytes. The
+/// const assertion below is what keeps that true rather than remembered.
+const BATCH_DELTAS: usize = 4;
 
 /// The node whose subtree the second frame removes.
 ///
@@ -758,6 +872,49 @@ fn script() -> [Delta; 8] {
     ]
 }
 
+/// The third frame, published as **one batch**.
+///
+/// **This is the second half of `E3-B01g`'s exit and it is deliberately a
+/// separate array from [`script`].** *A batch still rings at most one doorbell*
+/// is a claim about an accounting rule, and the only way to put teeth in it is
+/// to have a batch whose entry count and operation count are different numbers
+/// that a boot prints side by side. Four entries, one publish, one operation.
+///
+/// **What this is not is `E3-B01j`'s evidence.** That task counts boundary
+/// crossings per UI frame on both sides and `E3-B01`'s exit is the number under
+/// ten; nothing here publishes such a figure and the verdict below asks for no
+/// bound on one. What this batch is for is the doorbell, and the distinction
+/// matters because the two mechanisms move the same counter in opposite
+/// directions — `f_ring::doorbell::Bell::submitted` says so, and a boot that
+/// blurred them would report batching working and call it suppression.
+///
+/// Three creations under node 1, which the second frame left standing, and a
+/// commit. No removal, so [`Expected`]'s seed is not disturbed and the wake
+/// half's census is the serving half's plus three.
+fn batch_script() -> [Delta; BATCH_DELTAS] {
+    let create = |user_data: u64, node: u32, parent: u32, kind: u16| Delta {
+        user_data,
+        class: 0,
+        deadline: 0,
+        payload_offset: 0,
+        flags: 0,
+        body: Entry::CreateNode(CreateNode { node, parent, before: NO_NODE, kind }),
+    };
+    [
+        create(9, 5, 1, kind::LAYER),
+        create(10, 6, 5, kind::TRANSFORM),
+        create(11, 7, 5, kind::DRAW),
+        Delta {
+            user_data: 12,
+            class: 0,
+            deadline: FRAME_THREE_SLACK_NANOS,
+            payload_offset: 0,
+            flags: 0,
+            body: Entry::Commit(Commit { frame_token: FRAME_THREE }),
+        },
+    ]
+}
+
 /// What the script implies, counted from the script rather than written down
 /// beside it.
 ///
@@ -784,21 +941,35 @@ impl Expected {
     /// opcode stops this build and asks what a boot should expect of it.
     fn of(script: &[Delta]) -> Self {
         let mut expected = Self { frames: 0, edits: 0, created: 0, removed: REMOVED_NODES };
+        expected.count(script);
+        expected
+    }
+
+    /// Add one run of deltas to what is expected.
+    ///
+    /// Split out of [`Expected::of`] for the wake half, which submits two runs
+    /// — the script one entry at a time and the third frame as a batch — and
+    /// must not seed [`REMOVED_NODES`] twice. Calling `of` on each and adding
+    /// the two would do exactly that, and the boot would expect four removals
+    /// where the script asks for two.
+    ///
+    /// The `match` has one arm per opcode and no wildcard, so a seventh scene
+    /// opcode stops this build and asks what a boot should expect of it.
+    fn count(&mut self, script: &[Delta]) {
         for delta in script {
             match delta.body {
-                Entry::Commit(_) => expected.frames += 1,
+                Entry::Commit(_) => self.frames += 1,
                 Entry::CreateNode(_) => {
-                    expected.created += 1;
-                    expected.edits += 1;
+                    self.created += 1;
+                    self.edits += 1;
                 }
                 Entry::SetTransform(_)
                 | Entry::SetPath(_)
                 | Entry::SetPaint(_)
                 | Entry::SetEffect(_)
-                | Entry::RemoveNode(_) => expected.edits += 1,
+                | Entry::RemoveNode(_) => self.edits += 1,
             }
         }
-        expected
     }
 
     /// How many nodes the graph should hold at the end. Unit: nodes.
@@ -819,7 +990,141 @@ impl Report {
             Half::Starved => self.starved_verdict(),
             Half::Serve => self.serve_verdict(),
             Half::Floorless => self.floorless_verdict(),
+            Half::Wake => self.wake_verdict(),
         }
+    }
+
+    /// The half that sleeps, `E3-B01g`.
+    ///
+    /// **Two exits' worth of clauses and the order is the argument.** The scene
+    /// clauses come first, because a doorbell that woke a component which then
+    /// applied the wrong frame is a doorbell that proved nothing; then the two
+    /// halves of the exit, each with the control that stops it passing for the
+    /// wrong reason.
+    fn wake_verdict(&self) -> Result<(), &'static str> {
+        let mut expected = Expected::of(&script());
+        expected.count(&batch_script());
+
+        if self.board.outcome != stopped::TOLD {
+            return Err(
+                "the component did not end on the frame's stop notice: its outcome word says it \
+                 fell out of its loop for a reason of its own — which on this half includes \
+                 having stopped its core and never been rung",
+            );
+        }
+        if self.completed != self.submitted || self.refused != 0 {
+            return Err(
+                "the client did not get one clean completion per entry it submitted, so what \
+                 the component published is about a different run from the one that was asked \
+                 for",
+            );
+        }
+        if self.board.drained != self.submitted {
+            return Err(
+                "the component took a different number of entries off the ring than the client \
+                 put on it",
+            );
+        }
+        if self.board.refused != 0 || self.board.staged != 0 {
+            return Err(
+                "the component refused an entry, or ended with a frame still open: every delta \
+                 this client sent belongs to a frame that closed",
+            );
+        }
+        if self.board.frames != expected.frames
+            || self.board.edits != expected.edits
+            || self.board.created != expected.created
+            || self.board.removed != expected.removed
+            || self.board.live != expected.live()
+        {
+            return Err(
+                "the component's account of what it applied is not what the client's script and \
+                 its batch asked for",
+            );
+        }
+        if self.board.named != FRAME_THREE {
+            return Err(
+                "the last frame the component closed is not the batched one, so the batch \
+                 either did not arrive or did not close",
+            );
+        }
+
+        // --- cross-core delivery, `E3-B01g`'s first clause -------------------
+        //
+        // Four clauses and every one of them is a control for the next. Two
+        // cores, or the word *cross-core* means nothing. A doorbell delivered to
+        // the other one, or nothing was sent. A halt on that core, or there was
+        // nothing asleep to wake. And a halt that a **doorbell** ended — which
+        // is the one a timer would otherwise pass, because a halted core is
+        // restarted by any unmasked interrupt and every core running a process
+        // has a timer armed.
+        if self.bells.worker == self.bells.client {
+            return Err(
+                "the component ran on the core that rang it, so nothing here is cross-core: \
+                 this boot needs a second core and did not get one",
+            );
+        }
+        if self.bells.delivered == 0 {
+            return Err(
+                "no doorbell was delivered to the core the component ran on, so the client's \
+                 commits reached it by polling and the interrupt path was never taken",
+            );
+        }
+        if self.bells.parks == 0 {
+            return Err(
+                "the core the component ran on never halted, so whatever the doorbell reached \
+                 was not a parked compositor",
+            );
+        }
+        if self.bells.woken == 0 {
+            return Err(
+                "every halt of the component's core ended on something other than a doorbell \
+                 — the timer is armed on that core and will end a halt on its own, which is \
+                 the reason this count is separate from the halts",
+            );
+        }
+        // The two ends of the same event, counted independently: the component
+        // counts what the frame *answered* it, and the frame counts what it
+        // *did*. A build where one number was computed from the other could not
+        // fail this.
+        if self.board.halted != self.bells.parks {
+            return Err(
+                "the component and the frame disagree about how many times its core was really \
+                 stopped, which is one of the two counting the other's answer",
+            );
+        }
+        if self.board.parked != self.bells.parks.saturating_add(self.bells.spared) {
+            return Err(
+                "the waits the component asked for are not the halts plus the waits a latched \
+                 doorbell spared, so a wait went somewhere this boot cannot account for",
+            );
+        }
+        if self.bells.rings == 0 || self.bells.rings > self.bells.operations {
+            return Err(
+                "the client rang no doorbell at all, or rang more often than it accounted an \
+                 operation — either way the suppression figure beside it is not a ratio",
+            );
+        }
+
+        // --- a batch is one operation and at most one doorbell ---------------
+        //
+        // `E3-B01g`'s second clause, and the whole of what it has teeth against
+        // is a client that charged the doorbell per entry. `BATCH_DELTAS` is
+        // four; a build that accounted per entry would report four operations
+        // and four rings for one publish, and would then report a *falling*
+        // doorbells-per-operation as batch size rose and call that suppression.
+        if self.bells.batch_entries != BATCH_DELTAS as u64 {
+            return Err("the batch this half publishes is not the size the clause is about");
+        }
+        if self.bells.batch_operations != 1 {
+            return Err("a published batch was charged more than one operation, so \
+                 doorbells-per-operation on this channel counts entries and would fall as batch \
+                 size rose — which is batching being reported as suppression");
+        }
+        if self.bells.batch_rings > 1 {
+            return Err("one published batch rang more than one doorbell");
+        }
+        Ok(())
     }
 
     /// The half that is refused a compositor.
@@ -1179,6 +1484,9 @@ pub fn report_lines(report: &Report) {
             Half::Floorless =>
                 "a machine below the bottom of RFC 0080's ladder, which must be refused a \
                  compositor before a page is spent",
+            Half::Wake =>
+                "the component stops its own core between frames and the client on another \
+                 core rings it awake",
         }
     );
     match report.half {
@@ -1208,7 +1516,7 @@ pub fn report_lines(report: &Report) {
                 error::pack(error::ADMISSION, error::admission::NO_STATE_TREE),
             );
         }
-        Half::Serve | Half::Starved => {
+        Half::Serve | Half::Starved | Half::Wake => {
             crate::kprintln!(
                 "  compositor    {} entr(y/ies) submitted, {} answered, {} refused, {} drained \
                  by the component",
@@ -1270,6 +1578,38 @@ pub fn report_lines(report: &Report) {
                 report.image,
                 report.heap,
             );
+            if report.half == Half::Wake {
+                crate::kprintln!(
+                    "  compositor    doorbell {}: client core {} rang {} of {} operation(s); \
+                     core {} was delivered {}",
+                    report.bells.path,
+                    report.bells.client,
+                    report.bells.rings,
+                    report.bells.operations,
+                    report.bells.worker,
+                    report.bells.delivered,
+                );
+                crate::kprintln!(
+                    "  compositor    core {} halted {} time(s), {} of them ended by a doorbell, \
+                     {} wait(s) spared by a latched one; the component asked to stop {} time(s) \
+                     and was told it halted {}",
+                    report.bells.worker,
+                    report.bells.parks,
+                    report.bells.woken,
+                    report.bells.spared,
+                    report.board.parked,
+                    report.board.halted,
+                );
+                crate::kprintln!(
+                    "  compositor    one batch: {} entr(y/ies), {} operation(s), {} doorbell(s) \
+                     — a client charging per entry would say {} and {}",
+                    report.bells.batch_entries,
+                    report.bells.batch_operations,
+                    report.bells.batch_rings,
+                    BATCH_DELTAS,
+                    BATCH_DELTAS,
+                );
+            }
         }
     }
 }
@@ -1418,6 +1758,8 @@ unsafe fn mute(
         reported: 0,
         image: image.len() as u64,
         heap: 0,
+        // No core, no ring, no doorbell: this half probes a record.
+        bells: Bells::default(),
     })
 }
 
@@ -1479,6 +1821,8 @@ unsafe fn serve(
             reported: 0,
             image: image.len() as u64,
             heap: 0,
+            // Nothing was stood up, so nothing could be rung.
+            bells: Bells::default(),
         });
     }
 
@@ -1486,7 +1830,7 @@ unsafe fn serve(
     // the one number in this plan the component is asked to disbelieve.
     let described = match half {
         Half::Starved => STARVED_HEAP_BYTES,
-        Half::Serve | Half::Mute | Half::Floorless => routing::HEAP_BYTES,
+        Half::Serve | Half::Mute | Half::Floorless | Half::Wake => routing::HEAP_BYTES,
     };
     let bytes = u32::try_from(FRAME_SIZE).map_err(|_| Trouble::Channel(0))?;
 
@@ -1597,6 +1941,19 @@ unsafe fn serve(
         // `admit_backend` was given above — one function, so a boot cannot
         // admit one machine and describe another.
         (at::BACKEND_CAPABILITIES, reported),
+        // **Whether this frame will ring, which is a statement about the frame
+        // and not a mode of the component.** On every half but one it says
+        // *nobody rings*, which is what every boot before `E3-B01g` did and is
+        // what keeps those halves' numbers comparable with the runs that
+        // produced them. On the wake half it says the frame rings, and the
+        // component may then stop its core.
+        //
+        // A component that believed this on a frame that did not ring would
+        // hang, which is why it is written here rather than assumed at ring 3:
+        // whether an interrupt reaches that core is a fact about a vector, an
+        // interrupt controller and a second core, and all three are on this side
+        // of the boundary.
+        (at::DOORBELL, if half == Half::Wake { bell::RING } else { bell::POLL }),
     ] {
         board.write64(offset, value).map_err(Trouble::Channel)?;
     }
@@ -1611,9 +1968,28 @@ unsafe fn serve(
     unsafe { crate::smp::start_on(cpu) }.map_err(Trouble::Scheduled)?;
 
     let reaper = Collector::new(client_end.completions()).ok_or(Trouble::Channel(0))?;
-    let producer = Producer::new(client_end.channel()).ok_or(Trouble::Channel(0))?;
+    let mut producer = Producer::new(client_end.channel()).ok_or(Trouble::Channel(0))?;
     let notices = Poster::new(control.completions()).ok_or(Trouble::Channel(0))?;
     let arena = client_end.arena();
+
+    // --- the doorbell -------------------------------------------------------
+    //
+    // **The path is selected the way `f_ring::doorbell::Path` says and not by
+    // this half's name.** A feature bit is a statement about the protocol and
+    // the hardware is a statement about the silicon; conflating them is how a
+    // channel gets negotiated into an instruction that faults. What this half
+    // varies is the *hardware* half — whether one core may interrupt another —
+    // because that is the honest description of the difference between a boot
+    // that rings and one that does not: the polling halves are the same code
+    // over a machine that cannot ring, which is `Path::Polling`'s own sentence.
+    //
+    // The ringer carries the core, which is why `f_ring` takes an implementor
+    // rather than a function: that crate has no idea what an APIC identifier is
+    // and should not acquire one.
+    let hardware = Hardware { user_interrupts: false, cross_core_interrupts: half == Half::Wake };
+    let path = Path::select(client_end.negotiated(), hardware);
+    let mut doorbell = Bell::new(path, hardware, crate::doorbell::Ipi::to(cpu))
+        .map_err(|_| Trouble::Channel(0))?;
 
     // The client, on the half that has one. A starved component ends before it
     // adopts anything, so a client that submitted would be waiting for a
@@ -1623,8 +1999,24 @@ unsafe fn serve(
     // `PACING_SEED` is the whole of what decides the readings below, which is
     // what lets a pacing estimate be printed in a boot log at all.
     let mut env = SeededEnv::new(PACING_SEED, 0);
+    // Named `ends` rather than `wire`, which in this function is already the
+    // page the channel lives in. Two things called the same thing one scope
+    // apart is how a frame gets freed instead of a struct.
+    let ends = Wire { reaper: &reaper, arena: &arena, board: &board };
+    let mut batch_seen = Batched::default();
     let driven = match half {
-        Half::Serve | Half::Mute => drive(&producer, &reaper, &arena, &board, &mut env, tsc_khz),
+        Half::Serve | Half::Mute => drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, false),
+        Half::Wake => {
+            // The script first, one entry at a time and each one waited for, so
+            // that every submission lands on a core this client has watched stop.
+            // Then the third frame, whole, as the one batch the second clause is
+            // about.
+            drive(&producer, ends, &mut env, tsc_khz, &mut doorbell, true).and_then(|mut seen| {
+                batch_seen =
+                    drive_batch(&mut producer, ends, &mut env, tsc_khz, &mut doorbell, &mut seen)?;
+                Ok(seen)
+            })
+        }
         Half::Starved | Half::Floorless => {
             Ok(Seen { submitted: 0, completed: 0, refused: 0, deadline: 0, last_tick: 0 })
         }
@@ -1633,10 +2025,53 @@ unsafe fn serve(
     // Told to stop whatever happened above, because a component left serving a
     // client that has gone is a core this boot never gets back.
     let told = notices.post(control::entry(control::notice::STOP, 0, 0, 0));
+    // **And rung for, on the half where the component may be asleep.** A stop
+    // notice goes on the *control* ring, which has no wakeup flag of its own and
+    // needs none: a doorbell says only *stop halting*, and which ring had
+    // something on it is a question the component answers by looking. A frame
+    // that posted the notice and did not ring would leave a parked component
+    // holding a core nobody ever gets back — which is the one hang this half can
+    // produce, and it would be reported as `Trouble::Overdue` three hundred
+    // lines further down with nothing naming the cause.
+    //
+    // Unconditionally rather than on a `wanted`: there is nothing to suppress,
+    // because this is the last thing the client says and the component is
+    // required to have ended before the join returns.
+    if half == Half::Wake {
+        doorbell.submitted(true);
+    }
     // SAFETY: `start_on` was called for this core and nothing else has joined it.
     // The closure serves nothing: a compositor reaches no device, so there is
     // nothing it can ask the frame for while it runs.
     let joined = unsafe { crate::smp::join_serviced(cpu, tsc_khz, EXIT_MICROS, &mut || {}) };
+
+    // --- what the other core saw, read once it has stopped running ----------
+    //
+    // **After the join and not before it, and that is what makes reading another
+    // core's counters legal rather than lucky.** `crate::doorbell::delivered_at`
+    // is the long form: the mailbox word the join waits on is stored with
+    // `Release` by the worker and loaded with `Acquire` here, so everything that
+    // core wrote before it reported finished — these four counts included — is
+    // visible to this one. No new cross-core word was needed; the rendezvous
+    // RFC 0016 already pays for is the rendezvous this reads behind.
+    let bells = Bells {
+        path: match doorbell.path() {
+            Path::Polling => "Polling",
+            Path::KernelIpi => "KernelIpi",
+            Path::UserInterrupt => "UserInterrupt",
+        },
+        worker: cpu,
+        client: crate::arch::x86_64::current_cpu(),
+        operations: doorbell.operations(),
+        rings: doorbell.rings(),
+        batch_entries: batch_seen.entries,
+        batch_operations: batch_seen.operations,
+        batch_rings: batch_seen.rings,
+        delivered: crate::doorbell::delivered_at(cpu),
+        parks: crate::doorbell::parks_at(cpu),
+        woken: crate::doorbell::woken_at(cpu),
+        spared: crate::doorbell::spared_at(cpu),
+    };
 
     // What the page carries now, which is not what this function wrote into it:
     // `drive` promotes the report after the first frame closes. Read before the
@@ -1702,6 +2137,7 @@ unsafe fn serve(
         reported: page_reported,
         image: image.len() as u64,
         heap: described,
+        bells,
     })
 }
 
@@ -1746,14 +2182,27 @@ struct Seen {
 /// completion does not arrive inside the bound.
 fn drive(
     producer: &Producer<'_>,
-    reaper: &Collector<'_>,
-    arena: &Arena<'_>,
-    board: &Window,
+    wire: Wire<'_, '_>,
     env: &mut SeededEnv,
     tsc_khz: u64,
+    doorbell: &mut Bell<crate::doorbell::Ipi>,
+    waited: bool,
 ) -> Result<Seen, Trouble> {
+    let Wire { reaper, arena, board } = wire;
     let mut seen = Seen { submitted: 0, completed: 0, refused: 0, deadline: 0, last_tick: 0 };
+    let mut parked = 0;
     for mut delta in script() {
+        // **On the half that sleeps, wait for it to be asleep.** Without this
+        // the boot would still be correct — the ring's arm-look-sleep and the
+        // frame's latch between them mean nothing is ever lost — and it would
+        // be evidence of nothing in particular, because *a client's commit woke
+        // a parked compositor* would be a likely interleaving rather than a
+        // thing that happened. [`waited_for_park`] says what it costs and what
+        // it does not buy.
+        if waited {
+            parked = waited_for_park(board, tsc_khz, parked)?;
+        }
+
         // --- the clock, written before the entry it belongs to --------------
         //
         // **The order is the whole of why the component's measurements mean
@@ -1793,10 +2242,17 @@ fn drive(
         if !arena.copy_in(0, &payload) {
             return Err(Trouble::Refused);
         }
-        if producer.submit(entry).is_err() {
-            return Err(Trouble::Refused);
-        }
+        let wanted = match producer.submit(entry) {
+            Ok(wanted) => wanted,
+            Err(_) => return Err(Trouble::Refused),
+        };
         seen.submitted += 1;
+        // One entry is one operation, and it rings only if the component said
+        // it was about to sleep — which on the polling halves it never does,
+        // because it was told nobody rings and never arms the flag. So the same
+        // call on every half accounts the same operations and sends no
+        // interrupt where none was asked for.
+        doorbell.submitted(wanted);
 
         // Waited for, and bounded rather than spun on: a run that reaches the
         // bound has a component that is not making progress, which is a
@@ -1851,6 +2307,181 @@ fn drive(
         }
     }
     Ok(seen)
+}
+
+/// The client's end of the channel, and the page beside it.
+///
+/// Three references that travel together and always will — a completion ring,
+/// the arena a payload is staged in, and the routing page the component reads
+/// its clock off. `Scheduling` one file up made the same move for the same
+/// reason: threading them separately is what put two functions here past
+/// clippy's argument bound, and a bound that is routed around with an `allow`
+/// is a bound nobody is keeping.
+///
+/// The producer is **not** in it, and that is not tidiness: [`drive`] holds it
+/// shared and [`drive_batch`] holds it exclusively, because `Producer::batch`
+/// takes `&mut self` so that a submission cannot interleave with a batch that is
+/// still being filled. Putting it here would make that a runtime rule again.
+#[derive(Clone, Copy)]
+struct Wire<'a, 'm> {
+    /// Where completions are reaped.
+    reaper: &'a Collector<'m>,
+    /// Where a payload is staged before its entry is published.
+    arena: &'a Arena<'m>,
+    /// The page the client writes its clock into and reads the component's
+    /// park count out of.
+    board: &'a Window,
+}
+
+/// What one published batch cost.
+///
+/// Three numbers because the clause is a comparison between them: entries is
+/// what went on the ring, operations is what the doorbell was charged, and rings
+/// is what it sent. A build that charged per entry moves the first two together
+/// and that is the failure the clause exists to catch.
+#[derive(Clone, Copy, Default)]
+struct Batched {
+    /// Entries staged and published. Unit: entries.
+    entries: u64,
+    /// Operations the doorbell accounted for them. Unit: operations.
+    operations: u64,
+    /// Doorbells it sent. Unit: doorbells.
+    rings: u64,
+}
+
+/// Wait until the component's own park count has moved past `was`.
+///
+/// **A timing observation, and nothing rests on it.** The word is written
+/// volatilely by the component on one core and read volatilely here on another,
+/// exactly as `at::TICK_NANOS` already is in the other direction; a reading that
+/// was stale would make this client ring early, and the ring's arm-look-sleep
+/// and the frame's wakeup latch would absorb that without losing an entry. What
+/// it buys is that the boot's own sentence is about a run: the submission that
+/// follows lands on a core this client has watched stop.
+///
+/// # Errors
+///
+/// [`Trouble::NotParked`] where the count did not move inside the bound, which
+/// is its own variant because it is a failure of this harness's patience and not
+/// of the component — the two would otherwise be one red line.
+fn waited_for_park(board: &Window, tsc_khz: u64, was: u64) -> Result<u64, Trouble> {
+    let deadline = crate::smp::deadline_after(tsc_khz, EXIT_MICROS);
+    loop {
+        let now = board.read64(reported::PARKED).unwrap_or(was);
+        if now > was {
+            return Ok(now);
+        }
+        if crate::smp::past(deadline) {
+            return Err(Trouble::NotParked);
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Publish the third frame as one batch, and account it as one operation.
+///
+/// **`E3-B01g`'s second clause, and the reason the payloads go to different
+/// offsets.** [`drive`] writes every payload at offset zero because it waits for
+/// a completion before the next entry, so the bytes are read before they are
+/// overwritten. A batch cannot do that: four entries become visible with one
+/// store and the component may read any of them in any order, so each needs its
+/// own bytes. The stride is `PAYLOAD_BYTES`, which is the stride
+/// `abi/src/scene.rs` fixes for exactly this reason.
+///
+/// # Errors
+///
+/// [`Trouble::Refused`] where the ring will not take the batch or a completion
+/// does not arrive inside the bound, and [`Trouble::NotParked`] where the
+/// component never stopped its core.
+fn drive_batch(
+    producer: &mut Producer<'_>,
+    wire: Wire<'_, '_>,
+    env: &mut SeededEnv,
+    tsc_khz: u64,
+    doorbell: &mut Bell<crate::doorbell::Ipi>,
+    seen: &mut Seen,
+) -> Result<Batched, Trouble> {
+    let Wire { reaper, arena, board } = wire;
+    // Asleep first, as [`drive`]'s own submissions are, and for the same reason.
+    // The count is read fresh rather than carried in, because every entry above
+    // moved it and what this needs is one more park after the last of them.
+    let was = board.read64(reported::PARKED).unwrap_or(0);
+    waited_for_park(board, tsc_khz, was)?;
+
+    // One reading for the whole batch, written before any of it goes on the
+    // ring. Four entries published by one store are one moment, and giving them
+    // four readings would be this client inventing an ordering the ring does not
+    // have.
+    let step_nanos = 1 + env.next_u64() % STEP_SPREAD_NANOS;
+    env.advance(step_nanos);
+    let now = env.now().as_nanos();
+    if board.write64(at::TICK_NANOS, now).is_err() {
+        return Err(Trouble::Refused);
+    }
+    seen.last_tick = now;
+
+    let mut expected = [0u64; BATCH_DELTAS];
+    let mut batch = producer.batch();
+    for (ix, mut delta) in batch_script().into_iter().enumerate() {
+        // Its own bytes, at its own offset, and the entry is told where they
+        // are. A batch whose entries all named offset zero would decode four
+        // times into whichever payload was written last.
+        let at_offset = ix * PAYLOAD_BYTES;
+        delta.payload_offset = at_offset as u32;
+        if matches!(delta.body, Entry::Commit(_)) {
+            delta.deadline = now.saturating_add(delta.deadline);
+            seen.deadline = delta.deadline;
+        }
+        let (entry, payload) = delta.encode();
+        if !arena.copy_in(at_offset, &payload) {
+            return Err(Trouble::Refused);
+        }
+        expected[ix] = entry.user_data;
+        if batch.push(entry).is_err() {
+            return Err(Trouble::Refused);
+        }
+    }
+
+    // **One store, one operation, at most one doorbell.** Everything above this
+    // line is invisible to the component; everything after it has already
+    // happened as far as the component is concerned. That is what makes the
+    // accounting below a rule rather than a convention.
+    let before = doorbell.operations();
+    let rang = doorbell.rings();
+    let wanted = batch.publish().map_err(|_| Trouble::Refused)?;
+    doorbell.submitted(wanted);
+    let batched = Batched {
+        entries: BATCH_DELTAS as u64,
+        operations: doorbell.operations() - before,
+        rings: doorbell.rings() - rang,
+    };
+    seen.submitted += BATCH_DELTAS as u64;
+
+    // Reaped in whatever order they come back, matched by the word each entry
+    // carried. A client that assumed the order would be asserting something the
+    // ring does not promise, and would pass on a component that answered the
+    // batch backwards.
+    let deadline = crate::smp::deadline_after(tsc_khz, EXIT_MICROS);
+    let mut taken = 0;
+    while taken < BATCH_DELTAS {
+        match reaper.take() {
+            Ok(Some(answer)) => {
+                seen.completed += 1;
+                taken += 1;
+                if answer.result < 0 || !expected.contains(&answer.user_data) {
+                    seen.refused += 1;
+                }
+            }
+            Ok(None) => {
+                if crate::smp::past(deadline) {
+                    return Err(Trouble::Refused);
+                }
+                core::hint::spin_loop();
+            }
+            Err(_) => return Err(Trouble::Refused),
+        }
+    }
+    Ok(batched)
 }
 
 /// Is this completion anything other than *the entry it names was accepted*?

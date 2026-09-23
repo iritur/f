@@ -619,7 +619,7 @@ reserves, loaded or not. The cost is linear in the constant, and exactly so —
 these are arrays indexed by it plus `linker.ld`'s `AP_CORES * AP_STACK_STRIDE`:
 
 ```
-resident(N) = 1 352 094 + 64 296 × N bytes        62.8 KiB per core
+resident(N) = 1 909 150 + 64 328 × N bytes        62.8 KiB per core
 ```
 
 | MAX_CPUS | resident | AP spin on a 64-thread machine |
@@ -644,7 +644,7 @@ here, from the Threadripper experiment, until 2026-09-17 — by which time `.tex
 had tripled and the figure was wrong by more than fourteen cores' worth of the
 per-core term. The slope is the part that is about `MAX_CPUS`, and it is the
 only part that is gated: `cargo xtask cores` links the kernel at two ceilings
-and requires a core to cost 64 296 bytes. Nothing checks the intercept, because
+and requires a core to cost 64 328 bytes — re-measured on 2026-09-23, when `E3-B01g` gave every core four doorbell counters and a wakeup latch. Nothing checks the intercept, because
 it moves in every commit that changes a line and a check on it would fire in all
 of them — so re-read it before quoting it. The recipe is in
 `kernel/src/percpu.rs` beside the constant, and a green `cargo xtask cores`

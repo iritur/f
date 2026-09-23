@@ -25,7 +25,7 @@
 # deadline that frame carried, what a frame costs here, and what was given up to
 # fit.
 
-schema = 3
+schema = 4
 name   = "compositor"
 image  = "user/compositor"
 

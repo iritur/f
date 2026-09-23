@@ -17,7 +17,7 @@
 # on an exit; in the soft class, with two mebibytes for everything it is made
 # of.
 
-schema = 3
+schema = 4
 name   = "virtio-net"
 image  = "user/virtio-net"
 

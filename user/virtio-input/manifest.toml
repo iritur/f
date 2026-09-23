@@ -18,7 +18,7 @@
 # This is a virtio device under an emulator and `user/virtio-input/src/clock.rs`
 # is where what that costs is written down.
 
-schema = 3
+schema = 4
 name   = "virtio-input"
 image  = "user/virtio-input"
 

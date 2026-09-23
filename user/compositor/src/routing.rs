@@ -239,6 +239,48 @@ pub mod at {
     /// changed could not tell that apart from a component that recomputes.
     /// Unit: none — a bitmask of capability indices.
     pub const BACKEND_CAPABILITIES: u32 = 112;
+
+    /// Whether this build's frame will ring a doorbell for this component.
+    ///
+    /// One of the [`bell`](super::bell) constants. It is the frame's statement
+    /// about *itself*, and the component believes it without checking, because
+    /// there is nothing to check it against: whether a doorbell reaches this
+    /// core is a fact about a vector, an interrupt controller and another core,
+    /// and every one of those is on the far side of the boundary.
+    ///
+    /// **A component that stopped its core on a frame that will not ring would
+    /// hang**, and that is the whole reason this word exists rather than the
+    /// component simply always parking. `f_ring::doorbell::Path` is the frame's
+    /// own name for the same decision — polling, a kernel interrupt, a user
+    /// interrupt — selected at channel creation from what was negotiated *and*
+    /// what the hardware reports. This is that decision, narrowed to the one bit
+    /// a component can act on: does the frame ring, or must this component look
+    /// for itself.
+    ///
+    /// Zero is [`bell::POLL`](super::bell::POLL), so a frame that never wrote
+    /// this word gets the behaviour every boot before `E3-B01g` had. That is the
+    /// safe default in the only sense that matters here: a component that spins
+    /// when it could have slept wastes a core, and one that sleeps when nobody
+    /// will ring never comes back.
+    /// Unit: none — a [`bell`](super::bell) ordinal.
+    pub const DOORBELL: u32 = 120;
+}
+
+/// What the frame says it will do when this component has nothing to do.
+///
+/// Two values and deliberately not a boolean, for the reason
+/// `f_ring::doorbell::Path` has three: the question *how is this component
+/// woken* has more answers than *is it woken*, and a user-level interrupt is
+/// the answer this tree is holding a row of technical debt for. A boolean here
+/// would have to be widened the day that row is paid, and a word that names its
+/// answers does not.
+pub mod bell {
+    /// Nobody rings. The component looks for itself, forever, and this is what
+    /// every boot before `E3-B01g` did.
+    pub const POLL: u64 = 0;
+    /// The frame rings a kernel inter-processor interrupt, so the component may
+    /// stop its core with `f_abi::door::WAIT` and be restarted by one.
+    pub const RING: u64 = 1;
 }
 
 /// The state nodes this component's manifest declares, by the id it declares
@@ -444,6 +486,33 @@ pub mod reported {
     /// two rather than two out of two.
     /// Unit: frames — UI frames.
     pub const LATE: u32 = super::REPORT + 160;
+
+    // --- the doorbell, `E3-B01g` --------------------------------------------
+    //
+    // **Written as they happen and not at the end**, which every other word in
+    // this module is. The frame reads them while the component is still running
+    // — it waits for [`PARKED`] to move before it submits the entry whose
+    // doorbell is supposed to wake this component, so that *a client's commit
+    // woke a parked compositor* is a sentence about a run rather than about a
+    // likely interleaving.
+    //
+    // **Nothing rests on that read.** It is a timing observation and a racy one:
+    // the word is written volatilely on one core and read volatilely on another,
+    // exactly as `at::TICK_NANOS` already is in the other direction, and a frame
+    // that read a stale value would ring early or late and the protocol would
+    // absorb it either way. What makes the doorbell correct is the ring's own
+    // arm-look-sleep and the frame's wakeup latch, neither of which consults
+    // this.
+
+    /// Times this component asked the frame to stop its core. Unit: waits.
+    pub const PARKED: u32 = super::REPORT + 168;
+    /// How many of those really stopped it, as the frame answered.
+    ///
+    /// Below [`PARKED`] by however many times a doorbell had already arrived
+    /// between this component deciding to sleep and the frame acting on it —
+    /// which is the race the frame latches, and a count of it is the only
+    /// evidence that the latch is doing anything. Unit: waits.
+    pub const HALTED: u32 = super::REPORT + 176;
 }
 
 /// Why the component's loop ended.

@@ -3112,6 +3112,8 @@ fn compositor_boot(
         compositor::Half::Mute
     } else if boot.has_parameter(b"compositor=floorless") {
         compositor::Half::Floorless
+    } else if boot.has_parameter(b"compositor=wake") {
+        compositor::Half::Wake
     } else {
         return None;
     };
@@ -3132,7 +3134,10 @@ fn compositor_boot(
         // `floorless` is refused before a page is spent, so both can say what
         // they came to say on a machine with one core.
         compositor::Half::Mute | compositor::Half::Floorless => Some(me),
-        compositor::Half::Serve | compositor::Half::Starved => None,
+        // And the wake half least of all: its whole subject is a doorbell
+        // crossing from one core to another, so a machine with one core has
+        // nothing to prove rather than a smaller thing to prove.
+        compositor::Half::Serve | compositor::Half::Starved | compositor::Half::Wake => None,
     }) else {
         kprintln!(
             "FAIL: the compositor boot needs a second core — the component holds the graph at              ring 3 and the frame is its client"

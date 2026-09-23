@@ -383,6 +383,49 @@ impl Server {
         mapping.arena().copy_out(offset, out)
     }
 
+    /// Say that this end is about to stop looking, so its peer must ring.
+    ///
+    /// **The half of the suppression protocol that lives on the sleeping side**,
+    /// and the reason it is here rather than only on
+    /// [`Consumer`](crate::Consumer): a component holds an [`Adopted`], which
+    /// borrows nothing and binds the mapping for the length of a call, so it has
+    /// no `Consumer` to reach. Until `E3-B01g` nothing at ring 3 ever slept, so
+    /// nothing needed one.
+    ///
+    /// The order a caller owes is the protocol's and is not checked here: arm,
+    /// then **look again**, and sleep only if the second look found nothing. A
+    /// caller that armed and slept without looking is the lost wakeup RFC 0020
+    /// describes from the producer's side -- the entry it would have found
+    /// arrived between its last look and its decision, and the producer had
+    /// already read an unarmed flag and rung nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`RingError::Corrupt`] for a peer cursor that is impossible, which is the
+    /// same refusal every other method here makes for the same reason.
+    pub fn arm_wakeup(&self) -> Result<(), RingError> {
+        let mapping = self.0.bind();
+        let consumer = Consumer::new(mapping.channel()).ok_or(RingError::Corrupt)?;
+        consumer.arm_wakeup();
+        Ok(())
+    }
+
+    /// Say that this end is looking again, so its peer need not ring.
+    ///
+    /// Called on the way out of a sleep and on every turn that found work, which
+    /// is what makes doorbells-per-operation fall to zero under load: a consumer
+    /// that never disarmed would be rung for every entry it was already draining.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::arm_wakeup`].
+    pub fn disarm_wakeup(&self) -> Result<(), RingError> {
+        let mapping = self.0.bind();
+        let consumer = Consumer::new(mapping.channel()).ok_or(RingError::Corrupt)?;
+        consumer.disarm_wakeup();
+        Ok(())
+    }
+
     /// Answer one submission.
     ///
     /// # Errors

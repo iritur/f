@@ -202,6 +202,7 @@ jobs:
       - run: cargo xtask lint-registries
       - run: cargo xtask lint-owed
       - run: cargo xtask lint-decomposition
+      - run: cargo xtask lint-token-pair
       - run: cargo xtask lint-reproduce
       - run: cargo xtask lint-remap
       - run: cargo xtask lint-testing-status

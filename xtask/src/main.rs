@@ -963,6 +963,7 @@ fn main() -> ExitCode {
         "lint-registries" => lint_registries(),
         "lint-owed" => lint_owed(),
         "lint-decomposition" => lint_decomposition(),
+        "lint-token-pair" => lint_token_pair(),
         "lint-arch-tests" => lint_arch_tests(),
         "lint-snapshot" => lint_snapshot(),
         "lint-reproduce" => lint_reproduce(),
@@ -1239,6 +1240,11 @@ cargo xtask <command>
                      epoch whose `E<n>-00` is ticked. Five ids extending its own
                      id is what a decomposition is; an epoch still waiting to be
                      decomposed is held out, because that wait is the task
+  lint-token-pair    No type outside interface/src/token.rs holds an `Rgb`
+                     without the `Token` pair it was checked against, and
+                     nothing outside it computes readability. RFC 0079's last
+                     reversal condition, and the one it says to watch first: it
+                     does not look like a reversal, it looks like a cache
   lint-snapshot      claims/snapshot.json holds what the registry holds
   lint-arch-tests    No test is compiled on one architecture and not the other
                      without a reason and a reversal recorded beside it
@@ -6890,7 +6896,7 @@ const MUTATIONS: &[(&str, &str, &str, &str)] = &[
 /// This number and the two documents that publish it move together or not at
 /// all, and the failure below names those documents, because the person who
 /// sees it will not have read this.
-const CORE_COST_BYTES: u64 = 64_296;
+const CORE_COST_BYTES: u64 = 64_328;
 
 /// The output sections `kernel/linker.ld` pads to a page boundary **inside** the
 /// section, so `sh_size` is a whole number of pages rather than the size of what
@@ -7489,13 +7495,28 @@ mod core_cost_tests {
     /// section came to. Read off `readelf -S` on images built at each, and kept
     /// here because the numbers are the argument: without them the rule below
     /// is somebody's opinion about linker scripts.
+    ///
+    /// **Re-measured on 2026-09-23**, by building `f-kernel` at each of the five
+    /// ceilings with the command [`core_cost_builds`] uses and reading
+    /// `readelf -S -W` off each image. `E3-B01g` gave every core four doorbell
+    /// counters and a wakeup latch, which moved `.bss` by 32 bytes a core and
+    /// therefore moved the slope; the whole table moves with it, because a row
+    /// left at the old figure would make the fit succeed on numbers no kernel
+    /// ever had.
+    ///
+    /// The three that carry a slope are `.data` at 2 448, `.bss` at 4 536 and
+    /// `.stacks` at 57 344 bytes a core, and they sum to [`CORE_COST_BYTES`].
+    /// Every span in the table agrees — 2 to 8, 2 to 32, 8 to 64 and 2 to 64 —
+    /// which is what makes this a measurement of a line rather than two points
+    /// somebody drew one through. `.rodata` is flat at all five and is the
+    /// padded section the fit has to see and refuse to take a slope from.
     const MEASURED: &[(usize, u64, u64, u64, u64)] = &[
         // ceiling, .data, .bss, .stacks, .rodata
-        (2, 54_128, 9_016, 212_992, 155_648),
-        (8, 68_816, 36_040, 557_056, 155_648),
-        (16, 88_400, 72_072, 1_015_808, 155_648),
-        (32, 127_568, 144_136, 1_933_312, 155_648),
-        (64, 205_904, 288_264, 3_768_320, 159_744),
+        (2, 54_128, 9_080, 344_064, 204_800),
+        (8, 68_816, 36_296, 688_128, 204_800),
+        (16, 88_400, 72_584, 1_146_880, 204_800),
+        (32, 127_568, 145_160, 2_064_384, 204_800),
+        (64, 205_904, 290_312, 3_899_392, 204_800),
     ];
 
     fn sections(at: usize) -> Vec<(String, u64)> {
@@ -7516,18 +7537,38 @@ mod core_cost_tests {
         slope_from_sections((high - low) as u64, &growth).expect("a model that holds").slope
     }
 
-    /// The failure this whole reading replaced: 2 to 64 is the pair `verify`
-    /// takes, and the total grew by 3 990 448 bytes over 62 cores, which does
-    /// not divide. Per section it does — the four bytes were the remainder of
-    /// one page of `.rodata` padding, and never a cost.
+    /// 2 to 64 is the pair `verify` takes, and the total grew by 3 988 336
+    /// bytes over 62 cores.
+    ///
+    /// **This test used to demonstrate why the reading must be per section, and
+    /// on 2026-09-23 it stopped being able to.** The old measurement's total was
+    /// 3 990 448, which does *not* divide by 62: the four extra bytes were the
+    /// remainder of one page of `.rodata` padding, and never a cost. Today's
+    /// `.rodata` is flat at 204 800 across all five ceilings — it no longer
+    /// crosses a page boundary anywhere in the table — so the naive total
+    /// divides cleanly, **by coincidence and not by argument**.
+    ///
+    /// The per-section reading is still the method and the reason has not
+    /// changed; what changed is that this pair can no longer show it. The
+    /// showing moved to
+    /// [`the_padded_section_is_reported_and_carries_no_slope`], which supplies
+    /// the step from a fixture rather than hoping the kernel keeps providing
+    /// one — and that is the better home for it, because a demonstration that
+    /// depends on where a linker happens to pad is a demonstration with a
+    /// shelf life.
     #[test]
     fn the_pair_verify_takes_reads_the_published_cost() {
         assert_eq!(slope_between(2, 64), CORE_COST_BYTES);
 
         let total: u64 = sections(64).iter().map(|(_, size)| size).sum::<u64>()
             - sections(2).iter().map(|(_, size)| size).sum::<u64>();
-        assert_eq!(total, 3_990_448, "the growth the old reading divided");
-        assert_ne!(total % 62, 0, "and it is still not a whole number of bytes per core");
+        assert_eq!(total, 3_988_336, "the growth this kernel's sections come to");
+        assert_eq!(
+            total % 62,
+            0,
+            "today the naive total happens to divide; when it stops, this line is the \
+             warning that the coincidence has ended and not a regression"
+        );
     }
 
     /// Two points define a slope and do not establish a line. Every adjacent
@@ -7546,9 +7587,29 @@ mod core_cost_tests {
     /// `.rodata` is the section the padding is about, so the test that matters
     /// is that it is excused for the right reason rather than by being ignored:
     /// it is reported as quantised, and it contributes nothing to the slope.
+    ///
+    /// **The step is supplied here rather than read out of [`MEASURED`], and
+    /// that changed on 2026-09-23.** It used to come from the kernel: the old
+    /// table's `.rodata` gained one page between 32 and 64 and this test read
+    /// it. Today's `.rodata` is flat at all five ceilings, so the live kernel
+    /// exhibits no step at all and the mechanism would have gone untested while
+    /// looking fine. One page is added to the high reading here, which is
+    /// exactly what the linker did then and may do again at any ceiling.
+    ///
+    /// *What would reverse this:* a kernel whose `.rodata` steps again inside
+    /// the measured range. Then the fixture is redundant and the honest test is
+    /// the one that reads it, because a real step is better evidence than a
+    /// constructed one.
     #[test]
     fn the_padded_section_is_reported_and_carries_no_slope() {
-        let growth = section_growth(&sections(32), &sections(64)).expect("one kernel twice");
+        let low = sections(32);
+        let mut high = sections(64);
+        for entry in &mut high {
+            if entry.0 == ".rodata" {
+                entry.1 += 4_096;
+            }
+        }
+        let growth = section_growth(&low, &high).expect("one kernel twice");
         let read = slope_from_sections(32, &growth).expect("a model that holds");
         assert_eq!(read.quantised.len(), 1, "one section stepped: {:?}", read.quantised);
         assert!(read.quantised[0].contains(".rodata"), "{:?}", read.quantised);
@@ -12958,6 +13019,12 @@ const COMPOSITOR_HALVES: &[(&str, &str)] = &[
          image on a screen: it must be refused a compositor ADMISSION/NO_RUNG before a page
          is spent, while this boot's own machine is admitted through the same function",
     ),
+    (
+        "wake",
+        "the component stops its own core between frames and a client on another core rings
+         it awake: cross-core delivery, observed for the first time, and one batch of four
+         entries charged one operation and at most one doorbell",
+    ),
 ];
 
 /// Boot the compositor: a component that holds the machine's scene graph at
@@ -13030,7 +13097,7 @@ fn compositor(kind: Option<&str>) -> Result<(), String> {
     if all {
         println!(
             "
-compositor: ok — all four halves held. A component held the machine's scene graph at
+compositor: ok — all five halves held. A component held the machine's scene graph at
              ring 3, took two frames of deltas across one ring, applied each whole or not
              at all, and published what it holds into the state tree its own manifest
              declares — which the frame read back rather than being told. It started on
@@ -13042,7 +13109,15 @@ compositor: ok — all four halves held. A component held the machine's scene gr
              than a schema's. And the same record with its state declaration emptied was
              refused ADMISSION/NO_STATE_TREE while the record as declared was admitted,
              and a machine below the bottom of the ladder was refused a compositor
-             ADMISSION/NO_RUNG before a page was spent while this machine was admitted."
+             ADMISSION/NO_RUNG before a page was spent while this machine was admitted.
+             And the fifth is `E3-B01g`: the same component, told that this frame rings,
+             armed the ring's wakeup flag and stopped its own core between frames, while
+             the client on the boot processor waited for it to stop and then rang — which
+             is the first time in this tree that a doorbell has been delivered from one
+             core to another and the delivery observed. The last frame went as one batch
+             of four entries, charged one operation and one doorbell; a client accounting
+             per entry would have said four of each and the kernel's verdict would have
+             refused it."
         );
     }
     Ok(())
@@ -14691,6 +14766,13 @@ fn lint_all() -> Result<(), String> {
     // than one honestly listed as review.
     lint_units()?;
     lint_callbacks()?;
+    // The third rule of that shape, and the newest: a colour outside the one
+    // module that resolves one, carried with no record of the ground it was
+    // checked against. RFC 0079 ends by naming it the reversal to watch first
+    // and by saying why it is the hard one to see — it will not look like a
+    // reversal, it will look like a cache — and every test in that module goes
+    // on passing through it. E3-B06d.
+    lint_token_pair()?;
     lint_claim_owners()?;
     // Beside `lint_claim_owners` because it reads the same registry and asks the
     // next question about it: not whether each entry is well formed, but whether
@@ -21169,6 +21251,548 @@ mod decomposition_tests {
     }
 }
 
+/// The one module in which a colour may exist without the pair it was checked
+/// against.
+///
+/// A file and not a crate. `f-interface` holds a ladder, a screen-reader
+/// projection, an agent surface and the node vocabulary beside this file, and
+/// none of those is allowed to cache a colour either — RFC 0079's last reversal
+/// condition is about *any type outside this module*, and the module is one
+/// file.
+const THE_RESOLVER: &str = "interface/src/token.rs";
+
+/// The type a colour is spelled as.
+const CARRIED: &str = "Rgb";
+
+/// The half that has to be beside it.
+///
+/// `Token` and not `TokenName`, and the word boundary in [`cites`] is what keeps
+/// the two apart. A `TokenName` is a name a theme wrote down that this
+/// vocabulary may not have — `Paint::unknown` carries one — so it is the record
+/// of a refusal rather than the half of a pair that was checked. A type holding
+/// an `Rgb` beside a `TokenName` has remembered which name it could not resolve,
+/// which is not the same as remembering what the colour is defensible against.
+const PAIR: &str = "Token";
+
+/// The type inside [`THE_RESOLVER`] that holds a [`CARRIED`] with no [`PAIR`],
+/// and which the exemption is the whole reason is green.
+///
+/// It is *read* rather than assumed, because of how a text scan rots: it stops
+/// finding anything, every file in the tree comes out clean, and the rule is a
+/// check that cannot fail — which this repository has twice recorded the fate
+/// of. `Raised` is `{ colour: Rgb, contrast_x1000, steps, reached }`: no `Token`
+/// in it, in the one file where that is allowed. If [`type_bodies`] stops seeing
+/// it, it has stopped seeing types, and [`pairing_report`] refuses instead of
+/// printing `ok`.
+const RESOLVER_WITNESS: &str = "Raised";
+
+/// The projection E3-B06d's first clause is about.
+///
+/// Named because *contains no readability arithmetic at all* is a negative about
+/// a source, and a negative about a source is worth nothing unless something
+/// confirms the source was read. A prefix matching no file is this check going
+/// green about a component that has moved, which is the shape of every vacuous
+/// clause this file has had to be repaired for.
+const THE_PROJECTION: &str = "user/compositor/";
+
+/// The spellings in [`THE_RESOLVER`] that *compute* readability rather than
+/// report it, and what finding one somewhere else means.
+///
+/// Every entry exists only as a free item in that module, so a use of it
+/// anywhere else is arithmetic and not a lookup. `contrast_x1000(` is the one
+/// that needs care and carries its paren for it: `Resolved::contrast_x1000` is a
+/// method over the nine-entry table `resolve` filled, so `.contrast_x1000(` is
+/// exactly what a projection is supposed to call, and [`cites`] keeps the two
+/// apart by refusing a match preceded by a dot. However the free function is
+/// pathed, nothing in front of it is a dot.
+///
+/// What would reverse the `Floors` row, which is the debatable one: a second
+/// caller of `resolve_with` that is not a test. Today the floors are chosen in
+/// one place and RFC 0079 lists them under *not themeable at all*, so a
+/// component naming them is a component deciding readability policy. A future in
+/// which a display's own measured characteristics pick the floors makes that
+/// legitimate, and the row moves to wherever that decision is made.
+const READABILITY: &[(&str, &str)] = &[
+    ("luminance_x100000(", "relative luminance, computed"),
+    (
+        "contrast_x1000(",
+        "a contrast ratio computed from two colours — `Resolved::contrast_x1000`, reached \
+         through a dot, is the lookup a projection wants",
+    ),
+    ("contrast_of_luminance_x1000(", "a contrast ratio computed from two luminances"),
+    ("best_reachable_x1000(", "the ceiling on what a clamp can promise"),
+    ("raise_to_floor(", "an ink being clamped, which is `resolve`'s work and not a caller's"),
+    ("LINEAR_X100000", "the sRGB transfer table"),
+    ("LUMINANCE_X100000_MAX", "white's luminance, which nothing but arithmetic wants"),
+    ("CONTRAST_TEXT_X1000", "a contrast floor, which RFC 0079 puts outside what a theme sets"),
+    ("CONTRAST_NONTEXT_X1000", "a contrast floor, which RFC 0079 puts outside what a theme sets"),
+    ("REACHABLE_X1000", "the ceiling the whole clamp policy rests on"),
+    ("CLAMP_STEPS", "the clamp's own scan"),
+    ("Floors", "which floors a theme is held to, which is the resolver's decision"),
+];
+
+/// The code half of a line: everything before the first `//`.
+///
+/// Comments are dropped before anything below looks at a line, and that is a
+/// rule with a consequence worth stating rather than a convenience. A type whose
+/// doc comment says *the token this was checked against* and whose fields do not
+/// is exactly the type this check exists to find, so a scan that read comments
+/// would be talked out of its own finding by the comment apologising for it.
+/// `a_pair_named_only_in_a_comment_is_not_a_pair` pins it.
+fn code_only(line: &str) -> &str {
+    line.split("//").next().unwrap_or("")
+}
+
+/// Does `code` name `needle` as a thing rather than as part of another word?
+///
+/// The dot is the load-bearing half. `.contrast_x1000(` is a lookup into a table
+/// `resolve` already filled and is what RFC 0079 tells a projection to call; the
+/// same spelling with anything else in front of it is the free function, which
+/// computes. Refusing a match preceded by a dot is the whole of the difference,
+/// and `computing_a_contrast_is_refused_and_looking_one_up_is_not` is the
+/// fixture that holds it.
+///
+/// The trailing boundary is applied only when the needle ends in an identifier
+/// character, so that `Token` does not match `TokenName` while `contrast_x1000(`
+/// still matches `contrast_x1000(a, b)`.
+fn cites(code: &str, needle: &str) -> bool {
+    let bounded_after = needle.chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let mut from = 0;
+    while let Some(offset) = code[from..].find(needle) {
+        let at = from + offset;
+        let before = code[..at].chars().next_back();
+        let after = code[at + needle.len()..].chars().next();
+        let open = !matches!(before, Some(c) if c.is_alphanumeric() || c == '_' || c == '.');
+        let close = !bounded_after || !matches!(after, Some(c) if c.is_alphanumeric() || c == '_');
+        if open && close {
+            return true;
+        }
+        from = at + needle.len();
+    }
+    false
+}
+
+/// The name a `struct`, `enum` or `union` line declares, if it declares one.
+fn declared_type(code: &str) -> Option<&str> {
+    for keyword in ["struct ", "enum ", "union "] {
+        let mut from = 0;
+        while let Some(offset) = code[from..].find(keyword) {
+            let at = from + offset;
+            let before = code[..at].chars().next_back();
+            if !matches!(before, Some(c) if c.is_alphanumeric() || c == '_') {
+                let rest = code[at + keyword.len()..].trim_start();
+                let name = rest.split(|c: char| !(c.is_alphanumeric() || c == '_')).next()?;
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+            from = at + keyword.len();
+        }
+    }
+    None
+}
+
+/// Every type definition in `text`, as `(line number, name, the code of its
+/// body)`.
+///
+/// A brace count over comment-stripped lines rather than a parse. What it has to
+/// get right is *where a type ends*, because a body that runs on swallows the
+/// next type's fields and a body that stops early drops the field this check is
+/// looking for — and both of those are silent. [`RESOLVER_WITNESS`] is the
+/// guard: a scan that has stopped delimiting bodies stops finding `Raised`, and
+/// [`pairing_report`] refuses on that rather than reporting a clean tree.
+fn type_bodies(text: &str) -> Vec<(usize, String, String)> {
+    let lines: Vec<&str> = text.lines().map(code_only).collect();
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let Some(name) = declared_type(lines[index]).map(str::to_string) else {
+            index += 1;
+            continue;
+        };
+        let mut body = String::new();
+        let mut depth: i32 = 0;
+        let mut opened = false;
+        let mut end = index;
+        while end < lines.len() {
+            let line = lines[end];
+            body.push_str(line);
+            body.push('\n');
+            depth += i32::try_from(line.matches('{').count()).unwrap_or(i32::MAX);
+            depth -= i32::try_from(line.matches('}').count()).unwrap_or(i32::MAX);
+            opened |= line.contains('{');
+            end += 1;
+            if opened && depth <= 0 {
+                break;
+            }
+            // A unit or tuple struct: no brace to close, and the semicolon is
+            // where it ends. Without this arm the body runs on to the next `}`
+            // in the file and reads somebody else's fields.
+            if !opened && line.trim_end().ends_with(';') {
+                break;
+            }
+        }
+        out.push((index + 1, name, body));
+        index = end.max(index + 1);
+    }
+    out
+}
+
+/// Every type outside [`THE_RESOLVER`] holding a colour with no token beside it,
+/// and every use of that module's arithmetic outside it.
+///
+/// `files` is the tree as `(relative path, text)`. The two exemptions are
+/// decided here rather than by the caller so that a fixture can drive them:
+/// [`THE_RESOLVER`] itself, which is where the checking happens, and `xtask/`,
+/// which holds the fixtures this check searches for — the same reason
+/// [`is_tooling`] exists for [`lint_stamp`].
+fn pairing_findings(files: &[(&str, &str)]) -> Vec<String> {
+    let mut findings = Vec::new();
+    for (rel, text) in files {
+        if *rel == THE_RESOLVER || is_tooling(rel) {
+            continue;
+        }
+        for (line, name, body) in type_bodies(text) {
+            if cites(&body, CARRIED) && !cites(&body, PAIR) {
+                findings.push(format!(
+                    "  {rel}:{line}  `{name}` holds an `{CARRIED}` and no `{PAIR}` beside it"
+                ));
+            }
+        }
+        for (offset, line) in text.lines().enumerate() {
+            let code = code_only(line);
+            for (needle, why) in READABILITY {
+                if cites(code, needle) {
+                    findings.push(format!("  {rel}:{}  `{needle}` — {why}", offset + 1));
+                }
+            }
+        }
+    }
+    findings
+}
+
+/// The reading itself, over texts rather than over the filesystem.
+///
+/// Split out for the reason `decomposition_report` was: the three refusals below
+/// are unreachable from the real tree — it has a resolver, it has a compositor,
+/// and it has types in it — so welded to the filesystem they would be guards
+/// nobody could ever watch work. The seam is what makes them reachable from a
+/// fixture, and `a_scan_that_reads_no_types_is_refused_rather_than_passed` is
+/// what makes a mutation of one of them red.
+fn pairing_report(files: &[(&str, &str)]) -> Result<String, String> {
+    let Some((_, resolver)) = files.iter().find(|(rel, _)| *rel == THE_RESOLVER) else {
+        return Err(format!(
+            "{THE_RESOLVER} was not read, so the file this rule exempts is not where it was.\n\
+             Every other file in the tree is about to be told it may not hold an `{CARRIED}`,\n\
+             which is not a finding — it is this check having lost the module it is written\n\
+             around. Move the path, or say here where a token now becomes a value."
+        ));
+    };
+
+    let witness = type_bodies(resolver).into_iter().any(|(_, name, body)| {
+        name == RESOLVER_WITNESS && cites(&body, CARRIED) && !cites(&body, PAIR)
+    });
+    if !witness {
+        return Err(format!(
+            "`{RESOLVER_WITNESS}` in {THE_RESOLVER} is not being read as a type holding an\n\
+             `{CARRIED}` with no `{PAIR}`, which is what it is. So this check's scan has\n\
+             stopped delimiting type bodies, and a scan that finds nothing reports a clean\n\
+             tree — which is indistinguishable from the property holding. Repair the scan,\n\
+             or name a different witness and say why that one stopped being one."
+        ));
+    }
+
+    let seen = files.iter().filter(|(rel, _)| rel.starts_with(THE_PROJECTION)).count();
+    if seen == 0 {
+        return Err(format!(
+            "no file under {THE_PROJECTION} was read. E3-B06d's first clause is that the\n\
+             compositor contains no readability arithmetic at all, and that clause is a\n\
+             negative about a source: it is worth exactly as much as the evidence that the\n\
+             source was opened. Point this constant at wherever the projection went."
+        ));
+    }
+
+    let examined: usize = files
+        .iter()
+        .filter(|(rel, _)| *rel != THE_RESOLVER && !is_tooling(rel))
+        .map(|(_, text)| type_bodies(text).len())
+        .sum();
+
+    let findings = pairing_findings(files);
+    if findings.is_empty() {
+        // The counts rather than the word `ok` alone, for `lint_decomposition`'s
+        // reason: this rule rots by reading less, and a count is the only place
+        // that shows.
+        return Ok(format!(
+            "lint-token-pair: ok  ({examined} type(s) across {} file(s): none outside \
+             {THE_RESOLVER} holds an `{CARRIED}` without its `{PAIR}`)\n  \
+             {THE_RESOLVER}  is the exemption, and `{RESOLVER_WITNESS}` in it is what shows \
+             the scan still reads a type\n  \
+             {THE_PROJECTION}  {seen} file(s), and no readability arithmetic in any of them \
+             — E3-B06d's first clause, read from the source rather than promised",
+            files.len()
+        ));
+    }
+
+    Err(format!(
+        "{} place(s) outside {THE_RESOLVER} carry a colour without its pair, or do the\n\
+         arithmetic that module exists to have already done:\n{}\n\n\
+         RFC 0079 resolves an ink *once per ground*, because contrast is a property of a\n\
+         pair and a single resolved colour is defensible only against whichever ground it\n\
+         happened to be checked on. Its last reversal condition — the one it says to watch\n\
+         first — is a projection that stops asking `Resolved::on` and starts remembering a\n\
+         colour: *it will not look like a reversal, it will look like a cache*, and every\n\
+         test in the resolver goes on passing while the interface is unreadable on the\n\
+         grounds nobody checked.\n\n\
+         Hold a `Resolved` and ask it for the pair at the point of use. If a colour must be\n\
+         carried, carry the two `{PAIR}`s with it — `Paint` and `Boundary` are the two\n\
+         shapes in the resolver that already do, and both are `Copy`. There is deliberately\n\
+         no exemption list here: an exemption is the cache with a comment on it.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// No type outside the resolver holds a colour without the token pair it was
+/// checked against, and nothing outside it computes readability.
+///
+/// # The defect this was written against
+///
+/// It has not happened here yet, which is the point of writing it now. RFC 0079
+/// closes with the reversal it says to watch first, and it is the only one of
+/// its seven that describes a *silent* failure: a projection that caches an
+/// `Rgb`. Every test in `interface/src/token.rs` passes through it — the module
+/// is still correct, it is simply no longer being asked — and what goes wrong is
+/// an interface that is unreadable on the grounds nobody looked at. The signal
+/// that RFC names is textual, *any type outside this module that holds an `Rgb`
+/// without the `Token` pair it came from*, so the check is textual too.
+///
+/// # Why it also refuses the arithmetic
+///
+/// Because E3-B06d's first clause is *the compositor contains no readability
+/// arithmetic at all*, and that is a negative about a source file. A test can
+/// show that a compositor gets the right answer; nothing but a reading of the
+/// source can show that it did not work the answer out for itself. So the second
+/// half of this rule is [`READABILITY`]: the spellings that exist only as free
+/// items in the resolver, which is what computing looks like from outside.
+/// Between the two halves, a projection that neither holds a loose colour nor
+/// names the arithmetic has no route to a readability decision of its own.
+///
+/// # What it does not check
+///
+/// That anything *uses* a `Resolved`. This is a negative rule and a negative
+/// rule is green over an empty file. The positive half of E3-B06d's first clause
+/// — the compositor holding a `Resolved` and asking it for pairs — is a diff in
+/// `user/compositor/`, and this check is what keeps that honest afterwards
+/// rather than what puts it there.
+///
+/// It also says nothing about a colour that never came from a token: a device's
+/// own framebuffer clear value is not an `Rgb` under this vocabulary and this
+/// rule would not see it. That is the boundary rather than a hole — RFC 0079
+/// owns what a token resolves to, and nothing else.
+///
+/// # Errors
+///
+/// A type outside the resolver holding a colour with no token, a use of that
+/// module's arithmetic outside it, or a tree in which this check can no longer
+/// find the module, the witness or the projection it is written around.
+fn lint_token_pair() -> Result<(), String> {
+    let mut files: Vec<(String, String)> = Vec::new();
+    for path in rust_sources()? {
+        let rel = relative(&path);
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {rel}: {e}"))?;
+        files.push((rel, text));
+    }
+    let view: Vec<(&str, &str)> =
+        files.iter().map(|(rel, text)| (rel.as_str(), text.as_str())).collect();
+    println!("{}", pairing_report(&view)?);
+    Ok(())
+}
+
+#[cfg(test)]
+mod token_pair_tests {
+    use super::*;
+
+    /// What the resolver looks like to this check: one type holding a colour
+    /// with no token, which is legal in exactly that file.
+    const RESOLVER: &str = "\
+pub struct Raised {
+    pub colour: Rgb,
+    pub contrast_x1000: u32,
+    pub steps: u8,
+}
+";
+
+    /// A projection carrying a colour the way RFC 0079 requires: with both
+    /// halves of the pair it was checked as.
+    const GREEN: &str = "\
+pub struct Painted {
+    pub ground: Token,
+    pub ink: Token,
+    pub ink_rgb: Rgb,
+}
+";
+
+    /// The two lines a cache deletes.
+    const THE_PAIR: &str = "    pub ground: Token,\n    pub ink: Token,\n";
+
+    fn findings(rel: &str, text: &str) -> Vec<String> {
+        pairing_findings(&[(THE_RESOLVER, RESOLVER), (rel, text)])
+    }
+
+    #[test]
+    fn a_colour_carried_with_its_pair_passes() {
+        let found = findings("user/compositor/src/paint.rs", GREEN);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn a_colour_carried_without_its_pair_is_the_whole_rule() {
+        // The fixture that makes it fail, which is the half a green run cannot
+        // demonstrate and which RFC 0079 names as the thing to watch first.
+        let red = GREEN.replace(THE_PAIR, "");
+        assert_ne!(red, GREEN, "the pair must be found to remove");
+        let found = findings("user/compositor/src/paint.rs", &red);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("`Painted`"), "the finding must name the type: {}", found[0]);
+    }
+
+    #[test]
+    fn a_token_name_is_not_the_pair() {
+        // `TokenName` is a name the vocabulary may not have — the record of a
+        // refusal. Without the word boundary in `cites` it would satisfy this
+        // rule, and a cache labelled with an unresolvable name would pass.
+        let red = GREEN.replace("Token,", "TokenName,");
+        let found = findings("user/panel/src/lib.rs", &red);
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+
+    #[test]
+    fn a_pair_named_only_in_a_comment_is_not_a_pair() {
+        // The comment apologising for the cache is the commonest form this
+        // arrives in, and a scan that read comments would be argued out of its
+        // own finding by it.
+        let red = GREEN
+            .replace(THE_PAIR, "")
+            .replace("pub struct Painted", "/// The Token pair.\npub struct Painted");
+        let found = findings("user/compositor/src/paint.rs", &red);
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+
+    #[test]
+    fn the_resolver_itself_is_exempt() {
+        // `Raised` is the case: a colour with no token, in the file that did the
+        // checking. Anywhere else it is the defect.
+        let found = pairing_findings(&[(THE_RESOLVER, RESOLVER)]);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn the_checker_is_exempt_because_it_holds_these_fixtures() {
+        let red = GREEN.replace(THE_PAIR, "");
+        let found = findings("xtask/src/main.rs", &red);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn computing_a_contrast_is_refused_and_looking_one_up_is_not() {
+        // The two spellings differ by one character and the whole of E3-B06d's
+        // first clause is on the difference: the free function computes, the
+        // method reads the nine-entry table `resolve` filled.
+        let computed = "fn check(a: Rgb, b: Rgb) -> u32 { contrast_x1000(a, b) }\n";
+        let looked_up = "fn check(r: &Resolved) -> u32 { r.contrast_x1000(ink, ground) }\n";
+        let found = findings("user/compositor/src/paint.rs", computed);
+        assert!(
+            found.iter().any(|f| f.contains("contrast_x1000(")),
+            "the free function is arithmetic: {found:?}"
+        );
+        let found = findings("user/compositor/src/paint.rs", looked_up);
+        assert!(found.is_empty(), "a lookup through a dot is what a projection wants: {found:?}");
+    }
+
+    #[test]
+    fn a_floor_read_outside_the_resolver_is_arithmetic_too() {
+        // The constants as well as the functions: a projection that knows the
+        // number 4 500 is a projection about to compare something to it.
+        let red = "const F: u32 = CONTRAST_TEXT_X1000;\n";
+        let found = findings("user/compositor/src/paint.rs", red);
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+
+    #[test]
+    fn a_scan_that_reads_no_types_is_refused_rather_than_passed() {
+        // The rot this check has, and the one `lint_decomposition` was repaired
+        // for: a reader that has stopped matching the files reports nothing, and
+        // nothing is what green looks like. Asserted through the refusal rather
+        // than through the empty scan, because the first version of that one
+        // asserted the scan and a mutation of the guard stayed green.
+        let blind = "pub struct Raised { pub colour: u32 }\n";
+        let refusal = pairing_report(&[(THE_RESOLVER, blind), ("user/compositor/src/lib.rs", "")])
+            .expect_err("a scan that cannot see the witness is not green");
+        assert!(refusal.contains(RESOLVER_WITNESS), "{refusal}");
+    }
+
+    #[test]
+    fn a_resolver_that_moved_is_refused() {
+        let refusal = pairing_report(&[("user/compositor/src/lib.rs", "")])
+            .expect_err("the exempt module missing is not green");
+        assert!(refusal.contains(THE_RESOLVER), "{refusal}");
+    }
+
+    #[test]
+    fn a_projection_that_moved_is_refused() {
+        let refusal = pairing_report(&[(THE_RESOLVER, RESOLVER)])
+            .expect_err("reading no compositor at all is not green");
+        assert!(refusal.contains(THE_PROJECTION), "{refusal}");
+    }
+
+    #[test]
+    fn the_tree_as_it_stands_is_green() {
+        lint_token_pair().expect("a colour outside the resolver without the pair it came from");
+    }
+
+    #[test]
+    fn the_compositor_is_what_the_first_clause_is_about() {
+        // E3-B06d's first clause, driven against the real files rather than a
+        // fixture: the compositor contains no readability arithmetic at all, and
+        // adding either half of what this rule refuses makes it red naming the
+        // real path. That is what shows the green run above is green because of
+        // what those files say and not because nothing was opened.
+        let mut real: Vec<(String, String)> = Vec::new();
+        for path in rust_sources().expect("walking the workspace") {
+            let rel = relative(&path);
+            if rel.starts_with(THE_PROJECTION) {
+                real.push((rel, std::fs::read_to_string(&path).expect("reading a source")));
+            }
+        }
+        assert!(!real.is_empty(), "no file under {THE_PROJECTION} was found to read");
+
+        let view: Vec<(&str, &str)> =
+            real.iter().map(|(rel, text)| (rel.as_str(), text.as_str())).collect();
+        let found = pairing_findings(&view);
+        assert!(found.is_empty(), "{found:?}");
+
+        let cached = format!("{}\npub struct Cached {{ pub ink: Rgb }}\n", real[0].1);
+        let mut with_cache = view.clone();
+        with_cache[0] = (real[0].0.as_str(), cached.as_str());
+        let found = pairing_findings(&with_cache);
+        assert!(
+            found.iter().any(|f| f.contains(&real[0].0) && f.contains("`Cached`")),
+            "a cached colour in the real compositor must be named: {found:?}"
+        );
+
+        let computed =
+            format!("{}\nfn worse(a: Rgb, b: Rgb) -> u32 {{ contrast_x1000(a, b) }}\n", real[0].1);
+        let mut with_arithmetic = view.clone();
+        with_arithmetic[0] = (real[0].0.as_str(), computed.as_str());
+        let found = pairing_findings(&with_arithmetic);
+        assert!(
+            found.iter().any(|f| f.contains("contrast_x1000(")),
+            "readability arithmetic in the real compositor must be named: {found:?}"
+        );
+    }
+}
+
 /// How many tasks each task transitively unblocks.
 ///
 /// The number a reader cannot work out by looking: `needs:` points backwards,
@@ -23447,6 +24071,31 @@ enum Route {
     /// rather than leaving a green run to imply otherwise.
     /// E2-B07, RFC 0012.
     Attest,
+    /// `claims/0034`'s rate over the corpus in `claims/canvas-corpus/`:
+    /// canvases against declared nodes, summed over every application a porter
+    /// from outside this tree ported into the vocabulary of RFC 0077.
+    ///
+    /// The only route here that runs no subprocess, and the reason is the
+    /// claim's own: the corpus-level refusal must be the *same* refusal
+    /// `f_interface::node::canvas_census` gives one empty tree, so that the two
+    /// halves cannot come to disagree. One function, called once, on the trees
+    /// laid end to end. A command spawned to make that call would be a second
+    /// reader of the corpus, and a second reader is the thing being avoided.
+    ///
+    /// It is a `count` under RFC 0069's taxonomy — a ratio of two integers
+    /// taken from declarations, with no clock in it — so it is the same number
+    /// in a container, on bare metal and under an emulator, which is what
+    /// `claims/0034`'s `[hardware]` note says and why this route needs no
+    /// measurement environment.
+    ///
+    /// **What it usually does is refuse**, and that is the route working. There
+    /// is no corpus: `E3-B06l` built this, the entry format and the refusal, and
+    /// could not build a corpus, because the claim asks for one ported by
+    /// somebody who did not write the vocabulary and everything here was written
+    /// by the tree that wrote it. `claims/canvas-corpus/README.md` is addressed
+    /// to whoever is that somebody.
+    /// E3-B06l, E3-D01, RFC 0077.
+    Canvas,
     /// A claim whose workload does not exist yet, naming the task that owes it.
     ///
     /// Every other route in this table runs something, and the registry has not
@@ -23591,17 +24240,22 @@ const ROUTES: &[(&str, Route)] = &[
     // says so and refuses, which is the distinction the registry needed the day
     // a claim was registered in front of the code rather than behind it.
     ("raster-cost-per-rung", Route::Unbuilt("E3-B02")),
-    // The second and third rows whose workload is absent rather than late, and
-    // they are absent for two different reasons that the one variant is still
-    // the right answer to. `canvas-escape-rate` needs a *corpus* — applications
-    // ported by somebody who was free to give up and reach for a canvas — and
-    // `E3-B06l` is what builds one; the three interfaces in `interface/src/`
-    // are the vocabulary author's own argument and counting them would measure
-    // the argument. `theme-refusals` needs a compositor and a corpus of themes
-    // nobody working on the module wrote, and `E3-B01` is what lands both. Each
-    // refusal names its task, so the next question after the failure is
-    // answered by the failure. E3-D01 and RFC 0077; E3-D03 and RFC 0079.
-    ("canvas-escape-rate", Route::Unbuilt("E3-B06l")),
+    // `canvas-escape-rate` was the second such row and is no longer one: it has
+    // a workload, and the workload refuses. That is the distinction worth
+    // keeping. `Route::Unbuilt` means *nothing here could run*;
+    // [`Route::Canvas`] means the route ran, read `claims/canvas-corpus/`,
+    // found no applications a porter outside this tree had ported, and said so
+    // through `f_interface::node::canvas_census`. The first is a promise
+    // somebody owes; the second is a measurement apparatus standing ready with
+    // nothing in front of it, which is a different and more useful state to be
+    // in — and it is the state `E3-B06l` could reach, because the corpus is the
+    // half of this claim no commit in this repository can honestly supply.
+    // E3-D01, RFC 0077.
+    ("canvas-escape-rate", Route::Canvas),
+    // Still absent rather than late: `theme-refusals` needs a compositor and a
+    // corpus of themes nobody working on the module wrote, and `E3-B01` is what
+    // lands both. The refusal names its task, so the next question after the
+    // failure is answered by the failure. E3-D03, RFC 0079.
     ("theme-refusals", Route::Unbuilt("E3-B01")),
 ];
 
@@ -23728,6 +24382,7 @@ fn claim_run(name: Option<&str>) -> Result<(), String> {
         Route::Rollback => claim_rollback(&text, &relative(&file))?,
         Route::Compare => claim_compare_run(&text, &relative(&file))?,
         Route::Attest => claim_attest(&text, &relative(&file))?,
+        Route::Canvas => claim_canvas(&text, &relative(&file))?,
         Route::Unbuilt(owed) => {
             return Err(format!(
                 "claim {name} has no workload: {owed} is the task that builds one.\n\
@@ -24021,17 +24676,77 @@ fn claim_compare(
     workloads: &[Workload],
     closing: &str,
 ) -> Result<(), String> {
+    let thresholds = thresholds_or_refuse(claim, file)?;
+
+    let mut output = String::new();
+    let mut findings = Vec::new();
+
+    for (what, program, args) in workloads {
+        println!("--- {what} ---\n");
+        let (text, ok) = capture_echoing(program, args)?;
+        output.push_str(&text);
+        if !ok {
+            findings.push(format!("  {what}: the workload failed; see its output above"));
+        }
+        println!();
+    }
+
+    claim_verdict(claim, file, &thresholds, &output, findings, closing)
+}
+
+/// One claim's `[threshold]` table, or the refusal that it states none.
+///
+/// Split out and asked *before* a workload runs rather than after, which is the
+/// whole of why it is a function: a claim whose table this route compares
+/// nothing against is a fault in the registry, and finding that out at the end
+/// of a five-minute run of four kernel builds is finding it out in the most
+/// expensive place there is.
+///
+/// # Errors
+///
+/// The claim states no `[threshold]` table.
+fn thresholds_or_refuse(
+    claim: &str,
+    file: &str,
+) -> Result<std::collections::BTreeMap<String, Bound>, String> {
     let thresholds = thresholds_in(claim);
     if thresholds.is_empty() {
         return Err(format!("{file} has no `[threshold]` table, so this route compares nothing"));
     }
+    Ok(thresholds)
+}
 
+/// A claim's `[threshold]` table against rows somebody has already measured.
+///
+/// The second half of [`claim_compare`], taken out of it so that a route whose
+/// workload is *not* a subprocess can reach the same comparison. There is
+/// exactly one such route — [`claim_canvas`], which counts a corpus in this
+/// process because the counting is `f_interface::node::canvas_census` and
+/// spawning a command to call one function would be a second copy of the
+/// corpus reader wearing a command's clothes.
+///
+/// `output` is whatever text carries the rows, whether a child printed it or
+/// this process built it: [`measured_rows`]' contract is one line of `name
+/// value`, and it does not care which.
+///
+/// # Errors
+///
+/// [`claim_compare`]'s: every red row, every row nothing printed, and whatever
+/// the caller already had against the run.
+fn claim_verdict(
+    claim: &str,
+    file: &str,
+    thresholds: &std::collections::BTreeMap<String, Bound>,
+    output: &str,
+    workload_findings: Vec<String>,
+    closing: &str,
+) -> Result<(), String> {
     let mut measured = std::collections::BTreeMap::new();
     let mut findings = Vec::new();
 
-    // Before anything is measured, because a bound this cannot read is a bound
-    // that would otherwise print `green ... (no bound)` further down and be
-    // counted as a row that passed.
+    // Before anything the caller found, because a bound this cannot read is a
+    // bound that would otherwise print `green ... (no bound)` further down and
+    // be counted as a row that passed.
     for (name, spellings) in unreadable_bounds_in(claim) {
         findings.push(format!(
             "  {name}: this claim states {} and nothing here can read {}. A bound parsed \
@@ -24045,19 +24760,11 @@ fn claim_compare(
             if spellings.len() == 1 { "it" } else { "them" },
         ));
     }
-
-    for (what, program, args) in workloads {
-        println!("--- {what} ---\n");
-        let (output, ok) = capture_echoing(program, args)?;
-        measured_rows(&output, &thresholds, &mut measured, &mut findings);
-        if !ok {
-            findings.push(format!("  {what}: the workload failed; see its output above"));
-        }
-        println!();
-    }
+    findings.extend(workload_findings);
+    measured_rows(output, thresholds, &mut measured, &mut findings);
 
     println!("=== {file}'s [threshold] table against what the workload(s) printed ===\n");
-    for (name, bound) in &thresholds {
+    for (name, bound) in thresholds {
         let Some(&value) = measured.get(name) else {
             println!("    ?  {name}: no workload printed this row");
             findings.push(format!(
@@ -24092,6 +24799,611 @@ fn claim_compare(
         findings.len(),
         findings.join("\n")
     ))
+}
+
+// ---------------------------------------------------------------------------
+// `claims/0034`: the canvas escape rate, and the corpus it is a rate over.
+// ---------------------------------------------------------------------------
+
+/// Where the corpus lives. `claims/canvas-corpus/README.md` is addressed to the
+/// porter and says what an entry is.
+const CANVAS_CORPUS: &str = "claims/canvas-corpus";
+
+/// One application somebody ported into the vocabulary of RFC 0077.
+///
+/// Everything here except [`nodes`](Self::nodes) is the *record* rather than the
+/// measurement, and it is the half `claims/0034` spends its `[baseline]` note
+/// on: the rate means nothing without knowing which applications were ported,
+/// by whom, and whether the porter was free to give up and reach for a canvas.
+/// A run that printed a number and not this would be the claim's own stated
+/// failure mode, delivered by the command that exists to prevent it.
+struct Ported {
+    /// The file it came out of.
+    file: String,
+    /// What was ported — an application and a version, not a category.
+    application: String,
+    /// Where the original is, so somebody can disagree with the port.
+    source: String,
+    /// Who did the porting.
+    ported_by: String,
+    /// Did the porter write the vocabulary being measured?
+    ///
+    /// `false` is read, recorded and **excluded from the rate**. See
+    /// [`canvas_report`] for why that is arithmetic rather than manners.
+    independent: bool,
+    /// What the porter wrote about it: what was hard, what a canvas was for.
+    notes: String,
+    /// The tree, in declaration order, already through
+    /// `f_interface::node::check`.
+    nodes: Vec<f_interface::node::Node>,
+}
+
+/// Every `.toml` file in the corpus directory, sorted, with its text.
+///
+/// Sorted because `read_dir` is not ordered and RFC 0004 applies to the tooling
+/// that implements RFC 0004. Non-`.toml` files are skipped rather than refused:
+/// the README lives here, and so will a porter's screenshots and notes.
+///
+/// It is not a directory *walk* — one `read_dir`, no recursion, no skip list —
+/// which is deliberate given this file's *Common mistakes* entry about the five
+/// walkers. A corpus that wanted subdirectories would want one per porter, and
+/// that is a flat name with a hyphen in it.
+///
+/// # Errors
+///
+/// The directory cannot be read, or one of its files cannot be.
+fn canvas_corpus_files() -> Result<Vec<(String, String)>, String> {
+    let dir = root().join(CANVAS_CORPUS);
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("reading {CANVAS_CORPUS}/: {e}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "toml"))
+        .collect();
+    files.sort();
+
+    let mut out = Vec::new();
+    for path in files {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {}: {e}", relative(&path)))?;
+        out.push((relative(&path), text));
+    }
+    Ok(out)
+}
+
+/// One corpus entry, or every sentence saying why it is not one.
+///
+/// The manifest reader parses it, because a second TOML subset in this file
+/// would be another reader of one grammar and the grammar is already written
+/// down in `xtask/src/manifest.rs`. What is *checked* here is this schema, and
+/// the keys are consumed rather than looked up: a leftover key is a misspelt
+/// field, and a corpus entry whose `independent = true` was silently read as
+/// absent is precisely the mistake this whole route exists to make impossible.
+///
+/// # Errors
+///
+/// A syntax error, a missing or mistyped field, an unknown key, an unknown
+/// role, or a tree `f_interface::node::check` refuses.
+fn corpus_entry(file: &str, text: &str) -> Result<Ported, Vec<String>> {
+    use f_interface::node::{Node, NodeId, Role};
+
+    let doc = manifest::parse(file, text)?;
+    let mut top = doc.top;
+    let mut findings = Vec::new();
+
+    let string =
+        |top: &mut manifest::Table, key: &str, findings: &mut Vec<String>| match top.remove(key) {
+            Some(manifest::Entry { value: manifest::Value::Str(text), .. })
+                if !text.trim().is_empty() =>
+            {
+                text
+            }
+            Some(manifest::Entry { line, value: manifest::Value::Str(_) }) => {
+                findings.push(format!(
+                    "  {file}:{line}  `{key}` is empty. Every field here is the record the rate \
+                 is read beside, and an empty one is a row that says nothing while looking \
+                 answered"
+                ));
+                String::new()
+            }
+            Some(manifest::Entry { line, .. }) => {
+                findings.push(format!("  {file}:{line}  `{key}` is a string"));
+                String::new()
+            }
+            None => {
+                findings.push(format!("  {file}  `{key}` is required and missing"));
+                String::new()
+            }
+        };
+
+    let application = string(&mut top, "application", &mut findings);
+    let source = string(&mut top, "source", &mut findings);
+    let ported_by = string(&mut top, "ported_by", &mut findings);
+    let notes = string(&mut top, "notes", &mut findings);
+
+    let independent = match top.remove("independent") {
+        Some(manifest::Entry { value: manifest::Value::Bool(flag), .. }) => flag,
+        Some(manifest::Entry { line, .. }) => {
+            findings.push(format!("  {file}:{line}  `independent` is `true` or `false`"));
+            false
+        }
+        None => {
+            findings.push(format!(
+                "  {file}  `independent` is required and missing. It has no default, and the \
+                 default it would have had is the one that admits a port by the vocabulary's \
+                 own authors into a corpus whose whole purpose is to exclude one"
+            ));
+            false
+        }
+    };
+
+    for key in top.keys() {
+        findings.push(format!("  {file}  `{key}` is not a field of a corpus entry"));
+    }
+    for name in doc.tables.keys() {
+        findings.push(format!("  {file}  `[{name}]`: a corpus entry has no tables"));
+    }
+    for name in doc.arrays.keys().filter(|name| *name != "node") {
+        findings.push(format!(
+            "  {file}  `[[{name}]]`: a corpus entry declares nodes and nothing else"
+        ));
+    }
+
+    let mut nodes = Vec::new();
+    for (index, (line, table)) in doc.arrays.get("node").into_iter().flatten().enumerate() {
+        let place = format!("{file}:{line}  [[node]] #{}", index + 1);
+        let mut table = table.clone();
+        let mut int = |key: &str, findings: &mut Vec<String>| match table.remove(key) {
+            Some(manifest::Entry { value: manifest::Value::Int(value), .. }) => value,
+            Some(_) => {
+                findings.push(format!("  {place}: `{key}` is an unsigned integer"));
+                0
+            }
+            None => {
+                findings.push(format!("  {place}: `{key}` is required and missing"));
+                0
+            }
+        };
+        let id = int("id", &mut findings);
+        let parent = int("parent", &mut findings);
+
+        let role = match table.remove("role") {
+            Some(manifest::Entry { value: manifest::Value::Str(name), .. }) => {
+                let Some(role) = Role::from_name(&name) else {
+                    findings.push(format!(
+                        "  {place}: `{name}` is not a role of the vocabulary. The spellings are \
+                         the second column of the `vocabulary!` invocation in \
+                         interface/src/node.rs, and a port that needed a role the vocabulary \
+                         does not have is the finding RFC 0077 asks for — recorded in an RFC \
+                         and in this entry's `notes`, never by inventing a spelling here"
+                    ));
+                    continue;
+                };
+                role
+            }
+            Some(manifest::Entry { line, .. }) => {
+                findings.push(format!("  {file}:{line}  `role` is a string"));
+                continue;
+            }
+            None => {
+                findings.push(format!("  {place}: `role` is required and missing"));
+                continue;
+            }
+        };
+        for key in table.keys() {
+            findings.push(format!("  {place}: `{key}` is not a field of a node"));
+        }
+        nodes.push(Node::new(NodeId::new(id), NodeId::new(parent), role));
+    }
+
+    // The tree, before it is counted. This is what makes an entry a port rather
+    // than a tally: `check` refuses a canvas that declared nothing, a cell
+    // outside a row and a table whose rows are not the same width, so a corpus
+    // cannot reach a flattering rate by declaring canvases it never populated.
+    // `claims/0034`'s statement rests on it — *`canvas_escapes` is zero for
+    // every tree that passed `check`, by construction* — and that sentence is
+    // only true of this corpus because of this call.
+    if findings.is_empty()
+        && let Err(defect) = f_interface::node::check(&nodes)
+    {
+        findings
+            .push(format!("  {file}  the tree is not one a projection could be given: {defect:?}"));
+    }
+
+    if findings.is_empty() {
+        Ok(Ported {
+            file: file.to_string(),
+            application,
+            source,
+            ported_by,
+            independent,
+            notes,
+            nodes,
+        })
+    } else {
+        Err(findings)
+    }
+}
+
+/// The corpus, what it was, and the rate over it — or the refusal.
+///
+/// # The one thing this function must not grow
+///
+/// A second emptiness check. `claims/0034`'s `[workload]` asks for the
+/// corpus-level refusal and the per-tree one to be incapable of disagreeing, so
+/// the corpus-level refusal is `f_interface::node::canvas_census` answering
+/// `None` and nothing else: the admitted trees are laid end to end and handed to
+/// the same function a single tree is handed. There is no `if
+/// admitted.is_empty()` anywhere below and there must never be, because two
+/// conditions meaning *empty* are two conditions that will one day disagree, and
+/// the direction they disagree in here is a clean zero that retires RFC 0077's
+/// reversal condition on a day nobody has ported anything.
+///
+/// # Why the trees are concatenated
+///
+/// Because the rate is defined over the corpus and not averaged over
+/// applications: canvases summed, nodes summed, one division at the end. A
+/// concatenation is that sum, and `canvas_census` computes it directly.
+/// Identities collide across applications in the concatenation and it does not
+/// matter — the census reads roles and a length, never an edge — which is also
+/// why `check` runs per entry in [`corpus_entry`] and never here, where two
+/// applications both naming node 1 would be a `Defect::DuplicateId` about
+/// nothing.
+///
+/// # Why `independent = false` is excluded rather than footnoted
+///
+/// `claims/0034` can go red in one direction only, so the one defence it has is
+/// who did the porting. A self-port scores well and establishes nothing; the
+/// claim says so twice in its own words. Excluding it here makes the exclusion
+/// arithmetic rather than a reader's diligence, and it means a corpus of nothing
+/// but self-ports refuses through the same `None` an empty directory gets —
+/// because it is the same state.
+///
+/// # Errors
+///
+/// A corpus entry that does not parse, or a corpus with no admitted nodes in it.
+fn canvas_report(files: &[(String, String)]) -> Result<String, String> {
+    let mut ported = Vec::new();
+    let mut findings = Vec::new();
+    for (file, text) in files {
+        match corpus_entry(file, text) {
+            Ok(entry) => ported.push(entry),
+            Err(why) => findings.extend(why),
+        }
+    }
+    if !findings.is_empty() {
+        return Err(format!(
+            "{} finding(s) against {CANVAS_CORPUS}/:\n{}\n\n\
+             A corpus entry that does not parse is neither counted as zero nor skipped. \
+             Either would move the rate — one by shrinking the denominator, the other by \
+             leaving a porter's afternoon out of the number silently — and the rate is the \
+             one thing in this claim nobody can check by reading it.\n\n\
+             {CANVAS_CORPUS}/README.md is what an entry is.",
+            findings.len(),
+            findings.join("\n")
+        ));
+    }
+
+    let mut record = format!("=== {CANVAS_CORPUS}/: what was counted ===\n\n");
+    if ported.is_empty() {
+        record.push_str("  nothing: the corpus directory holds no entries\n\n");
+    }
+    for entry in &ported {
+        // The same census, per entry, so the record says where the corpus total
+        // came from rather than asking a reader to take it. `None` here is a
+        // file that declared an application and no nodes, which is visible in
+        // the record instead of being a rule of its own.
+        let counted = match f_interface::node::canvas_census(&entry.nodes) {
+            Some((canvases, declared)) => format!("{canvases} canvas(es) in {declared} node(s)"),
+            None => "no nodes at all".to_string(),
+        };
+        record.push_str(&format!(
+            "  {}\n    application  {}\n    source       {}\n    ported by    {}\n    \
+             independent  {}\n    counted      {counted}\n    notes        {}\n\n",
+            entry.file,
+            entry.application,
+            entry.source,
+            entry.ported_by,
+            entry.independent,
+            entry.notes,
+        ));
+    }
+
+    let excluded = ported.iter().filter(|entry| !entry.independent).count();
+    if excluded > 0 {
+        record.push_str(&format!(
+            "  {excluded} of the entries above declare `independent = false` and are not in\n  \
+             the corpus: a port by somebody who wrote the vocabulary is the vocabulary\n  \
+             grading its own homework, and neither its canvases nor its nodes reach the\n  \
+             rate below.\n\n"
+        ));
+    }
+
+    // One vector, one census, one division. See this function's first heading
+    // for why there is no second test of emptiness anywhere near this.
+    let mut nodes = Vec::new();
+    for entry in ported.iter().filter(|entry| entry.independent) {
+        nodes.extend_from_slice(&entry.nodes);
+    }
+    let Some((canvases, declared)) = f_interface::node::canvas_census(&nodes) else {
+        return Err(format!(
+            "{record}the corpus is empty, so there is no rate.\n\n\
+             This is `f_interface::node::canvas_census` answering `None` for a corpus with no \
+             nodes in it — the same refusal it gives one empty tree, from the same function, \
+             which is what `claims/0034`'s `[workload]` asks for so that the two halves cannot \
+             come to disagree. A clean zero here would say *fewer than one node in twenty is a \
+             canvas* about a corpus nobody has ported, and would retire RFC 0077's reversal \
+             condition in the one direction this metric can do damage silently and in the \
+             reassuring direction.\n\n\
+             What is owed is not code. It is a corpus of applications ported by somebody who \
+             did not write the vocabulary. `E3-B06l` built this route, the entry format and \
+             this refusal, and could not build that: everything in this repository was written \
+             by the tree that wrote the vocabulary. {CANVAS_CORPUS}/README.md is addressed to \
+             the porter."
+        ));
+    };
+
+    // Rounded **up**, and the rounding rule is part of the number rather than an
+    // implementation detail. `canvases * 1000 / declared` truncates, and
+    // truncation on a metric bounded by `max = 50` moves every borderline corpus
+    // in the direction that flatters the vocabulary: a rate of 50.9 reported as
+    // 50 is RFC 0077's reversal condition failing to fire, and reported as 51 it
+    // fires and somebody argues about it, which is what the condition is for.
+    //
+    // *What would reverse this:* a corpus large enough that one node either way
+    // cannot move the rate, at which point the rule stops mattering and the
+    // cheaper truncation is fine. Nothing in this epoch is near that.
+    let rate = (canvases as u64 * 1000).div_ceil(declared as u64);
+
+    record.push_str(&format!(
+        "=== the rate ===\n\n\
+         applications {}\n\
+         canvas_nodes {canvases}\n\
+         declared_nodes {declared}\n\
+         canvas_escape_rate_x1000 {rate}\n\n",
+        ported.iter().filter(|entry| entry.independent).count(),
+    ));
+    Ok(record)
+}
+
+/// `claims/0034`'s rate over the corpus, against the claim's own table.
+///
+/// The one route in [`ROUTES`] whose workload is not a subprocess. It counts in
+/// this process because the counting is one call to
+/// `f_interface::node::canvas_census`, and a command spawned to make that call
+/// would be a second corpus reader that could come to disagree with this one
+/// about what the corpus was — which is the failure `claims/0034` is written to
+/// avoid, moved one layer out.
+///
+/// # Errors
+///
+/// [`canvas_report`]'s refusals, or [`claim_verdict`]'s.
+fn claim_canvas(claim: &str, file: &str) -> Result<(), String> {
+    let thresholds = thresholds_or_refuse(claim, file)?;
+    let report = canvas_report(&canvas_corpus_files()?)?;
+    print!("{report}");
+    claim_verdict(
+        claim,
+        file,
+        &thresholds,
+        &report,
+        Vec::new(),
+        "A rate over the target is RFC 0077's primary reversal condition firing: the\n\
+         vocabulary is too small for the work real applications do. Read `canvas_nodes`\n\
+         against `applications` before treating it as one — the RFC's own *one is a gap;\n\
+         two is a shape* — and then read the `notes` of every entry above, because what\n\
+         the canvases were *for* is the list of roles to argue for, one at a time, and it\n\
+         is only ever written there.\n\n\
+         A rate far under the target is not the opposite finding, and the claim says so.\n\
+         It is equally consistent with a corpus of applications too simple to push on the\n\
+         vocabulary at all, and no number this command prints tells the two apart. What\n\
+         does: whether the corpus above holds anything section 13 calls hard.",
+    )
+}
+
+/// `claims/0034`'s two halves: what the corpus was, and the refusal when there
+/// is none.
+///
+/// These are unit tests and not a boot because the metric is a `count` under RFC
+/// 0069 — a ratio of two integers taken from declarations, identical on every
+/// machine — so there is nothing a boot would add except minutes. What they are
+/// for is the half a green `cargo xtask claim canvas-escape-rate` cannot show:
+/// the command refuses today, so every line that computes and records a rate
+/// would otherwise be code nothing has ever run.
+#[cfg(test)]
+mod canvas_corpus {
+    /// One corpus entry, as a `(file, text)` pair the way the directory reader
+    /// hands them over.
+    ///
+    /// Built here rather than committed under `claims/canvas-corpus/` on
+    /// purpose: a fixture in that directory would be a self-port sitting in the
+    /// corpus directory, and the first reader to skim it would read the corpus
+    /// as non-empty. The directory holds what a porter put there and nothing
+    /// else.
+    fn entry(
+        name: &str,
+        application: &str,
+        independent: bool,
+        nodes: &[(u64, u64, &str)],
+    ) -> (String, String) {
+        let mut text = format!(
+            "application = \"{application}\"\n\
+             source      = \"https://example.invalid/{name}\"\n\
+             ported_by   = \"a fixture\"\n\
+             independent = {independent}\n\
+             notes       = \"what was hard\"\n"
+        );
+        for (id, parent, role) in nodes {
+            text.push_str(&format!(
+                "\n[[node]]\nid     = {id}\nparent = {parent}\nrole   = \"{role}\"\n"
+            ));
+        }
+        (format!("claims/canvas-corpus/{name}.toml"), text)
+    }
+
+    /// A surface with `fillers` pieces of text under it and `canvases` canvases,
+    /// each canvas declaring one child so the tree passes `check`.
+    fn shaped(canvases: u64, fillers: u64) -> Vec<(u64, u64, &'static str)> {
+        let mut nodes = vec![(1, 0, "surface")];
+        for i in 0..canvases {
+            nodes.push((2 + 2 * i, 1, "canvas"));
+            nodes.push((3 + 2 * i, 2 + 2 * i, "text"));
+        }
+        for i in 0..fillers {
+            nodes.push((1_000_000 + i, 1, "text"));
+        }
+        nodes
+    }
+
+    #[test]
+    fn an_empty_corpus_refuses_rather_than_reporting_a_clean_zero() {
+        let why = super::canvas_report(&[]).expect_err("an empty corpus has no rate");
+        assert!(why.contains("the corpus is empty"), "{why}");
+        assert!(why.contains("canvas_census"), "{why}");
+        // The refusal and nothing that looks like a measurement. A clean zero
+        // here is the one failure this claim cannot see, because it fails in
+        // the reassuring direction.
+        //
+        // *The edit that makes this go red:* replace the `let ... else` in
+        // `canvas_report` with `unwrap_or((0, 0))`, or add an
+        // `if admitted.is_empty()` that reports a zero rate.
+        assert!(!why.contains("canvas_escape_rate_x1000 0"), "{why}");
+    }
+
+    #[test]
+    fn a_corpus_of_self_ports_is_the_same_refusal_and_still_records_them() {
+        let files = [entry("ours", "a panel we wrote", false, &shaped(1, 30))];
+        let why = super::canvas_report(&files).expect_err("a self-port is not a corpus");
+        // Excluded from the rate...
+        assert!(why.contains("the corpus is empty"), "{why}");
+        // ...and recorded anyway, which is the half that makes the refusal
+        // readable: somebody has to be able to see what was looked at.
+        //
+        // *The edit that makes this go red:* drop the `independent` filter in
+        // `canvas_report`, and the first assertion fails; drop the record, and
+        // the rest do.
+        assert!(why.contains("a panel we wrote"), "{why}");
+        assert!(why.contains("independent  false"), "{why}");
+        assert!(why.contains("1 canvas(es) in 33 node(s)"), "{why}");
+        assert!(why.contains("are not in"), "{why}");
+    }
+
+    #[test]
+    fn an_admitted_corpus_reports_the_rate_beside_what_it_counted() {
+        let files = [entry("theirs", "some-editor 4.2", true, &shaped(1, 30))];
+        let report = super::canvas_report(&files).expect("a corpus with nodes in it has a rate");
+        // 1 canvas in 33 nodes: 1000/33 = 30.3, rounded away from flattering.
+        assert!(report.contains("canvas_escape_rate_x1000 31"), "{report}");
+        assert!(report.contains("canvas_nodes 1"), "{report}");
+        assert!(report.contains("declared_nodes 33"), "{report}");
+        assert!(report.contains("applications 1"), "{report}");
+        // The record, which `claims/0034`'s `[baseline]` note says is what
+        // stands in for a baseline here. A run that cannot say what it counted
+        // is not this claim whatever number it produced.
+        //
+        // *The edit that makes this go red:* stop pushing the per-entry block
+        // onto `record`.
+        assert!(report.contains("some-editor 4.2"), "{report}");
+        assert!(report.contains("ported by    a fixture"), "{report}");
+        assert!(report.contains("https://example.invalid/theirs"), "{report}");
+        assert!(report.contains("what was hard"), "{report}");
+    }
+
+    #[test]
+    fn the_rate_is_over_the_corpus_and_not_averaged_over_applications() {
+        // One small application that is a tenth canvas, one large one that is
+        // no canvas at all. The corpus rate is 1 in 100; the average of the two
+        // per-application rates is 1 in 20, which is the target exactly — so an
+        // averaging implementation would report a corpus sitting on its own
+        // threshold as sitting on it, and this one reports 10.
+        //
+        // *The edit that makes this go red:* compute a rate per entry and
+        // average them.
+        let files = [
+            entry("small", "a small one", true, &shaped(1, 7)),
+            entry("large", "a large one", true, &shaped(0, 89)),
+        ];
+        let report = super::canvas_report(&files).expect("two applications are a corpus");
+        assert!(report.contains("canvas_nodes 1"), "{report}");
+        assert!(report.contains("declared_nodes 100"), "{report}");
+        assert!(report.contains("canvas_escape_rate_x1000 10"), "{report}");
+        assert!(report.contains("applications 2"), "{report}");
+    }
+
+    #[test]
+    fn a_borderline_rate_rounds_the_way_that_does_not_flatter_the_vocabulary() {
+        // 51 canvases in 1001 nodes is 50.949 per thousand. Truncated it is 50,
+        // which is `claims/0034`'s `max` exactly and reports green; rounded up
+        // it is 51 and RFC 0077's reversal condition fires. The condition
+        // exists to be argued with, and a rounding rule that quietly keeps it
+        // from firing is the condition being retired by arithmetic.
+        //
+        // *The edit that makes this go red:* change `div_ceil` to `/`.
+        let files = [entry("borderline", "a borderline one", true, &shaped(51, 898))];
+        let report = super::canvas_report(&files).expect("a corpus with nodes in it has a rate");
+        assert!(report.contains("declared_nodes 1001"), "{report}");
+        assert!(report.contains("canvas_escape_rate_x1000 51"), "{report}");
+    }
+
+    #[test]
+    fn an_entry_is_a_tree_a_projection_could_be_given_and_not_a_tally() {
+        // A canvas that declared nothing: the loophole RFC 0078 closes, and the
+        // cheapest way to flatter this rate would be a corpus full of them —
+        // every one of them a node in the denominator and a canvas in the
+        // numerator, but declaring nothing is how an application avoids the
+        // work the vocabulary is being measured on.
+        //
+        // *The edit that makes this go red:* drop the `check` call in
+        // `corpus_entry`.
+        let files = [entry("hollow", "a hollow one", true, &[(1, 0, "surface"), (2, 1, "canvas")])];
+        let why = super::canvas_report(&files).expect_err("an empty canvas is not a port");
+        assert!(why.contains("EmptyCanvas"), "{why}");
+    }
+
+    #[test]
+    fn independence_has_no_default() {
+        // The default a missing field would take is the one that admits a port
+        // by the vocabulary's own authors into the corpus that exists to
+        // exclude one, and a corpus entry is written by somebody who has never
+        // read this file.
+        //
+        // *The edit that makes this go red:* give `independent` a default of
+        // `true` — or of `false`, which is equally a default.
+        let (file, text) = entry("silent", "a silent one", true, &shaped(1, 8));
+        let text = text.replace("independent = true\n", "");
+        let why = super::canvas_report(&[(file, text)]).expect_err("independence is declared");
+        assert!(why.contains("`independent` is required and missing"), "{why}");
+    }
+
+    #[test]
+    fn a_role_the_vocabulary_does_not_have_is_refused_rather_than_ignored() {
+        // Ignoring it would shrink the denominator and leave the numerator
+        // alone, which moves the rate up — but a corpus reader that silently
+        // drops what it does not understand is one that cannot be read back,
+        // and RFC 0077 wants the missing role named in an RFC.
+        let files =
+            [entry("unknown", "one of those", true, &[(1, 0, "surface"), (2, 1, "carousel")])];
+        let why = super::canvas_report(&files).expect_err("`carousel` is not a role");
+        assert!(why.contains("is not a role of the vocabulary"), "{why}");
+    }
+
+    #[test]
+    fn the_corpus_directory_this_tree_ships_is_empty_and_the_command_says_so() {
+        // The state of the repository, asserted rather than described, so that
+        // the day somebody adds an entry this test is what tells them the claim
+        // has changed state and `claims/0034`'s `status` is now a decision
+        // somebody has to take in a reviewable diff.
+        let files = super::canvas_corpus_files().expect("the corpus directory is readable");
+        assert!(
+            files.is_empty(),
+            "claims/canvas-corpus/ now holds {} entr(y/ies). If a porter from outside this \
+             tree put them there, this assertion is the good news and should be replaced by \
+             a run: `cargo xtask claim canvas-escape-rate`, and claims/0034's `status` moves \
+             off `pending` in the same diff. If this tree put them there, they are not a \
+             corpus. {files:?}",
+            files.len()
+        );
+    }
 }
 
 /// `claims/0017`'s two workloads, and its `[threshold]` table applied to what

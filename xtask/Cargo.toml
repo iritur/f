@@ -51,5 +51,22 @@ f-assembler.workspace = true
 # above.
 f-text.workspace = true
 
+# The semantic vocabulary, for one route: `cargo xtask claim canvas-escape-rate`
+# counts canvases against declared nodes over the corpus in `claims/canvas-corpus/`,
+# and `f_interface::node::canvas_census` is the function that does the counting.
+#
+# It is a dependency rather than a reimplementation for the reason the whole
+# claim turns on. `claims/0034`'s `[workload]` says the corpus-level refusal and
+# the per-tree one must not be able to disagree, and two counters written twice
+# are two counters that will: a census here would drift from the one in
+# `interface/src/node.rs` the first time a role was added. There is one census,
+# it lives with the vocabulary, and this crate calls it. `no_std` library, `std`
+# binary — the same arrangement the rows above take, on `f-hash`'s argument.
+#
+# *What would reverse this:* the day a corpus is large enough that reading it
+# into `Vec<Node>` in the host is the wrong shape, the census moves behind a
+# component and this row goes. Nothing about the counting changes with it.
+f-interface.workspace = true
+
 [lints]
 workspace = true

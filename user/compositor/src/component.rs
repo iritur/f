@@ -37,10 +37,20 @@
 //! is why it is its own outcome — [`stopped::IDLE`] — and not folded into
 //! [`stopped::TOLD`].
 //!
-//! It is also, today, this component's only answer to *nothing has arrived*.
-//! `E3-B01g` is the task that replaces the spin with a doorbell, at which point
-//! this bound stops being reached in the ordinary case and starts being what it
-//! says it is.
+//! It is no longer this component's only answer to *nothing has arrived*.
+//! `E3-B01g` gave it a second one: on a frame that says it will ring —
+//! [`at::DOORBELL`](crate::routing::at::DOORBELL) — an idle turn arms the ring's
+//! wakeup flag, looks once more, and then asks the frame to stop this core.
+//! The bound above still counts those turns, because a park that is never rung
+//! is a hang and RFC 0046 says a hang is a count; what changed is that reaching
+//! it now costs the machine nothing per turn.
+//!
+//! **The order is the protocol and not a style.** Arm, *then look again*, and
+//! only then sleep. A component that armed and slept without looking is the
+//! lost wakeup RFC 0020 describes from the other side: the entry it would have
+//! found arrived between its last look and its decision, and the producer had
+//! already read an unarmed flag and rung nothing. The `continue` after the arm
+//! below is that second look, and deleting it is a hang rather than a slow loop.
 //!
 //! # What it does *not* do, said rather than implied
 //!
@@ -60,7 +70,7 @@ use f_scene::arena::Arena;
 use f_scene::commit::Batch;
 
 use crate::pacing::Tick;
-use crate::routing::{self, at, life, node, reported, stopped};
+use crate::routing::{self, at, bell, life, node, reported, stopped};
 use crate::tree::{FRAME_DELTAS_MAX, Held, Plan};
 
 /// A run that did what it meant to.
@@ -155,6 +165,15 @@ fn serve() -> ! {
 
     let mut route = Route { control: parts.control, told: false };
     let mut idle: u64 = 0;
+    // The doorbell's three pieces of state, and they are separate on purpose.
+    // `armed` is what the *ring* believes, and it must be put back the moment
+    // work arrives or the client rings for every entry it is already draining
+    // — which is the number `f_ring::doorbell` exists to drive to zero. The two
+    // counts are what this component publishes, and they differ by the times the
+    // frame had already been rung when it was asked to stop.
+    let mut armed = false;
+    let mut parked: u64 = 0;
+    let mut halted: u64 = 0;
     // The last reading this component believed. Zero until the frame writes one,
     // which is *the epoch* and not *unknown*: a compositor whose first entry
     // arrives before the frame has ticked charges that frame from the origin,
@@ -197,10 +216,50 @@ fn serve() -> ! {
             if idle > parts.spins {
                 break stopped::IDLE;
             }
-            core::hint::spin_loop();
+            // **A turn with no room to answer in is not a turn to sleep on**, and
+            // that is the one place the two things this branch counts as one have
+            // to come apart. A doorbell means *a submission arrived*; nothing
+            // rings when a client reaps, because a completion ring has no wakeup
+            // flag and needs none. So a component that parked because its
+            // completion ring was full would be waiting for a signal its peer has
+            // no reason to send, and would be rescued only by a timer tick —
+            // which is an accident and not a protocol.
+            if !parts.doorbell || room == 0 {
+                core::hint::spin_loop();
+                continue;
+            }
+            if !armed {
+                // Tell the client to ring, and then go round again. The second
+                // look is the `continue`, and the module comment says why it may
+                // not be optimised into a re-read here: a component that armed
+                // and slept in one turn is the lost wakeup.
+                if parts.data.arm_wakeup().is_err() {
+                    break stopped::NO_RING;
+                }
+                armed = true;
+                continue;
+            }
+            // Armed, and the turn after the arm found nothing. Stop the core.
+            parked += 1;
+            let _ = board.write64(reported::PARKED, parked);
+            if door::call0(door::WAIT) == door::HALTED {
+                halted += 1;
+                let _ = board.write64(reported::HALTED, halted);
+            }
             continue;
         };
         idle = 0;
+        if armed {
+            // Work arrived, so the client must stop ringing for it. Before the
+            // entry is answered rather than after, because the answer is what
+            // lets the client submit the next one — and a client that submitted
+            // against a flag this component had not put back would be rung for
+            // an entry it was already holding.
+            if parts.data.disarm_wakeup().is_err() {
+                break stopped::NO_RING;
+            }
+            armed = false;
+        }
 
         // The payload, out of the ring's own arena. **Zeroed first and offered
         // whatever the copy answered**, which is deliberate: an entry framing a
@@ -248,6 +307,14 @@ struct Parts {
     data: Server,
     /// Turns with nothing to do before the loop ends. Unit: turns.
     spins: u64,
+    /// Whether the frame says it will ring a doorbell for this component.
+    ///
+    /// Read once, at layout, and never again: it is a property of the frame
+    /// this component was started by, and a frame that changed its mind half
+    /// way through a run would be a frame that had stopped ringing for a
+    /// component already asleep. `crate::routing::at::DOORBELL` says why it is
+    /// told rather than discovered.
+    doorbell: bool,
     /// What this machine can draw with, how often it scans out, and how much of
     /// a frame to keep in hand.
     plan: Plan,
@@ -318,7 +385,14 @@ fn laid_out(board: &Window) -> Option<Parts> {
         margin_nanos: board.read64(at::PACING_MARGIN_NANOS).ok()?,
     };
 
-    Some(Parts { control, data, spins, plan })
+    // Not refused at any value, and the reason is the same shape as the pacing
+    // inputs above: every reading has an honest answer, and the honest answer to
+    // a word this frame did not write is *nobody rings, so look for yourself*.
+    // A refusal here would be this component declining to serve a client because
+    // it had not been promised a wakeup.
+    let doorbell = board.read64(at::DOORBELL).ok()? == bell::RING;
+
+    Some(Parts { control, data, spins, plan, doorbell })
 }
 
 /// Write what this component did into the half of the routing page that is its

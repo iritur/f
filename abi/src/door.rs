@@ -98,6 +98,67 @@ pub const CAP_REVOKE: u64 = 5;
 /// disagree about it.
 pub const CAP_MAP: u64 = 6;
 
+/// "I have nothing to do. Wake me when somebody rings."
+///
+/// Takes nothing and answers [`HALTED`] or [`AWAKE`]. The frame stops the core
+/// this component is on until a doorbell is delivered to it; the entry that
+/// caused the doorbell is already on the ring by then, because the ring's own
+/// suppression protocol is what decided to ring at all.
+///
+/// # Why this is the eighth call, and what it cost to add one
+///
+/// `kernel::process::syscall` says the intended cost of an eighth is arguing
+/// against RFC 0014 and RFC 0015 in writing, and this is that argument in the
+/// place a component reads. RFC 0014 narrows the door to *what a component
+/// cannot do for itself*, and stopping a core is the clearest possible member
+/// of that set: `hlt` is a ring-0 instruction, there is no unprivileged
+/// equivalent, and the alternative a component does have -- spinning -- is not
+/// a cheaper version of this but a different thing. A compositor that spins
+/// holds a core at full rate between frames, which is the cost `E3-B01h`'s
+/// pacing exists to avoid paying and would have made unmeasurable.
+///
+/// It is also the call RFC 0014 predicts rather than one it forbids: the
+/// document retires [`ANNOUNCE`] and [`PROGRESS`] when a component is *started
+/// with a channel and told on it*, and a component that is told on a channel is
+/// a component that has to be able to wait on one. This is the wait. When that
+/// day comes it is the two above that go and this that stays.
+///
+/// **It carries nothing, in either direction, and that is deliberate.** A wait
+/// that named a channel would be the frame holding a component's ring, which is
+/// a subscription and therefore state the frame would have to keep per
+/// component and per ring. What is here instead is *stop this core*, and which
+/// ring had work is a question the component answers for itself when it wakes --
+/// by looking, which is what R05 says polling is.
+///
+/// *Reversal:* a wait that takes a deadline. This one has none, and the bound
+/// on a component that is never rung is the frame's own -- the supervisor's stop
+/// deadline, and `kernel::smp::join_serviced`'s wall-clock bound at a boot. That
+/// is a bound on the *run* and not on the wait, which is enough while the only
+/// thing that parks is a compositor whose client is the frame, and is not enough
+/// the day two components with no frame between them share a channel.
+pub const WAIT: u64 = 7;
+
+/// [`WAIT`]'s answer when the core really stopped and a doorbell restarted it.
+///
+/// Worth telling apart from [`AWAKE`] by the component rather than only by the
+/// frame's own counters, because they are the two halves of the suppression
+/// number: a component that could not distinguish them would publish *I waited*
+/// where the interesting figure is *I waited and it cost the machine a stopped
+/// core*.
+pub const HALTED: i64 = 1;
+
+/// [`WAIT`]'s answer when a doorbell had already been delivered to this core
+/// since the last wait, so nothing was stopped.
+///
+/// **Not a failure and not a spurious wakeup.** It is the ordinary answer to the
+/// race the suppression protocol leaves open: the consumer decides to sleep, and
+/// the producer's ring arrives between that decision and the instruction that
+/// would have stopped the core. The frame latches it, and the component is told
+/// *there was already something for you* rather than being stopped holding work.
+/// A frame that did not latch it would hang here, which is the lost wakeup
+/// RFC 0020 is about, one layer down from the ring.
+pub const AWAKE: i64 = 0;
+
 /// The answer to [`PROGRESS`] while the component should carry on.
 pub const KEEP_GOING: i64 = 0;
 
