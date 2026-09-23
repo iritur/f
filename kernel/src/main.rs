@@ -3262,13 +3262,22 @@ fn semantic_boot(
 }
 
 /// `E2-B08`'s boot: a component that serves the objects ring, and this frame
-/// submitting on it.
+/// submitting on it — and, from `E3-B03b`, a typeface loaded across the same
+/// ring by content address.
 ///
-/// Two halves, and `kernel/src/objects.rs` argues why neither means anything
-/// alone: `objects=read` submits reads and requires every byte back, and
-/// `objects=quiet` submits nothing and requires the component to report that it
-/// was asked nothing. A delivered count of zero and a component nobody spoke to
-/// are the same number, and only the second half tells them apart.
+/// Two halves for `E2-B08`, and `kernel/src/objects.rs` argues why neither means
+/// anything alone: `objects=read` submits reads and requires every byte back,
+/// and `objects=quiet` submits nothing and requires the component to report that
+/// it was asked nothing. A delivered count of zero and a component nobody spoke
+/// to are the same number, and only the second half tells them apart.
+///
+/// `objects=face` and `objects=undeclared` are `E3-B03b`'s, and they take the
+/// `objects=` parameter rather than a `face=` one on purpose: it is this
+/// component, this store and this ring with one word on the board different, and
+/// a parameter of its own would suggest a second boot. The refusal the second of
+/// them exists for is the **frame's**, taken against the `[[face]]` table the
+/// loader placed in the component's own module — RFC 0108's section, not a field
+/// of the record — and the declared face loads in the same run as its control.
 ///
 /// The verdict is the kernel's rather than the harness's, exactly as `blk`'s is:
 /// it knows which half it asked for and what is in its own buffer afterwards.
@@ -3288,6 +3297,10 @@ fn objects_datapath(
         objects::Half::Provoke
     } else if boot.has_parameter(b"objects=written") {
         objects::Half::Written
+    } else if boot.has_parameter(b"objects=face") {
+        objects::Half::Face
+    } else if boot.has_parameter(b"objects=undeclared") {
+        objects::Half::Undeclared
     } else {
         return None;
     };

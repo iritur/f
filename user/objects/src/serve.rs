@@ -60,7 +60,7 @@ use f_zone::map::ZoneMap;
 use crate::dma::Landing;
 use crate::read::mount;
 use crate::service::Service;
-use f_abi::objects::board::{self as routing, PROVOKE, at, reported, stopped};
+use f_abi::objects::board::{self as routing, FACE, PROVOKE, at, reported, stopped};
 
 /// How many entries to take off the ring before answering.
 ///
@@ -149,11 +149,18 @@ struct Parts {
 
 /// Serve the objects ring until the frame says stop.
 ///
-/// `selector` is `board::SERVE` or `board::PROVOKE`; nothing else reaches here,
-/// because `component::start` calls this for those two alone. The provocation is
-/// a whole life rather than a flag on an entry, which is `user/virtio-blk`'s
-/// reason: a grep for the second call site below finds every way this component
-/// can stage a byte, and there are exactly two.
+/// `selector` is `board::SERVE`, `board::PROVOKE` or `board::FACE`; nothing else
+/// reaches here, because `component::start` calls this for those three alone.
+/// The provocation is a whole life rather than a flag on an entry, which is
+/// `user/virtio-blk`'s reason: a grep for the second call site below finds every
+/// way this component can stage a byte, and there are exactly two.
+///
+/// `board::FACE` adds two typefaces to the store and nothing else — the loop,
+/// the counts and the answers are the ones `SERVE` gives. **Both of
+/// `E3-B03b`'s boot halves enter here with that one selector**, so the component
+/// is byte-identical across the half that loads a face and the half whose face
+/// is refused; what differs is entirely on the frame's side of the ring.
+/// `board::FACE` argues why that matters.
 ///
 /// Every failure ends the run with a reason in [`reported::OUTCOME`] rather than
 /// a panic, and the reason matters: a component that stopped because its board
@@ -204,10 +211,18 @@ pub fn serve(selector: u32) -> ! {
     // What this component will be asked for. Built here rather than handed over,
     // because there is no device: the store is in this component's own heap and
     // the blob is written into it from the seed the frame chose.
-    let Some((mut service, hash)) = stocked(block_bytes, blob_bytes, seed) else {
+    let Some(stock) = stocked(block_bytes, blob_bytes, seed, selector == FACE) else {
         report(&board, None, stopped::NO_STORE);
         end(stopped::NO_STORE)
     };
+    let Stocked { mut service, hash, face, twin } = stock;
+    // A half that asked for faces and got none is `NO_FACE` and not `NO_STORE`:
+    // the store was built, and what would not fit is thirty-two more bytes.
+    // Two failures a reader would otherwise debug as one.
+    if selector == FACE && (face == [0; 32] || twin == [0; 32]) {
+        report(&board, None, stopped::NO_FACE);
+        end(stopped::NO_FACE)
+    }
 
     // What the client needs before it can name anything: which set was issued,
     // how wide a buffer is, how long the content is, and the hash to ask for.
@@ -221,6 +236,18 @@ pub fn serve(selector: u32) -> ! {
         let mut eight = [0u8; 8];
         eight.copy_from_slice(chunk);
         let _ = board.write64(reported::HASH + (word as u32) * 8, u64::from_le_bytes(eight));
+    }
+    // The two face addresses, beside the blob's and published the same way: the
+    // store's answer for bytes this component composed, written before the
+    // magic so that a frame which sees the magic has all of them. Zero on every
+    // half that asked for no face, which is a statement — this component stocked
+    // none — rather than a field nobody filled in.
+    for (offset, digest) in [(reported::FACE_HASH, &face), (reported::TWIN_HASH, &twin)] {
+        for (word, chunk) in digest.chunks_exact(8).enumerate() {
+            let mut eight = [0u8; 8];
+            eight.copy_from_slice(chunk);
+            let _ = board.write64(offset + (word as u32) * 8, u64::from_le_bytes(eight));
+        }
     }
     // The magic for the half the client reads *before* the run, so that the
     // client knows the set id is a set id and not a zero. The counts below are
@@ -330,6 +357,23 @@ fn laid_out(board: &Window) -> Option<Parts> {
     })
 }
 
+/// What [`stocked`] put in the store, and where.
+///
+/// A struct because four values travel together and two of them are only
+/// sometimes there; a four-tuple at the call site would be four positions a
+/// reader has to count.
+struct Stocked {
+    /// The service over the store, ready to answer entries.
+    service: Service<ZonedMemory, Memory>,
+    /// The blob's content address. Unit: bytes, a SHA-256 digest.
+    hash: [u8; 32],
+    /// The declared typeface's content address, or all zero on a half that
+    /// asked for none. Unit: bytes, a SHA-256 digest.
+    face: [u8; 32],
+    /// The undeclared twin's, on the same terms. Unit: bytes, a SHA-256 digest.
+    twin: [u8; 32],
+}
+
 /// Build the store, write the blob, and answer the service over it with the
 /// blob's content address.
 ///
@@ -337,11 +381,14 @@ fn laid_out(board: &Window) -> Option<Parts> {
 /// be built at, or a heap that could not hold one — which is a board the frame
 /// filled in with numbers this component's account cannot pay for, and is a
 /// refusal rather than a fault.
-fn stocked(
-    block_bytes: usize,
-    blob_bytes: usize,
-    seed: u64,
-) -> Option<(Service<ZonedMemory, Memory>, [u8; 32])> {
+///
+/// `faces` puts `E3-B03b`'s two typefaces in the same store: the one
+/// `user/objects/manifest.toml` declares and the twin nothing declares. They go
+/// in **together or not at all**, because the boot that refuses the second one
+/// is the boot that has to load the first — a positive control in the same run,
+/// and a half where only one of them was stocked would be a run where the
+/// control silently went missing.
+fn stocked(block_bytes: usize, blob_bytes: usize, seed: u64, faces: bool) -> Option<Stocked> {
     let record_blocks = (f_abi::store::Header::BYTES + blob_bytes).div_ceil(block_bytes);
     // One zone for the record plus a spare, above the three the format reserves,
     // and [`WRITE_ZONES`] more for what a client may write.
@@ -371,10 +418,25 @@ fn stocked(
     store.barrier().ok()?;
     drop(blob);
 
+    // The two typefaces, into the same store and by the same `put` the blob
+    // went through. Nothing here compares an address against the manifest: a
+    // component that checked its own declaration is a component that can stop
+    // checking, and the check belongs to the frame. `crate::face` is where that
+    // sentence is argued at length.
+    let (face, twin) = if faces {
+        let mut scratch = [0u8; crate::face::BYTES];
+        let one = crate::face::stock(&mut store, &mut scratch).ok()?;
+        let two = crate::face::stock_undeclared(&mut store, &mut scratch).ok()?;
+        store.barrier().ok()?;
+        (one, two)
+    } else {
+        ([0u8; 32], [0u8; 32])
+    };
+
     let log = Memory::new(LOG_BLOCK_BYTES, LOG_BLOCKS);
     let index = Index::mount(log, 0, LOG_BLOCKS).ok()?;
 
-    Some((Service::over(mount(store, index)), hash))
+    Some(Stocked { service: Service::over(mount(store, index)), hash, face, twin })
 }
 
 /// Copy one entry's payload out of the channel's inline arena.

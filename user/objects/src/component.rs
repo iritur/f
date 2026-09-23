@@ -85,7 +85,16 @@ pub fn start(argument: u64) -> ! {
     // third, which is `user/store/src/component.rs`'s rule and its reason: the
     // life a spawn into a place asks for is the one that has always been here.
     let selector = door::Entry::from_bits(argument).selector();
-    if selector == f_abi::objects::board::SERVE || selector == f_abi::objects::board::PROVOKE {
+    // Three now, and the third differs from the first two only in what is in the
+    // store when the loop starts. `board::FACE` argues why that is a selector
+    // rather than a word on the board: a component that stocked a typeface only
+    // when told to would be a component with an opinion about which boot it is
+    // in, and `E3-B03b`'s refusal is the frame's precisely so that this
+    // component has no opinion to have.
+    if selector == f_abi::objects::board::SERVE
+        || selector == f_abi::objects::board::PROVOKE
+        || selector == f_abi::objects::board::FACE
+    {
         crate::serve::serve(selector)
     }
 

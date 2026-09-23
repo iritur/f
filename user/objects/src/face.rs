@@ -62,22 +62,31 @@ use f_text::face::{self, Face};
 
 /// The design-unit grid of the face this component stocks.
 ///
-/// A thousand, which is the CFF convention rather than TrueType's 2048, and the
-/// choice matters only in that it is *written down*: the address in the manifest
-/// is a function of this number, so moving it is a red test and not a silent
-/// second face.
+/// `f_text::face::fixture`'s and not this crate's own, and the indirection is
+/// the point: the frame computes the same address for itself before it decides
+/// whether a component may load it, so a second transcription of these numbers
+/// here would be a second face with a different address — and the symptom would
+/// be a read that resolves to nothing rather than a diff anybody can see.
 /// Unit: design units per em.
-pub const UNITS_PER_EM: u32 = 1000;
+pub const UNITS_PER_EM: u32 = face::fixture::UNITS_PER_EM;
 
 /// The advances of the face this component stocks, glyph by glyph.
 ///
-/// Four, and the values are chosen to be distinguishable rather than
-/// typographic: a zero advance so that a reader answering zero for a glyph it
-/// does not carry would be indistinguishable from a real one and therefore has
-/// to answer `None` instead, and three that are not equal so that a reader that
-/// returned the wrong index would be caught.
+/// [`face::fixture::DECLARED`], for [`UNITS_PER_EM`]'s reason. The argument for
+/// *these four values* is there rather than here.
 /// Unit: design units.
-pub const ADVANCES: [u16; 4] = [0, 512, 1024, 600];
+pub const ADVANCES: [u16; 4] = face::fixture::DECLARED;
+
+/// The advances of the face this component stocks and **nothing declares**.
+///
+/// [`face::fixture::UNDECLARED`]: the same face with one advance one design unit
+/// larger. It is stocked beside the declared one so that `E3-B03b`'s second
+/// clause is about a face that is real, stored and readable and is refused for
+/// its address alone — a store that did not hold it would make the refusal
+/// ambiguous between a permission and a miss, which is the distinction
+/// [`Refusal`] has two variants for.
+/// Unit: design units.
+pub const UNDECLARED: [u16; 4] = face::fixture::UNDECLARED;
 
 /// How many bytes the composed face occupies, and therefore how large a buffer
 /// both halves of this module need.
@@ -121,7 +130,16 @@ pub enum Refusal {
 /// Whatever `f_text::face::compose` refuses, which for these constants is only
 /// a buffer shorter than [`BYTES`].
 pub fn compose(into: &mut [u8]) -> Result<usize, face::Refusal> {
-    face::compose(into, UNITS_PER_EM, &ADVANCES)
+    face::fixture::declared(into)
+}
+
+/// Compose the face nothing declares, into `into`.
+///
+/// # Errors
+///
+/// As [`compose`].
+pub fn compose_undeclared(into: &mut [u8]) -> Result<usize, face::Refusal> {
+    face::fixture::undeclared(into)
 }
 
 /// Compose the face and put it in the store, and answer the address the store
@@ -137,7 +155,40 @@ pub fn compose(into: &mut [u8]) -> Result<usize, face::Refusal> {
 /// [`Refusal::Malformed`] if the scratch buffer is too small for [`BYTES`], and
 /// [`Refusal::NotStocked`] for whatever the store says about a write.
 pub fn stock<D: Device>(store: &mut Store<D>, scratch: &mut [u8]) -> Result<[u8; 32], Refusal> {
-    let len = compose(scratch).map_err(Refusal::Malformed)?;
+    put(store, scratch, compose)
+}
+
+/// Compose the face nothing declares and put it in the store, and answer the
+/// address the store gave it.
+///
+/// **A second function and not a flag**, for `crate::serve`'s reason about its
+/// own provocation: a grep for this name finds every place this component puts
+/// a face nobody declared into a store, and there is exactly one. A boolean
+/// argument would put both faces behind one call site and make the answer *read
+/// the branch*.
+///
+/// # Errors
+///
+/// As [`stock`].
+pub fn stock_undeclared<D: Device>(
+    store: &mut Store<D>,
+    scratch: &mut [u8],
+) -> Result<[u8; 32], Refusal> {
+    put(store, scratch, compose_undeclared)
+}
+
+/// Compose with `writer` and put the result in the store.
+///
+/// The body [`stock`] and [`stock_undeclared`] share, so that what differs
+/// between a declared face and an undeclared one is the bytes and nothing about
+/// how they reach the store. Two stockers with two code paths would be two
+/// answers to *is this face in the store the same way the other one is*.
+fn put<D: Device>(
+    store: &mut Store<D>,
+    scratch: &mut [u8],
+    writer: fn(&mut [u8]) -> Result<usize, face::Refusal>,
+) -> Result<[u8; 32], Refusal> {
+    let len = writer(scratch).map_err(Refusal::Malformed)?;
     let bytes = scratch.get(..len).ok_or(Refusal::Malformed(face::Refusal::Truncated))?;
     // `kind::CHUNK` and not a fifth kind: a face is a run of bytes named by
     // SHA-256 over exactly those bytes, which is that kind's definition word for
@@ -332,12 +383,11 @@ mod tests {
         stock(&mut store, &mut scratch).expect("stocked");
         let declared = declaration();
 
-        let mut other = ADVANCES;
-        other[1] += 1;
         let mut bytes = [0u8; BYTES];
-        let len = face::compose(&mut bytes, UNITS_PER_EM, &other).expect("also a face");
-        let elsewhere =
-            store.put(kind::CHUNK, &bytes[..len]).expect("a store that holds the other one too");
+        let len = compose_undeclared(&mut bytes).expect("also a face");
+        let mut into_the_store = [0u8; BYTES];
+        let elsewhere = stock_undeclared(&mut store, &mut into_the_store)
+            .expect("a store that holds the other one too");
         assert_ne!(elsewhere, declared[0].hash, "the two faces have two addresses");
 
         let mut into = [0u8; BYTES];

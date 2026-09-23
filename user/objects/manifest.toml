@@ -49,6 +49,23 @@ domain = "private"
 # discarding `f-blob`, `f-zone`, `f-index` and `f-hash` and now cannot — and the
 # spawn went from **25 frames to 36**.
 #
+# **E3-B03b moved it again, to 60 120 bytes, and the number worth writing down
+# is not that one.** `crate::face::stock` became reachable from the serve loop,
+# so `--gc-sections` stopped discarding `f-text` and the SHA-256 path under it;
+# the spawn is **39 frames** and this account still covers it. What changed is
+# the *other* bound: `kernel::process::TEXT_PAGES` reserves sixteen pages —
+# 65 536 bytes — for any component the frame builds from a component file, and
+# this image is now **5 416 bytes** under it. That is a bound nobody here was
+# reading, it belongs to a constant in another crate, and it is checked at the
+# spawn — `text_pages > TEXT_PAGES` is `Error::TooLarge`, a refusal with a
+# reason and not a fault, which is the one good thing about it.
+#
+# *What moves it:* a real shaper. `E3-B03a` decides where one comes from and
+# `E3-B03e` onwards is where a table directory and a `cmap` arrive; none of that
+# fits in 5 416 bytes, so the day a shaper is reachable from this image is the
+# day `TEXT_PAGES` is a number somebody has to argue rather than inherit. Say
+# so there with the refusal quoted, not here.
+#
 # Sixteen pages still covers it, and the arithmetic is worth writing down because
 # it is not obvious: `kernel::component::account_bytes` stakes a place's account
 # at `memory_bytes` plus every declared need, rounded up to a power of two of
@@ -211,6 +228,15 @@ memory_bytes = 65_536
 # addressed by content hash and declared before it is used, and this line is the
 # declaration — the only place the set is written down, so a component asking the
 # store for anything else is refused before an entry crosses.
+#
+# **The refusal is the frame's, and `cargo xtask face` is where it happens.**
+# `kernel/src/objects.rs` reads this entry out of the section the loader placed
+# after the image, composes the same bytes and hashes them itself, and submits a
+# read only for an address this table names. `undeclared` puts a second face in
+# the same store — real, stored, readable, declared by nothing — and no entry
+# crosses for it. Nothing above the frame consults this line in that boot, which
+# is deliberate: a component that checks its own declaration is a component that
+# can stop checking.
 #
 # **The digest is not copied from anywhere; it is computed twice and compared.**
 # `user/objects/src/face.rs` composes the face out of two constants — a

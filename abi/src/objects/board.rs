@@ -76,6 +76,23 @@ pub const SERVE: u32 = 1;
 /// Unit: none — a selector ordinal.
 pub const PROVOKE: u32 = 2;
 
+/// The same loop again, with two typefaces in the store beside the blob.
+///
+/// `E3-B03b`. A third selector and not a flag, on [`PROVOKE`]'s argument and
+/// with a sharper reason of its own: what this selector adds is *content in a
+/// store*, and a component that stocked a face only when asked by a word on the
+/// board would be a component with an opinion about which boot it is in.
+///
+/// **Both face halves of the boot use this one selector**, and that is the
+/// load-bearing part. `objects=face` and `objects=undeclared` run a
+/// byte-identical component; what differs between them is entirely what the
+/// *frame* does with the two addresses it computes for itself. A component that
+/// behaved differently on the two halves could be the thing deciding which face
+/// may be loaded, and `E3-B03b`'s whole point is that it is not — a component
+/// that checks its own declaration is a component that can stop checking.
+/// Unit: none — a selector ordinal.
+pub const FACE: u32 = 3;
+
 /// Where the frame maps this page. Must equal `kernel::process::BOARD`.
 ///
 /// Asserted in `kernel/src/objects.rs` rather than trusted, so a build where the
@@ -222,6 +239,31 @@ pub mod reported {
     /// Unit: bytes of a SHA-256 digest, little-endian per word.
     pub const WRITTEN_HASH: u32 = 0x188;
 
+    /// The store's address for the typeface this component stocked that its
+    /// manifest **declares**, four words of it.
+    ///
+    /// Published so that the frame can check the store actually holds what the
+    /// frame believes it holds — the frame composes the same bytes and hashes
+    /// them itself, so this word is compared against arithmetic rather than
+    /// believed. It is **not** how the frame decides whether the face may be
+    /// loaded: that decision is made against the `[[face]]` table the loader
+    /// placed in this component's module, and a component publishing an address
+    /// it liked the look of changes nothing about it.
+    ///
+    /// Zero on every half that did not ask for a face.
+    /// Unit: bytes of a SHA-256 digest, little-endian per word.
+    pub const FACE_HASH: u32 = 0x1A8;
+
+    /// The store's address for the typeface this component stocked that
+    /// **nothing declares**, four words of it.
+    ///
+    /// The same face with one advance one design unit larger. It is here so
+    /// that `E3-B03b`'s refusal is about a face that is real, stored and
+    /// readable: a boot refusing an address no store holds would be refusing a
+    /// miss, and the two are different sentences.
+    /// Unit: bytes of a SHA-256 digest, little-endian per word.
+    pub const TWIN_HASH: u32 = 0x1C8;
+
     /// [`super::REPORTED_MAGIC`], written **last**. Unit: none.
     pub const MAGIC: u32 = 0x1F8;
 }
@@ -253,6 +295,11 @@ pub mod stopped {
     /// The self-check that makes the published zero worth reading did not move
     /// the counter it is there to move. Unit: none.
     pub const NO_SELF_CHECK: u64 = 7;
+    /// A face could not be composed into the store, on a half that asked for
+    /// one. Distinct from [`NO_STORE`] because a store that was built and a
+    /// store that would not take thirty-two more bytes are different failures,
+    /// and only the second of them is about [`super::FACE`]. Unit: none.
+    pub const NO_FACE: u64 = 8;
 }
 
 /// The content the frame and this component both put in the blob.
@@ -277,3 +324,17 @@ pub const fn content_byte(seed: u64, offset: usize) -> u8 {
         .wrapping_add(at.wrapping_mul(0xBF58_476D_1CE4_E5B9));
     ((mixed >> 33) ^ mixed) as u8
 }
+
+// The reported half's layout, checked by the machine rather than by reading the
+// offsets down a column. Every field added to this page since it was laid out
+// has had to fit between the last one and the magic, and two that overlapped
+// would be two counts in one word with nothing saying which of them won — a
+// defect whose symptom is a number that is *almost* right.
+//
+// *Reversal:* the page ceasing to be a flat layout of fixed offsets, which is
+// the day it is described by something both sides generate rather than both
+// sides spell.
+const _: () = assert!(reported::WRITTEN_HASH + 32 <= reported::FACE_HASH);
+const _: () = assert!(reported::FACE_HASH + 32 <= reported::TWIN_HASH);
+const _: () = assert!(reported::TWIN_HASH + 32 <= reported::MAGIC);
+const _: () = assert!(reported::MAGIC + 8 <= BYTES);

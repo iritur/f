@@ -48,6 +48,43 @@
 //! from a component that was never asked, which is the failure the first half
 //! cannot see.
 //!
+//! # `E3-B03b`'s two halves, and why the refusal is the frame's
+//!
+//! `objects=face` stands the component up with `board::FACE`, which puts two
+//! typefaces in its store beside the blob: the one `user/objects/manifest.toml`
+//! declares and a twin nothing declares. The frame **computes both addresses for
+//! itself** out of `f_text::face::fixture` — it never takes an address from the
+//! component in order to decide anything — looks each one up in the `[[face]]`
+//! table the loader placed in that component's module, and submits a read only
+//! for an address the table names. What comes back is hashed here and parsed
+//! here: the address is the name, so bytes that hash to something else are not
+//! the face that was asked for however well they parse.
+//!
+//! `objects=undeclared` runs a **byte-identical component** and does both things
+//! in one run: it loads the declared face — the positive control, in the same
+//! boot rather than in a previous one — and it refuses the twin *before an entry
+//! crosses*. The component's own entry count is the second witness: it answers
+//! one entry, so a refusal that leaked would show up on the component's side of
+//! the ring as well as on this one.
+//!
+//! **The refusal is the frame's and that is the whole point.** A component that
+//! checks its own declaration is a component that can stop checking; the check
+//! is here, against a table the component did not write and cannot reach, and
+//! `user/objects/src/face.rs` carries the same logic for a caller *above* the
+//! frame without either being the authority for the other.
+//!
+//! **What that is not, said before anybody reads it as more.** The frame refuses
+//! *on its own behalf*, as the client it is. It is not a rule the ring enforces
+//! against every client: nothing in `f_ring` reads a `[[face]]` table, and a
+//! different client submitting the twin's address would be answered, because the
+//! component holds the bytes and has no declaration to consult. That is the
+//! honest reading of *declared before it is used* today, and it is the same gap
+//! this file already records above — there is one client in this boot and it is
+//! the frame. The day `E1-B05`'s supervisor hands a place's occupant a peer, the
+//! question becomes *which side of the ring the table is checked on*, and the
+//! answer this file gives is that it is checked where the declaration is
+//! readable and the asker is not.
+//!
 //! # The wiring was proved by breaking it, and here is what it printed
 //!
 //! A threshold nothing has ever failed is a threshold whose wiring nobody has
@@ -77,10 +114,13 @@
 //! than of whatever the component felt like returning, and the comparison is
 //! between two computations rather than between a buffer and itself.
 
+use f_abi::manifest;
 use f_abi::objects::board::{self as routing, at, content_byte, reported, stopped};
 use f_abi::objects::{self, Request};
 use f_abi::{ABI_VERSION, Cqe, Negotiated, control, error, feature};
+use f_hash::sha256;
 use f_ring::{Arena, Collector, Mapping, Poster, Producer, Window};
+use f_text::face::{Face, fixture};
 
 use crate::mem::{FRAME_SIZE, FrameAllocator};
 use crate::paging;
@@ -105,6 +145,15 @@ const ENTRIES: u32 = 16;
 /// own sake: four times the ring's depth, so the ring fills and drains at least
 /// three times and the completion path is exercised rather than stepped over.
 const READS: u64 = 64;
+
+/// Where a face read's `user_data` starts, so that a completion says which
+/// question it is answering.
+///
+/// Away from the blob reads' tokens, which start at one, and away from the
+/// writes', which start at `0x1000` — three ranges and no arithmetic joining
+/// them, because a token a reader has to compute is a token nobody checks in a
+/// log. Unit: none — a token.
+const FACE_TOKEN: u64 = 0x2000;
 
 /// How much content the blob holds. Unit: bytes.
 ///
@@ -199,6 +248,29 @@ pub enum Half {
     /// *read* that follows, because the read names the content address the
     /// write returned and nothing else in this boot knows it.
     Written,
+    /// **`E3-B03b`'s first clause.** Load a typeface out of the store by the
+    /// content address this component's manifest declares, hash what comes back,
+    /// and parse it.
+    ///
+    /// The first consumer of E2's addressing that is not E2: nothing in this
+    /// half is about blobs, chunking or dedup, and what it asks of the store is
+    /// the one thing a content address is for — *give me the bytes that hash to
+    /// this*.
+    Face,
+    /// **`E3-B03b`'s second clause, with its own control beside it.**
+    ///
+    /// The same component, the same store, two faces in it. The declared one is
+    /// loaded — that is the control, and it runs in **this** boot rather than in
+    /// the one before it — and the twin, which is just as real and just as
+    /// readable, is refused before an entry crosses because no `[[face]]` entry
+    /// in the component's module names its address.
+    ///
+    /// Without the control this half is a boot that read nothing, which is what
+    /// a broken store also is. Without this half, [`Half::Face`] is a boot that
+    /// loaded the one face there was, and a declaration check answering `true`
+    /// unconditionally would pass it. Neither means anything alone, which is the
+    /// arrangement every half in this file has.
+    Undeclared,
 }
 
 impl Half {
@@ -210,7 +282,21 @@ impl Half {
             Self::Quiet => "quiet",
             Self::Provoke => "provoke",
             Self::Written => "written",
+            Self::Face => "face",
+            Self::Undeclared => "undeclared",
         }
+    }
+
+    /// Does this half ask the component for typefaces?
+    ///
+    /// One predicate, read on both sides of the arrangement: it chooses the
+    /// selector the component is started with and it gates the face work below.
+    /// A half added later that forgot to answer here would stock no face and
+    /// refuse nothing, and [`Report::verdict`] would go red on a count rather
+    /// than pass quietly.
+    #[must_use]
+    pub const fn faces(self) -> bool {
+        matches!(self, Self::Face | Self::Undeclared)
     }
 
     /// How many reads this half submits. Unit: count of reads.
@@ -218,7 +304,11 @@ impl Half {
     pub const fn reads(self) -> u64 {
         match self {
             Self::Read | Self::Provoke => READS,
-            Self::Quiet => 0,
+            // Zero *blob* reads. The face halves submit reads of a face, and
+            // those are counted where they are decided rather than here: this
+            // number is what `drive`'s content loop is asked for, and a face is
+            // not the blob.
+            Self::Quiet | Self::Face | Self::Undeclared => 0,
             // One read, and it is the read-back. The write half's evidence is
             // that this one read can be asked at all: its hash is the one the
             // component answered the write with.
@@ -235,7 +325,7 @@ impl Half {
     pub const fn writes(self) -> u64 {
         match self {
             Self::Written => WRITES,
-            Self::Read | Self::Quiet | Self::Provoke => 0,
+            Self::Read | Self::Quiet | Self::Provoke | Self::Face | Self::Undeclared => 0,
         }
     }
 }
@@ -293,6 +383,48 @@ impl Trouble {
     }
 }
 
+/// What the frame did about this component's declared typefaces.
+///
+/// Five counts and not a boolean, for [`Trouble`]'s reason one type up: *a face
+/// did not load* is a sentence somebody debugs by bisecting a store, and these
+/// five say which of five different things happened. Every one of them is taken
+/// by the frame on the frame's own side of the ring.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Faces {
+    /// `[[face]]` entries the loader placed in this component's module.
+    ///
+    /// Read out of the section after the image — RFC 0108 — and not out of the
+    /// record. Zero means the build put no declaration in the file, which makes
+    /// every refusal below correct and meaningless, so the verdict refuses it.
+    /// Unit: count of entries.
+    pub declared: u64,
+    /// Addresses the component published that agree with the frame's own
+    /// arithmetic over `f_text::face::fixture`.
+    ///
+    /// This is what says the store **holds** these faces. It is deliberately
+    /// not how a face is authorised: the frame composes the bytes and hashes
+    /// them itself, and a component publishing an address it liked the look of
+    /// changes nothing about which addresses the module declares.
+    /// Unit: count of addresses.
+    pub agreed: u64,
+    /// Entries naming a face address that this frame actually submitted.
+    ///
+    /// **The number `E3-B03b`'s second clause is about.** On the undeclared
+    /// half it must be one — the control — and not two.
+    /// Unit: count of entries.
+    pub crossed: u64,
+    /// Faces that came back, hashed to the address they were asked for, and
+    /// parsed as the face `f_text::face::fixture` describes.
+    /// Unit: count of faces.
+    pub loaded: u64,
+    /// Addresses refused because no `[[face]]` entry in the component's module
+    /// names them — refused **before** an entry was built, which is what
+    /// *declared before it is used* means as an ordering rather than as a
+    /// sentiment.
+    /// Unit: count of addresses.
+    pub refused: u64,
+}
+
 /// What the component said about itself, and what the client saw.
 #[derive(Clone, Copy, Debug)]
 pub struct Report {
@@ -347,6 +479,9 @@ pub struct Report {
     pub outcome: u64,
     /// The image the component was built from. Unit: bytes.
     pub image: u64,
+    /// What happened to this component's typefaces. All zero on the four halves
+    /// that ask for none.
+    pub faces: Faces,
 }
 
 impl Report {
@@ -443,6 +578,64 @@ impl Report {
                     return Err("the provocation delivered bytes that are not the record's");
                 }
             }
+            Half::Face => self.face_verdict()?,
+            Half::Undeclared => {
+                self.face_verdict()?;
+                // The refusal, and then the two things that stop it being a
+                // boot which refused everything.
+                if self.faces.refused != 1 {
+                    return Err(
+                        "the frame did not refuse the address no `[[face]]` entry declares — the                          face table was consulted and answered yes to a face nobody declared",
+                    );
+                }
+                if self.faces.agreed != 2 {
+                    return Err(
+                        "the undeclared face is not in the component's store at the address this                          frame computed, so the refusal above is about a miss rather than about a                          declaration",
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Everything both face halves have to satisfy.
+    ///
+    /// Shared rather than written twice, because the *control* is the part a
+    /// second copy would drift on: the undeclared half's evidence is that a
+    /// declared face loaded in the same run, and a verdict that checked the
+    /// refusal there and the load only over here would let the control go
+    /// missing without anything going red.
+    fn face_verdict(&self) -> Result<(), &'static str> {
+        if self.faces.declared == 0 {
+            return Err(
+                "the loader placed no `[[face]]` declaration in this component's module, so                  every address is undeclared and the refusal below decides nothing",
+            );
+        }
+        // Exactly one entry crossed, on both halves. On `face` that is the face
+        // itself; on `undeclared` it is the control, and the twin's absence
+        // from this count **is** the refusal — a check that stopped checking
+        // makes this two.
+        if self.faces.crossed != 1 {
+            return Err(
+                "an entry crossed the ring for a face the manifest did not declare, or none                  crossed at all",
+            );
+        }
+        if self.faces.loaded != 1 {
+            return Err(
+                "no face came back, hashed to the address it was asked for and parsed — so                  nothing here is evidence that a declared face can be loaded at all",
+            );
+        }
+        // The component's own count of reads, which is the second witness and
+        // comes from the other side of the ring: it counted what it answered,
+        // this frame counted what it sent, and a refusal that leaked would make
+        // the pair two rather than one. The generic check above compares
+        // entries against submissions; this compares a *read* against a face,
+        // and a component answering an entry with a refusal moves one and not
+        // the other.
+        if self.reads != self.faces.crossed {
+            return Err(
+                "the component answered a different number of reads than this frame submitted                  face addresses for",
+            );
         }
         Ok(())
     }
@@ -477,10 +670,19 @@ pub unsafe fn demonstrate(
     // every module.
     let (modules, count) = unsafe { crate::component::modules(boot) };
     let mut image: &'static [u8] = &[];
+    // The `[[face]]` table, out of the **section after the image** and not out
+    // of the record. RFC 0108 is why it is there: four sixty-four-byte entries
+    // in `Record` grew a type the assembler builds a stack temporary of, and
+    // every boot in the tree died three subsystems from the cause. What that
+    // costs a reader is this line — a declaration is reached from the module
+    // rather than from the record parsed out of one — and the cost is paid here
+    // because this is the one place in the frame that reads it.
+    let mut declared: &'static [manifest::Face] = &[];
     for module in modules.iter().take(count) {
-        let Ok(record) = f_abi::manifest::Record::read(module) else { continue };
+        let Ok(record) = manifest::Record::read(module) else { continue };
         if record.name.starts_with(b"objects") && record.name.get(7) == Some(&0) {
             image = record.image(module).map_err(|_| Trouble::BadReport)?;
+            declared = record.faces(module).map_err(|_| Trouble::BadReport)?;
             break;
         }
     }
@@ -536,6 +738,11 @@ pub unsafe fn demonstrate(
                 image,
                 selector: match half {
                     Half::Provoke => routing::PROVOKE,
+                    // One selector for both face halves, and that is the
+                    // load-bearing part: the component is byte-identical across
+                    // the half that loads a face and the half whose face is
+                    // refused, so it cannot be the thing making the decision.
+                    Half::Face | Half::Undeclared => routing::FACE,
                     Half::Read | Half::Quiet | Half::Written => routing::SERVE,
                 },
                 tree,
@@ -621,7 +828,7 @@ pub unsafe fn demonstrate(
 
     let arena = client_end.arena();
     let ends = Ends { producer: &producer, arena: &arena, reaper: &reaper };
-    let observed = drive(&board, ends, frames, owned, half, tsc_khz);
+    let observed = drive(&board, ends, frames, Owned { block: owned, declared }, half, tsc_khz);
 
     // Told to stop whatever happened above, because a component left serving a
     // client that has gone is a core this boot never gets back.
@@ -667,7 +874,27 @@ pub unsafe fn demonstrate(
         notices: report.notices,
         outcome: report.outcome,
         image: image.len() as u64,
+        faces: seen.faces,
     })
+}
+
+/// The client's own memory, and what its component is allowed to hand back.
+///
+/// A struct because the two travel together everywhere below and are the same
+/// decision stated twice — *this block is the client's, and these are the
+/// addresses the client may ask for*. Threading them as two more arguments is
+/// what put `drive`'s signature past clippy's bound, which is the reason
+/// [`Scheduling`] exists one type down.
+#[derive(Clone, Copy)]
+struct Owned {
+    /// The block the client allocated, lent to the component and read back
+    /// through the frame's own direct map.
+    block: crate::mem::Frame,
+    /// The `[[face]]` table the loader placed in the component's module.
+    ///
+    /// Borrowed from the module rather than copied, so there is one declaration
+    /// in this boot and the frame is reading the file the build produced.
+    declared: &'static [manifest::Face],
 }
 
 /// Where and for how long the component runs.
@@ -721,6 +948,9 @@ struct Seen {
     /// `reported::WRITTEN_HASH`, so an address it never computed has to be the
     /// same lie told twice through two mechanisms in one run.
     named: u64,
+    /// What happened to this component's typefaces. Every field zero on the
+    /// four halves that ask for none.
+    faces: Faces,
 }
 
 /// Wait for the registration, submit, reap and check.
@@ -728,11 +958,12 @@ fn drive(
     board: &Window,
     ends: Ends<'_, '_>,
     frames: &FrameAllocator,
-    owned: crate::mem::Frame,
+    owned: Owned,
     half: Half,
     tsc_khz: u64,
 ) -> Result<Seen, Trouble> {
     let Ends { producer, arena, reaper } = ends;
+    let block = owned.block;
     // The component has a store to build before it can say which set it
     // registered. Waited for rather than assumed, and bounded rather than
     // spun on: a run that reaches the bound has a component that is not making
@@ -752,12 +983,7 @@ fn drive(
     if set == 0 || content_bytes != BLOB_BYTES || stride != BLOCK_BYTES {
         return Err(Trouble::BadReport);
     }
-    let mut hash = [0u8; 32];
-    for word in 0..4u32 {
-        let value = board.read64(reported::HASH + word * 8).map_err(Trouble::Channel)?;
-        let start = (word * 8) as usize;
-        hash[start..start + 8].copy_from_slice(&value.to_le_bytes());
-    }
+    let hash = published(board, reported::HASH)?;
 
     let mut seen = Seen {
         submitted: 0,
@@ -767,6 +993,7 @@ fn drive(
         written_bytes: 0,
         set,
         named: 0,
+        faces: Faces::default(),
     };
     let wanted = half.reads();
 
@@ -775,7 +1002,7 @@ fn drive(
     // answered with, so the read-back cannot accidentally be answered out of
     // the blob the component stocked itself at start-up.
     if half.writes() > 0 {
-        write_back(&mut seen, half, producer, reaper, arena, frames, owned)?;
+        write_back(&mut seen, half, producer, reaper, arena, frames, block)?;
     }
 
     while seen.completed < wanted {
@@ -809,7 +1036,7 @@ fn drive(
         match reaper.take() {
             Ok(Some(answer)) => {
                 seen.completed += 1;
-                if verified(&answer, frames, owned, seen.completed) {
+                if verified(&answer, frames, block, seen.completed) {
                     seen.verified += 1;
                 }
             }
@@ -818,7 +1045,216 @@ fn drive(
         }
     }
 
+    // `E3-B03b`, and it runs last because the loop above is what proves this
+    // arrangement can move a byte at all: a face that failed to load after
+    // sixty-four blob reads had succeeded is a face problem, and one that
+    // failed on a half where nothing else ran could be anything.
+    if half.faces() {
+        seen.faces = load_faces(board, ends, frames, owned, half, &mut seen)?;
+    }
+
     Ok(seen)
+}
+
+/// Read one of the component's published content addresses off the board.
+///
+/// Four little-endian words, in the order FIPS 180-4 produces the bytes. One
+/// reader for all three of them — the blob's and the two faces' — because three
+/// copies of this loop are three places a word order can be got wrong, and two
+/// of them would be wrong about an address that then resolves to nothing.
+///
+/// # Errors
+///
+/// [`Trouble::Channel`] for an offset outside the page, which is a build whose
+/// two sides disagree about the layout rather than a run that went wrong.
+fn published(board: &Window, offset: u32) -> Result<[u8; 32], Trouble> {
+    let mut hash = [0u8; 32];
+    for word in 0..4u32 {
+        let value = board.read64(offset + word * 8).map_err(Trouble::Channel)?;
+        let start = (word * 8) as usize;
+        hash[start..start + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    Ok(hash)
+}
+
+/// `E3-B03b`: load the typeface this component declares, and refuse the one it
+/// does not.
+///
+/// # What decides, and what does not
+///
+/// **The `[[face]]` table in the component's own module decides.** It was put
+/// there by `cargo xtask component` out of `user/objects/manifest.toml`, the
+/// loader placed the file, `Record::read` judged it, and nothing at ring 3 can
+/// reach it. The component's published addresses are read too, and they decide
+/// nothing: they are compared against arithmetic this function does for itself,
+/// so what they establish is that the store **holds** these faces — which is
+/// what makes refusing the twin a statement about a declaration rather than
+/// about a miss.
+///
+/// # Why the refusal is taken before the entry is built
+///
+/// Because *declared before it is used* is an ordering, and a check taken after
+/// a submission is a check taken after the component has already been asked.
+/// The `continue` below happens with no entry encoded, nothing in the arena and
+/// nothing in the ring; [`Faces::crossed`] counts what got past it, and the
+/// component's own read count on the far side of the ring counts the same thing
+/// independently.
+///
+/// # Errors
+///
+/// [`Trouble::BadReport`] for a fixture this build cannot compose — which is a
+/// defect in `f_text` and not in this boot — and [`Trouble::Refused`] where the
+/// ring will not take an entry or will not give a completion back.
+fn load_faces(
+    board: &Window,
+    ends: Ends<'_, '_>,
+    frames: &FrameAllocator,
+    owned: Owned,
+    half: Half,
+    seen: &mut Seen,
+) -> Result<Faces, Trouble> {
+    let mut out = Faces { declared: owned.declared.len() as u64, ..Faces::default() };
+
+    // Both addresses, computed here out of the bytes `f_text::face::fixture`
+    // defines. This is the *only* place either address comes from: an address
+    // taken off the board and then looked up in the table would be the
+    // component choosing which question gets asked.
+    let mut bytes = [0u8; fixture::BYTES];
+    let declared = addressed(&mut bytes, fixture::declared)?;
+    let twin = addressed(&mut bytes, fixture::undeclared)?;
+
+    // What the component says it stocked, against that arithmetic. Two
+    // independent computations of one content meeting at an address neither
+    // side chose, which is the arrangement the blob already has.
+    for (offset, computed) in [(reported::FACE_HASH, declared), (reported::TWIN_HASH, twin)] {
+        if published(board, offset)? == computed {
+            out.agreed += 1;
+        }
+    }
+
+    // The declared face first on both halves, so that the control has run
+    // before the refusal is taken — `undeclared`'s evidence is that the same
+    // store answered the same frame moments earlier.
+    let both = [declared, twin];
+    let asked: &[[u8; 32]] = if half == Half::Undeclared { &both } else { &both[..1] };
+
+    for address in asked {
+        // **`E3-B03b`'s refusal.** In the frame, against the table the loader
+        // placed, before an entry exists. Delete this and the twin's read
+        // crosses: `crossed` becomes two, the component's own read count
+        // becomes two, and `refused` becomes zero — three counts, and the
+        // verdict refuses on all three.
+        if !owned.declared.iter().any(|entry| entry.hash == *address) {
+            out.refused += 1;
+            continue;
+        }
+        out.crossed += 1;
+        seen.submitted += 1;
+        let answer = read_face(&ends, seen, *address)?;
+        seen.completed += 1;
+        if is_the_face(frames, owned.block, &answer, address) {
+            out.loaded += 1;
+        }
+    }
+
+    Ok(out)
+}
+
+/// Compose a fixture face into `into` and answer its content address.
+///
+/// # Errors
+///
+/// [`Trouble::BadReport`] for a composition `f_text` refuses, which for these
+/// constants means a buffer shorter than `fixture::BYTES` and nothing else.
+fn addressed(
+    into: &mut [u8],
+    writer: fn(&mut [u8]) -> Result<usize, f_text::face::Refusal>,
+) -> Result<[u8; 32], Trouble> {
+    let len = writer(into).map_err(|_| Trouble::BadReport)?;
+    Ok(sha256(into.get(..len).ok_or(Trouble::BadReport)?))
+}
+
+/// Submit one read naming a face's content address, and wait for its
+/// completion.
+///
+/// # Errors
+///
+/// [`Trouble::Refused`] where the ring will not take the entry or hands back an
+/// error instead of a completion.
+fn read_face(ends: &Ends<'_, '_>, seen: &Seen, hash: [u8; 32]) -> Result<Cqe, Trouble> {
+    let request = Request {
+        user_data: FACE_TOKEN + seen.submitted,
+        cap: 0,
+        class: 0,
+        deadline: 0,
+        payload_offset: 0,
+        buf_set: seen.set,
+        buf_index: 0,
+        flags: f_abi::flags::FIXED_BUF,
+        // The length the fixture is, stated rather than left to the record: a
+        // client asking for more than the face is would be answered the face
+        // anyway — `Service::completed` states the smaller of the two — and the
+        // check that the bytes are the face would then be checking a number
+        // this side had already agreed to.
+        body: objects::Entry::Read(objects::Read { hash, bytes: fixture::BYTES as u32 }),
+    };
+    let (entry, payload) = request.encode();
+    if !ends.arena.copy_in(0, &payload) {
+        return Err(Trouble::Refused);
+    }
+    if ends.producer.submit(entry).is_err() {
+        return Err(Trouble::Refused);
+    }
+    loop {
+        match ends.reaper.take() {
+            Ok(Some(answer)) => return Ok(answer),
+            Ok(None) => core::hint::spin_loop(),
+            Err(_) => return Err(Trouble::Refused),
+        }
+    }
+}
+
+/// Is what landed in the client's own memory the face it asked for?
+///
+/// Three questions, and the first is the one that matters: **the bytes hash to
+/// the address that was asked for**. A store that returned a different face, or
+/// the right face at the wrong offset, fails there and not at a parse. The
+/// parse after it is what says a content address in a manifest names a
+/// *typeface* and not a run of the right length, which is the difference
+/// between `E3-B03b` and a blob read.
+fn is_the_face(
+    frames: &FrameAllocator,
+    owned: crate::mem::Frame,
+    answer: &Cqe,
+    want: &[u8; 32],
+) -> bool {
+    if answer.error().is_some() {
+        return false;
+    }
+    let Ok(stated) = usize::try_from(answer.result) else { return false };
+    if stated != fixture::BYTES {
+        return false;
+    }
+    let Ok(at) = usize::try_from(answer.ext) else { return false };
+    let Some(end) = at.checked_add(stated) else { return false };
+    let base = frames.virt(owned);
+    // SAFETY: `owned` is a block this boot allocated and holds, addressable
+    // through the direct map for the whole of this call, and the component that
+    // was lent it has answered the entry these bytes belong to — so nothing is
+    // writing them now. The range is checked against the block's own length
+    // before it is read.
+    let region = unsafe { core::slice::from_raw_parts(base, (BUFFER_PAGES * FRAME_SIZE) as usize) };
+    let Some(content) = region.get(at..end) else { return false };
+    if sha256(content) != *want {
+        return false;
+    }
+    let Ok(face) = Face::read(content) else { return false };
+    face.units_per_em() == fixture::UNITS_PER_EM
+        && face.glyphs() == fixture::DECLARED.len()
+        && fixture::DECLARED
+            .iter()
+            .enumerate()
+            .all(|(glyph, advance)| face.advance_design_units(glyph) == Some(*advance))
 }
 
 /// Submit this half's writes and count what crossed.
@@ -1028,6 +1464,12 @@ pub fn report_lines(report: &Report) {
             Half::Quiet => "the client submits nothing, and the component must say so",
             Half::Provoke =>
                 "every read goes through a page cache: the staged count must move, and the                  bytes must still be right",
+            Half::Face => {
+                "a typeface out of the store by the content address the manifest declares"
+            }
+            Half::Undeclared => {
+                "the declared face loads, and the twin nothing declares is refused before an                  entry crosses"
+            }
         }
     );
     crate::kprintln!(
@@ -1070,6 +1512,35 @@ pub fn report_lines(report: &Report) {
         Half::Provoke => {
             crate::kprintln!("  the row claims/0022 thresholds with a floor");
             crate::kprintln!("    provoked_staged_bytes_in_a_boot            {}", report.staged);
+        }
+        Half::Face | Half::Undeclared => {
+            // Not a claim's rows. `claims/` is for numbers that reach
+            // `docs/design/`, and none of these is a measurement — they are the
+            // counts `E3-B03b`'s two clauses are decided on, printed in the row
+            // shape so that a person reading a log and `cargo xtask face`
+            // reading the same log are looking at one thing. The harness keys
+            // on the first name.
+            crate::kprintln!("  the counts E3-B03b's two clauses are decided on");
+            crate::kprintln!(
+                "    face_declared_by_the_manifest              {}",
+                report.faces.declared
+            );
+            crate::kprintln!(
+                "    face_addresses_the_frame_recomputed        {}",
+                report.faces.agreed
+            );
+            crate::kprintln!(
+                "    face_entries_that_crossed                  {}",
+                report.faces.crossed
+            );
+            crate::kprintln!(
+                "    face_loaded_hashed_and_parsed              {}",
+                report.faces.loaded
+            );
+            crate::kprintln!(
+                "    face_addresses_refused_as_undeclared       {}",
+                report.faces.refused
+            );
         }
         Half::Written => {
             // `claims/0017`'s denominator, and deliberately *only* the
