@@ -86,6 +86,27 @@ f-semantic.workspace = true
 # moves to the driver and `kernel/src/compositor.rs` stops composing one.
 f-interface.workspace = true
 
+# `E3-B03b`'s fixture face, and this row takes one thing from the crate:
+# `face::fixture`, which is *bytes* — the declared face and its undeclared twin
+# — plus `face::Face` to parse what came back. The frame lays out no text, holds
+# no metric and shapes nothing; what it does is decide whether a content address
+# is one the component's manifest declared, and then read the answer back and
+# check that it is a face rather than a run of the right length.
+#
+# It is here rather than a second copy of those bytes for `f-hash`'s reason one
+# row up, sharpened by what this particular duplication would cost: the frame
+# computes the address of the face the component stored, so a second
+# transcription would be a second face with a different address, and the symptom
+# would be a read that resolves to nothing rather than a diff anybody can see.
+#
+# `no_std`, no allocator, no architecture, no dependencies at all, forbids
+# `unsafe` — so linking it adds nothing to the surface `lint-unsafe` measures.
+#
+# *Reversal:* a face that arrives from outside the build — RFC 0082's imported
+# shaper — at which point the bytes are not a fixture, the parser is not this
+# one, and this row goes with the stocking it exists for.
+f-text.workspace = true
+
 # The block driver, which is a component and not part of the frame — it inherits
 # `unsafe_code = "forbid"` like every other `user/` crate and `cargo xtask
 # lint-unsafe` holds it to that.
@@ -134,6 +155,25 @@ f-virtio-net.workspace = true
 # declines to make it in a task whose evidence is a picture on a screen. Reading
 # this comment and the two above it in one sitting is the argument.
 f-virtio-gpu.workspace = true
+
+# The input driver, on exactly the same terms as the three rows above it and for
+# the same three shared vocabularies: `routing`'s offsets, `driver::Counters`'
+# shape, and the constants `kernel/src/input.rs` checks a manifest against. The
+# frame calls none of its code and `cargo xtask lint-datapath` holds that rather
+# than leaving it to a reader.
+#
+# The fourth copy of one paragraph, and RFC 0051 and RFC 0054 have already said
+# everything there is to say about that: the reversal is those vocabularies
+# moving into `abi/`, where a wire layout two crates agree on belongs. What is
+# worth adding at the fourth is the one thing that is *not* a copy. This driver
+# routes a word the other three have no counterpart for — the clock it is told
+# to take its stamps against — and that word is a page offset like every other,
+# so it arrives through `routing` and costs this row nothing. The frame writes
+# it, the component reads it, and neither of them is the code that takes the
+# reading: `cargo xtask lint-stamp` names the driver and not this crate, and
+# `kernel/src/input.rs` says at length why the frame on this path is a courier
+# rather than a stage.
+f-virtio-input.workspace = true
 
 # The compositor, and the first of these rows that is not a driver. The frame
 # links it for `routing` — the page it fills in before the component's first

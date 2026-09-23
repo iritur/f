@@ -293,8 +293,33 @@ pub struct Supervising<'a, 'm> {
     pub asks: &'a Consumer<'m>,
     /// Where its answers go, and where the frame's notices go.
     pub answers: &'a Poster<'m>,
-    /// The client's end of the data ring, on the frame's side.
-    pub reaper: &'a Collector<'m>,
+    /// The client's end of the data ring, on the frame's side — where there is
+    /// one.
+    ///
+    /// # Why this became an `Option` at the fourth supervisor
+    ///
+    /// Because `kernel/src/input.rs` supervises the first driver in this tree
+    /// that **produces rather than answers**, and there is no client end for it
+    /// to hold. On the three datapaths before it the frame submits a request and
+    /// reaps a completion, so the far end of the data ring is the frame's and a
+    /// collector over it is the obvious field. An input driver holds the
+    /// *client's* end of its own data ring and the frame holds the server's:
+    /// nobody asks for an input event, so nothing is ever completed and there is
+    /// nothing to reap.
+    ///
+    /// The alternatives were both worse and both were written out before this
+    /// was. A collector handed in over the completions half of a ring neither
+    /// side posts on would be a field that is never observed and is a lie in the
+    /// type — two readers of one completion ring by construction, kept honest
+    /// only by the fact that neither reads. A second supervisor type would be
+    /// the fourth copy this module exists to prevent, for the sake of one field.
+    ///
+    /// *Reversal:* a datapath where a driver both produces unasked and answers
+    /// requests — a network interface's two queues in one component is the shape
+    /// — at which point *does this supervisor have a client end* stops being a
+    /// property of the driver and becomes a property of the queue, and the field
+    /// belongs to whatever names a queue rather than to this struct.
+    pub reaper: Option<&'a Collector<'m>>,
     /// The remapping unit the translation is programmed into.
     pub unit: &'a mut Unit,
     /// The device's own domain, which is the whole of what a translation may
@@ -417,6 +442,14 @@ impl Supervising<'_, '_> {
     /// a block request is a question a device owes an answer to, and a posted
     /// receive is not.
     ///
+    /// A supervisor with no client end — [`Supervising::reaper`] says which one
+    /// and why — serves the driver until the bound and then answers `None`,
+    /// which is the same sentence rather than a special case: a completion that
+    /// can never arrive is a completion that has not arrived by any deadline.
+    /// [`Supervising::awaited`] therefore answers [`Trouble::NoAnswer`] for such
+    /// a supervisor, which is the honest reply to a caller that asked a driver
+    /// producing unasked events for an answer it was never going to give.
+    ///
     /// # Errors
     ///
     /// Whatever [`Supervising::serve`] refuses.
@@ -424,7 +457,9 @@ impl Supervising<'_, '_> {
         let deadline = crate::smp::deadline_after(tsc_khz, micros);
         loop {
             self.serve()?;
-            if let Some(answer) = self.reaper.take().map_err(|_| Trouble::Channel(0))? {
+            if let Some(reaper) = self.reaper
+                && let Some(answer) = reaper.take().map_err(|_| Trouble::Channel(0))?
+            {
                 return Ok(Some(answer));
             }
             if crate::smp::past(deadline) {

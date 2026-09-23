@@ -867,18 +867,21 @@ impl Operable {
     /// refusal. It was public once, and the refusal was documented over it.
     ///
     /// It is `pub(crate)` rather than private because
-    /// [`crate::reader`](crate::reader) asks it of nodes of a **whole tree** it
-    /// has itself been admitted against, which is a wider scope than a canvas
-    /// has and a narrower one than none. That widening is deliberate and it is
-    /// bounded by the same rule: every caller below holds a value that proves
-    /// something was checked, and there is no route from outside this crate to
-    /// a bare [`Node`]'s answer.
+    /// [`crate::reader`](crate::reader) and [`crate::agent`](crate::agent) ask
+    /// it of nodes of a **whole tree** they have themselves been admitted
+    /// against, which is a wider scope than a canvas has and a narrower one
+    /// than none. That widening is deliberate and it is bounded by the same
+    /// rule: every caller below holds a value that proves something was
+    /// checked, and there is no route from outside this crate to a bare
+    /// [`Node`]'s answer.
     ///
-    /// Its three callers are [`Participating::operable`], which checks scope
+    /// Its four callers are [`Participating::operable`], which checks scope
     /// before it reads anything; `Participating::say`, which runs over nodes the
-    /// canvas has already been admitted against; and `reader::Reader::say`,
-    /// which runs over the tree its [`Reader`](crate::reader::Reader) was
-    /// admitted against.
+    /// canvas has already been admitted against; `reader::Reader::say`, which
+    /// runs over the tree its [`Reader`](crate::reader::Reader) was admitted
+    /// against; and `agent::Acting::select`, which runs over the tree its
+    /// `Acting` was admitted against — the same admission, since that type
+    /// holds the reader's rather than repeating it.
     pub(crate) const fn of(node: &Node) -> Self {
         match node.intent {
             None => Self::Inert,

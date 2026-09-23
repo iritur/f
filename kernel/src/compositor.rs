@@ -625,7 +625,13 @@ pub struct Board {
 impl Board {
     /// Read one out of the page, or `None` where the component never finished
     /// writing it.
-    fn of(board: &Window) -> Option<Self> {
+    ///
+    /// Visible to the rest of the frame rather than to this file alone, for
+    /// [`found`]'s reason: `kernel/src/input.rs` stands the same component up and
+    /// reads the same page, and a second reader there would be a second opinion
+    /// about what a compositor published — the failure this type exists to make
+    /// impossible between the component and the frame, repeated inside it.
+    pub(crate) fn of(board: &Window) -> Option<Self> {
         if board.read64(reported::MAGIC).ok()? != routing::MAGIC {
             return None;
         }
@@ -1276,10 +1282,17 @@ pub fn report_lines(report: &Report) {
 /// `xtask`'s `COMPONENTS` another, and a boot that took a module by index would
 /// be reading whichever component happened to be built first.
 ///
+/// Visible to the rest of the frame rather than to this file alone, because
+/// `kernel/src/input.rs` stands the same component up from the same boot modules
+/// and a second finder there would be a second answer to *which module is the
+/// compositor* — the exact defect the paragraph above is about, one layer up.
+/// It stays private to the crate: nothing outside the frame may name a boot
+/// module at all.
+///
 /// # Safety
 ///
 /// As [`demonstrate`]: the direct map must be live and cover every boot module.
-unsafe fn found(boot: &crate::BootInfo) -> Option<(&'static [u8], Record)> {
+pub(crate) unsafe fn found(boot: &crate::BootInfo) -> Option<(&'static [u8], Record)> {
     // SAFETY: the caller's guarantee.
     let (modules, count) = unsafe { crate::component::modules(boot) };
     for module in modules.iter().take(count) {
@@ -1297,8 +1310,12 @@ unsafe fn found(boot: &crate::BootInfo) -> Option<(&'static [u8], Record)> {
 /// `None` for a record with no such need, which is a compositor with nowhere to
 /// put its graph — refused before anything is spent rather than discovered as an
 /// allocation that comes back null at ring 3.
+///
+/// Visible to the rest of the frame for [`found`]'s reason: `kernel/src/input.rs`
+/// maps the same heap for the same component and must check it against the same
+/// constant.
 /// Unit: bytes.
-fn heap_declared(record: &Record) -> Option<u64> {
+pub(crate) fn heap_declared(record: &Record) -> Option<u64> {
     for need in record.needs() {
         if need.name.starts_with(b"heap") && need.name.get(4) == Some(&0) {
             return Some(need.bytes);

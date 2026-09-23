@@ -32,5 +32,6 @@ pub mod commit;
 pub mod degrade;
 pub mod dirty;
 pub mod effect;
+pub mod encode;
 pub mod kind;
 pub mod reconcile;

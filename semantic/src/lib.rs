@@ -67,8 +67,19 @@
 //! `E3-B06e` solves; a tree that carried either before there was anything to
 //! resolve against would be storing a value nobody could falsify.
 
+//! # The second thing that is here because neither crate may hold it
+//!
+//! [`agent`] — an agent's invocation, as a capability call. `f_interface::agent`
+//! selects the node and answers what may be done with it, and it stops there:
+//! the handle that authorises the doing is `f_abi::cap::Handle`, and
+//! `interface/Cargo.toml` declines `f-abi` so that the vocabulary stays a leaf.
+//! So the call lands here, on exactly the terms [`Registry`] lands here, and it
+//! keeps the same rule one layer down — nothing turns the intent a projection
+//! can *read* into the handle that would invoke it. `E3-B06j`.
+
 #![no_std]
 
+pub mod agent;
 pub mod registry;
 pub mod tree;
 pub mod vocabulary;

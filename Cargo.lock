@@ -117,8 +117,10 @@ dependencies = [
  "f-semantic",
  "f-store",
  "f-supervisor",
+ "f-text",
  "f-virtio-blk",
  "f-virtio-gpu",
+ "f-virtio-input",
  "f-virtio-net",
  "verus_builtin",
  "verus_builtin_macros",
@@ -343,4 +345,5 @@ dependencies = [
  "f-bench",
  "f-generation",
  "f-hash",
+ "f-text",
 ]

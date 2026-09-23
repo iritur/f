@@ -675,6 +675,29 @@ jobs:
       # is the frame, and the tree is a page the frame never maps to anybody.
       # RFC 0077, RFC 0083.
       - run: cargo xtask semantic
+      # E3-B04d and E3-B04a. The first boot in this tree in which something a
+      # person did reaches a scene graph. Two boots of two components. `deliver`
+      # stands `user/virtio-input` up at ring 3 over a real virtio-mouse the job
+      # adds, holds the machine still **in the middle of the run** while this
+      # harness moves the pointer over the emulator's monitor socket, drains the
+      # entries the driver submits unasked, decodes every one of them - which is
+      # what says each carries a reading, because the decoder refuses a payload
+      # with none - reaps the driver, stands `user/compositor` up on the core it
+      # gave back and hands it one `SetTransform` per event. The verdict is the
+      # kernel's, except for one clause this harness is the only thing entitled
+      # to make: how far it asked the pointer to move, against where the driver's
+      # accumulator ended up, two numbers on opposite sides of the emulator with
+      # neither holding the other's copy. `withheld` is the identical boot with
+      # the hand-on removed: the same events are produced, drained and decoded,
+      # and the graph must hold nothing but its own two setup nodes - without it
+      # the edit count above would say that a compositor applies deltas rather
+      # than that these came off a device.
+      #
+      # It needs one thing this job does not otherwise have, and it is the same
+      # thing `gpu` needs: a monitor socket, because an input event exists only
+      # while a device is running and cannot be injected from a command line.
+      # RFC 0047, RFC 0099, RFC 0103.
+      - run: cargo xtask input
       # `claims/0037`'s five rows, compared against the table rather than against
       # the boot's own refusals. The two are different checks: the boot asserts
       # the load half crossed nothing and the provoke half crossed exactly what

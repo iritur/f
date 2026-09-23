@@ -42,6 +42,10 @@ pub mod generation;
 // The third driver's supervisor. Beside `blk` and `net` and deliberately not
 // merged with them; `kernel/src/gpu.rs` says why and RFC 0054 argues it.
 pub mod gpu;
+// The fourth driver's supervisor, and the first that is also a consumer: the
+// driver produces and something else has to be told. `kernel/src/input.rs` says
+// why it is one file and not a supervisor beside a relay.
+pub mod input;
 pub mod iommu;
 pub mod jitter;
 pub mod measure;
@@ -994,6 +998,30 @@ pub extern "C" fn kmain(magic: u32, info: u32) -> ! {
         tree.physical(),
     );
     let _ = picture;
+
+    // E3-B04d and E3-B04a. The same shape a fourth time, with the first driver
+    // that **produces rather than answers**: a component whose crate forbids
+    // `unsafe` brings a real input device up through granted register windows,
+    // somebody outside the machine moves the pointer, the driver translates what
+    // the device reported into stamped entries and submits them unasked, and the
+    // frame hands each one to a compositor as a scene delta.
+    //
+    // Behind its own parameter like every other provocation in this file, and
+    // for the sharpest version of `gpu_datapath`'s reason: this stage holds the
+    // machine still **in the middle of itself**, while its driver is serving,
+    // because an input event has to be injected into a machine whose driver is
+    // already running. A default boot that ran this would wait for somebody who
+    // is not there.
+    let pointer = input_datapath(
+        &boot,
+        &mut frames,
+        &space,
+        features,
+        remapping.as_mut(),
+        clocks,
+        tree.physical(),
+    );
+    let _ = pointer;
 
     // E1-B07. What this machine can reserve, asked of the machine rather than
     // assumed about it. Behind its own parameter for the fixture's sake, like
@@ -4461,6 +4489,151 @@ fn gpu_datapath(
             CAPTURE_MICROS,
         );
     }
+    Some(report)
+}
+
+/// `E3-B04d` and `E3-B04a`. A fourth driver, the first that produces unasked,
+/// and a compositor that moves a node because somebody moved a pointer.
+///
+/// # Why this stage waits in the middle rather than at the end
+///
+/// `gpu_datapath` holds the machine still after its verdict, because a picture
+/// on a scanout survives the boot and can be captured afterwards. An input event
+/// does not survive anything: it exists only while a device is running and a
+/// driver is draining it, so the wait has to be *inside* the run. The marker
+/// `kernel/src/input.rs` prints is therefore printed before its verdict rather
+/// than after it, and the harness that answers it is talking to a machine whose
+/// driver is serving.
+///
+/// The consequence for a reader of the log is worth stating: a boot that goes
+/// red after that marker is a boot whose events were injected and whose path
+/// then failed, which is the interesting case. A boot that never prints the
+/// marker failed before the driver was up.
+///
+/// # The two halves
+///
+/// `input=deliver` hands every event the device produced to the compositor.
+/// `input=withheld` is the identical run with the hand-on removed, and is the
+/// control the exit needs: without it, the number of deltas a compositor applied
+/// would be evidence that a compositor applies deltas rather than that these
+/// came off a device.
+///
+/// The verdict is the kernel's rather than the harness's, exactly as `blk`'s and
+/// `gpu`'s are — with the one exception the harness is entitled to, which is
+/// where the pointer ended up. The kernel prints the driver's accumulated
+/// position and `cargo xtask input` compares it with how far it asked the
+/// pointer to move; neither side holds the other's number.
+fn input_datapath(
+    boot: &BootInfo,
+    frames: &mut mem::FrameAllocator,
+    space: &paging::AddressSpace,
+    features: paging::Features,
+    remapping: Option<&mut Remapping>,
+    clocks: arch::x86_64::apic::Clocks,
+    tree: u64,
+) -> Option<input::Report> {
+    let half = if boot.has_parameter(b"input=deliver") {
+        input::Half::Deliver
+    } else if boot.has_parameter(b"input=withheld") {
+        input::Half::Withheld
+    } else {
+        return None;
+    };
+
+    let Some(found) = remapping else {
+        kprintln!("FAIL: the input datapath asked for on a machine with no remapping unit");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+
+    // Another core, always, for `gpu_datapath`'s reason and one more besides: a
+    // component runs at ring 3 and the frame is the other end of its ring, and
+    // this stage stands **two** components up on that one core, one after the
+    // other. A machine with one core has nowhere to put either of them.
+    let me = arch::x86_64::current_cpu();
+    let Some(worker) = (smp::started() > 1).then(smp::first_worker).filter(|core| *core != me)
+    else {
+        kprintln!(
+            "FAIL: the input datapath needs a second core - the driver produces from ring 3 and \
+             the compositor consumes from ring 3, and the frame is between them"
+        );
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    };
+
+    kprintln!(
+        "  pointer       a fourth driver outside the frame, and the {} half: {}",
+        half.name(),
+        match half {
+            input::Half::Deliver =>
+                "what the device reported reaches a compositor's graph as a transform",
+            input::Half::Withheld =>
+                "the same events, decoded and not handed on, so nothing may reach the graph",
+        }
+    );
+
+    // SAFETY: the boot processor, with the kernel's address space in `CR3`,
+    // `frames` rebound onto its direct map, translation enabled, the direct map
+    // covering every boot module, `worker` a core that is up and idle, and
+    // nothing else in this kernel driving the device this finds - the `dma`,
+    // `blk`, `net` and `gpu` stages run on different parameters and drive
+    // different functions.
+    let outcome = unsafe {
+        input::demonstrate(
+            frames,
+            space,
+            features,
+            &mut found.unit,
+            &found.window,
+            &found.survey,
+            boot,
+            half,
+            input::Scheduling {
+                cpu: worker,
+                hz: TIMER_HZ,
+                target: RUNTIME_TICKS,
+                tsc_khz: clocks.tsc_khz,
+                tree,
+            },
+        )
+    };
+
+    let report = match outcome {
+        Ok(report) => report,
+        Err(why) => {
+            match why.bound() {
+                Some(micros) => {
+                    kprintln!(
+                        "FAIL: the input datapath ran out of time: {} of {} us",
+                        why.message(),
+                        micros,
+                    );
+                    kprintln!(
+                        "      That is an anti-wedge bound and not a check of the datapath: \
+                         nothing above this line reported a failure, and a red here is a \
+                         component that is stuck or a machine slower than the bound."
+                    );
+                }
+                None => kprintln!("FAIL: the input datapath: {}", why.message()),
+            }
+            arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+        }
+    };
+
+    input::report_lines(&report);
+    if let Err(why) = report.verdict() {
+        kprintln!("FAIL: the input datapath: {why}");
+        arch::x86_64::exit_qemu(arch::x86_64::Exit::Failure);
+    }
+    kprintln!(
+        "  input verdict {}",
+        match half {
+            input::Half::Deliver =>
+                "a person moved a pointer, one driver timed each report once, and a compositor \
+                 at ring 3 applied one transform per event",
+            input::Half::Withheld =>
+                "the same events crossed the same ring and none of them reached the graph, so \
+                 the delivering half's count is the device's and not this frame's",
+        }
+    );
     Some(report)
 }
 

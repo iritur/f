@@ -40,5 +40,16 @@ f-generation.workspace = true
 # arrangement the three rows above take, on `f-hash`'s argument.
 f-assembler.workspace = true
 
+# `E3-B03b`'s fixture face, for one test: `the_declared_face_is_the_fixtures`
+# hashes `f_text::face::fixture::bytes()` and requires the address
+# `user/objects/manifest.toml` declares to be that one.
+#
+# It is a dependency and not a dev-dependency because the check belongs to the
+# manifest checker rather than to a crate's own suite, and because the pin is
+# the only thing standing between an edited fixture and a manifest that declares
+# a face nobody stores. `no_std` library, `std` binary, on `f-hash`'s argument
+# above.
+f-text.workspace = true
+
 [lints]
 workspace = true

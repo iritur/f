@@ -47,12 +47,15 @@
 //! will audit the number and a number in a paragraph headed *measured* has to
 //! have been. A twenty-third role — `Gauge`, added to the `vocabulary!`
 //! invocation in `interface/src/node.rs` and taken out again — stops this
-//! crate's build at three sites, of which this file is one:
+//! crate's build at four sites, of which this file is one:
 //! `error[E0004]: non-exhaustive patterns: 'Role::Gauge' not covered` at
-//! `interface/src/reader.rs:196`, the match in [`phrasing`]. The other two are
-//! the two exhaustive matches in `interface/src/token.rs`, whose lines are not
-//! quoted here because that file is not this one's to keep accurate. All three
-//! are matches; there is no fourth site, because no file in this crate holds a
+//! `interface/src/reader.rs:199`, the match in [`phrasing`]. The other three
+//! are the two exhaustive matches in `interface/src/token.rs` and the one in
+//! `interface/src/agent.rs`, whose lines are not quoted here because those
+//! files are not this one's to keep accurate. The count was three until
+//! `E3-B06j` added the second projection, and a projection arriving without
+//! moving it would be a projection that had reached for a table. All four are
+//! matches; there is no fifth site, because no file in this crate holds a
 //! per-role table of either kind.
 //!
 //! One site in this file and not two, deliberately: a second per-role decision
@@ -396,6 +399,19 @@ impl<'a> Reader<'a> {
         self.nodes
     }
 
+    /// The arrangements this reading was admitted against.
+    ///
+    /// Published for [`crate::agent`], which keeps a [`Reader`] rather than
+    /// admitting a second time — *is this a tree at all* is one question with
+    /// one answer, and that module's comment says what a second opinion would
+    /// cost. Nothing in a reading is derived from this that
+    /// [`Utterance::when`](Utterance) does not already carry, so a consumer
+    /// that only wants words has no reason to call it.
+    #[must_use]
+    pub const fn canvases(&self) -> &'a [Arrangement] {
+        self.canvases
+    }
+
     /// How many lines a full reading takes.
     ///
     /// Call it to size the buffer [`read`](Self::read) is given. It is a
@@ -666,7 +682,7 @@ mod tests {
     ///
     /// The compile error is the compiler's: [`phrasing`] is a `match` over a
     /// closed enum with no wildcard, so `error[E0004]` is what a twenty-third
-    /// variant produces at `interface/src/reader.rs:196`. What this test holds
+    /// variant produces at `interface/src/reader.rs:199`. What this test holds
     /// is the two things the compiler cannot: that the arms are still one per
     /// role rather than a wildcard somebody added in a hurry, and that no arm
     /// has been collapsed into a catch-all.

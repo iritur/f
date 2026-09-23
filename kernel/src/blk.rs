@@ -1407,7 +1407,7 @@ unsafe fn run(
     let mut supervising = Supervising {
         asks: &asks,
         answers: &answers,
-        reaper: &reaper,
+        reaper: Some(&reaper),
         unit: &mut *unit,
         domain: &mut *domain,
         frames: &mut *frames,
@@ -2316,7 +2316,7 @@ impl Placed<'_> {
         Supervising {
             asks: ends.asks,
             answers: ends.answers,
-            reaper: ends.reaper,
+            reaper: Some(ends.reaper),
             unit: &mut *self.unit,
             domain,
             frames,
@@ -2445,7 +2445,7 @@ impl component::Datapath for Placed<'_> {
         let mut supervising = Supervising {
             asks: &asks,
             answers: &answers,
-            reaper: &reaper,
+            reaper: Some(&reaper),
             unit: &mut *self.unit,
             domain,
             frames: &mut *frames,
@@ -2508,7 +2508,7 @@ impl component::Datapath for Placed<'_> {
         let mut supervising = Supervising {
             asks: &asks,
             answers: &answers,
-            reaper: &reaper,
+            reaper: Some(&reaper),
             unit: &mut *self.unit,
             domain,
             frames: &mut *frames,
@@ -2550,7 +2550,7 @@ impl component::Datapath for Placed<'_> {
         let supervising = Supervising {
             asks: &asks,
             answers: &answers,
-            reaper: &reaper,
+            reaper: Some(&reaper),
             unit: &mut *self.unit,
             domain,
             frames: &mut *frames,

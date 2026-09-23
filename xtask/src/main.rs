@@ -523,6 +523,16 @@ const NOT_THE_FRAME: &[(&str, &str, &str)] = &[
     // with the direct map underneath every address in it — and `copies_per_read
     // = 0` would be a number about a component that is not one.
     ("kernel/", "ReadPath::", "user/objects/"),
+    // The fifth, and the fourth whose needle is `Driver::`. The frame links
+    // `f-virtio-input` from `E3-B04d` for the same three shared vocabularies the
+    // three rows above name, and `kernel/src/input.rs` calls none of its code: what
+    // it reads is `routing`'s offsets and what it writes is a page that crate
+    // describes. The third field is what keeps this from being satisfied by a name
+    // nothing defines, and it matters more on this driver than on the others -
+    // `user/virtio-input/src/driver.rs` holds the accumulator every coordinate on
+    // this path comes out of, so a frame that ran it would be a frame deciding where
+    // the pointer is.
+    ("kernel/", "Driver::", "user/virtio-input/"),
 ];
 
 /// The reversal conditions that have fallen due and are **not paid**, declared
@@ -801,10 +811,12 @@ fn main() -> ExitCode {
         "blk" => blk(args.get(1).map(String::as_str)),
         "net" => net(args.get(1).map(String::as_str)),
         "gpu" => gpu(args.get(1).map(String::as_str)),
+        "input" => input(args.get(1).map(String::as_str)),
         "screen" => screen(args.get(1).map(String::as_str)),
         "deadline" => deadline(args.get(1).map(String::as_str)),
         "runtime" => runtime(args.get(1).map(String::as_str)),
         "objects" => objects(args.get(1).map(String::as_str)),
+        "face" => face(args.get(1).map(String::as_str)),
         "compositor" => compositor(args.get(1).map(String::as_str)),
         "semantic" => semantic(args.get(1).map(String::as_str)),
         "init" => init_image().map(|path| println!("{}", relative(&path))),
@@ -1047,6 +1059,16 @@ cargo xtask <command>
                      argument. The only check here that observes something from
                      outside the machine, because a scanout cannot be read back
                      from inside one
+  input [half]       Boot the input path: a fourth driver component brings a real
+                     pointing device up, this harness moves the pointer from
+                     outside the machine while the driver is serving, and the
+                     frame hands every event it drains to a compositor as a
+                     scene transform - deliver; the identical boot with the
+                     hand-on removed, where the same events are produced and
+                     decoded and the graph must not move - withheld. Both with
+                     no argument. The only check here that acts *into* the
+                     machine while it runs, because an input event exists only
+                     while a device is running
   compositor [half]  Boot the compositor: a component that holds the machine's
                      scene graph at ring 3 and takes a client's deltas across one
                      ring. serve commits two frames and requires the component's
@@ -11939,6 +11961,469 @@ fn gpu(kind: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// The device `cargo xtask input` adds, and the two options on it.
+///
+/// `virtio-mouse-pci` and not a keyboard or a tablet, and the choice is the one
+/// thing about this machine that is load-bearing. A *relative* pointing device
+/// reports `EV_REL` records, which `user/virtio-input/src/driver.rs` accumulates
+/// into a position — so what the driver submits carries a coordinate, and a
+/// coordinate is a number this harness can check against what it asked for. A
+/// tablet reports `EV_ABS`, which that driver counts as ignored and does not
+/// translate; a keyboard reports `EV_KEY`, which it does translate but which
+/// carries nothing anybody outside the machine can predict the accumulation of.
+///
+/// `disable-legacy=on` forces the modern register layout, without which the
+/// device cannot negotiate the feature bit that routes its transfers through the
+/// remapping unit, and `iommu_platform=on` is the device half of the same bit.
+/// The consequence of getting that wrong is the one the network driver's comment
+/// states, at its sharpest: a bus master that addresses physical memory writes
+/// into it whenever *the user acts*, at a moment nothing in the machine chose,
+/// for as long as a buffer stays posted.
+///
+/// `id=` names the function in the emulator's own log and in nothing else, and
+/// the thing it is deliberately **not** used for is worth a sentence.
+/// `input-send-event` takes an optional `device`, which a reader would expect to
+/// be this name — it is not. That field names a *console*, and passing a qdev id
+/// there aborts the emulator with `Property 'qemu-fixed-text-console.device' not
+/// found`, which is how this comment came to exist. Omitted, the event goes to
+/// every input handler of its kind, and this machine has exactly one: `MACHINE`
+/// adds no other input device and the boot list above adds this one.
+///
+/// *What would reverse this:* a second input device on this machine, at which
+/// point *every handler of its kind* stops being one device and the routing has
+/// to be made rather than inherited — which needs a console to send through, and
+/// is the same reversal `virtio::VIRTIO_INPUT_MODERN` states from inside.
+const INPUT_DEVICE: &[&str] =
+    &["-device", "virtio-mouse-pci,id=f-pointer,disable-legacy=on,iommu_platform=on"];
+
+/// The line the kernel prints when its driver is serving and the pointer may be
+/// moved.
+///
+/// The harness waits for this and **not** for the verdict, which is the opposite
+/// of the display check's arrangement and is the same fact seen from the other
+/// side: a picture survives the boot that drew it and an input event exists only
+/// while a device is running, so the display's marker comes after its verdict
+/// and this one comes in the middle of the run. `kernel/src/input.rs` says the
+/// same thing from inside.
+const INPUT_MARKER: &str = "input inject";
+
+/// The line carrying where the driver's accumulator ended up.
+const INPUT_POINTER: &str = "input pointer";
+
+/// The byte the harness writes back when it has finished injecting.
+///
+/// One byte on the serial port, which the kernel polls for. Any byte would do
+/// and the value is not read; what matters is that *something* arrived. It says
+/// only *I have sent them* — the kernel keeps draining for its own settle period
+/// afterwards, because the emulator delivering an event and this process having
+/// asked for it are two different moments.
+const INPUT_ACK: &[u8] = b"k\n";
+
+/// How long the harness waits after the marker before the first event.
+///
+/// A second and a half. The marker is printed when the component has been given
+/// a core, which is before it has reset the device, negotiated features and set
+/// a queue up — and the emulator drops an input event for a device whose guest
+/// has not yet said `DRIVER_OK`. So this is a settling period for the *device*
+/// rather than for the harness, and the cost of it being too long is a second
+/// and a half while the cost of it being too short is an event that never
+/// happened.
+///
+/// *What would reverse this:* the kernel printing its marker when the driver has
+/// told it the device is up. It cannot today — the component publishes its
+/// counters at the end of its run and says nothing in the middle — and a notice
+/// on the control ring saying *I am serving* is the repair. That is a change to
+/// a component's protocol and belongs to whoever needs the moment to be exact.
+/// Unit: milliseconds.
+const INPUT_SETTLE_MS: u64 = 1_500;
+
+/// How long it waits between two events. Unit: milliseconds.
+///
+/// A tenth of a second, and not a measurement of anything: it exists so that the
+/// emulator's own event queue is never the thing being tested. Each command is
+/// one report and the driver drains reports as they arrive, so events sent back
+/// to back would still be counted correctly — this keeps a failed count from
+/// having two candidate explanations.
+const INPUT_GAP_MS: u64 = 100;
+
+/// The scale every coordinate on the input wire carries.
+///
+/// The field's own name is the number: `f_abi::input::PointerMotion` spells it
+/// `x_x65536`, and `user/virtio-input/src/driver.rs` multiplies whole device
+/// pixels by it. Written here rather than imported because `xtask` is a host
+/// crate and importing a bare-metal one for a constant would put a licence
+/// boundary in the way of a number — the decision `SECTOR_BYTES` above records,
+/// with the same consequence: if the two ever disagree, this check goes red on
+/// the position it reads back rather than a reader noticing.
+/// Unit: fixed-point units per device pixel.
+const INPUT_SCALE: i64 = 65_536;
+
+/// The motions this harness injects, in whole device pixels.
+///
+/// Five, none of them zero on either axis, and both properties are the fixture.
+/// Every value is non-zero because the emulator sends a record per axis it is
+/// given a value for and this harness must not depend on whether it elides a
+/// zero. No two are equal and the two running sums are never equal to each
+/// other, so a driver that accumulated x into y, or that reported the last delta
+/// rather than the position, produces a different pair of numbers rather than
+/// the same one.
+///
+/// The sum is the whole of what this harness knows and the kernel does not: it
+/// prints where its driver's accumulator ended up and holds no copy of this
+/// list, and this process holds no copy of the accumulator. Unit: device pixels.
+const MOTIONS: &[(i32, i32)] = &[(3, 5), (-1, 2), (10, -4), (2, 7), (-6, -6)];
+
+/// The two halves, and the second is what makes the first mean anything.
+const INPUT_PROVOCATIONS: &[(&str, &str)] = &[
+    ("deliver", "every event the device produced reaches a compositor's graph"),
+    ("withheld", "the same events, decoded and not handed on, so the graph must not move"),
+];
+
+/// Send the emulator the pointer motions this check is made of.
+///
+/// Three kinds of message: the greeting the monitor sends unprompted, the
+/// handshake it requires before it will take a command, and one
+/// `input-send-event` per motion. Each of those carries both axes in one
+/// command, which is one report on the wire — the emulator synchronises at the
+/// end of the batch — so the driver sees one report per call and this harness
+/// knows how many reports it asked for.
+///
+/// # Errors
+///
+/// Anything [`monitor_ask`] refuses, or a monitor that never greeted.
+fn monitor_inject(stream: &std::net::TcpStream) -> Result<(), String> {
+    use std::io::BufRead;
+
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|e| format!("setting a bound on the monitor: {e}"))?;
+    let mut reader = std::io::BufReader::new(
+        stream.try_clone().map_err(|e| format!("cloning the monitor connection: {e}"))?,
+    );
+    let mut writer =
+        stream.try_clone().map_err(|e| format!("cloning the monitor connection: {e}"))?;
+
+    let mut greeting = String::new();
+    reader.read_line(&mut greeting).map_err(|e| format!("reading the monitor's greeting: {e}"))?;
+    if !greeting.contains("QMP") {
+        return Err(format!("the monitor did not greet this connection: {}", greeting.trim()));
+    }
+    monitor_ask(&mut reader, &mut writer, "{\"execute\":\"qmp_capabilities\"}")?;
+
+    for (dx, dy) in MOTIONS {
+        std::thread::sleep(Duration::from_millis(INPUT_GAP_MS));
+        let axes = format!(
+            "[{{\"type\":\"rel\",\"data\":{{\"axis\":\"x\",\"value\":{dx}}}}},{{\"type\":\"rel\",\"data\":{{\"axis\":\"y\",\"value\":{dy}}}}}]"
+        );
+        let request =
+            format!("{{\"execute\":\"input-send-event\",\"arguments\":{{\"events\":{axes}}}}}");
+        monitor_ask(&mut reader, &mut writer, &request)?;
+    }
+    Ok(())
+}
+
+/// Boot the input path and move the pointer while it runs.
+///
+/// # Why this is neither [`machine_devices`] nor [`watched_boot`]
+///
+/// Because it has to act *into* the machine rather than out of it. The display
+/// check reads the emulator's framebuffer when the kernel says the picture is
+/// there; this one sends the emulator events when the kernel says its driver is
+/// serving, and the kernel then reports what arrived. The plumbing is the same —
+/// a monitor socket bound before the emulator starts, a line-at-a-time reader
+/// thread, and a byte written back on the serial port — and the direction of the
+/// interesting message is reversed.
+///
+/// # Errors
+///
+/// A boot that could not be started, a monitor that never connected, or one that
+/// refused an event.
+fn injected_boot(append: &str) -> Result<Watched, String> {
+    use std::io::{BufRead, Write};
+
+    // Bound before the emulator is spawned and held for the whole run, so there
+    // is no window in which the port is free for something else to take.
+    // `watched_boot`'s comment is the argument and it is unchanged here.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("could not open a monitor socket: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("could not read the monitor socket's port: {e}"))?
+        .port();
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("could not poll the monitor socket: {e}"))?;
+    let monitor = format!("tcp:127.0.0.1:{port}");
+
+    let mut devices: Vec<&str> = INPUT_DEVICE.to_vec();
+    devices.push("-qmp");
+    devices.push(&monitor);
+
+    let mut qemu = emulator(Some(append), &[], BOOT_MEMORY, &devices, &[])?;
+    qemu.stdout(Stdio::piped());
+    qemu.stdin(Stdio::piped());
+    let mut child = qemu.spawn().map_err(|e| format!("could not run qemu-system-x86_64: {e}"))?;
+    let mut stdin = child.stdin.take();
+
+    let (lines, arriving) = std::sync::mpsc::channel::<String>();
+    let reader = child.stdout.take().map(|out| {
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(out).lines() {
+                let Ok(line) = line else { break };
+                if lines.send(line).is_err() {
+                    break;
+                }
+            }
+        })
+    });
+
+    let mut log = String::new();
+    let mut injected = false;
+    let mut connection: Option<std::net::TcpStream> = None;
+    let mut trouble: Option<String> = None;
+
+    const TICK_MS: u64 = 20;
+    let mut ticks = BOOT_TIMEOUT.saturating_mul(1000 / TICK_MS);
+
+    let ending = loop {
+        if connection.is_none()
+            && let Ok((stream, _)) = listener.accept()
+        {
+            connection = Some(stream);
+        }
+
+        let mut marker = false;
+        while let Ok(line) = arriving.try_recv() {
+            let line = line.trim_end_matches('\r').to_string();
+            println!("{line}");
+            log.push_str(&line);
+            log.push('\n');
+            if line.contains(INPUT_MARKER) {
+                marker = true;
+            }
+        }
+
+        if marker && !injected && trouble.is_none() {
+            injected = true;
+            // The device's own settling period, not this harness's. See
+            // `INPUT_SETTLE_MS`.
+            std::thread::sleep(Duration::from_millis(INPUT_SETTLE_MS));
+            match connection.as_ref() {
+                Some(stream) => {
+                    if let Err(why) = monitor_inject(stream) {
+                        trouble = Some(why);
+                    }
+                }
+                None => {
+                    trouble = Some("the emulator's monitor never connected".to_string());
+                }
+            }
+            // The byte back, and it goes whether or not the injection worked: a
+            // machine left waiting for a harness that has given up ends on its
+            // own bound a minute later, which turns one failure into a slow one.
+            if let Some(pipe) = stdin.as_mut() {
+                let _ = pipe.write_all(INPUT_ACK);
+                let _ = pipe.flush();
+            }
+        }
+
+        match child.try_wait().map_err(|e| format!("waiting for qemu: {e}"))? {
+            Some(status) => break status.code().map_or(Ending::Signalled, Ending::Exited),
+            None if ticks == 0 => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Ending::TimedOut(BOOT_TIMEOUT);
+            }
+            None => {
+                ticks -= 1;
+                std::thread::sleep(Duration::from_millis(TICK_MS));
+            }
+        }
+    };
+
+    while let Ok(line) = arriving.recv() {
+        let line = line.trim_end_matches('\r').to_string();
+        println!("{line}");
+        log.push_str(&line);
+        log.push('\n');
+    }
+    if let Some(handle) = reader {
+        let _ = handle.join();
+    }
+    if let Some(why) = trouble {
+        return Err(why);
+    }
+    Ok(Watched { ending, log, shot: None })
+}
+
+/// Where the kernel said its driver's accumulator ended up, and after how many
+/// motion events.
+///
+/// Read by position in a whitespace split for [`gpu_claim`]'s reason: this is a
+/// boot log and not a data format, and a parser that searched for words would
+/// start agreeing with a sentence somebody rewrote.
+///
+/// # Errors
+///
+/// A log with no such line, or one whose numbers are not numbers.
+/// Unit: the first two are fixed-point units of 1/65536 device pixel; the third
+/// is events.
+fn input_pointer(log: &str) -> Result<(i64, i64, u64), String> {
+    let line = log
+        .lines()
+        .find(|line| line.contains(INPUT_POINTER))
+        .ok_or("the boot printed no pointer position")?;
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let at = |index: usize| -> Result<&str, String> {
+        fields.get(index).copied().ok_or_else(|| format!("short pointer line: {line}"))
+    };
+    let signed = |text: &str| -> Result<i64, String> {
+        text.parse::<i64>().map_err(|_| format!("`{text}` is not a coordinate in: {line}"))
+    };
+    // `input pointer x <x> y <y> in units of ... after <n> motion event(s)`.
+    // The leading spaces are not fields, so the first token is `input`.
+    let x = signed(at(3)?)?;
+    let y = signed(at(5)?)?;
+    let count = at(fields.len() - 3)?;
+    let motions =
+        count.parse::<u64>().map_err(|_| format!("`{count}` is not a count in: {line}"))?;
+    Ok((x, y, motions))
+}
+
+/// The exit criterion of `E3-B04d` and the run half of `E3-B04a`, as a command.
+///
+/// # What it asserts, and why one of the assertions is not the kernel's
+///
+/// Every clause about the driver, the readings it took, the entries that crossed
+/// and the deltas the compositor applied is the **kernel's** verdict, for the
+/// reason every datapath check in this file leaves it there: the kernel knows
+/// which half it asked for, what it drained and what came back out of a page a
+/// component published, and a harness that second-guessed it would be a second
+/// implementation of the check.
+///
+/// One clause is not, and it is the one this process is uniquely entitled to:
+/// **how far the pointer was asked to move**. `MOTIONS` is here and nowhere
+/// else; the driver's accumulator is in the machine and nowhere else; the kernel
+/// prints where the accumulator ended up and holds no copy of the list. So the
+/// comparison is between two numbers neither side derived from the other, which
+/// is the property `cargo xtask gpu` gets from a screen capture and this one
+/// gets from having been the thing that moved the mouse.
+///
+/// The control is `withheld`: the identical boot with the frame's hand-on
+/// removed. The events are produced, drained and decoded in that run too — the
+/// kernel's verdict requires it — and the compositor must still apply exactly
+/// the two deltas the boot's own setup sends. Without it, the delivering half's
+/// edit count would establish that a compositor applies deltas rather than that
+/// these came off a device.
+///
+/// # Errors
+///
+/// A boot that did not reach 33, one that never printed a verdict, or a pointer
+/// position that is not the one this harness asked for.
+fn input(kind: Option<&str>) -> Result<(), String> {
+    let chosen: Vec<&(&str, &str)> = match kind {
+        None => INPUT_PROVOCATIONS.iter().collect(),
+        Some(name) => {
+            let found = INPUT_PROVOCATIONS.iter().find(|(known, _)| *known == name);
+            let Some(found) = found else {
+                let list: Vec<String> = INPUT_PROVOCATIONS
+                    .iter()
+                    .map(|(name, what)| format!("  {name:<9} {what}"))
+                    .collect();
+                return Err(format!("unknown input half: {name}\n\n{}", list.join("\n")));
+            };
+            vec![found]
+        }
+    };
+
+    let asked_x: i64 = MOTIONS.iter().map(|(dx, _)| i64::from(*dx)).sum();
+    let asked_y: i64 = MOTIONS.iter().map(|(_, dy)| i64::from(*dy)).sum();
+
+    let all = chosen.len() > 1;
+    for (name, what) in chosen {
+        if all {
+            println!("\n--- input={name}: {what}");
+        }
+        let watched = injected_boot(&format!("input={name}"))?;
+
+        match watched.ending {
+            Ending::Exited(33) => {}
+            Ending::Exited(35) => {
+                return Err(format!(
+                    "the kernel refused to finish after `input={name}`. Either the device \
+                     produced nothing, or the driver did not time every report exactly once, \
+                     or an entry reached this frame with no reading on it, or the compositor \
+                     applied a different number of deltas than the frame handed it. The \
+                     serial log above says which."
+                ));
+            }
+            Ending::Exited(0) => {
+                return Err(format!(
+                    "the machine reset with no output during `input={name}`. A fault taken \
+                     while the remapping unit is enabled and this kernel's own tables are \
+                     under it is the frame having programmed a device wrong."
+                ));
+            }
+            other => return Err(format!("the boot {other}; expected exit 33")),
+        }
+
+        if !watched.log.contains(INPUT_MARKER) {
+            return Err(format!(
+                "`input={name}` never reached the point where its driver is serving, so \
+                 nothing was ever injected and what ran was a driver stood up and no events."
+            ));
+        }
+        if !watched.log.contains("input verdict") {
+            return Err(format!(
+                "`input={name}` finished without reaching a verdict.\n\n\
+                 The kernel prints one for every run it makes, so this means the stage did \
+                 not run: no remapping unit was found, or the input device this boot adds \
+                 was not there to drive."
+            ));
+        }
+
+        let (x, y, motions) = input_pointer(&watched.log)?;
+        println!(
+            "\ninput={name}: this harness moved the pointer by ({asked_x}, {asked_y}) device \
+             pixels in {} event(s); the driver's accumulator ended at ({x}, {y}) in units of \
+             1/{INPUT_SCALE} of one",
+            MOTIONS.len(),
+        );
+
+        if motions as usize != MOTIONS.len() {
+            return Err(format!(
+                "`input={name}` reported {motions} motion event(s) and this harness sent {}. \
+                 A count that is short is an event the emulator dropped or the driver never \
+                 drained; one that is long is a device reporting motion nobody caused.",
+                MOTIONS.len(),
+            ));
+        }
+        if x != asked_x * INPUT_SCALE || y != asked_y * INPUT_SCALE {
+            return Err(format!(
+                "`input={name}` ended with the pointer at ({x}, {y}) and this harness asked \
+                 for ({}, {}). The two numbers are computed on opposite sides of the \
+                 emulator and neither holds the other's copy, so a disagreement is the \
+                 driver's accumulation, the axis mapping, or the fixed-point scale — and \
+                 which of the three it is shows in how they differ.",
+                asked_x * INPUT_SCALE,
+                asked_y * INPUT_SCALE,
+            ));
+        }
+    }
+
+    if all {
+        println!(
+            "\nboth halves held: a pointer moved outside the machine, one driver at ring 3 \
+             timed each report exactly once and submitted what it saw unasked, this frame \
+             drained and decoded every entry, and a compositor at ring 3 applied one \
+             transform per event and said so in the state tree it publishes; the identical \
+             boot with the hand-on removed produced and decoded the same events and left \
+             the graph holding nothing but its own two setup nodes"
+        );
+    }
+    Ok(())
+}
+
 /// What `E1-B06` still cannot show, declared as a set rather than left in a
 /// paragraph.
 ///
@@ -12268,6 +12753,103 @@ const OBJECTS_HALVES: &[(&str, &str)] = &[
         "the client writes across the ring; both sides count the same bytes, and the\n         store's address for them agrees through two mechanisms",
     ),
 ];
+
+/// The halves of `cargo xtask face`, and what each is the authority for.
+///
+/// Two, and neither means anything alone — the shape `cargo xtask objects` and
+/// `cargo xtask semantic` both take, for the reason those files argue at
+/// length. `load` on its own is a boot that read the one face there was, and a
+/// `declares_face` that answered `true` unconditionally would pass it.
+/// `undeclared` on its own is a boot that read nothing, which is what a boot
+/// with a broken store also does.
+///
+/// The second column is what the kernel is told, and it is deliberately the
+/// `objects=` parameter rather than a `face=` one: this is the objects
+/// datapath's component, its store and its ring, with one word on the board
+/// different. A parameter of its own would suggest a second boot.
+const FACE_HALVES: &[(&str, &str, &str)] = &[
+    (
+        "load",
+        "objects=face",
+        "the component stocks the face `user/objects/manifest.toml` declares, the frame
+         computes its address itself, checks it against the record the loader placed,
+         reads it back and parses it",
+    ),
+    (
+        "undeclared",
+        "objects=undeclared",
+        "the same face with one advance one design unit larger — real, stored and
+         readable, and declared by nothing: no entry may cross",
+    ),
+];
+
+/// Boot `E3-B03b`: a face loaded out of the blob store by content address, and
+/// one the manifest did not declare refused before an entry crosses.
+///
+/// The verdict is the kernel's rather than this harness's, exactly as
+/// `objects`' is. What this side checks is that the boot *ran*: an exit code
+/// says the frame agreed with itself, and a green boot that printed no verdict
+/// line is a half that was skipped rather than one that held.
+fn face(kind: Option<&str>) -> Result<(), String> {
+    let chosen: Vec<&(&str, &str, &str)> = match kind {
+        None => FACE_HALVES.iter().collect(),
+        Some(name) => {
+            let Some(found) = FACE_HALVES.iter().find(|(known, _, _)| *known == name) else {
+                let list: Vec<String> =
+                    FACE_HALVES.iter().map(|(n, _, w)| format!("  {n:<10} {w}")).collect();
+                return Err(format!(
+                    "unknown face half: {name}
+
+{}",
+                    list.join(
+                        "
+"
+                    )
+                ));
+            };
+            vec![found]
+        }
+    };
+
+    let all = chosen.len() > 1;
+    for (name, parameter, what) in chosen {
+        if all {
+            println!(
+                "
+--- face={name}: {what}"
+            );
+        }
+        let (ending, log) =
+            machine_with(Some(parameter), &[], Capture::Printed, BOOT_TIMEOUT, BOOT_MEMORY)?;
+        match ending {
+            Ending::Exited(33) => {}
+            Ending::Exited(35) => {
+                return Err(format!(
+                    "the kernel refused to finish after `{parameter}`. On `load` that is a face                      that did not come back, did not parse, or is not the address the manifest                      declares; on `undeclared` it is an entry that crossed for a face nobody                      declared, which is the refusal this task exists for. The serial log above                      says which, and the verdict that refused is in `kernel/src/objects.rs`."
+                ));
+            }
+            Ending::TimedOut(_) => {
+                return Err(format!(
+                    "`{parameter}` never finished. A component that holds a core and does not                      give it back is the one failure a served datapath has that a spawn does not."
+                ));
+            }
+            other => return Err(format!("the boot {other}; expected exit 33")),
+        }
+        if !log.contains("face_declared_by_the_manifest") {
+            return Err(format!(
+                "`{parameter}` exited green and printed no face rows, so the half did not run.                  The likeliest cause is a boot with no `objects` component file."
+            ));
+        }
+    }
+
+    println!(
+        "
+face: ok — a face was loaded out of the blob store by the content address
+      `user/objects/manifest.toml` declares, and the same face with one advance
+      changed was refused by the frame before an entry crossed."
+    );
+    Ok(())
+}
 
 /// Boot the objects datapath: a component serving a ring from ring 3, and the
 /// frame as its client.
