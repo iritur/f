@@ -33,6 +33,12 @@
 //! - [`token`] — the typed token layer and what a theme cannot break. `E3-D03`, RFC 0079.
 //! - [`ladder`] — the renderer fallback ladder. `E3-D04`, RFC 0080.
 //!
+//! # The stages between a declaration and a scene
+//!
+//! - [`solve`] — layout from constraints, with the work bounded by the change
+//!   rather than by the tree. Section 12's second stage, and the one its own note
+//!   calls the entire engineering risk in this part. `E3-B06e`, RFC 0113.
+//!
 //! # The projections
 //!
 //! - [`reader`] — the screen-reader projection: a whole tree said, with nothing
@@ -50,4 +56,5 @@ pub mod canvas;
 pub mod ladder;
 pub mod node;
 pub mod reader;
+pub mod solve;
 pub mod token;
