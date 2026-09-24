@@ -323,6 +323,14 @@ fn report(board: &Window, driver: Option<&crate::driver::Driver>, outcome: u64) 
         let _ = board.write64(reported::MALFORMED, counters.malformed);
         let _ = board.write64(reported::SPUN, counters.spun);
         let _ = board.write64(reported::CLOCK_AT, driver.clock_at_nanos());
+        // The producer's half of the crossing attestation. Written here with
+        // the rest of the report rather than as the run goes, for this
+        // function's own reason: the magic goes last, so a frame that reads a
+        // page this function never finished finds a zero — and a zero is not a
+        // fold, because `Crossing::agrees_with` refuses one.
+        let crossing = driver.crossing();
+        let _ = board.write64(reported::CROSSING, crossing.word());
+        let _ = board.write64(reported::CROSSED, crossing.absorbed());
     }
     let _ = board.write64(reported::OUTCOME, outcome);
     let _ = board.write64(reported::MAGIC, routing::MAGIC);
