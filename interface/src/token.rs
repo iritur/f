@@ -1936,6 +1936,73 @@ pub struct Paint {
     pub refused: Option<Token>,
 }
 
+impl Paint {
+    /// The ink, in linear light, scaled so that 65 535 is full.
+    ///
+    /// # Why the conversion is here and not in the projection that wants it
+    ///
+    /// `f_abi::scene::SetPaint` says in as many words that its channels are
+    /// **linear light and not sRGB-encoded**, because a compositor works in
+    /// linear space and a wire value that had to be decoded first would be a
+    /// colour whose meaning depends on who decoded it. A theme is written in
+    /// sRGB bytes, because that is what a designer writes. So something has to
+    /// convert, and the question is only which module.
+    ///
+    /// It is this one, and the argument is not taste: a projection that
+    /// converted for itself would be a **second transfer function**, and a
+    /// second transfer function is exactly how a colour comes to pass the
+    /// readability check here and reach a screen as something else. RFC 0079's
+    /// rule is that a colour outside this module travels with the pair it was
+    /// checked as; `cargo xtask lint-token-pair` enforces it by refusing
+    /// [`LINEAR_X100000`] by name anywhere else in the tree. This method is the
+    /// door that rule leaves open — the pair is right here on the same value,
+    /// and what crosses out is three integers rather than a colour.
+    ///
+    /// **The ink and not the ground**, because the only consumer today
+    /// (`f_semantic::emit`) paints marks, and a mark is drawn in its ink. A
+    /// ground is painted by whatever draws the surface behind it, and nothing
+    /// does yet; the day something does, this gains a sibling rather than a
+    /// parameter, so that neither caller can pass the wrong one.
+    ///
+    /// Rounded to nearest and not truncated. The division is by 100 000, and
+    /// truncating would move every channel of every interface downwards by up to
+    /// one part in 65 536 in the same direction — which is a tint, not a
+    /// rounding error.
+    /// Unit: none — three intensities, each scaled so that 65 535 is full.
+    #[must_use]
+    pub fn ink_linear_x65535(&self) -> (u16, u16, u16) {
+        (
+            linear_x65535(self.ink_rgb.r),
+            linear_x65535(self.ink_rgb.g),
+            linear_x65535(self.ink_rgb.b),
+        )
+    }
+}
+
+/// One sRGB channel as the linear-light intensity a compositor works in.
+///
+/// [`Paint::ink_linear_x65535`] is the public door and this is the arithmetic
+/// behind it: [`LINEAR_X100000`]'s answer, rescaled from hundred-thousandths to
+/// the 65 535 that `f_abi::scene::SetPaint` calls full, rounded to nearest. The
+/// product needs `u64` — 100 000 times 65 535 is past `u32` by a factor of
+/// sixty-five — and the widening is written out rather than inferred.
+/// Unit: none — an intensity, scaled so that 65 535 is full.
+fn linear_x65535(channel: u8) -> u16 {
+    /// What the wire calls full.
+    /// Unit: none — an intensity scale.
+    const INTENSITY_X65535: u64 = 65_535;
+    /// What [`LINEAR_X100000`] is scaled by.
+    /// Unit: none — the scale of a linearised channel.
+    const LINEAR_SCALE: u64 = 100_000;
+
+    let linear = u64::from(LINEAR_X100000[channel as usize]);
+    let scaled = linear
+        .saturating_mul(INTENSITY_X65535)
+        .saturating_add(LINEAR_SCALE / 2)
+        .saturating_div(LINEAR_SCALE);
+    u16::try_from(scaled).unwrap_or(u16::MAX)
+}
+
 /// How much room a node needs and may have, in tenths of a point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Span {
@@ -2869,6 +2936,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_ink_crosses_as_linear_light_and_the_ends_of_the_range_are_exact() {
+        // The two values a wrong transfer cannot get wrong by accident, and the
+        // one it can. Black and white are the fixed points — a table, a cast and
+        // a wrong exponent all agree about them — so they are asserted to pin the
+        // *scale* rather than the curve, and `text`'s own grey is the third,
+        // where 0x1A is 1 033 hundred-thousandths of light and therefore 677 of
+        // 65 535. A truncating rescale answers 676 there and the same on both
+        // ends, which is why one of the three has to be off a round number.
+        let (resolved, _report) = resolve(&Theme::DEFAULT);
+        let mut white = Node::new(NodeId::new(1), NodeId::UNNAMED, Role::Surface);
+        white.style = TokenSet::EMPTY;
+        let paint = resolved.paint(&white);
+
+        assert_eq!(linear_x65535(0x00), 0, "black is none of the channel");
+        assert_eq!(linear_x65535(0xFF), 65_535, "white is all of it");
+        assert_eq!(linear_x65535(0x1A), 677);
+        assert_eq!(linear_x65535(0x76), 11_872);
+        assert_eq!(
+            paint.ink_linear_x65535(),
+            (
+                linear_x65535(paint.ink_rgb.r),
+                linear_x65535(paint.ink_rgb.g),
+                linear_x65535(paint.ink_rgb.b)
+            ),
+            "the three channels are not in the order they are named"
+        );
     }
 
     #[test]

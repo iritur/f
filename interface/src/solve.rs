@@ -464,6 +464,46 @@ pub struct Declared {
     pub depth: u32,
 }
 
+/// Where one node ended up, handed over by [`Layout::walk_resolved`].
+///
+/// Four fields, and the fourth is the one that is not obvious. A solve is one
+/// axis — the module header says why — so an offset is a number with no
+/// direction, and the direction is the parent's [`Flow`]. This module
+/// deliberately does not turn that into a pair of coordinates: *which way
+/// `Inline` points* is a reading direction, and a reading direction is a
+/// projection's to know, not a solver's. So the axis travels with the number and
+/// whoever draws decides what it means. [`Flow::Own`] here means *nothing
+/// arranged this node*, which is true of a root and of nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placed {
+    /// The node, by the identity its author chose.
+    pub id: NodeId,
+    /// The flow its parent arranges on, and therefore the axis its offset is
+    /// measured along.
+    pub along: Flow,
+    /// Where it sits along that axis, as [`Layout::placed_pt_x10`] answers it.
+    ///
+    /// **A cursor and not a coordinate**, which is the thing about this module
+    /// most likely to be misread: [`Layout::share`] starts each parent's cursor
+    /// at the parent's own offset, so this number is the sum of every offset
+    /// above it. Along one axis that reads as a coordinate; across a tree that
+    /// changes flow between levels it reads as nothing at all, because the terms
+    /// of the sum are on different axes. What is meaningful is the difference
+    /// between this and [`Placed::origin_pt_x10`], and a consumer that wants a
+    /// position takes it.
+    /// Unit: pt_x10.
+    pub offset_pt_x10: i32,
+    /// Where its parent sits along the same axis, or zero for a root.
+    ///
+    /// Here so that the subtraction above has both of its terms without a second
+    /// lookup, and so that whoever writes it writes it once.
+    /// Unit: pt_x10.
+    pub origin_pt_x10: i32,
+    /// How much of that axis it got.
+    /// Unit: pt_x10.
+    pub extent_pt_x10: i32,
+}
+
 /// Which slot, and nothing else.
 ///
 /// `scene::arena::SlotIx`'s reason for being a newtype: an author's identifier
@@ -848,6 +888,25 @@ pub struct Layout {
     marks: [Ix; MARKS_MAX],
     marked: usize,
     whole: bool,
+    /// The boundary roots the last pass actually re-solved, kept after the pass
+    /// rather than dropped with the local that planned them.
+    ///
+    /// **A pass that refuses writes nothing here**, which is the half worth
+    /// stating: [`Layout::solve`] empties this before it plans, so a [`Cascade`]
+    /// leaves a caller walking nothing rather than walking last frame's plan and
+    /// believing it is this frame's. `E3-B06f`'s emit stage is the caller — the
+    /// re-solved set is the set whose placement moved, and a projection that had
+    /// to rediscover it would rediscover it by walking the tree, which is the
+    /// cost this whole module exists to refuse one layer down.
+    plan: [Ix; SUBTREES_MAX],
+    planned: usize,
+    /// Did the last pass re-solve the whole forest?
+    ///
+    /// Separate from `planned` because a forest may hold more roots than
+    /// [`SUBTREES_MAX`], so *every root* is not a list this array could always
+    /// hold. Two fields and not one because the alternative is a sentinel length
+    /// meaning *more than I can say*, and a walk would have to know it.
+    plan_whole: bool,
     pass: u32,
     probes: Counter<u64>,
     lost: u32,
@@ -876,6 +935,9 @@ impl Layout {
             marks: [Ix::NONE; MARKS_MAX],
             marked: 0,
             whole: false,
+            plan: [Ix::NONE; SUBTREES_MAX],
+            planned: 0,
+            plan_whole: false,
             pass: 0,
             probes: Counter::new(0),
             lost: 0,
@@ -967,6 +1029,18 @@ impl Layout {
     /// it got, in tenths of a point.
     ///
     /// The output of the stage, in the order *offset, extent*.
+    ///
+    /// **The offset is a cursor and not a coordinate.** [`Layout::share`] starts
+    /// each parent's cursor at that parent's own offset, so what comes back here
+    /// is the sum of every offset above this node — which reads as a position
+    /// only while the whole chain is on one axis, and reads as nothing when the
+    /// flow changes between levels. A consumer that wants *where is this, in
+    /// front of its parent* subtracts the parent's offset from it, and
+    /// [`Placed::origin_pt_x10`] is that number handed over so the subtraction
+    /// has both terms without a second lookup. `f_semantic::emit` is the consumer
+    /// this matters to, because a scene transform composes down the tree and a
+    /// cursor sent as a translation would place every nested subtree at the sum
+    /// of its ancestors twice over.
     #[must_use]
     pub fn placed_pt_x10(&mut self, id: NodeId) -> Option<(i32, i32)> {
         let view = self.look(id)?;
@@ -1491,6 +1565,13 @@ impl Layout {
     /// again — or read the node the refusal names and put a definite extent on
     /// something above it.
     pub fn solve(&mut self, viewport_pt_x10: i32, scope: Scope) -> Result<Work, Cascade> {
+        // Emptied first, and before the early return as well as before the
+        // refusal: a pass that re-solved nothing must leave nothing to walk, or
+        // a caller emitting *what moved* would emit last frame's subtrees again
+        // and the frames would differ by a repetition nobody declared.
+        self.plan = [Ix::NONE; SUBTREES_MAX];
+        self.planned = 0;
+        self.plan_whole = false;
         if !self.whole && self.marked == 0 {
             return Ok(Work::NOTHING);
         }
@@ -1570,10 +1651,178 @@ impl Layout {
             }
         }
 
+        // What was re-solved, published only now: every statement above this
+        // line can still return `Err`, and a plan a caller could walk after a
+        // refusal would be a plan nothing executed.
+        self.plan_whole = self.whole;
+        self.plan = plan;
+        self.planned = if self.whole { 0 } else { planned };
+
         work.subtrees = u32::try_from(planned).unwrap_or(u32::MAX);
         self.marked = 0;
         self.whole = false;
         Ok(work)
+    }
+
+    /// Hand every node the last pass re-solved to `each`, in paint order, and
+    /// answer how many that was.
+    ///
+    /// # Why this exists rather than a getter per node
+    ///
+    /// Because the stage downstream of this one — `f_semantic::emit`, `E3-B06f`
+    /// — has to emit *what moved*, and the only two ways to find that out
+    /// without this are to walk the whole tree asking [`Layout::last_pass`],
+    /// which is the cost this module was written to refuse, or to keep a second
+    /// copy of the tree, which `Demand`'s own documentation refuses for the same
+    /// reason. So the set the pass planned is handed over rather than
+    /// rediscovered, and the walk is bounded by the plan the scope already
+    /// bounded.
+    ///
+    /// # What it hands over is exactly what the pass read
+    ///
+    /// The descent is [`Layout::place`]'s: a subtree root, then every child of
+    /// every node that *arranges* its children, and no descendant of a
+    /// [`Flow::Own`] node — because the solver did not place those either, and a
+    /// consumer emitting a placement this module did not compute would be
+    /// emitting last frame's number as though it were this frame's.
+    ///
+    /// The one asymmetry is named rather than left to be found: `boundary_of`
+    /// stamps the changed node and its ancestors on the way up, so a change
+    /// *inside* a `Flow::Own` subtree is a node the pass read and this walk does
+    /// not reach. [`Work::nodes`] and this count are therefore equal exactly
+    /// when no canvas encloses a change, and the tests assert the equality on a
+    /// fixture where that holds rather than asserting it flat.
+    ///
+    /// Every slot it touches is read through the same counted door a pass uses,
+    /// with a pass of zero — so [`Layout::probes`] and [`Slot::reads`] see this
+    /// walk and [`Layout::nodes_read_in`] does not, which is what keeps the
+    /// solver's own instrument an answer about the solver.
+    pub fn walk_resolved<F>(&mut self, mut each: F) -> u32
+    where
+        F: FnMut(Placed),
+    {
+        let mut handed = 0u32;
+        if self.plan_whole {
+            let mut root = self.roots;
+            while root.is_some() {
+                let next = self.slot(root).map_or(Ix::NONE, Slot::next_sibling);
+                handed = handed.saturating_add(self.walk_placed(root, &mut each));
+                root = next;
+            }
+            return handed;
+        }
+        for at in 0..self.planned {
+            let root = self.plan.get(at).copied().unwrap_or(Ix::NONE);
+            if root.is_some() {
+                handed = handed.saturating_add(self.walk_placed(root, &mut each));
+            }
+        }
+        handed
+    }
+
+    /// One re-solved subtree, in paint order.
+    ///
+    /// Iterative with one cursor per level, on [`Layout::place`]'s terms and for
+    /// its reason: the alternative is a stack whose depth a declaration chooses.
+    fn walk_placed<F>(&mut self, root: Ix, each: &mut F) -> u32
+    where
+        F: FnMut(Placed),
+    {
+        let Some(view) = self.peek(root) else { return 0 };
+        // The axis a node's offset is measured along is the axis its parent
+        // arranges on, which is why a root's is `Flow::Own`: nothing arranged
+        // it, and its offset is zero for exactly that reason. The parent's own
+        // offset comes back with it, because [`Placed::offset_pt_x10`] is a
+        // cursor and the difference is the part that means anything.
+        let (along, origin) = if view.parent.is_some() {
+            self.peek(view.parent).map_or((Flow::Own, 0), |up| (up.demand.flow, up.offset_pt_x10))
+        } else {
+            (Flow::Own, 0)
+        };
+        let mut handed = u32::from(self.hand(root, &view, along, origin, each));
+        let mut cursor = [Ix::NONE; LEVELS];
+        let mut arranged = [Flow::Own; LEVELS];
+        let mut origins = [0i32; LEVELS];
+        let mut depth = 0usize;
+        cursor[0] = if view.demand.arranges() { view.first_child } else { Ix::NONE };
+        arranged[0] = view.demand.flow;
+        origins[0] = view.offset_pt_x10;
+        loop {
+            let child = cursor.get(depth).copied().unwrap_or(Ix::NONE);
+            if !child.is_some() {
+                if depth == 0 {
+                    return handed;
+                }
+                depth -= 1;
+                continue;
+            }
+            let Some(cv) = self.peek(child) else {
+                if let Some(cell) = cursor.get_mut(depth) {
+                    *cell = Ix::NONE;
+                }
+                continue;
+            };
+            if let Some(cell) = cursor.get_mut(depth) {
+                *cell = cv.next_sibling;
+            }
+            let along = arranged.get(depth).copied().unwrap_or(Flow::Own);
+            let origin = origins.get(depth).copied().unwrap_or(0);
+            handed = handed.saturating_add(u32::from(self.hand(child, &cv, along, origin, each)));
+            if cv.demand.arranges() && cv.first_child.is_some() {
+                if depth + 1 < LEVELS {
+                    depth += 1;
+                    cursor[depth] = cv.first_child;
+                    arranged[depth] = cv.demand.flow;
+                    origins[depth] = cv.offset_pt_x10;
+                } else {
+                    self.lost = self.lost.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    /// Hand one node over, or count a link that led nowhere.
+    ///
+    /// The identity costs a counted read of its own, which is [`Slot::key`]'s
+    /// whole point: a walk cannot name a node without the counter seeing it.
+    fn hand<F>(
+        &mut self,
+        ix: Ix,
+        view: &View,
+        along: Flow,
+        origin_pt_x10: i32,
+        each: &mut F,
+    ) -> bool
+    where
+        F: FnMut(Placed),
+    {
+        let Some(id) = self.slot_mut(ix).map(Slot::key) else {
+            self.lost = self.lost.saturating_add(1);
+            return false;
+        };
+        each(Placed {
+            id,
+            along,
+            offset_pt_x10: view.offset_pt_x10,
+            origin_pt_x10,
+            extent_pt_x10: view.extent_pt_x10,
+        });
+        true
+    }
+
+    /// Read a slot outside a pass, and be counted for it.
+    ///
+    /// A pass of zero, so the stamp is left where the solver put it. Reaching
+    /// this with [`Ix::NONE`] is a link that led nowhere and is counted as one,
+    /// on [`Layout::lost`]'s terms.
+    fn peek(&mut self, ix: Ix) -> Option<View> {
+        match self.slot_mut(ix).map(|slot| slot.visit(0)) {
+            Some((view, _)) => Some(view),
+            None => {
+                self.lost = self.lost.saturating_add(1);
+                None
+            }
+        }
     }
 
     /// Put one boundary root into the plan, keeping the plan's entries disjoint.
@@ -2005,6 +2254,96 @@ mod tests {
     }
 
     #[test]
+    fn the_walk_hands_over_exactly_the_subtrees_the_pass_re_solved() {
+        let mut layout = Layout::new();
+        build(&mut layout, bounded());
+        layout.solve(VIEWPORT_PT_X10, Scope::UNBOUNDED).expect("a first full solve");
+        let touched: [u64; 5] = [0, 7, 108, 500, SECTIONS - 1];
+        for at in touched {
+            layout
+                .declare(leaf(at, 0), section(at), Demand::flexible(LEAF_PT_X10 + 10, 0, Flow::Own))
+                .expect("a leaf saying what it needs now");
+        }
+        let work = layout.solve(VIEWPORT_PT_X10, Scope::DEFAULT).expect("five subtrees, in scope");
+        let pass = layout.pass();
+
+        // What the walk hands over, and what it hands over *first*: preorder
+        // inside a subtree and plan order between them, so a section arrives
+        // before its leaves. `f_semantic::emit` depends on that order — the
+        // graph's dirty set coalesces a mark that encloses another, and the
+        // enclosing one arriving second would make one subtree into eleven
+        // marks.
+        let mut handed = 0u32;
+        let mut roots = 0u32;
+        let mut first_is_a_section = false;
+        let mut reads_before_each_root = true;
+        let walked = layout.walk_resolved(|placed| {
+            let is_section = (1_000..1_000 + SECTIONS).contains(&placed.id.value());
+            if handed == 0 {
+                first_is_a_section = is_section;
+            }
+            if is_section {
+                roots += 1;
+                // A section is definite, so its own offset is unchanged and its
+                // origin is the surface's nothing.
+                reads_before_each_root &= placed.origin_pt_x10 == 0;
+            } else {
+                // A leaf's cursor is measured from its section's, which is what
+                // makes the difference between the two a translation.
+                reads_before_each_root &= placed.offset_pt_x10 >= placed.origin_pt_x10;
+            }
+            handed += 1;
+        });
+
+        assert_eq!(walked, handed, "the walk's tally and the closure's count differ");
+        assert_eq!(walked, work.nodes, "the walk and the pass disagree about the set");
+        assert_eq!(walked, layout.nodes_read_in(pass), "the walk and the slots disagree");
+        assert_eq!(roots, work.subtrees);
+        assert!(first_is_a_section, "a subtree's root must be handed over before its children");
+        assert!(reads_before_each_root, "a cursor and its origin are not where they should be");
+        assert_eq!(layout.lost(), 0);
+
+        // And the walk stamped nothing: it reads through the counted door with a
+        // pass of zero, so the solver's own instrument still answers about the
+        // solver. Were it otherwise, every node this walk touched would now claim
+        // to have been re-solved.
+        assert_eq!(layout.nodes_read_in(pass), work.nodes);
+        assert_eq!(layout.last_pass(SURFACE), Some(pass - 1), "the walk restamped the surface");
+    }
+
+    #[test]
+    fn the_walk_stops_where_the_solver_stopped() {
+        // A canvas's occupants are placed by the application, so the pass does
+        // not descend into them — and neither may the walk, because a placement
+        // this module did not compute is last frame's number wearing this
+        // frame's stamp.
+        const CANVAS: NodeId = NodeId::new(41);
+        let mut layout = Layout::new();
+        layout
+            .declare(SURFACE, NodeId::UNNAMED, Demand::flexible(0, 0, Flow::Block))
+            .expect("a surface");
+        layout
+            .declare(CANVAS, SURFACE, Demand::flexible(200, 0, Flow::Own))
+            .expect("a canvas, arranging itself");
+        for which in 0..3 {
+            layout
+                .declare(leaf(0, which), CANVAS, Demand::flexible(10, 0, Flow::Own))
+                .expect("an occupant the application places");
+        }
+        let work = layout.solve(VIEWPORT_PT_X10, Scope::DEFAULT).expect("in scope");
+
+        let mut occupants = 0u32;
+        let walked = layout.walk_resolved(|placed| {
+            if placed.id == leaf(0, 0) || placed.id == leaf(0, 1) || placed.id == leaf(0, 2) {
+                occupants += 1;
+            }
+        });
+        assert_eq!(walked, 2, "the surface and the canvas, and nothing under the canvas");
+        assert_eq!(walked, work.nodes);
+        assert_eq!(occupants, 0, "the walk descended into a canvas");
+    }
+
+    #[test]
     fn two_changes_under_one_boundary_are_one_subtree() {
         let mut layout = Layout::new();
         build(&mut layout, bounded());
@@ -2207,8 +2546,15 @@ mod tests {
         // bytes and an index of sixteen thousand `u16`s. A slot that grew by one
         // word would cost another eighty kilobytes, which is why this is an
         // assertion and not a comment.
+        //
+        // **It moved once, by 136 bytes, and this is the record of it.** `E3-B06f`
+        // needs the plan a pass executed, not only the count of it, so the plan
+        // is kept: sixty-four `Ix`, a length and a flag. That is the whole of the
+        // growth, it is per *layout* rather than per slot — the eighty kilobytes
+        // above is what a per-slot word would have cost — and it buys the emit
+        // stage the difference between walking what moved and walking the tree.
         assert_eq!(core::mem::size_of::<Slot>(), 64);
-        assert_eq!(core::mem::size_of::<Layout>(), 688_376);
+        assert_eq!(core::mem::size_of::<Layout>(), 688_512);
 
         // And every `nothing` in it is zero, which is what makes a fresh one a
         // region of zero bytes rather than a region of set bits. RFC 0100's rule
