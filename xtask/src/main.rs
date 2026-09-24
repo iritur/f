@@ -956,6 +956,7 @@ fn main() -> ExitCode {
         "lint-testing-status" => lint_testing_status(),
         "lint-debt" => lint_debt(),
         "lint-claim-runs" => lint_claim_runs(),
+        "lint-schedules" => lint_schedules(),
         "lint-generations" => generation::fixpoint(),
         "lint-gate" => lint_gate(),
         "lint-manifests" => lint_manifests(),
@@ -1221,6 +1222,9 @@ cargo xtask <command>
   lint-testing-status  the TESTING-STATUS claims row says what claims/ holds
   lint-debt          every narrowed exit has a row in docs/TECHNICAL-DEBT.md
   lint-claim-runs    every gating claim is compared to its bounds by some workflow
+  lint-schedules     every scheduled workflow has one job that watches every
+                     other job in it and can open an issue about a red run.
+                     A-06, docs/postmortem/0002 and 0003
   lint-generations   every generation round-trips to a fixpoint
   lint-gate          the pull-request gate runs every check `verify` runs
   history --changes  where the recorded series stepped, rather than what crossed a bound
@@ -14799,6 +14803,13 @@ fn lint_all() -> Result<(), String> {
     // And the same question about the checks themselves rather than the claims:
     // does the gate run what this function runs? Nine of them it did not.
     lint_gate()?;
+    // And the question neither of those asks: when a check that only a schedule
+    // runs goes red, does anybody hear it? Twice not — `docs/postmortem/0002`
+    // and `0003`, and the second time the repair was already on a branch. A-06
+    // called the mechanism earned and not built; this is the file read that
+    // keeps it built, because the way it rots is somebody adding a job to
+    // `nightly.yml` and not adding it to the alarm's `needs:`.
+    lint_schedules()?;
     // The topology check RFC 0005 promised in the R02 row: every component
     // manifest fits the schema, declares a domain, and does not put an
     // imported image in `shared`. It runs here so a boot is not the first
@@ -15421,6 +15432,519 @@ fn lint_gate() -> Result<(), String> {
         absent.len(),
         absent.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n  ")
     ))
+}
+
+/// Every scheduled workflow has one job that watches every other job in it, and
+/// that job can reach a person.
+///
+/// # The incident this was written against, which is the second of its kind
+///
+/// `docs/postmortem/0003`: the nightly's `rollback` job went red at 03:11 UTC on
+/// 2026-09-23 and nobody read it for a day, and the repair had already been
+/// committed — on a branch, the day before — so the schedule reported a defect
+/// nobody could connect to its fix. `docs/postmortem/0002` is the first
+/// occurrence: five consecutive red nights, unread, in which the one job built
+/// to reach a person was itself the broken one. `TODO.md`'s **A-06** says
+/// *nightly sweeps and weekly checking stay green or stay loud*, and on
+/// 2026-09-24 it recorded in as many words that the loud half was earned and not
+/// built.
+///
+/// # Why this is a lint and not a test of the workflow
+///
+/// Because nothing in this repository can watch GitHub run anything, which is
+/// the same position `proof_schedule` is in and takes the same answer: check the
+/// half that is local. Whether a scheduled workflow's jobs are *watched* is a
+/// file read — a set of job names against one `needs:` list — and post-mortem
+/// 0003's own lesson is that a relation between two things in two files belongs
+/// in `verify` rather than in the expensive route that happened to notice it.
+///
+/// The way this mechanism rots is not exotic. Somebody adds a job to
+/// `nightly.yml` — this file has gained five in two epochs — and does not add it
+/// to the alarm's `needs:`, so the new job is the one job in the file nothing is
+/// listening to, and it is unwatched in exactly the way the old ones were.
+/// That is a red pull request now.
+///
+/// # What it checks
+///
+/// For every workflow with a `schedule:` trigger: that it has an `alarm` job;
+/// that the job names every other job in the file in `needs:`; that it runs
+/// `if: always()`, because a job conditioned on `failure()` cannot close a stale
+/// issue on a green run; that it declares no `container:`, because the image is
+/// a thing that can fail and a watcher that needs the image cannot report the
+/// image failing — which is the shape of `docs/postmortem/0002`; and that it
+/// holds `issues: write` and neither `contents: write` nor `packages: write`,
+/// because a machine that can open an issue should not also be able to push.
+///
+/// It also requires the two scripts the jobs run to exist, since a workflow
+/// calling a script that is not there fails at three in the morning in the one
+/// job whose failure nothing else reports — and requires the alarm to actually
+/// *run* both of them, and to post on `schedule`. Those last three are here
+/// because the check without them had a passing mutation and it was the obvious
+/// one: delete the posting step. The alarm then watched every job, held exactly
+/// the right permissions, wrote the whole issue body to the run summary and
+/// opened nothing, with every check green. A watcher that says nothing is the
+/// failure this exists to prevent, so a check that could not see it was checking
+/// the shape of the thing rather than the thing.
+///
+/// # What it does not check
+///
+/// That the alarm *works*. Opening an issue needs a token and a real failure,
+/// and only a real failure can exercise it; what is testable without one is the
+/// decision and the message, and those are in `ops/alarm.sh` with tests in this
+/// file. It also says nothing about the alarm job failing — no job in a workflow
+/// can watch itself, and that residue is named in `nightly.yml`'s own header
+/// rather than papered over.
+///
+/// # Errors
+///
+/// A scheduled workflow with no alarm, an alarm that does not watch every job, a
+/// watcher that cannot report, or a missing script.
+fn lint_schedules() -> Result<(), String> {
+    let dir = root().join(".github").join("workflows");
+    let mut files: Vec<(String, String)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| {
+        format!(
+            "reading .github/workflows/: {e}\n\n\
+             With no workflows there is no schedule to be loud, which is a larger finding\n\
+             than the one this check was written for."
+        )
+    })? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().is_some_and(|e| e == "yml" || e == "yaml") {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let text =
+                std::fs::read_to_string(&path).map_err(|e| format!("reading {name}: {e}"))?;
+            files.push((name, text));
+        }
+    }
+    files.sort();
+
+    for script in [ALARM_SCRIPT, ALARM_POST_SCRIPT] {
+        if !root().join(script).is_file() {
+            return Err(format!(
+                "{script} is not there, and every alarm job runs it.\n\n\
+                 A workflow calling a script that does not exist fails at three in the\n\
+                 morning, in the one job whose failure nothing else reports. That is\n\
+                 `docs/postmortem/0002` with a different cause."
+            ));
+        }
+    }
+
+    let mut findings: Vec<String> = Vec::new();
+    let mut watched = 0usize;
+    let mut scheduled = 0usize;
+    for (name, text) in &files {
+        if !text.lines().any(|line| line.trim_end() == "  schedule:") {
+            continue;
+        }
+        scheduled += 1;
+        let jobs = workflow_jobs(text);
+        let Some(alarm) = workflow_job_body(text, ALARM_JOB) else {
+            findings.push(format!(
+                "  {name}: has a schedule and no `{ALARM_JOB}` job, so {} job(s) in it fail \
+                 into a tab",
+                jobs.len()
+            ));
+            continue;
+        };
+
+        let needs = yaml_key_region(&alarm, "needs");
+        let unwatched: Vec<&String> = jobs
+            .iter()
+            .filter(|job| job.as_str() != ALARM_JOB)
+            .filter(|job| {
+                !needs
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+                    .any(|tok| tok == job.as_str())
+            })
+            .collect();
+        if !unwatched.is_empty() {
+            findings.push(format!(
+                "  {name}: `{ALARM_JOB}` does not name {} of its sibling job(s) in `needs:`: {}",
+                unwatched.len(),
+                unwatched.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if !alarm.contains("if: always()") {
+            findings.push(format!(
+                "  {name}: `{ALARM_JOB}` is not `if: always()`, so it cannot close a stale \
+                 issue on a green run"
+            ));
+        }
+        if alarm.lines().any(|line| line.trim_start().starts_with("container:")) {
+            findings.push(format!(
+                "  {name}: `{ALARM_JOB}` runs in a container, and the image is a thing that \
+                 can fail"
+            ));
+        }
+        if !alarm.contains("issues: write") {
+            findings.push(format!(
+                "  {name}: `{ALARM_JOB}` does not hold `issues: write`, so it can report \
+                 nothing"
+            ));
+        }
+        for wide in ["contents: write", "packages: write", "pull-requests: write"] {
+            if alarm.contains(wide) {
+                findings.push(format!(
+                    "  {name}: `{ALARM_JOB}` holds `{wide}`, which no call it makes needs"
+                ));
+            }
+        }
+        // The three rows below were added because the check without them had a
+        // passing mutation, and it is the mutation somebody would actually
+        // write: **delete the posting step**. The alarm then computed the
+        // decision, wrote the whole issue body to the run summary, watched every
+        // job, held exactly the right permissions — and opened nothing. Every
+        // check above it was green. A watcher that says nothing is the failure
+        // this whole mechanism exists to prevent, so a check that could not see
+        // it was checking the shape of the thing rather than the thing.
+        //
+        // The second row is the same defect one step smaller: leaving the step
+        // and narrowing its condition to the manual input turns off the only
+        // route that matters, because the route that matters is the one nobody
+        // chose. The third is the decision half going the same way.
+        for (needle, what) in [
+            ("bash ops/alarm.sh", "does not run the script that decides and writes the message"),
+            ("bash ops/alarm-post.sh", "does not run the script that opens, comments or closes"),
+            (
+                "github.event_name == 'schedule'",
+                "does not post on a schedule, which is the only route nobody has to choose",
+            ),
+        ] {
+            if !alarm.contains(needle) {
+                findings.push(format!("  {name}: `{ALARM_JOB}` {what} (`{needle}` is not in it)"));
+            }
+        }
+        watched += jobs.len().saturating_sub(1);
+    }
+
+    if scheduled == 0 {
+        return Err("no workflow in .github/workflows/ has a `schedule:` trigger.\n\n\
+             The nightly and the weekly are where the expensive evidence in this tree is\n\
+             produced — the sweep, both fuzzers, the proofs, five gating claims and the\n\
+             two-runner comparison. If they have really gone, `docs/TESTING-STATUS.md`\n\
+             and RFC 0053 describe schedules that do not exist."
+            .into());
+    }
+
+    if findings.is_empty() {
+        println!(
+            "lint-schedules: ok  ({scheduled} scheduled workflow(s), {watched} job(s) watched \
+             by an alarm that can open an issue)"
+        );
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} finding(s) against the alarm on this tree's schedules:\n{}\n\n\
+         A-06 says a nightly stays green or stays loud, and *a muted job is a deleted job\n\
+         with extra steps*. A job no alarm watches is muted by arrangement rather than by\n\
+         a reviewable diff, which is that item's own sentence turned against it. Twice now\n\
+         a red schedule went unread — `docs/postmortem/0002` and `0003` — and the second\n\
+         time the repair was already committed on a branch, so the schedule reported a\n\
+         defect nobody could connect to its fix.\n\n\
+         The shape to copy is `nightly.yml`'s `{ALARM_JOB}` job, whose header carries the\n\
+         argument for every line of it.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
+/// The one job name every scheduled workflow owes, written once so that the
+/// check and the five workflows cannot spell it two ways.
+const ALARM_JOB: &str = "alarm";
+
+/// The decision and the message, which reach no network and are tested here.
+const ALARM_SCRIPT: &str = "ops/alarm.sh";
+
+/// The three `gh` calls, which only a real failure can exercise.
+const ALARM_POST_SCRIPT: &str = "ops/alarm-post.sh";
+
+/// The job names a workflow declares, in file order.
+///
+/// Not a YAML parser, and it does not pretend to be one — `ops/detect.sh` says
+/// the same about its own reader and for the same reason. A job key is a line of
+/// exactly two spaces, a name and a colon, with nothing after it but a comment,
+/// inside the `jobs:` block. That is the shape every workflow in this repository
+/// is written in, and it was checked against all seven of them.
+///
+/// The failure mode is worth naming because it decides which way this is wrong
+/// when it is wrong: a line inside a `run: |` block that happened to look like a
+/// job key would add a phantom job, and a phantom job makes the check *red*. A
+/// real job would only be missed by a key this does not match, which is why a
+/// trailing comment is stripped rather than making the line fail to match.
+fn workflow_jobs(text: &str) -> Vec<String> {
+    let mut jobs = Vec::new();
+    let mut in_jobs = false;
+    for line in text.lines() {
+        if line.trim_end() == "jobs:" {
+            in_jobs = true;
+            continue;
+        }
+        if !in_jobs {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("  ") else { continue };
+        if rest.starts_with(' ') || rest.starts_with('#') || rest.is_empty() {
+            continue;
+        }
+        let Some((name, after)) = rest.split_once(':') else { continue };
+        let after = after.split('#').next().unwrap_or("").trim();
+        if !after.is_empty() {
+            continue;
+        }
+        if name.is_empty()
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            continue;
+        }
+        jobs.push(name.to_string());
+    }
+    jobs
+}
+
+/// One job's lines, from its key to the next job key or the end of the file.
+fn workflow_job_body(text: &str, job: &str) -> Option<String> {
+    let mut body: Option<Vec<&str>> = None;
+    let key = format!("  {job}:");
+    for line in text.lines() {
+        if line.trim_end() == key {
+            body = Some(Vec::new());
+            continue;
+        }
+        if let Some(collected) = body.as_mut() {
+            let is_next_job = line.starts_with("  ")
+                && !line.starts_with("   ")
+                && !line.trim_start().starts_with('#')
+                && line.trim_end().ends_with(':');
+            if is_next_job {
+                break;
+            }
+            collected.push(line);
+        }
+    }
+    body.map(|lines| lines.join("\n"))
+}
+
+/// Everything a four-space key holds, including a flow sequence written over
+/// several lines.
+///
+/// It stops at the next four-space key *or comment*, and the comment matters:
+/// `nightly.yml` writes a fourteen-name `needs:` as a multi-line sequence and
+/// puts a comment under it, and a region that swallowed the comment would be
+/// matching job names against English.
+fn yaml_key_region(body: &str, key: &str) -> String {
+    let opener = format!("    {key}:");
+    let mut region: Option<Vec<&str>> = None;
+    for line in body.lines() {
+        if line.starts_with(&opener) {
+            region = Some(vec![line]);
+            continue;
+        }
+        if let Some(collected) = region.as_mut() {
+            if line.starts_with("    ") && !line.starts_with("     ") && four_space_key(line) {
+                break;
+            }
+            collected.push(line);
+        }
+    }
+    region.map(|lines| lines.join("\n")).unwrap_or_default()
+}
+
+/// Whether a line at four spaces opens a new key, or is a comment.
+///
+/// `if: always()` does not end in a colon and is still the end of the region
+/// above it, which is the whole reason this is a function and not a suffix test.
+fn four_space_key(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        return true;
+    }
+    match trimmed.split_once(':') {
+        Some((name, _)) => {
+            !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        }
+        None => false,
+    }
+}
+
+/// The half of the alarm that does not need a token, a network or a red night.
+///
+/// `ops/alarm.sh` decides whether a run should say anything and writes what it
+/// would say; `ops/alarm-post.sh` is the three `gh` calls that say it. The split
+/// exists so that this module can run the first half against fixtures, and the
+/// second half is honestly declared as the part only a real failure exercises.
+///
+/// `docs/postmortem/0002` is why that matters more here than in most places: the
+/// one job built to reach a person was itself broken for five nights, and it was
+/// invisible because nothing but a nightly ever ran it. A notification mechanism
+/// with no tests is a notification mechanism nobody has ever seen work.
+#[cfg(test)]
+mod schedule_alarm {
+    use std::process::Command;
+
+    /// One run of `ops/alarm.sh` over a fixture, returning what it wrote.
+    ///
+    /// The scratch directory is named after the test rather than drawn from a
+    /// clock or a random source, which is RFC 0004 applied to a temporary file:
+    /// two runs of one test use one path, so a failure leaves the fixture where
+    /// the next run can read it.
+    fn run(case: &str, jobs: &str, log: Option<&str>, head: &str) -> (String, String, String) {
+        let dir = std::env::temp_dir().join(format!("f-alarm-{case}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        let table = dir.join("jobs.tsv");
+        std::fs::write(&table, jobs).expect("job table");
+        let log_path = dir.join("log.txt");
+        match log {
+            Some(text) => std::fs::write(&log_path, text).expect("log"),
+            None => {
+                let _ = std::fs::remove_file(&log_path);
+            }
+        }
+        let out = Command::new("bash")
+            .arg(super::root().join(super::ALARM_SCRIPT))
+            .current_dir(super::root())
+            .env("ALARM_JOBS", &table)
+            .env("ALARM_WORKFLOW", "nightly")
+            .env("ALARM_SHA", "b74807ca")
+            .env("ALARM_BRANCH", "main")
+            .env("ALARM_HEAD", head)
+            .env("ALARM_RUN_URL", "https://example.invalid/run/1")
+            .env("ALARM_LOG", &log_path)
+            .env("ALARM_OUT", &dir)
+            .output()
+            .expect(
+                "`bash` is what every alarm job runs, and this suite runs in the development \
+                 container where it is present. A machine without it cannot exercise the one \
+                 half of this mechanism that is exercisable at all.",
+            );
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).expect(name);
+        (read("decision").trim().to_string(), read("title").trim().to_string(), read("body.md"))
+    }
+
+    #[test]
+    fn a_failing_job_is_red_and_the_title_is_its_name() {
+        let (decision, title, body) = run(
+            "red",
+            "environment\tsuccess\nimage\tsuccess\nrollback\tfailure\nsweep\tsuccess\n",
+            Some(
+                "rollback\tstep\t2026-09-23T03:11:00.0000000Z FAIL: the generation: no module folds to the root it was asked for\n",
+            ),
+            "a03b9660",
+        );
+        assert_eq!(decision, "red");
+        assert_eq!(title, "nightly is red: rollback");
+        assert!(body.contains("FAIL: the generation"), "{body}");
+        assert!(body.contains("| `rollback` | failure |"), "{body}");
+    }
+
+    #[test]
+    fn a_moved_default_branch_is_the_first_thing_the_body_says_to_check() {
+        // `docs/postmortem/0003` in one assertion. The run tested `b74807ca`
+        // while the repair sat in `a03b966` on a branch, and the day that cost
+        // is the day nothing told a reader to look at the range.
+        let (_, _, body) =
+            run("moved", "rollback\tfailure\n", Some("x\ty\tFAIL: something\n"), "a03b9660");
+        assert!(body.contains("git log --oneline b74807ca..main"), "{body}");
+        assert!(body.contains("the repair may already exist"), "{body}");
+
+        // And the other direction, which has to be said rather than left out:
+        // when the branch has not moved, this is not that incident's shape and
+        // the body must not send a reader looking for a fix that cannot exist.
+        let (_, _, body) =
+            run("still", "rollback\tfailure\n", Some("x\ty\tFAIL: something\n"), "b74807ca");
+        assert!(!body.contains("git log --oneline"), "{body}");
+        assert!(body.contains("no later commit that could already be"), "{body}");
+    }
+
+    #[test]
+    fn the_title_is_a_signature_and_not_a_finishing_order() {
+        // The whole of the second-consecutive-failure question. The caller
+        // matches on the title to decide *comment* rather than *open a second
+        // issue*, so two nights that fail the same way must spell the title the
+        // same way even when the jobs finish in a different order.
+        let one = run("order-a", "miri\tfailure\ncut\tfailure\n", None, "").1;
+        let two = run("order-b", "cut\tfailure\nmiri\tfailure\n", None, "").1;
+        assert_eq!(one, two);
+        assert_eq!(one, "nightly is red: cut, miri");
+
+        // And a title stays a title: four names become three and a count.
+        let many = run("many", "d\tfailure\nc\tfailure\nb\tfailure\na\tfailure\n", None, "").1;
+        assert_eq!(many, "nightly is red: a, b, c, and 1 more");
+    }
+
+    #[test]
+    fn a_skipped_job_is_not_a_failure_and_a_green_run_closes() {
+        // `maintain.yml` skips `diagnose` on every day nothing moved. A
+        // mechanism that read a skip as red would be red most days, and a
+        // mechanism that is red most days is the muting A-06 names.
+        let (decision, title, body) =
+            run("skipped", "detect\tsuccess\ndiagnose\tskipped\n", None, "b74807ca");
+        assert_eq!(decision, "green");
+        assert_eq!(title, "nightly is red:", "the prefix a green run closes on");
+        assert!(body.contains("green again"), "{body}");
+    }
+
+    #[test]
+    fn a_cancelled_run_asserts_nothing_in_either_direction() {
+        // It must not open — nobody's defect — and it must not *close*, because
+        // closing on a run that proved nothing is how a real finding
+        // disappears.
+        let (decision, _, _) =
+            run("cancelled", "sweep\tcancelled\nimage\tsuccess\n", None, "b74807ca");
+        assert_eq!(decision, "nothing");
+
+        // A cancellation beside a failure is still a failure: a matrix
+        // cancelling its siblings after one of them failed has not stopped
+        // being a red run.
+        let (decision, _, _) =
+            run("both", "sweep\tcancelled\nrollback\tfailure\n", None, "b74807ca");
+        assert_eq!(decision, "red");
+    }
+
+    #[test]
+    fn a_log_with_nothing_this_tree_recognises_says_so() {
+        // The fallback is deliberately last and deliberately visible: a run
+        // whose failure has no vocabulary here is a run worth looking at.
+        let (_, _, body) = run(
+            "unknown",
+            "sweep\tfailure\n",
+            Some("sweep\tstep\t2026-09-23T03:11:00.0000000Z Process completed with exit code 2.\n"),
+            "b74807ca",
+        );
+        assert!(body.contains("Process completed with exit code 2"), "{body}");
+
+        let (_, _, body) = run("nolog", "sweep\tfailure\n", None, "b74807ca");
+        assert!(body.contains("the log could not be read"), "{body}");
+    }
+
+    #[test]
+    fn this_tree_s_schedules_are_watched() {
+        // The same shape `proof_schedule`'s test takes: nothing here can watch
+        // GitHub run anything, so what is asserted is the half that is local,
+        // and it is asserted by the suite as well as by `lint` so that renaming
+        // a job goes red in two places.
+        super::lint_schedules().expect("a scheduled workflow has a job nothing is listening to");
+    }
+
+    const FIXTURE: &str = "name: example\n\non:\n  schedule:\n    - cron: \"11 3 * * *\"\n\njobs:\n  build:\n    runs-on: ubuntu-latest\n  test:\n    runs-on: ubuntu-latest\n  alarm:\n    needs:\n      [\n        build,\n      ]\n    # test is not in that list, and this comment must not be read as if it were\n    if: always()\n";
+
+    #[test]
+    fn a_job_missing_from_the_needs_list_is_the_failure_this_exists_for() {
+        let jobs = super::workflow_jobs(FIXTURE);
+        assert_eq!(jobs, vec!["build", "test", "alarm"]);
+        let body = super::workflow_job_body(FIXTURE, "alarm").expect("the alarm job");
+        let needs = super::yaml_key_region(&body, "needs");
+        assert!(needs.contains("build"), "{needs}");
+        // The assertion the comment in the fixture is there for: a region that
+        // ran past the flow sequence would find `test` in English and report a
+        // watched job that is not watched — a false green, which is the one
+        // direction this check must not fail in.
+        assert!(!needs.contains("test"), "{needs}");
+    }
 }
 
 /// Every claim that gates is compared to its own `[threshold]` table by some
@@ -16711,10 +17235,27 @@ const INPUT_PATH: &[(&str, &str)] = &[
     ),
     (
         "interface/",
-        "the frame loop and the late-latch. This is where a second reading is most \
-         tempting and most damaging: at latch time the correct measurement and the \
-         wrong one differ by which of two numbers is called the event's time, and \
-         the wrong one is the shorter expression",
+        "the vocabulary a scene is declared in, and the solver over it. This row \
+         said *the frame loop and the late-latch* until RFC 0120, and neither was \
+         ever here: a late latch needs an arena, a chain and a frame, and this \
+         crate holds none of the three. The row stays because a declaration is \
+         where a stamp would first be wanted the day an animation is declared \
+         against one, and it is held open rather than checked — this crate \
+         depends on neither `f-env` nor `f-input`, which `stage_reach` computes \
+         and prints",
+    ),
+    (
+        "user/compositor/",
+        "the frame loop and the late-latch, which is where `interface/`'s row said \
+         they were and where RFC 0120 found them. This is the stage a second \
+         reading is most tempting and most damaging in: at latch time the correct \
+         measurement and the wrong one differ by which of two numbers is called \
+         the event's time, and the wrong one is the shorter expression. The \
+         component holds no clock at all — RFC 0004 gives one at ring 3 neither a \
+         timer nor a port — so what is checked here is the mint: \
+         `f_compositor::latch` turns the scanout it aimed at into a `StampNanos`, \
+         [`WIRE_MINT`] is the rule that keeps its argument a field read, and the \
+         reversal is a display that reports its own scanout instant",
     ),
     (
         "scene/",
@@ -17518,6 +18059,22 @@ pub fn latency_nanos(latched: StampNanos, event: StampNanos) -> u64 {
 }
 ";
 
+    /// The stage that mints a target rather than a reading, held.
+    ///
+    /// The late latch, `E3-B01i` and RFC 0120. It is a separate fixture from
+    /// [`STAGE_HELD`] because it is a separate clause: this stage is the only one
+    /// on the path that calls [`WIRE_MINT`](super::WIRE_MINT) on a number that
+    /// came out of its *own* arithmetic — the scanout it aimed the frame at — and
+    /// what keeps that legal is the argument being a field read. A version of
+    /// this file that spelled it `from_wire_nanos(scanout_nanos)` is a finding,
+    /// which is `a_bare_local_handed_to_the_wire_mint_is_refused_because_that_is
+    /// _where_a_helper_lands`'s subject at a different stage.
+    const LATCH_HELD: &str = "pub fn latch(&mut self, aim: Aim) -> Option<Predicted> {
+    let scanout = StampNanos::from_wire_nanos(aim.scanout_nanos);
+    self.predictor.predict_at(scanout)
+}
+";
+
     /// The whole path, held. One file per stage, because a stage with no file
     /// is itself a finding.
     ///
@@ -17535,6 +18092,7 @@ pub fn latency_nanos(latched: StampNanos, event: StampNanos) -> u64 {
             ("scene/src/commit.rs", STAGE_HELD),
             ("abi/src/input.rs", STAGE_HELD),
             ("user/virtio-input/src/clock.rs", CALLER_HELD),
+            ("user/compositor/src/latch.rs", LATCH_HELD),
         ]
     }
 

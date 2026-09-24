@@ -209,6 +209,12 @@ jobs:
       - run: cargo xtask lint-testing-status
       - run: cargo xtask lint-debt
       - run: cargo xtask lint-claim-runs
+      # The half of A-06 that is a file read. `docs/postmortem/0003` is a red
+      # nightly nobody read for a day, and the way its successor gets missed is
+      # a job added to `nightly.yml` and not added to the alarm's `needs:` —
+      # which is a set of names against a list, and belongs here rather than at
+      # three in the morning.
+      - run: cargo xtask lint-schedules
       - run: cargo xtask lint-boundary
       - run: cargo xtask lint-gate
       # Formatting and clippy, by calling the definition rather than restating

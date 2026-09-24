@@ -214,6 +214,19 @@ of rung 1 observable without a GPU* — and the three stages after it, the two
 lower rungs that must match rung 1's image, and `claims/0033`'s four numbers all
 want compute shaders that no machine here reports.
 
+**What `E3-B02j` closing on 2026-09-24 changed, and what it did not.** The claim's
+*input* half now exists without the machine: `claims/0033-scene/scene.toml` is one
+scene, hashed, cited by the claim's `[workload]`, and argued for on
+representativeness rather than reachability — an audio timeline at the moment its
+playhead moves, three dirty nodes of 995. The claim's four numbers still want the
+purchase and nothing here has moved them. What the closing adds to *this page* is
+better than a smaller list: a seven-row `[unreachable]` table naming, per row,
+what no rung in this tree can do and which task would change it — from *there is
+no rung* through *`third_party/` holds no shaper, so every glyph run including
+`latin` is unbuildable* to *no pixel above the frame reaches a screen*. That is
+the per-row account of what the GPU buys, which is what this page asks of every
+blocker and has from most of them only in prose.
+
 **What stands where `claims/runner-class-A.md` stands for the other machine is
 `E5-D01`, and it is not the same kind of thing.** That line is *name the
 machine*, and its exit is *a bill of materials anyone can buy* — a document. It
@@ -298,7 +311,7 @@ the two kinds together would never find out.
 
 | The machine | Lines that wait on it directly | Lines that wait on one of those | What closes it |
 |---|---|---|---|
-| A GPU — the machine `E5-D01` has not named | `E3-B02d`, `E3-B02e`, `E3-B02f`, `E3-B02g`, `E3-B02i` | `E3-B02h`, `E3-B02j`, `E3-B02k`, `E3-B02l`, `E3-B03g`, `E3-B03h`, `E3-B03j`, `E3-B06g`, and behind the last of those `E3-B06`, `E3-P04` and `E3-P05` | A part reporting compute shaders, and **`E5-P06`** — added on 2026-09-24 for this reading: *obtain the machine `E5-D01` specifies, and boot F on it*, on `E0-D10` and `E0-P18`'s precedent, with all five direct dependents naming both lines so the wait is on a boot rather than on a bill of materials. Five lines directly, eight behind them: the largest single purchase in the epoch. |
+| A GPU — the machine `E5-D01` has not named | `E3-B02d`, `E3-B02e`, `E3-B02f`, `E3-B02g`, `E3-B02i` | `E3-B02h`, `E3-B02k`, `E3-B02l`, `E3-B03g`, `E3-B03h`, `E3-B03j`, `E3-B06g`, and behind the last of those `E3-B06`, `E3-P04` and `E3-P05` | A part reporting compute shaders, and **`E5-P06`** — added on 2026-09-24 for this reading: *obtain the machine `E5-D01` specifies, and boot F on it*, on `E0-D10` and `E0-P18`'s precedent, with all five direct dependents naming both lines so the wait is on a boot rather than on a bill of materials. Five lines directly, **seven** behind them: the largest single purchase in the epoch. `E3-B02j` was the eighth and came off this list on 2026-09-24 by being closed rather than by being narrowed — see the bullet below. |
 | `runner-class-A`, with F booted on it | `E3-B05d`, `E3-B07`, `E3-B07f`, `E3-P03` | `E3-P06` behind `E3-B07`; `E3-P02` needs it as well as the rig | The row for `E0-D10` above, and `E0-P18`. `bench/src/lib.rs` refuses a recording outside a recording class and that refusal is the harness working. |
 | `photodiode-rig` | `E3-P01b`, `E3-P01e` | `E3-P01`, `E3-P01f`, `E3-P02`, `E3-B04`, `E3-R01` | The section above. Three of `E3-P01`'s six subtasks closed on the near side of the purchase and three did not. |
 | An energy meter | `E3-P07` | none in E3 | A specification first — nothing in the file buys one, and there is no line to close. |
@@ -324,12 +337,25 @@ there is none, that is said rather than padded.
   subject is *a machine reporting no compute shaders*, which is every machine
   here, so it is on this page **only** because it waits on `E3-B02h`, and it
   comes off the day `E3-B02h` renders at all. Nothing about it is a purchase.
-- **`E3-B02j`** — the scene `claims/0033` did not fix. Its exit is a choice, an
-  argument and a content hash: three things a text editor produces. It waits on
-  `E3-B02i`, which is rung 4 on a GPU. RFC 0088 settled that a decide task's exit
-  may not require its implementation, and this is a build line whose exit is a
-  decision. Naming that is this page's business; moving the `needs:` is
-  `intent/`'s.
+- **`E3-B02j`** — **closed on 2026-09-24, and it is the one line on this page that
+  came off by being done.** The bullet here said its exit was a choice, an
+  argument and a content hash — three things a text editor produces — and that it
+  waited on `E3-B02i`, rung 4 on a GPU, which inverted the exit's own point: a
+  scene chosen once every rung can draw it is a scene chosen for *reachability*,
+  which is the choice the line exists to refuse. The `needs:` moved and the line
+  closed the same day. `claims/0033-scene/scene.toml` is the scene, named in the
+  claim's `[workload]` by the SHA-256 of its bytes, and **this tree cannot draw
+  one node of it**: seven rows of an `[unreachable]` table name what no rung can
+  do and the task that would change each.
+
+  Two things about it matter on this page. First, the GPU blocker is now
+  *narrower and better documented* rather than smaller — the `[unreachable]` table
+  is a per-row statement of what the purchase buys, which is what this page has
+  been asking every blocker for. Second, it is the worked example of the shape
+  RFC 0088 names: **a line whose exit a text editor can meet does not belong
+  behind a purchase**, and the way this one got there was a `needs:` edge nobody
+  re-read. That is worth checking the rest of this section against rather than
+  reading as a one-off.
 - **`E3-B02k`** — four rungs, one scene, one machine, one invocation. **No half.**
   A GPU and a recording environment, both, and `cargo xtask claim
   raster-cost-per-rung` refuses with `Route::Unbuilt("E3-B02")` until there is
@@ -426,8 +452,18 @@ cites RFC 0093, and the rows below. A narrowing with no row is a clause deleted
 rather than moved, which is the one thing the RFC rests on; a row naming no
 narrowing is a debt nobody owes, or a clause already answered whose row should
 have gone in the diff that answered it. It is the discipline `gap_holds` applies
-to `OWED_REVERSALS`, `CHAOS_GAP` and five others, pointed at this page.
+to `OWED_REVERSALS`, `CHAOS_GAP` and six others, pointed at this page.
 
 What it does not check is the prose above the table. The blocker sections are
 read by people and kept by people, and saying so is better than implying a
 coverage that is not there.
+
+**Read on 2026-09-24, and that sentence collected its first receipt.** Three waves
+landed in two days and nothing above the table had been re-read since: the GPU row
+still listed `E3-B02j`, which had closed, and its bullet still explained why the
+line was blocked. One closed line wrongly described for one day is a small thing;
+the shape is not, because the register below it went on being correct throughout
+by being checked. A document that is wrong for three days is a small incident, and
+this repository counts those — so the cadence for the prose is now **every wave
+that closes a line named in it**, and this paragraph is where the next reader
+finds out that nothing enforces it.

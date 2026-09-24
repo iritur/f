@@ -22,6 +22,20 @@ on:
   schedule:
     - cron: "17 4 * * 1"
   workflow_dispatch:
+    inputs:
+      # The half of the alarm a person can exercise without waiting for the
+      # schedule. `dry-run` makes the `alarm` job compute the decision, the
+      # title and the whole issue body, write them to the run summary, and open
+      # nothing — so what a reviewer is being asked to trust can be read before
+      # it has ever run for real. `post` is the deliberate end-to-end test and
+      # opens a real issue; `off` wants neither. A `schedule` run ignores this
+      # and always posts. `nightly.yml` carries the argument.
+      alarm:
+        description: "On a manual run: dry-run (default), post, or off"
+        required: false
+        type: choice
+        default: "dry-run"
+        options: ["dry-run", "post", "off"]
 
 jobs:
   hooks:
@@ -65,3 +79,74 @@ jobs:
         # reviewable diff and a decision about what this repository accepts —
         # not a way to make a red build green.
         run: cargo xtask eval
+  # A red schedule is loud, and until this job existed it was not.
+  #
+  # `nightly.yml`'s `alarm` job carries the whole argument: the two post-mortems
+  # of a red schedule nobody read, why this is a job rather than a step inside
+  # one, why it runs outside any container, why the title is a sorted signature
+  # so a second consecutive failure is a comment rather than a second issue, and
+  # why a green run closes what it opened. This is that job watching this file.
+  #
+  # This file also runs on pull requests touching `.claude/`, so the decision half
+  # of the alarm is exercised by ordinary work rather than only by a schedule.
+  # The posting step is still `schedule`-only: a pull request that went red
+  # should be read in the pull request.
+  #
+  # The three permissions replace the default set rather than adding to it, and
+  # each row is here for one call: `contents: read` for the checkout and one
+  # read of the default branch's head, `actions: read` for the failing job's
+  # log, `issues: write` for the open, the comment and the close. No
+  # `packages:`, because this pulls no image, and no write to anything else.
+  #
+  # `cargo xtask lint-schedules` is what keeps the list below complete: it runs
+  # in `verify` and in the pull-request gate and refuses a scheduled workflow
+  # whose alarm does not name every other job in its file.
+  alarm:
+    name: a red run says so in this repository
+    needs: [hooks, evals]
+    # Not `failure()`: closing a stale issue on a green run is half of the job.
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: what happened, and what to say about it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS: ${{ toJSON(needs) }}
+          ALARM_JOBS: alarm/jobs.tsv
+          ALARM_WORKFLOW: agent-evals
+          ALARM_SHA: ${{ github.sha }}
+          ALARM_BRANCH: ${{ github.event.repository.default_branch }}
+          ALARM_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ALARM_LOG: alarm/log.txt
+          ALARM_OUT: alarm
+        run: |
+          mkdir -p alarm
+          printf '%s' "$NEEDS" | jq -r 'to_entries[] | "\(.key)\t\(.value.result)"' > alarm/jobs.tsv
+          cat alarm/jobs.tsv
+          # Per job and not per run: the run-level log archive is not served
+          # until the whole run has finished, and this job is part of the run.
+          : > alarm/log.txt
+          for id in $(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+                        --jq '.jobs[] | select(.conclusion == "failure") | .id' || true); do
+            gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$id/logs" >> alarm/log.txt || true
+          done
+          ALARM_HEAD=$(gh api "repos/$GITHUB_REPOSITORY/commits/$ALARM_BRANCH" --jq .sha || true) \
+            bash ops/alarm.sh
+          {
+            echo "## $(cat alarm/title)"
+            echo
+            echo "decision: \`$(cat alarm/decision)\`"
+            echo
+            cat alarm/body.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: open it, comment on it, or close it
+        if: github.event_name == 'schedule' || github.event.inputs.alarm == 'post'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash ops/alarm-post.sh
